@@ -44,7 +44,7 @@ func run(ctx context.Context) error {
 
 	// Start TCP listener.
 	listener := proxy.NewListener(cfg.ListenAddr, detector)
-	fmt.Printf("katashiro-proxy: listening on %s (db: %s)\n", cfg.ListenAddr, cfg.DBPath)
+	fmt.Fprintf(os.Stderr, "katashiro-proxy: listening on %s (db: %s)\n", cfg.ListenAddr, cfg.DBPath)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -55,7 +55,7 @@ func run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		fmt.Println("katashiro-proxy: shutting down...")
+		fmt.Fprintln(os.Stderr, "katashiro-proxy: shutting down...")
 		return nil
 	}
 }
