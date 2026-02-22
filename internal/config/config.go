@@ -13,6 +13,9 @@ type Config struct {
 
 	// CACertPath is the path to the CA certificate file.
 	CACertPath string `json:"ca_cert_path"`
+
+	// DBPath is the path to the SQLite database file.
+	DBPath string `json:"db_path"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -20,5 +23,6 @@ func Default() *Config {
 	return &Config{
 		ListenAddr: ":8080",
 		MCPAddr:    ":3000",
+		DBPath:     "katashiro.db",
 	}
 }

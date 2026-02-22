@@ -1,10 +1,19 @@
 package http
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net"
+	gohttp "net/http"
+	"time"
+
+	"github.com/usk6666/katashiro-proxy/internal/session"
 )
+
+const maxBodyRecordSize = 1 << 20 // 1MB
 
 // httpMethods contains the common HTTP method prefixes used for protocol detection.
 var httpMethods = [][]byte{
@@ -18,12 +27,31 @@ var httpMethods = [][]byte{
 	[]byte("CONNECT "),
 }
 
-// Handler processes HTTP/1.x connections.
-type Handler struct{}
+// hop-by-hop headers that should not be forwarded.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Proxy-Connection",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
 
-// NewHandler creates a new HTTP handler.
-func NewHandler() *Handler {
-	return &Handler{}
+// Handler processes HTTP/1.x connections.
+type Handler struct {
+	store     session.Store
+	transport *gohttp.Transport
+}
+
+// NewHandler creates a new HTTP handler with session recording.
+func NewHandler(store session.Store) *Handler {
+	return &Handler{
+		store:     store,
+		transport: &gohttp.Transport{},
+	}
 }
 
 // Name returns the protocol name.
@@ -41,10 +69,125 @@ func (h *Handler) Detect(peek []byte) bool {
 	return false
 }
 
-// Handle processes an HTTP connection.
+// Handle processes HTTP connections in a loop (keep-alive support).
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
-	// TODO: Implement HTTP MITM proxy
-	_ = ctx
-	_ = conn
+	reader := bufio.NewReader(conn)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		req, err := gohttp.ReadRequest(reader)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("read request: %w", err)
+		}
+
+		if err := h.handleRequest(ctx, conn, req); err != nil {
+			return err
+		}
+
+		if req.Close {
+			return nil
+		}
+	}
+}
+
+func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
+	start := time.Now()
+
+	// Capture request body for recording.
+	var reqBody []byte
+	if req.Body != nil {
+		reqBody, _ = io.ReadAll(io.LimitReader(req.Body, maxBodyRecordSize))
+		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+	}
+
+	// Ensure absolute URL for forward proxy.
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	if req.URL.Scheme == "" {
+		req.URL.Scheme = "http"
+	}
+
+	// Remove hop-by-hop headers.
+	removeHopByHopHeaders(req.Header)
+
+	// Forward request upstream.
+	outReq := req.WithContext(ctx)
+	outReq.RequestURI = ""
+
+	resp, err := h.transport.RoundTrip(outReq)
+	if err != nil {
+		// Send 502 Bad Gateway to client.
+		errResp := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		conn.Write([]byte(errResp))
+		return fmt.Errorf("upstream request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Capture response body for recording.
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyRecordSize))
+
+	// Write response back to client.
+	if err := writeResponse(conn, resp, respBody); err != nil {
+		return fmt.Errorf("write response: %w", err)
+	}
+
+	duration := time.Since(start)
+
+	// Record session.
+	entry := &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: start,
+		Duration:  duration,
+		Request: session.RecordedRequest{
+			Method:  req.Method,
+			URL:     req.URL,
+			Headers: req.Header,
+			Body:    reqBody,
+		},
+		Response: session.RecordedResponse{
+			StatusCode: resp.StatusCode,
+			Headers:    resp.Header,
+			Body:       respBody,
+		},
+	}
+	if h.store != nil {
+		if err := h.store.Save(ctx, entry); err != nil {
+			return fmt.Errorf("save session: %w", err)
+		}
+	}
+
 	return nil
+}
+
+func removeHopByHopHeaders(header gohttp.Header) {
+	for _, h := range hopByHopHeaders {
+		header.Del(h)
+	}
+}
+
+func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
+	w := bufio.NewWriter(conn)
+	fmt.Fprintf(w, "HTTP/%d.%d %d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, gohttp.StatusText(resp.StatusCode))
+	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	resp.Header.Del("Transfer-Encoding")
+	for key, vals := range resp.Header {
+		for _, val := range vals {
+			fmt.Fprintf(w, "%s: %s\r\n", key, val)
+		}
+	}
+	fmt.Fprintf(w, "\r\n")
+	if _, err := w.Write(body); err != nil {
+		return err
+	}
+	return w.Flush()
 }
