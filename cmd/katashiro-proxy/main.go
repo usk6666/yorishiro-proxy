@@ -2,10 +2,17 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/usk6666/katashiro-proxy/internal/config"
+	"github.com/usk6666/katashiro-proxy/internal/protocol"
+	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
 func main() {
@@ -19,10 +26,36 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	// TODO: Initialize MCP server and proxy listener
-	fmt.Println("katashiro-proxy: starting...")
+	cfg := config.Default()
+	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "proxy listen address")
+	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path")
+	flag.Parse()
 
-	<-ctx.Done()
-	fmt.Println("katashiro-proxy: shutting down...")
-	return nil
+	// Initialize SQLite session store.
+	store, err := session.NewSQLiteStore(ctx, cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("init session store: %w", err)
+	}
+	defer store.Close()
+
+	// Build protocol handlers and detector.
+	httpHandler := protohttp.NewHandler(store)
+	detector := protocol.NewDetector(httpHandler)
+
+	// Start TCP listener.
+	listener := proxy.NewListener(cfg.ListenAddr, detector)
+	fmt.Printf("katashiro-proxy: listening on %s (db: %s)\n", cfg.ListenAddr, cfg.DBPath)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		fmt.Println("katashiro-proxy: shutting down...")
+		return nil
+	}
 }

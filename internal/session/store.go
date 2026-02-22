@@ -19,7 +19,10 @@ type Store interface {
 
 // ListOptions configures entry listing behavior.
 type ListOptions struct {
-	Protocol string
-	Limit    int
-	Offset   int
+	Protocol   string
+	Method     string
+	URLPattern string
+	StatusCode int
+	Limit      int
+	Offset     int
 }
