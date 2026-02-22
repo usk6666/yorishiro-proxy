@@ -1,11 +1,11 @@
 ---
-description: "Linear Issue を読み込み、ブランチ作成から実装・テスト・コミットまでを一気通貫で実行"
+description: "Linear Issue を読み込み、ブランチ作成から実装・テスト・コミット・PR 作成までを一気通貫で実行"
 user-invokable: true
 ---
 
 # /implement
 
-Linear Issue に基づいて実装を行う一気通貫ワークフロー。
+Linear Issue に基づいて実装から PR 作成までを行う一気通貫ワークフロー。
 
 ## 引数
 
@@ -28,10 +28,34 @@ Linear Issue に基づいて実装を行う一気通貫ワークフロー。
    - `go build ./...`
 8. **コミット**: Conventional Commits 形式でコミット
    - コミットメッセージのフッターに `Refs: <Issue ID>` を含める
-9. **結果報告**: 実装内容のサマリーを表示
+9. **プッシュ**: `git push -u origin <branch-name>` でリモートにプッシュ
+10. **PR 作成**:
+    - `git diff main...HEAD` で差分を確認
+    - PR タイトルは Conventional Commits 形式 (例: `feat(protocol): add HTTP handler`)
+    - PR 本文は以下のテンプレートに従う
+    - `gh pr create` で PR を作成
+11. **Issue ステータス更新**: ステータスを "In Review" に更新
+12. **結果報告**: 実装サマリー + PR URL を表示
+
+## PR 本文テンプレート
+
+```markdown
+## Summary
+- <変更の箇条書き>
+
+## Test plan
+- [ ] テスト項目
+
+Resolves <Issue ID>
+Linear: https://linear.app/usk6666/issue/<Issue ID>
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+```
 
 ## 注意事項
 
 - ビルドまたはテストが失敗した場合は修正してから再実行
 - Issue のラベルや説明から実装のスコープを判断する
 - 大きな変更の場合は計画を立ててからユーザーに確認を取る
+- ステップ 7 でビルド・テスト検証済みのため、PR 作成時に再実行しない
+- PR 作成が失敗した場合は `/pr` を手動実行するよう案内する
