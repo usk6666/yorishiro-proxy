@@ -15,6 +15,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// drainTimeout is the maximum duration allowed for flushing remaining writes
+// during Close(). If the timeout expires, pending writes fail with a deadline error.
+const drainTimeout = 5 * time.Second
+
 // SQLiteStore implements Store using SQLite with WAL mode.
 type SQLiteStore struct {
 	db      *sql.DB
@@ -89,7 +93,7 @@ func (s *SQLiteStore) writeLoop() {
 			op.result <- err
 		case <-s.done:
 			// Drain remaining writes with a timeout.
-			drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 			defer drainCancel()
 			for {
 				select {

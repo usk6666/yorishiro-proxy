@@ -163,6 +163,96 @@ func mustParseURL(raw string) *url.URL {
 	return u
 }
 
+func TestSQLiteStore_Save_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	// Cancel the context before calling Save.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/cancelled")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+
+	err := store.Save(ctx, entry)
+	if err == nil {
+		t.Fatal("expected error from Save with cancelled context, got nil")
+	}
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestSQLiteStore_Close_CompletesWithPendingWrites(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	// Write some entries before closing.
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		entry := &Entry{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/close-test")},
+			Response:  RecordedResponse{StatusCode: 200},
+		}
+		if err := store.Save(ctx, entry); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	// Close should complete within a bounded time.
+	done := make(chan error, 1)
+	go func() {
+		done <- store.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not complete within 10 seconds")
+	}
+}
+
+func TestSQLiteStore_Save_ContextPropagation(t *testing.T) {
+	store := newTestStore(t)
+
+	// Use a context with a short timeout to verify it propagates through writeOp.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/ctx-prop")},
+		Response:  RecordedResponse{StatusCode: 201},
+	}
+
+	// Save should succeed with a valid context.
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save with valid context: %v", err)
+	}
+
+	// Verify the entry was actually written.
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Request.Method != "POST" {
+		t.Errorf("Method = %q, want %q", got.Request.Method, "POST")
+	}
+}
+
 func TestSQLiteStore_List_LIKEWildcardEscape(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
