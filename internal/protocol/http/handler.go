@@ -17,6 +17,8 @@ import (
 
 const maxBodyRecordSize = 1 << 20 // 1MB
 
+const defaultRequestTimeout = 60 * time.Second
+
 // httpMethods contains the common HTTP method prefixes used for protocol detection.
 var httpMethods = [][]byte{
 	[]byte("GET "),
@@ -44,10 +46,11 @@ var hopByHopHeaders = []string{
 
 // Handler processes HTTP/1.x connections.
 type Handler struct {
-	store     session.Store
-	issuer    *cert.Issuer
-	transport *gohttp.Transport
-	logger    *slog.Logger
+	store          session.Store
+	issuer         *cert.Issuer
+	transport      *gohttp.Transport
+	logger         *slog.Logger
+	requestTimeout time.Duration
 }
 
 // NewHandler creates a new HTTP handler with session recording.
@@ -66,6 +69,18 @@ func NewHandler(store session.Store, issuer *cert.Issuer, logger *slog.Logger) *
 // useful for testing, where the upstream server uses a self-signed certificate.
 func (h *Handler) SetTransport(t *gohttp.Transport) {
 	h.transport = t
+}
+
+// SetRequestTimeout sets the timeout for reading HTTP request headers.
+func (h *Handler) SetRequestTimeout(d time.Duration) {
+	h.requestTimeout = d
+}
+
+func (h *Handler) effectiveRequestTimeout() time.Duration {
+	if h.requestTimeout > 0 {
+		return h.requestTimeout
+	}
+	return defaultRequestTimeout
 }
 
 // Name returns the protocol name.
@@ -94,6 +109,11 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		default:
 		}
 
+		// Set read deadline for request header reading (Slowloris protection).
+		if timeout := h.effectiveRequestTimeout(); timeout > 0 {
+			conn.SetReadDeadline(time.Now().Add(timeout))
+		}
+
 		req, err := gohttp.ReadRequest(reader)
 		if err != nil {
 			if err == io.EOF {
@@ -101,6 +121,9 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 			}
 			return fmt.Errorf("read request: %w", err)
 		}
+
+		// Reset deadline after successful read.
+		conn.SetReadDeadline(time.Time{})
 
 		// CONNECT method starts HTTPS MITM tunnel.
 		if req.Method == gohttp.MethodConnect {
