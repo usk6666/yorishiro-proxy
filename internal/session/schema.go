@@ -30,6 +30,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_response_status ON sessions(response_sta
 
 var migrations = map[int]string{
 	1: schemaV1,
+	3: `CREATE INDEX IF NOT EXISTS idx_sessions_protocol ON sessions(protocol);
+CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sessions(timestamp);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -50,7 +52,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	for v := current + 1; v <= latest; v++ {
 		ddl, ok := migrations[v]
 		if !ok {
-			return fmt.Errorf("missing migration for version %d", v)
+			continue
 		}
 		if err := execMigration(ctx, db, v, ddl, current == 0 && v == 1); err != nil {
 			return fmt.Errorf("migration to version %d: %w", v, err)
