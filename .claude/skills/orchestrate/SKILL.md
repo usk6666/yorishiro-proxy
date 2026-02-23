@@ -271,6 +271,100 @@ Task(description="Implement USK-BB", subagent_type="general-purpose", isolation=
 
 ---
 
+### Phase 2.5: レビューゲート
+
+バッチ内で成功した PR に対してレビューゲートを実行する。
+レビューは PR 単位で順次実行し、各 PR 内では Code Review + Security Review を並行起動する。
+
+#### 2.5-1. レビュー対象の特定
+
+バッチ内で PR が作成された Issue を対象とする。失敗した Issue（PR なし）はスキップ。
+
+#### 2.5-2. PR ごとのレビューサイクル
+
+各 PR に対して `/review-gate` スキルと同等のフローを実行する。
+`.claude/agents/code-reviewer.md` と `.claude/agents/security-reviewer.md` を Read ツールで読み込み、
+プレースホルダーを置換して起動する。
+
+**Step A: 初回レビュー（並行）**
+
+同一メッセージ内で 2 つの Task ツールを並行起動:
+
+```
+Task(description="Code review PR #<N>", subagent_type="general-purpose", prompt=<Code Review プロンプト>)
+Task(description="Security review PR #<N>", subagent_type="general-purpose", prompt=<Security Review プロンプト>)
+```
+
+プレースホルダー構築:
+- `{{PRODUCT_CONTEXT}}` → Phase 0 で構築したプロダクトコンテキストを再利用
+- `{{SECURITY_CONTEXT}}` → katashiro-proxy の脅威モデル（MITM プロキシ、CA 鍵保持、MCP 経由コマンド）
+- `{{ISSUE_ID}}`, `{{ISSUE_DESCRIPTION}}` → Phase 1 で取得した Issue 情報
+- `{{PR_NUMBER}}`, `{{PR_TITLE}}`, `{{CHANGED_FILES}}` → サブエージェントの結果から取得
+
+**Step B: 判定集約**
+
+各エージェントの出力から `VERDICT:` を抽出:
+- 両方 `APPROVED` → この PR のレビュー完了。次の PR へ
+- いずれか `CHANGES_REQUESTED` → Step C へ
+
+**Step C: Fix サイクル（最大 2 ラウンド）**
+
+`.claude/agents/fixer.md` を Read ツールで読み込み、プレースホルダーを置換して起動:
+
+```
+Task(description="Fix review findings PR #<N> round <R>", subagent_type="general-purpose", isolation="worktree", prompt=<Fixer プロンプト>)
+```
+
+- `{{CODE_REVIEW_FINDINGS}}` → Code Review の所見（APPROVED なら "None"）
+- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review の所見（APPROVED なら "None"）
+- `{{BRANCH_NAME}}` → PR のヘッドブランチ名
+
+Fix 後、`CHANGES_REQUESTED` だったレビューのみ再実行。
+2 ラウンドで解決しない場合は `ESCALATED` としてユーザーに報告する。
+
+#### 2.5-3. 並行度戦略
+
+| シナリオ | 戦略 | 同時 Agent 数 |
+|---------|------|-------------|
+| 1 PR のレビュー | Code + Security 並行 | 2 |
+| 2+ PR のレビュー | PR 単位で順次、各 PR 内は並行 | 2 |
+| Fix 中 | Fixer 1 agent のみ（排他） | 1 |
+
+#### 2.5-4. レビュー結果の記録
+
+各 PR のレビュー結果を以下の形式で記録し、Phase 3 で集約する:
+
+```
+pr_review_results[PR番号] = {
+  code_review: APPROVED | CHANGES_REQUESTED,
+  security_review: APPROVED | CHANGES_REQUESTED,
+  final_verdict: APPROVED | ESCALATED,
+  fix_rounds: 0 | 1 | 2,
+  unresolved_findings: [...]
+}
+```
+
+#### 2.5-5. Linear ステータス連携
+
+| イベント | Linear コメント |
+|---------|----------------|
+| レビュー開始 | "PR #N created. Automated review starting." |
+| レビュー通過 | "PR #N: Code Review APPROVED, Security Review APPROVED" |
+| Fix サイクル開始 | "PR #N: Review found issues. Fix round N starting." |
+| Fix 後通過 | "PR #N: All findings resolved after N fix round(s)." |
+| エスカレーション | "PR #N: ESCALATION - N unresolved findings after 2 fix rounds." |
+
+`mcp__linear-server__create_comment` で Issue にコメントを投稿する。
+
+#### 2.5-6. エスカレーション時の対処
+
+エスカレーションされた PR がある場合:
+- バッチの他の PR の処理は続行する
+- ユーザーに未解決所見の詳細を報告し、手動対応を依頼する
+- 後続バッチの実行はユーザーの判断に委ねる（ブロッカーかどうかによる）
+
+---
+
 ### Phase 3: 結果の集約と報告
 
 #### 3-1. 全体サマリー
@@ -283,21 +377,26 @@ Task(description="Implement USK-BB", subagent_type="general-purpose", isolation=
 ### Phase 1: Core Proxy Engine + SQLite Session Store
 
 #### Batch 1
-| Issue | タイトル | ステータス | PR | テスト |
-|-------|---------|----------|-----|-------|
-| USK-XX | PeekConn buffered reader | ✅ 成功 | #4 | 8 passed |
-| USK-YY | SQLite session Store | ✅ 成功 | #5 | 12 passed |
+| Issue | タイトル | ステータス | PR | テスト | Code Review | Security Review | Fix Rounds |
+|-------|---------|----------|-----|-------|-------------|----------------|------------|
+| USK-XX | PeekConn buffered reader | ✅ 成功 | #4 | 8 passed | ✅ APPROVED | ✅ APPROVED | 0 |
+| USK-YY | SQLite session Store | ✅ 成功 | #5 | 12 passed | ✅ APPROVED | ⚠️ Fix→✅ | 1 |
 
 #### Batch 2
-| Issue | タイトル | ステータス | PR | テスト |
-|-------|---------|----------|-----|-------|
-| USK-AA | Detector wiring | ✅ 成功 | #6 | 5 passed |
-| USK-BB | HTTP handler | ❌ 失敗 | — | 2 failed |
+| Issue | タイトル | ステータス | PR | テスト | Code Review | Security Review | Fix Rounds |
+|-------|---------|----------|-----|-------|-------------|----------------|------------|
+| USK-AA | Detector wiring | ✅ 成功 | #6 | 5 passed | ✅ APPROVED | ✅ APPROVED | 0 |
+| USK-BB | HTTP handler | ❌ 失敗 | — | 2 failed | — | — | — |
 
 ### 失敗した Issue
 - **USK-BB**: HTTP handler — テスト失敗 (`TestHTTPHandler_Proxy`)
   - ワークツリー: `/path/to/worktree` (手動確認可能)
   - 推奨: エラーログを確認し、手動修正または再実行
+
+### エスカレーションされた Issue（レビュー未通過）
+- **USK-ZZ**: ... — Security Review で N 件の未解決所見
+  - 未解決: S-1 (HIGH), S-3 (MEDIUM)
+  - 推奨: 手動レビューと修正
 
 ### 次のステップ
 - USK-BB を修正後、Batch 3 (Issue 5: main.go wiring) に進行可能
@@ -306,8 +405,9 @@ Task(description="Implement USK-BB", subagent_type="general-purpose", isolation=
 
 #### 3-2. Issue ステータス更新
 
-- 成功した Issue: ステータスを "In Review" に更新
-- 失敗した Issue: "In Progress" のまま維持し、`mcp__linear-server__create_comment` でエラー詳細を記録
+- 実装成功 + レビュー通過: ステータスを "In Review" に更新
+- 実装成功 + レビューエスカレーション: "In Review" に更新し、未解決所見をコメントに記録
+- 実装失敗: "In Progress" のまま維持し、`mcp__linear-server__create_comment` でエラー詳細を記録
 
 #### 3-3. 後処理
 
