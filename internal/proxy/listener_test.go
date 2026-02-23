@@ -188,6 +188,114 @@ func TestListener_MultipleConnections_AllDrain(t *testing.T) {
 	}
 }
 
+func TestListener_Semaphore_RejectsAtCapacity(t *testing.T) {
+	handler := &slowHandler{delay: 500 * time.Millisecond, name: "slow"}
+	detector := &slowDetector{handler: handler}
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:           "127.0.0.1:0",
+		Detector:       detector,
+		Logger:         newTestLogger(),
+		MaxConnections: 2,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Fill both slots.
+	conn1 := dialAndSend(t, listener.Addr())
+	defer conn1.Close()
+	conn2 := dialAndSend(t, listener.Addr())
+	defer conn2.Close()
+
+	if !waitForEntered(handler, 2, 2*time.Second) {
+		t.Fatalf("only %d/2 handlers entered", handler.entered.Load())
+	}
+
+	// Third connection should be rejected (closed by server).
+	conn3, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn3.Close()
+
+	// Send data so the server can process the connection.
+	conn3.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+
+	// The server should close the connection because semaphore is full.
+	buf := make([]byte, 1)
+	conn3.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = conn3.Read(buf)
+	if err == nil {
+		t.Fatal("expected error reading from rejected connection")
+	}
+
+	// Only 2 handlers should have been entered (third was rejected).
+	if handler.entered.Load() != 2 {
+		t.Errorf("handler entered = %d, want 2", handler.entered.Load())
+	}
+}
+
+func TestListener_Semaphore_ReleasesSlot(t *testing.T) {
+	handler := &slowHandler{delay: 100 * time.Millisecond, name: "fast"}
+	detector := &slowDetector{handler: handler}
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:           "127.0.0.1:0",
+		Detector:       detector,
+		Logger:         newTestLogger(),
+		MaxConnections: 1,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// First connection occupies the single slot.
+	conn1 := dialAndSend(t, listener.Addr())
+	defer conn1.Close()
+
+	if !waitForEntered(handler, 1, 2*time.Second) {
+		t.Fatal("first handler was never entered")
+	}
+
+	// Wait for the first handler to complete and release the slot.
+	deadline := time.Now().Add(2 * time.Second)
+	for handler.handled.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if handler.handled.Load() < 1 {
+		t.Fatal("first handler never completed")
+	}
+
+	// Second connection should now be accepted.
+	conn2 := dialAndSend(t, listener.Addr())
+	defer conn2.Close()
+
+	if !waitForEntered(handler, 2, 2*time.Second) {
+		t.Fatalf("second handler was never entered, entered = %d", handler.entered.Load())
+	}
+}
+
 func TestListener_PeekTimeout_DisconnectsSlowClient(t *testing.T) {
 	handler := &slowHandler{delay: 0, name: "fast"}
 	detector := &slowDetector{handler: handler}

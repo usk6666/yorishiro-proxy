@@ -33,6 +33,9 @@ type Config struct {
 
 	// RequestTimeout is the timeout for reading HTTP request headers.
 	RequestTimeout time.Duration `json:"request_timeout"`
+
+	// MaxConnections is the maximum number of concurrent proxy connections.
+	MaxConnections int `json:"max_connections"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -45,5 +48,6 @@ func Default() *Config {
 		LogFormat:      "text",
 		PeekTimeout:    30 * time.Second,
 		RequestTimeout: 60 * time.Second,
+		MaxConnections: 1024,
 	}
 }
