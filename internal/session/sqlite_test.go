@@ -249,8 +249,8 @@ func TestMigrate_FreshDatabase(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("version = %d, want 1", version)
+	if version != 3 {
+		t.Errorf("version = %d, want 3", version)
 	}
 
 	_, err = db.ExecContext(ctx,
@@ -281,8 +281,8 @@ func TestMigrate_Idempotent(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("version = %d, want 1", version)
+	if version != 3 {
+		t.Errorf("version = %d, want 3", version)
 	}
 }
 
@@ -308,6 +308,112 @@ func TestMigrate_FutureVersionError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "newer than latest") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestMigrate_V3_CreatesIndexes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "indexes.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Query SQLite for index names on the sessions table.
+	rows, err := db.QueryContext(ctx, "SELECT name FROM pragma_index_list('sessions')")
+	if err != nil {
+		t.Fatalf("query index list: %v", err)
+	}
+	defer rows.Close()
+
+	indexes := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan index name: %v", err)
+		}
+		indexes[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration: %v", err)
+	}
+
+	want := []string{
+		"idx_sessions_protocol",
+		"idx_sessions_timestamp",
+		"idx_sessions_method",
+		"idx_sessions_url",
+		"idx_sessions_response_status",
+	}
+	for _, idx := range want {
+		if !indexes[idx] {
+			t.Errorf("expected index %q to exist, but it was not found", idx)
+		}
+	}
+}
+
+func TestMigrate_UpgradeFromV1_CreatesV3Indexes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "upgrade.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Simulate a database at v1 by running bootstrap + v1 migration manually.
+	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, schemaV1); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (1)"); err != nil {
+		t.Fatalf("insert version: %v", err)
+	}
+
+	// Run migrate — should apply v3 (skipping v2).
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var version int
+	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if version != 3 {
+		t.Errorf("version = %d, want 3", version)
+	}
+
+	// Verify v3 indexes exist.
+	rows, err := db.QueryContext(ctx, "SELECT name FROM pragma_index_list('sessions')")
+	if err != nil {
+		t.Fatalf("query index list: %v", err)
+	}
+	defer rows.Close()
+
+	indexes := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan index name: %v", err)
+		}
+		indexes[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration: %v", err)
+	}
+
+	for _, idx := range []string{"idx_sessions_protocol", "idx_sessions_timestamp"} {
+		if !indexes[idx] {
+			t.Errorf("expected index %q to exist after upgrade, but it was not found", idx)
+		}
 	}
 }
 
