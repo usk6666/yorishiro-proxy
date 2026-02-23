@@ -113,6 +113,11 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 		default:
 		}
 
+		// Set read deadline for request header reading (Slowloris protection).
+		if timeout := h.effectiveRequestTimeout(); timeout > 0 {
+			tlsConn.SetReadDeadline(time.Now().Add(timeout))
+		}
+
 		req, err := gohttp.ReadRequest(reader)
 		if err != nil {
 			if err == io.EOF {
@@ -120,6 +125,9 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 			}
 			return fmt.Errorf("read HTTPS request: %w", err)
 		}
+
+		// Reset deadline after successful read.
+		tlsConn.SetReadDeadline(time.Time{})
 
 		if err := h.handleHTTPSRequest(ctx, tlsConn, connectHost, req); err != nil {
 			return err

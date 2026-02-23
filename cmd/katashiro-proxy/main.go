@@ -41,6 +41,8 @@ func run(ctx context.Context) error {
 	flag.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file (default: stderr)")
 	flag.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "CA certificate file path")
 	flag.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path")
+	flag.DurationVar(&cfg.PeekTimeout, "peek-timeout", cfg.PeekTimeout, "protocol detection timeout")
+	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "HTTP request read timeout")
 	flag.Parse()
 
 	// Initialize logger.
@@ -73,10 +75,12 @@ func run(ctx context.Context) error {
 
 	// Build protocol handlers and detector.
 	httpHandler := protohttp.NewHandler(store, issuer, logger)
+	httpHandler.SetRequestTimeout(cfg.RequestTimeout)
 	detector := protocol.NewDetector(httpHandler)
 
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)
+	manager.SetPeekTimeout(cfg.PeekTimeout)
 
 	if stdio {
 		return runStdio(ctx, ca, store, manager, logger)
