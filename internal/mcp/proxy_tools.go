@@ -66,7 +66,7 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		}
 	}
 
-	if err := s.manager.Start(context.Background(), input.ListenAddr); err != nil {
+	if err := s.manager.Start(s.appCtx, input.ListenAddr); err != nil {
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
 	}
 
