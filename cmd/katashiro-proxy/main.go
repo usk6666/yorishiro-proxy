@@ -43,6 +43,7 @@ func run(ctx context.Context) error {
 	flag.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path")
 	flag.DurationVar(&cfg.PeekTimeout, "peek-timeout", cfg.PeekTimeout, "protocol detection timeout")
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "HTTP request read timeout")
+	flag.IntVar(&cfg.MaxConnections, "max-connections", cfg.MaxConnections, "max concurrent connections (0 = unlimited)")
 	flag.Parse()
 
 	// Initialize logger.
@@ -81,6 +82,7 @@ func run(ctx context.Context) error {
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)
 	manager.SetPeekTimeout(cfg.PeekTimeout)
+	manager.SetMaxConnections(cfg.MaxConnections)
 
 	if stdio {
 		return runStdio(ctx, ca, store, manager, logger)
