@@ -29,7 +29,7 @@ func setupTestSession(t *testing.T, ca *cert.CA) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(ca)
+	s := NewServer(ca, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
