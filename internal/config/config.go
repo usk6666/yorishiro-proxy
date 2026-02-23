@@ -30,7 +30,7 @@ type Config struct {
 // Default returns a Config with sensible defaults.
 func Default() *Config {
 	return &Config{
-		ListenAddr: ":8080",
+		ListenAddr: "127.0.0.1:8080",
 		MCPAddr:    ":3000",
 		DBPath:     "katashiro.db",
 		LogLevel:   "info",
