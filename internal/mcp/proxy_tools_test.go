@@ -101,8 +101,8 @@ func TestProxyStart_DefaultAddr(t *testing.T) {
 	cs := setupTestSessionWithManager(t, manager)
 
 	// Call without listen_addr to use default.
-	// Note: This will try to bind to :8080. If that port is in use, the test
-	// may fail, which is acceptable in CI environments.
+	// Note: This will try to bind to 127.0.0.1:8080. If that port is in use,
+	// the test may fail, which is acceptable in CI environments.
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "proxy_start",
 	})
@@ -111,7 +111,7 @@ func TestProxyStart_DefaultAddr(t *testing.T) {
 	}
 
 	if result.IsError {
-		// Port :8080 might be in use; skip the test.
+		// Port 127.0.0.1:8080 might be in use; skip the test.
 		t.Skipf("proxy_start with default addr failed (port likely in use): %v", result.Content)
 	}
 

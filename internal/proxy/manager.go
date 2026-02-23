@@ -41,7 +41,7 @@ func NewManager(detector ProtocolDetector, logger *slog.Logger) *Manager {
 }
 
 // Start begins the proxy on the specified listen address.
-// If listenAddr is empty, it defaults to ":8080".
+// If listenAddr is empty, it defaults to "127.0.0.1:8080".
 // Returns ErrAlreadyRunning if the proxy is already started.
 func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 	m.mu.Lock()
@@ -52,7 +52,7 @@ func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 	}
 
 	if listenAddr == "" {
-		listenAddr = ":8080"
+		listenAddr = "127.0.0.1:8080"
 	}
 
 	listener := NewListener(listenAddr, m.detector, m.logger)
