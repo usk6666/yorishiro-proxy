@@ -41,6 +41,7 @@ func (s *Server) Run(ctx context.Context, transport gomcp.Transport) error {
 }
 
 func (s *Server) registerTools() {
+	s.registerDeleteSession()
 	s.registerExportCACert()
 	s.registerGetSession()
 	s.registerListSessions()
