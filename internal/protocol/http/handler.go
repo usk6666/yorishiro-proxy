@@ -11,6 +11,7 @@ import (
 	gohttp "net/http"
 	"time"
 
+	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -44,14 +45,18 @@ var hopByHopHeaders = []string{
 // Handler processes HTTP/1.x connections.
 type Handler struct {
 	store     session.Store
+	issuer    *cert.Issuer
 	transport *gohttp.Transport
 	logger    *slog.Logger
 }
 
 // NewHandler creates a new HTTP handler with session recording.
-func NewHandler(store session.Store, logger *slog.Logger) *Handler {
+// If issuer is non-nil, CONNECT requests are handled for HTTPS MITM;
+// otherwise CONNECT requests receive a 501 Not Implemented response.
+func NewHandler(store session.Store, issuer *cert.Issuer, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:     store,
+		issuer:    issuer,
 		transport: &gohttp.Transport{},
 		logger:    logger,
 	}
@@ -89,6 +94,11 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 				return nil
 			}
 			return fmt.Errorf("read request: %w", err)
+		}
+
+		// CONNECT method starts HTTPS MITM tunnel.
+		if req.Method == gohttp.MethodConnect {
+			return h.handleCONNECT(ctx, conn, req)
 		}
 
 		if err := h.handleRequest(ctx, conn, req); err != nil {

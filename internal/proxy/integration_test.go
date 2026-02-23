@@ -22,7 +22,7 @@ func startProxy(t *testing.T, ctx context.Context, store session.Store) (*proxy.
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	httpHandler := protohttp.NewHandler(store, logger)
+	httpHandler := protohttp.NewHandler(store, nil, logger)
 	detector := protocol.NewDetector(httpHandler)
 	listener := proxy.NewListener("127.0.0.1:0", detector, logger)
 
