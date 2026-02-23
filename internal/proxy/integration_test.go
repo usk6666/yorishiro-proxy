@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/url"
@@ -20,9 +21,10 @@ import (
 func startProxy(t *testing.T, ctx context.Context, store session.Store) (*proxy.Listener, context.CancelFunc) {
 	t.Helper()
 
-	httpHandler := protohttp.NewHandler(store)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	httpHandler := protohttp.NewHandler(store, logger)
 	detector := protocol.NewDetector(httpHandler)
-	listener := proxy.NewListener("127.0.0.1:0", detector)
+	listener := proxy.NewListener("127.0.0.1:0", detector, logger)
 
 	proxyCtx, proxyCancel := context.WithCancel(ctx)
 
@@ -74,7 +76,8 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	store, err := session.NewSQLiteStore(ctx, dbPath)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -158,7 +161,8 @@ func TestIntegration_HTTPForwardProxy_POST(t *testing.T) {
 	defer upstreamServer.Close()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	store, err := session.NewSQLiteStore(ctx, dbPath)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}

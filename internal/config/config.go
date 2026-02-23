@@ -16,6 +16,15 @@ type Config struct {
 
 	// DBPath is the path to the SQLite database file.
 	DBPath string `json:"db_path"`
+
+	// LogLevel is the minimum log level: debug, info, warn, error.
+	LogLevel string `json:"log_level"`
+
+	// LogFormat is the log output format: text, json.
+	LogFormat string `json:"log_format"`
+
+	// LogFile is the log output file path. Empty means stderr.
+	LogFile string `json:"log_file"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -24,5 +33,7 @@ func Default() *Config {
 		ListenAddr: ":8080",
 		MCPAddr:    ":3000",
 		DBPath:     "katashiro.db",
+		LogLevel:   "info",
+		LogFormat:  "text",
 	}
 }
