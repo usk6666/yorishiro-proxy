@@ -21,9 +21,10 @@ var ErrNotRunning = errors.New("proxy is not running")
 // Manager controls the lifecycle of a proxy Listener.
 // It provides Start/Stop methods with thread-safe state management.
 type Manager struct {
-	detector    ProtocolDetector
-	logger      *slog.Logger
-	peekTimeout time.Duration
+	detector       ProtocolDetector
+	logger         *slog.Logger
+	peekTimeout    time.Duration
+	maxConnections int
 
 	mu         sync.Mutex
 	running    bool
@@ -57,10 +58,11 @@ func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 	}
 
 	listener := NewListener(ListenerConfig{
-		Addr:        listenAddr,
-		Detector:    m.detector,
-		Logger:      m.logger,
-		PeekTimeout: m.peekTimeout,
+		Addr:           listenAddr,
+		Detector:       m.detector,
+		Logger:         m.logger,
+		PeekTimeout:    m.peekTimeout,
+		MaxConnections: m.maxConnections,
 	})
 	listenerCtx, cancel := context.WithCancel(ctx)
 
@@ -137,6 +139,11 @@ func (m *Manager) Stop(ctx context.Context) error {
 // SetPeekTimeout sets the protocol detection timeout for new connections.
 func (m *Manager) SetPeekTimeout(d time.Duration) {
 	m.peekTimeout = d
+}
+
+// SetMaxConnections sets the maximum number of concurrent connections.
+func (m *Manager) SetMaxConnections(n int) {
+	m.maxConnections = n
 }
 
 // Status returns whether the proxy is running and its listen address.

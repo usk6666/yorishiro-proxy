@@ -13,6 +13,8 @@ const peekSize = 16
 
 const defaultPeekTimeout = 30 * time.Second
 
+const defaultMaxConnections = 1024
+
 // ProtocolDetector selects a handler based on peeked bytes.
 type ProtocolDetector interface {
 	Detect(peek []byte) ProtocolHandler
@@ -20,23 +22,26 @@ type ProtocolDetector interface {
 
 // ListenerConfig holds configuration for creating a Listener.
 type ListenerConfig struct {
-	Addr        string
-	Detector    ProtocolDetector
-	Logger      *slog.Logger
-	PeekTimeout time.Duration // 0 = defaultPeekTimeout (30s)
+	Addr           string
+	Detector       ProtocolDetector
+	Logger         *slog.Logger
+	PeekTimeout    time.Duration // 0 = defaultPeekTimeout (30s)
+	MaxConnections int           // 0 = defaultMaxConnections (1024)
 }
 
 // Listener accepts TCP connections and dispatches them to protocol handlers.
 type Listener struct {
-	addr        string
-	detector    ProtocolDetector
-	logger      *slog.Logger
-	peekTimeout time.Duration
+	addr           string
+	detector       ProtocolDetector
+	logger         *slog.Logger
+	peekTimeout    time.Duration
+	maxConnections int
 
 	mu       sync.Mutex
 	listener net.Listener
 	ready    chan struct{}
 	wg       sync.WaitGroup
+	sem      chan struct{} // nil if unlimited
 }
 
 // NewListener creates a new TCP listener with the given configuration.
@@ -45,12 +50,22 @@ func NewListener(cfg ListenerConfig) *Listener {
 	if peekTimeout == 0 {
 		peekTimeout = defaultPeekTimeout
 	}
+	maxConns := cfg.MaxConnections
+	if maxConns == 0 {
+		maxConns = defaultMaxConnections
+	}
+	var sem chan struct{}
+	if maxConns > 0 {
+		sem = make(chan struct{}, maxConns)
+	}
 	return &Listener{
-		addr:        cfg.Addr,
-		detector:    cfg.Detector,
-		logger:      cfg.Logger,
-		peekTimeout: peekTimeout,
-		ready:       make(chan struct{}),
+		addr:           cfg.Addr,
+		detector:       cfg.Detector,
+		logger:         cfg.Logger,
+		peekTimeout:    peekTimeout,
+		maxConnections: maxConns,
+		ready:          make(chan struct{}),
+		sem:            sem,
 	}
 }
 
@@ -85,7 +100,23 @@ func (l *Listener) Start(ctx context.Context) error {
 				return fmt.Errorf("accept: %w", err)
 			}
 		}
+		// Non-blocking semaphore acquire: reject if at capacity.
+		if l.sem != nil {
+			select {
+			case l.sem <- struct{}{}:
+			default:
+				l.logger.Warn("connection rejected: at capacity",
+					"remote_addr", conn.RemoteAddr().String(),
+					"max_connections", l.maxConnections)
+				conn.Close()
+				continue
+			}
+		}
+
 		l.wg.Go(func() {
+			if l.sem != nil {
+				defer func() { <-l.sem }()
+			}
 			l.handleConn(ctx, conn)
 		})
 	}
