@@ -218,4 +218,8 @@ Linear: https://linear.app/usk6666/issue/{{ISSUE_ID}}
 3. **テストサマリー**: テスト数、カバレッジ情報
 4. **PR URL**: 作成した PR の URL
 5. **注意事項**: レビュー時に注目すべき点、既知の制限事項
+
+**注意**: PR 作成後、オーケストレーターが自動で Code Review Agent と Security Review Agent による
+レビューを実行する。そのため、自己レビューや品質チェックの追加実施は不要。
+`go vet` / `go test -race` / `go build` の検証が通過していれば十分である。
 ```
