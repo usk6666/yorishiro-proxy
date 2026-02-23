@@ -60,7 +60,7 @@ func setupTestSessionWithStore(t *testing.T, ca *cert.CA, store session.Store) *
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(ca, store, nil)
+	s := NewServer(context.Background(), ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
