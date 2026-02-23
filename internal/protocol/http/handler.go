@@ -62,6 +62,12 @@ func NewHandler(store session.Store, issuer *cert.Issuer, logger *slog.Logger) *
 	}
 }
 
+// SetTransport replaces the handler's HTTP transport. This is primarily
+// useful for testing, where the upstream server uses a self-signed certificate.
+func (h *Handler) SetTransport(t *gohttp.Transport) {
+	h.transport = t
+}
+
 // Name returns the protocol name.
 func (h *Handler) Name() string {
 	return "HTTP/1.x"
