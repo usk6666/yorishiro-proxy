@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/url"
 	"path/filepath"
 	"testing"
@@ -11,7 +13,8 @@ import (
 func newTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	store, err := NewSQLiteStore(context.Background(), dbPath)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}

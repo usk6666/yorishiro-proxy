@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	gohttp "net/http"
 	"time"
@@ -44,13 +45,15 @@ var hopByHopHeaders = []string{
 type Handler struct {
 	store     session.Store
 	transport *gohttp.Transport
+	logger    *slog.Logger
 }
 
 // NewHandler creates a new HTTP handler with session recording.
-func NewHandler(store session.Store) *Handler {
+func NewHandler(store session.Store, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:     store,
 		transport: &gohttp.Transport{},
+		logger:    logger,
 	}
 }
 
@@ -126,6 +129,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
+		h.logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		// Send 502 Bad Gateway to client.
 		errResp := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		conn.Write([]byte(errResp))
@@ -162,9 +166,12 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	if h.store != nil {
 		if err := h.store.Save(ctx, entry); err != nil {
+			h.logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 			return fmt.Errorf("save session: %w", err)
 		}
 	}
+
+	h.logger.Info("http request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 
 	return nil
 }
