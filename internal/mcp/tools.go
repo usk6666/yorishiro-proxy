@@ -283,3 +283,56 @@ func (s *Server) handleListSessions(ctx context.Context, _ *gomcp.CallToolReques
 
 	return nil, result, nil
 }
+
+// deleteSessionInput is the typed input for the delete_session tool.
+type deleteSessionInput struct {
+	// SessionID is the unique identifier of the session to delete.
+	SessionID string `json:"session_id,omitempty" jsonschema:"session ID to delete (required unless delete_all is true)"`
+	// DeleteAll when true deletes all session entries.
+	DeleteAll bool `json:"delete_all,omitempty" jsonschema:"delete all sessions (default false)"`
+}
+
+// deleteSessionResult is the structured output of the delete_session tool.
+type deleteSessionResult struct {
+	// DeletedCount is the number of sessions that were deleted.
+	DeletedCount int64 `json:"deleted_count"`
+}
+
+// registerDeleteSession registers the delete_session MCP tool.
+func (s *Server) registerDeleteSession() {
+	gomcp.AddTool(s.server, &gomcp.Tool{
+		Name:        "delete_session",
+		Description: "Delete a recorded proxy session by ID or delete all sessions. Provide session_id to delete a single session, or set delete_all to true to remove all sessions.",
+	}, s.handleDeleteSession)
+}
+
+// handleDeleteSession handles the delete_session tool invocation.
+// It deletes a single session by ID or all sessions when delete_all is true.
+func (s *Server) handleDeleteSession(ctx context.Context, _ *gomcp.CallToolRequest, input deleteSessionInput) (*gomcp.CallToolResult, *deleteSessionResult, error) {
+	if s.store == nil {
+		return nil, nil, fmt.Errorf("session store is not initialized")
+	}
+
+	if input.SessionID == "" && !input.DeleteAll {
+		return nil, nil, fmt.Errorf("either session_id or delete_all must be specified")
+	}
+
+	if input.DeleteAll {
+		n, err := s.store.DeleteAll(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("delete all sessions: %w", err)
+		}
+		return nil, &deleteSessionResult{DeletedCount: n}, nil
+	}
+
+	// Verify the session exists before deleting.
+	if _, err := s.store.Get(ctx, input.SessionID); err != nil {
+		return nil, nil, fmt.Errorf("session not found: %s", input.SessionID)
+	}
+
+	if err := s.store.Delete(ctx, input.SessionID); err != nil {
+		return nil, nil, fmt.Errorf("delete session: %w", err)
+	}
+
+	return nil, &deleteSessionResult{DeletedCount: 1}, nil
+}
