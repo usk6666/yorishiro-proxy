@@ -143,12 +143,19 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
 	start := time.Now()
 
-	// Capture request body for recording.
-	var reqBody []byte
+	// Read the full request body so the upstream receives uncorrupted data.
+	var recordReqBody []byte
+	var reqTruncated bool
 	if req.Body != nil {
-		reqBody, _ = io.ReadAll(io.LimitReader(req.Body, maxBodyRecordSize))
+		fullBody, _ := io.ReadAll(req.Body)
 		req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+		req.Body = io.NopCloser(bytes.NewReader(fullBody))
+
+		recordReqBody = fullBody
+		if len(fullBody) > maxBodyRecordSize {
+			recordReqBody = fullBody[:maxBodyRecordSize]
+			reqTruncated = true
+		}
 	}
 
 	// Ensure absolute URL for forward proxy.
@@ -178,12 +185,20 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	defer resp.Body.Close()
 
-	// Capture response body for recording.
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyRecordSize))
+	// Read the full response body so the client receives uncorrupted data.
+	fullRespBody, _ := io.ReadAll(resp.Body)
 
-	// Write response back to client.
-	if err := writeResponse(conn, resp, respBody); err != nil {
+	// Write response back to client (full body).
+	if err := writeResponse(conn, resp, fullRespBody); err != nil {
 		return fmt.Errorf("write response: %w", err)
+	}
+
+	// Truncate for recording.
+	recordRespBody := fullRespBody
+	var respTruncated bool
+	if len(fullRespBody) > maxBodyRecordSize {
+		recordRespBody = fullRespBody[:maxBodyRecordSize]
+		respTruncated = true
 	}
 
 	duration := time.Since(start)
@@ -194,15 +209,17 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		Timestamp: start,
 		Duration:  duration,
 		Request: session.RecordedRequest{
-			Method:  req.Method,
-			URL:     req.URL,
-			Headers: req.Header,
-			Body:    reqBody,
+			Method:        req.Method,
+			URL:           req.URL,
+			Headers:       req.Header,
+			Body:          recordReqBody,
+			BodyTruncated: reqTruncated,
 		},
 		Response: session.RecordedResponse{
-			StatusCode: resp.StatusCode,
-			Headers:    resp.Header,
-			Body:       respBody,
+			StatusCode:    resp.StatusCode,
+			Headers:       resp.Header,
+			Body:          recordRespBody,
+			BodyTruncated: respTruncated,
 		},
 	}
 	if h.store != nil {

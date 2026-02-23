@@ -114,8 +114,8 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
 		entry.Protocol,
 		entry.Request.Method,
@@ -127,6 +127,8 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 		entry.Response.Body,
 		entry.Timestamp.UTC().Format(time.RFC3339Nano),
 		entry.Duration.Milliseconds(),
+		boolToInt(entry.Request.BodyTruncated),
+		boolToInt(entry.Response.BodyTruncated),
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -156,7 +158,7 @@ func (s *SQLiteStore) Save(ctx context.Context, entry *Entry) error {
 // Get retrieves a session entry by ID.
 func (s *SQLiteStore) Get(ctx context.Context, id string) (*Entry, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms
+		`SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated
 		 FROM sessions WHERE id = ?`, id)
 	return scanEntry(row)
 }
@@ -185,7 +187,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, err
 		args = append(args, opts.StatusCode)
 	}
 
-	query := "SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms FROM sessions"
+	query := "SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated FROM sessions"
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
@@ -250,12 +252,14 @@ type scannable interface {
 
 func scanEntry(row scannable) (*Entry, error) {
 	var (
-		entry       Entry
-		urlStr      string
-		reqHeaders  string
-		respHeaders string
-		tsStr       string
-		durationMs  int64
+		entry         Entry
+		urlStr        string
+		reqHeaders    string
+		respHeaders   string
+		tsStr         string
+		durationMs    int64
+		reqTruncated  int
+		respTruncated int
 	)
 
 	err := row.Scan(
@@ -270,6 +274,8 @@ func scanEntry(row scannable) (*Entry, error) {
 		&entry.Response.Body,
 		&tsStr,
 		&durationMs,
+		&reqTruncated,
+		&respTruncated,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -295,6 +301,9 @@ func scanEntry(row scannable) (*Entry, error) {
 	entry.Timestamp, _ = time.Parse(time.RFC3339Nano, tsStr)
 	entry.Duration = time.Duration(durationMs) * time.Millisecond
 
+	entry.Request.BodyTruncated = reqTruncated != 0
+	entry.Response.BodyTruncated = respTruncated != 0
+
 	return &entry, nil
 }
 
@@ -304,4 +313,12 @@ func scanEntryFromRows(rows *sql.Rows) (*Entry, error) {
 
 func parseURL(raw string) (*url.URL, error) {
 	return url.Parse(raw)
+}
+
+// boolToInt converts a boolean to an integer (0 or 1) for SQLite storage.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
