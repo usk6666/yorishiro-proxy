@@ -162,3 +162,81 @@ func mustParseURL(raw string) *url.URL {
 	}
 	return u
 }
+
+func TestSQLiteStore_List_LIKEWildcardEscape(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert entries with special LIKE characters in URLs.
+	entries := []*Entry{
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/100%25off")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/user_name")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/username")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/normal")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+	}
+
+	for _, e := range entries {
+		if err := store.Save(ctx, e); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name       string
+		urlPattern string
+		wantLen    int
+	}{
+		{
+			name:       "literal percent sign matches only URLs containing %25",
+			urlPattern: "%25",
+			wantLen:    1,
+		},
+		{
+			name:       "literal underscore matches only URLs containing _",
+			urlPattern: "user_name",
+			wantLen:    1,
+		},
+		{
+			name:       "plain substring still works",
+			urlPattern: "example.com",
+			wantLen:    4,
+		},
+		{
+			name:       "no match",
+			urlPattern: "nonexistent",
+			wantLen:    0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := store.List(ctx, ListOptions{URLPattern: tt.urlPattern})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(got) != tt.wantLen {
+				t.Errorf("got %d entries, want %d", len(got), tt.wantLen)
+			}
+		})
+	}
+}
