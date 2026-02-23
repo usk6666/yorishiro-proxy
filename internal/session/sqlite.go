@@ -25,6 +25,7 @@ type SQLiteStore struct {
 }
 
 type writeOp struct {
+	ctx    context.Context
 	entry  *Entry
 	result chan error
 }
@@ -81,19 +82,21 @@ func (s *SQLiteStore) writeLoop() {
 			if !ok {
 				return
 			}
-			err := s.saveSync(context.Background(), op.entry)
+			err := s.saveSync(op.ctx, op.entry)
 			if err != nil {
 				s.logger.Warn("session write failed", "error", err)
 			}
 			op.result <- err
 		case <-s.done:
-			// Drain remaining writes.
+			// Drain remaining writes with a timeout.
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer drainCancel()
 			for {
 				select {
 				case op := <-s.writeCh:
-					err := s.saveSync(context.Background(), op.entry)
+					err := s.saveSync(drainCtx, op.entry)
 					if err != nil {
-						s.logger.Warn("session write failed", "error", err)
+						s.logger.Warn("session write failed during drain", "error", err)
 					}
 					op.result <- err
 				default:
@@ -147,7 +150,7 @@ func (s *SQLiteStore) Save(ctx context.Context, entry *Entry) error {
 	}
 	result := make(chan error, 1)
 	select {
-	case s.writeCh <- writeOp{entry: entry, result: result}:
+	case s.writeCh <- writeOp{ctx: ctx, entry: entry, result: result}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
