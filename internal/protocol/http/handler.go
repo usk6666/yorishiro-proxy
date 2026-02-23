@@ -118,6 +118,15 @@ func (h *Handler) Detect(peek []byte) bool {
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	reader := bufio.NewReader(conn)
 
+	// Watch for context cancellation and interrupt blocking reads.
+	// When the proxy is shutting down, ReadRequest may be blocked waiting
+	// for the next request on a keep-alive connection. Setting an immediate
+	// read deadline causes it to return with a timeout error.
+	go func() {
+		<-ctx.Done()
+		conn.SetReadDeadline(time.Now())
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
