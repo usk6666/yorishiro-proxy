@@ -63,8 +63,11 @@ func waitForEntered(handler *slowHandler, target int32, timeout time.Duration) b
 func TestListener_GracefulShutdown_WaitsForHandlers(t *testing.T) {
 	handler := &slowHandler{delay: 300 * time.Millisecond, name: "slow"}
 	detector := &slowDetector{handler: handler}
-	logger := newTestLogger()
-	listener := proxy.NewListener("127.0.0.1:0", detector, logger)
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:     "127.0.0.1:0",
+		Detector: detector,
+		Logger:   newTestLogger(),
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -79,19 +82,15 @@ func TestListener_GracefulShutdown_WaitsForHandlers(t *testing.T) {
 		t.Fatal("listener not ready")
 	}
 
-	// Establish a connection that will be handled slowly.
 	conn := dialAndSend(t, listener.Addr())
 	defer conn.Close()
 
-	// Wait for the handler goroutine to actually enter Handle.
 	if !waitForEntered(handler, 1, 2*time.Second) {
 		t.Fatal("handler was never entered")
 	}
 
-	// Cancel context to trigger shutdown.
 	cancel()
 
-	// Start() should block until the slow handler completes.
 	select {
 	case err := <-errCh:
 		if err != nil {
@@ -101,7 +100,6 @@ func TestListener_GracefulShutdown_WaitsForHandlers(t *testing.T) {
 		t.Fatal("Start did not return after context cancellation")
 	}
 
-	// Verify handler completed.
 	if handler.handled.Load() != 1 {
 		t.Errorf("handled = %d, want 1", handler.handled.Load())
 	}
@@ -110,8 +108,11 @@ func TestListener_GracefulShutdown_WaitsForHandlers(t *testing.T) {
 func TestListener_GracefulShutdown_EmptyDrain(t *testing.T) {
 	handler := &slowHandler{delay: time.Second, name: "slow"}
 	detector := &slowDetector{handler: handler}
-	logger := newTestLogger()
-	listener := proxy.NewListener("127.0.0.1:0", detector, logger)
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:     "127.0.0.1:0",
+		Detector: detector,
+		Logger:   newTestLogger(),
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -126,7 +127,6 @@ func TestListener_GracefulShutdown_EmptyDrain(t *testing.T) {
 		t.Fatal("listener not ready")
 	}
 
-	// Cancel immediately with no active connections.
 	cancel()
 
 	select {
@@ -142,8 +142,11 @@ func TestListener_GracefulShutdown_EmptyDrain(t *testing.T) {
 func TestListener_MultipleConnections_AllDrain(t *testing.T) {
 	handler := &slowHandler{delay: 200 * time.Millisecond, name: "slow"}
 	detector := &slowDetector{handler: handler}
-	logger := newTestLogger()
-	listener := proxy.NewListener("127.0.0.1:0", detector, logger)
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:     "127.0.0.1:0",
+		Detector: detector,
+		Logger:   newTestLogger(),
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -158,7 +161,6 @@ func TestListener_MultipleConnections_AllDrain(t *testing.T) {
 		t.Fatal("listener not ready")
 	}
 
-	// Establish multiple connections.
 	const numConns = 5
 	conns := make([]net.Conn, numConns)
 	for i := range numConns {
@@ -166,15 +168,12 @@ func TestListener_MultipleConnections_AllDrain(t *testing.T) {
 		defer conns[i].Close()
 	}
 
-	// Wait for all handlers to enter Handle.
 	if !waitForEntered(handler, numConns, 2*time.Second) {
 		t.Fatalf("only %d/%d handlers entered", handler.entered.Load(), numConns)
 	}
 
-	// Cancel context.
 	cancel()
 
-	// Wait for Start to return.
 	select {
 	case err := <-errCh:
 		if err != nil {
@@ -184,8 +183,52 @@ func TestListener_MultipleConnections_AllDrain(t *testing.T) {
 		t.Fatal("Start did not return after context cancellation")
 	}
 
-	// All handlers should have completed.
 	if got := handler.handled.Load(); got != numConns {
 		t.Errorf("handled = %d, want %d", got, numConns)
+	}
+}
+
+func TestListener_PeekTimeout_DisconnectsSlowClient(t *testing.T) {
+	handler := &slowHandler{delay: 0, name: "fast"}
+	detector := &slowDetector{handler: handler}
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      newTestLogger(),
+		PeekTimeout: 200 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Connect but send no data — should be disconnected by peek timeout.
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Wait for the connection to be closed by the server.
+	buf := make([]byte, 1)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected error reading from timed-out connection")
+	}
+
+	// Handler should never have been entered (peek failed).
+	if handler.entered.Load() != 0 {
+		t.Errorf("handler entered = %d, want 0", handler.entered.Load())
 	}
 }

@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // Config holds the application configuration.
 type Config struct {
 	// ListenAddr is the TCP address the proxy listens on.
@@ -25,15 +27,23 @@ type Config struct {
 
 	// LogFile is the log output file path. Empty means stderr.
 	LogFile string `json:"log_file"`
+
+	// PeekTimeout is the timeout for protocol detection on new connections.
+	PeekTimeout time.Duration `json:"peek_timeout"`
+
+	// RequestTimeout is the timeout for reading HTTP request headers.
+	RequestTimeout time.Duration `json:"request_timeout"`
 }
 
 // Default returns a Config with sensible defaults.
 func Default() *Config {
 	return &Config{
-		ListenAddr: "127.0.0.1:8080",
-		MCPAddr:    ":3000",
-		DBPath:     "katashiro.db",
-		LogLevel:   "info",
-		LogFormat:  "text",
+		ListenAddr:     "127.0.0.1:8080",
+		MCPAddr:        ":3000",
+		DBPath:         "katashiro.db",
+		LogLevel:       "info",
+		LogFormat:      "text",
+		PeekTimeout:    30 * time.Second,
+		RequestTimeout: 60 * time.Second,
 	}
 }

@@ -6,20 +6,32 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 )
 
 const peekSize = 16
+
+const defaultPeekTimeout = 30 * time.Second
 
 // ProtocolDetector selects a handler based on peeked bytes.
 type ProtocolDetector interface {
 	Detect(peek []byte) ProtocolHandler
 }
 
+// ListenerConfig holds configuration for creating a Listener.
+type ListenerConfig struct {
+	Addr        string
+	Detector    ProtocolDetector
+	Logger      *slog.Logger
+	PeekTimeout time.Duration // 0 = defaultPeekTimeout (30s)
+}
+
 // Listener accepts TCP connections and dispatches them to protocol handlers.
 type Listener struct {
-	addr     string
-	detector ProtocolDetector
-	logger   *slog.Logger
+	addr        string
+	detector    ProtocolDetector
+	logger      *slog.Logger
+	peekTimeout time.Duration
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -27,13 +39,18 @@ type Listener struct {
 	wg       sync.WaitGroup
 }
 
-// NewListener creates a new TCP listener on the given address with a protocol detector.
-func NewListener(addr string, detector ProtocolDetector, logger *slog.Logger) *Listener {
+// NewListener creates a new TCP listener with the given configuration.
+func NewListener(cfg ListenerConfig) *Listener {
+	peekTimeout := cfg.PeekTimeout
+	if peekTimeout == 0 {
+		peekTimeout = defaultPeekTimeout
+	}
 	return &Listener{
-		addr:     addr,
-		detector: detector,
-		logger:   logger,
-		ready:    make(chan struct{}),
+		addr:        cfg.Addr,
+		detector:    cfg.Detector,
+		logger:      cfg.Logger,
+		peekTimeout: peekTimeout,
+		ready:       make(chan struct{}),
 	}
 }
 
@@ -80,11 +97,19 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	pc := NewPeekConn(conn)
 	remoteAddr := conn.RemoteAddr().String()
 
+	// Set read deadline for protocol detection (Slowloris protection).
+	if l.peekTimeout > 0 {
+		conn.SetReadDeadline(time.Now().Add(l.peekTimeout))
+	}
+
 	peek, err := pc.Peek(peekSize)
 	if err != nil && len(peek) == 0 {
 		l.logger.Debug("peek failed", "remote_addr", remoteAddr, "error", err)
 		return
 	}
+
+	// Reset deadline before passing to handler.
+	conn.SetReadDeadline(time.Time{})
 
 	handler := l.detector.Detect(peek)
 	if handler == nil {
