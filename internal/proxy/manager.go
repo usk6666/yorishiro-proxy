@@ -32,6 +32,7 @@ type Manager struct {
 	listener   *Listener
 	cancel     context.CancelFunc
 	done       chan struct{}
+	startedAt  time.Time // zero value when not running
 }
 
 // NewManager creates a new Manager with the given protocol detector and logger.
@@ -91,6 +92,7 @@ func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 	m.listener = listener
 	m.cancel = cancel
 	m.done = done
+	m.startedAt = time.Now()
 
 	m.logger.Info("proxy started", "listen_addr", m.listenAddr)
 
@@ -118,6 +120,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.listener = nil
 	m.cancel = nil
 	m.done = nil
+	m.startedAt = time.Time{}
 
 	m.mu.Unlock()
 
@@ -151,4 +154,27 @@ func (m *Manager) Status() (running bool, listenAddr string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.running, m.listenAddr
+}
+
+// ActiveConnections returns the number of connections currently being handled.
+// Returns 0 when the proxy is not running.
+func (m *Manager) ActiveConnections() int {
+	m.mu.Lock()
+	l := m.listener
+	m.mu.Unlock()
+	if l == nil {
+		return 0
+	}
+	return l.ActiveConnections()
+}
+
+// Uptime returns the duration since the proxy was started.
+// Returns 0 when the proxy is not running.
+func (m *Manager) Uptime() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.running || m.startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(m.startedAt)
 }

@@ -539,6 +539,94 @@ func TestSQLiteStore_Save_ContextPropagation(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_Count_Empty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	count, err := store.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Count on empty store = %d, want 0", count)
+	}
+}
+
+func TestSQLiteStore_Count_WithEntries(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	entries := []*Entry{
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTPS",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("https://example.com/b")},
+			Response:  RecordedResponse{StatusCode: 201},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/c")},
+			Response:  RecordedResponse{StatusCode: 404},
+		},
+	}
+
+	for _, e := range entries {
+		if err := store.Save(ctx, e); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	count, err := store.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("Count = %d, want 3", count)
+	}
+}
+
+func TestSQLiteStore_Count_AfterDelete(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/del")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	count, err := store.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count before delete: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Count before delete = %d, want 1", count)
+	}
+
+	if err := store.Delete(ctx, entry.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	count, err = store.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count after delete: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Count after delete = %d, want 0", count)
+	}
+}
+
 func TestSQLiteStore_List_LIKEWildcardEscape(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

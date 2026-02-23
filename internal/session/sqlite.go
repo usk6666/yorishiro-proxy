@@ -239,6 +239,16 @@ func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// Count returns the total number of session entries.
+func (s *SQLiteStore) Count(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count sessions: %w", err)
+	}
+	return count, nil
+}
+
 // Close shuts down the writer goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
 	close(s.done)

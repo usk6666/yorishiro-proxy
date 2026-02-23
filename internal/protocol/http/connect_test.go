@@ -96,6 +96,12 @@ func (m *mockStore) DeleteAll(_ context.Context) (int64, error) {
 	return n, nil
 }
 
+func (m *mockStore) Count(_ context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return int64(len(m.entries)), nil
+}
+
 func (m *mockStore) Entries() []*session.Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
