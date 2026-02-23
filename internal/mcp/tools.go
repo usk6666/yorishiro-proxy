@@ -73,18 +73,18 @@ func formatFingerprint(b []byte) string {
 
 // listSessionsInput is the input parameters for the list_sessions tool.
 type listSessionsInput struct {
-	// Protocol filters sessions by protocol (e.g. "http", "https").
-	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. http, https)"`
+	// Protocol filters sessions by protocol (e.g. "HTTP/1.x", "HTTPS").
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS)"`
 	// Method filters sessions by HTTP method (e.g. "GET", "POST").
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`
-	// URLPattern filters sessions by URL using a LIKE search pattern.
-	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL LIKE search pattern"`
+	// URLPattern filters sessions by URL using a substring search pattern.
+	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
 	// StatusCode filters sessions by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
-	// Limit is the maximum number of sessions to return (default 50).
-	Limit int `json:"limit,omitempty" jsonschema:"maximum number of sessions to return (default 50)"`
-	// Offset is the number of sessions to skip for pagination.
-	Offset int `json:"offset,omitempty" jsonschema:"number of sessions to skip for pagination"`
+	// Limit is the maximum number of sessions to return (default 50, max 1000).
+	Limit int `json:"limit,omitempty" jsonschema:"maximum number of sessions to return (default 50, max 1000)"`
+	// Offset is the number of sessions to skip for pagination (must be >= 0).
+	Offset int `json:"offset,omitempty" jsonschema:"number of sessions to skip for pagination (must be >= 0)"`
 }
 
 // listSessionsEntry is a single session entry in the list_sessions response.
@@ -107,12 +107,15 @@ type listSessionsEntry struct {
 type listSessionsResult struct {
 	// Sessions is the list of matching session entries.
 	Sessions []listSessionsEntry `json:"sessions"`
-	// Total is the number of sessions returned.
-	Total int `json:"total"`
+	// Count is the number of sessions returned in this page.
+	Count int `json:"count"`
 }
 
 // defaultListLimit is the default number of sessions returned when limit is not specified.
 const defaultListLimit = 50
+
+// maxListLimit is the maximum allowed value for limit to prevent OOM from unbounded queries.
+const maxListLimit = 1000
 
 // registerListSessions registers the list_sessions MCP tool.
 func (s *Server) registerListSessions() {
@@ -129,8 +132,14 @@ func (s *Server) handleListSessions(ctx context.Context, _ *gomcp.CallToolReques
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
+	// S-3: Validate non-negative offset.
+	if input.Offset < 0 {
+		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
+	}
+
+	// S-1: Enforce limit bounds to prevent OOM.
 	limit := input.Limit
-	if limit <= 0 {
+	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
 	}
 
@@ -167,7 +176,7 @@ func (s *Server) handleListSessions(ctx context.Context, _ *gomcp.CallToolReques
 
 	result := &listSessionsResult{
 		Sessions: sessions,
-		Total:    len(sessions),
+		Count:    len(sessions),
 	}
 
 	return nil, result, nil

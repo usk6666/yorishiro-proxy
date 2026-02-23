@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
@@ -390,8 +391,8 @@ func TestListSessions_NoFilter(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 4 {
-		t.Errorf("total = %d, want 4", out.Total)
+	if out.Count != 4 {
+		t.Errorf("total = %d, want 4", out.Count)
 	}
 	if len(out.Sessions) != 4 {
 		t.Errorf("sessions count = %d, want 4", len(out.Sessions))
@@ -420,8 +421,8 @@ func TestListSessions_FilterByProtocol(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 1 {
-		t.Errorf("total = %d, want 1", out.Total)
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
 	}
 	if len(out.Sessions) > 0 && out.Sessions[0].Protocol != "HTTPS" {
 		t.Errorf("protocol = %q, want HTTPS", out.Sessions[0].Protocol)
@@ -450,8 +451,8 @@ func TestListSessions_FilterByMethod(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 1 {
-		t.Errorf("total = %d, want 1", out.Total)
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
 	}
 	if len(out.Sessions) > 0 && out.Sessions[0].Method != "POST" {
 		t.Errorf("method = %q, want POST", out.Sessions[0].Method)
@@ -480,8 +481,8 @@ func TestListSessions_FilterByURLPattern(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 2 {
-		t.Errorf("total = %d, want 2", out.Total)
+	if out.Count != 2 {
+		t.Errorf("total = %d, want 2", out.Count)
 	}
 }
 
@@ -507,8 +508,8 @@ func TestListSessions_FilterByStatusCode(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 1 {
-		t.Errorf("total = %d, want 1", out.Total)
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
 	}
 	if len(out.Sessions) > 0 && out.Sessions[0].StatusCode != 404 {
 		t.Errorf("status_code = %d, want 404", out.Sessions[0].StatusCode)
@@ -537,8 +538,8 @@ func TestListSessions_CombinedFilters(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 1 {
-		t.Errorf("total = %d, want 1", out.Total)
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
 	}
 	if len(out.Sessions) > 0 {
 		s := out.Sessions[0]
@@ -573,8 +574,8 @@ func TestListSessions_Pagination(t *testing.T) {
 	if err := json.Unmarshal([]byte(textContent.Text), &out1); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out1.Total != 2 {
-		t.Errorf("page 1 total = %d, want 2", out1.Total)
+	if out1.Count != 2 {
+		t.Errorf("page 1 count = %d, want 2", out1.Count)
 	}
 
 	// Get next 2 sessions with offset.
@@ -594,8 +595,8 @@ func TestListSessions_Pagination(t *testing.T) {
 	if err := json.Unmarshal([]byte(textContent.Text), &out2); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out2.Total != 2 {
-		t.Errorf("page 2 total = %d, want 2", out2.Total)
+	if out2.Count != 2 {
+		t.Errorf("page 2 count = %d, want 2", out2.Count)
 	}
 
 	// Verify no overlap between pages.
@@ -633,8 +634,8 @@ func TestListSessions_DefaultLimit(t *testing.T) {
 	}
 
 	// We have 4 entries, which is less than default limit of 50.
-	if out.Total != 4 {
-		t.Errorf("total = %d, want 4", out.Total)
+	if out.Count != 4 {
+		t.Errorf("total = %d, want 4", out.Count)
 	}
 }
 
@@ -658,8 +659,8 @@ func TestListSessions_EmptyResult(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 0 {
-		t.Errorf("total = %d, want 0", out.Total)
+	if out.Count != 0 {
+		t.Errorf("total = %d, want 0", out.Count)
 	}
 	if len(out.Sessions) != 0 {
 		t.Errorf("sessions count = %d, want 0", len(out.Sessions))
@@ -688,8 +689,8 @@ func TestListSessions_NoMatchingFilter(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Total != 0 {
-		t.Errorf("total = %d, want 0", out.Total)
+	if out.Count != 0 {
+		t.Errorf("total = %d, want 0", out.Count)
 	}
 }
 
@@ -755,5 +756,109 @@ func TestListSessions_ResponseFields(t *testing.T) {
 	// Verify timestamp is valid RFC 3339 format.
 	if _, err := time.Parse("2006-01-02T15:04:05Z", s.Timestamp); err != nil {
 		t.Errorf("timestamp %q is not valid RFC 3339: %v", s.Timestamp, err)
+	}
+}
+
+// --- Security review fix tests ---
+
+func TestListSessions_ExtremeLimit(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	tests := []struct {
+		name      string
+		limit     int
+		wantCount int
+	}{
+		{"huge limit defaults to 50", 2147483647, 4},
+		{"over max defaults to 50", 1001, 4},
+		{"zero defaults to 50", 0, 4},
+		{"negative defaults to 50", -1, 4},
+		{"max allowed is respected", 1000, 4},
+		{"valid limit 2", 2, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := fmt.Sprintf(`{"limit":%d}`, tt.limit)
+			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+				Name:      "list_sessions",
+				Arguments: json.RawMessage(args),
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if result.IsError {
+				t.Fatalf("expected success, got error: %v", result.Content)
+			}
+
+			var out listSessionsResult
+			textContent := result.Content[0].(*gomcp.TextContent)
+			if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			if out.Count != tt.wantCount {
+				t.Errorf("count = %d, want %d", out.Count, tt.wantCount)
+			}
+		})
+	}
+}
+
+func TestListSessions_NegativeOffset(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"offset":-1}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for negative offset")
+	}
+}
+
+func TestListSessions_CountField(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	// Verify the JSON response uses "count" field, not "total".
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"limit":2}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	textContent := result.Content[0].(*gomcp.TextContent)
+
+	// Verify "count" is present in JSON.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(textContent.Text), &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if _, ok := raw["count"]; !ok {
+		t.Error("response JSON does not contain 'count' field")
+	}
+	if _, ok := raw["total"]; ok {
+		t.Error("response JSON still contains deprecated 'total' field")
+	}
+
+	var out listSessionsResult
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Count != 2 {
+		t.Errorf("count = %d, want 2", out.Count)
 	}
 }
