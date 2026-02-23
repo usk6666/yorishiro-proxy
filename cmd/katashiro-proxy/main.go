@@ -56,7 +56,7 @@ func run(ctx context.Context) error {
 	defer store.Close()
 
 	// Build protocol handlers and detector.
-	httpHandler := protohttp.NewHandler(store, logger)
+	httpHandler := protohttp.NewHandler(store, nil, logger)
 	detector := protocol.NewDetector(httpHandler)
 
 	// Start TCP listener.
