@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -71,6 +72,21 @@ func (h *Handler) SetTransport(t *gohttp.Transport) {
 	h.transport = t
 }
 
+// SetInsecureSkipVerify configures whether the handler skips TLS certificate
+// verification when connecting to upstream servers. When enabled, a warning
+// is logged because this disables important security checks.
+// This is intended for vulnerability assessments against targets using
+// self-signed or expired certificates.
+func (h *Handler) SetInsecureSkipVerify(skip bool) {
+	if skip {
+		h.logger.Warn("upstream TLS certificate verification is disabled — connections to upstream servers will not verify certificates")
+		if h.transport.TLSClientConfig == nil {
+			h.transport.TLSClientConfig = &tls.Config{}
+		}
+		h.transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+}
+
 // SetRequestTimeout sets the timeout for reading HTTP request headers.
 func (h *Handler) SetRequestTimeout(d time.Duration) {
 	h.requestTimeout = d
@@ -101,6 +117,15 @@ func (h *Handler) Detect(peek []byte) bool {
 // Handle processes HTTP connections in a loop (keep-alive support).
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	reader := bufio.NewReader(conn)
+
+	// Watch for context cancellation and interrupt blocking reads.
+	// When the proxy is shutting down, ReadRequest may be blocked waiting
+	// for the next request on a keep-alive connection. Setting an immediate
+	// read deadline causes it to return with a timeout error.
+	go func() {
+		<-ctx.Done()
+		conn.SetReadDeadline(time.Now())
+	}()
 
 	for {
 		select {

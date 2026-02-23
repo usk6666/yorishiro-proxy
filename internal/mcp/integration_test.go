@@ -312,7 +312,11 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		}
 	}
 
-	// 7. Stop the proxy via MCP tool.
+	// 7. Close idle keep-alive connections before stopping, so the proxy does
+	// not block waiting for the next request on a persistent connection.
+	client.CloseIdleConnections()
+
+	// Stop the proxy via MCP tool.
 	stopResult := callTool[proxyStopResult](t, env.cs, "proxy_stop", nil)
 	if stopResult.Status != "stopped" {
 		t.Errorf("proxy_stop status = %q, want %q", stopResult.Status, "stopped")
