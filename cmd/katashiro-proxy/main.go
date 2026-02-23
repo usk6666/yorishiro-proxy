@@ -44,6 +44,7 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.PeekTimeout, "peek-timeout", cfg.PeekTimeout, "protocol detection timeout")
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "HTTP request read timeout")
 	flag.IntVar(&cfg.MaxConnections, "max-connections", cfg.MaxConnections, "max concurrent connections (default 1024)")
+	flag.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "skip TLS certificate verification for upstream connections")
 	flag.Parse()
 
 	// Initialize logger.
@@ -77,6 +78,7 @@ func run(ctx context.Context) error {
 	// Build protocol handlers and detector.
 	httpHandler := protohttp.NewHandler(store, issuer, logger)
 	httpHandler.SetRequestTimeout(cfg.RequestTimeout)
+	httpHandler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	detector := protocol.NewDetector(httpHandler)
 
 	// Create proxy manager for MCP tool control.

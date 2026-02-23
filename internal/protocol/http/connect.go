@@ -106,6 +106,14 @@ func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname stri
 func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost string) error {
 	reader := bufio.NewReader(tlsConn)
 
+	// Watch for context cancellation and interrupt blocking reads.
+	// Same as Handle(): ReadRequest may block on keep-alive connections
+	// and needs an immediate deadline to unblock during shutdown.
+	go func() {
+		<-ctx.Done()
+		tlsConn.SetReadDeadline(time.Now())
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():

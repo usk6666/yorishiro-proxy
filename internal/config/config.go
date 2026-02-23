@@ -36,6 +36,12 @@ type Config struct {
 
 	// MaxConnections is the maximum number of concurrent proxy connections.
 	MaxConnections int `json:"max_connections"`
+
+	// InsecureSkipVerify disables TLS certificate verification for upstream
+	// connections. This is useful when the target uses self-signed or expired
+	// certificates, such as during vulnerability assessments.
+	// WARNING: Enabling this option disables security checks on upstream TLS.
+	InsecureSkipVerify bool `json:"insecure_skip_verify"`
 }
 
 // Default returns a Config with sensible defaults.
