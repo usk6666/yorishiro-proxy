@@ -155,6 +155,79 @@ func TestSQLiteStore_Delete(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_DeleteAll(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert multiple entries.
+	entries := []*Entry{
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
+			Response:  RecordedResponse{StatusCode: 201},
+		},
+		{
+			Protocol:  "HTTPS",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("https://example.com/c")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+	}
+	for _, e := range entries {
+		if err := store.Save(ctx, e); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	// Verify entries exist.
+	all, err := store.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 entries before DeleteAll, got %d", len(all))
+	}
+
+	// Delete all.
+	n, err := store.DeleteAll(ctx)
+	if err != nil {
+		t.Fatalf("DeleteAll: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("DeleteAll returned %d, want 3", n)
+	}
+
+	// Verify all deleted.
+	all, err = store.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List after DeleteAll: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("expected 0 entries after DeleteAll, got %d", len(all))
+	}
+}
+
+func TestSQLiteStore_DeleteAll_Empty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Delete all on empty store should return 0.
+	n, err := store.DeleteAll(ctx)
+	if err != nil {
+		t.Fatalf("DeleteAll: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("DeleteAll on empty store returned %d, want 0", n)
+	}
+}
+
 func mustParseURL(raw string) *url.URL {
 	u, err := url.Parse(raw)
 	if err != nil {

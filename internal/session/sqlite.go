@@ -230,6 +230,19 @@ func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteAll removes all session entries and returns the number of deleted rows.
+func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions")
+	if err != nil {
+		return 0, fmt.Errorf("delete all sessions: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // Close shuts down the writer goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
 	close(s.done)
