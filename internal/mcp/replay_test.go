@@ -1,0 +1,893 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+	"time"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/session"
+)
+
+// roundTripFunc is an adapter to use a function as an http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// setupTestSessionWithReplayDoer creates an MCP client session with a custom HTTP doer for replay testing.
+func setupTestSessionWithReplayDoer(t *testing.T, store session.Store, doer httpDoer) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	s := NewServer(nil, store, nil)
+	s.replayDoer = doer
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+// newEchoServer creates a test HTTP server that echoes back request details as JSON.
+func newEchoServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		resp := map[string]any{
+			"method":  r.Method,
+			"url":     r.URL.String(),
+			"headers": r.Header,
+			"body":    string(body),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Echo", "true")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestReplayRequest_Success(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
+		Duration:  250 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Content-Type": {"application/json"}, "X-Custom": {"original"}},
+			Body:    []byte(`{"key":"value"}`),
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"status":"ok"}`),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil) // Use real HTTP client
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the response.
+	if out.NewSessionID == "" {
+		t.Error("expected non-empty new_session_id")
+	}
+	if out.NewSessionID == entry.ID {
+		t.Error("new_session_id should differ from original session_id")
+	}
+	if out.StatusCode != 200 {
+		t.Errorf("status_code = %d, want 200", out.StatusCode)
+	}
+	if out.ResponseBodyEncoding != "text" {
+		t.Errorf("response_body_encoding = %q, want text", out.ResponseBodyEncoding)
+	}
+	if out.DurationMs < 0 {
+		t.Errorf("duration_ms = %d, should be >= 0", out.DurationMs)
+	}
+
+	// Verify the echo server received the right data.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+	if echo["method"] != "POST" {
+		t.Errorf("echo method = %q, want POST", echo["method"])
+	}
+	if echo["body"] != `{"key":"value"}` {
+		t.Errorf("echo body = %q, want {\"key\":\"value\"}", echo["body"])
+	}
+
+	// Verify the replay was recorded as a new session.
+	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	if err != nil {
+		t.Fatalf("get new session: %v", err)
+	}
+	if newEntry.Request.Method != "POST" {
+		t.Errorf("recorded method = %q, want POST", newEntry.Request.Method)
+	}
+	if newEntry.Response.StatusCode != 200 {
+		t.Errorf("recorded status = %d, want 200", newEntry.Response.StatusCode)
+	}
+}
+
+func TestReplayRequest_OverrideHeaders(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Authorization": {"Bearer old-token"}, "Accept": {"text/html"}},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_request",
+		Arguments: map[string]any{
+			"session_id": entry.ID,
+			"override_headers": map[string]any{
+				"Authorization": "Bearer new-token",
+				"X-New-Header":  "added",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the echo server received overridden headers.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+
+	headers, ok := echo["headers"].(map[string]any)
+	if !ok {
+		t.Fatal("expected headers in echo response")
+	}
+
+	// Check Authorization was overridden.
+	authValues, ok := headers["Authorization"].([]any)
+	if !ok || len(authValues) == 0 {
+		t.Fatal("expected Authorization header in echo response")
+	}
+	if authValues[0] != "Bearer new-token" {
+		t.Errorf("Authorization = %q, want Bearer new-token", authValues[0])
+	}
+
+	// Check new header was added.
+	newValues, ok := headers["X-New-Header"].([]any)
+	if !ok || len(newValues) == 0 {
+		t.Fatal("expected X-New-Header in echo response")
+	}
+	if newValues[0] != "added" {
+		t.Errorf("X-New-Header = %q, want added", newValues[0])
+	}
+
+	// Check original Accept header was preserved.
+	acceptValues, ok := headers["Accept"].([]any)
+	if !ok || len(acceptValues) == 0 {
+		t.Fatal("expected Accept header in echo response")
+	}
+	if acceptValues[0] != "text/html" {
+		t.Errorf("Accept = %q, want text/html", acceptValues[0])
+	}
+}
+
+func TestReplayRequest_OverrideBody(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Content-Type": {"application/json"}},
+			Body:    []byte(`{"original":"body"}`),
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	overrideBody := `{"override":"body"}`
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_request",
+		Arguments: map[string]any{
+			"session_id":    entry.ID,
+			"override_body": overrideBody,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the echo server received the overridden body.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+	if echo["body"] != overrideBody {
+		t.Errorf("echo body = %q, want %q", echo["body"], overrideBody)
+	}
+
+	// Verify the recorded session has the overridden body.
+	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	if err != nil {
+		t.Fatalf("get new session: %v", err)
+	}
+	if string(newEntry.Request.Body) != overrideBody {
+		t.Errorf("recorded body = %q, want %q", newEntry.Request.Body, overrideBody)
+	}
+}
+
+func TestReplayRequest_OverrideEmptyBody(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Content-Type": {"application/json"}},
+			Body:    []byte(`{"original":"body"}`),
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	emptyBody := ""
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_request",
+		Arguments: map[string]any{
+			"session_id":    entry.ID,
+			"override_body": emptyBody,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the echo server received an empty body.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+	if echo["body"] != "" {
+		t.Errorf("echo body = %q, want empty", echo["body"])
+	}
+}
+
+func TestReplayRequest_OverrideURL(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	// Original URL points to a different path.
+	u, _ := url.Parse(echoServer.URL + "/original-path")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	overrideURL := echoServer.URL + "/overridden-path"
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_request",
+		Arguments: map[string]any{
+			"session_id":   entry.ID,
+			"override_url": overrideURL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the echo server received the overridden URL path.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+	if echo["url"] != "/overridden-path" {
+		t.Errorf("echo url = %q, want /overridden-path", echo["url"])
+	}
+
+	// Verify recorded session has the overridden URL.
+	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	if err != nil {
+		t.Fatalf("get new session: %v", err)
+	}
+	if newEntry.Request.URL.Path != "/overridden-path" {
+		t.Errorf("recorded URL path = %q, want /overridden-path", newEntry.Request.URL.Path)
+	}
+}
+
+func TestReplayRequest_OverrideMethod(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_request",
+		Arguments: map[string]any{
+			"session_id":      entry.ID,
+			"override_method": "PUT",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the echo server received PUT method.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+	if echo["method"] != "PUT" {
+		t.Errorf("echo method = %q, want PUT", echo["method"])
+	}
+
+	// Verify recorded session has PUT method.
+	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	if err != nil {
+		t.Fatalf("get new session: %v", err)
+	}
+	if newEntry.Request.Method != "PUT" {
+		t.Errorf("recorded method = %q, want PUT", newEntry.Request.Method)
+	}
+}
+
+func TestReplayRequest_AllOverrides(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/original")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Accept": {"text/html"}},
+			Body:    nil,
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	overrideBody := `{"all":"overridden"}`
+	overrideURL := echoServer.URL + "/new-path"
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_request",
+		Arguments: map[string]any{
+			"session_id":      entry.ID,
+			"override_method": "PATCH",
+			"override_url":    overrideURL,
+			"override_headers": map[string]any{
+				"Content-Type": "application/json",
+			},
+			"override_body": overrideBody,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+
+	if echo["method"] != "PATCH" {
+		t.Errorf("echo method = %q, want PATCH", echo["method"])
+	}
+	if echo["url"] != "/new-path" {
+		t.Errorf("echo url = %q, want /new-path", echo["url"])
+	}
+	if echo["body"] != overrideBody {
+		t.Errorf("echo body = %q, want %q", echo["body"], overrideBody)
+	}
+}
+
+func TestReplayRequest_NonexistentSession(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": "nonexistent-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nonexistent session")
+	}
+}
+
+func TestReplayRequest_EmptySessionID(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": ""},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for empty session_id")
+	}
+}
+
+func TestReplayRequest_NilStore(t *testing.T) {
+	cs := setupTestSessionWithReplayDoer(t, nil, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": "some-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+func TestReplayRequest_InvalidOverrideURL(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "missing scheme",
+			url:  "example.com/path",
+		},
+		{
+			name: "relative path only",
+			url:  "/just-a-path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+				Name: "replay_request",
+				Arguments: map[string]any{
+					"session_id":   entry.ID,
+					"override_url": tt.url,
+				},
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if !result.IsError {
+				t.Fatalf("expected IsError=true for invalid override_url %q", tt.url)
+			}
+		})
+	}
+}
+
+func TestReplayRequest_NilOriginalURL(t *testing.T) {
+	store := newTestStore(t)
+
+	// Create an entry without a URL (nil URL).
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     nil,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	// Without override_url, should fail because original URL is nil.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil original URL without override")
+	}
+}
+
+func TestReplayRequest_NetworkError(t *testing.T) {
+	store := newTestStore(t)
+
+	// Point to a non-routable address to trigger a connection error.
+	u, _ := url.Parse("http://192.0.2.1:1/unreachable")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	// Use an HTTP client with a very short timeout.
+	shortTimeoutDoer := &http.Client{
+		Timeout: 100 * time.Millisecond,
+	}
+	cs := setupTestSessionWithReplayDoer(t, store, shortTimeoutDoer)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for network error")
+	}
+}
+
+func TestReplayRequest_PreservesProtocol(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTPS",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the new session preserves the protocol from the original.
+	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	if err != nil {
+		t.Fatalf("get new session: %v", err)
+	}
+	if newEntry.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want HTTPS", newEntry.Protocol)
+	}
+}
+
+func TestReplayRequest_ResponseFieldsComplete(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	// Verify JSON structure has all expected fields.
+	textContent := result.Content[0].(*gomcp.TextContent)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(textContent.Text), &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+
+	requiredFields := []string{
+		"new_session_id",
+		"status_code",
+		"response_headers",
+		"response_body",
+		"response_body_encoding",
+		"duration_ms",
+	}
+	for _, field := range requiredFields {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("response JSON missing required field %q", field)
+		}
+	}
+}
+
+func TestReplayRequest_ServerReturnsNon200(t *testing.T) {
+	store := newTestStore(t)
+
+	// Create a server that returns 500.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "internal server error")
+	}))
+	t.Cleanup(server.Close)
+
+	u, _ := url.Parse(server.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	// Non-200 responses are valid results, not errors.
+	if result.IsError {
+		t.Fatalf("expected success even for 500 response, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if out.StatusCode != 500 {
+		t.Errorf("status_code = %d, want 500", out.StatusCode)
+	}
+	if out.ResponseBody != "internal server error" {
+		t.Errorf("response_body = %q, want 'internal server error'", out.ResponseBody)
+	}
+}
