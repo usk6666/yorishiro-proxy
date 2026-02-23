@@ -28,12 +28,18 @@ internal/
   proxy/
     listener.go            # TCP リスナ (Layer 4)
     handler.go             # ProtocolHandler インターフェース
+    peekconn.go            # バッファ付き net.Conn ラッパー
   protocol/
     detect.go              # プロトコル検出ロジック
-    http/                  # HTTP/1.x, HTTP/2 MITM 実装
+    http/                  # HTTP/1.x, HTTPS MITM 実装
+      handler.go           # HTTP forward proxy ハンドラ
+      connect.go           # CONNECT トンネル・HTTPS MITM
   session/                 # リクエスト/レスポンス記録・セッション管理
   cert/                    # TLS 証明書生成・CA 管理
+    ca.go                  # ルート CA 生成・読み込み
+    issuer.go              # 動的サーバ証明書発行
   config/                  # 設定読み込み
+  logging/                 # 構造化ロギング (log/slog)
 ```
 
 ## ビルド・テスト
@@ -69,8 +75,16 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 
 - `github.com/modelcontextprotocol/go-sdk` — MCP 公式 Go SDK
 - `modernc.org/sqlite` — Pure Go SQLite ドライバ (BSD-3-Clause)
+- `github.com/google/uuid` — UUID 生成 (Apache-2.0)
+- `golang.org/x/sync` — singleflight 等の並行制御 (BSD-3-Clause)
 
 新しい外部依存を追加する場合は `/license-check` スキルでライセンスを確認すること。
+
+## 開発ワークフロー
+
+1. `/implement <Issue ID>` — Issue の実装・テスト・コミット・PR 作成を一気通貫で実行
+2. `/review-gate` — PR に対して Code Review + Security Review を並行実行。問題があれば自動修正→再レビュー（最大 2 ラウンド）
+3. `/orchestrate` — 複数 Issue の依存関係を分析し、最適な並行度でサブエージェントに実装を委任
 
 ## ブランチ戦略
 
