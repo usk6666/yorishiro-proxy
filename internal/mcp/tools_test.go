@@ -4,13 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"io"
+	"log/slog"
+	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
+	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
 // newTestCA creates a CA with a generated certificate for testing.
@@ -23,13 +29,30 @@ func newTestCA(t *testing.T) *cert.CA {
 	return ca
 }
 
+// newTestStore creates a SQLite session store for testing.
+func newTestStore(t *testing.T) session.Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := session.NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
+
 // setupTestSession creates a connected MCP client session for testing tools.
 // It returns the client session and a cleanup function.
-func setupTestSession(t *testing.T, ca *cert.CA) *gomcp.ClientSession {
+func setupTestSession(t *testing.T, ca *cert.CA, store ...session.Store) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(ca)
+	var st0 session.Store
+	if len(store) > 0 {
+		st0 = store[0]
+	}
+	s := NewServer(ca, st0)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -252,6 +275,336 @@ func TestFormatFingerprint(t *testing.T) {
 			got := formatFingerprint(tt.input)
 			if got != tt.want {
 				t.Errorf("formatFingerprint(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// saveTestEntry is a helper that saves a session entry and returns it with the assigned ID.
+func saveTestEntry(t *testing.T, store session.Store, entry *session.Entry) *session.Entry {
+	t.Helper()
+	if err := store.Save(context.Background(), entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	return entry
+}
+
+func TestGetSession_Success(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	u, _ := url.Parse("http://example.com/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
+		Duration:  250 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Content-Type": {"application/json"}, "Host": {"example.com"}},
+			Body:    []byte(`{"key":"value"}`),
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"status":"ok"}`),
+		},
+	})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out getSessionResult
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify all fields.
+	if out.ID != entry.ID {
+		t.Errorf("ID = %q, want %q", out.ID, entry.ID)
+	}
+	if out.Protocol != "HTTP/1.x" {
+		t.Errorf("Protocol = %q, want %q", out.Protocol, "HTTP/1.x")
+	}
+	if out.Method != "POST" {
+		t.Errorf("Method = %q, want %q", out.Method, "POST")
+	}
+	if out.URL != "http://example.com/api/test" {
+		t.Errorf("URL = %q, want %q", out.URL, "http://example.com/api/test")
+	}
+	if out.RequestBody != `{"key":"value"}` {
+		t.Errorf("RequestBody = %q, want %q", out.RequestBody, `{"key":"value"}`)
+	}
+	if out.RequestBodyEncoding != "text" {
+		t.Errorf("RequestBodyEncoding = %q, want %q", out.RequestBodyEncoding, "text")
+	}
+	if out.ResponseStatusCode != 200 {
+		t.Errorf("ResponseStatusCode = %d, want %d", out.ResponseStatusCode, 200)
+	}
+	if out.ResponseBody != `{"status":"ok"}` {
+		t.Errorf("ResponseBody = %q, want %q", out.ResponseBody, `{"status":"ok"}`)
+	}
+	if out.ResponseBodyEncoding != "text" {
+		t.Errorf("ResponseBodyEncoding = %q, want %q", out.ResponseBodyEncoding, "text")
+	}
+	if out.Timestamp != "2025-01-15T10:30:00Z" {
+		t.Errorf("Timestamp = %q, want %q", out.Timestamp, "2025-01-15T10:30:00Z")
+	}
+	if out.DurationMs != 250 {
+		t.Errorf("DurationMs = %d, want %d", out.DurationMs, 250)
+	}
+
+	// Verify headers.
+	if got := out.RequestHeaders["Content-Type"]; len(got) != 1 || got[0] != "application/json" {
+		t.Errorf("RequestHeaders[Content-Type] = %v, want [application/json]", got)
+	}
+	if got := out.ResponseHeaders["Content-Type"]; len(got) != 1 || got[0] != "application/json" {
+		t.Errorf("ResponseHeaders[Content-Type] = %v, want [application/json]", got)
+	}
+}
+
+func TestGetSession_NotFound(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": "nonexistent-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nonexistent session ID")
+	}
+}
+
+func TestGetSession_EmptySessionID(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": ""},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for empty session_id")
+	}
+}
+
+func TestGetSession_NilStore(t *testing.T) {
+	cs := setupTestSession(t, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": "some-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+func TestGetSession_BinaryBody(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	// Create binary data that is not valid UTF-8.
+	binaryData := []byte{0xFF, 0xFE, 0x00, 0x01, 0x80, 0x90, 0xA0, 0xB0}
+
+	u, _ := url.Parse("http://example.com/binary")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Content-Type": {"application/octet-stream"}},
+			Body:    binaryData,
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/octet-stream"}},
+			Body:       binaryData,
+		},
+	})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out getSessionResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify binary bodies are Base64-encoded.
+	if out.RequestBodyEncoding != "base64" {
+		t.Errorf("RequestBodyEncoding = %q, want %q", out.RequestBodyEncoding, "base64")
+	}
+	if out.ResponseBodyEncoding != "base64" {
+		t.Errorf("ResponseBodyEncoding = %q, want %q", out.ResponseBodyEncoding, "base64")
+	}
+
+	// Decode and verify the binary content.
+	decodedReq, err := base64.StdEncoding.DecodeString(out.RequestBody)
+	if err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if string(decodedReq) != string(binaryData) {
+		t.Errorf("decoded request body = %v, want %v", decodedReq, binaryData)
+	}
+
+	decodedResp, err := base64.StdEncoding.DecodeString(out.ResponseBody)
+	if err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if string(decodedResp) != string(binaryData) {
+		t.Errorf("decoded response body = %v, want %v", decodedResp, binaryData)
+	}
+}
+
+func TestGetSession_EmptyBody(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	u, _ := url.Parse("http://example.com/empty")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  50 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}},
+			Body:    nil,
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 204,
+			Headers:    map[string][]string{},
+			Body:       nil,
+		},
+	})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out getSessionResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if out.RequestBody != "" {
+		t.Errorf("RequestBody = %q, want empty", out.RequestBody)
+	}
+	if out.RequestBodyEncoding != "text" {
+		t.Errorf("RequestBodyEncoding = %q, want %q", out.RequestBodyEncoding, "text")
+	}
+	if out.ResponseBody != "" {
+		t.Errorf("ResponseBody = %q, want empty", out.ResponseBody)
+	}
+	if out.ResponseBodyEncoding != "text" {
+		t.Errorf("ResponseBodyEncoding = %q, want %q", out.ResponseBodyEncoding, "text")
+	}
+}
+
+func TestEncodeBody(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         []byte
+		wantBody     string
+		wantEncoding string
+	}{
+		{
+			name:         "nil body",
+			body:         nil,
+			wantBody:     "",
+			wantEncoding: "text",
+		},
+		{
+			name:         "empty body",
+			body:         []byte{},
+			wantBody:     "",
+			wantEncoding: "text",
+		},
+		{
+			name:         "text body",
+			body:         []byte("hello world"),
+			wantBody:     "hello world",
+			wantEncoding: "text",
+		},
+		{
+			name:         "json body",
+			body:         []byte(`{"key":"value"}`),
+			wantBody:     `{"key":"value"}`,
+			wantEncoding: "text",
+		},
+		{
+			name:         "binary body",
+			body:         []byte{0xFF, 0xFE, 0x00, 0x01},
+			wantBody:     base64.StdEncoding.EncodeToString([]byte{0xFF, 0xFE, 0x00, 0x01}),
+			wantEncoding: "base64",
+		},
+		{
+			name:         "utf8 with multibyte chars",
+			body:         []byte("こんにちは"),
+			wantBody:     "こんにちは",
+			wantEncoding: "text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBody, gotEncoding := encodeBody(tt.body)
+			if gotBody != tt.wantBody {
+				t.Errorf("body = %q, want %q", gotBody, tt.wantBody)
+			}
+			if gotEncoding != tt.wantEncoding {
+				t.Errorf("encoding = %q, want %q", gotEncoding, tt.wantEncoding)
 			}
 		})
 	}
