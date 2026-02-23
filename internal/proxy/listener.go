@@ -24,6 +24,7 @@ type Listener struct {
 	mu       sync.Mutex
 	listener net.Listener
 	ready    chan struct{}
+	wg       sync.WaitGroup
 }
 
 // NewListener creates a new TCP listener on the given address with a protocol detector.
@@ -60,12 +61,16 @@ func (l *Listener) Start(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				l.wg.Wait()
 				return nil
 			default:
+				l.wg.Wait()
 				return fmt.Errorf("accept: %w", err)
 			}
 		}
-		go l.handleConn(ctx, conn)
+		l.wg.Go(func() {
+			l.handleConn(ctx, conn)
+		})
 	}
 }
 
