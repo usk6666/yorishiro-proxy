@@ -15,6 +15,9 @@ type Store interface {
 
 	// Delete removes a session entry by ID.
 	Delete(ctx context.Context, id string) error
+
+	// DeleteAll removes all session entries and returns the number of deleted rows.
+	DeleteAll(ctx context.Context) (int64, error)
 }
 
 // ListOptions configures entry listing behavior.

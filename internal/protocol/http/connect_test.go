@@ -88,6 +88,14 @@ func (m *mockStore) Delete(_ context.Context, id string) error {
 	return fmt.Errorf("not found: %s", id)
 }
 
+func (m *mockStore) DeleteAll(_ context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := int64(len(m.entries))
+	m.entries = nil
+	return n, nil
+}
+
 func (m *mockStore) Entries() []*session.Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()

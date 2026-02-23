@@ -1201,3 +1201,190 @@ func TestListSessions_CountField(t *testing.T) {
 		t.Errorf("count = %d, want 2", out.Count)
 	}
 }
+
+// --- delete_session tests ---
+
+func TestDeleteSession_SingleDelete(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	// List sessions to get a valid ID.
+	entries, err := store.List(context.Background(), session.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one session")
+	}
+	targetID := entries[0].ID
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "delete_session",
+		Arguments: map[string]any{"session_id": targetID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out deleteSessionResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.DeletedCount != 1 {
+		t.Errorf("deleted_count = %d, want 1", out.DeletedCount)
+	}
+
+	// Verify session is deleted.
+	_, err = store.Get(context.Background(), targetID)
+	if err == nil {
+		t.Error("expected error when getting deleted session, got nil")
+	}
+}
+
+func TestDeleteSession_DeleteAll(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "delete_session",
+		Arguments: map[string]any{"delete_all": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out deleteSessionResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.DeletedCount != 4 {
+		t.Errorf("deleted_count = %d, want 4", out.DeletedCount)
+	}
+
+	// Verify all sessions are deleted.
+	entries, err := store.List(context.Background(), session.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries after delete_all, got %d", len(entries))
+	}
+}
+
+func TestDeleteSession_DeleteAllEmpty(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "delete_session",
+		Arguments: map[string]any{"delete_all": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out deleteSessionResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.DeletedCount != 0 {
+		t.Errorf("deleted_count = %d, want 0", out.DeletedCount)
+	}
+}
+
+func TestDeleteSession_NotFound(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "delete_session",
+		Arguments: map[string]any{"session_id": "nonexistent-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nonexistent session ID")
+	}
+}
+
+func TestDeleteSession_NoParams(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "delete_session",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true when neither session_id nor delete_all is specified")
+	}
+}
+
+func TestDeleteSession_NilStore(t *testing.T) {
+	cs := setupTestSessionWithStore(t, nil, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "delete_session",
+		Arguments: map[string]any{"session_id": "some-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+func TestDeleteSession_ResponseFields(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "delete_session",
+		Arguments: map[string]any{"delete_all": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	textContent := result.Content[0].(*gomcp.TextContent)
+
+	// Verify JSON has "deleted_count" field.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(textContent.Text), &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if _, ok := raw["deleted_count"]; !ok {
+		t.Error("response JSON does not contain 'deleted_count' field")
+	}
+}
