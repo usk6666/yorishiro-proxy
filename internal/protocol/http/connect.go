@@ -23,7 +23,9 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Validate that the issuer is configured for TLS interception.
 	if h.issuer == nil {
 		h.logger.Warn("CONNECT received but TLS issuer not configured", "host", req.Host)
-		conn.Write([]byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+		if _, err := conn.Write([]byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
+			h.logger.Debug("failed to write error response", "error", err)
+		}
 		return nil
 	}
 
@@ -31,7 +33,9 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	hostname, err := parseConnectHost(req.Host)
 	if err != nil {
 		h.logger.Warn("invalid CONNECT host", "host", req.Host, "error", err)
-		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+		if _, err := conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
+			h.logger.Debug("failed to write error response", "error", err)
+		}
 		return nil
 	}
 
@@ -159,7 +163,9 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	if err != nil {
 		h.logger.Error("HTTPS upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		if _, err := conn.Write([]byte(errResp)); err != nil {
+			h.logger.Debug("failed to write error response", "error", err)
+		}
 		return fmt.Errorf("HTTPS upstream request: %w", err)
 	}
 	defer resp.Body.Close()
