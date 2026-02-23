@@ -11,10 +11,11 @@ import (
 
 // Server wraps the MCP server and registers proxy-related tools.
 type Server struct {
-	server  *gomcp.Server
-	ca      *cert.CA
-	store   session.Store
-	manager *proxy.Manager
+	server     *gomcp.Server
+	ca         *cert.CA
+	store      session.Store
+	manager    *proxy.Manager
+	replayDoer httpDoer // injectable HTTP client for replay_request testing
 }
 
 // NewServer creates a new MCP server with proxy tools registered.
@@ -45,6 +46,7 @@ func (s *Server) registerTools() {
 	s.registerExportCACert()
 	s.registerGetSession()
 	s.registerListSessions()
+	s.registerReplayRequest()
 	s.registerProxyStart()
 	s.registerProxyStop()
 }
