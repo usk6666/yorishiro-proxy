@@ -28,7 +28,7 @@ func setupTestSessionWithReplayDoer(t *testing.T, store session.Store, doer http
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(nil, store, nil)
+	s := NewServer(context.Background(), nil, store, nil)
 	s.replayDoer = doer
 	ct, st := gomcp.NewInMemoryTransports()
 
