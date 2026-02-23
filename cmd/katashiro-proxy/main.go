@@ -90,9 +90,15 @@ func run(ctx context.Context) error {
 // are configured, it loads the CA from files. Otherwise, it generates an
 // ephemeral CA that lasts for the lifetime of the process.
 func initCA(cfg *config.Config, logger *slog.Logger) (*cert.CA, error) {
+	hasCert := cfg.CACertPath != ""
+	hasKey := cfg.CAKeyPath != ""
+	if hasCert != hasKey {
+		return nil, fmt.Errorf("both -ca-cert and -ca-key must be specified together")
+	}
+
 	ca := &cert.CA{}
 
-	if cfg.CACertPath != "" && cfg.CAKeyPath != "" {
+	if hasCert && hasKey {
 		if err := ca.Load(cfg.CACertPath, cfg.CAKeyPath); err != nil {
 			return nil, fmt.Errorf("load CA from %s / %s: %w", cfg.CACertPath, cfg.CAKeyPath, err)
 		}
