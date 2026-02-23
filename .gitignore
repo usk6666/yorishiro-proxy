@@ -3,6 +3,9 @@
 *.sqlite
 *.sqlite3
 
+# Log files
+*.log
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
