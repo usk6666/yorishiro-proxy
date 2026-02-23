@@ -183,7 +183,6 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	if h.store != nil {
 		if err := h.store.Save(ctx, entry); err != nil {
 			h.logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
-			return fmt.Errorf("save session: %w", err)
 		}
 	}
 

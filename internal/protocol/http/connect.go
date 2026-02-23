@@ -200,7 +200,6 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	if h.store != nil {
 		if err := h.store.Save(ctx, entry); err != nil {
 			h.logger.Error("HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
-			return fmt.Errorf("save HTTPS session: %w", err)
 		}
 	}
 
