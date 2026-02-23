@@ -181,8 +181,10 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, err
 		args = append(args, opts.Method)
 	}
 	if opts.URLPattern != "" {
-		conditions = append(conditions, "url LIKE ?")
-		args = append(args, "%"+opts.URLPattern+"%")
+		// Escape LIKE wildcards to prevent unintended pattern matching.
+		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.URLPattern)
+		conditions = append(conditions, "url LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+escaped+"%")
 	}
 	if opts.StatusCode != 0 {
 		conditions = append(conditions, "response_status = ?")
