@@ -45,7 +45,7 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 
 	// Perform TLS handshake with the client.
-	tlsConn, err := h.tlsHandshake(conn, hostname)
+	tlsConn, err := h.tlsHandshake(ctx, conn, hostname)
 	if err != nil {
 		h.logger.Error("TLS handshake failed", "host", hostname, "error", err)
 		return nil // Connection is already broken; don't propagate.
@@ -83,14 +83,14 @@ func parseConnectHost(hostPort string) (string, error) {
 
 // tlsHandshake performs a TLS server handshake on the client connection,
 // presenting a dynamically generated certificate for the given hostname.
-func (h *Handler) tlsHandshake(conn net.Conn, hostname string) (*tls.Conn, error) {
+func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (*tls.Conn, error) {
 	tlsConfig := &tls.Config{
 		GetCertificate: h.issuer.GetCertificateForClientHello,
 	}
 
 	tlsConn := tls.Server(conn, tlsConfig)
 
-	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return nil, fmt.Errorf("TLS handshake for %s: %w", hostname, err)
 	}
 
