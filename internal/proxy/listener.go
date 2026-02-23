@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 )
@@ -18,6 +19,7 @@ type ProtocolDetector interface {
 type Listener struct {
 	addr     string
 	detector ProtocolDetector
+	logger   *slog.Logger
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -25,10 +27,11 @@ type Listener struct {
 }
 
 // NewListener creates a new TCP listener on the given address with a protocol detector.
-func NewListener(addr string, detector ProtocolDetector) *Listener {
+func NewListener(addr string, detector ProtocolDetector, logger *slog.Logger) *Listener {
 	return &Listener{
 		addr:     addr,
 		detector: detector,
+		logger:   logger,
 		ready:    make(chan struct{}),
 	}
 }
@@ -70,18 +73,25 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	pc := NewPeekConn(conn)
+	remoteAddr := conn.RemoteAddr().String()
 
 	peek, err := pc.Peek(peekSize)
 	if err != nil && len(peek) == 0 {
+		l.logger.Debug("peek failed", "remote_addr", remoteAddr, "error", err)
 		return
 	}
 
 	handler := l.detector.Detect(peek)
 	if handler == nil {
+		l.logger.Warn("no protocol handler matched", "remote_addr", remoteAddr, "peek_bytes", fmt.Sprintf("%x", peek))
 		return
 	}
 
-	handler.Handle(ctx, pc)
+	l.logger.Debug("connection dispatched", "remote_addr", remoteAddr, "protocol", handler.Name())
+
+	if err := handler.Handle(ctx, pc); err != nil {
+		l.logger.Error("handler error", "remote_addr", remoteAddr, "protocol", handler.Name(), "error", err)
+	}
 }
 
 // Addr returns the listener's network address, or empty string if not started.
