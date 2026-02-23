@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -69,6 +70,21 @@ func NewHandler(store session.Store, issuer *cert.Issuer, logger *slog.Logger) *
 // useful for testing, where the upstream server uses a self-signed certificate.
 func (h *Handler) SetTransport(t *gohttp.Transport) {
 	h.transport = t
+}
+
+// SetInsecureSkipVerify configures whether the handler skips TLS certificate
+// verification when connecting to upstream servers. When enabled, a warning
+// is logged because this disables important security checks.
+// This is intended for vulnerability assessments against targets using
+// self-signed or expired certificates.
+func (h *Handler) SetInsecureSkipVerify(skip bool) {
+	if skip {
+		h.logger.Warn("upstream TLS certificate verification is disabled — connections to upstream servers will not verify certificates")
+		if h.transport.TLSClientConfig == nil {
+			h.transport.TLSClientConfig = &tls.Config{}
+		}
+		h.transport.TLSClientConfig.InsecureSkipVerify = true
+	}
 }
 
 // SetRequestTimeout sets the timeout for reading HTTP request headers.
