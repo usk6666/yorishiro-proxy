@@ -132,16 +132,13 @@ func TestManager_StopAfterStop_Error(t *testing.T) {
 	}
 }
 
-func TestManager_StartWithDefaultAddr(t *testing.T) {
+func TestManager_StartWithRandomPort(t *testing.T) {
 	logger := newTestLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
-	// Use empty string for listenAddr to trigger default.
-	// Note: We use 127.0.0.1:0 to avoid binding to :8080 in tests,
-	// but we test the empty-address code path separately by checking
-	// that Start with "" doesn't panic and returns a valid address.
-	// Since :8080 may be in use, we test with a random port directly.
+	// Start with a random port to verify the manager correctly reports
+	// the actual listen address assigned by the OS.
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -201,8 +198,8 @@ func TestManager_StartWithInvalidAddr(t *testing.T) {
 	// Use an invalid address format.
 	err := manager.Start(context.Background(), "invalid-address-no-port")
 	if err == nil {
-		t.Fatal("expected error for invalid address")
 		manager.Stop(context.Background())
+		t.Fatal("expected error for invalid address")
 	}
 
 	// Should still be not running after failed start.

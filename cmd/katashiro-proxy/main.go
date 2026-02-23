@@ -66,7 +66,6 @@ func run(ctx context.Context) error {
 	if err := manager.Start(ctx, cfg.ListenAddr); err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
-	logger.Info("proxy started", "listen_addr", cfg.ListenAddr, "db_path", cfg.DBPath)
 
 	<-ctx.Done()
 	logger.Info("shutting down")
