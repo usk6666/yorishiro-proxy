@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -51,6 +52,17 @@ func setupTestSessionWithReplayDoer(t *testing.T, store session.Store, doer http
 	return cs
 }
 
+// newPermissiveClient returns an HTTP client without SSRF protection,
+// suitable for tests that need to connect to localhost echo servers.
+func newPermissiveClient() *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // newEchoServer creates a test HTTP server that echoes back request details as JSON.
 func newEchoServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -93,7 +105,7 @@ func TestReplayRequest_Success(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil) // Use real HTTP client
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
@@ -178,7 +190,7 @@ func TestReplayRequest_OverrideHeaders(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
@@ -264,7 +276,7 @@ func TestReplayRequest_OverrideBody(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	overrideBody := `{"override":"body"}`
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -328,7 +340,7 @@ func TestReplayRequest_OverrideEmptyBody(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	emptyBody := ""
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -383,7 +395,7 @@ func TestReplayRequest_OverrideURL(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	overrideURL := echoServer.URL + "/overridden-path"
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -446,7 +458,7 @@ func TestReplayRequest_OverrideMethod(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
@@ -509,7 +521,7 @@ func TestReplayRequest_AllOverrides(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	overrideBody := `{"all":"overridden"}`
 	overrideURL := echoServer.URL + "/new-path"
 
@@ -752,7 +764,7 @@ func TestReplayRequest_PreservesProtocol(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
@@ -802,7 +814,7 @@ func TestReplayRequest_ResponseFieldsComplete(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
@@ -864,7 +876,7 @@ func TestReplayRequest_ServerReturnsNon200(t *testing.T) {
 		},
 	})
 
-	cs := setupTestSessionWithReplayDoer(t, store, nil)
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
@@ -889,5 +901,255 @@ func TestReplayRequest_ServerReturnsNon200(t *testing.T) {
 	}
 	if out.ResponseBody != "internal server error" {
 		t.Errorf("response_body = %q, want 'internal server error'", out.ResponseBody)
+	}
+}
+
+// --- Security tests for S-1, S-2, S-3 ---
+
+func TestReplayRequest_RejectsNonHTTPScheme(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "file scheme", url: "file:///etc/passwd"},
+		{name: "gopher scheme", url: "gopher://localhost:70/"},
+		{name: "ftp scheme", url: "ftp://example.com/file"},
+		{name: "javascript scheme", url: "javascript://example.com/"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+				Name: "replay_request",
+				Arguments: map[string]any{
+					"session_id":   entry.ID,
+					"override_url": tt.url,
+				},
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if !result.IsError {
+				t.Fatalf("expected IsError=true for scheme in %q", tt.url)
+			}
+		})
+	}
+}
+
+func TestReplayRequest_RejectsNonHTTPSchemeInOriginalURL(t *testing.T) {
+	store := newTestStore(t)
+
+	// Store a session with a file:// scheme URL.
+	u, _ := url.Parse("file:///etc/passwd")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for file:// scheme in original URL")
+	}
+}
+
+func TestDenyPrivateNetwork(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		wantErr bool
+	}{
+		{name: "loopback IPv4", address: "127.0.0.1:80", wantErr: true},
+		{name: "loopback IPv6", address: "[::1]:80", wantErr: true},
+		{name: "private 10.x", address: "10.0.0.1:80", wantErr: true},
+		{name: "private 172.16.x", address: "172.16.0.1:80", wantErr: true},
+		{name: "private 192.168.x", address: "192.168.1.1:80", wantErr: true},
+		{name: "link-local IPv4", address: "169.254.169.254:80", wantErr: true},
+		{name: "link-local IPv6", address: "[fe80::1]:80", wantErr: true},
+		{name: "unspecified IPv4", address: "0.0.0.0:80", wantErr: true},
+		{name: "unspecified IPv6", address: "[::]:80", wantErr: true},
+		{name: "public IPv4", address: "93.184.216.34:80", wantErr: false},
+		{name: "public IPv4 other", address: "8.8.8.8:53", wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := denyPrivateNetwork("tcp", tt.address, nil)
+			if tt.wantErr && err == nil {
+				t.Errorf("denyPrivateNetwork(%q) = nil, want error", tt.address)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("denyPrivateNetwork(%q) = %v, want nil", tt.address, err)
+			}
+		})
+	}
+}
+
+func TestReplayRequest_SSRFBlocksLoopback(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/api/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	// Use nil doer so the production SSRF-protected client is used.
+	cs := setupTestSessionWithReplayDoer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	// The request should fail because the echo server is on loopback,
+	// which is blocked by the SSRF protection.
+	if !result.IsError {
+		t.Fatal("expected IsError=true when replaying to loopback address")
+	}
+}
+
+func TestValidateURLScheme(t *testing.T) {
+	tests := []struct {
+		scheme  string
+		wantErr bool
+	}{
+		{"http", false},
+		{"https", false},
+		{"file", true},
+		{"ftp", true},
+		{"gopher", true},
+		{"", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.scheme, func(t *testing.T) {
+			u := &url.URL{Scheme: tt.scheme, Host: "example.com"}
+			err := validateURLScheme(u)
+			if tt.wantErr && err == nil {
+				t.Errorf("validateURLScheme(%q) = nil, want error", tt.scheme)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("validateURLScheme(%q) = %v, want nil", tt.scheme, err)
+			}
+		})
+	}
+}
+
+func TestReplayRequest_ResponseBodySizeLimit(t *testing.T) {
+	store := newTestStore(t)
+
+	// Create a server that returns a body larger than 1MB.
+	largeSize := maxReplayResponseSize + 1024
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		// Write a body larger than maxReplayResponseSize.
+		w.Write(bytes.Repeat([]byte("A"), largeSize))
+	}))
+	t.Cleanup(server.Close)
+
+	u, _ := url.Parse(server.URL + "/large-response")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_request",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRequestResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// The response body should be truncated to maxReplayResponseSize (1MB).
+	// Since the body is base64-encoded (non-UTF8 repeated 'A' bytes are actually UTF8,
+	// so it will be text encoding), check the length.
+	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	if err != nil {
+		t.Fatalf("get new session: %v", err)
+	}
+	if len(newEntry.Response.Body) > maxReplayResponseSize {
+		t.Errorf("response body size = %d, want <= %d", len(newEntry.Response.Body), maxReplayResponseSize)
+	}
+	if len(newEntry.Response.Body) != maxReplayResponseSize {
+		t.Errorf("response body size = %d, want exactly %d (truncated by LimitReader)", len(newEntry.Response.Body), maxReplayResponseSize)
 	}
 }

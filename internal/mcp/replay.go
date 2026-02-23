@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"syscall"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -15,6 +17,40 @@ import (
 
 // defaultReplayTimeout is the default timeout for replay HTTP requests.
 const defaultReplayTimeout = 30 * time.Second
+
+// maxReplayResponseSize is the maximum response body size (1 MB) to prevent OOM.
+const maxReplayResponseSize = 1 << 20
+
+// allowedSchemes are the URL schemes permitted for replay requests.
+var allowedSchemes = map[string]bool{
+	"http":  true,
+	"https": true,
+}
+
+// validateURLScheme checks that the URL uses an allowed scheme (http or https).
+func validateURLScheme(u *url.URL) error {
+	if !allowedSchemes[u.Scheme] {
+		return fmt.Errorf("unsupported URL scheme %q: only http and https are allowed", u.Scheme)
+	}
+	return nil
+}
+
+// denyPrivateNetwork returns an error if the resolved IP is a private, loopback,
+// link-local, or otherwise internal address. This prevents SSRF attacks.
+func denyPrivateNetwork(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("split host port: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("invalid IP address: %s", host)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return fmt.Errorf("connections to private/internal networks are not allowed: %s", ip)
+	}
+	return nil
+}
 
 // replayRequestInput is the typed input for the replay_request tool.
 type replayRequestInput struct {
@@ -92,11 +128,20 @@ func (s *Server) handleReplayRequest(ctx context.Context, _ *gomcp.CallToolReque
 		if parsed.Scheme == "" || parsed.Host == "" {
 			return nil, nil, fmt.Errorf("invalid override_url %q: must include scheme and host", input.OverrideURL)
 		}
+		// S-1: Validate URL scheme (http/https only) to prevent SSRF via non-HTTP protocols.
+		if err := validateURLScheme(parsed); err != nil {
+			return nil, nil, fmt.Errorf("invalid override_url %q: %w", input.OverrideURL, err)
+		}
 		targetURL = parsed
 	}
 
 	if targetURL == nil {
 		return nil, nil, fmt.Errorf("original session has no URL and no override_url was provided")
+	}
+
+	// S-1: Validate the final target URL scheme (covers both original and overridden URLs).
+	if err := validateURLScheme(targetURL); err != nil {
+		return nil, nil, err
 	}
 
 	var body io.Reader
@@ -141,7 +186,8 @@ func (s *Server) handleReplayRequest(ctx context.Context, _ *gomcp.CallToolReque
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// S-3: Limit response body read to prevent OOM from unbounded responses.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxReplayResponseSize))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read replay response body: %w", err)
 	}
@@ -191,13 +237,22 @@ func (s *Server) handleReplayRequest(ctx context.Context, _ *gomcp.CallToolReque
 
 // httpClient returns the HTTP client to use for replay requests.
 // If a custom doer is set (for testing), it wraps it; otherwise,
-// it returns a client with the default replay timeout.
+// it returns a client with the default replay timeout and SSRF protection.
 func (s *Server) httpClient() httpDoer {
 	if s.replayDoer != nil {
 		return s.replayDoer
 	}
+	// S-2: Use a custom Dialer with a Control function to block connections
+	// to private/internal networks, preventing SSRF and DNS rebinding attacks.
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: defaultReplayTimeout,
+			Control: denyPrivateNetwork,
+		}).DialContext,
+	}
 	return &http.Client{
-		Timeout: defaultReplayTimeout,
+		Timeout:   defaultReplayTimeout,
+		Transport: transport,
 		// Do not follow redirects automatically; record the raw redirect response.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
