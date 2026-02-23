@@ -1,12 +1,14 @@
 package session
 
-const schemaVersion = 1
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
 
-const createSchema = `
-CREATE TABLE IF NOT EXISTS schema_version (
-	version INTEGER NOT NULL
-);
+const bootstrapSQL = `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);`
 
+const schemaV1 = `
 CREATE TABLE IF NOT EXISTS sessions (
 	id              TEXT PRIMARY KEY,
 	protocol        TEXT NOT NULL,
@@ -25,3 +27,78 @@ CREATE INDEX IF NOT EXISTS idx_sessions_method ON sessions(method);
 CREATE INDEX IF NOT EXISTS idx_sessions_url ON sessions(url);
 CREATE INDEX IF NOT EXISTS idx_sessions_response_status ON sessions(response_status);
 `
+
+var migrations = map[int]string{
+	1: schemaV1,
+}
+
+func migrate(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
+		return fmt.Errorf("bootstrap schema_version: %w", err)
+	}
+
+	current, err := getCurrentVersion(ctx, db)
+	if err != nil {
+		return fmt.Errorf("get current version: %w", err)
+	}
+
+	latest := latestVersion()
+	if current > latest {
+		return fmt.Errorf("database schema version %d is newer than latest known version %d", current, latest)
+	}
+
+	for v := current + 1; v <= latest; v++ {
+		ddl, ok := migrations[v]
+		if !ok {
+			return fmt.Errorf("missing migration for version %d", v)
+		}
+		if err := execMigration(ctx, db, v, ddl, current == 0 && v == 1); err != nil {
+			return fmt.Errorf("migration to version %d: %w", v, err)
+		}
+	}
+
+	return nil
+}
+
+func getCurrentVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var version int
+	err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("query schema version: %w", err)
+	}
+	return version, nil
+}
+
+func latestVersion() int {
+	max := 0
+	for v := range migrations {
+		if v > max {
+			max = v
+		}
+	}
+	return max
+}
+
+func execMigration(ctx context.Context, db *sql.DB, version int, ddl string, isInitial bool) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("execute DDL: %w", err)
+	}
+
+	if isInitial {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (?)", version); err != nil {
+			return fmt.Errorf("insert schema version: %w", err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, "UPDATE schema_version SET version = ?", version); err != nil {
+			return fmt.Errorf("update schema version: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}

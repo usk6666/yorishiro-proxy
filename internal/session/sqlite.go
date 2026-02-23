@@ -47,23 +47,10 @@ func NewSQLiteStore(ctx context.Context, path string, logger *slog.Logger) (*SQL
 		return nil, fmt.Errorf("enable WAL mode: %w", err)
 	}
 
-	// Run schema creation.
-	if _, err := db.ExecContext(ctx, createSchema); err != nil {
+	// Run schema migrations.
+	if err := migrate(ctx, db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("create schema: %w", err)
-	}
-
-	// Initialize schema version if empty.
-	var count int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_version").Scan(&count); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("check schema version: %w", err)
-	}
-	if count == 0 {
-		if _, err := db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (?)", schemaVersion); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("insert schema version: %w", err)
-		}
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	s := &SQLiteStore{

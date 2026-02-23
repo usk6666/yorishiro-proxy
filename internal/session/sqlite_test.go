@@ -2,12 +2,16 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -225,6 +229,107 @@ func TestSQLiteStore_DeleteAll_Empty(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("DeleteAll on empty store returned %d, want 0", n)
+	}
+}
+
+func TestMigrate_FreshDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "fresh.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var version int
+	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want 1", version)
+	}
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms)
+		 VALUES ('test-id', 'HTTP/1.x', 'GET', 'http://example.com', '{}', NULL, 200, '{}', NULL, '2025-01-01T00:00:00Z', 100)`)
+	if err != nil {
+		t.Fatalf("insert into sessions: %v", err)
+	}
+}
+
+func TestMigrate_Idempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "idempotent.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+
+	var version int
+	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want 1", version)
+	}
+}
+
+func TestMigrate_FutureVersionError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "future.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (999)"); err != nil {
+		t.Fatalf("insert version: %v", err)
+	}
+
+	err = migrate(ctx, db)
+	if err == nil {
+		t.Fatal("expected error for future version, got nil")
+	}
+	if !strings.Contains(err.Error(), "newer than latest") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestGetCurrentVersion_EmptyTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "empty-version.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	version, err := getCurrentVersion(ctx, db)
+	if err != nil {
+		t.Fatalf("getCurrentVersion: %v", err)
+	}
+	if version != 0 {
+		t.Errorf("version = %d, want 0", version)
 	}
 }
 
