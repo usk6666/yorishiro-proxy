@@ -9,9 +9,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/config"
 	"github.com/usk6666/katashiro-proxy/internal/logging"
+	"github.com/usk6666/katashiro-proxy/internal/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
@@ -30,6 +32,8 @@ func main() {
 
 func run(ctx context.Context) error {
 	cfg := config.Default()
+	var stdio bool
+	flag.BoolVar(&stdio, "stdio", false, "run as MCP server on stdin/stdout")
 	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "proxy listen address")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level (debug, info, warn, error)")
@@ -40,6 +44,8 @@ func run(ctx context.Context) error {
 	flag.Parse()
 
 	// Initialize logger.
+	// In stdio mode, logs go to stderr by default (the logging package never
+	// writes to stdout), keeping stdout clean for MCP JSON-RPC messages.
 	logger, logCleanup, err := logging.Setup(logging.Config{
 		Level:  cfg.LogLevel,
 		Format: cfg.LogFormat,
@@ -72,7 +78,35 @@ func run(ctx context.Context) error {
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)
 
-	// Start proxy via manager.
+	if stdio {
+		return runStdio(ctx, ca, store, manager, logger)
+	}
+
+	return runProxy(ctx, cfg, manager, logger)
+}
+
+// runStdio starts the MCP server on stdin/stdout. The proxy is not started
+// automatically; use the proxy_start tool to begin intercepting traffic.
+func runStdio(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, logger *slog.Logger) error {
+	logger.Info("starting MCP server on stdio")
+
+	mcpServer := mcp.NewServer(ctx, ca, store, manager)
+	transport := &gomcp.StdioTransport{}
+
+	if err := mcpServer.Run(ctx, transport); err != nil {
+		// Context cancellation is expected during graceful shutdown.
+		if ctx.Err() != nil {
+			logger.Info("MCP server stopped")
+			return nil
+		}
+		return fmt.Errorf("MCP server: %w", err)
+	}
+
+	return nil
+}
+
+// runProxy starts the proxy directly without an MCP server.
+func runProxy(ctx context.Context, cfg *config.Config, manager *proxy.Manager, logger *slog.Logger) error {
 	if err := manager.Start(ctx, cfg.ListenAddr); err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
