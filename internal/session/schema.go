@@ -30,6 +30,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_response_status ON sessions(response_sta
 
 var migrations = map[int]string{
 	1: schemaV1,
+	2: `ALTER TABLE sessions ADD COLUMN request_body_truncated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN response_body_truncated INTEGER NOT NULL DEFAULT 0;`,
 	3: `CREATE INDEX IF NOT EXISTS idx_sessions_protocol ON sessions(protocol);
 CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sessions(timestamp);`,
 }

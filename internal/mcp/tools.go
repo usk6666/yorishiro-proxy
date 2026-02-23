@@ -103,6 +103,10 @@ type getSessionResult struct {
 	ResponseBody string `json:"response_body"`
 	// ResponseBodyEncoding indicates the encoding of the response body ("text" or "base64").
 	ResponseBodyEncoding string `json:"response_body_encoding"`
+	// RequestBodyTruncated indicates whether the request body was truncated during recording.
+	RequestBodyTruncated bool `json:"request_body_truncated"`
+	// ResponseBodyTruncated indicates whether the response body was truncated during recording.
+	ResponseBodyTruncated bool `json:"response_body_truncated"`
 	// Timestamp is the time the session was recorded in RFC 3339 format.
 	Timestamp string `json:"timestamp"`
 	// DurationMs is the session duration in milliseconds.
@@ -142,19 +146,21 @@ func (s *Server) handleGetSession(ctx context.Context, _ *gomcp.CallToolRequest,
 	respBody, respEncoding := encodeBody(entry.Response.Body)
 
 	result := &getSessionResult{
-		ID:                   entry.ID,
-		Protocol:             entry.Protocol,
-		Method:               entry.Request.Method,
-		URL:                  urlStr,
-		RequestHeaders:       entry.Request.Headers,
-		RequestBody:          reqBody,
-		RequestBodyEncoding:  reqEncoding,
-		ResponseStatusCode:   entry.Response.StatusCode,
-		ResponseHeaders:      entry.Response.Headers,
-		ResponseBody:         respBody,
-		ResponseBodyEncoding: respEncoding,
-		Timestamp:            entry.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-		DurationMs:           entry.Duration.Milliseconds(),
+		ID:                    entry.ID,
+		Protocol:              entry.Protocol,
+		Method:                entry.Request.Method,
+		URL:                   urlStr,
+		RequestHeaders:        entry.Request.Headers,
+		RequestBody:           reqBody,
+		RequestBodyEncoding:   reqEncoding,
+		ResponseStatusCode:    entry.Response.StatusCode,
+		ResponseHeaders:       entry.Response.Headers,
+		ResponseBody:          respBody,
+		ResponseBodyEncoding:  respEncoding,
+		RequestBodyTruncated:  entry.Request.BodyTruncated,
+		ResponseBodyTruncated: entry.Response.BodyTruncated,
+		Timestamp:             entry.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		DurationMs:            entry.Duration.Milliseconds(),
 	}
 
 	return nil, result, nil
