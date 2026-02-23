@@ -148,7 +148,9 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		h.logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		// Send 502 Bad Gateway to client.
 		errResp := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-		conn.Write([]byte(errResp))
+		if _, err := conn.Write([]byte(errResp)); err != nil {
+			h.logger.Debug("failed to write error response", "error", err)
+		}
 		return fmt.Errorf("upstream request: %w", err)
 	}
 	defer resp.Body.Close()
