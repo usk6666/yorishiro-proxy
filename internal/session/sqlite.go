@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ type SQLiteStore struct {
 	writeCh chan writeOp
 	done    chan struct{}
 	wg      sync.WaitGroup
+	logger  *slog.Logger
 }
 
 type writeOp struct {
@@ -28,7 +30,7 @@ type writeOp struct {
 }
 
 // NewSQLiteStore opens (or creates) a SQLite database at path and initializes the schema.
-func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
+func NewSQLiteStore(ctx context.Context, path string, logger *slog.Logger) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
@@ -63,9 +65,11 @@ func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 		db:      db,
 		writeCh: make(chan writeOp, 256),
 		done:    make(chan struct{}),
+		logger:  logger,
 	}
 	s.wg.Add(1)
 	go s.writeLoop()
+	logger.Info("session store initialized", "db_path", path)
 	return s, nil
 }
 
@@ -77,13 +81,21 @@ func (s *SQLiteStore) writeLoop() {
 			if !ok {
 				return
 			}
-			op.result <- s.saveSync(context.Background(), op.entry)
+			err := s.saveSync(context.Background(), op.entry)
+			if err != nil {
+				s.logger.Warn("session write failed", "error", err)
+			}
+			op.result <- err
 		case <-s.done:
 			// Drain remaining writes.
 			for {
 				select {
 				case op := <-s.writeCh:
-					op.result <- s.saveSync(context.Background(), op.entry)
+					err := s.saveSync(context.Background(), op.entry)
+					if err != nil {
+						s.logger.Warn("session write failed", "error", err)
+					}
+					op.result <- err
 				default:
 					return
 				}
