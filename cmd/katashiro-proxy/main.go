@@ -59,20 +59,20 @@ func run(ctx context.Context) error {
 	httpHandler := protohttp.NewHandler(store, nil, logger)
 	detector := protocol.NewDetector(httpHandler)
 
-	// Start TCP listener.
-	listener := proxy.NewListener(cfg.ListenAddr, detector, logger)
+	// Create proxy manager for MCP tool control.
+	manager := proxy.NewManager(detector, logger)
+
+	// Start proxy via manager.
+	if err := manager.Start(ctx, cfg.ListenAddr); err != nil {
+		return fmt.Errorf("start proxy: %w", err)
+	}
 	logger.Info("proxy started", "listen_addr", cfg.ListenAddr, "db_path", cfg.DBPath)
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- listener.Start(ctx)
-	}()
+	<-ctx.Done()
+	logger.Info("shutting down")
 
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		logger.Info("shutting down")
-		return nil
+	if err := manager.Stop(context.Background()); err != nil {
+		logger.Warn("proxy stop error", "error", err)
 	}
+	return nil
 }
