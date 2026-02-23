@@ -5,6 +5,7 @@ go 1.25.4
 require (
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
+	golang.org/x/sync v0.19.0
 	modernc.org/sqlite v1.46.1
 )
 
