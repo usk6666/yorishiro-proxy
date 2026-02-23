@@ -199,15 +199,21 @@ func removeHopByHopHeaders(header gohttp.Header) {
 
 func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
 	w := bufio.NewWriter(conn)
-	fmt.Fprintf(w, "HTTP/%d.%d %d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, gohttp.StatusText(resp.StatusCode))
+	if _, err := fmt.Fprintf(w, "HTTP/%d.%d %d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, gohttp.StatusText(resp.StatusCode)); err != nil {
+		return err
+	}
 	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	resp.Header.Del("Transfer-Encoding")
 	for key, vals := range resp.Header {
 		for _, val := range vals {
-			fmt.Fprintf(w, "%s: %s\r\n", key, val)
+			if _, err := fmt.Fprintf(w, "%s: %s\r\n", key, val); err != nil {
+				return err
+			}
 		}
 	}
-	fmt.Fprintf(w, "\r\n")
+	if _, err := fmt.Fprintf(w, "\r\n"); err != nil {
+		return err
+	}
 	if _, err := w.Write(body); err != nil {
 		return err
 	}
