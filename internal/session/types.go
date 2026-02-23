@@ -17,15 +17,17 @@ type Entry struct {
 
 // RecordedRequest holds the captured request data.
 type RecordedRequest struct {
-	Method  string
-	URL     *url.URL
-	Headers map[string][]string
-	Body    []byte
+	Method        string
+	URL           *url.URL
+	Headers       map[string][]string
+	Body          []byte
+	BodyTruncated bool
 }
 
 // RecordedResponse holds the captured response data.
 type RecordedResponse struct {
-	StatusCode int
-	Headers    map[string][]string
-	Body       []byte
+	StatusCode    int
+	Headers       map[string][]string
+	Body          []byte
+	BodyTruncated bool
 }

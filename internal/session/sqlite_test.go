@@ -249,8 +249,9 @@ func TestMigrate_FreshDatabase(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("version = %d, want 3", version)
+	want := latestVersion()
+	if version != want {
+		t.Errorf("version = %d, want %d", version, want)
 	}
 
 	_, err = db.ExecContext(ctx,
@@ -281,8 +282,9 @@ func TestMigrate_Idempotent(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("version = %d, want 3", version)
+	want := latestVersion()
+	if version != want {
+		t.Errorf("version = %d, want %d", version, want)
 	}
 }
 
