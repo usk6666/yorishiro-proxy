@@ -3,8 +3,10 @@ package mcp
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/session"
@@ -69,6 +71,106 @@ func formatFingerprint(b []byte) string {
 		parts[i] = fmt.Sprintf("%02X", v)
 	}
 	return strings.Join(parts, ":")
+}
+
+// getSessionInput is the typed input for the get_session tool.
+type getSessionInput struct {
+	// SessionID is the unique identifier of the session to retrieve.
+	SessionID string `json:"session_id"`
+}
+
+// getSessionResult is the structured output of the get_session tool.
+type getSessionResult struct {
+	// ID is the unique identifier of the session.
+	ID string `json:"id"`
+	// Protocol is the protocol used (e.g., "HTTP/1.x").
+	Protocol string `json:"protocol"`
+	// Method is the HTTP method (e.g., "GET", "POST").
+	Method string `json:"method"`
+	// URL is the request URL.
+	URL string `json:"url"`
+	// RequestHeaders is the request headers as a JSON object.
+	RequestHeaders map[string][]string `json:"request_headers"`
+	// RequestBody is the request body as text or Base64-encoded string.
+	RequestBody string `json:"request_body"`
+	// RequestBodyEncoding indicates the encoding of the request body ("text" or "base64").
+	RequestBodyEncoding string `json:"request_body_encoding"`
+	// ResponseStatusCode is the HTTP response status code.
+	ResponseStatusCode int `json:"response_status_code"`
+	// ResponseHeaders is the response headers as a JSON object.
+	ResponseHeaders map[string][]string `json:"response_headers"`
+	// ResponseBody is the response body as text or Base64-encoded string.
+	ResponseBody string `json:"response_body"`
+	// ResponseBodyEncoding indicates the encoding of the response body ("text" or "base64").
+	ResponseBodyEncoding string `json:"response_body_encoding"`
+	// Timestamp is the time the session was recorded in RFC 3339 format.
+	Timestamp string `json:"timestamp"`
+	// DurationMs is the session duration in milliseconds.
+	DurationMs int64 `json:"duration_ms"`
+}
+
+// registerGetSession registers the get_session MCP tool.
+func (s *Server) registerGetSession() {
+	gomcp.AddTool(s.server, &gomcp.Tool{
+		Name:        "get_session",
+		Description: "Retrieve the full details of a recorded proxy session by its ID. Returns request/response headers, bodies, timing information, and metadata. Binary bodies are returned as Base64-encoded strings.",
+	}, s.handleGetSession)
+}
+
+// handleGetSession handles the get_session tool invocation.
+// It retrieves a session entry by ID and returns its full details.
+func (s *Server) handleGetSession(ctx context.Context, _ *gomcp.CallToolRequest, input getSessionInput) (*gomcp.CallToolResult, *getSessionResult, error) {
+	if s.store == nil {
+		return nil, nil, fmt.Errorf("session store is not initialized")
+	}
+
+	if input.SessionID == "" {
+		return nil, nil, fmt.Errorf("session_id is required")
+	}
+
+	entry, err := s.store.Get(ctx, input.SessionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get session: %w", err)
+	}
+
+	urlStr := ""
+	if entry.Request.URL != nil {
+		urlStr = entry.Request.URL.String()
+	}
+
+	reqBody, reqEncoding := encodeBody(entry.Request.Body)
+	respBody, respEncoding := encodeBody(entry.Response.Body)
+
+	result := &getSessionResult{
+		ID:                   entry.ID,
+		Protocol:             entry.Protocol,
+		Method:               entry.Request.Method,
+		URL:                  urlStr,
+		RequestHeaders:       entry.Request.Headers,
+		RequestBody:          reqBody,
+		RequestBodyEncoding:  reqEncoding,
+		ResponseStatusCode:   entry.Response.StatusCode,
+		ResponseHeaders:      entry.Response.Headers,
+		ResponseBody:         respBody,
+		ResponseBodyEncoding: respEncoding,
+		Timestamp:            entry.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		DurationMs:           entry.Duration.Milliseconds(),
+	}
+
+	return nil, result, nil
+}
+
+// encodeBody returns the body as a string with its encoding type.
+// If the body is valid UTF-8 text, it is returned as-is with encoding "text".
+// Otherwise, it is Base64-encoded with encoding "base64".
+func encodeBody(body []byte) (string, string) {
+	if len(body) == 0 {
+		return "", "text"
+	}
+	if utf8.Valid(body) {
+		return string(body), "text"
+	}
+	return base64.StdEncoding.EncodeToString(body), "base64"
 }
 
 // listSessionsInput is the input parameters for the list_sessions tool.
