@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
@@ -46,13 +47,20 @@ func newTestStore(t *testing.T) session.Store {
 // It returns the client session and a cleanup function.
 func setupTestSession(t *testing.T, ca *cert.CA, store ...session.Store) *gomcp.ClientSession {
 	t.Helper()
-	ctx := context.Background()
-
 	var st0 session.Store
 	if len(store) > 0 {
 		st0 = store[0]
 	}
-	s := NewServer(ca, st0)
+	return setupTestSessionWithStore(t, ca, st0)
+}
+
+// setupTestSessionWithStore creates a connected MCP client session for testing tools
+// with a custom session store.
+func setupTestSessionWithStore(t *testing.T, ca *cert.CA, store session.Store) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	s := NewServer(ca, store)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -279,6 +287,8 @@ func TestFormatFingerprint(t *testing.T) {
 		})
 	}
 }
+
+// --- get_session tests (from main/PR #12) ---
 
 // saveTestEntry is a helper that saves a session entry and returns it with the assigned ID.
 func saveTestEntry(t *testing.T, store session.Store, entry *session.Entry) *session.Entry {
@@ -607,5 +617,587 @@ func TestEncodeBody(t *testing.T) {
 				t.Errorf("encoding = %q, want %q", gotEncoding, tt.wantEncoding)
 			}
 		})
+	}
+}
+
+// --- list_sessions tests (from branch USK-17) ---
+
+// mustParseURL parses a URL string and panics on error.
+func mustParseURL(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
+// seedTestSessions inserts test session entries into the store.
+func seedTestSessions(t *testing.T, store session.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	entries := []*session.Entry{
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+			Duration:  100 * time.Millisecond,
+			Request: session.RecordedRequest{
+				Method:  "GET",
+				URL:     mustParseURL("http://example.com/api/users"),
+				Headers: map[string][]string{"Host": {"example.com"}},
+			},
+			Response: session.RecordedResponse{
+				StatusCode: 200,
+				Headers:    map[string][]string{"Content-Type": {"application/json"}},
+				Body:       []byte(`{"users":[]}`),
+			},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 1, 1, 10, 1, 0, 0, time.UTC),
+			Duration:  200 * time.Millisecond,
+			Request: session.RecordedRequest{
+				Method:  "POST",
+				URL:     mustParseURL("http://example.com/api/users"),
+				Headers: map[string][]string{"Host": {"example.com"}},
+				Body:    []byte(`{"name":"test"}`),
+			},
+			Response: session.RecordedResponse{
+				StatusCode: 201,
+				Headers:    map[string][]string{"Content-Type": {"application/json"}},
+				Body:       []byte(`{"id":"1","name":"test"}`),
+			},
+		},
+		{
+			Protocol:  "HTTPS",
+			Timestamp: time.Date(2025, 1, 1, 10, 2, 0, 0, time.UTC),
+			Duration:  150 * time.Millisecond,
+			Request: session.RecordedRequest{
+				Method:  "GET",
+				URL:     mustParseURL("https://secure.example.com/login"),
+				Headers: map[string][]string{"Host": {"secure.example.com"}},
+			},
+			Response: session.RecordedResponse{
+				StatusCode: 302,
+				Headers:    map[string][]string{"Location": {"/dashboard"}},
+			},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 1, 1, 10, 3, 0, 0, time.UTC),
+			Duration:  50 * time.Millisecond,
+			Request: session.RecordedRequest{
+				Method:  "GET",
+				URL:     mustParseURL("http://other.com/notfound"),
+				Headers: map[string][]string{"Host": {"other.com"}},
+			},
+			Response: session.RecordedResponse{
+				StatusCode: 404,
+				Headers:    map[string][]string{"Content-Type": {"text/html"}},
+				Body:       []byte("not found"),
+			},
+		},
+	}
+
+	for _, e := range entries {
+		if err := store.Save(ctx, e); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+}
+
+func TestListSessions_NoFilter(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "list_sessions",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 4 {
+		t.Errorf("total = %d, want 4", out.Count)
+	}
+	if len(out.Sessions) != 4 {
+		t.Errorf("sessions count = %d, want 4", len(out.Sessions))
+	}
+}
+
+func TestListSessions_FilterByProtocol(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"protocol":"HTTPS"}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
+	}
+	if len(out.Sessions) > 0 && out.Sessions[0].Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want HTTPS", out.Sessions[0].Protocol)
+	}
+}
+
+func TestListSessions_FilterByMethod(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"method":"POST"}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
+	}
+	if len(out.Sessions) > 0 && out.Sessions[0].Method != "POST" {
+		t.Errorf("method = %q, want POST", out.Sessions[0].Method)
+	}
+}
+
+func TestListSessions_FilterByURLPattern(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"url_pattern":"example.com/api"}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 2 {
+		t.Errorf("total = %d, want 2", out.Count)
+	}
+}
+
+func TestListSessions_FilterByStatusCode(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"status_code":404}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
+	}
+	if len(out.Sessions) > 0 && out.Sessions[0].StatusCode != 404 {
+		t.Errorf("status_code = %d, want 404", out.Sessions[0].StatusCode)
+	}
+}
+
+func TestListSessions_CombinedFilters(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"method":"GET","status_code":200}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 1 {
+		t.Errorf("total = %d, want 1", out.Count)
+	}
+	if len(out.Sessions) > 0 {
+		s := out.Sessions[0]
+		if s.Method != "GET" {
+			t.Errorf("method = %q, want GET", s.Method)
+		}
+		if s.StatusCode != 200 {
+			t.Errorf("status_code = %d, want 200", s.StatusCode)
+		}
+	}
+}
+
+func TestListSessions_Pagination(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	// Get first 2 sessions.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"limit":2,"offset":0}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out1 listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out1); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out1.Count != 2 {
+		t.Errorf("page 1 count = %d, want 2", out1.Count)
+	}
+
+	// Get next 2 sessions with offset.
+	result, err = cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"limit":2,"offset":2}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out2 listSessionsResult
+	textContent = result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out2.Count != 2 {
+		t.Errorf("page 2 count = %d, want 2", out2.Count)
+	}
+
+	// Verify no overlap between pages.
+	ids := make(map[string]bool)
+	for _, s := range out1.Sessions {
+		ids[s.ID] = true
+	}
+	for _, s := range out2.Sessions {
+		if ids[s.ID] {
+			t.Errorf("session %s appears in both pages", s.ID)
+		}
+	}
+}
+
+func TestListSessions_DefaultLimit(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	// Call without limit; should use default (50), returning all 4.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "list_sessions",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// We have 4 entries, which is less than default limit of 50.
+	if out.Count != 4 {
+		t.Errorf("total = %d, want 4", out.Count)
+	}
+}
+
+func TestListSessions_EmptyResult(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "list_sessions",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 0 {
+		t.Errorf("total = %d, want 0", out.Count)
+	}
+	if len(out.Sessions) != 0 {
+		t.Errorf("sessions count = %d, want 0", len(out.Sessions))
+	}
+}
+
+func TestListSessions_NoMatchingFilter(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"method":"DELETE"}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 0 {
+		t.Errorf("total = %d, want 0", out.Count)
+	}
+}
+
+func TestListSessions_NilStore(t *testing.T) {
+	cs := setupTestSessionWithStore(t, nil, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "list_sessions",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+func TestListSessions_ResponseFields(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"status_code":200}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(out.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(out.Sessions))
+	}
+
+	s := out.Sessions[0]
+	if s.ID == "" {
+		t.Error("session ID is empty")
+	}
+	if s.Protocol != "HTTP/1.x" {
+		t.Errorf("protocol = %q, want HTTP/1.x", s.Protocol)
+	}
+	if s.Method != "GET" {
+		t.Errorf("method = %q, want GET", s.Method)
+	}
+	if s.URL != "http://example.com/api/users" {
+		t.Errorf("url = %q, want http://example.com/api/users", s.URL)
+	}
+	if s.StatusCode != 200 {
+		t.Errorf("status_code = %d, want 200", s.StatusCode)
+	}
+	if s.Timestamp == "" {
+		t.Error("timestamp is empty")
+	}
+	// Verify timestamp is valid RFC 3339 format.
+	if _, err := time.Parse("2006-01-02T15:04:05Z", s.Timestamp); err != nil {
+		t.Errorf("timestamp %q is not valid RFC 3339: %v", s.Timestamp, err)
+	}
+}
+
+// --- Security review fix tests ---
+
+func TestListSessions_ExtremeLimit(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	tests := []struct {
+		name      string
+		limit     int
+		wantCount int
+	}{
+		{"huge limit defaults to 50", 2147483647, 4},
+		{"over max defaults to 50", 1001, 4},
+		{"zero defaults to 50", 0, 4},
+		{"negative defaults to 50", -1, 4},
+		{"max allowed is respected", 1000, 4},
+		{"valid limit 2", 2, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := fmt.Sprintf(`{"limit":%d}`, tt.limit)
+			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+				Name:      "list_sessions",
+				Arguments: json.RawMessage(args),
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if result.IsError {
+				t.Fatalf("expected success, got error: %v", result.Content)
+			}
+
+			var out listSessionsResult
+			textContent := result.Content[0].(*gomcp.TextContent)
+			if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			if out.Count != tt.wantCount {
+				t.Errorf("count = %d, want %d", out.Count, tt.wantCount)
+			}
+		})
+	}
+}
+
+func TestListSessions_NegativeOffset(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"offset":-1}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for negative offset")
+	}
+}
+
+func TestListSessions_CountField(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store)
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	// Verify the JSON response uses "count" field, not "total".
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"limit":2}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	textContent := result.Content[0].(*gomcp.TextContent)
+
+	// Verify "count" is present in JSON.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(textContent.Text), &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if _, ok := raw["count"]; !ok {
+		t.Error("response JSON does not contain 'count' field")
+	}
+	if _, ok := raw["total"]; ok {
+		t.Error("response JSON still contains deprecated 'total' field")
+	}
+
+	var out listSessionsResult
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Count != 2 {
+		t.Errorf("count = %d, want 2", out.Count)
 	}
 }
