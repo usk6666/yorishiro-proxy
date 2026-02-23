@@ -25,7 +25,7 @@ func setupTestSessionWithManager(t *testing.T, manager *proxy.Manager) *gomcp.Cl
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(nil, manager)
+	s := NewServer(nil, nil, manager)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
