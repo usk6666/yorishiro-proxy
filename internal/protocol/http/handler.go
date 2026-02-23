@@ -144,6 +144,11 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 			if err == io.EOF {
 				return nil
 			}
+			// If the context was cancelled, return the context error
+			// instead of the read deadline error.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("read request: %w", err)
 		}
 
