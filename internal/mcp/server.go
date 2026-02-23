@@ -19,7 +19,7 @@ type Server struct {
 // The ca parameter provides the CA certificate for the export_ca_cert tool.
 // If ca is nil, the export_ca_cert tool will return an error when called.
 // The store parameter provides session storage for session-related tools.
-// If store is nil, session tools will return an error when called.
+// If store is nil, session-related tools will return an error when called.
 func NewServer(ca *cert.CA, store session.Store) *Server {
 	server := gomcp.NewServer(&gomcp.Implementation{
 		Name:    "katashiro-proxy",
@@ -39,4 +39,5 @@ func (s *Server) Run(ctx context.Context, transport gomcp.Transport) error {
 func (s *Server) registerTools() {
 	s.registerExportCACert()
 	s.registerGetSession()
+	s.registerListSessions()
 }
