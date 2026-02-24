@@ -54,6 +54,7 @@ type Handler struct {
 	transport      *gohttp.Transport
 	logger         *slog.Logger
 	requestTimeout time.Duration
+	passthrough    *proxy.PassthroughList
 	scope          *proxy.CaptureScope
 }
 
@@ -93,6 +94,19 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 // SetRequestTimeout sets the timeout for reading HTTP request headers.
 func (h *Handler) SetRequestTimeout(d time.Duration) {
 	h.requestTimeout = d
+}
+
+// SetPassthroughList sets the TLS passthrough list used to determine which
+// CONNECT destinations should bypass MITM interception. When a CONNECT target
+// matches a pattern in the list, the proxy relays encrypted bytes directly
+// without performing a TLS handshake.
+func (h *Handler) SetPassthroughList(pl *proxy.PassthroughList) {
+	h.passthrough = pl
+}
+
+// PassthroughList returns the handler's current TLS passthrough list, or nil.
+func (h *Handler) PassthroughList() *proxy.PassthroughList {
+	return h.passthrough
 }
 
 // SetCaptureScope sets the capture scope used to filter which requests

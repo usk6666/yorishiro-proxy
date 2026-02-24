@@ -54,6 +54,12 @@ type Config struct {
 	// CleanupInterval is the interval between automatic cleanup runs.
 	// 0 disables automatic cleanup. Default: 1h.
 	CleanupInterval time.Duration `json:"cleanup_interval"`
+
+	// TLSPassthrough is a list of domain patterns that should bypass TLS
+	// interception (MITM). Supported formats:
+	//   - Exact match: "example.com"
+	//   - Wildcard: "*.example.com" (matches any subdomain)
+	TLSPassthrough []string `json:"tls_passthrough"`
 }
 
 // Default returns a Config with sensible defaults.
