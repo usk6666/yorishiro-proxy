@@ -92,11 +92,11 @@ katashiro-proxy は MITM プロキシとして動作するため:
 **同一メッセージ内**で 2 つの Task ツールを並行起動する:
 
 ```
-Task(description="Code review PR #<N>", subagent_type="general-purpose", prompt=<Code Review プロンプト>)
-Task(description="Security review PR #<N>", subagent_type="general-purpose", prompt=<Security Review プロンプト>)
+Task(description="Code review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Code Review プロンプト>)
+Task(description="Security review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Security Review プロンプト>)
 ```
 
-**注意**: `isolation: "worktree"` は **使用しない**（レビューは read-only のため不要）。
+**注意**: レビューは read-only だが、並列実行時に対象ブランチの checkout がメイン worktree の状態と競合するため `isolation: "worktree"` を使用する。
 
 ---
 

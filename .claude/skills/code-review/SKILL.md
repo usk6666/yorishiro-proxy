@@ -66,6 +66,7 @@ katashiro-proxy は AI エージェント向けネットワークプロキシ（
 
 Task ツールで起動:
 - `subagent_type`: `"general-purpose"`
+- `isolation`: `"worktree"`
 - `description`: `"Code review PR #<N>"`
 - `prompt`: 置換後のプロンプト
 

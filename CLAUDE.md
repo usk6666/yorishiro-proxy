@@ -86,6 +86,31 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 2. `/review-gate` — PR に対して Code Review + Security Review を並行実行。問題があれば自動修正→再レビュー（最大 2 ラウンド）
 3. `/orchestrate` — 複数 Issue の依存関係を分析し、最適な並行度でサブエージェントに実装を委任
 
+> **注意**: `/implement` は単一セッションでの単独実行を前提とする。複数 Issue を並行実装する場合は `/orchestrate` を使用すること。
+
+## エージェント隔離戦略 (Worktree)
+
+サブエージェントによる並行作業での git 競合を防ぐため、以下のルールを適用する。
+
+### 原則
+
+- **メイン worktree（リポジトリのクローン元）は main ブランチに固定し、直接の作業を禁止する** — ブランチ切り替えやコミットは全て worktree 内で行う。main ブランチは branch protection により直接 push できない
+- **全てのサブエージェントは `isolation: "worktree"` で起動する** — 並列実行時にメイン worktree の HEAD を checkout すると、他のエージェントが読み取るコードの状態と競合するため、読み取り専用のレビューエージェントも worktree で隔離する
+
+### Task ツールでの分類
+
+| エージェント種別 | 操作 | isolation |
+|---------------|------|-----------|
+| implementer | コード実装・コミット・プッシュ | `"worktree"` |
+| fixer | レビュー所見の修正・コミット・プッシュ | `"worktree"` |
+| code-reviewer | 対象ブランチの checkout・差分の読み取り・レビュー投稿 | `"worktree"` |
+| security-reviewer | 対象ブランチの checkout・差分の読み取り・レビュー投稿 | `"worktree"` |
+
+### 新規エージェント追加時
+
+1. 全てのサブエージェントは原則 `isolation: "worktree"` を使用する
+2. 起動元のスキル（`.claude/skills/*/SKILL.md`）に isolation 設定を明記
+
 ## ブランチ戦略
 
 - `main` — 常にビルド・テスト通過状態を維持

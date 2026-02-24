@@ -291,8 +291,8 @@ Task(description="Implement USK-BB", subagent_type="general-purpose", isolation=
 同一メッセージ内で 2 つの Task ツールを並行起動:
 
 ```
-Task(description="Code review PR #<N>", subagent_type="general-purpose", prompt=<Code Review プロンプト>)
-Task(description="Security review PR #<N>", subagent_type="general-purpose", prompt=<Security Review プロンプト>)
+Task(description="Code review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Code Review プロンプト>)
+Task(description="Security review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Security Review プロンプト>)
 ```
 
 プレースホルダー構築:
