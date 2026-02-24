@@ -17,6 +17,7 @@ type Server struct {
 	store       session.Store
 	manager     *proxy.Manager
 	passthrough *proxy.PassthroughList
+	scope       *proxy.CaptureScope
 	dbPath      string   // path to the SQLite database file for status reporting
 	replayDoer  httpDoer // injectable HTTP client for replay_request testing
 }
@@ -36,6 +37,13 @@ func WithDBPath(path string) ServerOption {
 func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
 	return func(s *Server) {
 		s.passthrough = pl
+	}
+}
+
+// WithCaptureScope sets the capture scope for the set/get/clear_capture_scope tools.
+func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
+	return func(s *Server) {
+		s.scope = scope
 	}
 }
 
@@ -80,4 +88,7 @@ func (s *Server) registerTools() {
 	s.registerAddTLSPassthrough()
 	s.registerRemoveTLSPassthrough()
 	s.registerListTLSPassthrough()
+	s.registerSetCaptureScope()
+	s.registerGetCaptureScope()
+	s.registerClearCaptureScope()
 }

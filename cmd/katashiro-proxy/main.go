@@ -110,6 +110,10 @@ func run(ctx context.Context) error {
 	httpHandler.SetRequestTimeout(cfg.RequestTimeout)
 	httpHandler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	httpHandler.SetPassthroughList(passthrough)
+
+	// Create shared capture scope for controlling session recording.
+	scope := proxy.NewCaptureScope()
+	httpHandler.SetCaptureScope(scope)
 	detector := protocol.NewDetector(httpHandler)
 
 	// Create proxy manager for MCP tool control.
@@ -118,7 +122,7 @@ func run(ctx context.Context) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	if stdio {
-		return runStdio(ctx, ca, store, manager, passthrough, cfg.DBPath, logger)
+		return runStdio(ctx, ca, store, manager, passthrough, scope, cfg.DBPath, logger)
 	}
 
 	return runProxy(ctx, cfg, manager, logger)
@@ -126,10 +130,10 @@ func run(ctx context.Context) error {
 
 // runStdio starts the MCP server on stdin/stdout. The proxy is not started
 // automatically; use the proxy_start tool to begin intercepting traffic.
-func runStdio(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, passthrough *proxy.PassthroughList, dbPath string, logger *slog.Logger) error {
+func runStdio(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, dbPath string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
-	mcpServer := mcp.NewServer(ctx, ca, store, manager, mcp.WithDBPath(dbPath), mcp.WithPassthroughList(passthrough))
+	mcpServer := mcp.NewServer(ctx, ca, store, manager, mcp.WithDBPath(dbPath), mcp.WithPassthroughList(passthrough), mcp.WithCaptureScope(scope))
 	transport := &gomcp.StdioTransport{}
 
 	if err := mcpServer.Run(ctx, transport); err != nil {
