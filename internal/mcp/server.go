@@ -16,6 +16,7 @@ type Server struct {
 	ca         *cert.CA
 	store      session.Store
 	manager    *proxy.Manager
+	scope      *proxy.CaptureScope
 	dbPath     string   // path to the SQLite database file for status reporting
 	replayDoer httpDoer // injectable HTTP client for replay_request testing
 }
@@ -27,6 +28,13 @@ type ServerOption func(*Server)
 func WithDBPath(path string) ServerOption {
 	return func(s *Server) {
 		s.dbPath = path
+	}
+}
+
+// WithCaptureScope sets the capture scope for the set/get/clear_capture_scope tools.
+func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
+	return func(s *Server) {
+		s.scope = scope
 	}
 }
 
@@ -68,4 +76,7 @@ func (s *Server) registerTools() {
 	s.registerProxyStart()
 	s.registerProxyStop()
 	s.registerProxyStatus()
+	s.registerSetCaptureScope()
+	s.registerGetCaptureScope()
+	s.registerClearCaptureScope()
 }

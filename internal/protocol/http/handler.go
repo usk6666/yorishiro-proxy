@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"net/url"
 	"time"
 
 	"github.com/usk6666/katashiro-proxy/internal/cert"
@@ -53,6 +54,7 @@ type Handler struct {
 	transport      *gohttp.Transport
 	logger         *slog.Logger
 	requestTimeout time.Duration
+	scope          *proxy.CaptureScope
 }
 
 // NewHandler creates a new HTTP handler with session recording.
@@ -91,6 +93,17 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 // SetRequestTimeout sets the timeout for reading HTTP request headers.
 func (h *Handler) SetRequestTimeout(d time.Duration) {
 	h.requestTimeout = d
+}
+
+// SetCaptureScope sets the capture scope used to filter which requests
+// are recorded to the session store. If scope is nil, all requests are recorded.
+func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
+	h.scope = scope
+}
+
+// CaptureScope returns the handler's capture scope, or nil if not set.
+func (h *Handler) CaptureScope() *proxy.CaptureScope {
+	return h.scope
 }
 
 func (h *Handler) effectiveRequestTimeout() time.Duration {
@@ -272,7 +285,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		},
 		Tags: smugglingTags(smuggling),
 	}
-	if h.store != nil {
+	if h.store != nil && h.shouldCapture(req.Method, req.URL) {
 		if err := h.store.Save(ctx, entry); err != nil {
 			logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		}
@@ -281,6 +294,15 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	logger.Info("http request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 
 	return nil
+}
+
+// shouldCapture checks the capture scope to determine whether a request
+// should be recorded. Returns true if no scope is configured.
+func (h *Handler) shouldCapture(method string, u *url.URL) bool {
+	if h.scope == nil {
+		return true
+	}
+	return h.scope.ShouldCapture(method, u)
 }
 
 func removeHopByHopHeaders(header gohttp.Header) {
