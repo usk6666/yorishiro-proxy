@@ -9,7 +9,6 @@ import (
 	"crypto/x509/pkix"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -25,19 +24,36 @@ type cachedCert struct {
 }
 
 // Issuer dynamically generates TLS server certificates signed by a CA.
-// It caches certificates per hostname using sync.Map and coalesces concurrent
-// requests for the same hostname using singleflight.Group.
+// It caches certificates per hostname using a size-limited LRU cache and
+// coalesces concurrent requests for the same hostname using singleflight.Group.
 type Issuer struct {
 	ca    *CA
-	cache sync.Map         // hostname -> *cachedCert
+	cache *lruCache
 	group singleflight.Group
 }
 
-// NewIssuer creates a new Issuer that signs server certificates with the given CA.
-func NewIssuer(ca *CA) *Issuer {
-	return &Issuer{
-		ca: ca,
+// IssuerOption configures an Issuer.
+type IssuerOption func(*Issuer)
+
+// WithMaxCacheSize sets the maximum number of certificates to cache.
+// If size is <= 0, defaultMaxCacheSize is used.
+func WithMaxCacheSize(size int) IssuerOption {
+	return func(iss *Issuer) {
+		iss.cache = newLRUCache(size)
 	}
+}
+
+// NewIssuer creates a new Issuer that signs server certificates with the given CA.
+// Options can be provided to configure cache behavior.
+func NewIssuer(ca *CA, opts ...IssuerOption) *Issuer {
+	iss := &Issuer{
+		ca:    ca,
+		cache: newLRUCache(defaultMaxCacheSize),
+	}
+	for _, opt := range opts {
+		opt(iss)
+	}
+	return iss
 }
 
 // GetCertificate returns a TLS certificate for the given hostname.
@@ -46,25 +62,16 @@ func NewIssuer(ca *CA) *Issuer {
 // Concurrent requests for the same hostname are coalesced via singleflight.
 func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 	// Check cache first.
-	if val, ok := iss.cache.Load(hostname); ok {
-		cc := val.(*cachedCert)
-		if time.Now().Before(cc.expiresAt) {
-			return cc.cert, nil
-		}
-		// Expired entry; delete and regenerate.
-		iss.cache.Delete(hostname)
+	if cc, ok := iss.cache.Get(hostname); ok {
+		return cc.cert, nil
 	}
 
 	// Use singleflight to coalesce concurrent requests for the same hostname.
 	result, err, _ := iss.group.Do(hostname, func() (interface{}, error) {
 		// Double-check cache after acquiring the singleflight slot,
 		// in case another goroutine populated it while we were waiting.
-		if val, ok := iss.cache.Load(hostname); ok {
-			cc := val.(*cachedCert)
-			if time.Now().Before(cc.expiresAt) {
-				return cc.cert, nil
-			}
-			iss.cache.Delete(hostname)
+		if cc, ok := iss.cache.Get(hostname); ok {
+			return cc.cert, nil
 		}
 
 		cert, expiresAt, err := iss.generate(hostname)
@@ -76,7 +83,7 @@ func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 			cert:      cert,
 			expiresAt: expiresAt,
 		}
-		iss.cache.Store(hostname, cc)
+		iss.cache.Put(hostname, cc)
 
 		return cert, nil
 	})
@@ -92,6 +99,12 @@ func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 // tls.Config.GetCertificate callback signature.
 func (iss *Issuer) GetCertificateForClientHello(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return iss.GetCertificate(hello.ServerName)
+}
+
+// CacheLen returns the number of certificates currently in the cache.
+// This is primarily useful for diagnostics and testing.
+func (iss *Issuer) CacheLen() int {
+	return iss.cache.Len()
 }
 
 // generate creates a new ECDSA P-256 server certificate for the given hostname,
