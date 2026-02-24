@@ -353,8 +353,20 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *test
 	}
 
 	// All Save calls should have been attempted (and failed).
-	if got := store.saveCallCount.Load(); got < int64(numRequests) {
-		t.Errorf("Save call count = %d, want >= %d", got, numRequests)
+	// Because the HTTP handler writes the response to the client before calling
+	// store.Save(), the last Save may still be in-flight when the final
+	// client.Get() returns. Poll with a bounded deadline instead of asserting
+	// immediately.
+	deadline := time.After(5 * time.Second)
+	for {
+		if got := store.saveCallCount.Load(); got >= int64(numRequests) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for Save call count to reach %d (got %d)", numRequests, store.saveCallCount.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

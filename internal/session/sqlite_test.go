@@ -1101,34 +1101,25 @@ func TestSQLiteStore_Delete_AfterClose(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_Save_WriteCh_ContextCancelDuringSend(t *testing.T) {
+func TestSQLiteStore_Save_ContextCancelWhenWriteLoopStopped(t *testing.T) {
 	// This test verifies that Save respects context cancellation when the
-	// writeCh buffer is full, i.e., the send to writeCh cannot proceed
-	// immediately and the context is cancelled while waiting.
+	// write loop is no longer processing operations (e.g., after Close).
+	// After Close, Save can enqueue to the buffered channel but no goroutine
+	// consumes it, so Save blocks on the result channel until context expires.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
-	// Do NOT defer store.Close() — we manually close the done channel below,
-	// and calling Close() again would panic on double-close.
 
-	// Close the done channel to make writeLoop exit so we can fill the buffer.
-	close(store.done)
-	store.wg.Wait()
-
-	// Fill the writeCh buffer (size 256).
-	for i := 0; i < 256; i++ {
-		store.writeCh <- writeOp{
-			ctx:    context.Background(),
-			entry:  &Entry{Protocol: "fill"},
-			result: make(chan error, 1),
-		}
+	// Close the store to stop the write loop.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	// Now the channel is full. A Save with a short-lived context should
-	// return a context cancellation error.
+	// Save with a short-lived context should return a context error
+	// because no goroutine is consuming from the write channel.
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
@@ -1141,14 +1132,11 @@ func TestSQLiteStore_Save_WriteCh_ContextCancelDuringSend(t *testing.T) {
 
 	err = store.Save(ctx, entry)
 	if err == nil {
-		t.Fatal("expected error from Save when writeCh is full and context expires, got nil")
+		t.Fatal("expected error from Save when write loop is stopped and context expires, got nil")
 	}
 	if err != context.DeadlineExceeded {
 		t.Errorf("expected context.DeadlineExceeded, got %v", err)
 	}
-
-	// Clean up: just close the underlying database.
-	store.db.Close()
 }
 
 func TestSQLiteStore_Get_CancelledContext(t *testing.T) {
@@ -1270,8 +1258,7 @@ func TestSQLiteStore_ReadOnlyDB(t *testing.T) {
 	if err != nil {
 		// If the store cannot even open in this read-only state, that is
 		// acceptable — the important thing is it does not panic.
-		t.Logf("NewSQLiteStore on read-only DB returned error (acceptable): %v", err)
-		return
+		t.Skipf("NewSQLiteStore on read-only DB returned error (acceptable): %v", err)
 	}
 	defer roStore.Close()
 
@@ -1279,9 +1266,8 @@ func TestSQLiteStore_ReadOnlyDB(t *testing.T) {
 	got, err := roStore.Get(ctx, savedID)
 	if err != nil {
 		// Some SQLite implementations may fail reads too when
-		// WAL mode cannot be initialized. Log and skip assertions.
-		t.Logf("Get from read-only store failed (acceptable): %v", err)
-		return
+		// WAL mode cannot be initialized. Skip rather than silently pass.
+		t.Skipf("Get from read-only store failed (acceptable): %v", err)
 	}
 	if got.Request.Method != "GET" {
 		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
@@ -1294,9 +1280,13 @@ func TestSQLiteStore_ReadOnlyDB(t *testing.T) {
 		Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/readonly-write")},
 		Response:  RecordedResponse{StatusCode: 201},
 	}
-	err = roStore.Save(ctx, writeEntry)
+	writeCtx, writeCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer writeCancel()
+	err = roStore.Save(writeCtx, writeEntry)
 	if err == nil {
 		t.Log("Save to read-only store succeeded unexpectedly — filesystem may not enforce read-only on this platform")
+	} else {
+		t.Logf("Save to read-only store correctly failed: %v", err)
 	}
 }
 
