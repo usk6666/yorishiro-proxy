@@ -11,14 +11,15 @@ import (
 
 // Server wraps the MCP server and registers proxy-related tools.
 type Server struct {
-	server         *gomcp.Server
-	appCtx         context.Context
-	ca             *cert.CA
-	store          session.Store
-	manager        *proxy.Manager
-	scope          *proxy.CaptureScope
-	dbPath         string    // path to the SQLite database file for status reporting
-	replayDoer     httpDoer  // injectable HTTP client for replay_request testing
+	server          *gomcp.Server
+	appCtx          context.Context
+	ca              *cert.CA
+	store           session.Store
+	manager         *proxy.Manager
+	passthrough     *proxy.PassthroughList
+	scope           *proxy.CaptureScope
+	dbPath          string    // path to the SQLite database file for status reporting
+	replayDoer      httpDoer  // injectable HTTP client for replay_request testing
 	rawReplayDialer rawDialer // injectable dialer for replay_raw testing
 }
 
@@ -29,6 +30,14 @@ type ServerOption func(*Server)
 func WithDBPath(path string) ServerOption {
 	return func(s *Server) {
 		s.dbPath = path
+	}
+}
+
+// WithPassthroughList sets the TLS passthrough list for the MCP server,
+// enabling the add/remove/list TLS passthrough tools.
+func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
+	return func(s *Server) {
+		s.passthrough = pl
 	}
 }
 
@@ -78,6 +87,9 @@ func (s *Server) registerTools() {
 	s.registerProxyStart()
 	s.registerProxyStop()
 	s.registerProxyStatus()
+	s.registerAddTLSPassthrough()
+	s.registerRemoveTLSPassthrough()
+	s.registerListTLSPassthrough()
 	s.registerSetCaptureScope()
 	s.registerGetCaptureScope()
 	s.registerClearCaptureScope()
