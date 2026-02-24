@@ -296,6 +296,58 @@ func TestListener_Semaphore_ReleasesSlot(t *testing.T) {
 	}
 }
 
+func TestListener_ActiveConnections_NoSemaphore(t *testing.T) {
+	// With MaxConnections < 0 (or not set), sem is nil-equivalent but default applies.
+	// Default is 1024 so sem will always be non-nil. Test with a configured value.
+	handler := &slowHandler{delay: 500 * time.Millisecond, name: "slow"}
+	detector := &slowDetector{handler: handler}
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:           "127.0.0.1:0",
+		Detector:       detector,
+		Logger:         newTestLogger(),
+		MaxConnections: 10,
+	})
+
+	// Before starting, ActiveConnections should be 0.
+	if got := listener.ActiveConnections(); got != 0 {
+		t.Errorf("ActiveConnections before start = %d, want 0", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Still 0 with no connections.
+	if got := listener.ActiveConnections(); got != 0 {
+		t.Errorf("ActiveConnections with no conns = %d, want 0", got)
+	}
+
+	// Open 2 connections.
+	conn1 := dialAndSend(t, listener.Addr())
+	defer conn1.Close()
+	conn2 := dialAndSend(t, listener.Addr())
+	defer conn2.Close()
+
+	if !waitForEntered(handler, 2, 2*time.Second) {
+		t.Fatalf("only %d/2 handlers entered", handler.entered.Load())
+	}
+
+	active := listener.ActiveConnections()
+	if active != 2 {
+		t.Errorf("ActiveConnections = %d, want 2", active)
+	}
+}
+
 func TestListener_PeekTimeout_DisconnectsSlowClient(t *testing.T) {
 	handler := &slowHandler{delay: 0, name: "fast"}
 	detector := &slowDetector{handler: handler}

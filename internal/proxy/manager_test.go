@@ -237,6 +237,84 @@ func TestManager_StopWithCancelledContext(t *testing.T) {
 	}
 }
 
+func TestManager_ActiveConnections_NotRunning(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	if got := manager.ActiveConnections(); got != 0 {
+		t.Errorf("ActiveConnections when not running = %d, want 0", got)
+	}
+}
+
+func TestManager_ActiveConnections_Running(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	ctx := context.Background()
+	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer manager.Stop(context.Background())
+
+	// No active connections should exist immediately after starting.
+	if got := manager.ActiveConnections(); got != 0 {
+		t.Errorf("ActiveConnections after start = %d, want 0", got)
+	}
+}
+
+func TestManager_Uptime_NotRunning(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	if got := manager.Uptime(); got != 0 {
+		t.Errorf("Uptime when not running = %v, want 0", got)
+	}
+}
+
+func TestManager_Uptime_Running(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	ctx := context.Background()
+	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer manager.Stop(context.Background())
+
+	// Uptime should be positive when running.
+	time.Sleep(50 * time.Millisecond)
+	uptime := manager.Uptime()
+	if uptime <= 0 {
+		t.Errorf("Uptime = %v, want > 0", uptime)
+	}
+	if uptime > 5*time.Second {
+		t.Errorf("Uptime = %v, unexpectedly large", uptime)
+	}
+}
+
+func TestManager_Uptime_AfterStop(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	ctx := context.Background()
+	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := manager.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Uptime should be 0 after stopping.
+	if got := manager.Uptime(); got != 0 {
+		t.Errorf("Uptime after stop = %v, want 0", got)
+	}
+}
+
 func TestManager_ConcurrentStatus(t *testing.T) {
 	logger := newTestLogger()
 	detector := &stubDetector{}

@@ -131,6 +131,11 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 			if err == io.EOF {
 				return nil
 			}
+			// If the context was cancelled, return the context error
+			// instead of the read deadline error.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("read HTTPS request: %w", err)
 		}
 

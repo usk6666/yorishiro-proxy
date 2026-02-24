@@ -22,6 +22,10 @@ type Store interface {
 
 	// DeleteAll removes all session entries and returns the number of deleted rows.
 	DeleteAll(ctx context.Context) (int64, error)
+
+	// Count returns the total number of session entries matching the given filter options.
+	// Unlike List, it ignores Limit and Offset and returns the full matching count.
+	Count(ctx context.Context, opts ListOptions) (int, error)
 }
 
 // ListOptions configures entry listing behavior.

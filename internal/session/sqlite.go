@@ -264,6 +264,20 @@ func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// Count returns the total number of session entries matching the given filter
+// options. Unlike List, it ignores Limit and Offset fields.
+func (s *SQLiteStore) Count(ctx context.Context, opts ListOptions) (int, error) {
+	whereClause, args := buildWhereClause(opts)
+
+	query := "SELECT COUNT(*) FROM sessions" + whereClause
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count sessions: %w", err)
+	}
+	return count, nil
+}
+
 // Close shuts down the writer goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
 	close(s.done)

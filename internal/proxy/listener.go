@@ -169,3 +169,12 @@ func (l *Listener) Addr() string {
 func (l *Listener) Ready() <-chan struct{} {
 	return l.ready
 }
+
+// ActiveConnections returns the number of connections currently being handled.
+// It returns 0 if the semaphore is not configured (unlimited connections).
+func (l *Listener) ActiveConnections() int {
+	if l.sem == nil {
+		return 0
+	}
+	return len(l.sem)
+}
