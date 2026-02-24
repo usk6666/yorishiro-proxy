@@ -251,7 +251,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, err
 
 	var entries []*Entry
 	for rows.Next() {
-		entry, err := scanEntryFromRows(rows)
+		entry, err := scanEntry(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -394,7 +394,7 @@ func scanEntry(row scannable) (*Entry, error) {
 	}
 
 	if urlStr != "" {
-		parsed, err := parseURL(urlStr)
+		parsed, err := url.Parse(urlStr)
 		if err == nil {
 			entry.Request.URL = parsed
 		}
@@ -412,7 +412,11 @@ func scanEntry(row scannable) (*Entry, error) {
 		}
 	}
 
-	entry.Timestamp, _ = time.Parse(time.RFC3339Nano, tsStr)
+	ts, err := time.Parse(time.RFC3339Nano, tsStr)
+	if err != nil {
+		slog.Warn("failed to parse session timestamp (possible bug)", "value", tsStr, "error", err)
+	}
+	entry.Timestamp = ts
 	entry.Duration = time.Duration(durationMs) * time.Millisecond
 
 	entry.Request.BodyTruncated = reqTruncated != 0
@@ -431,14 +435,6 @@ func scanEntry(row scannable) (*Entry, error) {
 	}
 
 	return &entry, nil
-}
-
-func scanEntryFromRows(rows *sql.Rows) (*Entry, error) {
-	return scanEntry(rows)
-}
-
-func parseURL(raw string) (*url.URL, error) {
-	return url.Parse(raw)
 }
 
 // boolToInt converts a boolean to an integer (0 or 1) for SQLite storage.

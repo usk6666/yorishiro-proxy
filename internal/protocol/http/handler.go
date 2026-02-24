@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"net/http/httptrace"
 	"net/url"
 	"time"
 
@@ -311,7 +312,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	outReq := req.WithContext(ctx)
 	outReq.RequestURI = ""
 
-	resp, err := h.transport.RoundTrip(outReq)
+	resp, serverAddr, err := roundTripWithTrace(h.transport, outReq)
 	if err != nil {
 		logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		// Send 502 Bad Gateway to client.
@@ -324,7 +325,10 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	defer resp.Body.Close()
 
 	// Read the full response body so the client receives uncorrupted data.
-	fullRespBody, _ := io.ReadAll(resp.Body)
+	fullRespBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Warn("failed to read response body", "error", err)
+	}
 
 	// Capture raw response bytes by serializing the response as received.
 	rawResponse := serializeRawResponse(resp, fullRespBody)
@@ -354,6 +358,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		RawResponse: rawResponse,
 		ConnInfo: &session.ConnectionInfo{
 			ClientAddr: clientAddr,
+			ServerAddr: serverAddr,
 		},
 		Request: session.RecordedRequest{
 			Method:        req.Method,
@@ -419,6 +424,22 @@ func removeHopByHopHeaders(header gohttp.Header) {
 	for _, h := range hopByHopHeaders {
 		header.Del(h)
 	}
+}
+
+// roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
+// capture the remote address of the TCP connection used for the request.
+func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*gohttp.Response, string, error) {
+	var serverAddr string
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Conn != nil {
+				serverAddr = info.Conn.RemoteAddr().String()
+			}
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	resp, err := transport.RoundTrip(req)
+	return resp, serverAddr, err
 }
 
 func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
