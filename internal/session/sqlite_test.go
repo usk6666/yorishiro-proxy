@@ -976,3 +976,342 @@ func TestSQLiteStore_DeleteExcess_InvalidMaxCount(t *testing.T) {
 		t.Fatal("expected error for maxCount=-1, got nil")
 	}
 }
+
+func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	u, _ := url.Parse("http://example.com/persist")
+
+	entry := &Entry{
+		ConnID:    "conn-persist-001",
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC),
+		Duration:  250 * time.Millisecond,
+		Request: RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Content-Type": {"application/json"}, "Host": {"example.com"}},
+			Body:    []byte(`{"key":"value"}`),
+		},
+		Response: RecordedResponse{
+			StatusCode: 201,
+			Headers:    map[string][]string{"Content-Type": {"application/json"}, "X-Request-Id": {"abc123"}},
+			Body:       []byte(`{"id":"42"}`),
+		},
+		Tags: map[string]string{"source": "test", "category": "persistence"},
+	}
+
+	// 1. Open store, save entry, close.
+	store1, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store1: %v", err)
+	}
+	if err := store1.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	savedID := entry.ID
+	if savedID == "" {
+		t.Fatal("Save did not assign ID")
+	}
+	if err := store1.Close(); err != nil {
+		t.Fatalf("close store1: %v", err)
+	}
+
+	// 2. Reopen the same database file.
+	store2, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store2: %v", err)
+	}
+	defer store2.Close()
+
+	// 3. Retrieve the entry and verify all fields survived the reopen.
+	got, err := store2.Get(ctx, savedID)
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+
+	if got.ID != savedID {
+		t.Errorf("ID = %q, want %q", got.ID, savedID)
+	}
+	if got.ConnID != "conn-persist-001" {
+		t.Errorf("ConnID = %q, want %q", got.ConnID, "conn-persist-001")
+	}
+	if got.Protocol != "HTTP/1.x" {
+		t.Errorf("Protocol = %q, want %q", got.Protocol, "HTTP/1.x")
+	}
+	if got.Request.Method != "POST" {
+		t.Errorf("Method = %q, want %q", got.Request.Method, "POST")
+	}
+	if got.Request.URL.String() != "http://example.com/persist" {
+		t.Errorf("URL = %q, want %q", got.Request.URL.String(), "http://example.com/persist")
+	}
+	if got.Request.Headers["Content-Type"][0] != "application/json" {
+		t.Errorf("Request Content-Type = %q, want %q", got.Request.Headers["Content-Type"][0], "application/json")
+	}
+	if got.Request.Headers["Host"][0] != "example.com" {
+		t.Errorf("Request Host = %q, want %q", got.Request.Headers["Host"][0], "example.com")
+	}
+	if string(got.Request.Body) != `{"key":"value"}` {
+		t.Errorf("Request Body = %q, want %q", got.Request.Body, `{"key":"value"}`)
+	}
+	if got.Response.StatusCode != 201 {
+		t.Errorf("StatusCode = %d, want %d", got.Response.StatusCode, 201)
+	}
+	if got.Response.Headers["Content-Type"][0] != "application/json" {
+		t.Errorf("Response Content-Type = %q, want %q", got.Response.Headers["Content-Type"][0], "application/json")
+	}
+	if got.Response.Headers["X-Request-Id"][0] != "abc123" {
+		t.Errorf("Response X-Request-Id = %q, want %q", got.Response.Headers["X-Request-Id"][0], "abc123")
+	}
+	if string(got.Response.Body) != `{"id":"42"}` {
+		t.Errorf("Response Body = %q, want %q", got.Response.Body, `{"id":"42"}`)
+	}
+	if !got.Timestamp.Equal(time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("Timestamp = %v, want %v", got.Timestamp, time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC))
+	}
+	if got.Duration != 250*time.Millisecond {
+		t.Errorf("Duration = %v, want %v", got.Duration, 250*time.Millisecond)
+	}
+	if got.Tags["source"] != "test" {
+		t.Errorf("Tags[source] = %q, want %q", got.Tags["source"], "test")
+	}
+	if got.Tags["category"] != "persistence" {
+		t.Errorf("Tags[category] = %q, want %q", got.Tags["category"], "persistence")
+	}
+
+	// 4. List and Count should also reflect persisted data.
+	entries, err := store2.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List after reopen: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("List returned %d entries, want 1", len(entries))
+	}
+
+	count, err := store2.Count(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("Count after reopen: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Count = %d, want 1", count)
+	}
+}
+
+func TestSQLiteStore_PersistenceAcrossReopen_MultipleEntries(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// 1. Open store and save multiple entries with different characteristics.
+	store1, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store1: %v", err)
+	}
+
+	entries := []*Entry{
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTPS",
+			Timestamp: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
+			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("https://example.com/b")},
+			Response:  RecordedResponse{StatusCode: 201, Body: []byte("created")},
+		},
+		{
+			ConnID:    "conn-multi-003",
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+			Request:   RecordedRequest{Method: "DELETE", URL: mustParseURL("http://other.com/c")},
+			Response:  RecordedResponse{StatusCode: 204},
+		},
+	}
+
+	savedIDs := make([]string, len(entries))
+	for i, e := range entries {
+		if err := store1.Save(ctx, e); err != nil {
+			t.Fatalf("Save[%d]: %v", i, err)
+		}
+		savedIDs[i] = e.ID
+	}
+	if err := store1.Close(); err != nil {
+		t.Fatalf("close store1: %v", err)
+	}
+
+	// 2. Reopen and verify all entries persist.
+	store2, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store2: %v", err)
+	}
+	defer store2.Close()
+
+	all, err := store2.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("List returned %d entries, want 3", len(all))
+	}
+
+	// Verify each entry can be individually retrieved.
+	for i, id := range savedIDs {
+		got, err := store2.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get[%d]: %v", i, err)
+		}
+		if got.Request.Method != entries[i].Request.Method {
+			t.Errorf("entry[%d] Method = %q, want %q", i, got.Request.Method, entries[i].Request.Method)
+		}
+		if got.Response.StatusCode != entries[i].Response.StatusCode {
+			t.Errorf("entry[%d] StatusCode = %d, want %d", i, got.Response.StatusCode, entries[i].Response.StatusCode)
+		}
+	}
+
+	// Verify filters work against persisted data.
+	getEntries, err := store2.List(ctx, ListOptions{Method: "GET"})
+	if err != nil {
+		t.Fatalf("List(Method=GET): %v", err)
+	}
+	if len(getEntries) != 1 {
+		t.Errorf("List(Method=GET) returned %d entries, want 1", len(getEntries))
+	}
+
+	httpsEntries, err := store2.List(ctx, ListOptions{Protocol: "HTTPS"})
+	if err != nil {
+		t.Fatalf("List(Protocol=HTTPS): %v", err)
+	}
+	if len(httpsEntries) != 1 {
+		t.Errorf("List(Protocol=HTTPS) returned %d entries, want 1", len(httpsEntries))
+	}
+}
+
+func TestSQLiteStore_PersistenceAcrossReopen_DeletePersists(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// 1. Open store, save two entries, delete one, close.
+	store1, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store1: %v", err)
+	}
+
+	entry1 := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/keep")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+	entry2 := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/remove")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+
+	if err := store1.Save(ctx, entry1); err != nil {
+		t.Fatalf("Save entry1: %v", err)
+	}
+	if err := store1.Save(ctx, entry2); err != nil {
+		t.Fatalf("Save entry2: %v", err)
+	}
+	if err := store1.Delete(ctx, entry2.ID); err != nil {
+		t.Fatalf("Delete entry2: %v", err)
+	}
+	if err := store1.Close(); err != nil {
+		t.Fatalf("close store1: %v", err)
+	}
+
+	// 2. Reopen and verify the deletion persisted.
+	store2, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store2: %v", err)
+	}
+	defer store2.Close()
+
+	all, err := store2.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 entry after reopen, got %d", len(all))
+	}
+	if all[0].ID != entry1.ID {
+		t.Errorf("remaining entry ID = %q, want %q", all[0].ID, entry1.ID)
+	}
+
+	// Deleted entry should not be found.
+	_, err = store2.Get(ctx, entry2.ID)
+	if err == nil {
+		t.Fatal("expected error for deleted entry, got nil")
+	}
+}
+
+func TestSQLiteStore_PersistenceAcrossReopen_NilBodyAndHeaders(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Save an entry with nil body and nil headers — verifies edge case handling.
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC),
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     mustParseURL("http://example.com/empty"),
+			Headers: nil,
+			Body:    nil,
+		},
+		Response: RecordedResponse{
+			StatusCode: 204,
+			Headers:    nil,
+			Body:       nil,
+		},
+	}
+
+	store1, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store1: %v", err)
+	}
+	if err := store1.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	savedID := entry.ID
+	if err := store1.Close(); err != nil {
+		t.Fatalf("close store1: %v", err)
+	}
+
+	// Reopen and verify nil fields are handled correctly.
+	store2, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store2: %v", err)
+	}
+	defer store2.Close()
+
+	got, err := store2.Get(ctx, savedID)
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+
+	if got.Request.Method != "GET" {
+		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
+	}
+	if got.Response.StatusCode != 204 {
+		t.Errorf("StatusCode = %d, want %d", got.Response.StatusCode, 204)
+	}
+	if got.Request.URL.String() != "http://example.com/empty" {
+		t.Errorf("URL = %q, want %q", got.Request.URL.String(), "http://example.com/empty")
+	}
+	if got.Tags != nil {
+		t.Errorf("Tags = %v, want nil", got.Tags)
+	}
+}
