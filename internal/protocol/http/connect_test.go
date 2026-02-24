@@ -102,10 +102,12 @@ func (m *mockStore) DeleteAll(_ context.Context) (int64, error) {
 	return n, nil
 }
 
-func (m *mockStore) Count(_ context.Context, _ session.ListOptions) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.entries), nil
+func (m *mockStore) DeleteOlderThan(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) DeleteExcess(_ context.Context, _ int) (int64, error) {
+	return 0, nil
 }
 
 func (m *mockStore) Entries() []*session.Entry {
