@@ -83,6 +83,8 @@ type getSessionInput struct {
 type getSessionResult struct {
 	// ID is the unique identifier of the session.
 	ID string `json:"id"`
+	// ConnID is the connection ID for log correlation.
+	ConnID string `json:"conn_id"`
 	// Protocol is the protocol used (e.g., "HTTP/1.x").
 	Protocol string `json:"protocol"`
 	// Method is the HTTP method (e.g., "GET", "POST").
@@ -147,6 +149,7 @@ func (s *Server) handleGetSession(ctx context.Context, _ *gomcp.CallToolRequest,
 
 	result := &getSessionResult{
 		ID:                    entry.ID,
+		ConnID:                entry.ConnID,
 		Protocol:              entry.Protocol,
 		Method:                entry.Request.Method,
 		URL:                   urlStr,

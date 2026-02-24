@@ -8,6 +8,7 @@ import (
 // Entry represents a single recorded proxy session entry.
 type Entry struct {
 	ID        string
+	ConnID    string // connection ID for log correlation
 	Protocol  string
 	Request   RecordedRequest
 	Response  RecordedResponse

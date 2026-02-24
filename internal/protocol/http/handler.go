@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/usk6666/katashiro-proxy/internal/cert"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -114,6 +115,12 @@ func (h *Handler) Detect(peek []byte) bool {
 	return false
 }
 
+// connLogger returns the connection-scoped logger from context,
+// falling back to the handler's logger.
+func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
+	return proxy.LoggerFromContext(ctx, h.logger)
+}
+
 // Handle processes HTTP connections in a loop (keep-alive support).
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	reader := bufio.NewReader(conn)
@@ -172,6 +179,8 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 
 func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
 	start := time.Now()
+	logger := h.connLogger(ctx)
+	connID := proxy.ConnIDFromContext(ctx)
 
 	// Read the full request body so the upstream receives uncorrupted data.
 	var recordReqBody []byte
@@ -205,11 +214,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
-		h.logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		// Send 502 Bad Gateway to client.
 		errResp := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		if _, err := conn.Write([]byte(errResp)); err != nil {
-			h.logger.Debug("failed to write error response", "error", err)
+			logger.Debug("failed to write error response", "error", err)
 		}
 		return fmt.Errorf("upstream request: %w", err)
 	}
@@ -235,6 +244,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	// Record session.
 	entry := &session.Entry{
+		ConnID:    connID,
 		Protocol:  "HTTP/1.x",
 		Timestamp: start,
 		Duration:  duration,
@@ -254,11 +264,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	if h.store != nil {
 		if err := h.store.Save(ctx, entry); err != nil {
-			h.logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+			logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		}
 	}
 
-	h.logger.Info("http request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+	logger.Info("http request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 
 	return nil
 }

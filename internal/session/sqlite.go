@@ -114,9 +114,10 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
+		entry.ConnID,
 		entry.Protocol,
 		entry.Request.Method,
 		urlStr,
@@ -158,7 +159,7 @@ func (s *SQLiteStore) Save(ctx context.Context, entry *Entry) error {
 // Get retrieves a session entry by ID.
 func (s *SQLiteStore) Get(ctx context.Context, id string) (*Entry, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated
+		`SELECT id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated
 		 FROM sessions WHERE id = ?`, id)
 	return scanEntry(row)
 }
@@ -201,7 +202,7 @@ func buildWhereClause(opts ListOptions) (string, []interface{}) {
 func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, error) {
 	whereClause, args := buildWhereClause(opts)
 
-	query := "SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated FROM sessions" + whereClause
+	query := "SELECT id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated FROM sessions" + whereClause
 	query += " ORDER BY timestamp DESC"
 
 	if opts.Limit > 0 {
@@ -324,6 +325,7 @@ func scanEntry(row scannable) (*Entry, error) {
 
 	err := row.Scan(
 		&entry.ID,
+		&entry.ConnID,
 		&entry.Protocol,
 		&entry.Request.Method,
 		&urlStr,
