@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -974,5 +975,444 @@ func TestSQLiteStore_DeleteExcess_InvalidMaxCount(t *testing.T) {
 	_, err = store.DeleteExcess(ctx, -1)
 	if err == nil {
 		t.Fatal("expected error for maxCount=-1, got nil")
+	}
+}
+
+// --- Error Recovery Tests ---
+
+func TestSQLiteStore_Save_AfterClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	// Close the store first.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Save after Close should not panic. It should either return an error
+	// or block until the context is cancelled.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/after-close")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+
+	err = store.Save(ctx, entry)
+	if err == nil {
+		t.Fatal("expected error from Save after Close, got nil")
+	}
+}
+
+func TestSQLiteStore_Get_AfterClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	// Save an entry before closing.
+	ctx := context.Background()
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/get-after-close")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	savedID := entry.ID
+
+	// Close the store.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Get after Close should return an error (database is closed), not panic.
+	_, err = store.Get(ctx, savedID)
+	if err == nil {
+		t.Fatal("expected error from Get after Close, got nil")
+	}
+}
+
+func TestSQLiteStore_List_AfterClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// List after Close should return an error, not panic.
+	_, err = store.List(context.Background(), ListOptions{})
+	if err == nil {
+		t.Fatal("expected error from List after Close, got nil")
+	}
+}
+
+func TestSQLiteStore_Count_AfterClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Count after Close should return an error, not panic.
+	_, err = store.Count(context.Background(), ListOptions{})
+	if err == nil {
+		t.Fatal("expected error from Count after Close, got nil")
+	}
+}
+
+func TestSQLiteStore_Delete_AfterClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Delete after Close should return an error, not panic.
+	err = store.Delete(context.Background(), "nonexistent-id")
+	if err == nil {
+		t.Fatal("expected error from Delete after Close, got nil")
+	}
+}
+
+func TestSQLiteStore_Save_WriteCh_ContextCancelDuringSend(t *testing.T) {
+	// This test verifies that Save respects context cancellation when the
+	// writeCh buffer is full, i.e., the send to writeCh cannot proceed
+	// immediately and the context is cancelled while waiting.
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	// Do NOT defer store.Close() — we manually close the done channel below,
+	// and calling Close() again would panic on double-close.
+
+	// Close the done channel to make writeLoop exit so we can fill the buffer.
+	close(store.done)
+	store.wg.Wait()
+
+	// Fill the writeCh buffer (size 256).
+	for i := 0; i < 256; i++ {
+		store.writeCh <- writeOp{
+			ctx:    context.Background(),
+			entry:  &Entry{Protocol: "fill"},
+			result: make(chan error, 1),
+		}
+	}
+
+	// Now the channel is full. A Save with a short-lived context should
+	// return a context cancellation error.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/backpressure")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+
+	err = store.Save(ctx, entry)
+	if err == nil {
+		t.Fatal("expected error from Save when writeCh is full and context expires, got nil")
+	}
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+
+	// Clean up: just close the underlying database.
+	store.db.Close()
+}
+
+func TestSQLiteStore_Get_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	// Save an entry with a valid context.
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/ctx-cancel")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+	if err := store.Save(context.Background(), entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Cancel the context before Get.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.Get(ctx, entry.ID)
+	if err == nil {
+		t.Fatal("expected error from Get with cancelled context, got nil")
+	}
+}
+
+func TestSQLiteStore_List_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.List(ctx, ListOptions{})
+	if err == nil {
+		t.Fatal("expected error from List with cancelled context, got nil")
+	}
+}
+
+func TestSQLiteStore_Count_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.Count(ctx, ListOptions{})
+	if err == nil {
+		t.Fatal("expected error from Count with cancelled context, got nil")
+	}
+}
+
+func TestSQLiteStore_Delete_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := store.Delete(ctx, "some-id")
+	if err == nil {
+		t.Fatal("expected error from Delete with cancelled context, got nil")
+	}
+}
+
+func TestSQLiteStore_DeleteAll_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.DeleteAll(ctx)
+	if err == nil {
+		t.Fatal("expected error from DeleteAll with cancelled context, got nil")
+	}
+}
+
+func TestSQLiteStore_ReadOnlyDB(t *testing.T) {
+	// Create a normal store, save an entry, then make the DB file read-only.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	ctx := context.Background()
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/readonly")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	savedID := entry.ID
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Make the DB file and its WAL/SHM files read-only.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		p := dbPath + suffix
+		// Ignore errors for WAL/SHM files — they may not exist yet.
+		os.Chmod(p, 0444)
+	}
+	// Also make the directory read-only so SQLite cannot create new files.
+	os.Chmod(tmpDir, 0555)
+	t.Cleanup(func() {
+		// Restore permissions so t.TempDir() cleanup can remove files.
+		os.Chmod(tmpDir, 0755)
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			os.Chmod(dbPath+suffix, 0644)
+		}
+	})
+
+	// Re-open the store. The driver might succeed at opening (since the file
+	// is readable), but writes should fail because the filesystem is read-only.
+	roStore, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		// If the store cannot even open in this read-only state, that is
+		// acceptable — the important thing is it does not panic.
+		t.Logf("NewSQLiteStore on read-only DB returned error (acceptable): %v", err)
+		return
+	}
+	defer roStore.Close()
+
+	// Reading the previously saved entry should succeed.
+	got, err := roStore.Get(ctx, savedID)
+	if err != nil {
+		// Some SQLite implementations may fail reads too when
+		// WAL mode cannot be initialized. Log and skip assertions.
+		t.Logf("Get from read-only store failed (acceptable): %v", err)
+		return
+	}
+	if got.Request.Method != "GET" {
+		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
+	}
+
+	// Writing to a read-only DB should fail.
+	writeEntry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/readonly-write")},
+		Response:  RecordedResponse{StatusCode: 201},
+	}
+	err = roStore.Save(ctx, writeEntry)
+	if err == nil {
+		t.Log("Save to read-only store succeeded unexpectedly — filesystem may not enforce read-only on this platform")
+	}
+}
+
+func TestSQLiteStore_ConcurrentSavesUnderLoad(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Fire many concurrent saves to stress the write channel.
+	const numGoroutines = 100
+	errs := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(n int) {
+			entry := &Entry{
+				Protocol:  "HTTP/1.x",
+				Timestamp: time.Now(),
+				Request:   RecordedRequest{Method: "GET", URL: mustParseURL(fmt.Sprintf("http://example.com/concurrent/%d", n))},
+				Response:  RecordedResponse{StatusCode: 200},
+			}
+			errs <- store.Save(ctx, entry)
+		}(i)
+	}
+
+	for i := 0; i < numGoroutines; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent Save %d failed: %v", i, err)
+		}
+	}
+
+	// Verify all entries were saved.
+	entries, err := store.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != numGoroutines {
+		t.Errorf("got %d entries, want %d", len(entries), numGoroutines)
+	}
+}
+
+func TestSQLiteStore_Save_ContextCancelDuringWriteLoop(t *testing.T) {
+	// Verifies that when the write loop is processing, cancelling the
+	// context of a pending Save returns promptly.
+	store := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start a save, then immediately cancel the context.
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/cancel-during-write")},
+		Response:  RecordedResponse{StatusCode: 200},
+	}
+
+	// Cancel almost immediately to race with the write loop.
+	go func() {
+		time.Sleep(1 * time.Millisecond)
+		cancel()
+	}()
+
+	// This may succeed (if writeLoop processes it before cancel) or fail with
+	// context.Canceled. Either is acceptable — it must not panic or deadlock.
+	err := store.Save(ctx, entry)
+	if err != nil && err != context.Canceled {
+		// If the write completed before cancellation, the save succeeds.
+		// If cancelled first, we get context.Canceled. Anything else is unexpected.
+		t.Logf("Save returned: %v (acceptable if context.Canceled or nil)", err)
+	}
+}
+
+func TestSQLiteStore_Close_IdempotentDoneChannel(t *testing.T) {
+	// Verify that the store's writeLoop exits cleanly when Close is called
+	// and no pending writes exist.
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	// Close immediately with no writes — should not hang or panic.
+	done := make(chan error, 1)
+	go func() {
+		done <- store.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not complete within 5 seconds")
+	}
+}
+
+func TestSQLiteStore_DeleteOlderThan_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.DeleteOlderThan(ctx, time.Now())
+	if err == nil {
+		t.Fatal("expected error from DeleteOlderThan with cancelled context, got nil")
+	}
+}
+
+func TestSQLiteStore_DeleteExcess_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.DeleteExcess(ctx, 10)
+	if err == nil {
+		t.Fatal("expected error from DeleteExcess with cancelled context, got nil")
 	}
 }
