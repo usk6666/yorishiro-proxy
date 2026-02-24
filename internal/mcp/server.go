@@ -16,7 +16,18 @@ type Server struct {
 	ca         *cert.CA
 	store      session.Store
 	manager    *proxy.Manager
+	dbPath     string   // path to the SQLite database file for status reporting
 	replayDoer httpDoer // injectable HTTP client for replay_request testing
+}
+
+// ServerOption configures a Server.
+type ServerOption func(*Server)
+
+// WithDBPath sets the path to the SQLite database file for status reporting.
+func WithDBPath(path string) ServerOption {
+	return func(s *Server) {
+		s.dbPath = path
+	}
 }
 
 // NewServer creates a new MCP server with proxy tools registered.
@@ -28,13 +39,16 @@ type Server struct {
 // If store is nil, session-related tools will return an error when called.
 // The manager parameter controls the proxy lifecycle for proxy_start/proxy_stop tools.
 // If manager is nil, those tools will return an error when called.
-func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager) *Server {
+func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
 	server := gomcp.NewServer(&gomcp.Implementation{
 		Name:    "katashiro-proxy",
 		Version: "0.0.1",
 	}, nil)
 
 	s := &Server{server: server, appCtx: ctx, ca: ca, store: store, manager: manager}
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.registerTools()
 	return s
 }
@@ -52,4 +66,5 @@ func (s *Server) registerTools() {
 	s.registerReplayRequest()
 	s.registerProxyStart()
 	s.registerProxyStop()
+	s.registerProxyStatus()
 }
