@@ -16,23 +16,17 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
-// handleCONNECT processes an HTTP CONNECT request to establish an HTTPS MITM tunnel.
-// It sends a 200 Connection Established response, performs a TLS handshake with
-// the client using a dynamically issued certificate, then proxies decrypted
-// HTTP requests to the upstream server over TLS.
+// handleCONNECT processes an HTTP CONNECT request. If the target host matches
+// a TLS passthrough pattern, it relays encrypted bytes directly without
+// interception. Otherwise, it performs HTTPS MITM: sends a 200 Connection
+// Established response, performs a TLS handshake with the client using a
+// dynamically issued certificate, then proxies decrypted HTTP requests to the
+// upstream server over TLS.
 func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
 	logger := h.connLogger(ctx)
 
-	// Validate that the issuer is configured for TLS interception.
-	if h.issuer == nil {
-		logger.Warn("CONNECT received but TLS issuer not configured", "host", req.Host)
-		if _, err := conn.Write([]byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
-			logger.Debug("failed to write error response", "error", err)
-		}
-		return nil
-	}
-
-	// Parse the hostname from the CONNECT request for certificate generation.
+	// Parse the hostname from the CONNECT request for passthrough check and
+	// certificate generation.
 	hostname, err := parseConnectHost(req.Host)
 	if err != nil {
 		logger.Warn("invalid CONNECT host", "host", req.Host, "error", err)
@@ -45,6 +39,21 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Preserve the full host:port for upstream forwarding.
 	// req.Host contains the original "host:port" from the CONNECT request.
 	connectAuthority := req.Host
+
+	// Check if the target host is in the TLS passthrough list.
+	// If so, relay encrypted bytes directly without MITM interception.
+	if h.passthrough != nil && h.passthrough.Contains(hostname) {
+		return h.handlePassthrough(ctx, conn, connectAuthority, hostname)
+	}
+
+	// Validate that the issuer is configured for TLS interception.
+	if h.issuer == nil {
+		logger.Warn("CONNECT received but TLS issuer not configured", "host", req.Host)
+		if _, err := conn.Write([]byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
+			logger.Debug("failed to write error response", "error", err)
+		}
+		return nil
+	}
 
 	// Send 200 Connection Established to the client.
 	if _, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
@@ -64,6 +73,70 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Process HTTPS requests over the decrypted TLS connection.
 	// Pass the full authority (host:port) for URL reconstruction.
 	return h.httpsLoop(ctx, tlsConn, connectAuthority)
+}
+
+// handlePassthrough relays encrypted bytes between the client and the upstream
+// server without TLS interception. This is used for domains in the passthrough
+// list (e.g., cert-pinned services, out-of-scope domains).
+func (h *Handler) handlePassthrough(ctx context.Context, clientConn net.Conn, authority, hostname string) error {
+	logger := h.connLogger(ctx)
+	logger.Info("TLS passthrough", "host", authority)
+
+	// Connect to the upstream server.
+	upstream, err := net.DialTimeout("tcp", authority, 30*time.Second)
+	if err != nil {
+		logger.Error("passthrough upstream dial failed", "host", authority, "error", err)
+		if _, err := clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
+			logger.Debug("failed to write error response", "error", err)
+		}
+		return nil
+	}
+	defer upstream.Close()
+
+	// Send 200 Connection Established to the client.
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		return fmt.Errorf("write passthrough CONNECT 200: %w", err)
+	}
+
+	// Bidirectional relay: copy bytes in both directions until one side closes
+	// or the context is cancelled.
+	return relay(ctx, clientConn, upstream)
+}
+
+// relay copies data bidirectionally between two connections until one side
+// closes, an error occurs, or the context is cancelled.
+func relay(ctx context.Context, a, b net.Conn) error {
+	// Watch for context cancellation and interrupt blocking reads.
+	go func() {
+		<-ctx.Done()
+		a.SetReadDeadline(time.Now())
+		b.SetReadDeadline(time.Now())
+	}()
+
+	errCh := make(chan error, 2)
+
+	go func() {
+		_, err := io.Copy(b, a)
+		errCh <- err
+		// Signal the other goroutine to stop by closing the write side.
+		b.SetReadDeadline(time.Now())
+	}()
+
+	go func() {
+		_, err := io.Copy(a, b)
+		errCh <- err
+		a.SetReadDeadline(time.Now())
+	}()
+
+	// Wait for the first goroutine to finish.
+	err := <-errCh
+
+	// If context was cancelled, return the context error.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	return err
 }
 
 // parseConnectHost extracts the hostname from a CONNECT request's Host field.
