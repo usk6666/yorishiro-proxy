@@ -272,7 +272,10 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	var recordReqBody []byte
 	var reqTruncated bool
 	if req.Body != nil {
-		fullBody, _ := io.ReadAll(req.Body)
+		fullBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			logger.Warn("failed to read request body", "error", err)
+		}
 		req.Body.Close()
 		req.Body = io.NopCloser(bytes.NewReader(fullBody))
 
