@@ -21,7 +21,6 @@ type tlsMetadata struct {
 	Version     string
 	CipherSuite string
 	ALPN        string
-	ServerAddr  string
 }
 
 // handleCONNECT processes an HTTP CONNECT request. If the target host matches
@@ -327,7 +326,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	outReq := req.WithContext(ctx)
 	outReq.RequestURI = ""
 
-	resp, err := h.transport.RoundTrip(outReq)
+	resp, serverAddr, err := roundTripWithTrace(h.transport, outReq)
 	if err != nil {
 		logger.Error("HTTPS upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -339,7 +338,10 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	defer resp.Body.Close()
 
 	// Read the full response body so the client receives uncorrupted data.
-	fullRespBody, _ := io.ReadAll(resp.Body)
+	fullRespBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Warn("failed to read response body", "error", err)
+	}
 
 	// Capture raw response bytes by serializing the response as received.
 	rawResponse := serializeRawResponse(resp, fullRespBody)
@@ -375,6 +377,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		RawResponse: rawResponse,
 		ConnInfo: &session.ConnectionInfo{
 			ClientAddr:           clientAddr,
+			ServerAddr:           serverAddr,
 			TLSVersion:           tlsMeta.Version,
 			TLSCipher:            tlsMeta.CipherSuite,
 			TLSALPN:              tlsMeta.ALPN,
