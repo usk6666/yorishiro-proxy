@@ -138,7 +138,8 @@ func startTestProxy(t *testing.T, ctx context.Context, handler *Handler) (string
 			}
 			go func() {
 				defer conn.Close()
-				reader := bufio.NewReader(conn)
+				capture := &captureReader{r: conn}
+				reader := bufio.NewReader(capture)
 				req, err := gohttp.ReadRequest(reader)
 				if err != nil {
 					return
@@ -146,7 +147,7 @@ func startTestProxy(t *testing.T, ctx context.Context, handler *Handler) (string
 				if req.Method == gohttp.MethodConnect {
 					handler.handleCONNECT(proxyCtx, conn, req)
 				} else {
-					handler.handleRequest(proxyCtx, conn, req, &smugglingFlags{})
+					handler.handleRequest(proxyCtx, conn, req, &smugglingFlags{}, capture, 0, reader)
 				}
 			}()
 		}
@@ -1108,4 +1109,127 @@ func TestHandleCONNECT_PartialHTTPSRequests(t *testing.T) {
 		t.Fatalf("proxy is not accepting connections after partial HTTPS requests: %v", err)
 	}
 	conn.Close()
+}
+
+func TestTLSVersionString(t *testing.T) {
+	tests := []struct {
+		version uint16
+		want    string
+	}{
+		{tls.VersionTLS10, "TLS 1.0"},
+		{tls.VersionTLS11, "TLS 1.1"},
+		{tls.VersionTLS12, "TLS 1.2"},
+		{tls.VersionTLS13, "TLS 1.3"},
+		{0x0000, "unknown (0x0000)"},
+		{0xFFFF, "unknown (0xffff)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := tlsVersionString(tt.version)
+			if got != tt.want {
+				t.Errorf("tlsVersionString(0x%04x) = %q, want %q", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCaptureReader_BasicCapture(t *testing.T) {
+	data := []byte("Hello, World!")
+	cr := &captureReader{r: strings.NewReader(string(data))}
+
+	buf := make([]byte, 5)
+	n, err := cr.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("Read returned %d bytes, want 5", n)
+	}
+	if string(buf[:n]) != "Hello" {
+		t.Errorf("Read returned %q, want Hello", string(buf[:n]))
+	}
+
+	// Read the rest.
+	buf2 := make([]byte, 20)
+	n2, _ := cr.Read(buf2)
+
+	captured := cr.Bytes()
+	if string(captured) != string(data[:n+n2]) {
+		t.Errorf("Captured = %q, want %q", captured, data[:n+n2])
+	}
+}
+
+func TestCaptureReader_Reset(t *testing.T) {
+	cr := &captureReader{r: strings.NewReader("test data")}
+
+	buf := make([]byte, 4)
+	cr.Read(buf)
+
+	if cr.buf.Len() == 0 {
+		t.Error("expected non-empty buffer before reset")
+	}
+
+	cr.Reset()
+	if cr.buf.Len() != 0 {
+		t.Errorf("buffer after reset has %d bytes, want 0", cr.buf.Len())
+	}
+	if cr.Bytes() != nil {
+		t.Errorf("Bytes() after reset = %v, want nil", cr.Bytes())
+	}
+}
+
+func TestCaptureReader_MaxCaptureSize(t *testing.T) {
+	// Create data larger than maxRawCaptureSize.
+	bigData := make([]byte, maxRawCaptureSize+1024)
+	for i := range bigData {
+		bigData[i] = 'A'
+	}
+	cr := &captureReader{r: strings.NewReader(string(bigData))}
+
+	// Read all data.
+	buf := make([]byte, len(bigData))
+	total := 0
+	for {
+		n, err := cr.Read(buf[total:])
+		total += n
+		if err != nil {
+			break
+		}
+	}
+
+	captured := cr.Bytes()
+	if len(captured) > maxRawCaptureSize {
+		t.Errorf("captured %d bytes, want <= %d", len(captured), maxRawCaptureSize)
+	}
+}
+
+func TestSerializeRawResponse(t *testing.T) {
+	resp := &gohttp.Response{
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		StatusCode: 200,
+		Header: gohttp.Header{
+			"Content-Type": {"text/plain"},
+			"X-Custom":     {"value"},
+		},
+	}
+	body := []byte("Hello")
+
+	raw := serializeRawResponse(resp, body)
+	rawStr := string(raw)
+
+	if !strings.HasPrefix(rawStr, "HTTP/1.1 200 OK\r\n") {
+		t.Errorf("raw response doesn't start with expected status line: %q", rawStr[:min(len(rawStr), 30)])
+	}
+	if !strings.Contains(rawStr, "\r\n\r\nHello") {
+		t.Error("raw response doesn't contain body after header terminator")
+	}
+}
+
+func TestSerializeRawResponse_NilResponse(t *testing.T) {
+	raw := serializeRawResponse(nil, nil)
+	if raw != nil {
+		t.Errorf("serializeRawResponse(nil) = %v, want nil", raw)
+	}
 }

@@ -16,6 +16,14 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
+// tlsMetadata holds TLS connection information extracted from the handshake.
+type tlsMetadata struct {
+	Version     string
+	CipherSuite string
+	ALPN        string
+	ServerAddr  string
+}
+
 // handleCONNECT processes an HTTP CONNECT request. If the target host matches
 // a TLS passthrough pattern, it relays encrypted bytes directly without
 // interception. Otherwise, it performs HTTPS MITM: sends a 200 Connection
@@ -68,11 +76,15 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	defer tlsConn.Close()
 
-	logger.Info("CONNECT tunnel established", "host", connectAuthority)
+	// Extract TLS metadata from the client-side handshake.
+	tlsMeta := extractTLSMetadata(tlsConn)
+
+	logger.Info("CONNECT tunnel established", "host", connectAuthority,
+		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite)
 
 	// Process HTTPS requests over the decrypted TLS connection.
 	// Pass the full authority (host:port) for URL reconstruction.
-	return h.httpsLoop(ctx, tlsConn, connectAuthority)
+	return h.httpsLoop(ctx, tlsConn, connectAuthority, tlsMeta)
 }
 
 // handlePassthrough relays encrypted bytes between the client and the upstream
@@ -177,10 +189,37 @@ func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname stri
 	return tlsConn, nil
 }
 
+// extractTLSMetadata extracts TLS connection information from a completed handshake.
+func extractTLSMetadata(tlsConn *tls.Conn) tlsMetadata {
+	state := tlsConn.ConnectionState()
+	return tlsMetadata{
+		Version:     tlsVersionString(state.Version),
+		CipherSuite: tls.CipherSuiteName(state.CipherSuite),
+		ALPN:        state.NegotiatedProtocol,
+	}
+}
+
+// tlsVersionString converts a TLS version constant to a human-readable string.
+func tlsVersionString(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return fmt.Sprintf("unknown (0x%04x)", version)
+	}
+}
+
 // httpsLoop reads HTTP requests from the decrypted TLS connection in a loop
 // (supporting keep-alive) and forwards each to the upstream server over HTTPS.
-func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost string) error {
-	reader := bufio.NewReader(tlsConn)
+func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost string, tlsMeta tlsMetadata) error {
+	capture := &captureReader{r: tlsConn}
+	reader := bufio.NewReader(capture)
 
 	// Watch for context cancellation and interrupt blocking reads.
 	// Same as Handle(): ReadRequest may block on keep-alive connections
@@ -201,6 +240,9 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 		if timeout := h.effectiveRequestTimeout(); timeout > 0 {
 			tlsConn.SetReadDeadline(time.Now().Add(timeout))
 		}
+
+		// Mark the capture position before reading the request.
+		captureStart := capture.buf.Len()
 
 		// Check for HTTP request smuggling patterns in raw headers before
 		// ReadRequest normalizes them. Same check as Handle() for HTTP.
@@ -225,7 +267,7 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 		// Reset deadline after successful read.
 		tlsConn.SetReadDeadline(time.Time{})
 
-		if err := h.handleHTTPSRequest(ctx, tlsConn, connectHost, req, smuggling); err != nil {
+		if err := h.handleHTTPSRequest(ctx, tlsConn, connectHost, req, smuggling, tlsMeta, capture, captureStart, reader); err != nil {
 			return err
 		}
 
@@ -237,10 +279,11 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 
 // handleHTTPSRequest forwards a single decrypted HTTPS request to the upstream
 // server, records the session, and writes the response back to the client.
-func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags) error {
+func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, tlsMeta tlsMetadata, capture *captureReader, captureStart int, reader *bufio.Reader) error {
 	start := time.Now()
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
 
 	// Read the full request body so the upstream receives uncorrupted data.
 	var recordReqBody []byte
@@ -254,6 +297,18 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		if len(fullBody) > maxBodyRecordSize {
 			recordReqBody = fullBody[:maxBodyRecordSize]
 			reqTruncated = true
+		}
+	}
+
+	// Extract raw request bytes captured by the captureReader.
+	var rawRequest []byte
+	if capture != nil {
+		captureEnd := capture.buf.Len()
+		buffered := reader.Buffered()
+		rawEnd := captureEnd - buffered
+		if rawEnd > captureStart && captureStart < capture.buf.Len() {
+			rawRequest = make([]byte, rawEnd-captureStart)
+			copy(rawRequest, capture.buf.Bytes()[captureStart:rawEnd])
 		}
 	}
 
@@ -286,6 +341,15 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Read the full response body so the client receives uncorrupted data.
 	fullRespBody, _ := io.ReadAll(resp.Body)
 
+	// Capture raw response bytes by serializing the response as received.
+	rawResponse := serializeRawResponse(resp, fullRespBody)
+
+	// Extract the upstream server's TLS certificate subject if available.
+	var tlsCertSubject string
+	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		tlsCertSubject = resp.TLS.PeerCertificates[0].Subject.String()
+	}
+
 	// Write response back to the client over the TLS connection (full body).
 	if err := writeResponse(conn, resp, fullRespBody); err != nil {
 		return fmt.Errorf("write HTTPS response: %w", err)
@@ -303,10 +367,19 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	// Record session with HTTPS protocol and the full reconstructed URL.
 	entry := &session.Entry{
-		ConnID:    connID,
-		Protocol:  "HTTPS",
-		Timestamp: start,
-		Duration:  duration,
+		ConnID:      connID,
+		Protocol:    "HTTPS",
+		Timestamp:   start,
+		Duration:    duration,
+		RawRequest:  rawRequest,
+		RawResponse: rawResponse,
+		ConnInfo: &session.ConnectionInfo{
+			ClientAddr:           clientAddr,
+			TLSVersion:           tlsMeta.Version,
+			TLSCipher:            tlsMeta.CipherSuite,
+			TLSALPN:              tlsMeta.ALPN,
+			TLSServerCertSubject: tlsCertSubject,
+		},
 		Request: session.RecordedRequest{
 			Method: req.Method,
 			URL: &url.URL{

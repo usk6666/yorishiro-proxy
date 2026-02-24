@@ -122,9 +122,20 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 		urlStr = entry.Request.URL.String()
 	}
 
+	// Extract connection info fields, defaulting to empty strings.
+	var clientAddr, serverAddr, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject string
+	if entry.ConnInfo != nil {
+		clientAddr = entry.ConnInfo.ClientAddr
+		serverAddr = entry.ConnInfo.ServerAddr
+		tlsVersion = entry.ConnInfo.TLSVersion
+		tlsCipher = entry.ConnInfo.TLSCipher
+		tlsALPN = entry.ConnInfo.TLSALPN
+		tlsCertSubject = entry.ConnInfo.TLSServerCertSubject
+	}
+
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags, raw_request, raw_response, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
 		entry.ConnID,
 		entry.Protocol,
@@ -140,6 +151,14 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 		boolToInt(entry.Request.BodyTruncated),
 		boolToInt(entry.Response.BodyTruncated),
 		tags,
+		entry.RawRequest,
+		entry.RawResponse,
+		clientAddr,
+		serverAddr,
+		tlsVersion,
+		tlsCipher,
+		tlsALPN,
+		tlsCertSubject,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -167,7 +186,7 @@ func (s *SQLiteStore) Save(ctx context.Context, entry *Entry) error {
 }
 
 // sessionColumns is the list of columns selected in Get and List queries.
-const sessionColumns = `id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags`
+const sessionColumns = `id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags, raw_request, raw_response, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject`
 
 // Get retrieves a session entry by ID.
 func (s *SQLiteStore) Get(ctx context.Context, id string) (*Entry, error) {
@@ -325,15 +344,21 @@ type scannable interface {
 
 func scanEntry(row scannable) (*Entry, error) {
 	var (
-		entry         Entry
-		urlStr        string
-		reqHeaders    string
-		respHeaders   string
-		tsStr         string
-		durationMs    int64
-		reqTruncated  int
-		respTruncated int
-		tagsStr       string
+		entry          Entry
+		urlStr         string
+		reqHeaders     string
+		respHeaders    string
+		tsStr          string
+		durationMs     int64
+		reqTruncated   int
+		respTruncated  int
+		tagsStr        string
+		clientAddr     string
+		serverAddr     string
+		tlsVersion     string
+		tlsCipher      string
+		tlsALPN        string
+		tlsCertSubject string
 	)
 
 	err := row.Scan(
@@ -352,6 +377,14 @@ func scanEntry(row scannable) (*Entry, error) {
 		&reqTruncated,
 		&respTruncated,
 		&tagsStr,
+		&entry.RawRequest,
+		&entry.RawResponse,
+		&clientAddr,
+		&serverAddr,
+		&tlsVersion,
+		&tlsCipher,
+		&tlsALPN,
+		&tlsCertSubject,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -384,6 +417,18 @@ func scanEntry(row scannable) (*Entry, error) {
 
 	entry.Request.BodyTruncated = reqTruncated != 0
 	entry.Response.BodyTruncated = respTruncated != 0
+
+	// Populate ConnectionInfo if any connection metadata is present.
+	if clientAddr != "" || serverAddr != "" || tlsVersion != "" || tlsCipher != "" || tlsALPN != "" || tlsCertSubject != "" {
+		entry.ConnInfo = &ConnectionInfo{
+			ClientAddr:           clientAddr,
+			ServerAddr:           serverAddr,
+			TLSVersion:           tlsVersion,
+			TLSCipher:            tlsCipher,
+			TLSALPN:              tlsALPN,
+			TLSServerCertSubject: tlsCertSubject,
+		}
+	}
 
 	return &entry, nil
 }
