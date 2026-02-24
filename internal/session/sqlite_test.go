@@ -346,14 +346,15 @@ func TestMigrate_V3_CreatesIndexes(t *testing.T) {
 		t.Fatalf("rows iteration: %v", err)
 	}
 
-	want := []string{
+	wantIndexes := []string{
 		"idx_sessions_protocol",
 		"idx_sessions_timestamp",
 		"idx_sessions_method",
 		"idx_sessions_url",
 		"idx_sessions_response_status",
+		"idx_sessions_conn_id",
 	}
-	for _, idx := range want {
+	for _, idx := range wantIndexes {
 		if !indexes[idx] {
 			t.Errorf("expected index %q to exist, but it was not found", idx)
 		}
@@ -381,7 +382,7 @@ func TestMigrate_UpgradeFromV1_CreatesV3Indexes(t *testing.T) {
 		t.Fatalf("insert version: %v", err)
 	}
 
-	// Run migrate — should apply v3 (skipping v2).
+	// Run migrate — should apply all pending migrations (v2, v3, v4).
 	if err := migrate(ctx, db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -390,8 +391,9 @@ func TestMigrate_UpgradeFromV1_CreatesV3Indexes(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("version = %d, want 3", version)
+	want := latestVersion()
+	if version != want {
+		t.Errorf("version = %d, want %d", version, want)
 	}
 
 	// Verify v3 indexes exist.
@@ -413,7 +415,7 @@ func TestMigrate_UpgradeFromV1_CreatesV3Indexes(t *testing.T) {
 		t.Fatalf("rows iteration: %v", err)
 	}
 
-	for _, idx := range []string{"idx_sessions_protocol", "idx_sessions_timestamp"} {
+	for _, idx := range []string{"idx_sessions_protocol", "idx_sessions_timestamp", "idx_sessions_conn_id"} {
 		if !indexes[idx] {
 			t.Errorf("expected index %q to exist after upgrade, but it was not found", idx)
 		}
@@ -847,6 +849,117 @@ func TestSQLiteStore_DeleteExcess_NoExcess(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("DeleteExcess returned %d, want 0", n)
+	}
+}
+
+func TestSQLiteStore_ConnID_RoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	entry := &Entry{
+		ConnID:    "abcd1234",
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  50 * time.Millisecond,
+		Request: RecordedRequest{
+			Method: "GET",
+			URL:    mustParseURL("http://example.com/connid"),
+		},
+		Response: RecordedResponse{StatusCode: 200},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if got.ConnID != "abcd1234" {
+		t.Errorf("ConnID = %q, want %q", got.ConnID, "abcd1234")
+	}
+}
+
+func TestSQLiteStore_ConnID_EmptyDefault(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Save an entry without ConnID — should default to empty string.
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Request: RecordedRequest{
+			Method: "GET",
+			URL:    mustParseURL("http://example.com/no-connid"),
+		},
+		Response: RecordedResponse{StatusCode: 200},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if got.ConnID != "" {
+		t.Errorf("ConnID = %q, want empty string", got.ConnID)
+	}
+}
+
+func TestSQLiteStore_ConnID_InList(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	entries := []*Entry{
+		{
+			ConnID:    "conn0001",
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			ConnID:    "conn0001",
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
+			Response:  RecordedResponse{StatusCode: 201},
+		},
+		{
+			ConnID:    "conn0002",
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/c")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+	}
+
+	for _, e := range entries {
+		if err := store.Save(ctx, e); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	got, err := store.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	connIDCounts := make(map[string]int)
+	for _, e := range got {
+		connIDCounts[e.ConnID]++
+	}
+
+	if connIDCounts["conn0001"] != 2 {
+		t.Errorf("conn0001 count = %d, want 2", connIDCounts["conn0001"])
+	}
+	if connIDCounts["conn0002"] != 1 {
+		t.Errorf("conn0002 count = %d, want 1", connIDCounts["conn0002"])
 	}
 }
 

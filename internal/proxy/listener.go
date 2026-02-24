@@ -128,6 +128,14 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	pc := NewPeekConn(conn)
 	remoteAddr := conn.RemoteAddr().String()
 
+	// Generate a unique connection ID for log correlation.
+	connID := GenerateConnID()
+	connLogger := l.logger.With("conn_id", connID, "remote_addr", remoteAddr)
+
+	// Store connection ID and logger in context for downstream handlers.
+	ctx = ContextWithConnID(ctx, connID)
+	ctx = ContextWithLogger(ctx, connLogger)
+
 	// Set read deadline for protocol detection (Slowloris protection).
 	if l.peekTimeout > 0 {
 		conn.SetReadDeadline(time.Now().Add(l.peekTimeout))
@@ -135,7 +143,7 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 
 	peek, err := pc.Peek(peekSize)
 	if err != nil && len(peek) == 0 {
-		l.logger.Debug("peek failed", "remote_addr", remoteAddr, "error", err)
+		connLogger.Debug("peek failed", "error", err)
 		return
 	}
 
@@ -144,14 +152,14 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 
 	handler := l.detector.Detect(peek)
 	if handler == nil {
-		l.logger.Warn("no protocol handler matched", "remote_addr", remoteAddr, "peek_bytes", fmt.Sprintf("%x", peek))
+		connLogger.Warn("no protocol handler matched", "peek_bytes", fmt.Sprintf("%x", peek))
 		return
 	}
 
-	l.logger.Debug("connection dispatched", "remote_addr", remoteAddr, "protocol", handler.Name())
+	connLogger.Debug("connection dispatched", "protocol", handler.Name())
 
 	if err := handler.Handle(ctx, pc); err != nil {
-		l.logger.Error("handler error", "remote_addr", remoteAddr, "protocol", handler.Name(), "error", err)
+		connLogger.Error("handler error", "protocol", handler.Name(), "error", err)
 	}
 }
 
