@@ -36,6 +36,7 @@ ALTER TABLE sessions ADD COLUMN response_body_truncated INTEGER NOT NULL DEFAULT
 CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sessions(timestamp);`,
 	4: `ALTER TABLE sessions ADD COLUMN conn_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_sessions_conn_id ON sessions(conn_id);`,
+	5: `ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '{}';`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

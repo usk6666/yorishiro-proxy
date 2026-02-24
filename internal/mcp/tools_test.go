@@ -388,6 +388,61 @@ func TestGetSession_Success(t *testing.T) {
 	}
 }
 
+func TestGetSession_WithTags(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	u, _ := url.Parse("http://example.com/smuggle")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+		},
+		Tags: map[string]string{
+			"smuggling:cl_te_conflict": "true",
+			"smuggling:warnings":       "CL/TE conflict detected",
+		},
+	})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out getSessionResult
+	textContent, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if out.Tags == nil {
+		t.Fatal("expected non-nil tags")
+	}
+	if out.Tags["smuggling:cl_te_conflict"] != "true" {
+		t.Errorf("Tags[smuggling:cl_te_conflict] = %q, want %q", out.Tags["smuggling:cl_te_conflict"], "true")
+	}
+	if out.Tags["smuggling:warnings"] != "CL/TE conflict detected" {
+		t.Errorf("Tags[smuggling:warnings] = %q, want %q", out.Tags["smuggling:warnings"], "CL/TE conflict detected")
+	}
+}
+
 func TestGetSession_NotFound(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupTestSession(t, nil, store)

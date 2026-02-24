@@ -113,6 +113,8 @@ type getSessionResult struct {
 	Timestamp string `json:"timestamp"`
 	// DurationMs is the session duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
+	// Tags holds optional key-value metadata such as smuggling detection flags.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // registerGetSession registers the get_session MCP tool.
@@ -164,6 +166,7 @@ func (s *Server) handleGetSession(ctx context.Context, _ *gomcp.CallToolRequest,
 		ResponseBodyTruncated: entry.Response.BodyTruncated,
 		Timestamp:             entry.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		DurationMs:            entry.Duration.Milliseconds(),
+		Tags:                  entry.Tags,
 	}
 
 	return nil, result, nil
