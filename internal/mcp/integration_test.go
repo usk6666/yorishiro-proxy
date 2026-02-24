@@ -425,6 +425,9 @@ func TestIntegration_ListSessions_Empty(t *testing.T) {
 	if result.Count != 0 {
 		t.Errorf("list_sessions count = %d, want 0", result.Count)
 	}
+	if result.Total != 0 {
+		t.Errorf("list_sessions total = %d, want 0", result.Total)
+	}
 	if len(result.Sessions) != 0 {
 		t.Errorf("list_sessions sessions length = %d, want 0", len(result.Sessions))
 	}

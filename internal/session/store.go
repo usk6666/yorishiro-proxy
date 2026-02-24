@@ -13,6 +13,10 @@ type Store interface {
 	// List returns all session entries, optionally filtered.
 	List(ctx context.Context, opts ListOptions) ([]*Entry, error)
 
+	// Count returns the total number of session entries matching the given filter options.
+	// Unlike List, it ignores Limit and Offset and returns the full matching count.
+	Count(ctx context.Context, opts ListOptions) (int, error)
+
 	// Delete removes a session entry by ID.
 	Delete(ctx context.Context, id string) error
 
