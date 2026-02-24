@@ -390,8 +390,8 @@ func TestMigrate_UpgradeFromV1_CreatesV3Indexes(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("version = %d, want 3", version)
+	if version != latestVersion() {
+		t.Errorf("version = %d, want %d", version, latestVersion())
 	}
 
 	// Verify v3 indexes exist.

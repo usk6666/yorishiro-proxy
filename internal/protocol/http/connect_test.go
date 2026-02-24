@@ -146,7 +146,7 @@ func startTestProxy(t *testing.T, ctx context.Context, handler *Handler) (string
 				if req.Method == gohttp.MethodConnect {
 					handler.handleCONNECT(proxyCtx, conn, req)
 				} else {
-					handler.handleRequest(proxyCtx, conn, req)
+					handler.handleRequest(proxyCtx, conn, req, &smugglingFlags{})
 				}
 			}()
 		}

@@ -108,14 +108,23 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 		return fmt.Errorf("marshal response headers: %w", err)
 	}
 
+	tags := "{}"
+	if entry.Tags != nil {
+		tagsJSON, err := json.Marshal(entry.Tags)
+		if err != nil {
+			return fmt.Errorf("marshal tags: %w", err)
+		}
+		tags = string(tagsJSON)
+	}
+
 	urlStr := ""
 	if entry.Request.URL != nil {
 		urlStr = entry.Request.URL.String()
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
 		entry.Protocol,
 		entry.Request.Method,
@@ -129,6 +138,7 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 		entry.Duration.Milliseconds(),
 		boolToInt(entry.Request.BodyTruncated),
 		boolToInt(entry.Response.BodyTruncated),
+		tags,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -155,11 +165,13 @@ func (s *SQLiteStore) Save(ctx context.Context, entry *Entry) error {
 	}
 }
 
+// sessionColumns is the list of columns selected in Get and List queries.
+const sessionColumns = `id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags`
+
 // Get retrieves a session entry by ID.
 func (s *SQLiteStore) Get(ctx context.Context, id string) (*Entry, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated
-		 FROM sessions WHERE id = ?`, id)
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, id)
 	return scanEntry(row)
 }
 
@@ -201,7 +213,7 @@ func buildWhereClause(opts ListOptions) (string, []interface{}) {
 func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, error) {
 	whereClause, args := buildWhereClause(opts)
 
-	query := "SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated FROM sessions" + whereClause
+	query := "SELECT " + sessionColumns + " FROM sessions" + whereClause
 	query += " ORDER BY timestamp DESC"
 
 	if opts.Limit > 0 {
@@ -320,6 +332,7 @@ func scanEntry(row scannable) (*Entry, error) {
 		durationMs    int64
 		reqTruncated  int
 		respTruncated int
+		tagsStr       string
 	)
 
 	err := row.Scan(
@@ -336,6 +349,7 @@ func scanEntry(row scannable) (*Entry, error) {
 		&durationMs,
 		&reqTruncated,
 		&respTruncated,
+		&tagsStr,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -356,6 +370,11 @@ func scanEntry(row scannable) (*Entry, error) {
 	}
 	if err := json.Unmarshal([]byte(respHeaders), &entry.Response.Headers); err != nil {
 		entry.Response.Headers = make(map[string][]string)
+	}
+	if tagsStr != "" && tagsStr != "{}" {
+		if err := json.Unmarshal([]byte(tagsStr), &entry.Tags); err != nil {
+			entry.Tags = nil
+		}
 	}
 
 	entry.Timestamp, _ = time.Parse(time.RFC3339Nano, tsStr)

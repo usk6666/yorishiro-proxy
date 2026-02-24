@@ -139,6 +139,12 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 			conn.SetReadDeadline(time.Now().Add(timeout))
 		}
 
+		// Check for HTTP request smuggling patterns in raw headers before
+		// ReadRequest normalizes them. This is important because Go's
+		// ReadRequest strips Content-Length when Transfer-Encoding is
+		// present, making post-parse detection impossible.
+		smuggling := checkRequestSmuggling(reader, h.logger)
+
 		req, err := gohttp.ReadRequest(reader)
 		if err != nil {
 			if err == io.EOF {
@@ -152,6 +158,9 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 			return fmt.Errorf("read request: %w", err)
 		}
 
+		// Log any detected smuggling patterns.
+		logSmugglingWarnings(h.logger, smuggling, req)
+
 		// Reset deadline after successful read.
 		conn.SetReadDeadline(time.Time{})
 
@@ -160,7 +169,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 			return h.handleCONNECT(ctx, conn, req)
 		}
 
-		if err := h.handleRequest(ctx, conn, req); err != nil {
+		if err := h.handleRequest(ctx, conn, req, smuggling); err != nil {
 			return err
 		}
 
@@ -170,7 +179,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	}
 }
 
-func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
+func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, smuggling *smugglingFlags) error {
 	start := time.Now()
 
 	// Read the full request body so the upstream receives uncorrupted data.
@@ -251,6 +260,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 			Body:          recordRespBody,
 			BodyTruncated: respTruncated,
 		},
+		Tags: smugglingTags(smuggling),
 	}
 	if h.store != nil {
 		if err := h.store.Save(ctx, entry); err != nil {

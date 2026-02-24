@@ -13,6 +13,10 @@ type Entry struct {
 	Response  RecordedResponse
 	Timestamp time.Time
 	Duration  time.Duration
+	// Tags holds optional key-value metadata for the session entry.
+	// Examples include security flags such as smuggling detection results.
+	// A nil map indicates no tags are present.
+	Tags map[string]string
 }
 
 // RecordedRequest holds the captured request data.
