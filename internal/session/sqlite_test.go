@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -470,7 +471,7 @@ func TestSQLiteStore_Save_CancelledContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from Save with cancelled context, got nil")
 	}
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }
