@@ -11,14 +11,15 @@ import (
 
 // Server wraps the MCP server and registers proxy-related tools.
 type Server struct {
-	server     *gomcp.Server
-	appCtx     context.Context
-	ca         *cert.CA
-	store      session.Store
-	manager    *proxy.Manager
-	scope      *proxy.CaptureScope
-	dbPath     string   // path to the SQLite database file for status reporting
-	replayDoer httpDoer // injectable HTTP client for replay_request testing
+	server         *gomcp.Server
+	appCtx         context.Context
+	ca             *cert.CA
+	store          session.Store
+	manager        *proxy.Manager
+	scope          *proxy.CaptureScope
+	dbPath         string    // path to the SQLite database file for status reporting
+	replayDoer     httpDoer  // injectable HTTP client for replay_request testing
+	rawReplayDialer rawDialer // injectable dialer for replay_raw testing
 }
 
 // ServerOption configures a Server.
@@ -73,6 +74,7 @@ func (s *Server) registerTools() {
 	s.registerGetSession()
 	s.registerListSessions()
 	s.registerReplayRequest()
+	s.registerReplayRaw()
 	s.registerProxyStart()
 	s.registerProxyStop()
 	s.registerProxyStatus()

@@ -132,8 +132,9 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	connID := GenerateConnID()
 	connLogger := l.logger.With("conn_id", connID, "remote_addr", remoteAddr)
 
-	// Store connection ID and logger in context for downstream handlers.
+	// Store connection ID, client address, and logger in context for downstream handlers.
 	ctx = ContextWithConnID(ctx, connID)
+	ctx = ContextWithClientAddr(ctx, remoteAddr)
 	ctx = ContextWithLogger(ctx, connLogger)
 
 	// Set read deadline for protocol detection (Slowloris protection).

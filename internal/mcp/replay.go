@@ -3,6 +3,8 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -257,5 +259,150 @@ func (s *Server) httpClient() httpDoer {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+}
+
+// replayRawInput is the typed input for the replay_raw tool.
+type replayRawInput struct {
+	// SessionID is the unique identifier of the session to replay.
+	SessionID string `json:"session_id"`
+	// TargetAddr is an optional target address (host:port) to send the raw bytes to.
+	// If not specified, the original session's URL host:port is used.
+	TargetAddr string `json:"target_addr,omitempty" jsonschema:"target address (host:port) to send raw bytes to"`
+	// UseTLS indicates whether to use TLS for the connection.
+	// If not specified, it is inferred from the original session's protocol.
+	UseTLS *bool `json:"use_tls,omitempty" jsonschema:"use TLS for the connection (default: inferred from session protocol)"`
+}
+
+// replayRawResult is the structured output of the replay_raw tool.
+type replayRawResult struct {
+	// ResponseData is the raw response bytes, Base64-encoded.
+	ResponseData string `json:"response_data"`
+	// ResponseSize is the number of response bytes received.
+	ResponseSize int `json:"response_size"`
+	// DurationMs is the round-trip duration in milliseconds.
+	DurationMs int64 `json:"duration_ms"`
+}
+
+// rawDialer abstracts raw TCP/TLS connection creation for testability.
+type rawDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// registerReplayRaw registers the replay_raw MCP tool.
+func (s *Server) registerReplayRaw() {
+	gomcp.AddTool(s.server, &gomcp.Tool{
+		Name:        "replay_raw",
+		Description: "Replay raw HTTP bytes from a recorded session exactly as captured, without re-parsing or modifying them. This preserves header ordering, whitespace, and HTTP version for byte-faithful replay. Useful for reproducing HTTP request smuggling attacks and other protocol-level vulnerabilities.",
+	}, s.handleReplayRaw)
+}
+
+// handleReplayRaw handles the replay_raw tool invocation.
+// It retrieves the session's raw request bytes and sends them directly over TCP/TLS.
+func (s *Server) handleReplayRaw(ctx context.Context, _ *gomcp.CallToolRequest, input replayRawInput) (*gomcp.CallToolResult, *replayRawResult, error) {
+	if s.store == nil {
+		return nil, nil, fmt.Errorf("session store is not initialized")
+	}
+
+	if input.SessionID == "" {
+		return nil, nil, fmt.Errorf("session_id is required")
+	}
+
+	// Retrieve the original session.
+	entry, err := s.store.Get(ctx, input.SessionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get session: %w", err)
+	}
+
+	// Verify raw request bytes are available.
+	if len(entry.RawRequest) == 0 {
+		return nil, nil, fmt.Errorf("session %s has no raw request bytes", input.SessionID)
+	}
+
+	// Determine the target address.
+	targetAddr := input.TargetAddr
+	if targetAddr == "" {
+		if entry.Request.URL == nil {
+			return nil, nil, fmt.Errorf("session has no URL and no target_addr was provided")
+		}
+		host := entry.Request.URL.Hostname()
+		port := entry.Request.URL.Port()
+		if port == "" {
+			if entry.Request.URL.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		targetAddr = net.JoinHostPort(host, port)
+	}
+
+	// Determine whether to use TLS.
+	useTLS := entry.Protocol == "HTTPS"
+	if input.UseTLS != nil {
+		useTLS = *input.UseTLS
+	}
+
+	// Establish the connection.
+	dialer := s.rawDialerFunc()
+	start := time.Now()
+
+	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect to %s: %w", targetAddr, err)
+	}
+	defer conn.Close()
+
+	// Upgrade to TLS if needed.
+	if useTLS {
+		host, _, _ := net.SplitHostPort(targetAddr)
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: true,
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return nil, nil, fmt.Errorf("TLS handshake with %s: %w", targetAddr, err)
+		}
+		conn = tlsConn
+	}
+
+	// Set a deadline for the entire operation.
+	conn.SetDeadline(time.Now().Add(defaultReplayTimeout))
+
+	// Send the raw request bytes exactly as captured.
+	if _, err := conn.Write(entry.RawRequest); err != nil {
+		return nil, nil, fmt.Errorf("send raw request: %w", err)
+	}
+
+	// Read the raw response (limited to maxReplayResponseSize).
+	respData, err := io.ReadAll(io.LimitReader(conn, maxReplayResponseSize))
+	if err != nil {
+		// Connection may be closed by the server after sending the response.
+		// If we already have some data, that's fine.
+		if len(respData) == 0 {
+			return nil, nil, fmt.Errorf("read raw response: %w", err)
+		}
+	}
+	duration := time.Since(start)
+
+	result := &replayRawResult{
+		ResponseData: base64.StdEncoding.EncodeToString(respData),
+		ResponseSize: len(respData),
+		DurationMs:   duration.Milliseconds(),
+	}
+
+	return nil, result, nil
+}
+
+// rawDialerFunc returns the raw dialer to use for replay_raw connections.
+// If a custom dialer is set (for testing), it is returned; otherwise,
+// a dialer with SSRF protection is returned.
+func (s *Server) rawDialerFunc() rawDialer {
+	if s.rawReplayDialer != nil {
+		return s.rawReplayDialer
+	}
+	return &net.Dialer{
+		Timeout: defaultReplayTimeout,
+		Control: denyPrivateNetwork,
 	}
 }

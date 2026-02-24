@@ -1746,3 +1746,412 @@ func TestSQLiteStore_PersistenceAcrossReopen_NilBodyAndHeaders(t *testing.T) {
 		t.Errorf("Tags = %v, want nil", got.Tags)
 	}
 }
+
+func TestSQLiteStore_RawBytes_SaveAndGet(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	rawResp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+
+	u, _ := url.Parse("http://example.com/test")
+	entry := &Entry{
+		Protocol:    "HTTP/1.x",
+		Timestamp:   time.Now(),
+		Duration:    100 * time.Millisecond,
+		RawRequest:  rawReq,
+		RawResponse: rawResp,
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}},
+		},
+		Response: RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Length": {"2"}},
+			Body:       []byte("OK"),
+		},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if string(got.RawRequest) != string(rawReq) {
+		t.Errorf("RawRequest = %q, want %q", got.RawRequest, rawReq)
+	}
+	if string(got.RawResponse) != string(rawResp) {
+		t.Errorf("RawResponse = %q, want %q", got.RawResponse, rawResp)
+	}
+}
+
+func TestSQLiteStore_RawBytes_NilRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	u, _ := url.Parse("http://example.com/no-raw")
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  50 * time.Millisecond,
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if got.RawRequest != nil {
+		t.Errorf("RawRequest = %v, want nil", got.RawRequest)
+	}
+	if got.RawResponse != nil {
+		t.Errorf("RawResponse = %v, want nil", got.RawResponse)
+	}
+}
+
+func TestSQLiteStore_ConnectionInfo_SaveAndGet(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	u, _ := url.Parse("https://example.com/secure")
+	entry := &Entry{
+		Protocol:  "HTTPS",
+		Timestamp: time.Now(),
+		Duration:  200 * time.Millisecond,
+		ConnInfo: &ConnectionInfo{
+			ClientAddr:           "192.168.1.100:54321",
+			ServerAddr:           "93.184.216.34:443",
+			TLSVersion:           "TLS 1.3",
+			TLSCipher:            "TLS_AES_128_GCM_SHA256",
+			TLSALPN:              "h2",
+			TLSServerCertSubject: "CN=example.com,O=Example Inc",
+		},
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}},
+		},
+		Response: RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"text/html"}},
+			Body:       []byte("<html>ok</html>"),
+		},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if got.ConnInfo == nil {
+		t.Fatal("ConnInfo is nil, want non-nil")
+	}
+	if got.ConnInfo.ClientAddr != "192.168.1.100:54321" {
+		t.Errorf("ClientAddr = %q, want %q", got.ConnInfo.ClientAddr, "192.168.1.100:54321")
+	}
+	if got.ConnInfo.ServerAddr != "93.184.216.34:443" {
+		t.Errorf("ServerAddr = %q, want %q", got.ConnInfo.ServerAddr, "93.184.216.34:443")
+	}
+	if got.ConnInfo.TLSVersion != "TLS 1.3" {
+		t.Errorf("TLSVersion = %q, want %q", got.ConnInfo.TLSVersion, "TLS 1.3")
+	}
+	if got.ConnInfo.TLSCipher != "TLS_AES_128_GCM_SHA256" {
+		t.Errorf("TLSCipher = %q, want %q", got.ConnInfo.TLSCipher, "TLS_AES_128_GCM_SHA256")
+	}
+	if got.ConnInfo.TLSALPN != "h2" {
+		t.Errorf("TLSALPN = %q, want %q", got.ConnInfo.TLSALPN, "h2")
+	}
+	if got.ConnInfo.TLSServerCertSubject != "CN=example.com,O=Example Inc" {
+		t.Errorf("TLSServerCertSubject = %q, want %q", got.ConnInfo.TLSServerCertSubject, "CN=example.com,O=Example Inc")
+	}
+}
+
+func TestSQLiteStore_ConnectionInfo_NilRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	u, _ := url.Parse("http://example.com/plain")
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  50 * time.Millisecond,
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if got.ConnInfo != nil {
+		t.Errorf("ConnInfo = %+v, want nil", got.ConnInfo)
+	}
+}
+
+func TestSQLiteStore_ConnectionInfo_ClientAddrOnly(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	u, _ := url.Parse("http://example.com/plain")
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  50 * time.Millisecond,
+		ConnInfo: &ConnectionInfo{
+			ClientAddr: "10.0.0.1:12345",
+		},
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if got.ConnInfo == nil {
+		t.Fatal("ConnInfo is nil, want non-nil")
+	}
+	if got.ConnInfo.ClientAddr != "10.0.0.1:12345" {
+		t.Errorf("ClientAddr = %q, want %q", got.ConnInfo.ClientAddr, "10.0.0.1:12345")
+	}
+	if got.ConnInfo.TLSVersion != "" {
+		t.Errorf("TLSVersion = %q, want empty", got.ConnInfo.TLSVersion)
+	}
+}
+
+func TestSQLiteStore_RawBytesAndConnInfo_Combined(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	rawReq := []byte("POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello")
+	rawResp := []byte("HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nOK")
+
+	u, _ := url.Parse("https://example.com/api")
+	entry := &Entry{
+		Protocol:    "HTTPS",
+		Timestamp:   time.Now(),
+		Duration:    300 * time.Millisecond,
+		RawRequest:  rawReq,
+		RawResponse: rawResp,
+		ConnInfo: &ConnectionInfo{
+			ClientAddr:           "192.168.1.50:9999",
+			ServerAddr:           "93.184.216.34:443",
+			TLSVersion:           "TLS 1.2",
+			TLSCipher:            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+			TLSALPN:              "http/1.1",
+			TLSServerCertSubject: "CN=example.com",
+		},
+		Tags: map[string]string{"smuggling:cl_te_conflict": "true"},
+		Request: RecordedRequest{
+			Method:  "POST",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}, "Content-Length": {"5"}},
+			Body:    []byte("hello"),
+		},
+		Response: RecordedResponse{
+			StatusCode: 201,
+			Headers:    map[string][]string{"Content-Length": {"2"}},
+			Body:       []byte("OK"),
+		},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// Verify all new fields together.
+	if string(got.RawRequest) != string(rawReq) {
+		t.Errorf("RawRequest = %q, want %q", got.RawRequest, rawReq)
+	}
+	if string(got.RawResponse) != string(rawResp) {
+		t.Errorf("RawResponse = %q, want %q", got.RawResponse, rawResp)
+	}
+	if got.ConnInfo == nil {
+		t.Fatal("ConnInfo is nil")
+	}
+	if got.ConnInfo.ClientAddr != "192.168.1.50:9999" {
+		t.Errorf("ClientAddr = %q, want %q", got.ConnInfo.ClientAddr, "192.168.1.50:9999")
+	}
+	if got.ConnInfo.TLSVersion != "TLS 1.2" {
+		t.Errorf("TLSVersion = %q, want %q", got.ConnInfo.TLSVersion, "TLS 1.2")
+	}
+	if got.Tags["smuggling:cl_te_conflict"] != "true" {
+		t.Errorf("Tags[smuggling:cl_te_conflict] = %q, want %q", got.Tags["smuggling:cl_te_conflict"], "true")
+	}
+	// Verify existing fields still work.
+	if got.Request.Method != "POST" {
+		t.Errorf("Method = %q, want %q", got.Request.Method, "POST")
+	}
+	if got.Response.StatusCode != 201 {
+		t.Errorf("StatusCode = %d, want %d", got.Response.StatusCode, 201)
+	}
+}
+
+func TestSQLiteStore_MigrationV6_ExistingData(t *testing.T) {
+	// Test that migration v6 doesn't corrupt existing data by creating a DB
+	// with v5 schema first, then upgrading.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Create store (which runs migrations up to v6).
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	// Save an entry without raw bytes or conn info (simulating pre-v6 data).
+	ctx := context.Background()
+	u, _ := url.Parse("http://example.com/existing")
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}},
+		},
+		Response: RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("existing"),
+		},
+	}
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save pre-v6 entry: %v", err)
+	}
+	store.Close()
+
+	// Reopen the store (re-runs migrations).
+	store2, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("Reopen store: %v", err)
+	}
+	defer store2.Close()
+
+	// Verify the existing entry is intact.
+	got, err := store2.Get(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Get existing entry: %v", err)
+	}
+	if got.Request.Method != "GET" {
+		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
+	}
+	if string(got.Response.Body) != "existing" {
+		t.Errorf("Body = %q, want %q", got.Response.Body, "existing")
+	}
+	// New fields should have zero values.
+	if got.RawRequest != nil {
+		t.Errorf("RawRequest = %v, want nil", got.RawRequest)
+	}
+	if got.RawResponse != nil {
+		t.Errorf("RawResponse = %v, want nil", got.RawResponse)
+	}
+	// ConnInfo should be nil (all fields are empty defaults).
+	if got.ConnInfo != nil {
+		t.Errorf("ConnInfo = %+v, want nil", got.ConnInfo)
+	}
+}
+
+func TestSQLiteStore_RawBytes_InList(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	rawReq := []byte("GET /list-test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+	u, _ := url.Parse("http://example.com/list-test")
+	entry := &Entry{
+		Protocol:   "HTTP/1.x",
+		Timestamp:  time.Now(),
+		Duration:   50 * time.Millisecond,
+		RawRequest: rawReq,
+		ConnInfo: &ConnectionInfo{
+			ClientAddr: "10.0.0.2:8080",
+		},
+		Request: RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	}
+
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	entries, err := store.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("List returned %d entries, want 1", len(entries))
+	}
+
+	got := entries[0]
+	if string(got.RawRequest) != string(rawReq) {
+		t.Errorf("RawRequest in List = %q, want %q", got.RawRequest, rawReq)
+	}
+	if got.ConnInfo == nil || got.ConnInfo.ClientAddr != "10.0.0.2:8080" {
+		t.Errorf("ConnInfo.ClientAddr in List = %v, want 10.0.0.2:8080", got.ConnInfo)
+	}
+}
