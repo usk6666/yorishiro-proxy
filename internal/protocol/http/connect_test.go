@@ -784,3 +784,328 @@ func newBufferedConn(conn net.Conn, reader *bufio.Reader) *bufferedConn {
 func (bc *bufferedConn) Read(b []byte) (int, error) {
 	return bc.reader.Read(b)
 }
+
+func TestHandleCONNECT_MalformedRequests(t *testing.T) {
+	issuer, _ := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "binary garbage data",
+			payload: []byte{0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD, 0x80, 0x81},
+		},
+		{
+			name:    "empty line only",
+			payload: []byte("\r\n\r\n"),
+		},
+		{
+			name:    "NUL byte in CONNECT host",
+			payload: []byte("CONNECT evil\x00.example.com:443 HTTP/1.1\r\nHost: evil\x00.example.com:443\r\n\r\n"),
+		},
+		{
+			name: "ultra long hostname in CONNECT",
+			payload: []byte(fmt.Sprintf("CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n",
+				strings.Repeat("a", 9000), strings.Repeat("a", 9000))),
+		},
+		{
+			name:    "CONNECT with missing port",
+			payload: []byte("CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+		},
+		{
+			name:    "CONNECT with invalid port",
+			payload: []byte("CONNECT example.com:99999 HTTP/1.1\r\nHost: example.com:99999\r\n\r\n"),
+		},
+		{
+			name:    "CONNECT with negative port",
+			payload: []byte("CONNECT example.com:-1 HTTP/1.1\r\nHost: example.com:-1\r\n\r\n"),
+		},
+		{
+			name:    "CONNECT with empty host",
+			payload: []byte("CONNECT :443 HTTP/1.1\r\nHost: :443\r\n\r\n"),
+		},
+		{
+			name:    "double CONNECT request",
+			payload: []byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nCONNECT evil.com:443 HTTP/1.1\r\nHost: evil.com:443\r\n\r\n"),
+		},
+		{
+			name:    "CONNECT with invalid HTTP version",
+			payload: []byte("CONNECT example.com:443 HTTP/9.9\r\nHost: example.com:443\r\n\r\n"),
+		},
+		{
+			name:    "negative Content-Length on CONNECT",
+			payload: []byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nContent-Length: -1\r\n\r\n"),
+		},
+		{
+			name:    "non-numeric Content-Length on CONNECT",
+			payload: []byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nContent-Length: abc\r\n\r\n"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+			if err != nil {
+				t.Fatalf("dial proxy: %v", err)
+			}
+			defer conn.Close()
+
+			conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+			if _, err := conn.Write(tt.payload); err != nil {
+				// Write failure is acceptable — proxy may close the connection.
+				return
+			}
+
+			// Read any response. The proxy must not panic.
+			buf := make([]byte, 4096)
+			_, err = conn.Read(buf)
+			_ = err // Any outcome is acceptable.
+		})
+	}
+
+	// Verify the proxy is still alive after all malformed requests.
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("proxy is not accepting connections after malformed requests: %v", err)
+	}
+	conn.Close()
+}
+
+func TestHandleCONNECT_PartialRequests(t *testing.T) {
+	issuer, _ := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "partial CONNECT request line",
+			payload: []byte("CONNECT example.com:443 HT"),
+		},
+		{
+			name:    "CONNECT request line without CRLF",
+			payload: []byte("CONNECT example.com:443 HTTP/1.1"),
+		},
+		{
+			name:    "CONNECT headers without blank line",
+			payload: []byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443"),
+		},
+		{
+			name:    "CONNECT with single CRLF only",
+			payload: []byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+			if err != nil {
+				t.Fatalf("dial proxy: %v", err)
+			}
+
+			conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+			if _, err := conn.Write(tt.payload); err != nil {
+				conn.Close()
+				return
+			}
+
+			// Close write side to simulate abrupt client disconnection.
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				tcpConn.CloseWrite()
+			}
+
+			// Read until EOF or error.
+			buf := make([]byte, 4096)
+			_, err = conn.Read(buf)
+			_ = err
+
+			conn.Close()
+		})
+	}
+
+	// Verify proxy is still alive.
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("proxy is not accepting connections after partial CONNECT requests: %v", err)
+	}
+	conn.Close()
+}
+
+func TestHandleCONNECT_MalformedHTTPSRequests(t *testing.T) {
+	// Test malformed HTTP requests sent inside an established HTTPS MITM tunnel.
+	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "ok")
+	}))
+	defer upstream.Close()
+
+	port := upstreamPort(t, upstream)
+	connectHost := "localhost:" + port
+
+	issuer, rootCAs := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testLogger())
+	handler.transport = upstreamTransport(upstream)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "missing Host header in TLS tunnel",
+			payload: "GET /test HTTP/1.1\r\nConnection: close\r\n\r\n",
+		},
+		{
+			name: "ultra long path in TLS tunnel",
+			payload: fmt.Sprintf("GET /%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+				strings.Repeat("B", 9000), connectHost),
+		},
+		{
+			name: "NUL byte in header inside TLS tunnel",
+			payload: fmt.Sprintf("GET /test HTTP/1.1\r\nHost: %s\r\nX-Evil: foo\x00bar\r\nConnection: close\r\n\r\n",
+				connectHost),
+		},
+		{
+			name: "negative Content-Length inside TLS tunnel",
+			payload: fmt.Sprintf("POST /test HTTP/1.1\r\nHost: %s\r\nContent-Length: -1\r\nConnection: close\r\n\r\n",
+				connectHost),
+		},
+		{
+			name: "non-numeric Content-Length inside TLS tunnel",
+			payload: fmt.Sprintf("POST /test HTTP/1.1\r\nHost: %s\r\nContent-Length: xyz\r\nConnection: close\r\n\r\n",
+				connectHost),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Establish CONNECT tunnel and TLS handshake.
+			tlsConn, _ := doConnectAndTLS(t, proxyAddr, connectHost, rootCAs)
+			defer tlsConn.Close()
+
+			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+			// Send malformed request over the encrypted tunnel.
+			if _, err := tlsConn.Write([]byte(tt.payload)); err != nil {
+				return
+			}
+
+			// Read response — the handler should either respond with an error
+			// or close the connection gracefully.
+			buf := make([]byte, 4096)
+			_, err := tlsConn.Read(buf)
+			_ = err // Any outcome is acceptable.
+		})
+	}
+
+	// Verify the proxy still accepts new CONNECT tunnels.
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("proxy is not accepting connections after malformed HTTPS requests: %v", err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	connectReq := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn.Write([]byte(connectReq))
+
+	reader := bufio.NewReader(conn)
+	resp, err := gohttp.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("proxy did not respond to valid CONNECT after malformed requests: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Errorf("CONNECT status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+}
+
+func TestHandleCONNECT_PartialHTTPSRequests(t *testing.T) {
+	// Test partial HTTP requests inside an HTTPS tunnel (client disconnects mid-request).
+	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.WriteHeader(gohttp.StatusOK)
+	}))
+	defer upstream.Close()
+
+	port := upstreamPort(t, upstream)
+	connectHost := "localhost:" + port
+
+	issuer, rootCAs := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testLogger())
+	handler.transport = upstreamTransport(upstream)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "partial request line in TLS tunnel",
+			payload: "GET /test HT",
+		},
+		{
+			name:    "request line only in TLS tunnel",
+			payload: "GET /test HTTP/1.1",
+		},
+		{
+			name: "headers without blank line in TLS tunnel",
+			payload: fmt.Sprintf("GET /test HTTP/1.1\r\nHost: %s", connectHost),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tlsConn, _ := doConnectAndTLS(t, proxyAddr, connectHost, rootCAs)
+
+			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+			if _, err := tlsConn.Write([]byte(tt.payload)); err != nil {
+				tlsConn.Close()
+				return
+			}
+
+			// Close the TLS connection to simulate abrupt client disconnection.
+			tlsConn.Close()
+		})
+	}
+
+	// Verify proxy is still alive.
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("proxy is not accepting connections after partial HTTPS requests: %v", err)
+	}
+	conn.Close()
+}
