@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -20,11 +21,13 @@ import (
 // the client using a dynamically issued certificate, then proxies decrypted
 // HTTP requests to the upstream server over TLS.
 func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
+	logger := h.connLogger(ctx)
+
 	// Validate that the issuer is configured for TLS interception.
 	if h.issuer == nil {
-		h.logger.Warn("CONNECT received but TLS issuer not configured", "host", req.Host)
+		logger.Warn("CONNECT received but TLS issuer not configured", "host", req.Host)
 		if _, err := conn.Write([]byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
-			h.logger.Debug("failed to write error response", "error", err)
+			logger.Debug("failed to write error response", "error", err)
 		}
 		return nil
 	}
@@ -32,9 +35,9 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Parse the hostname from the CONNECT request for certificate generation.
 	hostname, err := parseConnectHost(req.Host)
 	if err != nil {
-		h.logger.Warn("invalid CONNECT host", "host", req.Host, "error", err)
+		logger.Warn("invalid CONNECT host", "host", req.Host, "error", err)
 		if _, err := conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
-			h.logger.Debug("failed to write error response", "error", err)
+			logger.Debug("failed to write error response", "error", err)
 		}
 		return nil
 	}
@@ -51,12 +54,12 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Perform TLS handshake with the client.
 	tlsConn, err := h.tlsHandshake(ctx, conn, hostname)
 	if err != nil {
-		h.logger.Error("TLS handshake failed", "host", hostname, "error", err)
+		logger.Error("TLS handshake failed", "host", hostname, "error", err)
 		return nil // Connection is already broken; don't propagate.
 	}
 	defer tlsConn.Close()
 
-	h.logger.Info("CONNECT tunnel established", "host", connectAuthority)
+	logger.Info("CONNECT tunnel established", "host", connectAuthority)
 
 	// Process HTTPS requests over the decrypted TLS connection.
 	// Pass the full authority (host:port) for URL reconstruction.
@@ -163,6 +166,8 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 // server, records the session, and writes the response back to the client.
 func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags) error {
 	start := time.Now()
+	logger := h.connLogger(ctx)
+	connID := proxy.ConnIDFromContext(ctx)
 
 	// Read the full request body so the upstream receives uncorrupted data.
 	var recordReqBody []byte
@@ -196,10 +201,10 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
-		h.logger.Error("HTTPS upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		logger.Error("HTTPS upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 		if _, err := conn.Write([]byte(errResp)); err != nil {
-			h.logger.Debug("failed to write error response", "error", err)
+			logger.Debug("failed to write error response", "error", err)
 		}
 		return fmt.Errorf("HTTPS upstream request: %w", err)
 	}
@@ -225,6 +230,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	// Record session with HTTPS protocol and the full reconstructed URL.
 	entry := &session.Entry{
+		ConnID:    connID,
 		Protocol:  "HTTPS",
 		Timestamp: start,
 		Duration:  duration,
@@ -251,11 +257,11 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	}
 	if h.store != nil {
 		if err := h.store.Save(ctx, entry); err != nil {
-			h.logger.Error("HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+			logger.Error("HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		}
 	}
 
-	h.logger.Info("https request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+	logger.Info("https request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 
 	return nil
 }

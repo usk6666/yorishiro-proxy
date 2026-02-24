@@ -123,9 +123,10 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
+		entry.ConnID,
 		entry.Protocol,
 		entry.Request.Method,
 		urlStr,
@@ -166,7 +167,7 @@ func (s *SQLiteStore) Save(ctx context.Context, entry *Entry) error {
 }
 
 // sessionColumns is the list of columns selected in Get and List queries.
-const sessionColumns = `id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags`
+const sessionColumns = `id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags`
 
 // Get retrieves a session entry by ID.
 func (s *SQLiteStore) Get(ctx context.Context, id string) (*Entry, error) {
@@ -337,6 +338,7 @@ func scanEntry(row scannable) (*Entry, error) {
 
 	err := row.Scan(
 		&entry.ID,
+		&entry.ConnID,
 		&entry.Protocol,
 		&entry.Request.Method,
 		&urlStr,

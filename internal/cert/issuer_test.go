@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -452,5 +453,103 @@ func TestNewIssuer_NotNil(t *testing.T) {
 	iss := NewIssuer(ca)
 	if iss == nil {
 		t.Fatal("NewIssuer returned nil")
+	}
+}
+
+func TestNewIssuer_DefaultCacheSize(t *testing.T) {
+	ca := newTestCA(t)
+	iss := NewIssuer(ca)
+
+	if iss.cache == nil {
+		t.Fatal("cache is nil")
+	}
+	if iss.cache.maxSize != defaultMaxCacheSize {
+		t.Errorf("default cache maxSize = %d, want %d", iss.cache.maxSize, defaultMaxCacheSize)
+	}
+}
+
+func TestNewIssuer_WithMaxCacheSize(t *testing.T) {
+	ca := newTestCA(t)
+
+	tests := []struct {
+		name     string
+		size     int
+		wantSize int
+	}{
+		{name: "custom size", size: 256, wantSize: 256},
+		{name: "small size", size: 1, wantSize: 1},
+		{name: "zero falls back to default", size: 0, wantSize: defaultMaxCacheSize},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			iss := NewIssuer(ca, WithMaxCacheSize(tt.size))
+			if iss.cache.maxSize != tt.wantSize {
+				t.Errorf("cache maxSize = %d, want %d", iss.cache.maxSize, tt.wantSize)
+			}
+		})
+	}
+}
+
+func TestGetCertificate_CacheEviction(t *testing.T) {
+	ca := newTestCA(t)
+	iss := NewIssuer(ca, WithMaxCacheSize(3))
+
+	// Generate certificates for 3 hosts to fill the cache.
+	hosts := []string{"a.example.com", "b.example.com", "c.example.com"}
+	certs := make(map[string]*tls.Certificate)
+	for _, h := range hosts {
+		cert, err := iss.GetCertificate(h)
+		if err != nil {
+			t.Fatalf("GetCertificate(%q): %v", h, err)
+		}
+		certs[h] = cert
+	}
+
+	if iss.CacheLen() != 3 {
+		t.Fatalf("CacheLen = %d, want 3", iss.CacheLen())
+	}
+
+	// Adding a 4th host should evict the LRU entry ("a.example.com").
+	cert4, err := iss.GetCertificate("d.example.com")
+	if err != nil {
+		t.Fatalf("GetCertificate(d.example.com): %v", err)
+	}
+	if cert4 == nil {
+		t.Fatal("GetCertificate returned nil for new host")
+	}
+
+	if iss.CacheLen() != 3 {
+		t.Errorf("CacheLen = %d after eviction, want 3", iss.CacheLen())
+	}
+
+	// "a.example.com" should have been evicted; requesting it again should
+	// produce a new (different) certificate.
+	certA2, err := iss.GetCertificate("a.example.com")
+	if err != nil {
+		t.Fatalf("GetCertificate(a.example.com) after eviction: %v", err)
+	}
+	if certA2 == certs["a.example.com"] {
+		t.Error("expected a new certificate after eviction, got the same pointer")
+	}
+}
+
+func TestCacheLen_ReflectsCacheState(t *testing.T) {
+	ca := newTestCA(t)
+	iss := NewIssuer(ca, WithMaxCacheSize(10))
+
+	if iss.CacheLen() != 0 {
+		t.Errorf("initial CacheLen = %d, want 0", iss.CacheLen())
+	}
+
+	for i := 0; i < 5; i++ {
+		hostname := fmt.Sprintf("host-%d.example.com", i)
+		if _, err := iss.GetCertificate(hostname); err != nil {
+			t.Fatalf("GetCertificate(%q): %v", hostname, err)
+		}
+	}
+
+	if iss.CacheLen() != 5 {
+		t.Errorf("CacheLen = %d after 5 certs, want 5", iss.CacheLen())
 	}
 }
