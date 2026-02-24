@@ -115,6 +115,32 @@ type getSessionResult struct {
 	DurationMs int64 `json:"duration_ms"`
 	// Tags holds optional key-value metadata such as smuggling detection flags.
 	Tags map[string]string `json:"tags,omitempty"`
+	// RawRequest is the original raw HTTP request bytes, Base64-encoded.
+	// Preserves header ordering, whitespace, and HTTP version for smuggling analysis.
+	// Empty string if no raw bytes were captured.
+	RawRequest string `json:"raw_request,omitempty"`
+	// RawResponse is the original raw HTTP response bytes, Base64-encoded.
+	// Empty string if no raw bytes were captured.
+	RawResponse string `json:"raw_response,omitempty"`
+	// ConnInfo holds network and TLS connection metadata.
+	// Nil if no connection information was recorded.
+	ConnInfo *connInfoResult `json:"conn_info,omitempty"`
+}
+
+// connInfoResult is the connection metadata in the get_session response.
+type connInfoResult struct {
+	// ClientAddr is the client's remote address (e.g., "192.168.1.100:54321").
+	ClientAddr string `json:"client_addr,omitempty"`
+	// ServerAddr is the upstream server's resolved address.
+	ServerAddr string `json:"server_addr,omitempty"`
+	// TLSVersion is the negotiated TLS version (e.g., "TLS 1.3").
+	TLSVersion string `json:"tls_version,omitempty"`
+	// TLSCipher is the negotiated TLS cipher suite name.
+	TLSCipher string `json:"tls_cipher,omitempty"`
+	// TLSALPN is the negotiated ALPN protocol.
+	TLSALPN string `json:"tls_alpn,omitempty"`
+	// TLSServerCertSubject is the subject DN of the upstream server certificate.
+	TLSServerCertSubject string `json:"tls_server_cert_subject,omitempty"`
 }
 
 // registerGetSession registers the get_session MCP tool.
@@ -149,6 +175,28 @@ func (s *Server) handleGetSession(ctx context.Context, _ *gomcp.CallToolRequest,
 	reqBody, reqEncoding := encodeBody(entry.Request.Body)
 	respBody, respEncoding := encodeBody(entry.Response.Body)
 
+	// Encode raw bytes as base64 if present.
+	var rawReqStr, rawRespStr string
+	if len(entry.RawRequest) > 0 {
+		rawReqStr = base64.StdEncoding.EncodeToString(entry.RawRequest)
+	}
+	if len(entry.RawResponse) > 0 {
+		rawRespStr = base64.StdEncoding.EncodeToString(entry.RawResponse)
+	}
+
+	// Build connection info if present.
+	var connInfo *connInfoResult
+	if entry.ConnInfo != nil {
+		connInfo = &connInfoResult{
+			ClientAddr:           entry.ConnInfo.ClientAddr,
+			ServerAddr:           entry.ConnInfo.ServerAddr,
+			TLSVersion:           entry.ConnInfo.TLSVersion,
+			TLSCipher:            entry.ConnInfo.TLSCipher,
+			TLSALPN:              entry.ConnInfo.TLSALPN,
+			TLSServerCertSubject: entry.ConnInfo.TLSServerCertSubject,
+		}
+	}
+
 	result := &getSessionResult{
 		ID:                    entry.ID,
 		ConnID:                entry.ConnID,
@@ -167,6 +215,9 @@ func (s *Server) handleGetSession(ctx context.Context, _ *gomcp.CallToolRequest,
 		Timestamp:             entry.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		DurationMs:            entry.Duration.Milliseconds(),
 		Tags:                  entry.Tags,
+		RawRequest:            rawReqStr,
+		RawResponse:           rawRespStr,
+		ConnInfo:              connInfo,
 	}
 
 	return nil, result, nil

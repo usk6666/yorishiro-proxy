@@ -1543,3 +1543,153 @@ func TestDeleteSession_ResponseFields(t *testing.T) {
 		t.Error("response JSON does not contain 'deleted_count' field")
 	}
 }
+
+func TestGetSession_WithRawBytesAndConnInfo(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	rawReq := []byte("GET /raw-test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	rawResp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+
+	u, _ := url.Parse("https://example.com/raw-test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:    "HTTPS",
+		Timestamp:   time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
+		Duration:    150 * time.Millisecond,
+		RawRequest:  rawReq,
+		RawResponse: rawResp,
+		ConnInfo: &session.ConnectionInfo{
+			ClientAddr:           "192.168.1.50:54321",
+			ServerAddr:           "93.184.216.34:443",
+			TLSVersion:           "TLS 1.3",
+			TLSCipher:            "TLS_AES_128_GCM_SHA256",
+			TLSALPN:              "h2",
+			TLSServerCertSubject: "CN=example.com",
+		},
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Length": {"2"}},
+			Body:       []byte("OK"),
+		},
+	})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out getSessionResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify raw request is base64 encoded.
+	if out.RawRequest == "" {
+		t.Error("expected non-empty raw_request")
+	}
+	decodedReq, err := base64.StdEncoding.DecodeString(out.RawRequest)
+	if err != nil {
+		t.Fatalf("decode raw_request: %v", err)
+	}
+	if string(decodedReq) != string(rawReq) {
+		t.Errorf("decoded raw_request = %q, want %q", decodedReq, rawReq)
+	}
+
+	// Verify raw response is base64 encoded.
+	if out.RawResponse == "" {
+		t.Error("expected non-empty raw_response")
+	}
+	decodedResp, err := base64.StdEncoding.DecodeString(out.RawResponse)
+	if err != nil {
+		t.Fatalf("decode raw_response: %v", err)
+	}
+	if string(decodedResp) != string(rawResp) {
+		t.Errorf("decoded raw_response = %q, want %q", decodedResp, rawResp)
+	}
+
+	// Verify conn_info.
+	if out.ConnInfo == nil {
+		t.Fatal("conn_info is nil")
+	}
+	if out.ConnInfo.ClientAddr != "192.168.1.50:54321" {
+		t.Errorf("conn_info.client_addr = %q, want %q", out.ConnInfo.ClientAddr, "192.168.1.50:54321")
+	}
+	if out.ConnInfo.ServerAddr != "93.184.216.34:443" {
+		t.Errorf("conn_info.server_addr = %q, want %q", out.ConnInfo.ServerAddr, "93.184.216.34:443")
+	}
+	if out.ConnInfo.TLSVersion != "TLS 1.3" {
+		t.Errorf("conn_info.tls_version = %q, want %q", out.ConnInfo.TLSVersion, "TLS 1.3")
+	}
+	if out.ConnInfo.TLSCipher != "TLS_AES_128_GCM_SHA256" {
+		t.Errorf("conn_info.tls_cipher = %q, want %q", out.ConnInfo.TLSCipher, "TLS_AES_128_GCM_SHA256")
+	}
+	if out.ConnInfo.TLSALPN != "h2" {
+		t.Errorf("conn_info.tls_alpn = %q, want %q", out.ConnInfo.TLSALPN, "h2")
+	}
+	if out.ConnInfo.TLSServerCertSubject != "CN=example.com" {
+		t.Errorf("conn_info.tls_server_cert_subject = %q, want %q", out.ConnInfo.TLSServerCertSubject, "CN=example.com")
+	}
+}
+
+func TestGetSession_WithoutRawBytesOrConnInfo(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSession(t, nil, store)
+
+	u, _ := url.Parse("http://example.com/no-raw")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "get_session",
+		Arguments: map[string]any{"session_id": entry.ID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out getSessionResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// raw_request and raw_response should be omitted (empty).
+	if out.RawRequest != "" {
+		t.Errorf("raw_request = %q, want empty", out.RawRequest)
+	}
+	if out.RawResponse != "" {
+		t.Errorf("raw_response = %q, want empty", out.RawResponse)
+	}
+	// conn_info should be omitted (nil).
+	if out.ConnInfo != nil {
+		t.Errorf("conn_info = %+v, want nil", out.ConnInfo)
+	}
+}

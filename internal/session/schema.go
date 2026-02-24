@@ -37,6 +37,14 @@ CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sessions(timestamp);`,
 	4: `ALTER TABLE sessions ADD COLUMN conn_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_sessions_conn_id ON sessions(conn_id);`,
 	5: `ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '{}';`,
+	6: `ALTER TABLE sessions ADD COLUMN raw_request BLOB;
+ALTER TABLE sessions ADD COLUMN raw_response BLOB;
+ALTER TABLE sessions ADD COLUMN client_addr TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN server_addr TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN tls_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN tls_cipher TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN tls_alpn TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN tls_server_cert_subject TEXT NOT NULL DEFAULT '';`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

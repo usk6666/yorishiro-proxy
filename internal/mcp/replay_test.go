@@ -1,14 +1,18 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -1151,5 +1155,275 @@ func TestReplayRequest_ResponseBodySizeLimit(t *testing.T) {
 	}
 	if len(newEntry.Response.Body) != maxReplayResponseSize {
 		t.Errorf("response body size = %d, want exactly %d (truncated by LimitReader)", len(newEntry.Response.Body), maxReplayResponseSize)
+	}
+}
+
+// --- replay_raw tests ---
+
+// testDialer wraps a net.Dialer to satisfy the rawDialer interface for tests.
+// It allows connections to localhost (bypassing SSRF protection).
+type testDialer struct{}
+
+func (d *testDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, address)
+}
+
+// setupTestSessionWithRawDialer creates an MCP client session with a custom raw dialer for replay_raw testing.
+func setupTestSessionWithRawDialer(t *testing.T, store session.Store, dialer rawDialer) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	s := NewServer(context.Background(), nil, store, nil)
+	s.rawReplayDialer = dialer
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+// newRawEchoServer creates a TCP server that reads HTTP-like data and echoes back a simple response.
+func newRawEchoServer(t *testing.T) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				// Read the request.
+				reader := bufio.NewReader(c)
+				var reqBuf bytes.Buffer
+				for {
+					line, err := reader.ReadString('\n')
+					reqBuf.WriteString(line)
+					if err != nil || strings.TrimSpace(line) == "" {
+						break
+					}
+				}
+				// Send a simple response.
+				resp := "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nX-Echo: raw\r\n\r\nhello world"
+				c.Write([]byte(resp))
+			}(conn)
+		}
+	}()
+
+	return ln.Addr().String(), func() { ln.Close() }
+}
+
+func TestReplayRaw_Success(t *testing.T) {
+	store := newTestStore(t)
+	addr, cleanup := newRawEchoServer(t)
+	defer cleanup()
+
+	rawReq := []byte("GET /raw-test HTTP/1.1\r\nHost: example.com\r\nX-Custom: preserved\r\n\r\n")
+
+	host, port, _ := net.SplitHostPort(addr)
+	u, _ := url.Parse(fmt.Sprintf("http://%s:%s/raw-test", host, port))
+
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:   "HTTP/1.x",
+		Timestamp:  time.Now(),
+		Duration:   100 * time.Millisecond,
+		RawRequest: rawReq,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{"Host": {"example.com"}, "X-Custom": {"preserved"}},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithRawDialer(t, store, &testDialer{})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_raw",
+		Arguments: map[string]any{
+			"session_id":  entry.ID,
+			"target_addr": addr,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out replayRawResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify we got a response.
+	if out.ResponseSize == 0 {
+		t.Error("expected non-zero response_size")
+	}
+	if out.DurationMs < 0 {
+		t.Errorf("duration_ms = %d, should be >= 0", out.DurationMs)
+	}
+
+	// Decode and verify the response contains our echo.
+	respBytes, err := base64.StdEncoding.DecodeString(out.ResponseData)
+	if err != nil {
+		t.Fatalf("decode response_data: %v", err)
+	}
+	if !strings.Contains(string(respBytes), "hello world") {
+		t.Errorf("response doesn't contain 'hello world': %q", string(respBytes))
+	}
+	if !strings.Contains(string(respBytes), "X-Echo: raw") {
+		t.Errorf("response doesn't contain echo header: %q", string(respBytes))
+	}
+}
+
+func TestReplayRaw_NoRawBytes(t *testing.T) {
+	store := newTestStore(t)
+
+	u, _ := url.Parse("http://example.com/no-raw")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	cs := setupTestSessionWithRawDialer(t, store, &testDialer{})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_raw",
+		Arguments: map[string]any{
+			"session_id": entry.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for session without raw bytes")
+	}
+}
+
+func TestReplayRaw_EmptySessionID(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithRawDialer(t, store, &testDialer{})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_raw",
+		Arguments: map[string]any{"session_id": ""},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for empty session_id")
+	}
+}
+
+func TestReplayRaw_NonexistentSession(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupTestSessionWithRawDialer(t, store, &testDialer{})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_raw",
+		Arguments: map[string]any{"session_id": "nonexistent-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nonexistent session")
+	}
+}
+
+func TestReplayRaw_NilStore(t *testing.T) {
+	cs := setupTestSessionWithRawDialer(t, nil, &testDialer{})
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "replay_raw",
+		Arguments: map[string]any{"session_id": "some-id"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+func TestReplayRaw_SSRFBlocksLoopback(t *testing.T) {
+	store := newTestStore(t)
+	addr, cleanup := newRawEchoServer(t)
+	defer cleanup()
+
+	rawReq := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	u, _ := url.Parse("http://example.com/test")
+	entry := saveTestEntry(t, store, &session.Entry{
+		Protocol:   "HTTP/1.x",
+		Timestamp:  time.Now(),
+		Duration:   100 * time.Millisecond,
+		RawRequest: rawReq,
+		Request: session.RecordedRequest{
+			Method:  "GET",
+			URL:     u,
+			Headers: map[string][]string{},
+		},
+		Response: session.RecordedResponse{
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	})
+
+	// Use nil dialer so the production SSRF-protected dialer is used.
+	cs := setupTestSessionWithRawDialer(t, store, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "replay_raw",
+		Arguments: map[string]any{
+			"session_id":  entry.ID,
+			"target_addr": addr,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true when replaying to loopback address")
 	}
 }

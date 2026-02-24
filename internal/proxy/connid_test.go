@@ -85,3 +85,42 @@ func TestLoggerFromContext_FallbackToDefault(t *testing.T) {
 		t.Error("LoggerFromContext(nil fallback) returned nil, want slog.Default()")
 	}
 }
+
+func TestContextWithClientAddr_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	addr := "192.168.1.100:54321"
+
+	ctx = proxy.ContextWithClientAddr(ctx, addr)
+	got := proxy.ClientAddrFromContext(ctx)
+
+	if got != addr {
+		t.Errorf("ClientAddrFromContext() = %q, want %q", got, addr)
+	}
+}
+
+func TestClientAddrFromContext_EmptyContext(t *testing.T) {
+	ctx := context.Background()
+	got := proxy.ClientAddrFromContext(ctx)
+	if got != "" {
+		t.Errorf("ClientAddrFromContext(empty) = %q, want empty string", got)
+	}
+}
+
+func TestContextWithClientAddr_CoexistsWithConnID(t *testing.T) {
+	ctx := context.Background()
+	connID := "abcd1234"
+	addr := "10.0.0.1:8080"
+
+	ctx = proxy.ContextWithConnID(ctx, connID)
+	ctx = proxy.ContextWithClientAddr(ctx, addr)
+
+	gotConnID := proxy.ConnIDFromContext(ctx)
+	gotAddr := proxy.ClientAddrFromContext(ctx)
+
+	if gotConnID != connID {
+		t.Errorf("ConnIDFromContext() = %q, want %q", gotConnID, connID)
+	}
+	if gotAddr != addr {
+		t.Errorf("ClientAddrFromContext() = %q, want %q", gotAddr, addr)
+	}
+}

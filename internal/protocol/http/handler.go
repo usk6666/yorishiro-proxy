@@ -20,7 +20,49 @@ import (
 
 const maxBodyRecordSize = 1 << 20 // 1MB
 
+// maxRawCaptureSize limits the size of raw request/response bytes captured.
+// This prevents excessive memory use for very large requests.
+const maxRawCaptureSize = 2 << 20 // 2MB
+
 const defaultRequestTimeout = 60 * time.Second
+
+// captureReader wraps an io.Reader and records all bytes read into a buffer.
+// It is used to capture raw HTTP request/response bytes as they flow through
+// the reader, preserving the exact wire format for smuggling analysis and replay.
+type captureReader struct {
+	r   io.Reader
+	buf bytes.Buffer
+}
+
+// Read implements io.Reader, recording bytes into the capture buffer.
+func (cr *captureReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if n > 0 && cr.buf.Len() < maxRawCaptureSize {
+		// Limit capture to maxRawCaptureSize to prevent OOM.
+		remaining := maxRawCaptureSize - cr.buf.Len()
+		if n <= remaining {
+			cr.buf.Write(p[:n])
+		} else {
+			cr.buf.Write(p[:remaining])
+		}
+	}
+	return n, err
+}
+
+// Bytes returns a copy of the captured bytes.
+func (cr *captureReader) Bytes() []byte {
+	if cr.buf.Len() == 0 {
+		return nil
+	}
+	out := make([]byte, cr.buf.Len())
+	copy(out, cr.buf.Bytes())
+	return out
+}
+
+// Reset clears the capture buffer for reuse.
+func (cr *captureReader) Reset() {
+	cr.buf.Reset()
+}
 
 // httpMethods contains the common HTTP method prefixes used for protocol detection.
 var httpMethods = [][]byte{
@@ -150,7 +192,8 @@ func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 
 // Handle processes HTTP connections in a loop (keep-alive support).
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
-	reader := bufio.NewReader(conn)
+	capture := &captureReader{r: conn}
+	reader := bufio.NewReader(capture)
 
 	// Watch for context cancellation and interrupt blocking reads.
 	// When the proxy is shutting down, ReadRequest may be blocked waiting
@@ -172,6 +215,11 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		if timeout := h.effectiveRequestTimeout(); timeout > 0 {
 			conn.SetReadDeadline(time.Now().Add(timeout))
 		}
+
+		// Mark the capture position before reading the request.
+		// After ReadRequest + body read, everything between this mark
+		// and the current position (minus remaining buffer) is the raw request.
+		captureStart := capture.buf.Len()
 
 		// Check for HTTP request smuggling patterns in raw headers before
 		// ReadRequest normalizes them. This is important because Go's
@@ -203,7 +251,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 			return h.handleCONNECT(ctx, conn, req)
 		}
 
-		if err := h.handleRequest(ctx, conn, req, smuggling); err != nil {
+		if err := h.handleRequest(ctx, conn, req, smuggling, capture, captureStart, reader); err != nil {
 			return err
 		}
 
@@ -213,10 +261,11 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	}
 }
 
-func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, smuggling *smugglingFlags) error {
+func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, smuggling *smugglingFlags, capture *captureReader, captureStart int, reader *bufio.Reader) error {
 	start := time.Now()
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
 
 	// Read the full request body so the upstream receives uncorrupted data.
 	var recordReqBody []byte
@@ -230,6 +279,20 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		if len(fullBody) > maxBodyRecordSize {
 			recordReqBody = fullBody[:maxBodyRecordSize]
 			reqTruncated = true
+		}
+	}
+
+	// Extract raw request bytes captured by the captureReader.
+	// The raw bytes span from captureStart to the current capture position,
+	// minus any bytes buffered by the bufio.Reader (which belong to the next request).
+	var rawRequest []byte
+	if capture != nil {
+		captureEnd := capture.buf.Len()
+		buffered := reader.Buffered()
+		rawEnd := captureEnd - buffered
+		if rawEnd > captureStart && captureStart < capture.buf.Len() {
+			rawRequest = make([]byte, rawEnd-captureStart)
+			copy(rawRequest, capture.buf.Bytes()[captureStart:rawEnd])
 		}
 	}
 
@@ -263,6 +326,9 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Read the full response body so the client receives uncorrupted data.
 	fullRespBody, _ := io.ReadAll(resp.Body)
 
+	// Capture raw response bytes by serializing the response as received.
+	rawResponse := serializeRawResponse(resp, fullRespBody)
+
 	// Write response back to client (full body).
 	if err := writeResponse(conn, resp, fullRespBody); err != nil {
 		return fmt.Errorf("write response: %w", err)
@@ -280,10 +346,15 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	// Record session.
 	entry := &session.Entry{
-		ConnID:    connID,
-		Protocol:  "HTTP/1.x",
-		Timestamp: start,
-		Duration:  duration,
+		ConnID:      connID,
+		Protocol:    "HTTP/1.x",
+		Timestamp:   start,
+		Duration:    duration,
+		RawRequest:  rawRequest,
+		RawResponse: rawResponse,
+		ConnInfo: &session.ConnectionInfo{
+			ClientAddr: clientAddr,
+		},
 		Request: session.RecordedRequest{
 			Method:        req.Method,
 			URL:           req.URL,
@@ -308,6 +379,31 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	logger.Info("http request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 
 	return nil
+}
+
+// serializeRawResponse reconstructs raw HTTP response bytes from the parsed response
+// and body. This preserves the status line, headers, and body in wire format.
+func serializeRawResponse(resp *gohttp.Response, body []byte) []byte {
+	if resp == nil {
+		return nil
+	}
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "HTTP/%d.%d %d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, gohttp.StatusText(resp.StatusCode))
+	for key, vals := range resp.Header {
+		for _, val := range vals {
+			fmt.Fprintf(&buf, "%s: %s\r\n", key, val)
+		}
+	}
+	buf.WriteString("\r\n")
+	if len(body) > 0 {
+		remaining := maxRawCaptureSize - buf.Len()
+		if len(body) <= remaining {
+			buf.Write(body)
+		} else if remaining > 0 {
+			buf.Write(body[:remaining])
+		}
+	}
+	return buf.Bytes()
 }
 
 // shouldCapture checks the capture scope to determine whether a request
