@@ -42,6 +42,18 @@ type Config struct {
 	// certificates, such as during vulnerability assessments.
 	// WARNING: Enabling this option disables security checks on upstream TLS.
 	InsecureSkipVerify bool `json:"insecure_skip_verify"`
+
+	// RetentionMaxSessions is the maximum number of sessions to retain.
+	// 0 means unlimited (default).
+	RetentionMaxSessions int `json:"retention_max_sessions"`
+
+	// RetentionMaxAge is the maximum age of sessions to retain.
+	// 0 means unlimited (default).
+	RetentionMaxAge time.Duration `json:"retention_max_age"`
+
+	// CleanupInterval is the interval between automatic cleanup runs.
+	// 0 disables automatic cleanup. Default: 1h.
+	CleanupInterval time.Duration `json:"cleanup_interval"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -54,6 +66,7 @@ func Default() *Config {
 		LogFormat:      "text",
 		PeekTimeout:    30 * time.Second,
 		RequestTimeout: 60 * time.Second,
-		MaxConnections: 1024,
+		MaxConnections:  1024,
+		CleanupInterval: time.Hour,
 	}
 }

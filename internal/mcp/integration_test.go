@@ -443,8 +443,10 @@ func TestIntegration_ListTools(t *testing.T) {
 	}
 
 	expectedTools := map[string]bool{
+		"clear_sessions": false,
 		"proxy_start":    false,
 		"proxy_stop":     false,
+		"proxy_status":   false,
 		"list_sessions":  false,
 		"get_session":    false,
 		"replay_request": false,

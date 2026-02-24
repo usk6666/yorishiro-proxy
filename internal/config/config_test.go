@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestDefault_InsecureSkipVerifyIsFalse(t *testing.T) {
 	cfg := Default()
@@ -29,6 +32,9 @@ func TestDefault_FieldsHaveSensibleDefaults(t *testing.T) {
 		{"CACertPath", cfg.CACertPath, true},
 		{"CAKeyPath", cfg.CAKeyPath, true},
 		{"LogFile", cfg.LogFile, true},
+		{"RetentionMaxSessions", cfg.RetentionMaxSessions, true},
+		{"RetentionMaxAge", cfg.RetentionMaxAge, true},
+		{"CleanupInterval", cfg.CleanupInterval, false},
 	}
 
 	for _, tt := range tests {
@@ -52,6 +58,8 @@ func isZeroValue(v any) bool {
 		return val == 0
 	case bool:
 		return !val
+	case time.Duration:
+		return val == 0
 	default:
 		return false
 	}

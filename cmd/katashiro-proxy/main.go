@@ -45,6 +45,9 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "HTTP request read timeout")
 	flag.IntVar(&cfg.MaxConnections, "max-connections", cfg.MaxConnections, "max concurrent connections (default 1024)")
 	flag.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "skip TLS certificate verification for upstream connections")
+	flag.IntVar(&cfg.RetentionMaxSessions, "retention-max-sessions", cfg.RetentionMaxSessions, "max sessions to retain (0 = unlimited)")
+	flag.DurationVar(&cfg.RetentionMaxAge, "retention-max-age", cfg.RetentionMaxAge, "max session age (e.g. 720h for 30 days, 0 = unlimited)")
+	flag.DurationVar(&cfg.CleanupInterval, "cleanup-interval", cfg.CleanupInterval, "interval between automatic cleanup runs (0 = disabled)")
 	flag.Parse()
 
 	// Initialize logger.
@@ -67,6 +70,22 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("init session store: %w", err)
 	}
 	defer store.Close()
+
+	// Start session cleaner if retention policy is configured.
+	cleanerCfg := session.CleanerConfig{
+		MaxSessions: cfg.RetentionMaxSessions,
+		MaxAge:      cfg.RetentionMaxAge,
+		Interval:    cfg.CleanupInterval,
+	}
+	if cleanerCfg.Enabled() {
+		cleaner := session.NewCleaner(store, cleanerCfg, logger)
+		cleaner.Start(ctx)
+		defer cleaner.Stop()
+		logger.Info("session cleaner started",
+			"max_sessions", cleanerCfg.MaxSessions,
+			"max_age", cleanerCfg.MaxAge,
+			"interval", cleanerCfg.Interval)
+	}
 
 	// Initialize CA and certificate issuer for HTTPS MITM.
 	ca, err := initCA(cfg, logger)

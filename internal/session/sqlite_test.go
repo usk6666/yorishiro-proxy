@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
@@ -699,34 +700,29 @@ func TestSQLiteStore_List_LIKEWildcardEscape(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_Count(t *testing.T) {
+func TestSQLiteStore_DeleteOlderThan(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
+	now := time.Now().UTC()
 	entries := []*Entry{
 		{
 			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
+			Timestamp: now.Add(-48 * time.Hour), // 2 days ago
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/old1")},
 			Response:  RecordedResponse{StatusCode: 200},
 		},
 		{
 			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
-			Response:  RecordedResponse{StatusCode: 201},
-		},
-		{
-			Protocol:  "HTTPS",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("https://example.com/c")},
+			Timestamp: now.Add(-24 * time.Hour), // 1 day ago
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/old2")},
 			Response:  RecordedResponse{StatusCode: 200},
 		},
 		{
 			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://other.com/d")},
-			Response:  RecordedResponse{StatusCode: 404},
+			Timestamp: now.Add(-1 * time.Hour), // 1 hour ago
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/recent")},
+			Response:  RecordedResponse{StatusCode: 200},
 		},
 	}
 
@@ -736,47 +732,135 @@ func TestSQLiteStore_Count(t *testing.T) {
 		}
 	}
 
-	tests := []struct {
-		name      string
-		opts      ListOptions
-		wantCount int
-	}{
-		{"all", ListOptions{}, 4},
-		{"method GET", ListOptions{Method: "GET"}, 3},
-		{"method POST", ListOptions{Method: "POST"}, 1},
-		{"protocol HTTPS", ListOptions{Protocol: "HTTPS"}, 1},
-		{"URL pattern example.com", ListOptions{URLPattern: "example.com"}, 3},
-		{"status 404", ListOptions{StatusCode: 404}, 1},
-		{"status 200", ListOptions{StatusCode: 200}, 2},
-		{"combined GET+200", ListOptions{Method: "GET", StatusCode: 200}, 2},
-		{"no match", ListOptions{Method: "DELETE"}, 0},
-		{"limit ignored", ListOptions{Method: "GET", Limit: 1}, 3},
-		{"offset ignored", ListOptions{Method: "GET", Offset: 2}, 3},
-		{"limit and offset ignored", ListOptions{Limit: 1, Offset: 1}, 4},
+	// Delete entries older than 12 hours.
+	cutoff := now.Add(-12 * time.Hour)
+	n, err := store.DeleteOlderThan(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("DeleteOlderThan returned %d, want 2", n)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := store.Count(ctx, tt.opts)
-			if err != nil {
-				t.Fatalf("Count: %v", err)
-			}
-			if got != tt.wantCount {
-				t.Errorf("got %d, want %d", got, tt.wantCount)
-			}
-		})
+	// Verify only the recent entry remains.
+	remaining, err := store.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("expected 1 remaining entry, got %d", len(remaining))
+	}
+	if remaining[0].Request.URL.Path != "/recent" {
+		t.Errorf("remaining URL = %q, want /recent", remaining[0].Request.URL.Path)
 	}
 }
 
-func TestSQLiteStore_Count_Empty(t *testing.T) {
+func TestSQLiteStore_DeleteOlderThan_NoMatches(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	count, err := store.Count(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("Count: %v", err)
+	entry := &Entry{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now().UTC(),
+		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/new")},
+		Response:  RecordedResponse{StatusCode: 200},
 	}
-	if count != 0 {
-		t.Errorf("got %d, want 0", count)
+	if err := store.Save(ctx, entry); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Cutoff in the past — nothing should be deleted.
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	n, err := store.DeleteOlderThan(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("DeleteOlderThan returned %d, want 0", n)
+	}
+}
+
+func TestSQLiteStore_DeleteExcess(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	for i := 0; i < 10; i++ {
+		entry := &Entry{
+			Protocol:  "HTTP/1.x",
+			Timestamp: now.Add(time.Duration(i) * time.Second),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL(fmt.Sprintf("http://example.com/%d", i))},
+			Response:  RecordedResponse{StatusCode: 200},
+		}
+		if err := store.Save(ctx, entry); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	// Keep only 5 most recent.
+	n, err := store.DeleteExcess(ctx, 5)
+	if err != nil {
+		t.Fatalf("DeleteExcess: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("DeleteExcess returned %d, want 5", n)
+	}
+
+	// Verify 5 remain.
+	remaining, err := store.List(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(remaining) != 5 {
+		t.Fatalf("expected 5 remaining entries, got %d", len(remaining))
+	}
+
+	// Verify the remaining entries are the most recent (timestamps 5-9).
+	for _, e := range remaining {
+		path := e.Request.URL.Path
+		if path == "/0" || path == "/1" || path == "/2" || path == "/3" || path == "/4" {
+			t.Errorf("old entry %s should have been deleted", path)
+		}
+	}
+}
+
+func TestSQLiteStore_DeleteExcess_NoExcess(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		entry := &Entry{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now().UTC().Add(time.Duration(i) * time.Second),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL(fmt.Sprintf("http://example.com/%d", i))},
+			Response:  RecordedResponse{StatusCode: 200},
+		}
+		if err := store.Save(ctx, entry); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	// maxCount >= current count — nothing deleted.
+	n, err := store.DeleteExcess(ctx, 5)
+	if err != nil {
+		t.Fatalf("DeleteExcess: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("DeleteExcess returned %d, want 0", n)
+	}
+}
+
+func TestSQLiteStore_DeleteExcess_InvalidMaxCount(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := store.DeleteExcess(ctx, 0)
+	if err == nil {
+		t.Fatal("expected error for maxCount=0, got nil")
+	}
+
+	_, err = store.DeleteExcess(ctx, -1)
+	if err == nil {
+		t.Fatal("expected error for maxCount=-1, got nil")
 	}
 }
