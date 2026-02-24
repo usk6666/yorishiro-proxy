@@ -100,9 +100,13 @@ func peekHeaders(reader *bufio.Reader) []byte {
 	}
 
 	// Now peek exactly what's been buffered — no additional blocking reads.
+	// Cap at maxPeekSize to avoid scanning excessively large buffers.
 	buffered := reader.Buffered()
 	if buffered == 0 {
 		return nil
+	}
+	if buffered > maxPeekSize {
+		buffered = maxPeekSize
 	}
 
 	peeked, _ := reader.Peek(buffered)
@@ -147,14 +151,14 @@ func checkAmbiguousTE(headerBytes []byte, flags *smugglingFlags) {
 	for _, line := range lines {
 		lowerLine := bytes.ToLower(line)
 
-		// Find Transfer-Encoding headers.
-		idx := bytes.Index(lowerLine, []byte("transfer-encoding"))
-		if idx < 0 {
+		// Find Transfer-Encoding headers anchored to line start to avoid
+		// false positives from header values containing "transfer-encoding".
+		if !bytes.HasPrefix(lowerLine, []byte("transfer-encoding")) {
 			continue
 		}
 
 		// Check for space before colon (obfuscation).
-		afterName := line[idx+len("transfer-encoding"):]
+		afterName := line[len("transfer-encoding"):]
 		if len(afterName) > 0 && afterName[0] != ':' {
 			flags.AmbiguousTE = true
 			flags.Warnings = append(flags.Warnings,

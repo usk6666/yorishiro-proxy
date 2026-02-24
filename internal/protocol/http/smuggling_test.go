@@ -492,6 +492,12 @@ func TestCheckAmbiguousTE(t *testing.T) {
 			wantAmbiguous: false,
 			wantCount:     0,
 		},
+		{
+			name:          "transfer-encoding in header value should not match",
+			headerBytes:   "GET / HTTP/1.1\r\nX-Transfer-Encoding: chunked\r\n",
+			wantAmbiguous: false,
+			wantCount:     0,
+		},
 	}
 
 	for _, tt := range tests {
