@@ -95,8 +95,7 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 ### 原則
 
 - **メイン worktree（リポジトリのクローン元）は main ブランチに固定し、直接の作業を禁止する** — ブランチ切り替えやコミットは全て worktree 内で行う。main ブランチは branch protection により直接 push できない
-- **書き込み操作（実装・修正）を行うサブエージェントは `isolation: "worktree"` で起動する**
-- **読み取り専用（レビュー）のサブエージェントは worktree 不要**
+- **全てのサブエージェントは `isolation: "worktree"` で起動する** — 並列実行時にメイン worktree の HEAD を checkout すると、他のエージェントが読み取るコードの状態と競合するため、読み取り専用のレビューエージェントも worktree で隔離する
 
 ### Task ツールでの分類
 
@@ -104,14 +103,13 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 |---------------|------|-----------|
 | implementer | コード実装・コミット・プッシュ | `"worktree"` |
 | fixer | レビュー所見の修正・コミット・プッシュ | `"worktree"` |
-| code-reviewer | 差分の読み取り・レビュー投稿 | なし (read-only) |
-| security-reviewer | 差分の読み取り・レビュー投稿 | なし (read-only) |
+| code-reviewer | 対象ブランチの checkout・差分の読み取り・レビュー投稿 | `"worktree"` |
+| security-reviewer | 対象ブランチの checkout・差分の読み取り・レビュー投稿 | `"worktree"` |
 
 ### 新規エージェント追加時
 
-1. ファイルシステムに書き込む（コード変更・コミット）なら `isolation: "worktree"` を使用
-2. 読み取り専用なら isolation は不要
-3. 起動元のスキル（`.claude/skills/*/SKILL.md`）に isolation 設定を明記
+1. 全てのサブエージェントは原則 `isolation: "worktree"` を使用する
+2. 起動元のスキル（`.claude/skills/*/SKILL.md`）に isolation 設定を明記
 
 ## ブランチ戦略
 
