@@ -264,18 +264,39 @@ func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// Count returns the total number of session entries matching the given filter
-// options. Unlike List, it ignores Limit and Offset fields.
-func (s *SQLiteStore) Count(ctx context.Context, opts ListOptions) (int, error) {
-	whereClause, args := buildWhereClause(opts)
-
-	query := "SELECT COUNT(*) FROM sessions" + whereClause
-
-	var count int
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count sessions: %w", err)
+// DeleteOlderThan removes sessions with timestamps before the given cutoff.
+// It returns the number of deleted rows.
+func (s *SQLiteStore) DeleteOlderThan(ctx context.Context, before time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx,
+		"DELETE FROM sessions WHERE timestamp < ?",
+		before.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("delete sessions older than %s: %w", before.Format(time.RFC3339), err)
 	}
-	return count, nil
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteExcess removes the oldest sessions exceeding maxCount,
+// keeping only the most recent maxCount sessions.
+func (s *SQLiteStore) DeleteExcess(ctx context.Context, maxCount int) (int64, error) {
+	if maxCount <= 0 {
+		return 0, fmt.Errorf("maxCount must be > 0, got %d", maxCount)
+	}
+	result, err := s.db.ExecContext(ctx,
+		"DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY timestamp DESC LIMIT ?)",
+		maxCount)
+	if err != nil {
+		return 0, fmt.Errorf("delete excess sessions: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
 }
 
 // Close shuts down the writer goroutine and closes the database.
