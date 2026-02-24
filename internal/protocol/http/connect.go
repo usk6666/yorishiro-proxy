@@ -255,7 +255,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		},
 		Tags: smugglingTags(smuggling),
 	}
-	if h.store != nil {
+	if h.store != nil && h.shouldCapture(req.Method, entry.Request.URL) {
 		if err := h.store.Save(ctx, entry); err != nil {
 			logger.Error("HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		}
