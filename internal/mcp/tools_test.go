@@ -731,7 +731,10 @@ func TestListSessions_NoFilter(t *testing.T) {
 	}
 
 	if out.Count != 4 {
-		t.Errorf("total = %d, want 4", out.Count)
+		t.Errorf("count = %d, want 4", out.Count)
+	}
+	if out.Total != 4 {
+		t.Errorf("total = %d, want 4", out.Total)
 	}
 	if len(out.Sessions) != 4 {
 		t.Errorf("sessions count = %d, want 4", len(out.Sessions))
@@ -916,6 +919,9 @@ func TestListSessions_Pagination(t *testing.T) {
 	if out1.Count != 2 {
 		t.Errorf("page 1 count = %d, want 2", out1.Count)
 	}
+	if out1.Total != 4 {
+		t.Errorf("page 1 total = %d, want 4", out1.Total)
+	}
 
 	// Get next 2 sessions with offset.
 	result, err = cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -936,6 +942,9 @@ func TestListSessions_Pagination(t *testing.T) {
 	}
 	if out2.Count != 2 {
 		t.Errorf("page 2 count = %d, want 2", out2.Count)
+	}
+	if out2.Total != 4 {
+		t.Errorf("page 2 total = %d, want 4", out2.Total)
 	}
 
 	// Verify no overlap between pages.
@@ -999,7 +1008,10 @@ func TestListSessions_EmptyResult(t *testing.T) {
 	}
 
 	if out.Count != 0 {
-		t.Errorf("total = %d, want 0", out.Count)
+		t.Errorf("count = %d, want 0", out.Count)
+	}
+	if out.Total != 0 {
+		t.Errorf("total = %d, want 0", out.Total)
 	}
 	if len(out.Sessions) != 0 {
 		t.Errorf("sessions count = %d, want 0", len(out.Sessions))
@@ -1029,7 +1041,10 @@ func TestListSessions_NoMatchingFilter(t *testing.T) {
 	}
 
 	if out.Count != 0 {
-		t.Errorf("total = %d, want 0", out.Count)
+		t.Errorf("count = %d, want 0", out.Count)
+	}
+	if out.Total != 0 {
+		t.Errorf("total = %d, want 0", out.Total)
 	}
 }
 
@@ -1162,12 +1177,12 @@ func TestListSessions_NegativeOffset(t *testing.T) {
 	}
 }
 
-func TestListSessions_CountField(t *testing.T) {
+func TestListSessions_CountAndTotalFields(t *testing.T) {
 	store := newTestStore(t)
 	seedTestSessions(t, store)
 	cs := setupTestSessionWithStore(t, nil, store)
 
-	// Verify the JSON response uses "count" field, not "total".
+	// Verify the JSON response uses both "count" and "total" fields.
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "list_sessions",
 		Arguments: json.RawMessage(`{"limit":2}`),
@@ -1181,7 +1196,7 @@ func TestListSessions_CountField(t *testing.T) {
 
 	textContent := result.Content[0].(*gomcp.TextContent)
 
-	// Verify "count" is present in JSON.
+	// Verify both "count" and "total" are present in JSON.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(textContent.Text), &raw); err != nil {
 		t.Fatalf("unmarshal raw: %v", err)
@@ -1189,8 +1204,8 @@ func TestListSessions_CountField(t *testing.T) {
 	if _, ok := raw["count"]; !ok {
 		t.Error("response JSON does not contain 'count' field")
 	}
-	if _, ok := raw["total"]; ok {
-		t.Error("response JSON still contains deprecated 'total' field")
+	if _, ok := raw["total"]; !ok {
+		t.Error("response JSON does not contain 'total' field")
 	}
 
 	var out listSessionsResult
@@ -1199,6 +1214,91 @@ func TestListSessions_CountField(t *testing.T) {
 	}
 	if out.Count != 2 {
 		t.Errorf("count = %d, want 2", out.Count)
+	}
+	if out.Total != 4 {
+		t.Errorf("total = %d, want 4", out.Total)
+	}
+}
+
+func TestListSessions_TotalWithFilterAndPagination(t *testing.T) {
+	store := newTestStore(t)
+	seedTestSessions(t, store) // 4 entries: 3 GET, 1 POST; 3 HTTP/1.x, 1 HTTPS
+	cs := setupTestSessionWithStore(t, nil, store)
+
+	// Filter by method=GET (3 matches) with limit=1.
+	// count should be 1 (page size), total should be 3 (all matching).
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"method":"GET","limit":1}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out listSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out.Count != 1 {
+		t.Errorf("count = %d, want 1", out.Count)
+	}
+	if out.Total != 3 {
+		t.Errorf("total = %d, want 3", out.Total)
+	}
+
+	// Verify with offset=2, should get the last matching entry.
+	result, err = cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"method":"GET","limit":1,"offset":2}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out2 listSessionsResult
+	textContent = result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out2.Count != 1 {
+		t.Errorf("count = %d, want 1", out2.Count)
+	}
+	if out2.Total != 3 {
+		t.Errorf("total = %d, want 3 (should remain constant across pages)", out2.Total)
+	}
+
+	// Verify with offset beyond total, should get 0 entries but total still 3.
+	result, err = cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "list_sessions",
+		Arguments: json.RawMessage(`{"method":"GET","limit":10,"offset":100}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out3 listSessionsResult
+	textContent = result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out3); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if out3.Count != 0 {
+		t.Errorf("count = %d, want 0", out3.Count)
+	}
+	if out3.Total != 3 {
+		t.Errorf("total = %d, want 3 (should reflect total matching, not page)", out3.Total)
 	}
 }
 

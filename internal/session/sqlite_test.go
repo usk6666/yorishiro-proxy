@@ -616,3 +616,85 @@ func TestSQLiteStore_List_LIKEWildcardEscape(t *testing.T) {
 		})
 	}
 }
+
+func TestSQLiteStore_Count(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	entries := []*Entry{
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
+			Response:  RecordedResponse{StatusCode: 201},
+		},
+		{
+			Protocol:  "HTTPS",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("https://example.com/c")},
+			Response:  RecordedResponse{StatusCode: 200},
+		},
+		{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://other.com/d")},
+			Response:  RecordedResponse{StatusCode: 404},
+		},
+	}
+
+	for _, e := range entries {
+		if err := store.Save(ctx, e); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		opts      ListOptions
+		wantCount int
+	}{
+		{"all", ListOptions{}, 4},
+		{"method GET", ListOptions{Method: "GET"}, 3},
+		{"method POST", ListOptions{Method: "POST"}, 1},
+		{"protocol HTTPS", ListOptions{Protocol: "HTTPS"}, 1},
+		{"URL pattern example.com", ListOptions{URLPattern: "example.com"}, 3},
+		{"status 404", ListOptions{StatusCode: 404}, 1},
+		{"status 200", ListOptions{StatusCode: 200}, 2},
+		{"combined GET+200", ListOptions{Method: "GET", StatusCode: 200}, 2},
+		{"no match", ListOptions{Method: "DELETE"}, 0},
+		{"limit ignored", ListOptions{Method: "GET", Limit: 1}, 3},
+		{"offset ignored", ListOptions{Method: "GET", Offset: 2}, 3},
+		{"limit and offset ignored", ListOptions{Limit: 1, Offset: 1}, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := store.Count(ctx, tt.opts)
+			if err != nil {
+				t.Fatalf("Count: %v", err)
+			}
+			if got != tt.wantCount {
+				t.Errorf("got %d, want %d", got, tt.wantCount)
+			}
+		})
+	}
+}
+
+func TestSQLiteStore_Count_Empty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	count, err := store.Count(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("got %d, want 0", count)
+	}
+}

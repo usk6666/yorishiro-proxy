@@ -217,6 +217,10 @@ type listSessionsResult struct {
 	Sessions []listSessionsEntry `json:"sessions"`
 	// Count is the number of sessions returned in this page.
 	Count int `json:"count"`
+	// Total is the total number of sessions matching the filter criteria,
+	// ignoring limit/offset. AI agents can use this to determine how many
+	// pages remain for pagination.
+	Total int `json:"total"`
 }
 
 // defaultListLimit is the default number of sessions returned when limit is not specified.
@@ -265,6 +269,13 @@ func (s *Server) handleListSessions(ctx context.Context, _ *gomcp.CallToolReques
 		return nil, nil, fmt.Errorf("list sessions: %w", err)
 	}
 
+	// Fetch the total count of matching entries (ignoring limit/offset)
+	// so that AI agents can determine pagination boundaries.
+	total, err := s.store.Count(ctx, opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("count sessions: %w", err)
+	}
+
 	sessions := make([]listSessionsEntry, 0, len(entries))
 	for _, e := range entries {
 		urlStr := ""
@@ -285,6 +296,7 @@ func (s *Server) handleListSessions(ctx context.Context, _ *gomcp.CallToolReques
 	result := &listSessionsResult{
 		Sessions: sessions,
 		Count:    len(sessions),
+		Total:    total,
 	}
 
 	return nil, result, nil

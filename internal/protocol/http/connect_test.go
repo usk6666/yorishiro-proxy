@@ -76,6 +76,12 @@ func (m *mockStore) List(_ context.Context, _ session.ListOptions) ([]*session.E
 	return result, nil
 }
 
+func (m *mockStore) Count(_ context.Context, _ session.ListOptions) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.entries), nil
+}
+
 func (m *mockStore) Delete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
