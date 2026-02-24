@@ -129,6 +129,10 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 			tlsConn.SetReadDeadline(time.Now().Add(timeout))
 		}
 
+		// Check for HTTP request smuggling patterns in raw headers before
+		// ReadRequest normalizes them. Same check as Handle() for HTTP.
+		smuggling := checkRequestSmuggling(reader, h.logger)
+
 		req, err := gohttp.ReadRequest(reader)
 		if err != nil {
 			if err == io.EOF {
@@ -142,10 +146,13 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 			return fmt.Errorf("read HTTPS request: %w", err)
 		}
 
+		// Log any detected smuggling patterns.
+		logSmugglingWarnings(h.logger, smuggling, req)
+
 		// Reset deadline after successful read.
 		tlsConn.SetReadDeadline(time.Time{})
 
-		if err := h.handleHTTPSRequest(ctx, tlsConn, connectHost, req); err != nil {
+		if err := h.handleHTTPSRequest(ctx, tlsConn, connectHost, req, smuggling); err != nil {
 			return err
 		}
 
@@ -157,7 +164,7 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 
 // handleHTTPSRequest forwards a single decrypted HTTPS request to the upstream
 // server, records the session, and writes the response back to the client.
-func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request) error {
+func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags) error {
 	start := time.Now()
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
@@ -246,6 +253,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 			Body:          recordRespBody,
 			BodyTruncated: respTruncated,
 		},
+		Tags: smugglingTags(smuggling),
 	}
 	if h.store != nil {
 		if err := h.store.Save(ctx, entry); err != nil {
