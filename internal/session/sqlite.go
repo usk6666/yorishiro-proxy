@@ -163,8 +163,11 @@ func (s *SQLiteStore) Get(ctx context.Context, id string) (*Entry, error) {
 	return scanEntry(row)
 }
 
-// List returns session entries matching the given options.
-func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, error) {
+// buildWhereClause constructs a SQL WHERE clause and argument list from the
+// filter fields in ListOptions (Protocol, Method, URLPattern, StatusCode).
+// It returns the clause string (including "WHERE" prefix if non-empty) and
+// the corresponding positional arguments.
+func buildWhereClause(opts ListOptions) (string, []interface{}) {
 	var conditions []string
 	var args []interface{}
 
@@ -187,10 +190,18 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, err
 		args = append(args, opts.StatusCode)
 	}
 
-	query := "SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated FROM sessions"
+	clause := ""
 	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
+		clause = " WHERE " + strings.Join(conditions, " AND ")
 	}
+	return clause, args
+}
+
+// List returns session entries matching the given options.
+func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, error) {
+	whereClause, args := buildWhereClause(opts)
+
+	query := "SELECT id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated FROM sessions" + whereClause
 	query += " ORDER BY timestamp DESC"
 
 	if opts.Limit > 0 {
@@ -239,11 +250,15 @@ func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// Count returns the total number of session entries.
-func (s *SQLiteStore) Count(ctx context.Context) (int64, error) {
-	var count int64
-	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions").Scan(&count)
-	if err != nil {
+// Count returns the total number of session entries matching the given filter
+// options. Unlike List, it ignores Limit and Offset fields.
+func (s *SQLiteStore) Count(ctx context.Context, opts ListOptions) (int, error) {
+	whereClause, args := buildWhereClause(opts)
+
+	query := "SELECT COUNT(*) FROM sessions" + whereClause
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count sessions: %w", err)
 	}
 	return count, nil

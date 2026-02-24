@@ -96,10 +96,10 @@ func (m *mockStore) DeleteAll(_ context.Context) (int64, error) {
 	return n, nil
 }
 
-func (m *mockStore) Count(_ context.Context) (int64, error) {
+func (m *mockStore) Count(_ context.Context, _ session.ListOptions) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return int64(len(m.entries)), nil
+	return len(m.entries), nil
 }
 
 func (m *mockStore) Entries() []*session.Entry {

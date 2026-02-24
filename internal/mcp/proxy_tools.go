@@ -7,6 +7,7 @@ import (
 	"os"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
 // proxyStartInput is the input for the proxy_start tool.
@@ -105,7 +106,7 @@ type proxyStatusResult struct {
 	// ActiveConnections is the number of connections currently being handled.
 	ActiveConnections int `json:"active_connections"`
 	// TotalSessions is the total number of recorded session entries.
-	TotalSessions int64 `json:"total_sessions"`
+	TotalSessions int `json:"total_sessions"`
 	// DBSizeBytes is the size of the session database file in bytes. -1 if unavailable.
 	DBSizeBytes int64 `json:"db_size_bytes"`
 	// UptimeSeconds is the number of seconds since the proxy was started. 0 if not running.
@@ -139,7 +140,7 @@ func (s *Server) handleProxyStatus(ctx context.Context, _ *gomcp.CallToolRequest
 
 	// Total session count.
 	if s.store != nil {
-		count, err := s.store.Count(ctx)
+		count, err := s.store.Count(ctx, session.ListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("count sessions: %w", err)
 		}
