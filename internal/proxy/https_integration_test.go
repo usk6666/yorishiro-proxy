@@ -783,3 +783,153 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 		})
 	}
 }
+
+func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
+	const numClients = 15
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Start upstream HTTPS server that echoes a unique identifier back.
+	upstream, upstreamTransport := newTestUpstreamHTTPS(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("X-Echo-Path", r.URL.Path)
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "echo:%s:%s", r.URL.Path, string(body))
+	}))
+	defer upstream.Close()
+
+	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+
+	// Create temporary SQLite database.
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	// Generate test CA.
+	ca := &cert.CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("CA.Generate: %v", err)
+	}
+
+	// Start proxy with HTTPS MITM support.
+	listener, httpHandler, proxyCancel := startHTTPSProxy(t, ctx, store, ca)
+	defer proxyCancel()
+
+	// Configure the proxy's upstream transport to trust the test server.
+	httpHandler.SetTransport(upstreamTransport)
+
+	// Launch concurrent clients, each sending a unique HTTPS request.
+	var wg sync.WaitGroup
+	wg.Add(numClients)
+
+	for i := 0; i < numClients; i++ {
+		go func(id int) {
+			defer wg.Done()
+
+			// Each goroutine creates its own HTTP client (separate CONNECT tunnel).
+			client := httpsProxyClient(listener.Addr(), ca.Certificate())
+
+			path := fmt.Sprintf("/concurrent/%d", id)
+			reqBody := fmt.Sprintf(`{"client":%d}`, id)
+			targetURL := fmt.Sprintf("https://localhost:%s%s", upstreamPort, path)
+
+			resp, err := client.Post(targetURL, "application/json", strings.NewReader(reqBody))
+			if err != nil {
+				t.Errorf("client %d: HTTPS POST through proxy: %v", id, err)
+				return
+			}
+			defer resp.Body.Close()
+
+			body, _ := io.ReadAll(resp.Body)
+
+			if resp.StatusCode != gohttp.StatusOK {
+				t.Errorf("client %d: status = %d, want %d", id, resp.StatusCode, gohttp.StatusOK)
+			}
+
+			expectedBody := fmt.Sprintf("echo:%s:%s", path, reqBody)
+			if string(body) != expectedBody {
+				t.Errorf("client %d: body = %q, want %q", id, body, expectedBody)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Wait for all sessions to be persisted.
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify all sessions were recorded.
+	entries, err := store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: numClients + 10})
+	if err != nil {
+		t.Fatalf("List sessions: %v", err)
+	}
+	if len(entries) != numClients {
+		t.Fatalf("expected %d HTTPS sessions, got %d", numClients, len(entries))
+	}
+
+	// Verify each client's session is distinct and data is not mixed.
+	seenPaths := make(map[string]bool)
+	for _, entry := range entries {
+		if entry.Protocol != "HTTPS" {
+			t.Errorf("session protocol = %q, want %q", entry.Protocol, "HTTPS")
+		}
+		if entry.Request.Method != "POST" {
+			t.Errorf("session method = %q, want %q", entry.Request.Method, "POST")
+		}
+		if entry.Request.URL == nil {
+			t.Error("request URL is nil")
+			continue
+		}
+		if entry.Request.URL.Scheme != "https" {
+			t.Errorf("session URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+		}
+
+		path := entry.Request.URL.Path
+		seenPaths[path] = true
+
+		// Verify request body matches the path (no cross-contamination).
+		var pathID int
+		if _, err := fmt.Sscanf(path, "/concurrent/%d", &pathID); err != nil {
+			t.Errorf("unexpected path format: %q", path)
+			continue
+		}
+		expectedReqBody := fmt.Sprintf(`{"client":%d}`, pathID)
+		if string(entry.Request.Body) != expectedReqBody {
+			t.Errorf("session path %s: request body = %q, want %q (data mixed between sessions)",
+				path, entry.Request.Body, expectedReqBody)
+		}
+
+		// Verify response body matches.
+		expectedRespBody := fmt.Sprintf("echo:%s:%s", path, expectedReqBody)
+		if string(entry.Response.Body) != expectedRespBody {
+			t.Errorf("session path %s: response body = %q, want %q (data mixed between sessions)",
+				path, entry.Response.Body, expectedRespBody)
+		}
+
+		if entry.Response.StatusCode != 200 {
+			t.Errorf("session path %s: status = %d, want %d", path, entry.Response.StatusCode, 200)
+		}
+		if entry.ID == "" {
+			t.Errorf("session path %s: ID is empty", path)
+		}
+		if entry.Duration < 0 {
+			t.Errorf("session path %s: duration = %v, want non-negative", path, entry.Duration)
+		}
+	}
+
+	// Verify all unique paths were recorded (no duplicates, no missing).
+	if len(seenPaths) != numClients {
+		t.Errorf("expected %d unique paths, got %d", numClients, len(seenPaths))
+	}
+	for i := 0; i < numClients; i++ {
+		expectedPath := fmt.Sprintf("/concurrent/%d", i)
+		if !seenPaths[expectedPath] {
+			t.Errorf("missing session for path %q", expectedPath)
+		}
+	}
+}
