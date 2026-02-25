@@ -19,7 +19,7 @@ type Server struct {
 	passthrough     *proxy.PassthroughList
 	scope           *proxy.CaptureScope
 	dbPath          string    // path to the SQLite database file for status reporting
-	replayDoer      httpDoer  // injectable HTTP client for replay_request testing
+	replayDoer      httpDoer  // injectable HTTP client for execute(replay) testing
 	rawReplayDialer rawDialer // injectable dialer for replay_raw testing
 }
 

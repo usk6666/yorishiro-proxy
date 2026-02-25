@@ -907,6 +907,12 @@ func TestExecute_EmptyAction(t *testing.T) {
 	if !result.IsError {
 		t.Fatal("expected error for empty action")
 	}
+
+	// Verify the error message uses "action is required" (consistent with query tool's "resource is required").
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(textContent.Text, "action is required") {
+		t.Errorf("error message = %q, want to contain %q", textContent.Text, "action is required")
+	}
 }
 
 func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {

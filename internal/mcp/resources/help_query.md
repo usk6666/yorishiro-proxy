@@ -42,7 +42,9 @@ Get paginated messages within a session.
 
 Requires: `id` (session ID). Supports `limit` and `offset`.
 
-Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, timestamp), `count`, `total`.
+Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, timestamp), `count`, `total`.
+
+- **body_encoding**: `"text"` for UTF-8 safe bodies, `"base64"` for binary content.
 
 ### status
 Get current proxy status and health metrics. No additional parameters.
