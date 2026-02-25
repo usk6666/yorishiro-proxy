@@ -95,4 +95,5 @@ func (s *Server) registerTools() {
 	s.registerClearCaptureScope()
 	s.registerConfigure()
 	s.registerQuery()
+	s.registerExecute()
 }
