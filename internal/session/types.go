@@ -5,28 +5,31 @@ import (
 	"time"
 )
 
-// Entry represents a single recorded proxy session entry.
-type Entry struct {
-	ID        string
-	ConnID    string // connection ID for log correlation
-	Protocol  string
-	Request   RecordedRequest
-	Response  RecordedResponse
+// Session represents a recorded proxy session (connection-level metadata).
+// A session contains one or more messages depending on the session type:
+// unary sessions have exactly one send + one receive message,
+// stream/bidirectional sessions have multiple messages.
+type Session struct {
+	// ID is the unique identifier of the session.
+	ID string
+	// ConnID is the connection ID for log correlation.
+	ConnID string
+	// Protocol is the detected protocol (e.g., "HTTP/1.x", "HTTPS").
+	Protocol string
+	// SessionType indicates the communication pattern:
+	// "unary" (single request-response), "stream", or "bidirectional".
+	SessionType string
+	// State indicates the session lifecycle state:
+	// "active" (in progress), "complete" (finished), or "error" (failed).
+	State string
+	// Timestamp is the time the session was initiated.
 	Timestamp time.Time
-	Duration  time.Duration
-	// Tags holds optional key-value metadata for the session entry.
+	// Duration is the total duration of the session.
+	Duration time.Duration
+	// Tags holds optional key-value metadata for the session.
 	// Examples include security flags such as smuggling detection results.
 	// A nil map indicates no tags are present.
 	Tags map[string]string
-	// RawRequest holds the original raw HTTP request bytes as received on the wire.
-	// This preserves header ordering, whitespace, and HTTP version exactly as sent
-	// by the client, enabling smuggling analysis and byte-faithful replay.
-	// May be nil if raw capture was not performed.
-	RawRequest []byte
-	// RawResponse holds the original raw HTTP response bytes as received from
-	// the upstream server. This preserves the exact wire format for analysis.
-	// May be nil if raw capture was not performed.
-	RawResponse []byte
 	// ConnInfo holds network and TLS connection metadata.
 	// May be nil for sessions recorded without connection information.
 	ConnInfo *ConnectionInfo
@@ -52,19 +55,51 @@ type ConnectionInfo struct {
 	TLSServerCertSubject string
 }
 
-// RecordedRequest holds the captured request data.
-type RecordedRequest struct {
-	Method        string
-	URL           *url.URL
-	Headers       map[string][]string
-	Body          []byte
+// Message represents a single directional message within a session.
+// For HTTP unary sessions, there are exactly two messages: one send (request)
+// and one receive (response). For streaming protocols, there may be many.
+type Message struct {
+	// ID is the unique identifier of the message.
+	ID string
+	// SessionID is the ID of the session this message belongs to.
+	SessionID string
+	// Sequence is the order of this message within the session (0-based).
+	Sequence int
+	// Direction indicates the message flow: "send" (client to server)
+	// or "receive" (server to client).
+	Direction string
+	// Timestamp is the time this message was captured.
+	Timestamp time.Time
+	// Headers holds HTTP-style headers. May be nil for non-HTTP protocols.
+	Headers map[string][]string
+	// Body holds the message body content.
+	Body []byte
+	// RawBytes holds the original raw bytes as captured on the wire.
+	// This preserves header ordering, whitespace, and protocol version
+	// exactly as sent, enabling smuggling analysis and byte-faithful replay.
+	// May be nil if raw capture was not performed.
+	RawBytes []byte
+	// BodyTruncated indicates whether the body was truncated during recording.
 	BodyTruncated bool
+	// Method is the HTTP request method (e.g., "GET", "POST").
+	// Only set for HTTP send messages.
+	Method string
+	// URL is the HTTP request URL. Only set for HTTP send messages.
+	URL *url.URL
+	// StatusCode is the HTTP response status code.
+	// Only set for HTTP receive messages.
+	StatusCode int
+	// Metadata holds protocol-specific key-value metadata for this message.
+	Metadata map[string]string
 }
 
-// RecordedResponse holds the captured response data.
-type RecordedResponse struct {
-	StatusCode    int
-	Headers       map[string][]string
-	Body          []byte
-	BodyTruncated bool
+// SessionUpdate holds the fields that can be updated on an existing session.
+// Only non-zero/non-nil fields are applied.
+type SessionUpdate struct {
+	// State sets the session state (e.g., "complete", "error").
+	State string
+	// Duration sets the session duration.
+	Duration time.Duration
+	// Tags replaces the session tags.
+	Tags map[string]string
 }

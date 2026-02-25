@@ -109,19 +109,28 @@ func (s *Server) handleReplayRequest(ctx context.Context, _ *gomcp.CallToolReque
 		return nil, nil, fmt.Errorf("session_id is required")
 	}
 
-	// Retrieve the original session.
-	entry, err := s.store.Get(ctx, input.SessionID)
+	// Retrieve the original session and its send message.
+	sess, err := s.store.GetSession(ctx, input.SessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
 
+	sendMsgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get send messages: %w", err)
+	}
+	if len(sendMsgs) == 0 {
+		return nil, nil, fmt.Errorf("session %s has no send messages", input.SessionID)
+	}
+	sendMsg := sendMsgs[0]
+
 	// Build the replay request with overrides applied.
-	method := entry.Request.Method
+	method := sendMsg.Method
 	if input.OverrideMethod != "" {
 		method = input.OverrideMethod
 	}
 
-	targetURL := entry.Request.URL
+	targetURL := sendMsg.URL
 	if input.OverrideURL != "" {
 		parsed, err := url.Parse(input.OverrideURL)
 		if err != nil {
@@ -151,8 +160,8 @@ func (s *Server) handleReplayRequest(ctx context.Context, _ *gomcp.CallToolReque
 	if input.OverrideBody != nil {
 		reqBody = []byte(*input.OverrideBody)
 		body = bytes.NewReader(reqBody)
-	} else if len(entry.Request.Body) > 0 {
-		reqBody = entry.Request.Body
+	} else if len(sendMsg.Body) > 0 {
+		reqBody = sendMsg.Body
 		body = bytes.NewReader(reqBody)
 	}
 
@@ -162,7 +171,7 @@ func (s *Server) handleReplayRequest(ctx context.Context, _ *gomcp.CallToolReque
 	}
 
 	// Copy original headers.
-	for key, values := range entry.Request.Headers {
+	for key, values := range sendMsg.Headers {
 		for _, v := range values {
 			httpReq.Header.Add(key, v)
 		}
@@ -202,31 +211,51 @@ func (s *Server) handleReplayRequest(ctx context.Context, _ *gomcp.CallToolReque
 	}
 
 	// Record the replay as a new session.
-	newEntry := &session.Entry{
-		Protocol:  entry.Protocol,
-		Timestamp: start,
-		Duration:  duration,
-		Request: session.RecordedRequest{
-			Method:  method,
-			URL:     targetURL,
-			Headers: recordedHeaders,
-			Body:    reqBody,
-		},
-		Response: session.RecordedResponse{
-			StatusCode: resp.StatusCode,
-			Headers:    respHeaders,
-			Body:       respBody,
-		},
+	newSess := &session.Session{
+		Protocol:    sess.Protocol,
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		Duration:    duration,
 	}
 
-	if err := s.store.Save(ctx, newEntry); err != nil {
+	if err := s.store.SaveSession(ctx, newSess); err != nil {
 		return nil, nil, fmt.Errorf("save replay session: %w", err)
+	}
+
+	// Save send message.
+	newSendMsg := &session.Message{
+		SessionID: newSess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: start,
+		Method:    method,
+		URL:       targetURL,
+		Headers:   recordedHeaders,
+		Body:      reqBody,
+	}
+	if err := s.store.AppendMessage(ctx, newSendMsg); err != nil {
+		return nil, nil, fmt.Errorf("save replay send message: %w", err)
+	}
+
+	// Save receive message.
+	newRecvMsg := &session.Message{
+		SessionID:  newSess.ID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  start.Add(duration),
+		StatusCode: resp.StatusCode,
+		Headers:    respHeaders,
+		Body:       respBody,
+	}
+	if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
+		return nil, nil, fmt.Errorf("save replay receive message: %w", err)
 	}
 
 	respBodyStr, respBodyEncoding := encodeBody(respBody)
 
 	result := &replayRequestResult{
-		NewSessionID:         newEntry.ID,
+		NewSessionID:         newSess.ID,
 		StatusCode:           resp.StatusCode,
 		ResponseHeaders:      respHeaders,
 		ResponseBody:         respBodyStr,
@@ -308,27 +337,36 @@ func (s *Server) handleReplayRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 		return nil, nil, fmt.Errorf("session_id is required")
 	}
 
-	// Retrieve the original session.
-	entry, err := s.store.Get(ctx, input.SessionID)
+	// Retrieve the original session and its send message.
+	sess, err := s.store.GetSession(ctx, input.SessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
 
+	sendMsgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get send messages: %w", err)
+	}
+	if len(sendMsgs) == 0 {
+		return nil, nil, fmt.Errorf("session %s has no send messages", input.SessionID)
+	}
+	sendMsg := sendMsgs[0]
+
 	// Verify raw request bytes are available.
-	if len(entry.RawRequest) == 0 {
+	if len(sendMsg.RawBytes) == 0 {
 		return nil, nil, fmt.Errorf("session %s has no raw request bytes", input.SessionID)
 	}
 
 	// Determine the target address.
 	targetAddr := input.TargetAddr
 	if targetAddr == "" {
-		if entry.Request.URL == nil {
+		if sendMsg.URL == nil {
 			return nil, nil, fmt.Errorf("session has no URL and no target_addr was provided")
 		}
-		host := entry.Request.URL.Hostname()
-		port := entry.Request.URL.Port()
+		host := sendMsg.URL.Hostname()
+		port := sendMsg.URL.Port()
 		if port == "" {
-			if entry.Request.URL.Scheme == "https" {
+			if sendMsg.URL.Scheme == "https" {
 				port = "443"
 			} else {
 				port = "80"
@@ -338,7 +376,7 @@ func (s *Server) handleReplayRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 	}
 
 	// Determine whether to use TLS.
-	useTLS := entry.Protocol == "HTTPS"
+	useTLS := sess.Protocol == "HTTPS"
 	if input.UseTLS != nil {
 		useTLS = *input.UseTLS
 	}
@@ -370,7 +408,7 @@ func (s *Server) handleReplayRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 	conn.SetDeadline(time.Now().Add(defaultReplayTimeout))
 
 	// Send the raw request bytes exactly as captured.
-	if _, err := conn.Write(entry.RawRequest); err != nil {
+	if _, err := conn.Write(sendMsg.RawBytes); err != nil {
 		return nil, nil, fmt.Errorf("send raw request: %w", err)
 	}
 

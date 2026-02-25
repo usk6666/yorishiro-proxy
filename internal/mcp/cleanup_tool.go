@@ -47,7 +47,7 @@ func (s *Server) handleClearSessions(ctx context.Context, _ *gomcp.CallToolReque
 	}
 
 	cutoff := time.Now().UTC().AddDate(0, 0, -input.OlderThan)
-	n, err := s.store.DeleteOlderThan(ctx, cutoff)
+	n, err := s.store.DeleteSessionsOlderThan(ctx, cutoff)
 	if err != nil {
 		return nil, nil, fmt.Errorf("delete old sessions: %w", err)
 	}

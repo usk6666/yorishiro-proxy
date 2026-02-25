@@ -150,44 +150,70 @@ func TestIntegration_HTTPSGET(t *testing.T) {
 		t.Errorf("X-Test header = %q, want %q", resp.Header.Get("X-Test"), "upstream-https")
 	}
 
-	// Wait for session to be persisted.
-	time.Sleep(200 * time.Millisecond)
+	// Poll for session and messages to be persisted.
+	var sessions []*session.Session
+	var send, recv *session.Message
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		sessions, err = store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListSessions: %v", err)
+		}
+		if len(sessions) != 1 {
+			continue
+		}
+		msgs, mErr := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+		if mErr != nil {
+			t.Fatalf("GetMessages: %v", mErr)
+		}
+		for _, m := range msgs {
+			switch m.Direction {
+			case "send":
+				send = m
+			case "receive":
+				recv = m
+			}
+		}
+		if send != nil && recv != nil {
+			break
+		}
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 HTTPS session, got %d", len(sessions))
+	}
 
-	// Verify session was recorded.
-	entries, err := store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
-	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+	sess := sessions[0]
+	if sess.Protocol != "HTTPS" {
+		t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 HTTPS session, got %d", len(entries))
+	if send == nil {
+		t.Fatal("send message not found")
 	}
-
-	entry := entries[0]
-	if entry.Request.Method != "GET" {
-		t.Errorf("session method = %q, want %q", entry.Request.Method, "GET")
+	if recv == nil {
+		t.Fatal("receive message not found")
 	}
-	if entry.Protocol != "HTTPS" {
-		t.Errorf("session protocol = %q, want %q", entry.Protocol, "HTTPS")
+	if send.Method != "GET" {
+		t.Errorf("session method = %q, want %q", send.Method, "GET")
 	}
-	if entry.Request.URL == nil || entry.Request.URL.Scheme != "https" {
+	if send.URL == nil || send.URL.Scheme != "https" {
 		scheme := ""
-		if entry.Request.URL != nil {
-			scheme = entry.Request.URL.Scheme
+		if send.URL != nil {
+			scheme = send.URL.Scheme
 		}
 		t.Errorf("session URL scheme = %q, want %q", scheme, "https")
 	}
-	if entry.Request.URL == nil || entry.Request.URL.Path != "/test-path" {
+	if send.URL == nil || send.URL.Path != "/test-path" {
 		path := ""
-		if entry.Request.URL != nil {
-			path = entry.Request.URL.Path
+		if send.URL != nil {
+			path = send.URL.Path
 		}
 		t.Errorf("session URL path = %q, want %q", path, "/test-path")
 	}
-	if entry.Response.StatusCode != 200 {
-		t.Errorf("session status = %d, want %d", entry.Response.StatusCode, 200)
+	if recv.StatusCode != 200 {
+		t.Errorf("session status = %d, want %d", recv.StatusCode, 200)
 	}
-	if string(entry.Response.Body) != "hello from https upstream" {
-		t.Errorf("session response body = %q, want %q", entry.Response.Body, "hello from https upstream")
+	if string(recv.Body) != "hello from https upstream" {
+		t.Errorf("session response body = %q, want %q", recv.Body, "hello from https upstream")
 	}
 }
 
@@ -244,39 +270,65 @@ func TestIntegration_HTTPSPOST(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, expectedBody)
 	}
 
-	// Wait for session to be persisted.
-	time.Sleep(200 * time.Millisecond)
+	// Poll for session and messages to be persisted.
+	var sessions []*session.Session
+	var send, recv *session.Message
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		sessions, err = store.ListSessions(ctx, session.ListOptions{Method: "POST", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListSessions: %v", err)
+		}
+		if len(sessions) != 1 {
+			continue
+		}
+		msgs, mErr := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+		if mErr != nil {
+			t.Fatalf("GetMessages: %v", mErr)
+		}
+		for _, m := range msgs {
+			switch m.Direction {
+			case "send":
+				send = m
+			case "receive":
+				recv = m
+			}
+		}
+		if send != nil && recv != nil {
+			break
+		}
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 POST session, got %d", len(sessions))
+	}
 
-	// Verify session was recorded.
-	entries, err := store.List(ctx, session.ListOptions{Method: "POST", Limit: 10})
-	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+	sess := sessions[0]
+	if sess.Protocol != "HTTPS" {
+		t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 POST session, got %d", len(entries))
+	if send == nil {
+		t.Fatal("send message not found")
 	}
-
-	entry := entries[0]
-	if entry.Request.Method != "POST" {
-		t.Errorf("session method = %q, want %q", entry.Request.Method, "POST")
+	if recv == nil {
+		t.Fatal("receive message not found")
 	}
-	if entry.Protocol != "HTTPS" {
-		t.Errorf("session protocol = %q, want %q", entry.Protocol, "HTTPS")
+	if send.Method != "POST" {
+		t.Errorf("session method = %q, want %q", send.Method, "POST")
 	}
-	if entry.Request.URL == nil || entry.Request.URL.Scheme != "https" {
-		t.Errorf("session URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+	if send.URL == nil || send.URL.Scheme != "https" {
+		t.Errorf("session URL scheme = %q, want %q", send.URL.Scheme, "https")
 	}
-	if entry.Request.URL == nil || entry.Request.URL.Path != "/api/data" {
-		t.Errorf("session URL path = %q, want %q", entry.Request.URL.Path, "/api/data")
+	if send.URL == nil || send.URL.Path != "/api/data" {
+		t.Errorf("session URL path = %q, want %q", send.URL.Path, "/api/data")
 	}
-	if string(entry.Request.Body) != reqBody {
-		t.Errorf("session request body = %q, want %q", entry.Request.Body, reqBody)
+	if string(send.Body) != reqBody {
+		t.Errorf("session request body = %q, want %q", send.Body, reqBody)
 	}
-	if entry.Response.StatusCode != 201 {
-		t.Errorf("session response status = %d, want %d", entry.Response.StatusCode, 201)
+	if recv.StatusCode != 201 {
+		t.Errorf("session response status = %d, want %d", recv.StatusCode, 201)
 	}
-	if string(entry.Response.Body) != expectedBody {
-		t.Errorf("session response body = %q, want %q", entry.Response.Body, expectedBody)
+	if string(recv.Body) != expectedBody {
+		t.Errorf("session response body = %q, want %q", recv.Body, expectedBody)
 	}
 }
 
@@ -327,62 +379,82 @@ func TestIntegration_HTTPSSessionRecording(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify detailed session recording.
-	entries, err := store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(entries))
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
 	}
 
-	entry := entries[0]
+	sess := sessions[0]
 
 	// Protocol must be HTTPS.
-	if entry.Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want %q", entry.Protocol, "HTTPS")
+	if sess.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
+	}
+
+	msgs, err := store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	var send, recv *session.Message
+	for _, m := range msgs {
+		switch m.Direction {
+		case "send":
+			send = m
+		case "receive":
+			recv = m
+		}
+	}
+	if send == nil {
+		t.Fatal("send message not found")
+	}
+	if recv == nil {
+		t.Fatal("receive message not found")
 	}
 
 	// URL must have https scheme.
-	if entry.Request.URL == nil {
+	if send.URL == nil {
 		t.Fatal("request URL is nil")
 	}
-	if entry.Request.URL.Scheme != "https" {
-		t.Errorf("URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+	if send.URL.Scheme != "https" {
+		t.Errorf("URL scheme = %q, want %q", send.URL.Scheme, "https")
 	}
 
 	// URL path must match.
-	if entry.Request.URL.Path != "/session/check" {
-		t.Errorf("URL path = %q, want %q", entry.Request.URL.Path, "/session/check")
+	if send.URL.Path != "/session/check" {
+		t.Errorf("URL path = %q, want %q", send.URL.Path, "/session/check")
 	}
 
 	// Query parameters must be preserved.
-	if entry.Request.URL.RawQuery != "q=test&page=1" {
-		t.Errorf("URL query = %q, want %q", entry.Request.URL.RawQuery, "q=test&page=1")
+	if send.URL.RawQuery != "q=test&page=1" {
+		t.Errorf("URL query = %q, want %q", send.URL.RawQuery, "q=test&page=1")
 	}
 
 	// Host must contain localhost.
-	if !strings.Contains(entry.Request.URL.Host, "localhost") {
-		t.Errorf("URL host = %q, does not contain %q", entry.Request.URL.Host, "localhost")
+	if !strings.Contains(send.URL.Host, "localhost") {
+		t.Errorf("URL host = %q, does not contain %q", send.URL.Host, "localhost")
 	}
 
 	// Decrypted response body must be recorded.
-	if string(entry.Response.Body) != "session-test-body" {
-		t.Errorf("response body = %q, want %q", entry.Response.Body, "session-test-body")
+	if string(recv.Body) != "session-test-body" {
+		t.Errorf("response body = %q, want %q", recv.Body, "session-test-body")
 	}
 
 	// Response headers must be recorded (decrypted).
-	if gohttp.Header(entry.Response.Headers).Get("X-Custom-Response") != "custom-value" {
+	if gohttp.Header(recv.Headers).Get("X-Custom-Response") != "custom-value" {
 		t.Errorf("response header X-Custom-Response = %q, want %q",
-			gohttp.Header(entry.Response.Headers).Get("X-Custom-Response"), "custom-value")
+			gohttp.Header(recv.Headers).Get("X-Custom-Response"), "custom-value")
 	}
 
 	// Duration must be positive.
-	if entry.Duration <= 0 {
-		t.Errorf("duration = %v, want positive", entry.Duration)
+	if sess.Duration <= 0 {
+		t.Errorf("duration = %v, want positive", sess.Duration)
 	}
 
 	// ID must be assigned.
-	if entry.ID == "" {
+	if sess.ID == "" {
 		t.Error("session ID is empty")
 	}
 }
@@ -445,29 +517,36 @@ func TestIntegration_HTTPSKeepAlive(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Verify all 3 sessions were recorded.
-	entries, err := store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 HTTPS sessions, got %d", len(entries))
+	if len(sessions) != 3 {
+		t.Fatalf("expected 3 HTTPS sessions, got %d", len(sessions))
 	}
 
 	// Verify each session has correct protocol and unique paths.
-	// Note: entries are ordered by timestamp DESC, so we check all have HTTPS protocol.
 	paths := make(map[string]bool)
-	for _, entry := range entries {
-		if entry.Protocol != "HTTPS" {
-			t.Errorf("session protocol = %q, want %q", entry.Protocol, "HTTPS")
+	for _, sess := range sessions {
+		if sess.Protocol != "HTTPS" {
+			t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
 		}
-		if entry.Request.URL == nil {
+		sendMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+		if mErr != nil {
+			t.Fatalf("GetMessages: %v", mErr)
+		}
+		if len(sendMsgs) == 0 {
+			t.Error("no send message found")
+			continue
+		}
+		if sendMsgs[0].URL == nil {
 			t.Error("request URL is nil")
 			continue
 		}
-		if entry.Request.URL.Scheme != "https" {
-			t.Errorf("URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+		if sendMsgs[0].URL.Scheme != "https" {
+			t.Errorf("URL scheme = %q, want %q", sendMsgs[0].URL.Scheme, "https")
 		}
-		paths[entry.Request.URL.Path] = true
+		paths[sendMsgs[0].URL.Path] = true
 	}
 
 	// Verify all 3 unique paths were recorded.
@@ -555,27 +634,31 @@ func TestIntegration_HTTPSMultipleHosts(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify both sessions were recorded with different hosts.
-	entries, err := store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 HTTPS sessions, got %d", len(entries))
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 HTTPS sessions, got %d", len(sessions))
 	}
 
 	// Verify sessions have different host:port values.
 	hosts := make(map[string]bool)
-	for _, entry := range entries {
-		if entry.Request.URL == nil {
+	for _, sess := range sessions {
+		if sess.Protocol != "HTTPS" {
+			t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
+		}
+		sendMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+		if mErr != nil {
+			t.Fatalf("GetMessages: %v", mErr)
+		}
+		if len(sendMsgs) == 0 || sendMsgs[0].URL == nil {
 			t.Error("request URL is nil")
 			continue
 		}
-		hosts[entry.Request.URL.Host] = true
-		if entry.Protocol != "HTTPS" {
-			t.Errorf("protocol = %q, want %q", entry.Protocol, "HTTPS")
-		}
-		if entry.Request.URL.Scheme != "https" {
-			t.Errorf("URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+		hosts[sendMsgs[0].URL.Host] = true
+		if sendMsgs[0].URL.Scheme != "https" {
+			t.Errorf("URL scheme = %q, want %q", sendMsgs[0].URL.Scheme, "https")
 		}
 	}
 
@@ -717,66 +800,87 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 				t.Error("response body content differs from request body (transfer corruption)")
 			}
 
-			// Poll for session to be persisted (large bodies may take longer to save).
-			var entries []*session.Entry
+			// Poll for session and messages to be persisted (large bodies may take longer to save).
+			var httpsSessionList []*session.Session
+			var send, recv *session.Message
 			for i := 0; i < 50; i++ {
 				time.Sleep(100 * time.Millisecond)
-				entries, err = store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+				httpsSessionList, err = store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
 				if err != nil {
-					t.Fatalf("List sessions: %v", err)
+					t.Fatalf("ListSessions: %v", err)
 				}
-				if len(entries) == 1 {
+				if len(httpsSessionList) != 1 {
+					continue
+				}
+				allMsgs, mErr := store.GetMessages(ctx, httpsSessionList[0].ID, session.MessageListOptions{})
+				if mErr != nil {
+					t.Fatalf("GetMessages: %v", mErr)
+				}
+				for _, m := range allMsgs {
+					switch m.Direction {
+					case "send":
+						send = m
+					case "receive":
+						recv = m
+					}
+				}
+				if send != nil && recv != nil {
 					break
 				}
 			}
-			if len(entries) != 1 {
-				t.Fatalf("expected 1 HTTPS session, got %d", len(entries))
+			if len(httpsSessionList) != 1 {
+				t.Fatalf("expected 1 HTTPS session, got %d", len(httpsSessionList))
 			}
-
-			entry := entries[0]
+			sess := httpsSessionList[0]
+			if send == nil {
+				t.Fatal("send message not found")
+			}
+			if recv == nil {
+				t.Fatal("receive message not found")
+			}
 
 			// Verify request body recording.
-			if len(entry.Request.Body) != tt.wantRecordedReqLen {
-				t.Errorf("recorded request body length = %d, want %d", len(entry.Request.Body), tt.wantRecordedReqLen)
+			if len(send.Body) != tt.wantRecordedReqLen {
+				t.Errorf("recorded request body length = %d, want %d", len(send.Body), tt.wantRecordedReqLen)
 			}
-			if entry.Request.BodyTruncated != tt.wantReqTruncated {
-				t.Errorf("request BodyTruncated = %v, want %v", entry.Request.BodyTruncated, tt.wantReqTruncated)
+			if send.BodyTruncated != tt.wantReqTruncated {
+				t.Errorf("request BodyTruncated = %v, want %v", send.BodyTruncated, tt.wantReqTruncated)
 			}
 
 			// Verify response body recording.
-			if len(entry.Response.Body) != tt.wantRecordedRespLen {
-				t.Errorf("recorded response body length = %d, want %d", len(entry.Response.Body), tt.wantRecordedRespLen)
+			if len(recv.Body) != tt.wantRecordedRespLen {
+				t.Errorf("recorded response body length = %d, want %d", len(recv.Body), tt.wantRecordedRespLen)
 			}
-			if entry.Response.BodyTruncated != tt.wantRespTruncated {
-				t.Errorf("response BodyTruncated = %v, want %v", entry.Response.BodyTruncated, tt.wantRespTruncated)
+			if recv.BodyTruncated != tt.wantRespTruncated {
+				t.Errorf("response BodyTruncated = %v, want %v", recv.BodyTruncated, tt.wantRespTruncated)
 			}
 
 			// When truncated, verify the recorded body is the prefix of the original.
 			if tt.wantReqTruncated && tt.bodySize > 0 {
-				if !bytes.Equal(entry.Request.Body, reqBody[:maxBodyRecordSize]) {
+				if !bytes.Equal(send.Body, reqBody[:maxBodyRecordSize]) {
 					t.Error("truncated request body is not a prefix of the original body")
 				}
 			}
 			if tt.wantRespTruncated && tt.bodySize > 0 {
-				if !bytes.Equal(entry.Response.Body, reqBody[:maxBodyRecordSize]) {
+				if !bytes.Equal(recv.Body, reqBody[:maxBodyRecordSize]) {
 					t.Error("truncated response body is not a prefix of the original body")
 				}
 			}
 
 			// Verify metadata.
-			if entry.Protocol != "HTTPS" {
-				t.Errorf("protocol = %q, want %q", entry.Protocol, "HTTPS")
+			if sess.Protocol != "HTTPS" {
+				t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
 			}
-			if entry.Request.Method != "POST" {
-				t.Errorf("method = %q, want %q", entry.Request.Method, "POST")
+			if send.Method != "POST" {
+				t.Errorf("method = %q, want %q", send.Method, "POST")
 			}
-			if entry.Response.StatusCode != 200 {
-				t.Errorf("status code = %d, want %d", entry.Response.StatusCode, 200)
+			if recv.StatusCode != 200 {
+				t.Errorf("status code = %d, want %d", recv.StatusCode, 200)
 			}
-			if entry.Request.URL == nil || entry.Request.URL.Scheme != "https" {
+			if send.URL == nil || send.URL.Scheme != "https" {
 				scheme := ""
-				if entry.Request.URL != nil {
-					scheme = entry.Request.URL.Scheme
+				if send.URL != nil {
+					scheme = send.URL.Scheme
 				}
 				t.Errorf("URL scheme = %q, want %q", scheme, "https")
 			}
@@ -864,32 +968,55 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify all sessions were recorded.
-	entries, err := store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: numClients + 10})
+	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: numClients + 10})
 	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(entries) != numClients {
-		t.Fatalf("expected %d HTTPS sessions, got %d", numClients, len(entries))
+	if len(sessions) != numClients {
+		t.Fatalf("expected %d HTTPS sessions, got %d", numClients, len(sessions))
 	}
 
 	// Verify each client's session is distinct and data is not mixed.
 	seenPaths := make(map[string]bool)
-	for _, entry := range entries {
-		if entry.Protocol != "HTTPS" {
-			t.Errorf("session protocol = %q, want %q", entry.Protocol, "HTTPS")
+	for _, sess := range sessions {
+		if sess.Protocol != "HTTPS" {
+			t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
 		}
-		if entry.Request.Method != "POST" {
-			t.Errorf("session method = %q, want %q", entry.Request.Method, "POST")
+
+		allMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+		if mErr != nil {
+			t.Fatalf("GetMessages: %v", mErr)
 		}
-		if entry.Request.URL == nil {
+		var send, recv *session.Message
+		for _, m := range allMsgs {
+			switch m.Direction {
+			case "send":
+				send = m
+			case "receive":
+				recv = m
+			}
+		}
+		if send == nil {
+			t.Error("send message not found")
+			continue
+		}
+		if recv == nil {
+			t.Error("receive message not found")
+			continue
+		}
+
+		if send.Method != "POST" {
+			t.Errorf("session method = %q, want %q", send.Method, "POST")
+		}
+		if send.URL == nil {
 			t.Error("request URL is nil")
 			continue
 		}
-		if entry.Request.URL.Scheme != "https" {
-			t.Errorf("session URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+		if send.URL.Scheme != "https" {
+			t.Errorf("session URL scheme = %q, want %q", send.URL.Scheme, "https")
 		}
 
-		path := entry.Request.URL.Path
+		path := send.URL.Path
 		seenPaths[path] = true
 
 		// Verify request body matches the path (no cross-contamination).
@@ -899,26 +1026,26 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 			continue
 		}
 		expectedReqBody := fmt.Sprintf(`{"client":%d}`, pathID)
-		if string(entry.Request.Body) != expectedReqBody {
+		if string(send.Body) != expectedReqBody {
 			t.Errorf("session path %s: request body = %q, want %q (data mixed between sessions)",
-				path, entry.Request.Body, expectedReqBody)
+				path, send.Body, expectedReqBody)
 		}
 
 		// Verify response body matches.
 		expectedRespBody := fmt.Sprintf("echo:%s:%s", path, expectedReqBody)
-		if string(entry.Response.Body) != expectedRespBody {
+		if string(recv.Body) != expectedRespBody {
 			t.Errorf("session path %s: response body = %q, want %q (data mixed between sessions)",
-				path, entry.Response.Body, expectedRespBody)
+				path, recv.Body, expectedRespBody)
 		}
 
-		if entry.Response.StatusCode != 200 {
-			t.Errorf("session path %s: status = %d, want %d", path, entry.Response.StatusCode, 200)
+		if recv.StatusCode != 200 {
+			t.Errorf("session path %s: status = %d, want %d", path, recv.StatusCode, 200)
 		}
-		if entry.ID == "" {
+		if sess.ID == "" {
 			t.Errorf("session path %s: ID is empty", path)
 		}
-		if entry.Duration < 0 {
-			t.Errorf("session path %s: duration = %v, want non-negative", path, entry.Duration)
+		if sess.Duration < 0 {
+			t.Errorf("session path %s: duration = %v, want non-negative", path, sess.Duration)
 		}
 	}
 

@@ -631,8 +631,8 @@ func TestSmugglingDetection_EndToEnd_HTTP(t *testing.T) {
 	}
 
 	// Normal request should have no tags.
-	if entries[0].Tags != nil {
-		t.Errorf("expected nil tags for normal request, got %v", entries[0].Tags)
+	if entries[0].Session.Tags != nil {
+		t.Errorf("expected nil tags for normal request, got %v", entries[0].Session.Tags)
 	}
 }
 

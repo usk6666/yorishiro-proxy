@@ -30,7 +30,7 @@ type SQLiteStore struct {
 
 type writeOp struct {
 	ctx    context.Context
-	entry  *Entry
+	fn     func(ctx context.Context) error
 	result chan error
 }
 
@@ -45,6 +45,12 @@ func NewSQLiteStore(ctx context.Context, path string, logger *slog.Logger) (*SQL
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable WAL mode: %w", err)
+	}
+
+	// Enable foreign keys for cascade delete.
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	// Run schema migrations.
@@ -73,7 +79,7 @@ func (s *SQLiteStore) writeLoop() {
 			if !ok {
 				return
 			}
-			err := s.saveSync(op.ctx, op.entry)
+			err := op.fn(op.ctx)
 			if err != nil {
 				s.logger.Warn("session write failed", "error", err)
 			}
@@ -85,7 +91,7 @@ func (s *SQLiteStore) writeLoop() {
 			for {
 				select {
 				case op := <-s.writeCh:
-					err := s.saveSync(drainCtx, op.entry)
+					err := op.fn(drainCtx)
 					if err != nil {
 						s.logger.Warn("session write failed during drain", "error", err)
 					}
@@ -98,61 +104,72 @@ func (s *SQLiteStore) writeLoop() {
 	}
 }
 
-func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
-	reqHeaders, err := json.Marshal(entry.Request.Headers)
-	if err != nil {
-		return fmt.Errorf("marshal request headers: %w", err)
+// enqueueWrite sends a write operation to the writer goroutine and waits for the result.
+func (s *SQLiteStore) enqueueWrite(ctx context.Context, fn func(ctx context.Context) error) error {
+	result := make(chan error, 1)
+	select {
+	case s.writeCh <- writeOp{ctx: ctx, fn: fn, result: result}:
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	respHeaders, err := json.Marshal(entry.Response.Headers)
-	if err != nil {
-		return fmt.Errorf("marshal response headers: %w", err)
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
+}
 
+// SaveSession persists a new session.
+func (s *SQLiteStore) SaveSession(ctx context.Context, sess *Session) error {
+	if sess.ID == "" {
+		sess.ID = uuid.New().String()
+	}
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		return s.saveSessionSync(ctx, sess)
+	})
+}
+
+func (s *SQLiteStore) saveSessionSync(ctx context.Context, sess *Session) error {
 	tags := "{}"
-	if entry.Tags != nil {
-		tagsJSON, err := json.Marshal(entry.Tags)
+	if sess.Tags != nil {
+		tagsJSON, err := json.Marshal(sess.Tags)
 		if err != nil {
 			return fmt.Errorf("marshal tags: %w", err)
 		}
 		tags = string(tagsJSON)
 	}
 
-	urlStr := ""
-	if entry.Request.URL != nil {
-		urlStr = entry.Request.URL.String()
-	}
-
-	// Extract connection info fields, defaulting to empty strings.
 	var clientAddr, serverAddr, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject string
-	if entry.ConnInfo != nil {
-		clientAddr = entry.ConnInfo.ClientAddr
-		serverAddr = entry.ConnInfo.ServerAddr
-		tlsVersion = entry.ConnInfo.TLSVersion
-		tlsCipher = entry.ConnInfo.TLSCipher
-		tlsALPN = entry.ConnInfo.TLSALPN
-		tlsCertSubject = entry.ConnInfo.TLSServerCertSubject
+	if sess.ConnInfo != nil {
+		clientAddr = sess.ConnInfo.ClientAddr
+		serverAddr = sess.ConnInfo.ServerAddr
+		tlsVersion = sess.ConnInfo.TLSVersion
+		tlsCipher = sess.ConnInfo.TLSCipher
+		tlsALPN = sess.ConnInfo.TLSALPN
+		tlsCertSubject = sess.ConnInfo.TLSServerCertSubject
 	}
 
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags, raw_request, raw_response, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		entry.ID,
-		entry.ConnID,
-		entry.Protocol,
-		entry.Request.Method,
-		urlStr,
-		string(reqHeaders),
-		entry.Request.Body,
-		entry.Response.StatusCode,
-		string(respHeaders),
-		entry.Response.Body,
-		entry.Timestamp.UTC().Format(time.RFC3339Nano),
-		entry.Duration.Milliseconds(),
-		boolToInt(entry.Request.BodyTruncated),
-		boolToInt(entry.Response.BodyTruncated),
+	sessionType := sess.SessionType
+	if sessionType == "" {
+		sessionType = "unary"
+	}
+	state := sess.State
+	if state == "" {
+		state = "complete"
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.ID,
+		sess.ConnID,
+		sess.Protocol,
+		sessionType,
+		state,
+		sess.Timestamp.UTC().Format(time.RFC3339Nano),
+		sess.Duration.Milliseconds(),
 		tags,
-		entry.RawRequest,
-		entry.RawResponse,
 		clientAddr,
 		serverAddr,
 		tlsVersion,
@@ -166,59 +183,74 @@ func (s *SQLiteStore) saveSync(ctx context.Context, entry *Entry) error {
 	return nil
 }
 
-// Save persists a session entry asynchronously via the writer goroutine.
-func (s *SQLiteStore) Save(ctx context.Context, entry *Entry) error {
-	if entry.ID == "" {
-		entry.ID = uuid.New().String()
-	}
-	result := make(chan error, 1)
-	select {
-	case s.writeCh <- writeOp{ctx: ctx, entry: entry, result: result}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case err := <-result:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+// UpdateSession applies partial updates to an existing session.
+func (s *SQLiteStore) UpdateSession(ctx context.Context, id string, update SessionUpdate) error {
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		var sets []string
+		var args []interface{}
+
+		if update.State != "" {
+			sets = append(sets, "state = ?")
+			args = append(args, update.State)
+		}
+		if update.Duration != 0 {
+			sets = append(sets, "duration_ms = ?")
+			args = append(args, update.Duration.Milliseconds())
+		}
+		if update.Tags != nil {
+			tagsJSON, err := json.Marshal(update.Tags)
+			if err != nil {
+				return fmt.Errorf("marshal tags: %w", err)
+			}
+			sets = append(sets, "tags = ?")
+			args = append(args, string(tagsJSON))
+		}
+
+		if len(sets) == 0 {
+			return nil
+		}
+
+		args = append(args, id)
+		query := fmt.Sprintf("UPDATE sessions SET %s WHERE id = ?", strings.Join(sets, ", "))
+		_, err := s.db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("update session %s: %w", id, err)
+		}
+		return nil
+	})
 }
 
-// sessionColumns is the list of columns selected in Get and List queries.
-const sessionColumns = `id, conn_id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms, request_body_truncated, response_body_truncated, tags, raw_request, raw_response, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject`
-
-// Get retrieves a session entry by ID.
-func (s *SQLiteStore) Get(ctx context.Context, id string) (*Entry, error) {
+// GetSession retrieves a session by ID.
+func (s *SQLiteStore) GetSession(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, id)
-	return scanEntry(row)
+	return scanSession(row)
 }
 
-// buildWhereClause constructs a SQL WHERE clause and argument list from the
-// filter fields in ListOptions (Protocol, Method, URLPattern, StatusCode).
-// It returns the clause string (including "WHERE" prefix if non-empty) and
-// the corresponding positional arguments.
-func buildWhereClause(opts ListOptions) (string, []interface{}) {
+// sessionColumns is the list of columns selected in session queries.
+const sessionColumns = `id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject`
+
+// buildSessionWhereClause constructs a SQL WHERE clause from ListOptions.
+// Method, URLPattern, and StatusCode are matched via EXISTS subqueries on messages.
+func buildSessionWhereClause(opts ListOptions) (string, []interface{}) {
 	var conditions []string
 	var args []interface{}
 
 	if opts.Protocol != "" {
-		conditions = append(conditions, "protocol = ?")
+		conditions = append(conditions, "s.protocol = ?")
 		args = append(args, opts.Protocol)
 	}
 	if opts.Method != "" {
-		conditions = append(conditions, "method = ?")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.direction = 'send' AND m.method = ?)")
 		args = append(args, opts.Method)
 	}
 	if opts.URLPattern != "" {
-		// Escape LIKE wildcards to prevent unintended pattern matching.
 		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.URLPattern)
-		conditions = append(conditions, "url LIKE ? ESCAPE '\\'")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
 		args = append(args, "%"+escaped+"%")
 	}
 	if opts.StatusCode != 0 {
-		conditions = append(conditions, "response_status = ?")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
 		args = append(args, opts.StatusCode)
 	}
 
@@ -229,12 +261,12 @@ func buildWhereClause(opts ListOptions) (string, []interface{}) {
 	return clause, args
 }
 
-// List returns session entries matching the given options.
-func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, error) {
-	whereClause, args := buildWhereClause(opts)
+// ListSessions returns sessions matching the given options.
+func (s *SQLiteStore) ListSessions(ctx context.Context, opts ListOptions) ([]*Session, error) {
+	whereClause, args := buildSessionWhereClause(opts)
 
-	query := "SELECT " + sessionColumns + " FROM sessions" + whereClause
-	query += " ORDER BY timestamp DESC"
+	query := "SELECT " + sessionColumns + " FROM sessions s" + whereClause
+	query += " ORDER BY s.timestamp DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -249,23 +281,22 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]*Entry, err
 	}
 	defer rows.Close()
 
-	var entries []*Entry
+	var sessions []*Session
 	for rows.Next() {
-		entry, err := scanEntry(rows)
+		sess, err := scanSession(rows)
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry)
+		sessions = append(sessions, sess)
 	}
-	return entries, rows.Err()
+	return sessions, rows.Err()
 }
 
-// Count returns the total number of session entries matching the given filter
-// options. Unlike List, it ignores Limit and Offset fields.
-func (s *SQLiteStore) Count(ctx context.Context, opts ListOptions) (int, error) {
-	whereClause, args := buildWhereClause(opts)
+// CountSessions returns the total number of sessions matching the given filter options.
+func (s *SQLiteStore) CountSessions(ctx context.Context, opts ListOptions) (int, error) {
+	whereClause, args := buildSessionWhereClause(opts)
 
-	query := "SELECT COUNT(*) FROM sessions" + whereClause
+	query := "SELECT COUNT(*) FROM sessions s" + whereClause
 
 	var count int
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
@@ -274,8 +305,8 @@ func (s *SQLiteStore) Count(ctx context.Context, opts ListOptions) (int, error) 
 	return count, nil
 }
 
-// Delete removes a session entry by ID.
-func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
+// DeleteSession removes a session by ID (messages are cascade-deleted).
+func (s *SQLiteStore) DeleteSession(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("delete session %s: %w", id, err)
@@ -283,8 +314,8 @@ func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// DeleteAll removes all session entries and returns the number of deleted rows.
-func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
+// DeleteAllSessions removes all sessions and returns the number of deleted rows.
+func (s *SQLiteStore) DeleteAllSessions(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions")
 	if err != nil {
 		return 0, fmt.Errorf("delete all sessions: %w", err)
@@ -296,9 +327,8 @@ func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// DeleteOlderThan removes sessions with timestamps before the given cutoff.
-// It returns the number of deleted rows.
-func (s *SQLiteStore) DeleteOlderThan(ctx context.Context, before time.Time) (int64, error) {
+// DeleteSessionsOlderThan removes sessions with timestamps before the given cutoff.
+func (s *SQLiteStore) DeleteSessionsOlderThan(ctx context.Context, before time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
 		"DELETE FROM sessions WHERE timestamp < ?",
 		before.UTC().Format(time.RFC3339Nano))
@@ -312,9 +342,8 @@ func (s *SQLiteStore) DeleteOlderThan(ctx context.Context, before time.Time) (in
 	return n, nil
 }
 
-// DeleteExcess removes the oldest sessions exceeding maxCount,
-// keeping only the most recent maxCount sessions.
-func (s *SQLiteStore) DeleteExcess(ctx context.Context, maxCount int) (int64, error) {
+// DeleteExcessSessions removes the oldest sessions exceeding maxCount.
+func (s *SQLiteStore) DeleteExcessSessions(ctx context.Context, maxCount int) (int64, error) {
 	if maxCount <= 0 {
 		return 0, fmt.Errorf("maxCount must be > 0, got %d", maxCount)
 	}
@@ -331,6 +360,104 @@ func (s *SQLiteStore) DeleteExcess(ctx context.Context, maxCount int) (int64, er
 	return n, nil
 }
 
+// AppendMessage persists a new message associated with a session.
+func (s *SQLiteStore) AppendMessage(ctx context.Context, msg *Message) error {
+	if msg.ID == "" {
+		msg.ID = uuid.New().String()
+	}
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		return s.appendMessageSync(ctx, msg)
+	})
+}
+
+func (s *SQLiteStore) appendMessageSync(ctx context.Context, msg *Message) error {
+	headers := "{}"
+	if msg.Headers != nil {
+		headersJSON, err := json.Marshal(msg.Headers)
+		if err != nil {
+			return fmt.Errorf("marshal headers: %w", err)
+		}
+		headers = string(headersJSON)
+	}
+
+	metadata := "{}"
+	if msg.Metadata != nil {
+		metaJSON, err := json.Marshal(msg.Metadata)
+		if err != nil {
+			return fmt.Errorf("marshal metadata: %w", err)
+		}
+		metadata = string(metaJSON)
+	}
+
+	urlStr := ""
+	if msg.URL != nil {
+		urlStr = msg.URL.String()
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages (id, session_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID,
+		msg.SessionID,
+		msg.Sequence,
+		msg.Direction,
+		msg.Timestamp.UTC().Format(time.RFC3339Nano),
+		headers,
+		msg.Body,
+		msg.RawBytes,
+		boolToInt(msg.BodyTruncated),
+		msg.Method,
+		urlStr,
+		msg.StatusCode,
+		metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("insert message: %w", err)
+	}
+	return nil
+}
+
+// messageColumns is the list of columns selected in message queries.
+const messageColumns = `id, session_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata`
+
+// GetMessages retrieves messages for a session, optionally filtered by direction.
+func (s *SQLiteStore) GetMessages(ctx context.Context, sessionID string, opts MessageListOptions) ([]*Message, error) {
+	query := "SELECT " + messageColumns + " FROM messages WHERE session_id = ?"
+	args := []interface{}{sessionID}
+
+	if opts.Direction != "" {
+		query += " AND direction = ?"
+		args = append(args, opts.Direction)
+	}
+
+	query += " ORDER BY sequence ASC"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []*Message
+	for rows.Next() {
+		msg, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, rows.Err()
+}
+
+// CountMessages returns the number of messages for a session.
+func (s *SQLiteStore) CountMessages(ctx context.Context, sessionID string) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE session_id = ?", sessionID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count messages: %w", err)
+	}
+	return count, nil
+}
+
 // Close shuts down the writer goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
 	close(s.done)
@@ -342,16 +469,11 @@ type scannable interface {
 	Scan(dest ...interface{}) error
 }
 
-func scanEntry(row scannable) (*Entry, error) {
+func scanSession(row scannable) (*Session, error) {
 	var (
-		entry          Entry
-		urlStr         string
-		reqHeaders     string
-		respHeaders    string
+		sess           Session
 		tsStr          string
 		durationMs     int64
-		reqTruncated   int
-		respTruncated  int
 		tagsStr        string
 		clientAddr     string
 		serverAddr     string
@@ -362,23 +484,14 @@ func scanEntry(row scannable) (*Entry, error) {
 	)
 
 	err := row.Scan(
-		&entry.ID,
-		&entry.ConnID,
-		&entry.Protocol,
-		&entry.Request.Method,
-		&urlStr,
-		&reqHeaders,
-		&entry.Request.Body,
-		&entry.Response.StatusCode,
-		&respHeaders,
-		&entry.Response.Body,
+		&sess.ID,
+		&sess.ConnID,
+		&sess.Protocol,
+		&sess.SessionType,
+		&sess.State,
 		&tsStr,
 		&durationMs,
-		&reqTruncated,
-		&respTruncated,
 		&tagsStr,
-		&entry.RawRequest,
-		&entry.RawResponse,
 		&clientAddr,
 		&serverAddr,
 		&tlsVersion,
@@ -393,22 +506,10 @@ func scanEntry(row scannable) (*Entry, error) {
 		return nil, fmt.Errorf("scan session: %w", err)
 	}
 
-	if urlStr != "" {
-		parsed, err := url.Parse(urlStr)
-		if err == nil {
-			entry.Request.URL = parsed
-		}
-	}
-
-	if err := json.Unmarshal([]byte(reqHeaders), &entry.Request.Headers); err != nil {
-		entry.Request.Headers = make(map[string][]string)
-	}
-	if err := json.Unmarshal([]byte(respHeaders), &entry.Response.Headers); err != nil {
-		entry.Response.Headers = make(map[string][]string)
-	}
 	if tagsStr != "" && tagsStr != "{}" {
-		if err := json.Unmarshal([]byte(tagsStr), &entry.Tags); err != nil {
-			entry.Tags = nil
+		if err := json.Unmarshal([]byte(tagsStr), &sess.Tags); err != nil {
+			slog.Warn("failed to parse session tags", "session_id", sess.ID, "value", tagsStr, "error", err)
+			sess.Tags = nil
 		}
 	}
 
@@ -416,15 +517,11 @@ func scanEntry(row scannable) (*Entry, error) {
 	if err != nil {
 		slog.Warn("failed to parse session timestamp (possible bug)", "value", tsStr, "error", err)
 	}
-	entry.Timestamp = ts
-	entry.Duration = time.Duration(durationMs) * time.Millisecond
+	sess.Timestamp = ts
+	sess.Duration = time.Duration(durationMs) * time.Millisecond
 
-	entry.Request.BodyTruncated = reqTruncated != 0
-	entry.Response.BodyTruncated = respTruncated != 0
-
-	// Populate ConnectionInfo if any connection metadata is present.
 	if clientAddr != "" || serverAddr != "" || tlsVersion != "" || tlsCipher != "" || tlsALPN != "" || tlsCertSubject != "" {
-		entry.ConnInfo = &ConnectionInfo{
+		sess.ConnInfo = &ConnectionInfo{
 			ClientAddr:           clientAddr,
 			ServerAddr:           serverAddr,
 			TLSVersion:           tlsVersion,
@@ -434,7 +531,65 @@ func scanEntry(row scannable) (*Entry, error) {
 		}
 	}
 
-	return &entry, nil
+	return &sess, nil
+}
+
+func scanMessage(row scannable) (*Message, error) {
+	var (
+		msg           Message
+		tsStr         string
+		headersStr    string
+		urlStr        string
+		bodyTruncated int
+		metadataStr   string
+	)
+
+	err := row.Scan(
+		&msg.ID,
+		&msg.SessionID,
+		&msg.Sequence,
+		&msg.Direction,
+		&tsStr,
+		&headersStr,
+		&msg.Body,
+		&msg.RawBytes,
+		&bodyTruncated,
+		&msg.Method,
+		&urlStr,
+		&msg.StatusCode,
+		&metadataStr,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("message not found")
+		}
+		return nil, fmt.Errorf("scan message: %w", err)
+	}
+
+	if urlStr != "" {
+		parsed, err := url.Parse(urlStr)
+		if err == nil {
+			msg.URL = parsed
+		}
+	}
+
+	if err := json.Unmarshal([]byte(headersStr), &msg.Headers); err != nil {
+		msg.Headers = make(map[string][]string)
+	}
+	if metadataStr != "" && metadataStr != "{}" {
+		if err := json.Unmarshal([]byte(metadataStr), &msg.Metadata); err != nil {
+			msg.Metadata = nil
+		}
+	}
+
+	ts, err := time.Parse(time.RFC3339Nano, tsStr)
+	if err != nil {
+		slog.Warn("failed to parse message timestamp (possible bug)", "value", tsStr, "error", err)
+	}
+	msg.Timestamp = ts
+	msg.BodyTruncated = bodyTruncated != 0
+
+	return &msg, nil
 }
 
 // boolToInt converts a boolean to an integer (0 or 1) for SQLite storage.

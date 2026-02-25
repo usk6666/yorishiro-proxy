@@ -290,13 +290,33 @@ func TestFormatFingerprint(t *testing.T) {
 
 // --- get_session tests (from main/PR #12) ---
 
-// saveTestEntry is a helper that saves a session entry and returns it with the assigned ID.
-func saveTestEntry(t *testing.T, store session.Store, entry *session.Entry) *session.Entry {
+// testEntry is a convenience struct for creating test sessions with send/receive messages.
+type testEntry struct {
+	Session *session.Session
+	Send    *session.Message
+	Receive *session.Message
+}
+
+// saveTestEntry saves a session with send and receive messages and returns a testEntry.
+func saveTestEntry(t *testing.T, store session.Store, sess *session.Session, send *session.Message, recv *session.Message) *testEntry {
 	t.Helper()
-	if err := store.Save(context.Background(), entry); err != nil {
-		t.Fatalf("Save: %v", err)
+	ctx := context.Background()
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
 	}
-	return entry
+	if send != nil {
+		send.SessionID = sess.ID
+		if err := store.AppendMessage(ctx, send); err != nil {
+			t.Fatalf("AppendMessage(send): %v", err)
+		}
+	}
+	if recv != nil {
+		recv.SessionID = sess.ID
+		if err := store.AppendMessage(ctx, recv); err != nil {
+			t.Fatalf("AppendMessage(recv): %v", err)
+		}
+	}
+	return &testEntry{Session: sess, Send: send, Receive: recv}
 }
 
 func TestGetSession_Success(t *testing.T) {
@@ -304,26 +324,34 @@ func TestGetSession_Success(t *testing.T) {
 	cs := setupTestSession(t, nil, store)
 
 	u, _ := url.Parse("http://example.com/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
-		Duration:  250 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Content-Type": {"application/json"}, "Host": {"example.com"}},
-			Body:    []byte(`{"key":"value"}`),
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
+			Duration:  250 * time.Millisecond,
 		},
-		Response: session.RecordedResponse{
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/json"}, "Host": {"example.com"}},
+			Body:      []byte(`{"key":"value"}`),
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Type": {"application/json"}},
 			Body:       []byte(`{"status":"ok"}`),
 		},
-	})
+	)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "get_session",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -345,8 +373,8 @@ func TestGetSession_Success(t *testing.T) {
 	}
 
 	// Verify all fields.
-	if out.ID != entry.ID {
-		t.Errorf("ID = %q, want %q", out.ID, entry.ID)
+	if out.ID != entry.Session.ID {
+		t.Errorf("ID = %q, want %q", out.ID, entry.Session.ID)
 	}
 	if out.Protocol != "HTTP/1.x" {
 		t.Errorf("Protocol = %q, want %q", out.Protocol, "HTTP/1.x")
@@ -393,28 +421,36 @@ func TestGetSession_WithTags(t *testing.T) {
 	cs := setupTestSession(t, nil, store)
 
 	u, _ := url.Parse("http://example.com/smuggle")
-	entry := saveTestEntry(t, store, &session.Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
-		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}},
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
+			Duration:  100 * time.Millisecond,
+			Tags: map[string]string{
+				"smuggling:cl_te_conflict": "true",
+				"smuggling:warnings":       "CL/TE conflict detected",
+			},
 		},
-		Response: session.RecordedResponse{
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Host": {"example.com"}},
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
 			StatusCode: 200,
 			Headers:    map[string][]string{},
 		},
-		Tags: map[string]string{
-			"smuggling:cl_te_conflict": "true",
-			"smuggling:warnings":       "CL/TE conflict detected",
-		},
-	})
+	)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "get_session",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -498,26 +534,34 @@ func TestGetSession_BinaryBody(t *testing.T) {
 	binaryData := []byte{0xFF, 0xFE, 0x00, 0x01, 0x80, 0x90, 0xA0, 0xB0}
 
 	u, _ := url.Parse("http://example.com/binary")
-	entry := saveTestEntry(t, store, &session.Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Content-Type": {"application/octet-stream"}},
-			Body:    binaryData,
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 		},
-		Response: session.RecordedResponse{
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/octet-stream"}},
+			Body:      binaryData,
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Type": {"application/octet-stream"}},
 			Body:       binaryData,
 		},
-	})
+	)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "get_session",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -566,26 +610,34 @@ func TestGetSession_EmptyBody(t *testing.T) {
 	cs := setupTestSession(t, nil, store)
 
 	u, _ := url.Parse("http://example.com/empty")
-	entry := saveTestEntry(t, store, &session.Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  50 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}},
-			Body:    nil,
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  50 * time.Millisecond,
 		},
-		Response: session.RecordedResponse{
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{"Host": {"example.com"}},
+			Body:      nil,
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
 			StatusCode: 204,
 			Headers:    map[string][]string{},
 			Body:       nil,
 		},
-	})
+	)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "get_session",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -689,64 +741,101 @@ func mustParseURL(raw string) *url.URL {
 // seedTestSessions inserts test session entries into the store.
 func seedTestSessions(t *testing.T, store session.Store) {
 	t.Helper()
-	ctx := context.Background()
 
-	entries := []*session.Entry{
+	type seedEntry struct {
+		sess *session.Session
+		send *session.Message
+		recv *session.Message
+	}
+
+	entries := []seedEntry{
 		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
-			Duration:  100 * time.Millisecond,
-			Request: session.RecordedRequest{
-				Method:  "GET",
-				URL:     mustParseURL("http://example.com/api/users"),
-				Headers: map[string][]string{"Host": {"example.com"}},
+			sess: &session.Session{
+				Protocol:  "HTTP/1.x",
+				Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+				Duration:  100 * time.Millisecond,
 			},
-			Response: session.RecordedResponse{
+			send: &session.Message{
+				Sequence:  0,
+				Direction: "send",
+				Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+				Method:    "GET",
+				URL:       mustParseURL("http://example.com/api/users"),
+				Headers:   map[string][]string{"Host": {"example.com"}},
+			},
+			recv: &session.Message{
+				Sequence:   1,
+				Direction:  "receive",
+				Timestamp:  time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 				StatusCode: 200,
 				Headers:    map[string][]string{"Content-Type": {"application/json"}},
 				Body:       []byte(`{"users":[]}`),
 			},
 		},
 		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Date(2025, 1, 1, 10, 1, 0, 0, time.UTC),
-			Duration:  200 * time.Millisecond,
-			Request: session.RecordedRequest{
-				Method:  "POST",
-				URL:     mustParseURL("http://example.com/api/users"),
-				Headers: map[string][]string{"Host": {"example.com"}},
-				Body:    []byte(`{"name":"test"}`),
+			sess: &session.Session{
+				Protocol:  "HTTP/1.x",
+				Timestamp: time.Date(2025, 1, 1, 10, 1, 0, 0, time.UTC),
+				Duration:  200 * time.Millisecond,
 			},
-			Response: session.RecordedResponse{
+			send: &session.Message{
+				Sequence:  0,
+				Direction: "send",
+				Timestamp: time.Date(2025, 1, 1, 10, 1, 0, 0, time.UTC),
+				Method:    "POST",
+				URL:       mustParseURL("http://example.com/api/users"),
+				Headers:   map[string][]string{"Host": {"example.com"}},
+				Body:      []byte(`{"name":"test"}`),
+			},
+			recv: &session.Message{
+				Sequence:   1,
+				Direction:  "receive",
+				Timestamp:  time.Date(2025, 1, 1, 10, 1, 0, 0, time.UTC),
 				StatusCode: 201,
 				Headers:    map[string][]string{"Content-Type": {"application/json"}},
 				Body:       []byte(`{"id":"1","name":"test"}`),
 			},
 		},
 		{
-			Protocol:  "HTTPS",
-			Timestamp: time.Date(2025, 1, 1, 10, 2, 0, 0, time.UTC),
-			Duration:  150 * time.Millisecond,
-			Request: session.RecordedRequest{
-				Method:  "GET",
-				URL:     mustParseURL("https://secure.example.com/login"),
-				Headers: map[string][]string{"Host": {"secure.example.com"}},
+			sess: &session.Session{
+				Protocol:  "HTTPS",
+				Timestamp: time.Date(2025, 1, 1, 10, 2, 0, 0, time.UTC),
+				Duration:  150 * time.Millisecond,
 			},
-			Response: session.RecordedResponse{
+			send: &session.Message{
+				Sequence:  0,
+				Direction: "send",
+				Timestamp: time.Date(2025, 1, 1, 10, 2, 0, 0, time.UTC),
+				Method:    "GET",
+				URL:       mustParseURL("https://secure.example.com/login"),
+				Headers:   map[string][]string{"Host": {"secure.example.com"}},
+			},
+			recv: &session.Message{
+				Sequence:   1,
+				Direction:  "receive",
+				Timestamp:  time.Date(2025, 1, 1, 10, 2, 0, 0, time.UTC),
 				StatusCode: 302,
 				Headers:    map[string][]string{"Location": {"/dashboard"}},
 			},
 		},
 		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Date(2025, 1, 1, 10, 3, 0, 0, time.UTC),
-			Duration:  50 * time.Millisecond,
-			Request: session.RecordedRequest{
-				Method:  "GET",
-				URL:     mustParseURL("http://other.com/notfound"),
-				Headers: map[string][]string{"Host": {"other.com"}},
+			sess: &session.Session{
+				Protocol:  "HTTP/1.x",
+				Timestamp: time.Date(2025, 1, 1, 10, 3, 0, 0, time.UTC),
+				Duration:  50 * time.Millisecond,
 			},
-			Response: session.RecordedResponse{
+			send: &session.Message{
+				Sequence:  0,
+				Direction: "send",
+				Timestamp: time.Date(2025, 1, 1, 10, 3, 0, 0, time.UTC),
+				Method:    "GET",
+				URL:       mustParseURL("http://other.com/notfound"),
+				Headers:   map[string][]string{"Host": {"other.com"}},
+			},
+			recv: &session.Message{
+				Sequence:   1,
+				Direction:  "receive",
+				Timestamp:  time.Date(2025, 1, 1, 10, 3, 0, 0, time.UTC),
 				StatusCode: 404,
 				Headers:    map[string][]string{"Content-Type": {"text/html"}},
 				Body:       []byte("not found"),
@@ -755,9 +844,7 @@ func seedTestSessions(t *testing.T, store session.Store) {
 	}
 
 	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
+		saveTestEntry(t, store, e.sess, e.send, e.recv)
 	}
 }
 
@@ -1365,14 +1452,14 @@ func TestDeleteSession_SingleDelete(t *testing.T) {
 	cs := setupTestSessionWithStore(t, nil, store)
 
 	// List sessions to get a valid ID.
-	entries, err := store.List(context.Background(), session.ListOptions{})
+	sessions, err := store.ListSessions(context.Background(), session.ListOptions{})
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(entries) == 0 {
+	if len(sessions) == 0 {
 		t.Fatal("expected at least one session")
 	}
-	targetID := entries[0].ID
+	targetID := sessions[0].ID
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "delete_session",
@@ -1398,7 +1485,7 @@ func TestDeleteSession_SingleDelete(t *testing.T) {
 	}
 
 	// Verify session is deleted.
-	_, err = store.Get(context.Background(), targetID)
+	_, err = store.GetSession(context.Background(), targetID)
 	if err == nil {
 		t.Error("expected error when getting deleted session, got nil")
 	}
@@ -1433,12 +1520,12 @@ func TestDeleteSession_DeleteAll(t *testing.T) {
 	}
 
 	// Verify all sessions are deleted.
-	entries, err := store.List(context.Background(), session.ListOptions{})
+	remaining, err := store.ListSessions(context.Background(), session.ListOptions{})
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries after delete_all, got %d", len(entries))
+	if len(remaining) != 0 {
+		t.Errorf("expected 0 sessions after delete_all, got %d", len(remaining))
 	}
 }
 
@@ -1552,35 +1639,43 @@ func TestGetSession_WithRawBytesAndConnInfo(t *testing.T) {
 	rawResp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
 
 	u, _ := url.Parse("https://example.com/raw-test")
-	entry := saveTestEntry(t, store, &session.Entry{
-		Protocol:    "HTTPS",
-		Timestamp:   time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
-		Duration:    150 * time.Millisecond,
-		RawRequest:  rawReq,
-		RawResponse: rawResp,
-		ConnInfo: &session.ConnectionInfo{
-			ClientAddr:           "192.168.1.50:54321",
-			ServerAddr:           "93.184.216.34:443",
-			TLSVersion:           "TLS 1.3",
-			TLSCipher:            "TLS_AES_128_GCM_SHA256",
-			TLSALPN:              "h2",
-			TLSServerCertSubject: "CN=example.com",
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTPS",
+			Timestamp: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
+			Duration:  150 * time.Millisecond,
+			ConnInfo: &session.ConnectionInfo{
+				ClientAddr:           "192.168.1.50:54321",
+				ServerAddr:           "93.184.216.34:443",
+				TLSVersion:           "TLS 1.3",
+				TLSCipher:            "TLS_AES_128_GCM_SHA256",
+				TLSALPN:              "h2",
+				TLSServerCertSubject: "CN=example.com",
+			},
 		},
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}},
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{"Host": {"example.com"}},
+			RawBytes:  rawReq,
 		},
-		Response: session.RecordedResponse{
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Length": {"2"}},
 			Body:       []byte("OK"),
+			RawBytes:   rawResp,
 		},
-	})
+	)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "get_session",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -1648,25 +1743,33 @@ func TestGetSession_WithoutRawBytesOrConnInfo(t *testing.T) {
 	cs := setupTestSession(t, nil, store)
 
 	u, _ := url.Parse("http://example.com/no-raw")
-	entry := saveTestEntry(t, store, &session.Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 		},
-		Response: session.RecordedResponse{
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
 			StatusCode: 200,
 			Headers:    map[string][]string{},
 			Body:       []byte("ok"),
 		},
-	})
+	)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "get_session",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)

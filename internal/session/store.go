@@ -5,41 +5,70 @@ import (
 	"time"
 )
 
-// Store defines the interface for session entry persistence.
+// Store defines the interface for session and message persistence.
 type Store interface {
-	// Save persists a session entry.
-	Save(ctx context.Context, entry *Entry) error
+	// SaveSession persists a new session.
+	SaveSession(ctx context.Context, s *Session) error
 
-	// Get retrieves a session entry by ID.
-	Get(ctx context.Context, id string) (*Entry, error)
+	// UpdateSession applies partial updates to an existing session.
+	UpdateSession(ctx context.Context, id string, update SessionUpdate) error
 
-	// List returns all session entries, optionally filtered.
-	List(ctx context.Context, opts ListOptions) ([]*Entry, error)
+	// GetSession retrieves a session by ID.
+	GetSession(ctx context.Context, id string) (*Session, error)
 
-	// Count returns the total number of session entries matching the given filter options.
-	// Unlike List, it ignores Limit and Offset and returns the full matching count.
-	Count(ctx context.Context, opts ListOptions) (int, error)
+	// ListSessions returns sessions matching the given filter options.
+	ListSessions(ctx context.Context, opts ListOptions) ([]*Session, error)
 
-	// Delete removes a session entry by ID.
-	Delete(ctx context.Context, id string) error
+	// CountSessions returns the total number of sessions matching the given
+	// filter options. Unlike ListSessions, it ignores Limit and Offset.
+	CountSessions(ctx context.Context, opts ListOptions) (int, error)
 
-	// DeleteAll removes all session entries and returns the number of deleted rows.
-	DeleteAll(ctx context.Context) (int64, error)
+	// DeleteSession removes a session and its associated messages by ID.
+	DeleteSession(ctx context.Context, id string) error
 
-	// DeleteOlderThan removes sessions with timestamps before the given cutoff.
-	DeleteOlderThan(ctx context.Context, before time.Time) (int64, error)
+	// DeleteAllSessions removes all sessions and messages, returning the
+	// number of deleted sessions.
+	DeleteAllSessions(ctx context.Context) (int64, error)
 
-	// DeleteExcess removes the oldest sessions exceeding maxCount,
+	// DeleteSessionsOlderThan removes sessions with timestamps before the
+	// given cutoff, returning the number of deleted sessions.
+	// Associated messages are cascade-deleted.
+	DeleteSessionsOlderThan(ctx context.Context, before time.Time) (int64, error)
+
+	// DeleteExcessSessions removes the oldest sessions exceeding maxCount,
 	// keeping only the most recent maxCount sessions.
-	DeleteExcess(ctx context.Context, maxCount int) (int64, error)
+	DeleteExcessSessions(ctx context.Context, maxCount int) (int64, error)
+
+	// AppendMessage persists a new message associated with a session.
+	AppendMessage(ctx context.Context, msg *Message) error
+
+	// GetMessages retrieves messages for a session, optionally filtered.
+	GetMessages(ctx context.Context, sessionID string, opts MessageListOptions) ([]*Message, error)
+
+	// CountMessages returns the number of messages for a session.
+	CountMessages(ctx context.Context, sessionID string) (int, error)
 }
 
-// ListOptions configures entry listing behavior.
+// ListOptions configures session listing behavior.
 type ListOptions struct {
-	Protocol   string
-	Method     string
+	// Protocol filters sessions by protocol (e.g. "HTTP/1.x").
+	Protocol string
+	// Method filters sessions that have a send message with this HTTP method.
+	Method string
+	// URLPattern filters sessions that have a send message with a URL
+	// containing this substring.
 	URLPattern string
+	// StatusCode filters sessions that have a receive message with this
+	// HTTP response status code.
 	StatusCode int
-	Limit      int
-	Offset     int
+	// Limit is the maximum number of sessions to return.
+	Limit int
+	// Offset is the number of sessions to skip for pagination.
+	Offset int
+}
+
+// MessageListOptions configures message listing behavior.
+type MessageListOptions struct {
+	// Direction filters messages by direction ("send" or "receive").
+	Direction string
 }

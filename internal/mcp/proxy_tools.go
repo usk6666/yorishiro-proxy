@@ -140,7 +140,7 @@ func (s *Server) handleProxyStatus(ctx context.Context, _ *gomcp.CallToolRequest
 
 	// Total session count.
 	if s.store != nil {
-		count, err := s.store.Count(ctx, session.ListOptions{})
+		count, err := s.store.CountSessions(ctx, session.ListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("count sessions: %w", err)
 		}
