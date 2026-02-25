@@ -162,59 +162,91 @@ func (s *Server) handleGetSession(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, fmt.Errorf("session_id is required")
 	}
 
-	entry, err := s.store.Get(ctx, input.SessionID)
+	sess, err := s.store.GetSession(ctx, input.SessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
 
-	urlStr := ""
-	if entry.Request.URL != nil {
-		urlStr = entry.Request.URL.String()
+	// Get messages for this session.
+	msgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	reqBody, reqEncoding := encodeBody(entry.Request.Body)
-	respBody, respEncoding := encodeBody(entry.Response.Body)
+	// Find send and receive messages.
+	var sendMsg, recvMsg *session.Message
+	for _, msg := range msgs {
+		if msg.Direction == "send" && sendMsg == nil {
+			sendMsg = msg
+		}
+		if msg.Direction == "receive" && recvMsg == nil {
+			recvMsg = msg
+		}
+	}
 
-	// Encode raw bytes as base64 if present.
+	var urlStr, method string
+	var reqHeaders, respHeaders map[string][]string
+	var reqBody, respBody []byte
+	var reqTruncated, respTruncated bool
+	var statusCode int
 	var rawReqStr, rawRespStr string
-	if len(entry.RawRequest) > 0 {
-		rawReqStr = base64.StdEncoding.EncodeToString(entry.RawRequest)
+
+	if sendMsg != nil {
+		method = sendMsg.Method
+		if sendMsg.URL != nil {
+			urlStr = sendMsg.URL.String()
+		}
+		reqHeaders = sendMsg.Headers
+		reqBody = sendMsg.Body
+		reqTruncated = sendMsg.BodyTruncated
+		if len(sendMsg.RawBytes) > 0 {
+			rawReqStr = base64.StdEncoding.EncodeToString(sendMsg.RawBytes)
+		}
 	}
-	if len(entry.RawResponse) > 0 {
-		rawRespStr = base64.StdEncoding.EncodeToString(entry.RawResponse)
+	if recvMsg != nil {
+		statusCode = recvMsg.StatusCode
+		respHeaders = recvMsg.Headers
+		respBody = recvMsg.Body
+		respTruncated = recvMsg.BodyTruncated
+		if len(recvMsg.RawBytes) > 0 {
+			rawRespStr = base64.StdEncoding.EncodeToString(recvMsg.RawBytes)
+		}
 	}
+
+	reqBodyStr, reqEncoding := encodeBody(reqBody)
+	respBodyStr, respEncoding := encodeBody(respBody)
 
 	// Build connection info if present.
 	var connInfo *connInfoResult
-	if entry.ConnInfo != nil {
+	if sess.ConnInfo != nil {
 		connInfo = &connInfoResult{
-			ClientAddr:           entry.ConnInfo.ClientAddr,
-			ServerAddr:           entry.ConnInfo.ServerAddr,
-			TLSVersion:           entry.ConnInfo.TLSVersion,
-			TLSCipher:            entry.ConnInfo.TLSCipher,
-			TLSALPN:              entry.ConnInfo.TLSALPN,
-			TLSServerCertSubject: entry.ConnInfo.TLSServerCertSubject,
+			ClientAddr:           sess.ConnInfo.ClientAddr,
+			ServerAddr:           sess.ConnInfo.ServerAddr,
+			TLSVersion:           sess.ConnInfo.TLSVersion,
+			TLSCipher:            sess.ConnInfo.TLSCipher,
+			TLSALPN:              sess.ConnInfo.TLSALPN,
+			TLSServerCertSubject: sess.ConnInfo.TLSServerCertSubject,
 		}
 	}
 
 	result := &getSessionResult{
-		ID:                    entry.ID,
-		ConnID:                entry.ConnID,
-		Protocol:              entry.Protocol,
-		Method:                entry.Request.Method,
+		ID:                    sess.ID,
+		ConnID:                sess.ConnID,
+		Protocol:              sess.Protocol,
+		Method:                method,
 		URL:                   urlStr,
-		RequestHeaders:        entry.Request.Headers,
-		RequestBody:           reqBody,
+		RequestHeaders:        reqHeaders,
+		RequestBody:           reqBodyStr,
 		RequestBodyEncoding:   reqEncoding,
-		ResponseStatusCode:    entry.Response.StatusCode,
-		ResponseHeaders:       entry.Response.Headers,
-		ResponseBody:          respBody,
+		ResponseStatusCode:    statusCode,
+		ResponseHeaders:       respHeaders,
+		ResponseBody:          respBodyStr,
 		ResponseBodyEncoding:  respEncoding,
-		RequestBodyTruncated:  entry.Request.BodyTruncated,
-		ResponseBodyTruncated: entry.Response.BodyTruncated,
-		Timestamp:             entry.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-		DurationMs:            entry.Duration.Milliseconds(),
-		Tags:                  entry.Tags,
+		RequestBodyTruncated:  reqTruncated,
+		ResponseBodyTruncated: respTruncated,
+		Timestamp:             sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		DurationMs:            sess.Duration.Milliseconds(),
+		Tags:                  sess.Tags,
 		RawRequest:            rawReqStr,
 		RawResponse:           rawRespStr,
 		ConnInfo:              connInfo,
@@ -321,32 +353,46 @@ func (s *Server) handleListSessions(ctx context.Context, _ *gomcp.CallToolReques
 		Offset:     input.Offset,
 	}
 
-	entries, err := s.store.List(ctx, opts)
+	sessionList, err := s.store.ListSessions(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list sessions: %w", err)
 	}
 
-	// Fetch the total count of matching entries (ignoring limit/offset)
+	// Fetch the total count of matching sessions (ignoring limit/offset)
 	// so that AI agents can determine pagination boundaries.
-	total, err := s.store.Count(ctx, opts)
+	total, err := s.store.CountSessions(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count sessions: %w", err)
 	}
 
-	sessions := make([]listSessionsEntry, 0, len(entries))
-	for _, e := range entries {
-		urlStr := ""
-		if e.Request.URL != nil {
-			urlStr = e.Request.URL.String()
+	sessions := make([]listSessionsEntry, 0, len(sessionList))
+	for _, sess := range sessionList {
+		// Fetch first send and receive messages for method/url/status.
+		msgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("get messages for session %s: %w", sess.ID, err)
+		}
+		var method, urlStr string
+		var statusCode int
+		for _, msg := range msgs {
+			if msg.Direction == "send" && method == "" {
+				method = msg.Method
+				if msg.URL != nil {
+					urlStr = msg.URL.String()
+				}
+			}
+			if msg.Direction == "receive" && statusCode == 0 {
+				statusCode = msg.StatusCode
+			}
 		}
 
 		sessions = append(sessions, listSessionsEntry{
-			ID:         e.ID,
-			Protocol:   e.Protocol,
-			Method:     e.Request.Method,
+			ID:         sess.ID,
+			Protocol:   sess.Protocol,
+			Method:     method,
 			URL:        urlStr,
-			StatusCode: e.Response.StatusCode,
-			Timestamp:  e.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			StatusCode: statusCode,
+			Timestamp:  sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		})
 	}
 
@@ -393,7 +439,7 @@ func (s *Server) handleDeleteSession(ctx context.Context, _ *gomcp.CallToolReque
 	}
 
 	if input.DeleteAll {
-		n, err := s.store.DeleteAll(ctx)
+		n, err := s.store.DeleteAllSessions(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete all sessions: %w", err)
 		}
@@ -401,11 +447,11 @@ func (s *Server) handleDeleteSession(ctx context.Context, _ *gomcp.CallToolReque
 	}
 
 	// Verify the session exists before deleting.
-	if _, err := s.store.Get(ctx, input.SessionID); err != nil {
+	if _, err := s.store.GetSession(ctx, input.SessionID); err != nil {
 		return nil, nil, fmt.Errorf("session not found: %s", input.SessionID)
 	}
 
-	if err := s.store.Delete(ctx, input.SessionID); err != nil {
+	if err := s.store.DeleteSession(ctx, input.SessionID); err != nil {
 		return nil, nil, fmt.Errorf("delete session: %w", err)
 	}
 

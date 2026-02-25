@@ -180,7 +180,7 @@ func TestIntegration_TLSPassthrough_RelayWithoutMITM(t *testing.T) {
 
 	// Verify NO session was recorded (passthrough skips session recording).
 	time.Sleep(200 * time.Millisecond)
-	entries, err := store.List(ctx, session.ListOptions{Limit: 10})
+	entries, err := store.ListSessions(ctx, session.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("List sessions: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 
 	// Verify session WAS recorded (non-passthrough gets MITM'd).
 	time.Sleep(200 * time.Millisecond)
-	entries, err := store.List(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	entries, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
 		t.Fatalf("List sessions: %v", err)
 	}
@@ -250,12 +250,19 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 		t.Fatalf("expected 1 HTTPS session (MITM), got %d", len(entries))
 	}
 
-	entry := entries[0]
-	if entry.Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want %q", entry.Protocol, "HTTPS")
+	sess := entries[0]
+	if sess.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
 	}
-	if string(entry.Response.Body) != "mitm-response" {
-		t.Errorf("response body = %q, want %q", entry.Response.Body, "mitm-response")
+	recvMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "receive"})
+	if mErr != nil {
+		t.Fatalf("GetMessages: %v", mErr)
+	}
+	if len(recvMsgs) == 0 {
+		t.Fatal("no receive message found")
+	}
+	if string(recvMsgs[0].Body) != "mitm-response" {
+		t.Errorf("response body = %q, want %q", recvMsgs[0].Body, "mitm-response")
 	}
 }
 
@@ -386,7 +393,7 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	entries, err := store.List(ctx, session.ListOptions{Limit: 10})
+	entries, err := store.ListSessions(ctx, session.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -422,7 +429,7 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Session count should still be 1 (passthrough doesn't record).
-	entries, err = store.List(ctx, session.ListOptions{Limit: 10})
+	entries, err = store.ListSessions(ctx, session.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

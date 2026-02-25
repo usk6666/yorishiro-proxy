@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
@@ -46,76 +47,156 @@ func testLogger() *slog.Logger {
 
 // mockStore is a thread-safe minimal in-memory session store for testing.
 type mockStore struct {
-	mu      sync.Mutex
-	entries []*session.Entry
+	mu       sync.Mutex
+	sessions []*session.Session
+	messages []*session.Message
 }
 
-func (m *mockStore) Save(_ context.Context, entry *session.Entry) error {
+func (m *mockStore) SaveSession(_ context.Context, s *session.Session) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries = append(m.entries, entry)
+	if s.ID == "" {
+		s.ID = uuid.New().String()
+	}
+	m.sessions = append(m.sessions, s)
 	return nil
 }
 
-func (m *mockStore) Get(_ context.Context, id string) (*session.Entry, error) {
+func (m *mockStore) UpdateSession(_ context.Context, id string, update session.SessionUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, e := range m.entries {
-		if e.ID == id {
-			return e, nil
-		}
-	}
-	return nil, fmt.Errorf("not found: %s", id)
-}
-
-func (m *mockStore) List(_ context.Context, _ session.ListOptions) ([]*session.Entry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := make([]*session.Entry, len(m.entries))
-	copy(result, m.entries)
-	return result, nil
-}
-
-func (m *mockStore) Count(_ context.Context, _ session.ListOptions) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.entries), nil
-}
-
-func (m *mockStore) Delete(_ context.Context, id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, e := range m.entries {
-		if e.ID == id {
-			m.entries = append(m.entries[:i], m.entries[i+1:]...)
+	for _, s := range m.sessions {
+		if s.ID == id {
+			if update.State != "" {
+				s.State = update.State
+			}
+			if update.Duration != 0 {
+				s.Duration = update.Duration
+			}
+			if update.Tags != nil {
+				s.Tags = update.Tags
+			}
 			return nil
 		}
 	}
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) DeleteAll(_ context.Context) (int64, error) {
+func (m *mockStore) GetSession(_ context.Context, id string) (*session.Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := int64(len(m.entries))
-	m.entries = nil
+	for _, s := range m.sessions {
+		if s.ID == id {
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("not found: %s", id)
+}
+
+func (m *mockStore) ListSessions(_ context.Context, _ session.ListOptions) ([]*session.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]*session.Session, len(m.sessions))
+	copy(result, m.sessions)
+	return result, nil
+}
+
+func (m *mockStore) CountSessions(_ context.Context, _ session.ListOptions) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sessions), nil
+}
+
+func (m *mockStore) DeleteSession(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, s := range m.sessions {
+		if s.ID == id {
+			m.sessions = append(m.sessions[:i], m.sessions[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("not found: %s", id)
+}
+
+func (m *mockStore) DeleteAllSessions(_ context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := int64(len(m.sessions))
+	m.sessions = nil
+	m.messages = nil
 	return n, nil
 }
 
-func (m *mockStore) DeleteOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (m *mockStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) DeleteExcess(_ context.Context, _ int) (int64, error) {
+func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) Entries() []*session.Entry {
+func (m *mockStore) AppendMessage(_ context.Context, msg *session.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*session.Entry, len(m.entries))
-	copy(result, m.entries)
-	return result
+	m.messages = append(m.messages, msg)
+	return nil
+}
+
+func (m *mockStore) GetMessages(_ context.Context, sessionID string, opts session.MessageListOptions) ([]*session.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []*session.Message
+	for _, msg := range m.messages {
+		if msg.SessionID == sessionID {
+			if opts.Direction != "" && msg.Direction != opts.Direction {
+				continue
+			}
+			result = append(result, msg)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, msg := range m.messages {
+		if msg.SessionID == sessionID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// mockEntry is a convenience view of a recorded session with its send/receive messages.
+type mockEntry struct {
+	Session *session.Session
+	Send    *session.Message
+	Receive *session.Message
+}
+
+// Entries returns a list of mockEntry views for all recorded sessions.
+func (m *mockStore) Entries() []mockEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var entries []mockEntry
+	for _, s := range m.sessions {
+		e := mockEntry{Session: s}
+		for _, msg := range m.messages {
+			if msg.SessionID == s.ID {
+				if msg.Direction == "send" && e.Send == nil {
+					e.Send = msg
+				}
+				if msg.Direction == "receive" && e.Receive == nil {
+					e.Receive = msg
+				}
+			}
+		}
+		entries = append(entries, e)
+	}
+	return entries
 }
 
 // startTestProxy starts a TCP listener that runs the handler and returns
@@ -423,32 +504,38 @@ func TestHandleCONNECT_SessionRecording(t *testing.T) {
 
 	entry := entries[0]
 
-	if entry.Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want %q", entry.Protocol, "HTTPS")
+	if entry.Session.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTPS")
 	}
-	if entry.Request.Method != "POST" {
-		t.Errorf("method = %q, want %q", entry.Request.Method, "POST")
+	if entry.Send == nil {
+		t.Fatal("send message is nil")
 	}
-	if entry.Request.URL == nil {
+	if entry.Send.Method != "POST" {
+		t.Errorf("method = %q, want %q", entry.Send.Method, "POST")
+	}
+	if entry.Send.URL == nil {
 		t.Fatal("request URL is nil")
 	}
-	if entry.Request.URL.Scheme != "https" {
-		t.Errorf("URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+	if entry.Send.URL.Scheme != "https" {
+		t.Errorf("URL scheme = %q, want %q", entry.Send.URL.Scheme, "https")
 	}
-	if entry.Request.URL.Path != "/api/submit" {
-		t.Errorf("URL path = %q, want %q", entry.Request.URL.Path, "/api/submit")
+	if entry.Send.URL.Path != "/api/submit" {
+		t.Errorf("URL path = %q, want %q", entry.Send.URL.Path, "/api/submit")
 	}
-	if string(entry.Request.Body) != reqBody {
-		t.Errorf("request body = %q, want %q", entry.Request.Body, reqBody)
+	if string(entry.Send.Body) != reqBody {
+		t.Errorf("request body = %q, want %q", entry.Send.Body, reqBody)
 	}
-	if entry.Response.StatusCode != gohttp.StatusCreated {
-		t.Errorf("response status = %d, want %d", entry.Response.StatusCode, gohttp.StatusCreated)
+	if entry.Receive == nil {
+		t.Fatal("receive message is nil")
 	}
-	if string(entry.Response.Body) != "response-body" {
-		t.Errorf("response body = %q, want %q", entry.Response.Body, "response-body")
+	if entry.Receive.StatusCode != gohttp.StatusCreated {
+		t.Errorf("response status = %d, want %d", entry.Receive.StatusCode, gohttp.StatusCreated)
 	}
-	if entry.Duration <= 0 {
-		t.Errorf("duration = %v, want positive", entry.Duration)
+	if string(entry.Receive.Body) != "response-body" {
+		t.Errorf("response body = %q, want %q", entry.Receive.Body, "response-body")
+	}
+	if entry.Session.Duration <= 0 {
+		t.Errorf("duration = %v, want positive", entry.Session.Duration)
 	}
 }
 
@@ -513,11 +600,15 @@ func TestHandleCONNECT_KeepAlive(t *testing.T) {
 	}
 	for i, entry := range entries {
 		expectedPath := fmt.Sprintf("/path-%d", i+1)
-		if entry.Request.URL.Path != expectedPath {
-			t.Errorf("entry[%d] path = %q, want %q", i, entry.Request.URL.Path, expectedPath)
+		if entry.Send == nil || entry.Send.URL == nil {
+			t.Errorf("entry[%d] send or URL is nil", i)
+			continue
 		}
-		if entry.Protocol != "HTTPS" {
-			t.Errorf("entry[%d] protocol = %q, want %q", i, entry.Protocol, "HTTPS")
+		if entry.Send.URL.Path != expectedPath {
+			t.Errorf("entry[%d] path = %q, want %q", i, entry.Send.URL.Path, expectedPath)
+		}
+		if entry.Session.Protocol != "HTTPS" {
+			t.Errorf("entry[%d] protocol = %q, want %q", i, entry.Session.Protocol, "HTTPS")
 		}
 	}
 }
@@ -637,8 +728,8 @@ func TestHandleCONNECT_RegularHTTPStillWorks(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 session entry, got %d", len(entries))
 	}
-	if entries[0].Protocol != "HTTP/1.x" {
-		t.Errorf("protocol = %q, want %q", entries[0].Protocol, "HTTP/1.x")
+	if entries[0].Session.Protocol != "HTTP/1.x" {
+		t.Errorf("protocol = %q, want %q", entries[0].Session.Protocol, "HTTP/1.x")
 	}
 }
 
@@ -716,17 +807,23 @@ func TestHandleCONNECT_SessionURLHasHTTPSScheme(t *testing.T) {
 	}
 
 	entry := entries[0]
-	if entry.Request.URL.Scheme != "https" {
-		t.Errorf("URL scheme = %q, want %q", entry.Request.URL.Scheme, "https")
+	if entry.Send == nil {
+		t.Fatal("send message is nil")
 	}
-	if !strings.Contains(entry.Request.URL.Host, "localhost") {
-		t.Errorf("URL host = %q, does not contain %q", entry.Request.URL.Host, "localhost")
+	if entry.Send.URL == nil {
+		t.Fatal("send URL is nil")
 	}
-	if entry.Request.URL.Path != "/check-scheme" {
-		t.Errorf("URL path = %q, want %q", entry.Request.URL.Path, "/check-scheme")
+	if entry.Send.URL.Scheme != "https" {
+		t.Errorf("URL scheme = %q, want %q", entry.Send.URL.Scheme, "https")
 	}
-	if entry.Request.URL.RawQuery != "q=test" {
-		t.Errorf("URL query = %q, want %q", entry.Request.URL.RawQuery, "q=test")
+	if !strings.Contains(entry.Send.URL.Host, "localhost") {
+		t.Errorf("URL host = %q, does not contain %q", entry.Send.URL.Host, "localhost")
+	}
+	if entry.Send.URL.Path != "/check-scheme" {
+		t.Errorf("URL path = %q, want %q", entry.Send.URL.Path, "/check-scheme")
+	}
+	if entry.Send.URL.RawQuery != "q=test" {
+		t.Errorf("URL query = %q, want %q", entry.Send.URL.RawQuery, "q=test")
 	}
 }
 

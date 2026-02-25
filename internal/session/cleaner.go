@@ -50,7 +50,7 @@ func (c *Cleaner) RunOnce(ctx context.Context) (int64, error) {
 	// Delete by age first — this may reduce the count enough to skip excess deletion.
 	if c.config.MaxAge > 0 {
 		cutoff := time.Now().UTC().Add(-c.config.MaxAge)
-		n, err := c.store.DeleteOlderThan(ctx, cutoff)
+		n, err := c.store.DeleteSessionsOlderThan(ctx, cutoff)
 		if err != nil {
 			return total, err
 		}
@@ -62,7 +62,7 @@ func (c *Cleaner) RunOnce(ctx context.Context) (int64, error) {
 
 	// Delete by count.
 	if c.config.MaxSessions > 0 {
-		n, err := c.store.DeleteExcess(ctx, c.config.MaxSessions)
+		n, err := c.store.DeleteExcessSessions(ctx, c.config.MaxSessions)
 		if err != nil {
 			return total, err
 		}

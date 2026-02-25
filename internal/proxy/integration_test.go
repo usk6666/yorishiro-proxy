@@ -118,37 +118,63 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 		t.Errorf("X-Test header = %q, want %q", resp.Header.Get("X-Test"), "upstream")
 	}
 
-	// Wait for session to be persisted.
-	time.Sleep(100 * time.Millisecond)
+	// Poll for session and messages to be persisted.
+	var sessions []*session.Session
+	var send, recv *session.Message
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		sessions, err = store.ListSessions(ctx, session.ListOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("ListSessions: %v", err)
+		}
+		if len(sessions) != 1 {
+			continue
+		}
+		msgs, mErr := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+		if mErr != nil {
+			t.Fatalf("GetMessages: %v", mErr)
+		}
+		for _, m := range msgs {
+			switch m.Direction {
+			case "send":
+				send = m
+			case "receive":
+				recv = m
+			}
+		}
+		if send != nil && recv != nil {
+			break
+		}
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
 
-	// Verify session was recorded in SQLite.
-	entries, err := store.List(ctx, session.ListOptions{Limit: 10})
-	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+	sess := sessions[0]
+	if sess.Protocol != "HTTP/1.x" {
+		t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTP/1.x")
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(entries))
+	if send == nil {
+		t.Fatal("send message not found")
 	}
-
-	entry := entries[0]
-	if entry.Request.Method != "GET" {
-		t.Errorf("session method = %q, want %q", entry.Request.Method, "GET")
+	if recv == nil {
+		t.Fatal("receive message not found")
 	}
-	if entry.Request.URL == nil || entry.Request.URL.Path != "/test-path" {
+	if send.Method != "GET" {
+		t.Errorf("session method = %q, want %q", send.Method, "GET")
+	}
+	if send.URL == nil || send.URL.Path != "/test-path" {
 		path := ""
-		if entry.Request.URL != nil {
-			path = entry.Request.URL.Path
+		if send.URL != nil {
+			path = send.URL.Path
 		}
 		t.Errorf("session URL path = %q, want %q", path, "/test-path")
 	}
-	if entry.Response.StatusCode != 200 {
-		t.Errorf("session status = %d, want %d", entry.Response.StatusCode, 200)
+	if recv.StatusCode != 200 {
+		t.Errorf("session status = %d, want %d", recv.StatusCode, 200)
 	}
-	if string(entry.Response.Body) != "hello from upstream" {
-		t.Errorf("session response body = %q, want %q", entry.Response.Body, "hello from upstream")
-	}
-	if entry.Protocol != "HTTP/1.x" {
-		t.Errorf("session protocol = %q, want %q", entry.Protocol, "HTTP/1.x")
+	if string(recv.Body) != "hello from upstream" {
+		t.Errorf("session response body = %q, want %q", recv.Body, "hello from upstream")
 	}
 }
 
@@ -567,15 +593,22 @@ func TestIntegration_HTTPForwardProxy_POST(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	entries, err := store.List(ctx, session.ListOptions{Method: "POST"})
+	sessions, err := store.ListSessions(ctx, session.ListOptions{Method: "POST"})
 	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 POST session, got %d", len(entries))
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 POST session, got %d", len(sessions))
 	}
-	if entries[0].Response.StatusCode != 201 {
-		t.Errorf("session status = %d, want %d", entries[0].Response.StatusCode, 201)
+	recvMsgs, err := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{Direction: "receive"})
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(recvMsgs) == 0 {
+		t.Fatal("no receive message found")
+	}
+	if recvMsgs[0].StatusCode != 201 {
+		t.Errorf("session status = %d, want %d", recvMsgs[0].StatusCode, 201)
 	}
 }
 
@@ -710,61 +743,82 @@ func TestIntegration_LargeBodyBoundary_HTTP(t *testing.T) {
 				t.Error("response body content differs from request body (transfer corruption)")
 			}
 
-			// Poll for session to be persisted (large bodies may take longer to save).
-			var entries []*session.Entry
+			// Poll for session and messages to be persisted (large bodies may take longer to save).
+			var sessions []*session.Session
+			var send, recv *session.Message
 			for i := 0; i < 50; i++ {
 				time.Sleep(100 * time.Millisecond)
-				entries, err = store.List(ctx, session.ListOptions{Limit: 10})
+				sessions, err = store.ListSessions(ctx, session.ListOptions{Limit: 10})
 				if err != nil {
-					t.Fatalf("List sessions: %v", err)
+					t.Fatalf("ListSessions: %v", err)
 				}
-				if len(entries) == 1 {
+				if len(sessions) != 1 {
+					continue
+				}
+				msgs, err := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+				if err != nil {
+					t.Fatalf("GetMessages: %v", err)
+				}
+				for _, m := range msgs {
+					switch m.Direction {
+					case "send":
+						send = m
+					case "receive":
+						recv = m
+					}
+				}
+				if send != nil && recv != nil {
 					break
 				}
 			}
-			if len(entries) != 1 {
-				t.Fatalf("expected 1 session, got %d", len(entries))
+			if len(sessions) != 1 {
+				t.Fatalf("expected 1 session, got %d", len(sessions))
 			}
-
-			entry := entries[0]
+			sess := sessions[0]
+			if send == nil {
+				t.Fatal("send message not found")
+			}
+			if recv == nil {
+				t.Fatal("receive message not found")
+			}
 
 			// Verify request body recording.
-			if len(entry.Request.Body) != tt.wantRecordedReqLen {
-				t.Errorf("recorded request body length = %d, want %d", len(entry.Request.Body), tt.wantRecordedReqLen)
+			if len(send.Body) != tt.wantRecordedReqLen {
+				t.Errorf("recorded request body length = %d, want %d", len(send.Body), tt.wantRecordedReqLen)
 			}
-			if entry.Request.BodyTruncated != tt.wantReqTruncated {
-				t.Errorf("request BodyTruncated = %v, want %v", entry.Request.BodyTruncated, tt.wantReqTruncated)
+			if send.BodyTruncated != tt.wantReqTruncated {
+				t.Errorf("request BodyTruncated = %v, want %v", send.BodyTruncated, tt.wantReqTruncated)
 			}
 
 			// Verify response body recording.
-			if len(entry.Response.Body) != tt.wantRecordedRespLen {
-				t.Errorf("recorded response body length = %d, want %d", len(entry.Response.Body), tt.wantRecordedRespLen)
+			if len(recv.Body) != tt.wantRecordedRespLen {
+				t.Errorf("recorded response body length = %d, want %d", len(recv.Body), tt.wantRecordedRespLen)
 			}
-			if entry.Response.BodyTruncated != tt.wantRespTruncated {
-				t.Errorf("response BodyTruncated = %v, want %v", entry.Response.BodyTruncated, tt.wantRespTruncated)
+			if recv.BodyTruncated != tt.wantRespTruncated {
+				t.Errorf("response BodyTruncated = %v, want %v", recv.BodyTruncated, tt.wantRespTruncated)
 			}
 
 			// When truncated, verify the recorded body is the prefix of the original.
 			if tt.wantReqTruncated && tt.bodySize > 0 {
-				if !bytes.Equal(entry.Request.Body, reqBody[:maxBodyRecordSize]) {
+				if !bytes.Equal(send.Body, reqBody[:maxBodyRecordSize]) {
 					t.Error("truncated request body is not a prefix of the original body")
 				}
 			}
 			if tt.wantRespTruncated && tt.bodySize > 0 {
-				if !bytes.Equal(entry.Response.Body, reqBody[:maxBodyRecordSize]) {
+				if !bytes.Equal(recv.Body, reqBody[:maxBodyRecordSize]) {
 					t.Error("truncated response body is not a prefix of the original body")
 				}
 			}
 
 			// Verify metadata.
-			if entry.Protocol != "HTTP/1.x" {
-				t.Errorf("protocol = %q, want %q", entry.Protocol, "HTTP/1.x")
+			if sess.Protocol != "HTTP/1.x" {
+				t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTP/1.x")
 			}
-			if entry.Request.Method != "POST" {
-				t.Errorf("method = %q, want %q", entry.Request.Method, "POST")
+			if send.Method != "POST" {
+				t.Errorf("method = %q, want %q", send.Method, "POST")
 			}
-			if entry.Response.StatusCode != 200 {
-				t.Errorf("status code = %d, want %d", entry.Response.StatusCode, 200)
+			if recv.StatusCode != 200 {
+				t.Errorf("status code = %d, want %d", recv.StatusCode, 200)
 			}
 		})
 	}
@@ -843,67 +897,107 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 
 	wg.Wait()
 
-	// Wait for all sessions to be persisted.
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify all sessions were recorded.
-	entries, err := store.List(ctx, session.ListOptions{Limit: numClients + 10})
-	if err != nil {
-		t.Fatalf("List sessions: %v", err)
+	// Poll for all sessions and their messages to be persisted.
+	var sessions []*session.Session
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		sessions, err = store.ListSessions(ctx, session.ListOptions{Limit: numClients + 10})
+		if err != nil {
+			t.Fatalf("ListSessions: %v", err)
+		}
+		if len(sessions) < numClients {
+			continue
+		}
+		// Also verify all sessions have messages.
+		allHaveMessages := true
+		for _, s := range sessions {
+			mc, cErr := store.CountMessages(ctx, s.ID)
+			if cErr != nil {
+				t.Fatalf("CountMessages: %v", cErr)
+			}
+			if mc < 2 {
+				allHaveMessages = false
+				break
+			}
+		}
+		if allHaveMessages {
+			break
+		}
 	}
-	if len(entries) != numClients {
-		t.Fatalf("expected %d sessions, got %d", numClients, len(entries))
+	if len(sessions) != numClients {
+		t.Fatalf("expected %d sessions, got %d", numClients, len(sessions))
 	}
 
 	// Verify each client's session is distinct and data is not mixed.
 	seenPaths := make(map[string]bool)
 	seenBodies := make(map[string]bool)
-	for _, entry := range entries {
-		if entry.Protocol != "HTTP/1.x" {
-			t.Errorf("session protocol = %q, want %q", entry.Protocol, "HTTP/1.x")
+	for _, sess := range sessions {
+		if sess.Protocol != "HTTP/1.x" {
+			t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTP/1.x")
 		}
-		if entry.Request.Method != "POST" {
-			t.Errorf("session method = %q, want %q", entry.Request.Method, "POST")
+
+		msgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+		if mErr != nil {
+			t.Fatalf("GetMessages: %v", mErr)
 		}
-		if entry.Request.URL == nil {
+		var send, recv *session.Message
+		for _, m := range msgs {
+			switch m.Direction {
+			case "send":
+				send = m
+			case "receive":
+				recv = m
+			}
+		}
+		if send == nil {
+			t.Error("send message not found")
+			continue
+		}
+		if recv == nil {
+			t.Error("receive message not found")
+			continue
+		}
+
+		if send.Method != "POST" {
+			t.Errorf("session method = %q, want %q", send.Method, "POST")
+		}
+		if send.URL == nil {
 			t.Error("request URL is nil")
 			continue
 		}
 
-		path := entry.Request.URL.Path
+		path := send.URL.Path
 		seenPaths[path] = true
 
 		// Verify request body matches the path (no cross-contamination).
-		// Path is /concurrent/<id>, body is {"client":<id>}.
-		// Extract the ID from the path and verify it matches the body.
 		var pathID int
 		if _, err := fmt.Sscanf(path, "/concurrent/%d", &pathID); err != nil {
 			t.Errorf("unexpected path format: %q", path)
 			continue
 		}
 		expectedReqBody := fmt.Sprintf(`{"client":%d}`, pathID)
-		if string(entry.Request.Body) != expectedReqBody {
+		if string(send.Body) != expectedReqBody {
 			t.Errorf("session path %s: request body = %q, want %q (data mixed between sessions)",
-				path, entry.Request.Body, expectedReqBody)
+				path, send.Body, expectedReqBody)
 		}
 
 		// Verify response body matches.
 		expectedRespBody := fmt.Sprintf("echo:%s:%s", path, expectedReqBody)
-		if string(entry.Response.Body) != expectedRespBody {
+		if string(recv.Body) != expectedRespBody {
 			t.Errorf("session path %s: response body = %q, want %q (data mixed between sessions)",
-				path, entry.Response.Body, expectedRespBody)
+				path, recv.Body, expectedRespBody)
 		}
 
-		seenBodies[string(entry.Request.Body)] = true
+		seenBodies[string(send.Body)] = true
 
-		if entry.Response.StatusCode != 200 {
-			t.Errorf("session path %s: status = %d, want %d", path, entry.Response.StatusCode, 200)
+		if recv.StatusCode != 200 {
+			t.Errorf("session path %s: status = %d, want %d", path, recv.StatusCode, 200)
 		}
-		if entry.ID == "" {
+		if sess.ID == "" {
 			t.Errorf("session path %s: ID is empty", path)
 		}
-		if entry.Duration < 0 {
-			t.Errorf("session path %s: duration = %v, want non-negative", path, entry.Duration)
+		if sess.Duration < 0 {
+			t.Errorf("session path %s: duration = %v, want non-negative", path, sess.Duration)
 		}
 	}
 
@@ -921,44 +1015,60 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 
 // --- Error Recovery Integration Tests ---
 
-// failingStore is a session.Store that always returns an error from Save.
+// failingStore is a session.Store that always returns an error from SaveSession.
 // It is used to verify that the proxy continues forwarding traffic even when
 // session persistence fails (USK-36 fix).
 type failingStore struct {
 	saveCallCount atomic.Int64
 }
 
-func (s *failingStore) Save(_ context.Context, _ *session.Entry) error {
+func (s *failingStore) SaveSession(_ context.Context, _ *session.Session) error {
 	s.saveCallCount.Add(1)
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) Get(_ context.Context, _ string) (*session.Entry, error) {
-	return nil, errors.New("simulated DB read failure")
-}
-
-func (s *failingStore) List(_ context.Context, _ session.ListOptions) ([]*session.Entry, error) {
-	return nil, errors.New("simulated DB read failure")
-}
-
-func (s *failingStore) Count(_ context.Context, _ session.ListOptions) (int, error) {
-	return 0, errors.New("simulated DB read failure")
-}
-
-func (s *failingStore) Delete(_ context.Context, _ string) error {
+func (s *failingStore) UpdateSession(_ context.Context, _ string, _ session.SessionUpdate) error {
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteAll(_ context.Context) (int64, error) {
+func (s *failingStore) GetSession(_ context.Context, _ string) (*session.Session, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) ListSessions(_ context.Context, _ session.ListOptions) ([]*session.Session, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) CountSessions(_ context.Context, _ session.ListOptions) (int, error) {
+	return 0, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) DeleteSession(_ context.Context, _ string) error {
+	return errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) DeleteAllSessions(_ context.Context) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (s *failingStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteExcess(_ context.Context, _ int) (int64, error) {
+func (s *failingStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) AppendMessage(_ context.Context, _ *session.Message) error {
+	return errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) GetMessages(_ context.Context, _ string, _ session.MessageListOptions) ([]*session.Message, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) CountMessages(_ context.Context, _ string) (int, error) {
+	return 0, errors.New("simulated DB read failure")
 }
 
 func TestIntegration_ProxyContinuesOnSessionSaveFailure(t *testing.T) {
@@ -1012,15 +1122,15 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure(t *testing.T) {
 		t.Errorf("X-Test header = %q, want %q", resp.Header.Get("X-Test"), "ok")
 	}
 
-	// Verify that Save was actually called (and failed).
+	// Verify that SaveSession was actually called (and failed).
 	if store.saveCallCount.Load() == 0 {
-		t.Error("expected Save to be called at least once, but it was not")
+		t.Error("expected SaveSession to be called at least once, but it was not")
 	}
 }
 
 func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *testing.T) {
 	// Verifies that multiple sequential requests through the same proxy continue
-	// to work even when every Save call fails. This tests the keep-alive
+	// to work even when every SaveSession call fails. This tests the keep-alive
 	// connection behavior under persistent save failures.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1067,11 +1177,11 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *test
 		}
 	}
 
-	// All Save calls should have been attempted (and failed).
+	// All SaveSession calls should have been attempted (and failed).
 	// Because the HTTP handler writes the response to the client before calling
-	// store.Save(), the last Save may still be in-flight when the final
-	// client.Get() returns. Poll with a bounded deadline instead of asserting
-	// immediately.
+	// store.SaveSession(), the last SaveSession may still be in-flight when the
+	// final client.Get() returns. Poll with a bounded deadline instead of
+	// asserting immediately.
 	deadline := time.After(5 * time.Second)
 	for {
 		if got := store.saveCallCount.Load(); got >= int64(numRequests) {
@@ -1079,7 +1189,7 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *test
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for Save call count to reach %d (got %d)", numRequests, store.saveCallCount.Load())
+			t.Fatalf("timed out waiting for SaveSession call count to reach %d (got %d)", numRequests, store.saveCallCount.Load())
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

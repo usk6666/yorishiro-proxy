@@ -351,36 +351,53 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	duration := time.Since(start)
 
-	// Record session.
-	entry := &session.Entry{
-		ConnID:      connID,
-		Protocol:    "HTTP/1.x",
-		Timestamp:   start,
-		Duration:    duration,
-		RawRequest:  rawRequest,
-		RawResponse: rawResponse,
-		ConnInfo: &session.ConnectionInfo{
-			ClientAddr: clientAddr,
-			ServerAddr: serverAddr,
-		},
-		Request: session.RecordedRequest{
-			Method:        req.Method,
-			URL:           req.URL,
-			Headers:       req.Header,
-			Body:          recordReqBody,
-			BodyTruncated: reqTruncated,
-		},
-		Response: session.RecordedResponse{
-			StatusCode:    resp.StatusCode,
-			Headers:       resp.Header,
-			Body:          recordRespBody,
-			BodyTruncated: respTruncated,
-		},
-		Tags: smugglingTags(smuggling),
-	}
+	// Record session + messages.
 	if h.store != nil && h.shouldCapture(req.Method, req.URL) {
-		if err := h.store.Save(ctx, entry); err != nil {
+		sess := &session.Session{
+			ConnID:      connID,
+			Protocol:    "HTTP/1.x",
+			SessionType: "unary",
+			State:       "complete",
+			Timestamp:   start,
+			Duration:    duration,
+			Tags:        smugglingTags(smuggling),
+			ConnInfo: &session.ConnectionInfo{
+				ClientAddr: clientAddr,
+				ServerAddr: serverAddr,
+			},
+		}
+		if err := h.store.SaveSession(ctx, sess); err != nil {
 			logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		} else {
+			sendMsg := &session.Message{
+				SessionID:     sess.ID,
+				Sequence:      0,
+				Direction:     "send",
+				Timestamp:     start,
+				Method:        req.Method,
+				URL:           req.URL,
+				Headers:       req.Header,
+				Body:          recordReqBody,
+				RawBytes:      rawRequest,
+				BodyTruncated: reqTruncated,
+			}
+			if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+				logger.Error("send message save failed", "error", err)
+			}
+			recvMsg := &session.Message{
+				SessionID:     sess.ID,
+				Sequence:      1,
+				Direction:     "receive",
+				Timestamp:     start.Add(duration),
+				StatusCode:    resp.StatusCode,
+				Headers:       resp.Header,
+				Body:          recordRespBody,
+				RawBytes:      rawResponse,
+				BodyTruncated: respTruncated,
+			}
+			if err := h.store.AppendMessage(ctx, recvMsg); err != nil {
+				logger.Error("receive message save failed", "error", err)
+			}
 		}
 	}
 

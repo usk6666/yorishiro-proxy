@@ -29,422 +29,6 @@ func newTestStore(t *testing.T) *SQLiteStore {
 	return store
 }
 
-func TestSQLiteStore_SaveAndGet(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	u, _ := url.Parse("http://example.com/path")
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  150 * time.Millisecond,
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}},
-			Body:    nil,
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{"Content-Type": {"text/html"}},
-			Body:       []byte("<html>ok</html>"),
-		},
-	}
-
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if entry.ID == "" {
-		t.Fatal("Save did not assign ID")
-	}
-
-	got, err := store.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if got.Request.Method != "GET" {
-		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
-	}
-	if got.Request.URL.String() != "http://example.com/path" {
-		t.Errorf("URL = %q, want %q", got.Request.URL.String(), "http://example.com/path")
-	}
-	if got.Response.StatusCode != 200 {
-		t.Errorf("StatusCode = %d, want %d", got.Response.StatusCode, 200)
-	}
-	if string(got.Response.Body) != "<html>ok</html>" {
-		t.Errorf("Body = %q, want %q", got.Response.Body, "<html>ok</html>")
-	}
-	if got.Request.Headers["Host"][0] != "example.com" {
-		t.Errorf("Host header = %q, want %q", got.Request.Headers["Host"][0], "example.com")
-	}
-}
-
-func TestSQLiteStore_List_Filters(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	entries := []*Entry{
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
-			Response:  RecordedResponse{StatusCode: 201},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://other.com/c")},
-			Response:  RecordedResponse{StatusCode: 404},
-		},
-	}
-
-	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	tests := []struct {
-		name    string
-		opts    ListOptions
-		wantLen int
-	}{
-		{"all", ListOptions{}, 3},
-		{"method GET", ListOptions{Method: "GET"}, 2},
-		{"method POST", ListOptions{Method: "POST"}, 1},
-		{"URL pattern example", ListOptions{URLPattern: "example.com"}, 2},
-		{"status 404", ListOptions{StatusCode: 404}, 1},
-		{"limit 1", ListOptions{Limit: 1}, 1},
-		{"combined", ListOptions{Method: "GET", StatusCode: 200}, 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := store.List(ctx, tt.opts)
-			if err != nil {
-				t.Fatalf("List: %v", err)
-			}
-			if len(got) != tt.wantLen {
-				t.Errorf("got %d entries, want %d", len(got), tt.wantLen)
-			}
-		})
-	}
-}
-
-func TestSQLiteStore_Delete(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/del")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	if err := store.Delete(ctx, entry.ID); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-
-	_, err := store.Get(ctx, entry.ID)
-	if err == nil {
-		t.Fatal("expected error after delete, got nil")
-	}
-}
-
-func TestSQLiteStore_DeleteAll(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	// Insert multiple entries.
-	entries := []*Entry{
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
-			Response:  RecordedResponse{StatusCode: 201},
-		},
-		{
-			Protocol:  "HTTPS",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("https://example.com/c")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-	}
-	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	// Verify entries exist.
-	all, err := store.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(all) != 3 {
-		t.Fatalf("expected 3 entries before DeleteAll, got %d", len(all))
-	}
-
-	// Delete all.
-	n, err := store.DeleteAll(ctx)
-	if err != nil {
-		t.Fatalf("DeleteAll: %v", err)
-	}
-	if n != 3 {
-		t.Errorf("DeleteAll returned %d, want 3", n)
-	}
-
-	// Verify all deleted.
-	all, err = store.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List after DeleteAll: %v", err)
-	}
-	if len(all) != 0 {
-		t.Errorf("expected 0 entries after DeleteAll, got %d", len(all))
-	}
-}
-
-func TestSQLiteStore_DeleteAll_Empty(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	// Delete all on empty store should return 0.
-	n, err := store.DeleteAll(ctx)
-	if err != nil {
-		t.Fatalf("DeleteAll: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("DeleteAll on empty store returned %d, want 0", n)
-	}
-}
-
-func TestMigrate_FreshDatabase(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "fresh.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	if err := migrate(ctx, db); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	var version int
-	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
-		t.Fatalf("query version: %v", err)
-	}
-	want := latestVersion()
-	if version != want {
-		t.Errorf("version = %d, want %d", version, want)
-	}
-
-	_, err = db.ExecContext(ctx,
-		`INSERT INTO sessions (id, protocol, method, url, request_headers, request_body, response_status, response_headers, response_body, timestamp, duration_ms)
-		 VALUES ('test-id', 'HTTP/1.x', 'GET', 'http://example.com', '{}', NULL, 200, '{}', NULL, '2025-01-01T00:00:00Z', 100)`)
-	if err != nil {
-		t.Fatalf("insert into sessions: %v", err)
-	}
-}
-
-func TestMigrate_Idempotent(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "idempotent.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	if err := migrate(ctx, db); err != nil {
-		t.Fatalf("first migrate: %v", err)
-	}
-	if err := migrate(ctx, db); err != nil {
-		t.Fatalf("second migrate: %v", err)
-	}
-
-	var version int
-	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
-		t.Fatalf("query version: %v", err)
-	}
-	want := latestVersion()
-	if version != want {
-		t.Errorf("version = %d, want %d", version, want)
-	}
-}
-
-func TestMigrate_FutureVersionError(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "future.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
-		t.Fatalf("bootstrap: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (999)"); err != nil {
-		t.Fatalf("insert version: %v", err)
-	}
-
-	err = migrate(ctx, db)
-	if err == nil {
-		t.Fatal("expected error for future version, got nil")
-	}
-	if !strings.Contains(err.Error(), "newer than latest") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestMigrate_V3_CreatesIndexes(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "indexes.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	if err := migrate(ctx, db); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	// Query SQLite for index names on the sessions table.
-	rows, err := db.QueryContext(ctx, "SELECT name FROM pragma_index_list('sessions')")
-	if err != nil {
-		t.Fatalf("query index list: %v", err)
-	}
-	defer rows.Close()
-
-	indexes := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan index name: %v", err)
-		}
-		indexes[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows iteration: %v", err)
-	}
-
-	wantIndexes := []string{
-		"idx_sessions_protocol",
-		"idx_sessions_timestamp",
-		"idx_sessions_method",
-		"idx_sessions_url",
-		"idx_sessions_response_status",
-		"idx_sessions_conn_id",
-	}
-	for _, idx := range wantIndexes {
-		if !indexes[idx] {
-			t.Errorf("expected index %q to exist, but it was not found", idx)
-		}
-	}
-}
-
-func TestMigrate_UpgradeFromV1_CreatesV3Indexes(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "upgrade.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-
-	// Simulate a database at v1 by running bootstrap + v1 migration manually.
-	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
-		t.Fatalf("bootstrap: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, schemaV1); err != nil {
-		t.Fatalf("apply v1: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (1)"); err != nil {
-		t.Fatalf("insert version: %v", err)
-	}
-
-	// Run migrate — should apply all pending migrations (v2, v3, v4).
-	if err := migrate(ctx, db); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	var version int
-	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_version").Scan(&version); err != nil {
-		t.Fatalf("query version: %v", err)
-	}
-	if version != latestVersion() {
-		t.Errorf("version = %d, want %d", version, latestVersion())
-	}
-
-	// Verify v3 indexes exist.
-	rows, err := db.QueryContext(ctx, "SELECT name FROM pragma_index_list('sessions')")
-	if err != nil {
-		t.Fatalf("query index list: %v", err)
-	}
-	defer rows.Close()
-
-	indexes := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan index name: %v", err)
-		}
-		indexes[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows iteration: %v", err)
-	}
-
-	for _, idx := range []string{"idx_sessions_protocol", "idx_sessions_timestamp", "idx_sessions_conn_id"} {
-		if !indexes[idx] {
-			t.Errorf("expected index %q to exist after upgrade, but it was not found", idx)
-		}
-	}
-}
-
-func TestGetCurrentVersion_EmptyTable(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "empty-version.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
-		t.Fatalf("bootstrap: %v", err)
-	}
-
-	version, err := getCurrentVersion(ctx, db)
-	if err != nil {
-		t.Fatalf("getCurrentVersion: %v", err)
-	}
-	if version != 0 {
-		t.Errorf("version = %d, want 0", version)
-	}
-}
-
 func mustParseURL(raw string) *url.URL {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -453,1705 +37,667 @@ func mustParseURL(raw string) *url.URL {
 	return u
 }
 
-func TestSQLiteStore_Save_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	// Cancel the context before calling Save.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/cancelled")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-
-	err := store.Save(ctx, entry)
-	if err == nil {
-		t.Fatal("expected error from Save with cancelled context, got nil")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got %v", err)
-	}
-}
-
-func TestSQLiteStore_Close_CompletesWithPendingWrites(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	// Write some entries before closing.
+// saveTestSession saves a session with one send and one receive message.
+func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.Time, method string, reqURL string, statusCode int, reqBody, respBody []byte) *Session {
+	t.Helper()
 	ctx := context.Background()
-	for i := 0; i < 10; i++ {
-		entry := &Entry{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/close-test")},
-			Response:  RecordedResponse{StatusCode: 200},
-		}
-		if err := store.Save(ctx, entry); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
+
+	sess := &Session{
+		Protocol:    protocol,
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   ts,
+		Duration:    100 * time.Millisecond,
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
 	}
 
-	// Close should complete within a bounded time.
-	done := make(chan error, 1)
-	go func() {
-		done <- store.Close()
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Close did not complete within 10 seconds")
+	sendMsg := &Message{
+		SessionID: sess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: ts,
+		Method:    method,
+		URL:       mustParseURL(reqURL),
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      reqBody,
 	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	recvMsg := &Message{
+		SessionID:  sess.ID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  ts.Add(100 * time.Millisecond),
+		StatusCode: statusCode,
+		Headers:    map[string][]string{"Content-Type": {"text/html"}},
+		Body:       respBody,
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage(receive): %v", err)
+	}
+
+	return sess
 }
 
-func TestSQLiteStore_Save_ContextPropagation(t *testing.T) {
-	store := newTestStore(t)
-
-	// Use a context with a short timeout to verify it propagates through writeOp.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/ctx-prop")},
-		Response:  RecordedResponse{StatusCode: 201},
-	}
-
-	// Save should succeed with a valid context.
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save with valid context: %v", err)
-	}
-
-	// Verify the entry was actually written.
-	got, err := store.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.Request.Method != "POST" {
-		t.Errorf("Method = %q, want %q", got.Request.Method, "POST")
-	}
-}
-
-func TestSQLiteStore_Count(t *testing.T) {
+func TestSQLiteStore_SaveAndGetSession(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	entries := []*Entry{
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
-			Response:  RecordedResponse{StatusCode: 201},
-		},
-		{
-			Protocol:  "HTTPS",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("https://example.com/c")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://other.com/d")},
-			Response:  RecordedResponse{StatusCode: 404},
-		},
+	sess := &Session{
+		Protocol:    "HTTP/1.x",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   time.Now().UTC(),
+		Duration:    150 * time.Millisecond,
 	}
 
-	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if sess.ID == "" {
+		t.Fatal("SaveSession did not assign ID")
 	}
 
-	tests := []struct {
-		name      string
-		opts      ListOptions
-		wantCount int
-	}{
-		{"all", ListOptions{}, 4},
-		{"method GET", ListOptions{Method: "GET"}, 3},
-		{"method POST", ListOptions{Method: "POST"}, 1},
-		{"protocol HTTPS", ListOptions{Protocol: "HTTPS"}, 1},
-		{"URL pattern example.com", ListOptions{URLPattern: "example.com"}, 3},
-		{"status 404", ListOptions{StatusCode: 404}, 1},
-		{"status 200", ListOptions{StatusCode: 200}, 2},
-		{"combined GET+200", ListOptions{Method: "GET", StatusCode: 200}, 2},
-		{"no match", ListOptions{Method: "DELETE"}, 0},
-		{"limit ignored", ListOptions{Method: "GET", Limit: 1}, 3},
-		{"offset ignored", ListOptions{Method: "GET", Offset: 2}, 3},
-		{"limit and offset ignored", ListOptions{Limit: 1, Offset: 1}, 4},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := store.Count(ctx, tt.opts)
-			if err != nil {
-				t.Fatalf("Count: %v", err)
-			}
-			if got != tt.wantCount {
-				t.Errorf("got %d, want %d", got, tt.wantCount)
-			}
-		})
-	}
-}
-
-func TestSQLiteStore_Count_Empty(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	count, err := store.Count(ctx, ListOptions{})
+	got, err := store.GetSession(ctx, sess.ID)
 	if err != nil {
-		t.Fatalf("Count: %v", err)
+		t.Fatalf("GetSession: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("got %d, want 0", count)
-	}
-}
-
-func TestSQLiteStore_List_LIKEWildcardEscape(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	// Insert entries with special LIKE characters in URLs.
-	entries := []*Entry{
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/100%25off")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/user_name")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/username")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/normal")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-	}
-
-	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	tests := []struct {
-		name       string
-		urlPattern string
-		wantLen    int
-	}{
-		{
-			name:       "literal percent sign matches only URLs containing %25",
-			urlPattern: "%25",
-			wantLen:    1,
-		},
-		{
-			name:       "literal underscore matches only URLs containing _",
-			urlPattern: "user_name",
-			wantLen:    1,
-		},
-		{
-			name:       "plain substring still works",
-			urlPattern: "example.com",
-			wantLen:    4,
-		},
-		{
-			name:       "no match",
-			urlPattern: "nonexistent",
-			wantLen:    0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := store.List(ctx, ListOptions{URLPattern: tt.urlPattern})
-			if err != nil {
-				t.Fatalf("List: %v", err)
-			}
-			if len(got) != tt.wantLen {
-				t.Errorf("got %d entries, want %d", len(got), tt.wantLen)
-			}
-		})
-	}
-}
-
-func TestSQLiteStore_DeleteOlderThan(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	now := time.Now().UTC()
-	entries := []*Entry{
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: now.Add(-48 * time.Hour), // 2 days ago
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/old1")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: now.Add(-24 * time.Hour), // 1 day ago
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/old2")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: now.Add(-1 * time.Hour), // 1 hour ago
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/recent")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-	}
-
-	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	// Delete entries older than 12 hours.
-	cutoff := now.Add(-12 * time.Hour)
-	n, err := store.DeleteOlderThan(ctx, cutoff)
-	if err != nil {
-		t.Fatalf("DeleteOlderThan: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("DeleteOlderThan returned %d, want 2", n)
-	}
-
-	// Verify only the recent entry remains.
-	remaining, err := store.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(remaining) != 1 {
-		t.Fatalf("expected 1 remaining entry, got %d", len(remaining))
-	}
-	if remaining[0].Request.URL.Path != "/recent" {
-		t.Errorf("remaining URL = %q, want /recent", remaining[0].Request.URL.Path)
-	}
-}
-
-func TestSQLiteStore_DeleteOlderThan_NoMatches(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now().UTC(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/new")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	// Cutoff in the past — nothing should be deleted.
-	cutoff := time.Now().UTC().Add(-24 * time.Hour)
-	n, err := store.DeleteOlderThan(ctx, cutoff)
-	if err != nil {
-		t.Fatalf("DeleteOlderThan: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("DeleteOlderThan returned %d, want 0", n)
-	}
-}
-
-func TestSQLiteStore_DeleteExcess(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	now := time.Now().UTC()
-	for i := 0; i < 10; i++ {
-		entry := &Entry{
-			Protocol:  "HTTP/1.x",
-			Timestamp: now.Add(time.Duration(i) * time.Second),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL(fmt.Sprintf("http://example.com/%d", i))},
-			Response:  RecordedResponse{StatusCode: 200},
-		}
-		if err := store.Save(ctx, entry); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	// Keep only 5 most recent.
-	n, err := store.DeleteExcess(ctx, 5)
-	if err != nil {
-		t.Fatalf("DeleteExcess: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("DeleteExcess returned %d, want 5", n)
-	}
-
-	// Verify 5 remain.
-	remaining, err := store.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(remaining) != 5 {
-		t.Fatalf("expected 5 remaining entries, got %d", len(remaining))
-	}
-
-	// Verify the remaining entries are the most recent (timestamps 5-9).
-	for _, e := range remaining {
-		path := e.Request.URL.Path
-		if path == "/0" || path == "/1" || path == "/2" || path == "/3" || path == "/4" {
-			t.Errorf("old entry %s should have been deleted", path)
-		}
-	}
-}
-
-func TestSQLiteStore_DeleteExcess_NoExcess(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	for i := 0; i < 3; i++ {
-		entry := &Entry{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now().UTC().Add(time.Duration(i) * time.Second),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL(fmt.Sprintf("http://example.com/%d", i))},
-			Response:  RecordedResponse{StatusCode: 200},
-		}
-		if err := store.Save(ctx, entry); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	// maxCount >= current count — nothing deleted.
-	n, err := store.DeleteExcess(ctx, 5)
-	if err != nil {
-		t.Fatalf("DeleteExcess: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("DeleteExcess returned %d, want 0", n)
-	}
-}
-
-func TestSQLiteStore_ConnID_RoundTrip(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	entry := &Entry{
-		ConnID:    "abcd1234",
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  50 * time.Millisecond,
-		Request: RecordedRequest{
-			Method: "GET",
-			URL:    mustParseURL("http://example.com/connid"),
-		},
-		Response: RecordedResponse{StatusCode: 200},
-	}
-
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := store.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if got.ConnID != "abcd1234" {
-		t.Errorf("ConnID = %q, want %q", got.ConnID, "abcd1234")
-	}
-}
-
-func TestSQLiteStore_ConnID_EmptyDefault(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	// Save an entry without ConnID — should default to empty string.
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request: RecordedRequest{
-			Method: "GET",
-			URL:    mustParseURL("http://example.com/no-connid"),
-		},
-		Response: RecordedResponse{StatusCode: 200},
-	}
-
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := store.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if got.ConnID != "" {
-		t.Errorf("ConnID = %q, want empty string", got.ConnID)
-	}
-}
-
-func TestSQLiteStore_ConnID_InList(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	entries := []*Entry{
-		{
-			ConnID:    "conn0001",
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			ConnID:    "conn0001",
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/b")},
-			Response:  RecordedResponse{StatusCode: 201},
-		},
-		{
-			ConnID:    "conn0002",
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Now(),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/c")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-	}
-
-	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	got, err := store.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-
-	connIDCounts := make(map[string]int)
-	for _, e := range got {
-		connIDCounts[e.ConnID]++
-	}
-
-	if connIDCounts["conn0001"] != 2 {
-		t.Errorf("conn0001 count = %d, want 2", connIDCounts["conn0001"])
-	}
-	if connIDCounts["conn0002"] != 1 {
-		t.Errorf("conn0002 count = %d, want 1", connIDCounts["conn0002"])
-	}
-}
-
-func TestSQLiteStore_DeleteExcess_InvalidMaxCount(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	_, err := store.DeleteExcess(ctx, 0)
-	if err == nil {
-		t.Fatal("expected error for maxCount=0, got nil")
-	}
-
-	_, err = store.DeleteExcess(ctx, -1)
-	if err == nil {
-		t.Fatal("expected error for maxCount=-1, got nil")
-	}
-}
-
-// --- Error Recovery Tests ---
-
-func TestSQLiteStore_Save_AfterClose(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	// Close the store first.
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Save after Close should not panic. It should either return an error
-	// or block until the context is cancelled.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/after-close")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-
-	err = store.Save(ctx, entry)
-	if err == nil {
-		t.Fatal("expected error from Save after Close, got nil")
-	}
-}
-
-func TestSQLiteStore_Get_AfterClose(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	// Save an entry before closing.
-	ctx := context.Background()
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/get-after-close")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	savedID := entry.ID
-
-	// Close the store.
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Get after Close should return an error (database is closed), not panic.
-	_, err = store.Get(ctx, savedID)
-	if err == nil {
-		t.Fatal("expected error from Get after Close, got nil")
-	}
-}
-
-func TestSQLiteStore_List_AfterClose(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// List after Close should return an error, not panic.
-	_, err = store.List(context.Background(), ListOptions{})
-	if err == nil {
-		t.Fatal("expected error from List after Close, got nil")
-	}
-}
-
-func TestSQLiteStore_Count_AfterClose(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Count after Close should return an error, not panic.
-	_, err = store.Count(context.Background(), ListOptions{})
-	if err == nil {
-		t.Fatal("expected error from Count after Close, got nil")
-	}
-}
-
-func TestSQLiteStore_Delete_AfterClose(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Delete after Close should return an error, not panic.
-	err = store.Delete(context.Background(), "nonexistent-id")
-	if err == nil {
-		t.Fatal("expected error from Delete after Close, got nil")
-	}
-}
-
-func TestSQLiteStore_Save_ContextCancelWhenWriteLoopStopped(t *testing.T) {
-	// This test verifies that Save respects context cancellation when the
-	// write loop is no longer processing operations (e.g., after Close).
-	// After Close, Save can enqueue to the buffered channel but no goroutine
-	// consumes it, so Save blocks on the result channel until context expires.
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	// Close the store to stop the write loop.
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Save with a short-lived context should return a context error
-	// because no goroutine is consuming from the write channel.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/backpressure")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-
-	err = store.Save(ctx, entry)
-	if err == nil {
-		t.Fatal("expected error from Save when write loop is stopped and context expires, got nil")
-	}
-	if err != context.DeadlineExceeded {
-		t.Errorf("expected context.DeadlineExceeded, got %v", err)
-	}
-}
-
-func TestSQLiteStore_Get_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	// Save an entry with a valid context.
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/ctx-cancel")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-	if err := store.Save(context.Background(), entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	// Cancel the context before Get.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := store.Get(ctx, entry.ID)
-	if err == nil {
-		t.Fatal("expected error from Get with cancelled context, got nil")
-	}
-}
-
-func TestSQLiteStore_List_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := store.List(ctx, ListOptions{})
-	if err == nil {
-		t.Fatal("expected error from List with cancelled context, got nil")
-	}
-}
-
-func TestSQLiteStore_Count_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := store.Count(ctx, ListOptions{})
-	if err == nil {
-		t.Fatal("expected error from Count with cancelled context, got nil")
-	}
-}
-
-func TestSQLiteStore_Delete_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := store.Delete(ctx, "some-id")
-	if err == nil {
-		t.Fatal("expected error from Delete with cancelled context, got nil")
-	}
-}
-
-func TestSQLiteStore_DeleteAll_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := store.DeleteAll(ctx)
-	if err == nil {
-		t.Fatal("expected error from DeleteAll with cancelled context, got nil")
-	}
-}
-
-func TestSQLiteStore_ReadOnlyDB(t *testing.T) {
-	// Create a normal store, save an entry, then make the DB file read-only.
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	ctx := context.Background()
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/readonly")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	savedID := entry.ID
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Make the DB file and its WAL/SHM files read-only.
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		p := dbPath + suffix
-		// Ignore errors for WAL/SHM files — they may not exist yet.
-		os.Chmod(p, 0444)
-	}
-	// Also make the directory read-only so SQLite cannot create new files.
-	os.Chmod(tmpDir, 0555)
-	t.Cleanup(func() {
-		// Restore permissions so t.TempDir() cleanup can remove files.
-		os.Chmod(tmpDir, 0755)
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			os.Chmod(dbPath+suffix, 0644)
-		}
-	})
-
-	// Re-open the store. The driver might succeed at opening (since the file
-	// is readable), but writes should fail because the filesystem is read-only.
-	roStore, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		// If the store cannot even open in this read-only state, that is
-		// acceptable — the important thing is it does not panic.
-		t.Skipf("NewSQLiteStore on read-only DB returned error (acceptable): %v", err)
-	}
-	defer roStore.Close()
-
-	// Reading the previously saved entry should succeed.
-	got, err := roStore.Get(ctx, savedID)
-	if err != nil {
-		// Some SQLite implementations may fail reads too when
-		// WAL mode cannot be initialized. Skip rather than silently pass.
-		t.Skipf("Get from read-only store failed (acceptable): %v", err)
-	}
-	if got.Request.Method != "GET" {
-		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
-	}
-
-	// Writing to a read-only DB should fail.
-	writeEntry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "POST", URL: mustParseURL("http://example.com/readonly-write")},
-		Response:  RecordedResponse{StatusCode: 201},
-	}
-	writeCtx, writeCancel := context.WithTimeout(ctx, 3*time.Second)
-	defer writeCancel()
-	err = roStore.Save(writeCtx, writeEntry)
-	if err == nil {
-		t.Log("Save to read-only store succeeded unexpectedly — filesystem may not enforce read-only on this platform")
-	} else {
-		t.Logf("Save to read-only store correctly failed: %v", err)
-	}
-}
-
-func TestSQLiteStore_ConcurrentSavesUnderLoad(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	// Fire many concurrent saves to stress the write channel.
-	const numGoroutines = 100
-	errs := make(chan error, numGoroutines)
-
-	for i := 0; i < numGoroutines; i++ {
-		go func(n int) {
-			entry := &Entry{
-				Protocol:  "HTTP/1.x",
-				Timestamp: time.Now(),
-				Request:   RecordedRequest{Method: "GET", URL: mustParseURL(fmt.Sprintf("http://example.com/concurrent/%d", n))},
-				Response:  RecordedResponse{StatusCode: 200},
-			}
-			errs <- store.Save(ctx, entry)
-		}(i)
-	}
-
-	for i := 0; i < numGoroutines; i++ {
-		if err := <-errs; err != nil {
-			t.Errorf("concurrent Save %d failed: %v", i, err)
-		}
-	}
-
-	// Verify all entries were saved.
-	entries, err := store.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(entries) != numGoroutines {
-		t.Errorf("got %d entries, want %d", len(entries), numGoroutines)
-	}
-}
-
-func TestSQLiteStore_Save_ContextCancelDuringWriteLoop(t *testing.T) {
-	// Verifies that when the write loop is processing, cancelling the
-	// context of a pending Save returns promptly.
-	store := newTestStore(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Start a save, then immediately cancel the context.
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/cancel-during-write")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-
-	// Cancel almost immediately to race with the write loop.
-	go func() {
-		time.Sleep(1 * time.Millisecond)
-		cancel()
-	}()
-
-	// This may succeed (if writeLoop processes it before cancel) or fail with
-	// context.Canceled. Either is acceptable — it must not panic or deadlock.
-	err := store.Save(ctx, entry)
-	if err != nil && err != context.Canceled {
-		// If the write completed before cancellation, the save succeeds.
-		// If cancelled first, we get context.Canceled. Anything else is unexpected.
-		t.Logf("Save returned: %v (acceptable if context.Canceled or nil)", err)
-	}
-}
-
-func TestSQLiteStore_Close_IdempotentDoneChannel(t *testing.T) {
-	// Verify that the store's writeLoop exits cleanly when Close is called
-	// and no pending writes exist.
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	// Close immediately with no writes — should not hang or panic.
-	done := make(chan error, 1)
-	go func() {
-		done <- store.Close()
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Close did not complete within 5 seconds")
-	}
-}
-
-func TestSQLiteStore_DeleteOlderThan_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := store.DeleteOlderThan(ctx, time.Now())
-	if err == nil {
-		t.Fatal("expected error from DeleteOlderThan with cancelled context, got nil")
-	}
-}
-
-func TestSQLiteStore_DeleteExcess_CancelledContext(t *testing.T) {
-	store := newTestStore(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := store.DeleteExcess(ctx, 10)
-	if err == nil {
-		t.Fatal("expected error from DeleteExcess with cancelled context, got nil")
-	}
-}
-
-func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	u, _ := url.Parse("http://example.com/persist")
-
-	entry := &Entry{
-		ConnID:    "conn-persist-001",
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC),
-		Duration:  250 * time.Millisecond,
-		Request: RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Content-Type": {"application/json"}, "Host": {"example.com"}},
-			Body:    []byte(`{"key":"value"}`),
-		},
-		Response: RecordedResponse{
-			StatusCode: 201,
-			Headers:    map[string][]string{"Content-Type": {"application/json"}, "X-Request-Id": {"abc123"}},
-			Body:       []byte(`{"id":"42"}`),
-		},
-		Tags: map[string]string{"source": "test", "category": "persistence"},
-	}
-
-	// 1. Open store, save entry, close.
-	store1, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store1: %v", err)
-	}
-	if err := store1.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	savedID := entry.ID
-	if savedID == "" {
-		t.Fatal("Save did not assign ID")
-	}
-	if err := store1.Close(); err != nil {
-		t.Fatalf("close store1: %v", err)
-	}
-
-	// 2. Reopen the same database file.
-	store2, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store2: %v", err)
-	}
-	defer store2.Close()
-
-	// 3. Retrieve the entry and verify all fields survived the reopen.
-	got, err := store2.Get(ctx, savedID)
-	if err != nil {
-		t.Fatalf("Get after reopen: %v", err)
-	}
-
-	if got.ID != savedID {
-		t.Errorf("ID = %q, want %q", got.ID, savedID)
-	}
-	if got.ConnID != "conn-persist-001" {
-		t.Errorf("ConnID = %q, want %q", got.ConnID, "conn-persist-001")
-	}
 	if got.Protocol != "HTTP/1.x" {
 		t.Errorf("Protocol = %q, want %q", got.Protocol, "HTTP/1.x")
 	}
-	if got.Request.Method != "POST" {
-		t.Errorf("Method = %q, want %q", got.Request.Method, "POST")
+	if got.SessionType != "unary" {
+		t.Errorf("SessionType = %q, want %q", got.SessionType, "unary")
 	}
-	if got.Request.URL.String() != "http://example.com/persist" {
-		t.Errorf("URL = %q, want %q", got.Request.URL.String(), "http://example.com/persist")
+	if got.State != "complete" {
+		t.Errorf("State = %q, want %q", got.State, "complete")
 	}
-	if got.Request.Headers["Content-Type"][0] != "application/json" {
-		t.Errorf("Request Content-Type = %q, want %q", got.Request.Headers["Content-Type"][0], "application/json")
-	}
-	if got.Request.Headers["Host"][0] != "example.com" {
-		t.Errorf("Request Host = %q, want %q", got.Request.Headers["Host"][0], "example.com")
-	}
-	if string(got.Request.Body) != `{"key":"value"}` {
-		t.Errorf("Request Body = %q, want %q", got.Request.Body, `{"key":"value"}`)
-	}
-	if got.Response.StatusCode != 201 {
-		t.Errorf("StatusCode = %d, want %d", got.Response.StatusCode, 201)
-	}
-	if got.Response.Headers["Content-Type"][0] != "application/json" {
-		t.Errorf("Response Content-Type = %q, want %q", got.Response.Headers["Content-Type"][0], "application/json")
-	}
-	if got.Response.Headers["X-Request-Id"][0] != "abc123" {
-		t.Errorf("Response X-Request-Id = %q, want %q", got.Response.Headers["X-Request-Id"][0], "abc123")
-	}
-	if string(got.Response.Body) != `{"id":"42"}` {
-		t.Errorf("Response Body = %q, want %q", got.Response.Body, `{"id":"42"}`)
-	}
-	if !got.Timestamp.Equal(time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)) {
-		t.Errorf("Timestamp = %v, want %v", got.Timestamp, time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC))
-	}
-	if got.Duration != 250*time.Millisecond {
-		t.Errorf("Duration = %v, want %v", got.Duration, 250*time.Millisecond)
-	}
-	if got.Tags["source"] != "test" {
-		t.Errorf("Tags[source] = %q, want %q", got.Tags["source"], "test")
-	}
-	if got.Tags["category"] != "persistence" {
-		t.Errorf("Tags[category] = %q, want %q", got.Tags["category"], "persistence")
-	}
-
-	// 4. List and Count should also reflect persisted data.
-	entries, err := store2.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List after reopen: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Errorf("List returned %d entries, want 1", len(entries))
-	}
-
-	count, err := store2.Count(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("Count after reopen: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("Count = %d, want 1", count)
+	if got.Duration != 150*time.Millisecond {
+		t.Errorf("Duration = %v, want %v", got.Duration, 150*time.Millisecond)
 	}
 }
 
-func TestSQLiteStore_PersistenceAcrossReopen_MultipleEntries(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	// 1. Open store and save multiple entries with different characteristics.
-	store1, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store1: %v", err)
-	}
-
-	entries := []*Entry{
-		{
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
-			Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/a")},
-			Response:  RecordedResponse{StatusCode: 200},
-		},
-		{
-			Protocol:  "HTTPS",
-			Timestamp: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
-			Request:   RecordedRequest{Method: "POST", URL: mustParseURL("https://example.com/b")},
-			Response:  RecordedResponse{StatusCode: 201, Body: []byte("created")},
-		},
-		{
-			ConnID:    "conn-multi-003",
-			Protocol:  "HTTP/1.x",
-			Timestamp: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
-			Request:   RecordedRequest{Method: "DELETE", URL: mustParseURL("http://other.com/c")},
-			Response:  RecordedResponse{StatusCode: 204},
-		},
-	}
-
-	savedIDs := make([]string, len(entries))
-	for i, e := range entries {
-		if err := store1.Save(ctx, e); err != nil {
-			t.Fatalf("Save[%d]: %v", i, err)
-		}
-		savedIDs[i] = e.ID
-	}
-	if err := store1.Close(); err != nil {
-		t.Fatalf("close store1: %v", err)
-	}
-
-	// 2. Reopen and verify all entries persist.
-	store2, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store2: %v", err)
-	}
-	defer store2.Close()
-
-	all, err := store2.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(all) != 3 {
-		t.Fatalf("List returned %d entries, want 3", len(all))
-	}
-
-	// Verify each entry can be individually retrieved.
-	for i, id := range savedIDs {
-		got, err := store2.Get(ctx, id)
-		if err != nil {
-			t.Fatalf("Get[%d]: %v", i, err)
-		}
-		if got.Request.Method != entries[i].Request.Method {
-			t.Errorf("entry[%d] Method = %q, want %q", i, got.Request.Method, entries[i].Request.Method)
-		}
-		if got.Response.StatusCode != entries[i].Response.StatusCode {
-			t.Errorf("entry[%d] StatusCode = %d, want %d", i, got.Response.StatusCode, entries[i].Response.StatusCode)
-		}
-	}
-
-	// Verify filters work against persisted data.
-	getEntries, err := store2.List(ctx, ListOptions{Method: "GET"})
-	if err != nil {
-		t.Fatalf("List(Method=GET): %v", err)
-	}
-	if len(getEntries) != 1 {
-		t.Errorf("List(Method=GET) returned %d entries, want 1", len(getEntries))
-	}
-
-	httpsEntries, err := store2.List(ctx, ListOptions{Protocol: "HTTPS"})
-	if err != nil {
-		t.Fatalf("List(Protocol=HTTPS): %v", err)
-	}
-	if len(httpsEntries) != 1 {
-		t.Errorf("List(Protocol=HTTPS) returned %d entries, want 1", len(httpsEntries))
-	}
-}
-
-func TestSQLiteStore_PersistenceAcrossReopen_DeletePersists(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	// 1. Open store, save two entries, delete one, close.
-	store1, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store1: %v", err)
-	}
-
-	entry1 := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/keep")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-	entry2 := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Request:   RecordedRequest{Method: "GET", URL: mustParseURL("http://example.com/remove")},
-		Response:  RecordedResponse{StatusCode: 200},
-	}
-
-	if err := store1.Save(ctx, entry1); err != nil {
-		t.Fatalf("Save entry1: %v", err)
-	}
-	if err := store1.Save(ctx, entry2); err != nil {
-		t.Fatalf("Save entry2: %v", err)
-	}
-	if err := store1.Delete(ctx, entry2.ID); err != nil {
-		t.Fatalf("Delete entry2: %v", err)
-	}
-	if err := store1.Close(); err != nil {
-		t.Fatalf("close store1: %v", err)
-	}
-
-	// 2. Reopen and verify the deletion persisted.
-	store2, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store2: %v", err)
-	}
-	defer store2.Close()
-
-	all, err := store2.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(all) != 1 {
-		t.Fatalf("expected 1 entry after reopen, got %d", len(all))
-	}
-	if all[0].ID != entry1.ID {
-		t.Errorf("remaining entry ID = %q, want %q", all[0].ID, entry1.ID)
-	}
-
-	// Deleted entry should not be found.
-	_, err = store2.Get(ctx, entry2.ID)
-	if err == nil {
-		t.Fatal("expected error for deleted entry, got nil")
-	}
-}
-
-func TestSQLiteStore_PersistenceAcrossReopen_NilBodyAndHeaders(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	// Save an entry with nil body and nil headers — verifies edge case handling.
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC),
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     mustParseURL("http://example.com/empty"),
-			Headers: nil,
-			Body:    nil,
-		},
-		Response: RecordedResponse{
-			StatusCode: 204,
-			Headers:    nil,
-			Body:       nil,
-		},
-	}
-
-	store1, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store1: %v", err)
-	}
-	if err := store1.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	savedID := entry.ID
-	if err := store1.Close(); err != nil {
-		t.Fatalf("close store1: %v", err)
-	}
-
-	// Reopen and verify nil fields are handled correctly.
-	store2, err := NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("open store2: %v", err)
-	}
-	defer store2.Close()
-
-	got, err := store2.Get(ctx, savedID)
-	if err != nil {
-		t.Fatalf("Get after reopen: %v", err)
-	}
-
-	if got.Request.Method != "GET" {
-		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
-	}
-	if got.Response.StatusCode != 204 {
-		t.Errorf("StatusCode = %d, want %d", got.Response.StatusCode, 204)
-	}
-	if got.Request.URL.String() != "http://example.com/empty" {
-		t.Errorf("URL = %q, want %q", got.Request.URL.String(), "http://example.com/empty")
-	}
-	if got.Tags != nil {
-		t.Errorf("Tags = %v, want nil", got.Tags)
-	}
-}
-
-func TestSQLiteStore_RawBytes_SaveAndGet(t *testing.T) {
+func TestSQLiteStore_ConnInfo(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
-	rawResp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
-
-	u, _ := url.Parse("http://example.com/test")
-	entry := &Entry{
-		Protocol:    "HTTP/1.x",
-		Timestamp:   time.Now(),
-		Duration:    100 * time.Millisecond,
-		RawRequest:  rawReq,
-		RawResponse: rawResp,
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}},
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{"Content-Length": {"2"}},
-			Body:       []byte("OK"),
-		},
-	}
-
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := store.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if string(got.RawRequest) != string(rawReq) {
-		t.Errorf("RawRequest = %q, want %q", got.RawRequest, rawReq)
-	}
-	if string(got.RawResponse) != string(rawResp) {
-		t.Errorf("RawResponse = %q, want %q", got.RawResponse, rawResp)
-	}
-}
-
-func TestSQLiteStore_RawBytes_NilRoundTrip(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	u, _ := url.Parse("http://example.com/no-raw")
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  50 * time.Millisecond,
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
-		},
-	}
-
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := store.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if got.RawRequest != nil {
-		t.Errorf("RawRequest = %v, want nil", got.RawRequest)
-	}
-	if got.RawResponse != nil {
-		t.Errorf("RawResponse = %v, want nil", got.RawResponse)
-	}
-}
-
-func TestSQLiteStore_ConnectionInfo_SaveAndGet(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	u, _ := url.Parse("https://example.com/secure")
-	entry := &Entry{
+	sess := &Session{
 		Protocol:  "HTTPS",
-		Timestamp: time.Now(),
-		Duration:  200 * time.Millisecond,
+		Timestamp: time.Now().UTC(),
 		ConnInfo: &ConnectionInfo{
 			ClientAddr:           "192.168.1.100:54321",
 			ServerAddr:           "93.184.216.34:443",
 			TLSVersion:           "TLS 1.3",
 			TLSCipher:            "TLS_AES_128_GCM_SHA256",
 			TLSALPN:              "h2",
-			TLSServerCertSubject: "CN=example.com,O=Example Inc",
-		},
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}},
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{"Content-Type": {"text/html"}},
-			Body:       []byte("<html>ok</html>"),
+			TLSServerCertSubject: "CN=example.com",
 		},
 	}
 
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
 	}
 
-	got, err := store.Get(ctx, entry.ID)
+	got, err := store.GetSession(ctx, sess.ID)
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("GetSession: %v", err)
 	}
 
 	if got.ConnInfo == nil {
-		t.Fatal("ConnInfo is nil, want non-nil")
+		t.Fatal("ConnInfo is nil")
 	}
 	if got.ConnInfo.ClientAddr != "192.168.1.100:54321" {
 		t.Errorf("ClientAddr = %q, want %q", got.ConnInfo.ClientAddr, "192.168.1.100:54321")
 	}
-	if got.ConnInfo.ServerAddr != "93.184.216.34:443" {
-		t.Errorf("ServerAddr = %q, want %q", got.ConnInfo.ServerAddr, "93.184.216.34:443")
-	}
 	if got.ConnInfo.TLSVersion != "TLS 1.3" {
 		t.Errorf("TLSVersion = %q, want %q", got.ConnInfo.TLSVersion, "TLS 1.3")
 	}
-	if got.ConnInfo.TLSCipher != "TLS_AES_128_GCM_SHA256" {
-		t.Errorf("TLSCipher = %q, want %q", got.ConnInfo.TLSCipher, "TLS_AES_128_GCM_SHA256")
-	}
-	if got.ConnInfo.TLSALPN != "h2" {
-		t.Errorf("TLSALPN = %q, want %q", got.ConnInfo.TLSALPN, "h2")
-	}
-	if got.ConnInfo.TLSServerCertSubject != "CN=example.com,O=Example Inc" {
-		t.Errorf("TLSServerCertSubject = %q, want %q", got.ConnInfo.TLSServerCertSubject, "CN=example.com,O=Example Inc")
-	}
 }
 
-func TestSQLiteStore_ConnectionInfo_NilRoundTrip(t *testing.T) {
+func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := url.Parse("http://example.com/plain")
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  50 * time.Millisecond,
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
-		},
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
 	}
 
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
+	sendMsg := &Message{
+		SessionID: sess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "POST",
+		URL:       mustParseURL("http://example.com/api"),
+		Headers:   map[string][]string{"Content-Type": {"application/json"}},
+		Body:      []byte(`{"key":"value"}`),
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+	if sendMsg.ID == "" {
+		t.Fatal("AppendMessage did not assign ID")
 	}
 
-	got, err := store.Get(ctx, entry.ID)
+	recvMsg := &Message{
+		SessionID:  sess.ID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: 201,
+		Headers:    map[string][]string{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"id":"123"}`),
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage(receive): %v", err)
+	}
+
+	msgs, err := store.GetMessages(ctx, sess.ID, MessageListOptions{})
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("GetMessages: %v", err)
 	}
-
-	if got.ConnInfo != nil {
-		t.Errorf("ConnInfo = %+v, want nil", got.ConnInfo)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].Direction != "send" {
+		t.Errorf("first message direction = %q, want %q", msgs[0].Direction, "send")
+	}
+	if msgs[0].Method != "POST" {
+		t.Errorf("send method = %q, want %q", msgs[0].Method, "POST")
+	}
+	if msgs[1].StatusCode != 201 {
+		t.Errorf("receive status = %d, want %d", msgs[1].StatusCode, 201)
 	}
 }
 
-func TestSQLiteStore_ConnectionInfo_ClientAddrOnly(t *testing.T) {
+func TestSQLiteStore_FilterByDirection(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := url.Parse("http://example.com/plain")
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  50 * time.Millisecond,
-		ConnInfo: &ConnectionInfo{
-			ClientAddr: "10.0.0.1:12345",
-		},
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
-		},
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveSession(ctx, sess)
+
+	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET"})
+	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200})
+
+	sendMsgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{Direction: "send"})
+	if len(sendMsgs) != 1 {
+		t.Errorf("expected 1 send message, got %d", len(sendMsgs))
 	}
 
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := store.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if got.ConnInfo == nil {
-		t.Fatal("ConnInfo is nil, want non-nil")
-	}
-	if got.ConnInfo.ClientAddr != "10.0.0.1:12345" {
-		t.Errorf("ClientAddr = %q, want %q", got.ConnInfo.ClientAddr, "10.0.0.1:12345")
-	}
-	if got.ConnInfo.TLSVersion != "" {
-		t.Errorf("TLSVersion = %q, want empty", got.ConnInfo.TLSVersion)
+	recvMsgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{Direction: "receive"})
+	if len(recvMsgs) != 1 {
+		t.Errorf("expected 1 receive message, got %d", len(recvMsgs))
 	}
 }
 
-func TestSQLiteStore_RawBytesAndConnInfo_Combined(t *testing.T) {
+func TestSQLiteStore_CountMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	rawReq := []byte("POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello")
-	rawResp := []byte("HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nOK")
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveSession(ctx, sess)
+	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC()})
 
-	u, _ := url.Parse("https://example.com/api")
-	entry := &Entry{
-		Protocol:    "HTTPS",
-		Timestamp:   time.Now(),
-		Duration:    300 * time.Millisecond,
-		RawRequest:  rawReq,
-		RawResponse: rawResp,
-		ConnInfo: &ConnectionInfo{
-			ClientAddr:           "192.168.1.50:9999",
-			ServerAddr:           "93.184.216.34:443",
-			TLSVersion:           "TLS 1.2",
-			TLSCipher:            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-			TLSALPN:              "http/1.1",
-			TLSServerCertSubject: "CN=example.com",
-		},
-		Tags: map[string]string{"smuggling:cl_te_conflict": "true"},
-		Request: RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}, "Content-Length": {"5"}},
-			Body:    []byte("hello"),
-		},
-		Response: RecordedResponse{
-			StatusCode: 201,
-			Headers:    map[string][]string{"Content-Length": {"2"}},
-			Body:       []byte("OK"),
-		},
-	}
-
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := store.Get(ctx, entry.ID)
+	count, err := store.CountMessages(ctx, sess.ID)
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("CountMessages: %v", err)
 	}
-
-	// Verify all new fields together.
-	if string(got.RawRequest) != string(rawReq) {
-		t.Errorf("RawRequest = %q, want %q", got.RawRequest, rawReq)
-	}
-	if string(got.RawResponse) != string(rawResp) {
-		t.Errorf("RawResponse = %q, want %q", got.RawResponse, rawResp)
-	}
-	if got.ConnInfo == nil {
-		t.Fatal("ConnInfo is nil")
-	}
-	if got.ConnInfo.ClientAddr != "192.168.1.50:9999" {
-		t.Errorf("ClientAddr = %q, want %q", got.ConnInfo.ClientAddr, "192.168.1.50:9999")
-	}
-	if got.ConnInfo.TLSVersion != "TLS 1.2" {
-		t.Errorf("TLSVersion = %q, want %q", got.ConnInfo.TLSVersion, "TLS 1.2")
-	}
-	if got.Tags["smuggling:cl_te_conflict"] != "true" {
-		t.Errorf("Tags[smuggling:cl_te_conflict] = %q, want %q", got.Tags["smuggling:cl_te_conflict"], "true")
-	}
-	// Verify existing fields still work.
-	if got.Request.Method != "POST" {
-		t.Errorf("Method = %q, want %q", got.Request.Method, "POST")
-	}
-	if got.Response.StatusCode != 201 {
-		t.Errorf("StatusCode = %d, want %d", got.Response.StatusCode, 201)
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
 	}
 }
 
-func TestSQLiteStore_MigrationV6_ExistingData(t *testing.T) {
-	// Test that migration v6 doesn't corrupt existing data by creating a DB
-	// with v5 schema first, then upgrading.
+func TestSQLiteStore_UpdateSession(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{Protocol: "HTTP/1.x", State: "active", Timestamp: time.Now().UTC()}
+	store.SaveSession(ctx, sess)
+
+	err := store.UpdateSession(ctx, sess.ID, SessionUpdate{
+		State:    "complete",
+		Duration: 500 * time.Millisecond,
+		Tags:     map[string]string{"smuggling": "cl_te"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+
+	got, _ := store.GetSession(ctx, sess.ID)
+	if got.State != "complete" {
+		t.Errorf("State = %q, want %q", got.State, "complete")
+	}
+	if got.Duration != 500*time.Millisecond {
+		t.Errorf("Duration = %v, want %v", got.Duration, 500*time.Millisecond)
+	}
+	if got.Tags["smuggling"] != "cl_te" {
+		t.Errorf("Tags[smuggling] = %q, want %q", got.Tags["smuggling"], "cl_te")
+	}
+}
+
+func TestSQLiteStore_ListSessions_Filters(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/page", 200, nil, []byte("ok"))
+	saveTestSession(t, store, "HTTPS", now, "POST", "https://api.example.com/data", 201, []byte("body"), []byte("created"))
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://other.com/test", 404, nil, []byte("not found"))
+
+	tests := []struct {
+		name string
+		opts ListOptions
+		want int
+	}{
+		{"no filter", ListOptions{}, 3},
+		{"by protocol HTTP", ListOptions{Protocol: "HTTP/1.x"}, 2},
+		{"by protocol HTTPS", ListOptions{Protocol: "HTTPS"}, 1},
+		{"by method GET", ListOptions{Method: "GET"}, 2},
+		{"by method POST", ListOptions{Method: "POST"}, 1},
+		{"by URL pattern", ListOptions{URLPattern: "api.example"}, 1},
+		{"by status 404", ListOptions{StatusCode: 404}, 1},
+		{"by status 200", ListOptions{StatusCode: 200}, 1},
+		{"limit", ListOptions{Limit: 1}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions, err := store.ListSessions(ctx, tt.opts)
+			if err != nil {
+				t.Fatalf("ListSessions: %v", err)
+			}
+			if len(sessions) != tt.want {
+				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
+			}
+		})
+	}
+}
+
+func TestSQLiteStore_CountSessions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/a", 200, nil, nil)
+	saveTestSession(t, store, "HTTP/1.x", now, "POST", "http://example.com/b", 201, nil, nil)
+
+	count, err := store.CountSessions(ctx, ListOptions{Method: "GET"})
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
+	}
+
+	total, err := store.CountSessions(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("total = %d, want 2", total)
+	}
+}
+
+func TestSQLiteStore_DeleteSession_CascadeMessages(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := saveTestSession(t, store, "HTTP/1.x", time.Now().UTC(), "GET", "http://example.com/del", 200, nil, nil)
+
+	// Verify messages exist.
+	count, _ := store.CountMessages(ctx, sess.ID)
+	if count != 2 {
+		t.Fatalf("expected 2 messages before delete, got %d", count)
+	}
+
+	if err := store.DeleteSession(ctx, sess.ID); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	// Session should be gone.
+	_, err := store.GetSession(ctx, sess.ID)
+	if err == nil {
+		t.Fatal("expected error for deleted session, got nil")
+	}
+
+	// Messages should be cascade-deleted.
+	count, _ = store.CountMessages(ctx, sess.ID)
+	if count != 0 {
+		t.Errorf("expected 0 messages after cascade delete, got %d", count)
+	}
+}
+
+func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/2", 200, nil, nil)
+
+	n, err := store.DeleteAllSessions(ctx)
+	if err != nil {
+		t.Fatalf("DeleteAllSessions: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("deleted %d, want 2", n)
+	}
+
+	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	if len(remaining) != 0 {
+		t.Errorf("expected 0 remaining, got %d", len(remaining))
+	}
+}
+
+func TestSQLiteStore_DeleteSessionsOlderThan(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	saveTestSession(t, store, "HTTP/1.x", now.Add(-48*time.Hour), "GET", "http://a.com/old", 200, nil, nil)
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/new", 200, nil, nil)
+
+	n, err := store.DeleteSessionsOlderThan(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("deleted %d, want 1", n)
+	}
+
+	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	if len(remaining) != 1 {
+		t.Errorf("expected 1 remaining, got %d", len(remaining))
+	}
+}
+
+func TestSQLiteStore_DeleteExcessSessions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	for i := 0; i < 5; i++ {
+		saveTestSession(t, store, "HTTP/1.x", now.Add(time.Duration(i)*time.Second), "GET", fmt.Sprintf("http://a.com/%d", i), 200, nil, nil)
+	}
+
+	n, err := store.DeleteExcessSessions(ctx, 2)
+	if err != nil {
+		t.Fatalf("DeleteExcessSessions: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("deleted %d, want 3", n)
+	}
+
+	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	if len(remaining) != 2 {
+		t.Errorf("expected 2 remaining, got %d", len(remaining))
+	}
+}
+
+func TestSQLiteStore_RawBytes(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveSession(ctx, sess)
+
+	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	store.AppendMessage(ctx, &Message{
+		SessionID: sess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		RawBytes:  rawReq,
+	})
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{Direction: "send"})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 send message, got %d", len(msgs))
+	}
+	if string(msgs[0].RawBytes) != string(rawReq) {
+		t.Errorf("RawBytes mismatch")
+	}
+}
+
+func TestSQLiteStore_SequenceUniqueness(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveSession(ctx, sess)
+
+	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+
+	// Duplicate sequence should fail.
+	err := store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	if err == nil {
+		t.Fatal("expected error for duplicate sequence, got nil")
+	}
+}
+
+func TestSQLiteStore_CancelledContext(t *testing.T) {
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	err := store.SaveSession(ctx, sess)
+	if err == nil {
+		t.Fatal("expected error for cancelled context, got nil")
+	}
+}
+
+func TestSQLiteStore_ConcurrentSaves(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	const n = 50
+	errCh := make(chan error, n)
+
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			sess := &Session{
+				Protocol:  "HTTP/1.x",
+				Timestamp: time.Now().UTC(),
+			}
+			errCh <- store.SaveSession(ctx, sess)
+		}(i)
+	}
+
+	for i := 0; i < n; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("concurrent SaveSession: %v", err)
+		}
+	}
+
+	sessions, _ := store.ListSessions(ctx, ListOptions{})
+	if len(sessions) != n {
+		t.Errorf("expected %d sessions, got %d", n, len(sessions))
+	}
+}
+
+func TestSQLiteStore_LIKEWildcardEscape(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/100%25_done", 200, nil, nil)
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/normal", 200, nil, nil)
+
+	sessions, err := store.ListSessions(ctx, ListOptions{URLPattern: "100%25_done"})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Errorf("expected 1 match for LIKE wildcard escape, got %d", len(sessions))
+	}
+}
+
+func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := filepath.Join(dir, "persist.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	// Create store and save a session.
+	store1, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(1): %v", err)
+	}
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store1.SaveSession(ctx, sess)
+	store1.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: mustParseURL("http://example.com/persist")})
+	store1.Close()
+
+	// Reopen and verify.
+	store2, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(2): %v", err)
+	}
+	defer store2.Close()
+
+	sessions, _ := store2.ListSessions(ctx, ListOptions{})
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session after reopen, got %d", len(sessions))
+	}
+	msgs, _ := store2.GetMessages(ctx, sessions[0].ID, MessageListOptions{})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message after reopen, got %d", len(msgs))
+	}
+}
+
+func TestSQLiteStore_Migration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migrate.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	store, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	// Verify schema version.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	var version int
+	if err := db.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if version != latestVersion() {
+		t.Errorf("version = %d, want %d", version, latestVersion())
+	}
+}
+
+func TestSQLiteStore_FutureSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "future.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	// Create a database with a future schema version.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.ExecContext(ctx, bootstrapSQL)
+	db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (?)", latestVersion()+1)
+	db.Close()
+
+	_, err = NewSQLiteStore(ctx, dbPath, logger)
+	if err == nil {
+		t.Fatal("expected error for future schema version, got nil")
+	}
+	if !strings.Contains(err.Error(), "newer than latest") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestSQLiteStore_GetNotFound(t *testing.T) {
+	store := newTestStore(t)
+	_, err := store.GetSession(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent session, got nil")
+	}
+}
+
+func TestSQLiteStore_InvalidDBPath(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, err := NewSQLiteStore(context.Background(), "/nonexistent/path/to/db", logger)
+	if err == nil {
+		t.Fatal("expected error for invalid path, got nil")
+	}
+}
+
+func TestSQLiteStore_Tags(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now().UTC(),
+		Tags:      map[string]string{"key1": "val1", "key2": "val2"},
+	}
+	store.SaveSession(ctx, sess)
+
+	got, _ := store.GetSession(ctx, sess.ID)
+	if got.Tags["key1"] != "val1" {
+		t.Errorf("Tags[key1] = %q, want %q", got.Tags["key1"], "val1")
+	}
+	if got.Tags["key2"] != "val2" {
+		t.Errorf("Tags[key2] = %q, want %q", got.Tags["key2"], "val2")
+	}
+}
+
+func TestSQLiteStore_BodyTruncated(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveSession(ctx, sess)
+
+	store.AppendMessage(ctx, &Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     time.Now().UTC(),
+		Body:          []byte("partial"),
+		BodyTruncated: true,
+	})
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if !msgs[0].BodyTruncated {
+		t.Error("BodyTruncated = false, want true")
+	}
+}
+
+func TestSQLiteStore_DBFileCreated(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "created.db")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Create store (which runs migrations up to v6).
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
+	defer store.Close()
 
-	// Save an entry without raw bytes or conn info (simulating pre-v6 data).
-	ctx := context.Background()
-	u, _ := url.Parse("http://example.com/existing")
-	entry := &Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now(),
-		Duration:  100 * time.Millisecond,
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}},
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("existing"),
-		},
-	}
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save pre-v6 entry: %v", err)
-	}
-	store.Close()
-
-	// Reopen the store (re-runs migrations).
-	store2, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("Reopen store: %v", err)
-	}
-	defer store2.Close()
-
-	// Verify the existing entry is intact.
-	got, err := store2.Get(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("Get existing entry: %v", err)
-	}
-	if got.Request.Method != "GET" {
-		t.Errorf("Method = %q, want %q", got.Request.Method, "GET")
-	}
-	if string(got.Response.Body) != "existing" {
-		t.Errorf("Body = %q, want %q", got.Response.Body, "existing")
-	}
-	// New fields should have zero values.
-	if got.RawRequest != nil {
-		t.Errorf("RawRequest = %v, want nil", got.RawRequest)
-	}
-	if got.RawResponse != nil {
-		t.Errorf("RawResponse = %v, want nil", got.RawResponse)
-	}
-	// ConnInfo should be nil (all fields are empty defaults).
-	if got.ConnInfo != nil {
-		t.Errorf("ConnInfo = %+v, want nil", got.ConnInfo)
-	}
-}
-
-func TestSQLiteStore_RawBytes_InList(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	rawReq := []byte("GET /list-test HTTP/1.1\r\nHost: example.com\r\n\r\n")
-
-	u, _ := url.Parse("http://example.com/list-test")
-	entry := &Entry{
-		Protocol:   "HTTP/1.x",
-		Timestamp:  time.Now(),
-		Duration:   50 * time.Millisecond,
-		RawRequest: rawReq,
-		ConnInfo: &ConnectionInfo{
-			ClientAddr: "10.0.0.2:8080",
-		},
-		Request: RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
-		},
-		Response: RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
-		},
-	}
-
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	entries, err := store.List(ctx, ListOptions{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("List returned %d entries, want 1", len(entries))
-	}
-
-	got := entries[0]
-	if string(got.RawRequest) != string(rawReq) {
-		t.Errorf("RawRequest in List = %q, want %q", got.RawRequest, rawReq)
-	}
-	if got.ConnInfo == nil || got.ConnInfo.ClientAddr != "10.0.0.2:8080" {
-		t.Errorf("ConnInfo.ClientAddr in List = %v, want 10.0.0.2:8080", got.ConnInfo)
+	if _, err := os.Stat(dbPath); errors.Is(err, os.ErrNotExist) {
+		t.Errorf("database file was not created at %s", dbPath)
 	}
 }

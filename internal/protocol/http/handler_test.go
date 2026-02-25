@@ -170,8 +170,8 @@ func TestInsecureSkipVerify_HTTPSConnectToSelfSignedServer(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 session entry, got %d", len(entries))
 	}
-	if entries[0].Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want %q", entries[0].Protocol, "HTTPS")
+	if entries[0].Session.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want %q", entries[0].Session.Protocol, "HTTPS")
 	}
 }
 

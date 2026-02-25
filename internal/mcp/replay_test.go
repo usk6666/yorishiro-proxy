@@ -92,28 +92,36 @@ func TestReplayRequest_Success(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
-		Duration:  250 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Content-Type": {"application/json"}, "X-Custom": {"original"}},
-			Body:    []byte(`{"key":"value"}`),
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
+			Duration:  250 * time.Millisecond,
 		},
-		Response: session.RecordedResponse{
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/json"}, "X-Custom": {"original"}},
+			Body:      []byte(`{"key":"value"}`),
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Type": {"application/json"}},
 			Body:       []byte(`{"status":"ok"}`),
 		},
-	})
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -135,7 +143,7 @@ func TestReplayRequest_Success(t *testing.T) {
 	if out.NewSessionID == "" {
 		t.Error("expected non-empty new_session_id")
 	}
-	if out.NewSessionID == entry.ID {
+	if out.NewSessionID == entry.Session.ID {
 		t.Error("new_session_id should differ from original session_id")
 	}
 	if out.StatusCode != 200 {
@@ -161,15 +169,36 @@ func TestReplayRequest_Success(t *testing.T) {
 	}
 
 	// Verify the replay was recorded as a new session.
-	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	_, err = store.GetSession(context.Background(), out.NewSessionID)
 	if err != nil {
 		t.Fatalf("get new session: %v", err)
 	}
-	if newEntry.Request.Method != "POST" {
-		t.Errorf("recorded method = %q, want POST", newEntry.Request.Method)
+	newMsgs, err := store.GetMessages(context.Background(), out.NewSessionID, session.MessageListOptions{})
+	if err != nil {
+		t.Fatalf("get new session messages: %v", err)
 	}
-	if newEntry.Response.StatusCode != 200 {
-		t.Errorf("recorded status = %d, want 200", newEntry.Response.StatusCode)
+	var newSend, newRecv *session.Message
+	for _, m := range newMsgs {
+		switch m.Direction {
+		case "send":
+			newSend = m
+		case "receive":
+			newRecv = m
+		}
+	}
+	if newSend == nil || newSend.Method != "POST" {
+		method := ""
+		if newSend != nil {
+			method = newSend.Method
+		}
+		t.Errorf("recorded method = %q, want POST", method)
+	}
+	if newRecv == nil || newRecv.StatusCode != 200 {
+		status := 0
+		if newRecv != nil {
+			status = newRecv.StatusCode
+		}
+		t.Errorf("recorded status = %d, want 200", status)
 	}
 }
 
@@ -178,28 +207,36 @@ func TestReplayRequest_OverrideHeaders(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Authorization": {"Bearer old-token"}, "Accept": {"text/html"}},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{"Authorization": {"Bearer old-token"}, "Accept": {"text/html"}},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
 		Arguments: map[string]any{
-			"session_id": entry.ID,
+			"session_id": entry.Session.ID,
 			"override_headers": map[string]any{
 				"Authorization": "Bearer new-token",
 				"X-New-Header":  "added",
@@ -263,22 +300,30 @@ func TestReplayRequest_OverrideBody(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Content-Type": {"application/json"}},
-			Body:    []byte(`{"original":"body"}`),
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "POST",
+		URL:     u,
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"original":"body"}`),
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	overrideBody := `{"override":"body"}`
@@ -286,7 +331,7 @@ func TestReplayRequest_OverrideBody(t *testing.T) {
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
 		Arguments: map[string]any{
-			"session_id":    entry.ID,
+			"session_id":    entry.Session.ID,
 			"override_body": overrideBody,
 		},
 	})
@@ -313,12 +358,19 @@ func TestReplayRequest_OverrideBody(t *testing.T) {
 	}
 
 	// Verify the recorded session has the overridden body.
-	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	_, err = store.GetSession(context.Background(), out.NewSessionID)
 	if err != nil {
 		t.Fatalf("get new session: %v", err)
 	}
-	if string(newEntry.Request.Body) != overrideBody {
-		t.Errorf("recorded body = %q, want %q", newEntry.Request.Body, overrideBody)
+	newSendMsgs, err := store.GetMessages(context.Background(), out.NewSessionID, session.MessageListOptions{Direction: "send"})
+	if err != nil {
+		t.Fatalf("get send messages: %v", err)
+	}
+	if len(newSendMsgs) == 0 {
+		t.Fatal("no send message in replay session")
+	}
+	if string(newSendMsgs[0].Body) != overrideBody {
+		t.Errorf("recorded body = %q, want %q", newSendMsgs[0].Body, overrideBody)
 	}
 }
 
@@ -327,22 +379,30 @@ func TestReplayRequest_OverrideEmptyBody(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "POST",
-			URL:     u,
-			Headers: map[string][]string{"Content-Type": {"application/json"}},
-			Body:    []byte(`{"original":"body"}`),
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "POST",
+		URL:     u,
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"original":"body"}`),
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	emptyBody := ""
@@ -350,7 +410,7 @@ func TestReplayRequest_OverrideEmptyBody(t *testing.T) {
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
 		Arguments: map[string]any{
-			"session_id":    entry.ID,
+			"session_id":    entry.Session.ID,
 			"override_body": emptyBody,
 		},
 	})
@@ -383,21 +443,29 @@ func TestReplayRequest_OverrideURL(t *testing.T) {
 
 	// Original URL points to a different path.
 	u, _ := url.Parse(echoServer.URL + "/original-path")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	overrideURL := echoServer.URL + "/overridden-path"
@@ -405,7 +473,7 @@ func TestReplayRequest_OverrideURL(t *testing.T) {
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
 		Arguments: map[string]any{
-			"session_id":   entry.ID,
+			"session_id":   entry.Session.ID,
 			"override_url": overrideURL,
 		},
 	})
@@ -432,12 +500,23 @@ func TestReplayRequest_OverrideURL(t *testing.T) {
 	}
 
 	// Verify recorded session has the overridden URL.
-	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	_, err = store.GetSession(context.Background(), out.NewSessionID)
 	if err != nil {
 		t.Fatalf("get new session: %v", err)
 	}
-	if newEntry.Request.URL.Path != "/overridden-path" {
-		t.Errorf("recorded URL path = %q, want /overridden-path", newEntry.Request.URL.Path)
+	newSendMsgs, err := store.GetMessages(context.Background(), out.NewSessionID, session.MessageListOptions{Direction: "send"})
+	if err != nil {
+		t.Fatalf("get send messages: %v", err)
+	}
+	if len(newSendMsgs) == 0 {
+		t.Fatal("no send message in replay session")
+	}
+	if newSendMsgs[0].URL == nil || newSendMsgs[0].URL.Path != "/overridden-path" {
+		path := ""
+		if newSendMsgs[0].URL != nil {
+			path = newSendMsgs[0].URL.Path
+		}
+		t.Errorf("recorded URL path = %q, want /overridden-path", path)
 	}
 }
 
@@ -446,28 +525,36 @@ func TestReplayRequest_OverrideMethod(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
 		Arguments: map[string]any{
-			"session_id":      entry.ID,
+			"session_id":      entry.Session.ID,
 			"override_method": "PUT",
 		},
 	})
@@ -494,12 +581,19 @@ func TestReplayRequest_OverrideMethod(t *testing.T) {
 	}
 
 	// Verify recorded session has PUT method.
-	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	_, err = store.GetSession(context.Background(), out.NewSessionID)
 	if err != nil {
 		t.Fatalf("get new session: %v", err)
 	}
-	if newEntry.Request.Method != "PUT" {
-		t.Errorf("recorded method = %q, want PUT", newEntry.Request.Method)
+	newSendMsgs, err := store.GetMessages(context.Background(), out.NewSessionID, session.MessageListOptions{Direction: "send"})
+	if err != nil {
+		t.Fatalf("get send messages: %v", err)
+	}
+	if len(newSendMsgs) == 0 {
+		t.Fatal("no send message in replay session")
+	}
+	if newSendMsgs[0].Method != "PUT" {
+		t.Errorf("recorded method = %q, want PUT", newSendMsgs[0].Method)
 	}
 }
 
@@ -508,22 +602,30 @@ func TestReplayRequest_AllOverrides(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/original")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Accept": {"text/html"}},
-			Body:    nil,
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{"Accept": {"text/html"}},
+		Body:    nil,
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 	overrideBody := `{"all":"overridden"}`
@@ -532,7 +634,7 @@ func TestReplayRequest_AllOverrides(t *testing.T) {
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_request",
 		Arguments: map[string]any{
-			"session_id":      entry.ID,
+			"session_id":      entry.Session.ID,
 			"override_method": "PATCH",
 			"override_url":    overrideURL,
 			"override_headers": map[string]any{
@@ -622,21 +724,29 @@ func TestReplayRequest_InvalidOverrideURL(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, nil)
 
@@ -659,7 +769,7 @@ func TestReplayRequest_InvalidOverrideURL(t *testing.T) {
 			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 				Name: "replay_request",
 				Arguments: map[string]any{
-					"session_id":   entry.ID,
+					"session_id":   entry.Session.ID,
 					"override_url": tt.url,
 				},
 			})
@@ -677,28 +787,36 @@ func TestReplayRequest_NilOriginalURL(t *testing.T) {
 	store := newTestStore(t)
 
 	// Create an entry without a URL (nil URL).
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     nil,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     nil,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, nil)
 
 	// Without override_url, should fail because original URL is nil.
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -713,21 +831,29 @@ func TestReplayRequest_NetworkError(t *testing.T) {
 
 	// Point to a non-routable address to trigger a connection error.
 	u, _ := url.Parse("http://192.0.2.1:1/unreachable")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	// Use an HTTP client with a very short timeout.
 	shortTimeoutDoer := &http.Client{
@@ -737,7 +863,7 @@ func TestReplayRequest_NetworkError(t *testing.T) {
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -752,27 +878,35 @@ func TestReplayRequest_PreservesProtocol(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTPS",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -788,12 +922,12 @@ func TestReplayRequest_PreservesProtocol(t *testing.T) {
 	}
 
 	// Verify the new session preserves the protocol from the original.
-	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	newSess, err := store.GetSession(context.Background(), out.NewSessionID)
 	if err != nil {
 		t.Fatalf("get new session: %v", err)
 	}
-	if newEntry.Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want HTTPS", newEntry.Protocol)
+	if newSess.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want HTTPS", newSess.Protocol)
 	}
 }
 
@@ -802,27 +936,35 @@ func TestReplayRequest_ResponseFieldsComplete(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -864,27 +1006,35 @@ func TestReplayRequest_ServerReturnsNon200(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	u, _ := url.Parse(server.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -915,21 +1065,29 @@ func TestReplayRequest_RejectsNonHTTPScheme(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
@@ -948,7 +1106,7 @@ func TestReplayRequest_RejectsNonHTTPScheme(t *testing.T) {
 			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 				Name: "replay_request",
 				Arguments: map[string]any{
-					"session_id":   entry.ID,
+					"session_id":   entry.Session.ID,
 					"override_url": tt.url,
 				},
 			})
@@ -967,27 +1125,35 @@ func TestReplayRequest_RejectsNonHTTPSchemeInOriginalURL(t *testing.T) {
 
 	// Store a session with a file:// scheme URL.
 	u, _ := url.Parse("file:///etc/passwd")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -1034,28 +1200,36 @@ func TestReplayRequest_SSRFBlocksLoopback(t *testing.T) {
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	// Use nil doer so the production SSRF-protected client is used.
 	cs := setupTestSessionWithReplayDoer(t, store, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -1108,27 +1282,35 @@ func TestReplayRequest_ResponseBodySizeLimit(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	u, _ := url.Parse(server.URL + "/large-response")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithReplayDoer(t, store, newPermissiveClient())
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "replay_request",
-		Arguments: map[string]any{"session_id": entry.ID},
+		Arguments: map[string]any{"session_id": entry.Session.ID},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -1146,15 +1328,22 @@ func TestReplayRequest_ResponseBodySizeLimit(t *testing.T) {
 	// The response body should be truncated to maxReplayResponseSize (1MB).
 	// Since the body is base64-encoded (non-UTF8 repeated 'A' bytes are actually UTF8,
 	// so it will be text encoding), check the length.
-	newEntry, err := store.Get(context.Background(), out.NewSessionID)
+	_, err = store.GetSession(context.Background(), out.NewSessionID)
 	if err != nil {
 		t.Fatalf("get new session: %v", err)
 	}
-	if len(newEntry.Response.Body) > maxReplayResponseSize {
-		t.Errorf("response body size = %d, want <= %d", len(newEntry.Response.Body), maxReplayResponseSize)
+	newRecvMsgs, err := store.GetMessages(context.Background(), out.NewSessionID, session.MessageListOptions{Direction: "receive"})
+	if err != nil {
+		t.Fatalf("get receive messages: %v", err)
 	}
-	if len(newEntry.Response.Body) != maxReplayResponseSize {
-		t.Errorf("response body size = %d, want exactly %d (truncated by LimitReader)", len(newEntry.Response.Body), maxReplayResponseSize)
+	if len(newRecvMsgs) == 0 {
+		t.Fatal("no receive message in replay session")
+	}
+	if len(newRecvMsgs[0].Body) > maxReplayResponseSize {
+		t.Errorf("response body size = %d, want <= %d", len(newRecvMsgs[0].Body), maxReplayResponseSize)
+	}
+	if len(newRecvMsgs[0].Body) != maxReplayResponseSize {
+		t.Errorf("response body size = %d, want exactly %d (truncated by LimitReader)", len(newRecvMsgs[0].Body), maxReplayResponseSize)
 	}
 }
 
@@ -1243,29 +1432,37 @@ func TestReplayRaw_Success(t *testing.T) {
 	host, port, _ := net.SplitHostPort(addr)
 	u, _ := url.Parse(fmt.Sprintf("http://%s:%s/raw-test", host, port))
 
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:   "HTTP/1.x",
 		Timestamp:  time.Now(),
 		Duration:   100 * time.Millisecond,
-		RawRequest: rawReq,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{"Host": {"example.com"}, "X-Custom": {"preserved"}},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{"Host": {"example.com"}, "X-Custom": {"preserved"}},
+		RawBytes:  rawReq,
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithRawDialer(t, store, &testDialer{})
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_raw",
 		Arguments: map[string]any{
-			"session_id":  entry.ID,
+			"session_id":  entry.Session.ID,
 			"target_addr": addr,
 		},
 	})
@@ -1307,28 +1504,36 @@ func TestReplayRaw_NoRawBytes(t *testing.T) {
 	store := newTestStore(t)
 
 	u, _ := url.Parse("http://example.com/no-raw")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	cs := setupTestSessionWithRawDialer(t, store, &testDialer{})
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_raw",
 		Arguments: map[string]any{
-			"session_id": entry.ID,
+			"session_id": entry.Session.ID,
 		},
 	})
 	if err != nil {
@@ -1393,22 +1598,30 @@ func TestReplayRaw_SSRFBlocksLoopback(t *testing.T) {
 
 	rawReq := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	u, _ := url.Parse("http://example.com/test")
-	entry := saveTestEntry(t, store, &session.Entry{
+	entry := saveTestEntry(t, store,
+		&session.Session{
 		Protocol:   "HTTP/1.x",
 		Timestamp:  time.Now(),
 		Duration:   100 * time.Millisecond,
-		RawRequest: rawReq,
-		Request: session.RecordedRequest{
-			Method:  "GET",
-			URL:     u,
-			Headers: map[string][]string{},
 		},
-		Response: session.RecordedResponse{
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
+		&session.Message{
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
+		RawBytes:  rawReq,
 		},
-	})
+		&session.Message{
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+		},
+	)
 
 	// Use nil dialer so the production SSRF-protected dialer is used.
 	cs := setupTestSessionWithRawDialer(t, store, nil)
@@ -1416,7 +1629,7 @@ func TestReplayRaw_SSRFBlocksLoopback(t *testing.T) {
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "replay_raw",
 		Arguments: map[string]any{
-			"session_id":  entry.ID,
+			"session_id":  entry.Session.ID,
 			"target_addr": addr,
 		},
 	})
