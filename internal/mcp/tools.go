@@ -365,6 +365,7 @@ func (s *Server) handleListSessions(ctx context.Context, _ *gomcp.CallToolReques
 		return nil, nil, fmt.Errorf("count sessions: %w", err)
 	}
 
+	// TODO(USK-57): N+1 query pattern - consider JOIN or batch query in future optimization
 	sessions := make([]listSessionsEntry, 0, len(sessionList))
 	for _, sess := range sessionList {
 		// Fetch first send and receive messages for method/url/status.

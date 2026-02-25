@@ -508,6 +508,7 @@ func scanSession(row scannable) (*Session, error) {
 
 	if tagsStr != "" && tagsStr != "{}" {
 		if err := json.Unmarshal([]byte(tagsStr), &sess.Tags); err != nil {
+			slog.Warn("failed to parse session tags", "session_id", sess.ID, "value", tagsStr, "error", err)
 			sess.Tags = nil
 		}
 	}

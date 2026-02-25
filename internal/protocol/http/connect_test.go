@@ -1179,7 +1179,7 @@ func TestHandleCONNECT_PartialHTTPSRequests(t *testing.T) {
 			payload: "GET /test HTTP/1.1",
 		},
 		{
-			name: "headers without blank line in TLS tunnel",
+			name:    "headers without blank line in TLS tunnel",
 			payload: fmt.Sprintf("GET /test HTTP/1.1\r\nHost: %s", connectHost),
 		},
 	}
