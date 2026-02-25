@@ -1,0 +1,890 @@
+package mcp
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/katashiro-proxy/internal/session"
+)
+
+// setupQueryTestSession creates an MCP client session for query tool tests.
+// It accepts optional ServerOption values for configuring scope, passthrough, etc.
+func setupQueryTestSession(t *testing.T, store session.Store, opts ...ServerOption) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	ca := newTestCA(t)
+	s := NewServer(ctx, ca, store, nil, opts...)
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+// callQuery invokes the query tool and returns the raw CallToolResult.
+func callQuery(t *testing.T, cs *gomcp.ClientSession, input queryInput) *gomcp.CallToolResult {
+	t.Helper()
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(data, &args); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "query",
+		Arguments: args,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	return result
+}
+
+// unmarshalQueryResult extracts the JSON result from CallToolResult content.
+func unmarshalQueryResult(t *testing.T, result *gomcp.CallToolResult, dest any) {
+	t.Helper()
+	if len(result.Content) == 0 {
+		t.Fatal("result has no content")
+	}
+	text, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("content[0] type = %T, want *TextContent", result.Content[0])
+	}
+	if err := json.Unmarshal([]byte(text.Text), dest); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+}
+
+// seedSession creates a session and its messages in the store for testing.
+func seedSession(t *testing.T, store session.Store, id, protocol, method, urlStr string, statusCode int) {
+	t.Helper()
+	ctx := context.Background()
+
+	sess := &session.Session{
+		ID:          id,
+		ConnID:      "conn-" + id,
+		Protocol:    protocol,
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   time.Now().UTC(),
+		Duration:    150 * time.Millisecond,
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession(%s): %v", id, err)
+	}
+
+	parsedURL, _ := url.Parse(urlStr)
+
+	sendMsg := &session.Message{
+		ID:        id + "-send",
+		SessionID: id,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    method,
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      []byte("request body"),
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	recvMsg := &session.Message{
+		ID:         id + "-recv",
+		SessionID:  id,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: statusCode,
+		Headers:    map[string][]string{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"ok":true}`),
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage(recv): %v", err)
+	}
+}
+
+// --- Test: unknown and empty resource ---
+
+func TestQuery_EmptyResource(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for empty resource")
+	}
+}
+
+func TestQuery_UnknownResource(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "unknown"})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for unknown resource")
+	}
+	// Verify error message includes available resources.
+	text, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("content[0] type = %T, want *TextContent", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "sessions") || !strings.Contains(text.Text, "ca_cert") {
+		t.Errorf("error message should list available resources, got: %s", text.Text)
+	}
+}
+
+// --- Test: sessions resource ---
+
+func TestQuery_Sessions_Empty(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 0 {
+		t.Errorf("count = %d, want 0", out.Count)
+	}
+	if out.Total != 0 {
+		t.Errorf("total = %d, want 0", out.Total)
+	}
+	if len(out.Sessions) != 0 {
+		t.Errorf("sessions len = %d, want 0", len(out.Sessions))
+	}
+}
+
+func TestQuery_Sessions_WithData(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "sess-1", "HTTPS", "GET", "https://example.com/api", 200)
+	seedSession(t, store, "sess-2", "HTTP/1.x", "POST", "http://example.com/form", 302)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 2 {
+		t.Errorf("count = %d, want 2", out.Count)
+	}
+	if out.Total != 2 {
+		t.Errorf("total = %d, want 2", out.Total)
+	}
+
+	// Verify fields are populated (sessions returned newest first).
+	found := false
+	for _, s := range out.Sessions {
+		if s.ID == "sess-1" {
+			found = true
+			if s.Protocol != "HTTPS" {
+				t.Errorf("protocol = %q, want HTTPS", s.Protocol)
+			}
+			if s.Method != "GET" {
+				t.Errorf("method = %q, want GET", s.Method)
+			}
+			if s.StatusCode != 200 {
+				t.Errorf("status_code = %d, want 200", s.StatusCode)
+			}
+			if s.MessageCount != 2 {
+				t.Errorf("message_count = %d, want 2", s.MessageCount)
+			}
+			if s.SessionType != "unary" {
+				t.Errorf("session_type = %q, want unary", s.SessionType)
+			}
+			if s.State != "complete" {
+				t.Errorf("state = %q, want complete", s.State)
+			}
+		}
+	}
+	if !found {
+		t.Error("sess-1 not found in results")
+	}
+}
+
+func TestQuery_Sessions_WithFilter(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "sess-get", "HTTPS", "GET", "https://example.com/api", 200)
+	seedSession(t, store, "sess-post", "HTTPS", "POST", "https://example.com/api", 201)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Filter:   &queryFilter{Method: "POST"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Errorf("count = %d, want 1", out.Count)
+	}
+	if out.Total != 1 {
+		t.Errorf("total = %d, want 1", out.Total)
+	}
+	if out.Sessions[0].ID != "sess-post" {
+		t.Errorf("id = %q, want sess-post", out.Sessions[0].ID)
+	}
+}
+
+func TestQuery_Sessions_Pagination(t *testing.T) {
+	store := newTestStore(t)
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("sess-%d", i)
+		seedSession(t, store, id, "HTTPS", "GET", "https://example.com/"+id, 200)
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	// First page: limit 2, offset 0.
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Limit:    2,
+		Offset:   0,
+	})
+	if result.IsError {
+		t.Fatalf("page 1: expected success, got error: %v", result.Content)
+	}
+	var page1 querySessionsResult
+	unmarshalQueryResult(t, result, &page1)
+	if page1.Count != 2 {
+		t.Errorf("page 1 count = %d, want 2", page1.Count)
+	}
+	if page1.Total != 5 {
+		t.Errorf("page 1 total = %d, want 5", page1.Total)
+	}
+
+	// Second page: limit 2, offset 2.
+	result = callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Limit:    2,
+		Offset:   2,
+	})
+	if result.IsError {
+		t.Fatalf("page 2: expected success, got error: %v", result.Content)
+	}
+	var page2 querySessionsResult
+	unmarshalQueryResult(t, result, &page2)
+	if page2.Count != 2 {
+		t.Errorf("page 2 count = %d, want 2", page2.Count)
+	}
+	if page2.Total != 5 {
+		t.Errorf("page 2 total = %d, want 5", page2.Total)
+	}
+}
+
+func TestQuery_Sessions_NegativeOffset(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Offset:   -1,
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for negative offset")
+	}
+}
+
+func TestQuery_Sessions_NilStore(t *testing.T) {
+	cs := setupQueryTestSession(t, nil)
+
+	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+// --- Test: session resource ---
+
+func TestQuery_Session_Success(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "sess-detail", "HTTPS", "GET", "https://example.com/api/users", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "sess-detail",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.ID != "sess-detail" {
+		t.Errorf("id = %q, want sess-detail", out.ID)
+	}
+	if out.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want HTTPS", out.Protocol)
+	}
+	if out.Method != "GET" {
+		t.Errorf("method = %q, want GET", out.Method)
+	}
+	if out.URL != "https://example.com/api/users" {
+		t.Errorf("url = %q, want https://example.com/api/users", out.URL)
+	}
+	if out.ResponseStatusCode != 200 {
+		t.Errorf("response_status_code = %d, want 200", out.ResponseStatusCode)
+	}
+	if out.RequestBodyEncoding != "text" {
+		t.Errorf("request_body_encoding = %q, want text", out.RequestBodyEncoding)
+	}
+	if out.RequestBody != "request body" {
+		t.Errorf("request_body = %q, want 'request body'", out.RequestBody)
+	}
+	if out.MessageCount != 2 {
+		t.Errorf("message_count = %d, want 2", out.MessageCount)
+	}
+	if out.SessionType != "unary" {
+		t.Errorf("session_type = %q, want unary", out.SessionType)
+	}
+}
+
+func TestQuery_Session_MissingID(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "session"})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for missing id")
+	}
+}
+
+func TestQuery_Session_NotFound(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "nonexistent",
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nonexistent session")
+	}
+}
+
+func TestQuery_Session_NilStore(t *testing.T) {
+	cs := setupQueryTestSession(t, nil)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "some-id",
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+// --- Test: messages resource ---
+
+func TestQuery_Messages_Success(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "sess-msgs", "HTTPS", "GET", "https://example.com/api", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "messages",
+		ID:       "sess-msgs",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryMessagesResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 2 {
+		t.Errorf("count = %d, want 2", out.Count)
+	}
+	if out.Total != 2 {
+		t.Errorf("total = %d, want 2", out.Total)
+	}
+
+	// Verify message ordering by sequence.
+	if len(out.Messages) != 2 {
+		t.Fatalf("messages len = %d, want 2", len(out.Messages))
+	}
+	if out.Messages[0].Direction != "send" {
+		t.Errorf("messages[0].direction = %q, want send", out.Messages[0].Direction)
+	}
+	if out.Messages[0].Method != "GET" {
+		t.Errorf("messages[0].method = %q, want GET", out.Messages[0].Method)
+	}
+	if out.Messages[1].Direction != "receive" {
+		t.Errorf("messages[1].direction = %q, want receive", out.Messages[1].Direction)
+	}
+	if out.Messages[1].StatusCode != 200 {
+		t.Errorf("messages[1].status_code = %d, want 200", out.Messages[1].StatusCode)
+	}
+	if out.Messages[0].BodyEncoding != "text" {
+		t.Errorf("messages[0].body_encoding = %q, want text", out.Messages[0].BodyEncoding)
+	}
+}
+
+func TestQuery_Messages_Pagination(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &session.Session{
+		ID:          "sess-many",
+		Protocol:    "HTTPS",
+		SessionType: "stream",
+		State:       "complete",
+		Timestamp:   time.Now().UTC(),
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	// Create 5 messages.
+	for i := 0; i < 5; i++ {
+		msg := &session.Message{
+			ID:        fmt.Sprintf("msg-%d", i),
+			SessionID: "sess-many",
+			Sequence:  i,
+			Direction: "send",
+			Timestamp: time.Now().UTC(),
+			Method:    "GET",
+			Body:      []byte(fmt.Sprintf("body-%d", i)),
+		}
+		if err := store.AppendMessage(ctx, msg); err != nil {
+			t.Fatalf("AppendMessage(%d): %v", i, err)
+		}
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	// Page 1: limit 2, offset 0.
+	result := callQuery(t, cs, queryInput{
+		Resource: "messages",
+		ID:       "sess-many",
+		Limit:    2,
+		Offset:   0,
+	})
+	if result.IsError {
+		t.Fatalf("page 1: expected success: %v", result.Content)
+	}
+	var page1 queryMessagesResult
+	unmarshalQueryResult(t, result, &page1)
+	if page1.Count != 2 {
+		t.Errorf("page 1 count = %d, want 2", page1.Count)
+	}
+	if page1.Total != 5 {
+		t.Errorf("page 1 total = %d, want 5", page1.Total)
+	}
+
+	// Page 2: limit 2, offset 2.
+	result = callQuery(t, cs, queryInput{
+		Resource: "messages",
+		ID:       "sess-many",
+		Limit:    2,
+		Offset:   2,
+	})
+	if result.IsError {
+		t.Fatalf("page 2: expected success: %v", result.Content)
+	}
+	var page2 queryMessagesResult
+	unmarshalQueryResult(t, result, &page2)
+	if page2.Count != 2 {
+		t.Errorf("page 2 count = %d, want 2", page2.Count)
+	}
+
+	// Page 3: offset beyond total.
+	result = callQuery(t, cs, queryInput{
+		Resource: "messages",
+		ID:       "sess-many",
+		Limit:    2,
+		Offset:   10,
+	})
+	if result.IsError {
+		t.Fatalf("page 3: expected success: %v", result.Content)
+	}
+	var page3 queryMessagesResult
+	unmarshalQueryResult(t, result, &page3)
+	if page3.Count != 0 {
+		t.Errorf("page 3 count = %d, want 0", page3.Count)
+	}
+	if page3.Total != 5 {
+		t.Errorf("page 3 total = %d, want 5", page3.Total)
+	}
+}
+
+func TestQuery_Messages_MissingID(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "messages"})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for missing id")
+	}
+}
+
+func TestQuery_Messages_SessionNotFound(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "messages",
+		ID:       "nonexistent",
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nonexistent session")
+	}
+}
+
+func TestQuery_Messages_NegativeOffset(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "messages",
+		ID:       "any",
+		Offset:   -1,
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for negative offset")
+	}
+}
+
+func TestQuery_Messages_NilStore(t *testing.T) {
+	cs := setupQueryTestSession(t, nil)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "messages",
+		ID:       "some-id",
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil store")
+	}
+}
+
+// --- Test: status resource ---
+
+func TestQuery_Status_Basic(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "status"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryStatusResult
+	unmarshalQueryResult(t, result, &out)
+
+	// No manager configured, so proxy should not be running.
+	if out.Running {
+		t.Error("running = true, want false")
+	}
+	if out.TotalSessions != 0 {
+		t.Errorf("total_sessions = %d, want 0", out.TotalSessions)
+	}
+	// CA is initialized in setupQueryTestSession.
+	if !out.CAInitialized {
+		t.Error("ca_initialized = false, want true")
+	}
+}
+
+func TestQuery_Status_WithSessions(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "s1", "HTTPS", "GET", "https://example.com", 200)
+	seedSession(t, store, "s2", "HTTPS", "POST", "https://example.com", 201)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "status"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryStatusResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.TotalSessions != 2 {
+		t.Errorf("total_sessions = %d, want 2", out.TotalSessions)
+	}
+}
+
+// --- Test: config resource ---
+
+func TestQuery_Config_Default(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+
+	// No scope/passthrough configured, should have empty defaults.
+	if out.CaptureScope == nil {
+		t.Fatal("capture_scope is nil")
+	}
+	if len(out.CaptureScope.Includes) != 0 {
+		t.Errorf("includes len = %d, want 0", len(out.CaptureScope.Includes))
+	}
+	if len(out.CaptureScope.Excludes) != 0 {
+		t.Errorf("excludes len = %d, want 0", len(out.CaptureScope.Excludes))
+	}
+	if out.TLSPassthrough == nil {
+		t.Fatal("tls_passthrough is nil")
+	}
+	if out.TLSPassthrough.Count != 0 {
+		t.Errorf("tls_passthrough.count = %d, want 0", out.TLSPassthrough.Count)
+	}
+}
+
+func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
+	store := newTestStore(t)
+	scope := proxy.NewCaptureScope()
+	scope.SetRules(
+		[]proxy.ScopeRule{{Hostname: "target.com"}},
+		[]proxy.ScopeRule{{Hostname: "excluded.com"}},
+	)
+	pl := proxy.NewPassthroughList()
+	pl.Add("pinned.example.com")
+	pl.Add("*.cdn.example.com")
+
+	cs := setupQueryTestSession(t, store,
+		WithCaptureScope(scope),
+		WithPassthroughList(pl),
+	)
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+
+	if len(out.CaptureScope.Includes) != 1 {
+		t.Errorf("includes len = %d, want 1", len(out.CaptureScope.Includes))
+	}
+	if out.CaptureScope.Includes[0].Hostname != "target.com" {
+		t.Errorf("includes[0].hostname = %q, want target.com", out.CaptureScope.Includes[0].Hostname)
+	}
+	if len(out.CaptureScope.Excludes) != 1 {
+		t.Errorf("excludes len = %d, want 1", len(out.CaptureScope.Excludes))
+	}
+	if out.TLSPassthrough.Count != 2 {
+		t.Errorf("tls_passthrough.count = %d, want 2", out.TLSPassthrough.Count)
+	}
+	// Patterns should be sorted.
+	if len(out.TLSPassthrough.Patterns) == 2 {
+		if out.TLSPassthrough.Patterns[0] != "*.cdn.example.com" {
+			t.Errorf("patterns[0] = %q, want *.cdn.example.com", out.TLSPassthrough.Patterns[0])
+		}
+		if out.TLSPassthrough.Patterns[1] != "pinned.example.com" {
+			t.Errorf("patterns[1] = %q, want pinned.example.com", out.TLSPassthrough.Patterns[1])
+		}
+	}
+}
+
+// --- Test: ca_cert resource ---
+
+func TestQuery_CACert_Success(t *testing.T) {
+	store := newTestStore(t)
+	ca := newTestCA(t)
+
+	// Build server with the CA directly.
+	ctx := context.Background()
+	s := NewServer(ctx, ca, store, nil)
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "ca_cert"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryCACertResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.PEM == "" {
+		t.Error("pem is empty")
+	}
+	if out.Subject == "" {
+		t.Error("subject is empty")
+	}
+	if out.NotAfter == "" {
+		t.Error("not_after is empty")
+	}
+
+	// Verify fingerprint.
+	expectedFingerprint := sha256.Sum256(ca.Certificate().Raw)
+	expectedFingerprintStr := formatFingerprint(expectedFingerprint[:])
+	if out.Fingerprint != expectedFingerprintStr {
+		t.Errorf("fingerprint = %q, want %q", out.Fingerprint, expectedFingerprintStr)
+	}
+}
+
+func TestQuery_CACert_NilCA(t *testing.T) {
+	// Build server without CA.
+	ctx := context.Background()
+	s := NewServer(ctx, nil, nil, nil)
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "ca_cert"})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil CA")
+	}
+}
+
+// --- Test: sessions filter combinations ---
+
+func TestQuery_Sessions_FilterByProtocol(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "https-1", "HTTPS", "GET", "https://example.com", 200)
+	seedSession(t, store, "http-1", "HTTP/1.x", "GET", "http://example.com", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Filter:   &queryFilter{Protocol: "HTTPS"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Errorf("count = %d, want 1", out.Count)
+	}
+	if out.Sessions[0].Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want HTTPS", out.Sessions[0].Protocol)
+	}
+}
+
+func TestQuery_Sessions_FilterByURLPattern(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "api-1", "HTTPS", "GET", "https://example.com/api/users", 200)
+	seedSession(t, store, "page-1", "HTTPS", "GET", "https://example.com/pages/home", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Filter:   &queryFilter{URLPattern: "/api/"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Errorf("count = %d, want 1", out.Count)
+	}
+	if out.Sessions[0].ID != "api-1" {
+		t.Errorf("id = %q, want api-1", out.Sessions[0].ID)
+	}
+}
+
+func TestQuery_Sessions_FilterByStatusCode(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "ok-1", "HTTPS", "GET", "https://example.com/ok", 200)
+	seedSession(t, store, "err-1", "HTTPS", "GET", "https://example.com/error", 500)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Filter:   &queryFilter{StatusCode: 500},
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Errorf("count = %d, want 1", out.Count)
+	}
+	if out.Sessions[0].ID != "err-1" {
+		t.Errorf("id = %q, want err-1", out.Sessions[0].ID)
+	}
+}
+
