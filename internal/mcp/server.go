@@ -34,14 +34,14 @@ func WithDBPath(path string) ServerOption {
 }
 
 // WithPassthroughList sets the TLS passthrough list for the MCP server,
-// enabling the add/remove/list TLS passthrough tools.
+// enabling TLS passthrough configuration via the configure tool.
 func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
 	return func(s *Server) {
 		s.passthrough = pl
 	}
 }
 
-// WithCaptureScope sets the capture scope for the set/get/clear_capture_scope tools.
+// WithCaptureScope sets the capture scope for the configure and query tools.
 func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
 	return func(s *Server) {
 		s.scope = scope
@@ -51,10 +51,10 @@ func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
 // NewServer creates a new MCP server with proxy tools registered.
 // The ctx parameter is the application-level context that controls the proxy lifecycle;
 // when ctx is cancelled, the proxy started via proxy_start will shut down.
-// The ca parameter provides the CA certificate for the export_ca_cert tool.
-// If ca is nil, the export_ca_cert tool will return an error when called.
-// The store parameter provides session storage for session-related tools.
-// If store is nil, session-related tools will return an error when called.
+// The ca parameter provides the CA certificate for the query tool's ca_cert resource.
+// If ca is nil, querying ca_cert will return an error.
+// The store parameter provides session storage for session and replay operations.
+// If store is nil, session-related operations will return an error.
 // The manager parameter controls the proxy lifecycle for proxy_start/proxy_stop tools.
 // If manager is nil, those tools will return an error when called.
 func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
@@ -78,22 +78,8 @@ func (s *Server) Run(ctx context.Context, transport gomcp.Transport) error {
 }
 
 func (s *Server) registerTools() {
-	s.registerClearSessions()
-	s.registerDeleteSession()
-	s.registerExportCACert()
-	s.registerGetSession()
-	s.registerListSessions()
-	s.registerReplayRequest()
-	s.registerReplayRaw()
 	s.registerProxyStart()
 	s.registerProxyStop()
-	s.registerProxyStatus()
-	s.registerAddTLSPassthrough()
-	s.registerRemoveTLSPassthrough()
-	s.registerListTLSPassthrough()
-	s.registerSetCaptureScope()
-	s.registerGetCaptureScope()
-	s.registerClearCaptureScope()
 	s.registerConfigure()
 	s.registerQuery()
 	s.registerExecute()
