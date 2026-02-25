@@ -542,22 +542,34 @@ func TestProxyStatus_WithSessionCount(t *testing.T) {
 	// Save some sessions.
 	for i := 0; i < 3; i++ {
 		u, _ := url.Parse("http://example.com/test")
-		entry := &session.Entry{
+		sess := &session.Session{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
-			Request: session.RecordedRequest{
-				Method:  "GET",
-				URL:     u,
-				Headers: map[string][]string{"Host": {"example.com"}},
-			},
-			Response: session.RecordedResponse{
-				StatusCode: 200,
-				Headers:    map[string][]string{},
-			},
 		}
-		if err := store.Save(context.Background(), entry); err != nil {
-			t.Fatalf("Save: %v", err)
+		if err := store.SaveSession(context.Background(), sess); err != nil {
+			t.Fatalf("SaveSession: %v", err)
+		}
+		if err := store.AppendMessage(context.Background(), &session.Message{
+			SessionID: sess.ID,
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{"Host": {"example.com"}},
+		}); err != nil {
+			t.Fatalf("AppendMessage(send): %v", err)
+		}
+		if err := store.AppendMessage(context.Background(), &session.Message{
+			SessionID:  sess.ID,
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+		}); err != nil {
+			t.Fatalf("AppendMessage(recv): %v", err)
 		}
 	}
 

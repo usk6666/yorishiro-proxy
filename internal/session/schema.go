@@ -11,40 +11,53 @@ const bootstrapSQL = `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS sessions (
 	id              TEXT PRIMARY KEY,
+	conn_id         TEXT NOT NULL DEFAULT '',
 	protocol        TEXT NOT NULL,
-	method          TEXT NOT NULL DEFAULT '',
-	url             TEXT NOT NULL DEFAULT '',
-	request_headers TEXT NOT NULL DEFAULT '{}',
-	request_body    BLOB,
-	response_status INTEGER NOT NULL DEFAULT 0,
-	response_headers TEXT NOT NULL DEFAULT '{}',
-	response_body   BLOB,
+	session_type    TEXT NOT NULL DEFAULT 'unary',
+	state           TEXT NOT NULL DEFAULT 'complete',
 	timestamp       DATETIME NOT NULL,
-	duration_ms     INTEGER NOT NULL DEFAULT 0
+	duration_ms     INTEGER NOT NULL DEFAULT 0,
+	tags            TEXT NOT NULL DEFAULT '{}',
+	client_addr     TEXT NOT NULL DEFAULT '',
+	server_addr     TEXT NOT NULL DEFAULT '',
+	tls_version     TEXT NOT NULL DEFAULT '',
+	tls_cipher      TEXT NOT NULL DEFAULT '',
+	tls_alpn        TEXT NOT NULL DEFAULT '',
+	tls_server_cert_subject TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_method ON sessions(method);
-CREATE INDEX IF NOT EXISTS idx_sessions_url ON sessions(url);
-CREATE INDEX IF NOT EXISTS idx_sessions_response_status ON sessions(response_status);
+CREATE INDEX IF NOT EXISTS idx_sessions_protocol ON sessions(protocol);
+CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sessions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_sessions_conn_id ON sessions(conn_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
+CREATE INDEX IF NOT EXISTS idx_sessions_session_type ON sessions(session_type);
+
+CREATE TABLE IF NOT EXISTS messages (
+	id              TEXT PRIMARY KEY,
+	session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	sequence        INTEGER NOT NULL,
+	direction       TEXT NOT NULL,
+	timestamp       DATETIME NOT NULL,
+	headers         TEXT NOT NULL DEFAULT '{}',
+	body            BLOB,
+	raw_bytes       BLOB,
+	body_truncated  INTEGER NOT NULL DEFAULT 0,
+	method          TEXT NOT NULL DEFAULT '',
+	url             TEXT NOT NULL DEFAULT '',
+	status_code     INTEGER NOT NULL DEFAULT 0,
+	metadata        TEXT NOT NULL DEFAULT '{}',
+	UNIQUE(session_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
+CREATE INDEX IF NOT EXISTS idx_messages_method ON messages(method);
+CREATE INDEX IF NOT EXISTS idx_messages_url ON messages(url);
+CREATE INDEX IF NOT EXISTS idx_messages_status_code ON messages(status_code);
 `
 
 var migrations = map[int]string{
 	1: schemaV1,
-	2: `ALTER TABLE sessions ADD COLUMN request_body_truncated INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE sessions ADD COLUMN response_body_truncated INTEGER NOT NULL DEFAULT 0;`,
-	3: `CREATE INDEX IF NOT EXISTS idx_sessions_protocol ON sessions(protocol);
-CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sessions(timestamp);`,
-	4: `ALTER TABLE sessions ADD COLUMN conn_id TEXT NOT NULL DEFAULT '';
-CREATE INDEX IF NOT EXISTS idx_sessions_conn_id ON sessions(conn_id);`,
-	5: `ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '{}';`,
-	6: `ALTER TABLE sessions ADD COLUMN raw_request BLOB;
-ALTER TABLE sessions ADD COLUMN raw_response BLOB;
-ALTER TABLE sessions ADD COLUMN client_addr TEXT NOT NULL DEFAULT '';
-ALTER TABLE sessions ADD COLUMN server_addr TEXT NOT NULL DEFAULT '';
-ALTER TABLE sessions ADD COLUMN tls_version TEXT NOT NULL DEFAULT '';
-ALTER TABLE sessions ADD COLUMN tls_cipher TEXT NOT NULL DEFAULT '';
-ALTER TABLE sessions ADD COLUMN tls_alpn TEXT NOT NULL DEFAULT '';
-ALTER TABLE sessions ADD COLUMN tls_server_cert_subject TEXT NOT NULL DEFAULT '';`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

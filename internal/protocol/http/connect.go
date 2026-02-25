@@ -371,45 +371,63 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	duration := time.Since(start)
 
 	// Record session with HTTPS protocol and the full reconstructed URL.
-	entry := &session.Entry{
-		ConnID:      connID,
-		Protocol:    "HTTPS",
-		Timestamp:   start,
-		Duration:    duration,
-		RawRequest:  rawRequest,
-		RawResponse: rawResponse,
-		ConnInfo: &session.ConnectionInfo{
-			ClientAddr:           clientAddr,
-			ServerAddr:           serverAddr,
-			TLSVersion:           tlsMeta.Version,
-			TLSCipher:            tlsMeta.CipherSuite,
-			TLSALPN:              tlsMeta.ALPN,
-			TLSServerCertSubject: tlsCertSubject,
-		},
-		Request: session.RecordedRequest{
-			Method: req.Method,
-			URL: &url.URL{
-				Scheme:   "https",
-				Host:     req.URL.Host,
-				Path:     req.URL.Path,
-				RawQuery: req.URL.RawQuery,
-				Fragment: req.URL.Fragment,
-			},
-			Headers:       req.Header,
-			Body:          recordReqBody,
-			BodyTruncated: reqTruncated,
-		},
-		Response: session.RecordedResponse{
-			StatusCode:    resp.StatusCode,
-			Headers:       resp.Header,
-			Body:          recordRespBody,
-			BodyTruncated: respTruncated,
-		},
-		Tags: smugglingTags(smuggling),
+	reqURL := &url.URL{
+		Scheme:   "https",
+		Host:     req.URL.Host,
+		Path:     req.URL.Path,
+		RawQuery: req.URL.RawQuery,
+		Fragment: req.URL.Fragment,
 	}
-	if h.store != nil && h.shouldCapture(req.Method, entry.Request.URL) {
-		if err := h.store.Save(ctx, entry); err != nil {
+	if h.store != nil && h.shouldCapture(req.Method, reqURL) {
+		sess := &session.Session{
+			ConnID:      connID,
+			Protocol:    "HTTPS",
+			SessionType: "unary",
+			State:       "complete",
+			Timestamp:   start,
+			Duration:    duration,
+			Tags:        smugglingTags(smuggling),
+			ConnInfo: &session.ConnectionInfo{
+				ClientAddr:           clientAddr,
+				ServerAddr:           serverAddr,
+				TLSVersion:           tlsMeta.Version,
+				TLSCipher:            tlsMeta.CipherSuite,
+				TLSALPN:              tlsMeta.ALPN,
+				TLSServerCertSubject: tlsCertSubject,
+			},
+		}
+		if err := h.store.SaveSession(ctx, sess); err != nil {
 			logger.Error("HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		} else {
+			sendMsg := &session.Message{
+				SessionID:     sess.ID,
+				Sequence:      0,
+				Direction:     "send",
+				Timestamp:     start,
+				Method:        req.Method,
+				URL:           reqURL,
+				Headers:       req.Header,
+				Body:          recordReqBody,
+				RawBytes:      rawRequest,
+				BodyTruncated: reqTruncated,
+			}
+			if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+				logger.Error("HTTPS send message save failed", "error", err)
+			}
+			recvMsg := &session.Message{
+				SessionID:     sess.ID,
+				Sequence:      1,
+				Direction:     "receive",
+				Timestamp:     start.Add(duration),
+				StatusCode:    resp.StatusCode,
+				Headers:       resp.Header,
+				Body:          recordRespBody,
+				RawBytes:      rawResponse,
+				BodyTruncated: respTruncated,
+			}
+			if err := h.store.AppendMessage(ctx, recvMsg); err != nil {
+				logger.Error("HTTPS receive message save failed", "error", err)
+			}
 		}
 	}
 

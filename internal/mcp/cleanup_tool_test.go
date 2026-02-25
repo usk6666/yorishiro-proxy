@@ -20,31 +20,44 @@ func TestClearSessions_Success(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Insert old and new sessions.
-	entries := []*session.Entry{
-		{
+	saveTestEntry(t, store,
+		&session.Session{
 			Protocol:  "HTTP/1.x",
 			Timestamp: now.Add(-72 * time.Hour), // 3 days ago
-			Request: session.RecordedRequest{
-				Method: "GET",
-				URL:    mustParseTestURL("http://example.com/old"),
-			},
-			Response: session.RecordedResponse{StatusCode: 200},
 		},
-		{
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: now.Add(-72 * time.Hour),
+			Method:    "GET",
+			URL:       mustParseTestURL("http://example.com/old"),
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  now.Add(-72 * time.Hour),
+			StatusCode: 200,
+		},
+	)
+	saveTestEntry(t, store,
+		&session.Session{
 			Protocol:  "HTTP/1.x",
 			Timestamp: now.Add(-1 * time.Hour), // 1 hour ago
-			Request: session.RecordedRequest{
-				Method: "GET",
-				URL:    mustParseTestURL("http://example.com/new"),
-			},
-			Response: session.RecordedResponse{StatusCode: 200},
 		},
-	}
-	for _, e := range entries {
-		if err := store.Save(ctx, e); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: now.Add(-1 * time.Hour),
+			Method:    "GET",
+			URL:       mustParseTestURL("http://example.com/new"),
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  now.Add(-1 * time.Hour),
+			StatusCode: 200,
+		},
+	)
 
 	// Clear sessions older than 2 days.
 	result, err := cs.CallTool(ctx, &gomcp.CallToolParams{
@@ -74,9 +87,9 @@ func TestClearSessions_Success(t *testing.T) {
 	}
 
 	// Verify only the new session remains.
-	remaining, err := store.List(ctx, session.ListOptions{})
+	remaining, err := store.ListSessions(ctx, session.ListOptions{})
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("ListSessions: %v", err)
 	}
 	if len(remaining) != 1 {
 		t.Errorf("expected 1 remaining session, got %d", len(remaining))
@@ -131,18 +144,25 @@ func TestClearSessions_NothingToDelete(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a recent session.
-	entry := &session.Entry{
-		Protocol:  "HTTP/1.x",
-		Timestamp: time.Now().UTC(),
-		Request: session.RecordedRequest{
-			Method: "GET",
-			URL:    mustParseTestURL("http://example.com/recent"),
+	saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now().UTC(),
 		},
-		Response: session.RecordedResponse{StatusCode: 200},
-	}
-	if err := store.Save(ctx, entry); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now().UTC(),
+			Method:    "GET",
+			URL:       mustParseTestURL("http://example.com/recent"),
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now().UTC(),
+			StatusCode: 200,
+		},
+	)
 
 	result, err := cs.CallTool(ctx, &gomcp.CallToolParams{
 		Name: "clear_sessions",
