@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "proxy_start input",
+  "description": "Input schema for the proxy_start tool.",
+  "type": "object",
+  "properties": {
+    "listen_addr": {
+      "type": "string",
+      "description": "TCP address to listen on. Must be a loopback address. Defaults to 127.0.0.1:8080.",
+      "examples": ["127.0.0.1:8080", "127.0.0.1:9090", "[::1]:8080"]
+    },
+    "capture_scope": {
+      "type": "object",
+      "description": "Controls which requests are recorded. If omitted, all requests are captured.",
+      "properties": {
+        "includes": {
+          "type": "array",
+          "description": "Include rules. Only matching requests are captured.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        },
+        "excludes": {
+          "type": "array",
+          "description": "Exclude rules. Takes precedence over includes.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "tls_passthrough": {
+      "type": "array",
+      "description": "Domain patterns that bypass TLS interception.",
+      "items": {
+        "type": "string",
+        "examples": ["pinned-service.com", "*.googleapis.com"]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "scope_rule": {
+      "type": "object",
+      "description": "A scope rule. At least one field must be set.",
+      "properties": {
+        "hostname": {
+          "type": "string",
+          "description": "Hostname pattern. Exact match or wildcard (e.g. *.example.com)."
+        },
+        "url_prefix": {
+          "type": "string",
+          "description": "URL path prefix match."
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method (e.g. GET, POST)."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

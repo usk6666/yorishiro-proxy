@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "execute input",
+  "description": "Input schema for the execute tool.",
+  "type": "object",
+  "required": ["action", "params"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "The action to execute.",
+      "enum": ["replay", "replay_raw", "delete_sessions"]
+    },
+    "params": {
+      "type": "object",
+      "description": "Action-specific parameters.",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Session ID for replay, replay_raw, or single-session deletion."
+        },
+        "override_method": {
+          "type": "string",
+          "description": "HTTP method override for replay."
+        },
+        "override_url": {
+          "type": "string",
+          "description": "URL override for replay. Must include scheme and host."
+        },
+        "override_headers": {
+          "type": "object",
+          "description": "Header overrides for replay as key-value pairs.",
+          "additionalProperties": { "type": "string" }
+        },
+        "override_body": {
+          "type": "string",
+          "description": "Body override for replay."
+        },
+        "target_addr": {
+          "type": "string",
+          "description": "Target address (host:port) for replay_raw."
+        },
+        "use_tls": {
+          "type": "boolean",
+          "description": "Use TLS for replay_raw connection."
+        },
+        "older_than_days": {
+          "type": "integer",
+          "description": "Delete sessions older than this many days. Must be >= 1.",
+          "minimum": 1
+        },
+        "confirm": {
+          "type": "boolean",
+          "description": "Confirm bulk deletion (required for older_than_days or delete-all)."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
