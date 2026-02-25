@@ -102,8 +102,12 @@ func validateLoopbackAddr(addr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid listen_addr %q: %w", addr, err)
 	}
+	// Reject empty host to prevent binding to all interfaces (0.0.0.0).
+	if host == "" {
+		return fmt.Errorf("invalid listen_addr %q: host must be specified (e.g. 127.0.0.1:8080)", addr)
+	}
 	// Restrict to loopback addresses for security.
-	if host != "" && host != "localhost" {
+	if host != "localhost" {
 		ip := net.ParseIP(host)
 		if ip == nil || !ip.IsLoopback() {
 			return fmt.Errorf("invalid listen_addr %q: only loopback addresses are allowed", addr)
