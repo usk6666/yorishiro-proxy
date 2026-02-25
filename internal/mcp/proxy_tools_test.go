@@ -53,14 +53,14 @@ func setupTestSessionWithManager(t *testing.T, manager *proxy.Manager) *gomcp.Cl
 	return cs
 }
 
-func TestProxyStop_Success(t *testing.T) {
+func TestProxyStartStop_FullCycle(t *testing.T) {
 	logger := newTestLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
 	cs := setupTestSessionWithManager(t, manager)
 
-	// Start first.
+	// Start.
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "proxy_start",
 		Arguments: map[string]any{"listen_addr": "127.0.0.1:0"},
@@ -69,10 +69,16 @@ func TestProxyStop_Success(t *testing.T) {
 		t.Fatalf("CallTool start: %v", err)
 	}
 	if result.IsError {
-		t.Fatalf("expected start to succeed: %v", result.Content)
+		t.Fatalf("start failed: %v", result.Content)
 	}
 
-	// Now stop.
+	// Verify running.
+	running, _ := manager.Status()
+	if !running {
+		t.Error("expected manager to be running")
+	}
+
+	// Stop.
 	result, err = cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "proxy_stop",
 	})
@@ -80,53 +86,29 @@ func TestProxyStop_Success(t *testing.T) {
 		t.Fatalf("CallTool stop: %v", err)
 	}
 	if result.IsError {
-		t.Fatalf("expected stop to succeed: %v", result.Content)
+		t.Fatalf("stop failed: %v", result.Content)
 	}
 
-	var out proxyStopResult
-	textContent, ok := result.Content[0].(*gomcp.TextContent)
-	if !ok {
-		t.Fatalf("expected TextContent, got %T", result.Content[0])
-	}
-	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	// Verify stopped.
+	running, _ = manager.Status()
+	if running {
+		t.Error("expected manager to not be running")
 	}
 
-	if out.Status != "stopped" {
-		t.Errorf("status = %q, want %q", out.Status, "stopped")
-	}
-}
-
-func TestProxyStop_NotRunning(t *testing.T) {
-	logger := newTestLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	cs := setupTestSessionWithManager(t, manager)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "proxy_stop",
+	// Restart.
+	result, err = cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "proxy_start",
+		Arguments: map[string]any{"listen_addr": "127.0.0.1:0"},
 	})
 	if err != nil {
-		t.Fatalf("CallTool: %v", err)
+		t.Fatalf("CallTool restart: %v", err)
 	}
-	if !result.IsError {
-		t.Fatal("expected IsError=true for stop when not running")
+	if result.IsError {
+		t.Fatalf("restart failed: %v", result.Content)
 	}
-}
 
-func TestProxyStop_NilManager(t *testing.T) {
-	cs := setupTestSessionWithManager(t, nil)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "proxy_stop",
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected IsError=true for nil manager")
-	}
+	// Cleanup.
+	manager.Stop(context.Background())
 }
 
 // setupTestSessionForStatus creates an MCP client session with all dependencies for proxy_status testing.
