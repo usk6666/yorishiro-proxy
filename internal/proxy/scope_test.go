@@ -543,3 +543,142 @@ func TestCaptureScope_HostnameWithPort(t *testing.T) {
 		t.Error("hostname matching should ignore port in URL")
 	}
 }
+
+func TestCaptureScope_MergeRules_AddIncludes(t *testing.T) {
+	s := NewCaptureScope()
+	s.SetRules([]ScopeRule{{Hostname: "existing.com"}}, nil)
+
+	s.MergeRules(
+		[]ScopeRule{{Hostname: "new.com"}},
+		nil, nil, nil,
+	)
+
+	includes, _ := s.Rules()
+	if len(includes) != 2 {
+		t.Fatalf("expected 2 includes, got %d", len(includes))
+	}
+}
+
+func TestCaptureScope_MergeRules_RemoveIncludes(t *testing.T) {
+	s := NewCaptureScope()
+	s.SetRules([]ScopeRule{{Hostname: "a.com"}, {Hostname: "b.com"}}, nil)
+
+	s.MergeRules(
+		nil,
+		[]ScopeRule{{Hostname: "a.com"}},
+		nil, nil,
+	)
+
+	includes, _ := s.Rules()
+	if len(includes) != 1 {
+		t.Fatalf("expected 1 include, got %d", len(includes))
+	}
+	if includes[0].Hostname != "b.com" {
+		t.Errorf("expected b.com, got %q", includes[0].Hostname)
+	}
+}
+
+func TestCaptureScope_MergeRules_AddExcludes(t *testing.T) {
+	s := NewCaptureScope()
+
+	s.MergeRules(
+		nil, nil,
+		[]ScopeRule{{Hostname: "cdn.com"}},
+		nil,
+	)
+
+	_, excludes := s.Rules()
+	if len(excludes) != 1 {
+		t.Fatalf("expected 1 exclude, got %d", len(excludes))
+	}
+	if excludes[0].Hostname != "cdn.com" {
+		t.Errorf("expected cdn.com, got %q", excludes[0].Hostname)
+	}
+}
+
+func TestCaptureScope_MergeRules_RemoveExcludes(t *testing.T) {
+	s := NewCaptureScope()
+	s.SetRules(nil, []ScopeRule{{Hostname: "old.com"}, {Hostname: "keep.com"}})
+
+	s.MergeRules(
+		nil, nil,
+		nil,
+		[]ScopeRule{{Hostname: "old.com"}},
+	)
+
+	_, excludes := s.Rules()
+	if len(excludes) != 1 {
+		t.Fatalf("expected 1 exclude, got %d", len(excludes))
+	}
+	if excludes[0].Hostname != "keep.com" {
+		t.Errorf("expected keep.com, got %q", excludes[0].Hostname)
+	}
+}
+
+func TestCaptureScope_MergeRules_DuplicateSkipped(t *testing.T) {
+	s := NewCaptureScope()
+	s.SetRules([]ScopeRule{{Hostname: "existing.com"}}, nil)
+
+	s.MergeRules(
+		[]ScopeRule{{Hostname: "existing.com"}},
+		nil, nil, nil,
+	)
+
+	includes, _ := s.Rules()
+	if len(includes) != 1 {
+		t.Errorf("expected 1 include (duplicate should be skipped), got %d", len(includes))
+	}
+}
+
+func TestCaptureScope_MergeRules_CombinedDeltas(t *testing.T) {
+	s := NewCaptureScope()
+	s.SetRules(
+		[]ScopeRule{{Hostname: "keep.com"}, {Hostname: "remove.com"}},
+		[]ScopeRule{{Hostname: "old-cdn.com"}},
+	)
+
+	s.MergeRules(
+		[]ScopeRule{{Hostname: "add.com"}},
+		[]ScopeRule{{Hostname: "remove.com"}},
+		[]ScopeRule{{Hostname: "new-cdn.com"}},
+		[]ScopeRule{{Hostname: "old-cdn.com"}},
+	)
+
+	includes, excludes := s.Rules()
+	if len(includes) != 2 {
+		t.Fatalf("expected 2 includes, got %d", len(includes))
+	}
+	if len(excludes) != 1 {
+		t.Fatalf("expected 1 exclude, got %d", len(excludes))
+	}
+	if excludes[0].Hostname != "new-cdn.com" {
+		t.Errorf("expected new-cdn.com, got %q", excludes[0].Hostname)
+	}
+}
+
+func TestCaptureScope_MergeRules_ConcurrentAccess(t *testing.T) {
+	s := NewCaptureScope()
+	u, _ := url.Parse("http://example.com/path")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			s.MergeRules(
+				[]ScopeRule{{Hostname: "a.com"}},
+				[]ScopeRule{{Hostname: "b.com"}},
+				nil, nil,
+			)
+		}()
+		go func() {
+			defer wg.Done()
+			s.ShouldCapture("GET", u)
+		}()
+		go func() {
+			defer wg.Done()
+			s.Rules()
+		}()
+	}
+	wg.Wait()
+}
