@@ -1,0 +1,863 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
+)
+
+// setupProxyStartTestSession creates an MCP client session with Manager, CaptureScope,
+// and PassthroughList for testing the proxy_start tool.
+func setupProxyStartTestSession(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	var opts []ServerOption
+	if scope != nil {
+		opts = append(opts, WithCaptureScope(scope))
+	}
+	if pl != nil {
+		opts = append(opts, WithPassthroughList(pl))
+	}
+
+	s := NewServer(ctx, nil, nil, manager, opts...)
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+// callProxyStart invokes the proxy_start tool with the given arguments.
+func callProxyStart(t *testing.T, cs *gomcp.ClientSession, args map[string]any) (*gomcp.CallToolResult, error) {
+	t.Helper()
+	return cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "proxy_start",
+		Arguments: args,
+	})
+}
+
+// unmarshalProxyStartResult extracts the proxyStartResult from a CallToolResult.
+func unmarshalProxyStartResult(t *testing.T, result *gomcp.CallToolResult) proxyStartResult {
+	t.Helper()
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+	text, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected *TextContent, got %T", result.Content[0])
+	}
+	var out proxyStartResult
+	if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
+		t.Fatalf("unmarshal proxyStartResult: %v", err)
+	}
+	return out
+}
+
+func TestProxyStart_WithListenAddr(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+	if out.ListenAddr == "" {
+		t.Error("expected non-empty listen_addr")
+	}
+}
+
+func TestProxyStart_DefaultAddr(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	// Call without listen_addr to use default.
+	result, err := callProxyStart(t, cs, nil)
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	if result.IsError {
+		// Port 127.0.0.1:8080 might be in use; skip the test.
+		t.Skipf("proxy_start with default addr failed (port likely in use): %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+}
+
+func TestProxyStart_AlreadyRunning(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	// First start.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("first CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected first start to succeed: %v", result.Content)
+	}
+
+	// Second start should fail.
+	result, err = callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("second CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for double start")
+	}
+}
+
+func TestProxyStart_NilManager(t *testing.T) {
+	cs := setupProxyStartTestSession(t, nil, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for nil manager")
+	}
+}
+
+func TestProxyStart_NonLoopbackAddr(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	tests := []struct {
+		name string
+		addr string
+	}{
+		{name: "public IP", addr: "192.168.1.1:8080"},
+		{name: "all interfaces", addr: "0.0.0.0:8080"},
+		{name: "public IPv6", addr: "[::]:8080"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := callProxyStart(t, cs, map[string]any{
+				"listen_addr": tt.addr,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if !result.IsError {
+				t.Fatalf("expected error for non-loopback address %q", tt.addr)
+			}
+		})
+	}
+}
+
+func TestProxyStart_InvalidAddr(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "not-a-valid-address",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid address format")
+	}
+}
+
+func TestProxyStart_WithCaptureScope(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"includes": []any{
+				map[string]any{"hostname": "*.target.com", "url_prefix": "/api/", "method": "POST"},
+			},
+			"excludes": []any{
+				map[string]any{"hostname": "cdn.example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+
+	// Verify scope was applied.
+	includes, excludes := scope.Rules()
+	if len(includes) != 1 {
+		t.Fatalf("scope includes = %d, want 1", len(includes))
+	}
+	if includes[0].Hostname != "*.target.com" {
+		t.Errorf("includes[0].hostname = %q, want %q", includes[0].Hostname, "*.target.com")
+	}
+	if includes[0].URLPrefix != "/api/" {
+		t.Errorf("includes[0].url_prefix = %q, want %q", includes[0].URLPrefix, "/api/")
+	}
+	if includes[0].Method != "POST" {
+		t.Errorf("includes[0].method = %q, want %q", includes[0].Method, "POST")
+	}
+	if len(excludes) != 1 {
+		t.Fatalf("scope excludes = %d, want 1", len(excludes))
+	}
+	if excludes[0].Hostname != "cdn.example.com" {
+		t.Errorf("excludes[0].hostname = %q, want %q", excludes[0].Hostname, "cdn.example.com")
+	}
+}
+
+func TestProxyStart_WithCaptureScope_IncludesOnly(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"includes": []any{
+				map[string]any{"hostname": "example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	includes, excludes := scope.Rules()
+	if len(includes) != 1 {
+		t.Fatalf("includes = %d, want 1", len(includes))
+	}
+	if len(excludes) != 0 {
+		t.Errorf("excludes = %d, want 0", len(excludes))
+	}
+}
+
+func TestProxyStart_WithCaptureScope_ExcludesOnly(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"excludes": []any{
+				map[string]any{"hostname": "ads.example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	includes, excludes := scope.Rules()
+	if len(includes) != 0 {
+		t.Errorf("includes = %d, want 0", len(includes))
+	}
+	if len(excludes) != 1 {
+		t.Fatalf("excludes = %d, want 1", len(excludes))
+	}
+}
+
+func TestProxyStart_WithCaptureScope_EmptyRuleError(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	scope := proxy.NewCaptureScope()
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	// Include rule with no fields set should error.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"includes": []any{
+				map[string]any{},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for empty include rule")
+	}
+}
+
+func TestProxyStart_WithCaptureScope_EmptyExcludeRuleError(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	scope := proxy.NewCaptureScope()
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	// Exclude rule with no fields set should error.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"excludes": []any{
+				map[string]any{},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for empty exclude rule")
+	}
+}
+
+func TestProxyStart_WithCaptureScope_NilScope(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	// No scope configured on server.
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"includes": []any{
+				map[string]any{"hostname": "example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when scope is not initialized")
+	}
+}
+
+func TestProxyStart_WithTLSPassthrough(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	pl := proxy.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, nil, pl)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"tls_passthrough": []any{"pinned-service.com", "*.googleapis.com"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+
+	// Verify passthrough patterns were applied.
+	if pl.Len() != 2 {
+		t.Errorf("passthrough len = %d, want 2", pl.Len())
+	}
+	if !pl.Contains("pinned-service.com") {
+		t.Error("expected passthrough to contain pinned-service.com")
+	}
+	if !pl.Contains("sub.googleapis.com") {
+		t.Error("expected passthrough to match sub.googleapis.com via *.googleapis.com")
+	}
+}
+
+func TestProxyStart_WithTLSPassthrough_EmptyPattern(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	pl := proxy.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, nil, pl)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"tls_passthrough": []any{"valid.com", ""},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for empty passthrough pattern")
+	}
+}
+
+func TestProxyStart_WithTLSPassthrough_NilPassthrough(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	// No passthrough configured on server.
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"tls_passthrough": []any{"example.com"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when passthrough is not initialized")
+	}
+}
+
+func TestProxyStart_WithAllConfig(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, scope, pl)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"includes": []any{
+				map[string]any{"hostname": "*.target.com", "url_prefix": "/api/", "method": "POST"},
+			},
+			"excludes": []any{
+				map[string]any{"hostname": "cdn.example.com"},
+			},
+		},
+		"tls_passthrough": []any{"pinned-service.com", "*.googleapis.com"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+	if out.ListenAddr == "" {
+		t.Error("expected non-empty listen_addr")
+	}
+
+	// Verify scope was applied.
+	includes, excludes := scope.Rules()
+	if len(includes) != 1 {
+		t.Errorf("scope includes = %d, want 1", len(includes))
+	}
+	if len(excludes) != 1 {
+		t.Errorf("scope excludes = %d, want 1", len(excludes))
+	}
+
+	// Verify passthrough was applied.
+	if pl.Len() != 2 {
+		t.Errorf("passthrough len = %d, want 2", pl.Len())
+	}
+}
+
+func TestProxyStart_WithEmptyCaptureScope(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	// Pre-set some rules to verify empty scope object does not clear them.
+	scope.SetRules(
+		[]proxy.ScopeRule{{Hostname: "existing.com"}},
+		nil,
+	)
+
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	// Pass capture_scope as an empty object (no includes or excludes).
+	// The scope with empty includes/excludes should set empty rules.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":   "127.0.0.1:0",
+		"capture_scope": map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	// Empty capture_scope object should set empty rules (clear previous).
+	includes, excludes := scope.Rules()
+	if len(includes) != 0 {
+		t.Errorf("scope includes = %d, want 0 (empty scope should clear)", len(includes))
+	}
+	if len(excludes) != 0 {
+		t.Errorf("scope excludes = %d, want 0 (empty scope should clear)", len(excludes))
+	}
+}
+
+func TestProxyStart_WithoutCaptureScope(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	// Pre-set some rules to verify omitting capture_scope does not modify them.
+	scope.SetRules(
+		[]proxy.ScopeRule{{Hostname: "existing.com"}},
+		nil,
+	)
+
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	// Omit capture_scope entirely — existing rules should remain unchanged.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	includes, _ := scope.Rules()
+	if len(includes) != 1 {
+		t.Errorf("scope includes = %d, want 1 (omitted scope should not clear existing)", len(includes))
+	}
+	if len(includes) > 0 && includes[0].Hostname != "existing.com" {
+		t.Errorf("scope includes[0].hostname = %q, want %q", includes[0].Hostname, "existing.com")
+	}
+}
+
+func TestProxyStart_LoopbackAddresses(t *testing.T) {
+	tests := []struct {
+		name    string
+		addr    string
+		wantErr bool
+	}{
+		{name: "IPv4 loopback", addr: "127.0.0.1:0", wantErr: false},
+		{name: "localhost", addr: "localhost:0", wantErr: false},
+		{name: "IPv6 loopback", addr: "[::1]:0", wantErr: false},
+		{name: "empty host", addr: ":0", wantErr: true},
+		{name: "public IPv4", addr: "10.0.0.1:8080", wantErr: true},
+		{name: "all interfaces IPv4", addr: "0.0.0.0:8080", wantErr: true},
+		{name: "all interfaces IPv6", addr: "[::]:8080", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := newTestLogger()
+			detector := &stubDetector{}
+			manager := proxy.NewManager(detector, logger)
+			t.Cleanup(func() { manager.Stop(context.Background()) })
+
+			cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+			result, err := callProxyStart(t, cs, map[string]any{
+				"listen_addr": tt.addr,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+
+			if tt.wantErr && !result.IsError {
+				t.Fatalf("expected error for addr %q", tt.addr)
+			}
+			if !tt.wantErr && result.IsError {
+				t.Fatalf("expected success for addr %q, got error: %v", tt.addr, result.Content)
+			}
+		})
+	}
+}
+
+func TestProxyStart_ScopeAppliedBeforeStart(t *testing.T) {
+	// Verify that scope and passthrough are configured before the proxy starts.
+	// If scope validation fails, proxy should NOT start.
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	scope := proxy.NewCaptureScope()
+	cs := setupProxyStartTestSession(t, manager, scope, nil)
+
+	// Invalid scope rule should prevent proxy from starting.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"includes": []any{
+				map[string]any{}, // empty rule — invalid
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid scope rule")
+	}
+
+	// Verify proxy did NOT start.
+	running, _ := manager.Status()
+	if running {
+		t.Error("proxy should not be running after scope validation failure")
+		manager.Stop(context.Background())
+	}
+}
+
+func TestProxyStart_PassthroughAppliedBeforeStart(t *testing.T) {
+	// If passthrough validation fails, proxy should NOT start.
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	pl := proxy.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, nil, pl)
+
+	// Empty passthrough pattern should prevent proxy from starting.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"tls_passthrough": []any{"valid.com", ""},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for empty passthrough pattern")
+	}
+
+	// Verify proxy did NOT start.
+	running, _ := manager.Status()
+	if running {
+		t.Error("proxy should not be running after passthrough validation failure")
+		manager.Stop(context.Background())
+	}
+}
+
+func TestValidateLoopbackAddr(t *testing.T) {
+	tests := []struct {
+		name    string
+		addr    string
+		wantErr bool
+	}{
+		{name: "valid loopback", addr: "127.0.0.1:8080", wantErr: false},
+		{name: "localhost", addr: "localhost:8080", wantErr: false},
+		{name: "IPv6 loopback", addr: "[::1]:8080", wantErr: false},
+		{name: "empty host", addr: ":8080", wantErr: true},
+		{name: "public IP", addr: "192.168.1.1:8080", wantErr: true},
+		{name: "all interfaces", addr: "0.0.0.0:8080", wantErr: true},
+		{name: "invalid format", addr: "not-an-address", wantErr: true},
+		{name: "missing port", addr: "127.0.0.1", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateLoopbackAddr(tt.addr)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateLoopbackAddr(%q) error = %v, wantErr %v", tt.addr, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestApplyCaptureScope(t *testing.T) {
+	tests := []struct {
+		name        string
+		scope       *proxy.CaptureScope
+		input       *captureScopeInput
+		wantErr     bool
+		wantInclude int
+		wantExclude int
+	}{
+		{
+			name:  "nil scope returns error",
+			scope: nil,
+			input: &captureScopeInput{
+				Includes: []scopeRuleInput{{Hostname: "example.com"}},
+			},
+			wantErr: true,
+		},
+		{
+			name:  "valid includes and excludes",
+			scope: proxy.NewCaptureScope(),
+			input: &captureScopeInput{
+				Includes: []scopeRuleInput{{Hostname: "*.target.com"}},
+				Excludes: []scopeRuleInput{{Hostname: "cdn.target.com"}},
+			},
+			wantInclude: 1,
+			wantExclude: 1,
+		},
+		{
+			name:  "empty include rule returns error",
+			scope: proxy.NewCaptureScope(),
+			input: &captureScopeInput{
+				Includes: []scopeRuleInput{{}},
+			},
+			wantErr: true,
+		},
+		{
+			name:  "empty exclude rule returns error",
+			scope: proxy.NewCaptureScope(),
+			input: &captureScopeInput{
+				Excludes: []scopeRuleInput{{}},
+			},
+			wantErr: true,
+		},
+		{
+			name:        "empty input sets empty rules",
+			scope:       proxy.NewCaptureScope(),
+			input:       &captureScopeInput{},
+			wantInclude: 0,
+			wantExclude: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{scope: tt.scope}
+			err := s.applyCaptureScope(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("applyCaptureScope() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && tt.scope != nil {
+				includes, excludes := tt.scope.Rules()
+				if len(includes) != tt.wantInclude {
+					t.Errorf("includes = %d, want %d", len(includes), tt.wantInclude)
+				}
+				if len(excludes) != tt.wantExclude {
+					t.Errorf("excludes = %d, want %d", len(excludes), tt.wantExclude)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyTLSPassthrough(t *testing.T) {
+	tests := []struct {
+		name     string
+		pl       *proxy.PassthroughList
+		patterns []string
+		wantErr  bool
+		wantLen  int
+	}{
+		{
+			name:     "nil passthrough returns error",
+			pl:       nil,
+			patterns: []string{"example.com"},
+			wantErr:  true,
+		},
+		{
+			name:     "valid patterns",
+			pl:       proxy.NewPassthroughList(),
+			patterns: []string{"example.com", "*.googleapis.com"},
+			wantLen:  2,
+		},
+		{
+			name:     "empty pattern returns error",
+			pl:       proxy.NewPassthroughList(),
+			patterns: []string{"valid.com", ""},
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{passthrough: tt.pl}
+			err := s.applyTLSPassthrough(tt.patterns)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("applyTLSPassthrough() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && tt.pl != nil {
+				if tt.pl.Len() != tt.wantLen {
+					t.Errorf("passthrough len = %d, want %d", tt.pl.Len(), tt.wantLen)
+				}
+			}
+		})
+	}
+}
