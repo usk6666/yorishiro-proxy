@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -64,6 +65,8 @@ func (s *Server) registerExecute() {
 // handleExecute routes the execute tool invocation to the appropriate action handler.
 func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, input executeInput) (*gomcp.CallToolResult, any, error) {
 	switch input.Action {
+	case "":
+		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableActions, ", "))
 	case "replay":
 		return s.handleExecuteReplay(ctx, input.Params)
 	case "replay_raw":
