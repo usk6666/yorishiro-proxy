@@ -82,9 +82,12 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 
 ## 開発ワークフロー
 
-1. `/implement <Issue ID>` — Issue の実装・テスト・コミット・PR 作成を一気通貫で実行
-2. `/review-gate` — PR に対して Code Review + Security Review を並行実行。問題があれば自動修正→再レビュー（最大 2 ラウンド）
-3. `/orchestrate` — 複数 Issue の依存関係を分析し、最適な並行度でサブエージェントに実装を委任
+1. `/project status` — マイルストーン進捗を確認し、次に取り組む対象を決定
+2. `/project plan <milestone>` — ロードマップから Linear Issue を作成・整備
+3. `/orchestrate` — マイルストーン単位で複数 Issue をサブエージェントに並行実装
+4. `/implement <Issue ID>` — 単一 Issue の実装・テスト・コミット・PR 作成
+5. `/review-gate` — PR に対して Code Review + Security Review を並行実行。問題があれば自動修正→再レビュー（最大 2 ラウンド）
+6. `/project sync` — 実装完了後、ロードマップ文書を更新
 
 > **注意**: `/implement` は単一セッションでの単独実行を前提とする。複数 Issue を並行実装する場合は `/orchestrate` を使用すること。
 
