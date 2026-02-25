@@ -52,6 +52,58 @@ func (s *CaptureScope) Rules() (includes, excludes []ScopeRule) {
 	return cloneRules(s.includes), cloneRules(s.excludes)
 }
 
+// MergeRules atomically applies add/remove deltas to the current rules.
+// Within a single lock, it reads the current rules, applies the deltas, and writes back.
+// For add operations, duplicate rules (where all fields match) are skipped.
+// For remove operations, all matching rules are removed.
+func (s *CaptureScope) MergeRules(addIncludes, removeIncludes, addExcludes, removeExcludes []ScopeRule) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Apply include additions (skip duplicates).
+	for _, add := range addIncludes {
+		if !containsRule(s.includes, add) {
+			s.includes = append(s.includes, add)
+		}
+	}
+	// Apply include removals.
+	for _, rem := range removeIncludes {
+		s.includes = filterRule(s.includes, rem)
+	}
+
+	// Apply exclude additions (skip duplicates).
+	for _, add := range addExcludes {
+		if !containsRule(s.excludes, add) {
+			s.excludes = append(s.excludes, add)
+		}
+	}
+	// Apply exclude removals.
+	for _, rem := range removeExcludes {
+		s.excludes = filterRule(s.excludes, rem)
+	}
+}
+
+// containsRule reports whether rules contains a rule equal to target.
+func containsRule(rules []ScopeRule, target ScopeRule) bool {
+	for _, r := range rules {
+		if r.Hostname == target.Hostname && r.URLPrefix == target.URLPrefix && r.Method == target.Method {
+			return true
+		}
+	}
+	return false
+}
+
+// filterRule returns rules with all occurrences of target removed.
+func filterRule(rules []ScopeRule, target ScopeRule) []ScopeRule {
+	result := make([]ScopeRule, 0, len(rules))
+	for _, r := range rules {
+		if r.Hostname != target.Hostname || r.URLPrefix != target.URLPrefix || r.Method != target.Method {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
 // Clear removes all include and exclude rules, allowing all requests.
 func (s *CaptureScope) Clear() {
 	s.mu.Lock()
