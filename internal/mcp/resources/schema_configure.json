@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "configure input",
+  "description": "Input schema for the configure tool.",
+  "type": "object",
+  "properties": {
+    "operation": {
+      "type": "string",
+      "description": "How the configuration should be applied.",
+      "enum": ["merge", "replace"],
+      "default": "merge"
+    },
+    "capture_scope": {
+      "type": "object",
+      "description": "Capture scope configuration.",
+      "properties": {
+        "add_includes": {
+          "type": "array",
+          "description": "(merge) Rules to add to includes.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        },
+        "remove_includes": {
+          "type": "array",
+          "description": "(merge) Rules to remove from includes.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        },
+        "add_excludes": {
+          "type": "array",
+          "description": "(merge) Rules to add to excludes.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        },
+        "remove_excludes": {
+          "type": "array",
+          "description": "(merge) Rules to remove from excludes.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        },
+        "includes": {
+          "type": "array",
+          "description": "(replace) Full list of include rules.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        },
+        "excludes": {
+          "type": "array",
+          "description": "(replace) Full list of exclude rules.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "tls_passthrough": {
+      "type": "object",
+      "description": "TLS passthrough configuration.",
+      "properties": {
+        "add": {
+          "type": "array",
+          "description": "(merge) Patterns to add.",
+          "items": { "type": "string" }
+        },
+        "remove": {
+          "type": "array",
+          "description": "(merge) Patterns to remove.",
+          "items": { "type": "string" }
+        },
+        "patterns": {
+          "type": "array",
+          "description": "(replace) Full list of passthrough patterns.",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "scope_rule": {
+      "type": "object",
+      "description": "A scope rule. At least one field must be set.",
+      "properties": {
+        "hostname": {
+          "type": "string",
+          "description": "Hostname pattern. Exact match or wildcard (e.g. *.example.com)."
+        },
+        "url_prefix": {
+          "type": "string",
+          "description": "URL path prefix match."
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method (e.g. GET, POST)."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

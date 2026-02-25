@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "query input",
+  "description": "Input schema for the query tool.",
+  "type": "object",
+  "required": ["resource"],
+  "properties": {
+    "resource": {
+      "type": "string",
+      "description": "The resource to query.",
+      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert"]
+    },
+    "id": {
+      "type": "string",
+      "description": "Session ID. Required for session and messages resources."
+    },
+    "filter": {
+      "type": "object",
+      "description": "Filter options for the sessions resource.",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS)."
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method filter (e.g. GET, POST)."
+        },
+        "url_pattern": {
+          "type": "string",
+          "description": "URL substring search pattern."
+        },
+        "status_code": {
+          "type": "integer",
+          "description": "HTTP response status code filter."
+        }
+      },
+      "additionalProperties": false
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of items to return (default 50, max 1000).",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Number of items to skip for pagination.",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}
