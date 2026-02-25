@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
 )
 
 // configureInput is the typed input for the configure tool.
@@ -142,6 +141,13 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		if s.scope == nil {
 			return nil, nil, fmt.Errorf("capture scope is not initialized: proxy may not be running")
 		}
+		// Validate rules before applying.
+		if err := validateScopeRules("include", input.CaptureScope.Includes); err != nil {
+			return nil, nil, fmt.Errorf("capture_scope replace: %w", err)
+		}
+		if err := validateScopeRules("exclude", input.CaptureScope.Excludes); err != nil {
+			return nil, nil, fmt.Errorf("capture_scope replace: %w", err)
+		}
 		includes := toScopeRules(input.CaptureScope.Includes)
 		excludes := toScopeRules(input.CaptureScope.Excludes)
 		s.scope.SetRules(includes, excludes)
@@ -165,40 +171,22 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 }
 
 // mergeScope applies delta add/remove operations to the capture scope.
-// Since CaptureScope only supports SetRules (full replace), we read current
-// rules, apply deltas, and write back.
+// It uses CaptureScope.MergeRules for atomic read-modify-write.
 func (s *Server) mergeScope(cfg *configureCaptureScope) error {
-	includes, excludes := s.scope.Rules()
-
-	// Add new include rules.
-	for _, r := range cfg.AddIncludes {
-		rule := proxy.ScopeRule{Hostname: r.Hostname, URLPrefix: r.URLPrefix, Method: r.Method}
-		if !containsScopeRule(includes, rule) {
-			includes = append(includes, rule)
-		}
+	// Validate rules before applying.
+	if err := validateScopeRules("add_includes", cfg.AddIncludes); err != nil {
+		return err
+	}
+	if err := validateScopeRules("add_excludes", cfg.AddExcludes); err != nil {
+		return err
 	}
 
-	// Remove include rules.
-	for _, r := range cfg.RemoveIncludes {
-		rule := proxy.ScopeRule{Hostname: r.Hostname, URLPrefix: r.URLPrefix, Method: r.Method}
-		includes = removeScopeRule(includes, rule)
-	}
-
-	// Add new exclude rules.
-	for _, r := range cfg.AddExcludes {
-		rule := proxy.ScopeRule{Hostname: r.Hostname, URLPrefix: r.URLPrefix, Method: r.Method}
-		if !containsScopeRule(excludes, rule) {
-			excludes = append(excludes, rule)
-		}
-	}
-
-	// Remove exclude rules.
-	for _, r := range cfg.RemoveExcludes {
-		rule := proxy.ScopeRule{Hostname: r.Hostname, URLPrefix: r.URLPrefix, Method: r.Method}
-		excludes = removeScopeRule(excludes, rule)
-	}
-
-	s.scope.SetRules(includes, excludes)
+	s.scope.MergeRules(
+		toScopeRules(cfg.AddIncludes),
+		toScopeRules(cfg.RemoveIncludes),
+		toScopeRules(cfg.AddExcludes),
+		toScopeRules(cfg.RemoveExcludes),
+	)
 	return nil
 }
 
@@ -224,28 +212,14 @@ func (s *Server) replacePassthrough(cfg *configureTLSPassthrough) {
 	}
 }
 
-// containsScopeRule checks whether a rule exists in the slice (all fields must match).
-func containsScopeRule(rules []proxy.ScopeRule, target proxy.ScopeRule) bool {
-	for _, r := range rules {
-		if scopeRulesEqual(r, target) {
-			return true
+// validateScopeRules checks that every rule has at least one non-empty field.
+// It returns an error indicating the first invalid rule found.
+func validateScopeRules(kind string, rules []scopeRuleInput) error {
+	for i, r := range rules {
+		if r.Hostname == "" && r.URLPrefix == "" && r.Method == "" {
+			return fmt.Errorf("%s rule %d has no fields set: at least one of hostname, url_prefix, or method must be specified", kind, i)
 		}
 	}
-	return false
+	return nil
 }
 
-// removeScopeRule removes all occurrences of target from rules.
-func removeScopeRule(rules []proxy.ScopeRule, target proxy.ScopeRule) []proxy.ScopeRule {
-	result := make([]proxy.ScopeRule, 0, len(rules))
-	for _, r := range rules {
-		if !scopeRulesEqual(r, target) {
-			result = append(result, r)
-		}
-	}
-	return result
-}
-
-// scopeRulesEqual reports whether two ScopeRules are equal (all fields match).
-func scopeRulesEqual(a, b proxy.ScopeRule) bool {
-	return a.Hostname == b.Hostname && a.URLPrefix == b.URLPrefix && a.Method == b.Method
-}

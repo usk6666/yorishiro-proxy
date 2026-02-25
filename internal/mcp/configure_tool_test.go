@@ -709,3 +709,107 @@ func TestConfigure_ReplaceTLSPassthroughEmptyList(t *testing.T) {
 		t.Errorf("passthrough.Len() = %d, want 0", pl.Len())
 	}
 }
+
+func TestConfigure_MergeRejectsEmptyAddIncludeRule(t *testing.T) {
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+	cs := setupConfigureTestSession(t, scope, pl)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			CaptureScope: &configureCaptureScope{
+				AddIncludes: []scopeRuleInput{
+					{Hostname: "valid.com"},
+					{}, // all-empty rule
+				},
+			},
+		}),
+	})
+	if err != nil {
+		return // Go-level error is acceptable.
+	}
+	if !result.IsError {
+		t.Fatal("expected error for all-empty add_includes rule, got success")
+	}
+
+	// Scope should not have been modified.
+	includes, _ := scope.Rules()
+	if len(includes) != 0 {
+		t.Errorf("scope should remain empty after validation failure, got %d includes", len(includes))
+	}
+}
+
+func TestConfigure_MergeRejectsEmptyAddExcludeRule(t *testing.T) {
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+	cs := setupConfigureTestSession(t, scope, pl)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			CaptureScope: &configureCaptureScope{
+				AddExcludes: []scopeRuleInput{
+					{}, // all-empty rule
+				},
+			},
+		}),
+	})
+	if err != nil {
+		return // Go-level error is acceptable.
+	}
+	if !result.IsError {
+		t.Fatal("expected error for all-empty add_excludes rule, got success")
+	}
+}
+
+func TestConfigure_ReplaceRejectsEmptyIncludeRule(t *testing.T) {
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+	cs := setupConfigureTestSession(t, scope, pl)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "replace",
+			CaptureScope: &configureCaptureScope{
+				Includes: []scopeRuleInput{
+					{Hostname: "valid.com"},
+					{}, // all-empty rule
+				},
+			},
+		}),
+	})
+	if err != nil {
+		return // Go-level error is acceptable.
+	}
+	if !result.IsError {
+		t.Fatal("expected error for all-empty include rule in replace, got success")
+	}
+}
+
+func TestConfigure_ReplaceRejectsEmptyExcludeRule(t *testing.T) {
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+	cs := setupConfigureTestSession(t, scope, pl)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "replace",
+			CaptureScope: &configureCaptureScope{
+				Excludes: []scopeRuleInput{
+					{}, // all-empty rule
+				},
+			},
+		}),
+	})
+	if err != nil {
+		return // Go-level error is acceptable.
+	}
+	if !result.IsError {
+		t.Fatal("expected error for all-empty exclude rule in replace, got success")
+	}
+}
