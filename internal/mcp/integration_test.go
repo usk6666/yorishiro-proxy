@@ -174,12 +174,9 @@ func proxyHTTPClient(proxyAddr string) *gohttp.Client {
 	}
 }
 
-// Integration tests reuse the result types defined in the source files
-// (proxyStartResult, proxyStopResult, listSessionsResult, etc.).
-
 // TestIntegration_FullLifecycle tests the complete MCP tool lifecycle:
-// proxy_start -> HTTP request through proxy -> list_sessions -> get_session
-// -> replay_request -> delete_session -> proxy_stop.
+// proxy_start -> HTTP request through proxy -> query sessions -> query session
+// -> execute replay -> execute delete_sessions -> proxy_stop.
 func TestIntegration_FullLifecycle(t *testing.T) {
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
@@ -224,10 +221,12 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	// Wait for session to be persisted.
 	time.Sleep(200 * time.Millisecond)
 
-	// 3. List sessions via MCP tool.
-	listResult := callTool[listSessionsResult](t, env.cs, "list_sessions", nil)
+	// 3. List sessions via query tool.
+	listResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+	})
 	if listResult.Count != 1 {
-		t.Fatalf("list_sessions count = %d, want 1", listResult.Count)
+		t.Fatalf("query sessions count = %d, want 1", listResult.Count)
 	}
 	sessionEntry := listResult.Sessions[0]
 	if sessionEntry.Method != "GET" {
@@ -240,75 +239,82 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		t.Errorf("session URL = %q, want to contain /api/test", sessionEntry.URL)
 	}
 
-	// 4. Get session details via MCP tool.
-	getResult := callTool[getSessionResult](t, env.cs, "get_session", map[string]any{
-		"session_id": sessionEntry.ID,
+	// 4. Get session details via query tool.
+	getResult := callTool[querySessionResult](t, env.cs, "query", map[string]any{
+		"resource": "session",
+		"id":       sessionEntry.ID,
 	})
 	if getResult.ID != sessionEntry.ID {
-		t.Errorf("get_session ID = %q, want %q", getResult.ID, sessionEntry.ID)
+		t.Errorf("query session ID = %q, want %q", getResult.ID, sessionEntry.ID)
 	}
 	if getResult.Method != "GET" {
-		t.Errorf("get_session method = %q, want %q", getResult.Method, "GET")
+		t.Errorf("query session method = %q, want %q", getResult.Method, "GET")
 	}
 	if getResult.ResponseStatusCode != 200 {
-		t.Errorf("get_session response status = %d, want %d", getResult.ResponseStatusCode, 200)
+		t.Errorf("query session response status = %d, want %d", getResult.ResponseStatusCode, 200)
 	}
 	if getResult.ResponseBody != "hello from upstream" {
-		t.Errorf("get_session response body = %q, want %q", getResult.ResponseBody, "hello from upstream")
+		t.Errorf("query session response body = %q, want %q", getResult.ResponseBody, "hello from upstream")
 	}
 	if getResult.ResponseBodyEncoding != "text" {
-		t.Errorf("get_session response body encoding = %q, want %q", getResult.ResponseBodyEncoding, "text")
+		t.Errorf("query session response body encoding = %q, want %q", getResult.ResponseBodyEncoding, "text")
 	}
 	if getResult.DurationMs < 0 {
-		t.Errorf("get_session duration = %d, want >= 0", getResult.DurationMs)
+		t.Errorf("query session duration = %d, want >= 0", getResult.DurationMs)
 	}
 
-	// 5. Replay the request via MCP tool.
-	// Note: replay_request uses an HTTP client that by default blocks private
+	// 5. Replay the request via execute tool.
+	// Note: execute replay uses an HTTP client that by default blocks private
 	// networks (SSRF protection). Since our upstream is on loopback, we need
-	// to skip the replay test if the target is loopback.
-	// Instead, verify the session was created by checking replay's error for
-	// the private network check — this validates the tool is reachable.
+	// to handle the expected failure.
 	replayResult, replayErr := env.cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "replay_request",
+		Name: "execute",
 		Arguments: map[string]any{
-			"session_id": sessionEntry.ID,
+			"action": "replay",
+			"params": map[string]any{
+				"session_id": sessionEntry.ID,
+			},
 		},
 	})
 	if replayErr != nil {
-		t.Fatalf("CallTool(replay_request): %v", replayErr)
+		t.Fatalf("CallTool(execute/replay): %v", replayErr)
 	}
 	// The replay will fail because the target is a private address (SSRF protection).
 	// This is expected behavior — we verify the tool ran and returned an error.
 	if !replayResult.IsError {
 		// If replay succeeded (e.g., SSRF protection is relaxed), verify the result.
-		var rr replayRequestResult
+		var rr executeReplayResult
 		tc, ok := replayResult.Content[0].(*gomcp.TextContent)
 		if ok {
 			json.Unmarshal([]byte(tc.Text), &rr)
 		}
 		if rr.NewSessionID == "" {
-			t.Error("replay_request returned empty new_session_id")
+			t.Error("execute replay returned empty new_session_id")
 		}
 		if rr.StatusCode != 200 {
-			t.Errorf("replay_request status_code = %d, want 200", rr.StatusCode)
+			t.Errorf("execute replay status_code = %d, want 200", rr.StatusCode)
 		}
 	}
 
-	// 6. Delete the session via MCP tool.
-	deleteResult := callTool[deleteSessionResult](t, env.cs, "delete_session", map[string]any{
-		"session_id": sessionEntry.ID,
+	// 6. Delete the session via execute tool.
+	deleteResult := callTool[executeDeleteSessionsResult](t, env.cs, "execute", map[string]any{
+		"action": "delete_sessions",
+		"params": map[string]any{
+			"session_id": sessionEntry.ID,
+		},
 	})
 	if deleteResult.DeletedCount != 1 {
-		t.Errorf("delete_session deleted_count = %d, want 1", deleteResult.DeletedCount)
+		t.Errorf("execute delete_sessions deleted_count = %d, want 1", deleteResult.DeletedCount)
 	}
 
 	// Verify session is gone.
-	listAfterDelete := callTool[listSessionsResult](t, env.cs, "list_sessions", nil)
+	listAfterDelete := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+	})
 	// May have a replay session if replay succeeded.
 	for _, s := range listAfterDelete.Sessions {
 		if s.ID == sessionEntry.ID {
-			t.Error("deleted session still appears in list_sessions")
+			t.Error("deleted session still appears in query sessions")
 		}
 	}
 
@@ -329,27 +335,29 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	}
 }
 
-// TestIntegration_ExportCACert verifies the export_ca_cert tool returns a valid
+// TestIntegration_ExportCACert verifies the query ca_cert resource returns a valid
 // PEM certificate with metadata through the full MCP integration path.
 func TestIntegration_ExportCACert(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	result := callTool[exportCACertResult](t, env.cs, "export_ca_cert", nil)
+	result := callTool[queryCACertResult](t, env.cs, "query", map[string]any{
+		"resource": "ca_cert",
+	})
 
 	if result.PEM == "" {
-		t.Error("export_ca_cert PEM is empty")
+		t.Error("query ca_cert PEM is empty")
 	}
 	if !strings.HasPrefix(result.PEM, "-----BEGIN CERTIFICATE-----") {
-		t.Error("export_ca_cert PEM does not start with BEGIN CERTIFICATE header")
+		t.Error("query ca_cert PEM does not start with BEGIN CERTIFICATE header")
 	}
 	if result.Fingerprint == "" {
-		t.Error("export_ca_cert fingerprint is empty")
+		t.Error("query ca_cert fingerprint is empty")
 	}
 	if result.Subject == "" {
-		t.Error("export_ca_cert subject is empty")
+		t.Error("query ca_cert subject is empty")
 	}
 	if result.NotAfter == "" {
-		t.Error("export_ca_cert not_after is empty")
+		t.Error("query ca_cert not_after is empty")
 	}
 
 	// Verify not_after is in the future.
@@ -386,50 +394,59 @@ func TestIntegration_ProxyStart_DoubleStart(t *testing.T) {
 	})
 }
 
-// TestIntegration_GetSession_NotFound verifies that get_session returns an
+// TestIntegration_QuerySession_NotFound verifies that querying a session returns an
 // error for a non-existent session ID.
-func TestIntegration_GetSession_NotFound(t *testing.T) {
+func TestIntegration_QuerySession_NotFound(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	callToolExpectError(t, env.cs, "get_session", map[string]any{
-		"session_id": "nonexistent-session-id",
+	callToolExpectError(t, env.cs, "query", map[string]any{
+		"resource": "session",
+		"id":       "nonexistent-session-id",
 	})
 }
 
-// TestIntegration_DeleteSession_NotFound verifies that delete_session returns
-// an error for a non-existent session ID.
-func TestIntegration_DeleteSession_NotFound(t *testing.T) {
+// TestIntegration_ExecuteDeleteSessions_NotFound verifies that deleting a session
+// returns an error for a non-existent session ID.
+func TestIntegration_ExecuteDeleteSessions_NotFound(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	callToolExpectError(t, env.cs, "delete_session", map[string]any{
-		"session_id": "nonexistent-session-id",
+	callToolExpectError(t, env.cs, "execute", map[string]any{
+		"action": "delete_sessions",
+		"params": map[string]any{
+			"session_id": "nonexistent-session-id",
+		},
 	})
 }
 
-// TestIntegration_ReplayRequest_NoSession verifies that replay_request returns
+// TestIntegration_ExecuteReplay_NoSession verifies that execute replay returns
 // an error when the referenced session does not exist.
-func TestIntegration_ReplayRequest_NoSession(t *testing.T) {
+func TestIntegration_ExecuteReplay_NoSession(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	callToolExpectError(t, env.cs, "replay_request", map[string]any{
-		"session_id": "nonexistent-session-id",
+	callToolExpectError(t, env.cs, "execute", map[string]any{
+		"action": "replay",
+		"params": map[string]any{
+			"session_id": "nonexistent-session-id",
+		},
 	})
 }
 
-// TestIntegration_ListSessions_Empty verifies that list_sessions returns an
+// TestIntegration_QuerySessions_Empty verifies that query sessions returns an
 // empty list when no sessions have been recorded.
-func TestIntegration_ListSessions_Empty(t *testing.T) {
+func TestIntegration_QuerySessions_Empty(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	result := callTool[listSessionsResult](t, env.cs, "list_sessions", nil)
+	result := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+	})
 	if result.Count != 0 {
-		t.Errorf("list_sessions count = %d, want 0", result.Count)
+		t.Errorf("query sessions count = %d, want 0", result.Count)
 	}
 	if result.Total != 0 {
-		t.Errorf("list_sessions total = %d, want 0", result.Total)
+		t.Errorf("query sessions total = %d, want 0", result.Total)
 	}
 	if len(result.Sessions) != 0 {
-		t.Errorf("list_sessions sessions length = %d, want 0", len(result.Sessions))
+		t.Errorf("query sessions length = %d, want 0", len(result.Sessions))
 	}
 }
 
@@ -443,15 +460,11 @@ func TestIntegration_ListTools(t *testing.T) {
 	}
 
 	expectedTools := map[string]bool{
-		"clear_sessions": false,
-		"proxy_start":    false,
-		"proxy_stop":     false,
-		"proxy_status":   false,
-		"list_sessions":  false,
-		"get_session":    false,
-		"replay_request": false,
-		"delete_session": false,
-		"export_ca_cert": false,
+		"proxy_start": false,
+		"proxy_stop":  false,
+		"configure":   false,
+		"query":       false,
+		"execute":     false,
 	}
 
 	for _, tool := range toolsResult.Tools {
@@ -463,6 +476,24 @@ func TestIntegration_ListTools(t *testing.T) {
 	for name, found := range expectedTools {
 		if !found {
 			t.Errorf("expected tool %q not found in ListTools result", name)
+		}
+	}
+
+	// Verify no unexpected legacy tools are present.
+	legacyTools := []string{
+		"clear_sessions", "proxy_status", "list_sessions", "get_session",
+		"replay_request", "delete_session", "export_ca_cert",
+		"add_tls_passthrough", "remove_tls_passthrough", "list_tls_passthrough",
+		"set_capture_scope", "get_capture_scope", "clear_capture_scope",
+		"replay_raw",
+	}
+	toolSet := make(map[string]bool)
+	for _, tool := range toolsResult.Tools {
+		toolSet[tool.Name] = true
+	}
+	for _, legacy := range legacyTools {
+		if toolSet[legacy] {
+			t.Errorf("legacy tool %q should not be registered", legacy)
 		}
 	}
 }
@@ -528,45 +559,61 @@ func TestIntegration_MultipleRequests(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// List all sessions.
-	allResult := callTool[listSessionsResult](t, env.cs, "list_sessions", nil)
+	allResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+	})
 	if allResult.Count != 2 {
-		t.Fatalf("list_sessions count = %d, want 2", allResult.Count)
+		t.Fatalf("query sessions count = %d, want 2", allResult.Count)
 	}
 
 	// Filter by method.
-	getResult := callTool[listSessionsResult](t, env.cs, "list_sessions", map[string]any{
-		"method": "GET",
+	getResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+		"filter": map[string]any{
+			"method": "GET",
+		},
 	})
 	if getResult.Count != 1 {
-		t.Errorf("list_sessions(method=GET) count = %d, want 1", getResult.Count)
+		t.Errorf("query sessions(method=GET) count = %d, want 1", getResult.Count)
 	}
 
-	postResult := callTool[listSessionsResult](t, env.cs, "list_sessions", map[string]any{
-		"method": "POST",
+	postResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+		"filter": map[string]any{
+			"method": "POST",
+		},
 	})
 	if postResult.Count != 1 {
-		t.Errorf("list_sessions(method=POST) count = %d, want 1", postResult.Count)
+		t.Errorf("query sessions(method=POST) count = %d, want 1", postResult.Count)
 	}
 
 	// Filter by URL pattern.
-	urlResult := callTool[listSessionsResult](t, env.cs, "list_sessions", map[string]any{
-		"url_pattern": "/api/users",
+	urlResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+		"filter": map[string]any{
+			"url_pattern": "/api/users",
+		},
 	})
 	if urlResult.Count != 1 {
-		t.Errorf("list_sessions(url_pattern=/api/users) count = %d, want 1", urlResult.Count)
+		t.Errorf("query sessions(url_pattern=/api/users) count = %d, want 1", urlResult.Count)
 	}
 
-	// Delete all sessions.
-	delResult := callTool[deleteSessionResult](t, env.cs, "delete_session", map[string]any{
-		"delete_all": true,
+	// Delete all sessions via execute tool.
+	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "execute", map[string]any{
+		"action": "delete_sessions",
+		"params": map[string]any{
+			"confirm": true,
+		},
 	})
 	if delResult.DeletedCount != 2 {
-		t.Errorf("delete_session(delete_all) deleted_count = %d, want 2", delResult.DeletedCount)
+		t.Errorf("execute delete_sessions(confirm) deleted_count = %d, want 2", delResult.DeletedCount)
 	}
 
 	// Verify empty.
-	emptyResult := callTool[listSessionsResult](t, env.cs, "list_sessions", nil)
+	emptyResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
+		"resource": "sessions",
+	})
 	if emptyResult.Count != 0 {
-		t.Errorf("list_sessions after delete_all count = %d, want 0", emptyResult.Count)
+		t.Errorf("query sessions after delete_all count = %d, want 0", emptyResult.Count)
 	}
 }
