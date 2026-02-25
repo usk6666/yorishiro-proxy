@@ -68,6 +68,7 @@ func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *p
 		opt(s)
 	}
 	s.registerTools()
+	s.registerResources()
 	return s
 }
 
