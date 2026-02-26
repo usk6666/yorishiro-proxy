@@ -107,7 +107,8 @@ Each intercept rule has:
 - **enabled** (boolean): Whether the rule is active.
 - **direction** (string): `"request"`, `"response"`, or `"both"`.
 - **conditions** (object): Matching criteria:
-  - **url_pattern** (string): Regex for URL path matching.
+  - **host_pattern** (string): Regex for hostname matching (port excluded).
+  - **path_pattern** (string): Regex for URL path matching.
   - **methods** (array of strings): HTTP method whitelist.
   - **header_match** (object): Header name to regex mapping (AND logic).
 
@@ -168,11 +169,20 @@ Each intercept rule has:
   "intercept_rules": {
     "add": [
       {
+        "id": "target-host",
+        "enabled": true,
+        "direction": "request",
+        "conditions": {
+          "host_pattern": "httpbin\\.org"
+        }
+      },
+      {
         "id": "admin-api",
         "enabled": true,
         "direction": "request",
         "conditions": {
-          "url_pattern": "/api/admin.*",
+          "host_pattern": "api\\.target\\.com",
+          "path_pattern": "/api/admin.*",
           "methods": ["POST", "PUT", "DELETE"],
           "header_match": {"Content-Type": "application/json"}
         }
@@ -212,7 +222,7 @@ Each intercept rule has:
         "enabled": true,
         "direction": "both",
         "conditions": {
-          "url_pattern": "/api/.*"
+          "path_pattern": "/api/.*"
         }
       }
     ]

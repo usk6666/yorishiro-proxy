@@ -36,7 +36,8 @@ Each intercept rule has:
 - **enabled** (boolean, required): Whether the rule is active.
 - **direction** (string, required): `"request"`, `"response"`, or `"both"`.
 - **conditions** (object, required): Matching criteria (all conditions are AND-ed):
-  - **url_pattern** (string, optional): Regex pattern for URL path matching.
+  - **host_pattern** (string, optional): Regex pattern for hostname matching (port excluded).
+  - **path_pattern** (string, optional): Regex pattern for URL path matching.
   - **methods** (array of strings, optional): HTTP method whitelist (case-insensitive).
   - **header_match** (object, optional): Maps header names to regex patterns (AND logic).
 
@@ -78,11 +79,20 @@ Multiple rules use OR logic: a request/response is intercepted if any enabled ru
 {
   "intercept_rules": [
     {
+      "id": "target-host",
+      "enabled": true,
+      "direction": "request",
+      "conditions": {
+        "host_pattern": "httpbin\\.org"
+      }
+    },
+    {
       "id": "admin-api",
       "enabled": true,
       "direction": "request",
       "conditions": {
-        "url_pattern": "/api/admin.*",
+        "host_pattern": "api\\.target\\.com",
+        "path_pattern": "/api/admin.*",
         "methods": ["POST", "PUT", "DELETE"],
         "header_match": {"Content-Type": "application/json"}
       }

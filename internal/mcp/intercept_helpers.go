@@ -23,8 +23,11 @@ type interceptRuleInput struct {
 
 // interceptConditionsInput is the JSON representation of intercept rule conditions.
 type interceptConditionsInput struct {
-	// URLPattern is a regular expression matched against the request URL path.
-	URLPattern string `json:"url_pattern,omitempty" jsonschema:"regex pattern for URL path matching"`
+	// HostPattern is a regular expression matched against the request hostname (port excluded).
+	HostPattern string `json:"host_pattern,omitempty" jsonschema:"regex pattern for hostname matching"`
+
+	// PathPattern is a regular expression matched against the request URL path.
+	PathPattern string `json:"path_pattern,omitempty" jsonschema:"regex pattern for URL path matching"`
 
 	// Methods is a whitelist of HTTP methods (case-insensitive).
 	Methods []string `json:"methods,omitempty" jsonschema:"HTTP method whitelist (e.g. POST, PUT, DELETE)"`
@@ -43,7 +46,8 @@ type interceptRuleOutput struct {
 
 // interceptConditionsOutput is the JSON representation of intercept conditions in output.
 type interceptConditionsOutput struct {
-	URLPattern  string            `json:"url_pattern,omitempty"`
+	HostPattern string            `json:"host_pattern,omitempty"`
+	PathPattern string            `json:"path_pattern,omitempty"`
 	Methods     []string          `json:"methods,omitempty"`
 	HeaderMatch map[string]string `json:"header_match,omitempty"`
 }
@@ -55,7 +59,8 @@ func toInterceptRule(input interceptRuleInput) intercept.Rule {
 		Enabled:   input.Enabled,
 		Direction: intercept.Direction(input.Direction),
 		Conditions: intercept.Conditions{
-			URLPattern:  input.Conditions.URLPattern,
+			HostPattern: input.Conditions.HostPattern,
+			PathPattern: input.Conditions.PathPattern,
 			Methods:     input.Conditions.Methods,
 			HeaderMatch: input.Conditions.HeaderMatch,
 		},
@@ -69,7 +74,8 @@ func fromInterceptRule(r intercept.Rule) interceptRuleOutput {
 		Enabled:   r.Enabled,
 		Direction: string(r.Direction),
 		Conditions: interceptConditionsOutput{
-			URLPattern:  r.Conditions.URLPattern,
+			HostPattern: r.Conditions.HostPattern,
+			PathPattern: r.Conditions.PathPattern,
 			Methods:     r.Conditions.Methods,
 			HeaderMatch: r.Conditions.HeaderMatch,
 		},
