@@ -70,6 +70,18 @@ type executeParams struct {
 	Positions   []fuzzer.Position            `json:"positions,omitempty" jsonschema:"payload positions for fuzzing"`
 	PayloadSets map[string]fuzzer.PayloadSet `json:"payload_sets,omitempty" jsonschema:"named payload sets for fuzzing"`
 
+	// fuzz execution control parameters
+	Concurrency  *int     `json:"concurrency,omitempty" jsonschema:"number of concurrent workers (default: 1)"`
+	RateLimitRPS *float64 `json:"rate_limit_rps,omitempty" jsonschema:"requests per second limit (0 = unlimited)"`
+	DelayMs      *int     `json:"delay_ms,omitempty" jsonschema:"fixed delay between requests in ms"`
+	MaxRetries   *int     `json:"max_retries,omitempty" jsonschema:"retry count per failed request"`
+
+	// fuzz stop conditions
+	StopOn *fuzzer.StopCondition `json:"stop_on,omitempty" jsonschema:"automatic stop conditions for fuzz jobs"`
+
+	// fuzz job control (fuzz_pause, fuzz_resume, fuzz_cancel)
+	FuzzID string `json:"fuzz_id,omitempty" jsonschema:"fuzz job ID for pause/resume/cancel"`
+
 	// macro parameters (define_macro, run_macro, delete_macro)
 	Name         string            `json:"name,omitempty" jsonschema:"macro name"`
 	Description  string            `json:"description,omitempty" jsonschema:"macro description"`
@@ -80,7 +92,7 @@ type executeParams struct {
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "define_macro", "run_macro", "delete_macro"}
+var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -94,7 +106,10 @@ func (s *Server) registerExecute() {
 			"'release' forwards an intercepted request as-is (requires intercept_id); " +
 			"'modify_and_forward' forwards an intercepted request with mutations (same override params as resend, requires intercept_id); " +
 			"'drop' discards an intercepted request returning 502 to the client (requires intercept_id); " +
-			"'fuzz' runs a fuzz campaign against a recorded session with configurable positions, payload sets, and attack types (sequential/parallel); " +
+			"'fuzz' starts an async fuzz campaign (returns fuzz_id immediately, query fuzz_results for progress); " +
+			"'fuzz_pause' pauses a running fuzz job (requires fuzz_id); " +
+			"'fuzz_resume' resumes a paused fuzz job (requires fuzz_id); " +
+			"'fuzz_cancel' cancels a running or paused fuzz job (requires fuzz_id); " +
 			"'define_macro' saves a macro definition (upsert) with steps, extraction rules, and guards; " +
 			"'run_macro' executes a stored macro for testing; " +
 			"'delete_macro' removes a stored macro definition. " +
@@ -121,6 +136,12 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return s.handleExecuteDrop(ctx, input.Params)
 	case "fuzz":
 		return s.handleExecuteFuzz(ctx, input.Params)
+	case "fuzz_pause":
+		return s.handleExecuteFuzzPause(input.Params)
+	case "fuzz_resume":
+		return s.handleExecuteFuzzResume(input.Params)
+	case "fuzz_cancel":
+		return s.handleExecuteFuzzCancel(input.Params)
 	case "define_macro":
 		mp := paramsToMacroParams(input.Params)
 		result, err := s.handleExecuteDefineMacro(ctx, mp)
@@ -907,34 +928,11 @@ func (s *Server) handleExecuteDrop(_ context.Context, params executeParams) (*go
 	}, nil
 }
 
-// executeFuzzResult is the structured output of the fuzz action.
-type executeFuzzResult struct {
-	// FuzzID is the unique identifier of the fuzz job.
-	FuzzID string `json:"fuzz_id"`
-	// Status is the final job status.
-	Status string `json:"status"`
-	// Total is the total number of iterations.
-	Total int `json:"total"`
-	// Completed is the number of completed iterations.
-	Completed int `json:"completed"`
-	// Errors is the number of failed iterations.
-	Errors int `json:"errors"`
-	// Tag is the job tag (if set).
-	Tag string `json:"tag,omitempty"`
-	// Message is a human-readable summary.
-	Message string `json:"message"`
-}
-
 // handleExecuteFuzz handles the fuzz action within the execute tool.
-// It creates a fuzz engine, executes the job synchronously, and returns a summary.
-func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeFuzzResult, error) {
-	if s.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
-	}
-
-	fuzzStore, ok := s.store.(session.FuzzStore)
-	if !ok {
-		return nil, nil, fmt.Errorf("session store does not support fuzz operations")
+// It starts an asynchronous fuzz job and returns the fuzz_id immediately.
+func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *fuzzer.AsyncResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 
 	if params.SessionID == "" {
@@ -947,33 +945,122 @@ func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*
 		return nil, nil, fmt.Errorf("at least one position is required for fuzz action")
 	}
 
-	cfg := fuzzer.Config{
-		SessionID:   params.SessionID,
-		AttackType:  params.AttackType,
-		Positions:   params.Positions,
-		PayloadSets: params.PayloadSets,
-		Tag:         params.Tag,
+	cfg := fuzzer.RunConfig{
+		Config: fuzzer.Config{
+			SessionID:   params.SessionID,
+			AttackType:  params.AttackType,
+			Positions:   params.Positions,
+			PayloadSets: params.PayloadSets,
+			Tag:         params.Tag,
+		},
+		StopOn: params.StopOn,
 	}
 	if params.TimeoutMs != nil {
 		cfg.TimeoutMs = *params.TimeoutMs
 	}
+	if params.Concurrency != nil {
+		cfg.Concurrency = *params.Concurrency
+	}
+	if params.RateLimitRPS != nil {
+		cfg.RateLimitRPS = *params.RateLimitRPS
+	}
+	if params.DelayMs != nil {
+		cfg.DelayMs = *params.DelayMs
+	}
+	if params.MaxRetries != nil {
+		cfg.MaxRetries = *params.MaxRetries
+	}
 
-	// Build the HTTP client with SSRF protection.
-	httpClient := s.resendHTTPClient(params)
-
-	engine := fuzzer.NewEngine(s.store, s.store, fuzzStore, httpClient, fuzzer.DefaultWordlistBaseDir())
-	result, err := engine.Run(ctx, cfg)
+	// Use the application-level context so the job survives beyond the MCP request.
+	result, err := s.fuzzRunner.Start(s.appCtx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fuzz execution: %w", err)
 	}
 
-	return nil, &executeFuzzResult{
-		FuzzID:    result.FuzzID,
-		Status:    result.Status,
-		Total:     result.Total,
-		Completed: result.Completed,
-		Errors:    result.Errors,
-		Tag:       result.Tag,
-		Message:   fmt.Sprintf("Fuzz completed: %d/%d requests sent, %d errors", result.Completed, result.Total, result.Errors),
+	return nil, result, nil
+}
+
+// executeFuzzControlResult is the structured output of fuzz control actions.
+type executeFuzzControlResult struct {
+	// FuzzID is the ID of the fuzz job.
+	FuzzID string `json:"fuzz_id"`
+	// Action is the control action performed.
+	Action string `json:"action"`
+	// Status is the resulting job status.
+	Status string `json:"status"`
+}
+
+// handleExecuteFuzzPause handles the fuzz_pause action.
+func (s *Server) handleExecuteFuzzPause(params executeParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
+	}
+	if params.FuzzID == "" {
+		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_pause action")
+	}
+
+	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	if ctrl == nil {
+		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
+	}
+
+	if err := ctrl.Pause(); err != nil {
+		return nil, nil, fmt.Errorf("fuzz_pause: %w", err)
+	}
+
+	return nil, &executeFuzzControlResult{
+		FuzzID: params.FuzzID,
+		Action: "fuzz_pause",
+		Status: string(ctrl.Status()),
+	}, nil
+}
+
+// handleExecuteFuzzResume handles the fuzz_resume action.
+func (s *Server) handleExecuteFuzzResume(params executeParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
+	}
+	if params.FuzzID == "" {
+		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_resume action")
+	}
+
+	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	if ctrl == nil {
+		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
+	}
+
+	if err := ctrl.Resume(); err != nil {
+		return nil, nil, fmt.Errorf("fuzz_resume: %w", err)
+	}
+
+	return nil, &executeFuzzControlResult{
+		FuzzID: params.FuzzID,
+		Action: "fuzz_resume",
+		Status: string(ctrl.Status()),
+	}, nil
+}
+
+// handleExecuteFuzzCancel handles the fuzz_cancel action.
+func (s *Server) handleExecuteFuzzCancel(params executeParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
+	}
+	if params.FuzzID == "" {
+		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_cancel action")
+	}
+
+	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	if ctrl == nil {
+		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
+	}
+
+	if err := ctrl.Cancel(); err != nil {
+		return nil, nil, fmt.Errorf("fuzz_cancel: %w", err)
+	}
+
+	return nil, &executeFuzzControlResult{
+		FuzzID: params.FuzzID,
+		Action: "fuzz_cancel",
+		Status: string(ctrl.Status()),
 	}, nil
 }

@@ -5,7 +5,7 @@ Execute an action on recorded proxy data. Supports resending captured requests w
 ## Parameters
 
 ### action (string, required)
-The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`, `fuzz`, `define_macro`, `run_macro`, `delete_macro`.
+The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`, `fuzz`, `fuzz_pause`, `fuzz_resume`, `fuzz_cancel`, `define_macro`, `run_macro`, `delete_macro`.
 
 > **Note:** `replay` and `replay_raw` are accepted as deprecated aliases for `resend` and `resend_raw`.
 
@@ -95,7 +95,7 @@ Drop an intercepted request, returning a 502 Bad Gateway response to the client.
 Returns: intercept_id, action, status.
 
 ### fuzz
-Run a fuzz campaign against a recorded session. Injects payloads at specified positions and records each iteration as a new session.
+Start an asynchronous fuzz campaign against a recorded session. Returns fuzz_id immediately. Use `fuzz_pause`, `fuzz_resume`, `fuzz_cancel` for job control. Query `fuzz_results` resource for progress.
 
 **Parameters:**
 - **session_id** (string, required): ID of the template session to fuzz.
@@ -114,10 +114,44 @@ Run a fuzz campaign against a recorded session. Injects payloads at specified po
   - **path** (string): Relative path under `~/.katashiro-proxy/wordlists/` (for file).
   - **start**, **end**, **step** (integer): Range parameters (for range/sequence).
   - **format** (string): Format string (for sequence, e.g. `"user%04d"`).
+- **concurrency** (integer, optional): Number of concurrent workers (default: `1`).
+- **rate_limit_rps** (number, optional): Requests per second limit. `0` means unlimited.
+- **delay_ms** (integer, optional): Fixed delay between requests in milliseconds.
 - **timeout_ms** (integer, optional): Per-request timeout in milliseconds (default: `10000`).
+- **max_retries** (integer, optional): Retry count per failed request (default: `0`).
+- **stop_on** (object, optional): Automatic stop conditions:
+  - **status_codes** (array of integers): Stop when any of these HTTP status codes is received.
+  - **error_count** (integer): Stop when cumulative error count reaches this value.
+  - **latency_threshold_ms** (integer): Stop when sliding window median latency exceeds this value.
+  - **latency_baseline_multiplier** (number): Stop when current median exceeds baseline median times this multiplier.
+  - **latency_window** (integer): Sliding window size for latency detection (default: `10`).
 - **tag** (string, optional): Tag to label the fuzz job.
 
-Returns: fuzz_id, status, total, completed, errors, tag, message.
+Returns: fuzz_id, status, total_requests, tag, message.
+
+### fuzz_pause
+Pause a running fuzz job. Workers will stop after completing their current request.
+
+**Parameters:**
+- **fuzz_id** (string, required): ID of the fuzz job to pause.
+
+Returns: fuzz_id, action, status.
+
+### fuzz_resume
+Resume a paused fuzz job.
+
+**Parameters:**
+- **fuzz_id** (string, required): ID of the fuzz job to resume.
+
+Returns: fuzz_id, action, status.
+
+### fuzz_cancel
+Cancel a running or paused fuzz job. The job will be terminated and marked as cancelled.
+
+**Parameters:**
+- **fuzz_id** (string, required): ID of the fuzz job to cancel.
+
+Returns: fuzz_id, action, status.
 
 ## Usage Examples
 

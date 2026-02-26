@@ -5,6 +5,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
+	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
@@ -21,9 +22,10 @@ type Server struct {
 	scope           *proxy.CaptureScope
 	interceptEngine *intercept.Engine
 	interceptQueue  *intercept.Queue
-	dbPath          string    // path to the SQLite database file for status reporting
-	replayDoer      httpDoer  // injectable HTTP client for execute(replay) testing
-	rawReplayDialer rawDialer // injectable dialer for replay_raw testing
+	fuzzRunner      *fuzzer.Runner // async fuzz job runner
+	dbPath          string         // path to the SQLite database file for status reporting
+	replayDoer      httpDoer       // injectable HTTP client for execute(replay) testing
+	rawReplayDialer rawDialer      // injectable dialer for replay_raw testing
 }
 
 // ServerOption configures a Server.
@@ -64,6 +66,14 @@ func WithInterceptEngine(engine *intercept.Engine) ServerOption {
 func WithInterceptQueue(queue *intercept.Queue) ServerOption {
 	return func(s *Server) {
 		s.interceptQueue = queue
+	}
+}
+
+// WithFuzzRunner sets the async fuzz runner for the MCP server,
+// enabling asynchronous fuzz job execution, pause, resume, and cancel.
+func WithFuzzRunner(runner *fuzzer.Runner) ServerOption {
+	return func(s *Server) {
+		s.fuzzRunner = runner
 	}
 }
 
