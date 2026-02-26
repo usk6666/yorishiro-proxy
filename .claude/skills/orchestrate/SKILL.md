@@ -413,11 +413,26 @@ pr_review_results[PR番号] = {
 Claude Code の Task ツールは worktree に変更がある場合、完了後も自動削除しない。
 オーケストレーター（呼び出し元）が明示的に削除する。
 
-全バッチ・レビューサイクルが完了した後、以下を実行して全 worktree を削除する:
+**重要**: 別セッションがアクティブに使用中の worktree を破壊する事故を防ぐため、
+**自分が起動したサブエージェントの worktree のみ**をターゲット削除する。
 
-    make worktree-clean
+**手順:**
 
-- 成功・失敗を問わず全 worktree を削除する（変更は remote に push 済み）
+1. Phase 2 〜 2.5 の各 Task 呼び出し結果から agent ID を記録しておく
+   （Task ツールの戻り値に含まれる `agentId` フィールド）
+2. 全バッチ・レビューサイクル完了後、記録した agent ID ごとに以下を実行:
+
+```bash
+git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+```
+
+3. 全削除後にメタデータを清掃:
+
+```bash
+git worktree prune
+```
+
+- 成功・失敗を問わず自分が起動した全 worktree を削除する（変更は remote に push 済み）
 - 失敗した Issue のデバッグ情報は Linear コメントと `git checkout <branch-name>` で参照可能
 - `git worktree remove` はディレクトリのみ削除し、ブランチ・コミットは保持される
 

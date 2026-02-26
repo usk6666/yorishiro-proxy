@@ -231,9 +231,25 @@ if current_round > 2 and 集約判定 == CHANGES_REQUESTED:
 
 ### Phase 6: Worktree クリーンアップ
 
-レビューサイクル完了後、サブエージェントの worktree を削除する:
+レビューサイクル完了後、**自分が起動したサブエージェントの worktree のみ**を削除する。
 
-    make worktree-clean
+**重要**: 別セッションがアクティブに使用中の worktree を破壊する事故を防ぐため、
+一括削除は行わない。
+
+**手順:**
+
+1. Phase 2 〜 4 の各 Task 呼び出し結果から agent ID を記録しておく
+2. 記録した agent ID ごとに以下を実行:
+
+```bash
+git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+```
+
+3. 全削除後にメタデータを清掃:
+
+```bash
+git worktree prune
+```
 
 注意: `/orchestrate` 内から呼ばれた場合は Phase 3-3 で一括削除されるため重複するが、
 冪等なので問題ない。`/review-gate` 単独実行時にのみ実質的に機能する。
