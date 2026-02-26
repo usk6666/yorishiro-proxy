@@ -53,8 +53,10 @@ type executeParams struct {
 	Tag                string            `json:"tag,omitempty" jsonschema:"tag to attach to the result session"`
 
 	// resend_raw parameters
-	TargetAddr string `json:"target_addr,omitempty" jsonschema:"target address (host:port) for resend_raw"`
-	UseTLS     *bool  `json:"use_tls,omitempty" jsonschema:"use TLS for resend_raw connection"`
+	TargetAddr       string     `json:"target_addr,omitempty" jsonschema:"target address (host:port) for resend_raw"`
+	UseTLS           *bool      `json:"use_tls,omitempty" jsonschema:"use TLS for resend_raw connection"`
+	OverrideRawBase64 string    `json:"override_raw_base64,omitempty" jsonschema:"Base64-encoded raw bytes to replace entire payload (patches ignored)"`
+	Patches          []RawPatch `json:"patches,omitempty" jsonschema:"byte-level patches for resend_raw (offset, binary find/replace, text find/replace)"`
 
 	// delete_sessions parameters
 	OlderThanDays *int `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
@@ -87,7 +89,7 @@ func (s *Server) registerExecute() {
 		Description: "Execute an action on recorded proxy data. " +
 			"Available actions: " +
 			"'resend' resends a recorded HTTP request with optional mutation (method/URL/header/body overrides, body patches, dry-run); " +
-			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS; " +
+			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
 			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required); " +
 			"'release' forwards an intercepted request as-is (requires intercept_id); " +
 			"'modify_and_forward' forwards an intercepted request with mutations (same override params as resend, requires intercept_id); " +
@@ -517,17 +519,41 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 
 // executeResendRawResult is the structured output of the resend_raw action.
 type executeResendRawResult struct {
+	// NewSessionID is the session ID of the resent raw request (if recorded).
+	NewSessionID string `json:"new_session_id,omitempty"`
 	// ResponseData is the raw response bytes, Base64-encoded.
 	ResponseData string `json:"response_data"`
 	// ResponseSize is the number of response bytes received.
 	ResponseSize int `json:"response_size"`
 	// DurationMs is the round-trip duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
+	// Tag is the tag attached to the result session (if specified).
+	Tag string `json:"tag,omitempty"`
+}
+
+// executeRawDryRunResult is the structured output of a dry-run resend_raw.
+type executeRawDryRunResult struct {
+	// DryRun is always true for dry-run results.
+	DryRun bool `json:"dry_run"`
+	// RawPreview contains the patched raw bytes preview.
+	RawPreview *rawPreview `json:"raw_preview"`
+}
+
+// rawPreview is the preview of patched raw bytes for dry-run mode.
+type rawPreview struct {
+	// DataBase64 is the patched raw bytes, Base64-encoded.
+	DataBase64 string `json:"data_base64"`
+	// DataSize is the size of the patched raw bytes in bytes.
+	DataSize int `json:"data_size"`
+	// PatchesApplied is the number of patches that were applied.
+	PatchesApplied int `json:"patches_applied"`
 }
 
 // handleExecuteResendRaw handles the resend_raw action within the execute tool.
-// It retrieves the session's raw request bytes and sends them directly over TCP/TLS.
-func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeResendRawResult, error) {
+// It retrieves the session's raw request bytes, applies byte-level patches,
+// and sends them directly over TCP/TLS. Supports dry-run mode, override_raw_base64,
+// and byte-level patches (offset, binary find/replace, text find/replace).
+func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
 	if s.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
@@ -554,6 +580,25 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	// Verify raw request bytes are available.
 	if len(sendMsg.RawBytes) == 0 {
 		return nil, nil, fmt.Errorf("session %s has no raw request bytes", params.SessionID)
+	}
+
+	// Build the raw bytes to send, applying patches or override.
+	rawBytes, patchCount, err := buildResendRawBytes(sendMsg.RawBytes, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Dry-run mode: return preview without sending.
+	if params.DryRun {
+		preview := &executeRawDryRunResult{
+			DryRun: true,
+			RawPreview: &rawPreview{
+				DataBase64:     base64.StdEncoding.EncodeToString(rawBytes),
+				DataSize:       len(rawBytes),
+				PatchesApplied: patchCount,
+			},
+		}
+		return nil, preview, nil
 	}
 
 	// Determine the target address.
@@ -614,8 +659,8 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		return nil, nil, fmt.Errorf("set connection deadline: %w", err)
 	}
 
-	// Send the raw request bytes exactly as captured.
-	if _, err := conn.Write(sendMsg.RawBytes); err != nil {
+	// Send the (potentially patched) raw bytes.
+	if _, err := conn.Write(rawBytes); err != nil {
 		return nil, nil, fmt.Errorf("send raw request: %w", err)
 	}
 
@@ -630,13 +675,86 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	}
 	duration := time.Since(start)
 
+	// Record the resend_raw as a new session.
+	var tags map[string]string
+	if params.Tag != "" {
+		tags = map[string]string{"tag": params.Tag}
+	}
+
+	newSess := &session.Session{
+		Protocol:    sess.Protocol,
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		Duration:    duration,
+		Tags:        tags,
+	}
+
+	if err := s.store.SaveSession(ctx, newSess); err != nil {
+		return nil, nil, fmt.Errorf("save resend_raw session: %w", err)
+	}
+
+	// Save send message with the patched raw bytes.
+	newSendMsg := &session.Message{
+		SessionID: newSess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: start,
+		RawBytes:  rawBytes,
+	}
+	if err := s.store.AppendMessage(ctx, newSendMsg); err != nil {
+		return nil, nil, fmt.Errorf("save resend_raw send message: %w", err)
+	}
+
+	// Save receive message with the raw response.
+	newRecvMsg := &session.Message{
+		SessionID: newSess.ID,
+		Sequence:  1,
+		Direction: "receive",
+		Timestamp: start.Add(duration),
+		RawBytes:  respData,
+	}
+	if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
+		return nil, nil, fmt.Errorf("save resend_raw receive message: %w", err)
+	}
+
 	result := &executeResendRawResult{
+		NewSessionID: newSess.ID,
 		ResponseData: base64.StdEncoding.EncodeToString(respData),
 		ResponseSize: len(respData),
 		DurationMs:   duration.Milliseconds(),
+		Tag:          params.Tag,
 	}
 
 	return nil, result, nil
+}
+
+// buildResendRawBytes builds the raw bytes to send after applying mutations.
+// Priority: override_raw_base64 > patches > original raw bytes.
+// Returns the final bytes and the number of patches applied.
+func buildResendRawBytes(originalRaw []byte, params executeParams) ([]byte, int, error) {
+	// Full replacement takes priority.
+	if params.OverrideRawBase64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(params.OverrideRawBase64)
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid override_raw_base64: %w", err)
+		}
+		if len(decoded) == 0 {
+			return nil, 0, fmt.Errorf("override_raw_base64 decodes to empty bytes")
+		}
+		return decoded, 0, nil
+	}
+
+	// Apply byte-level patches to the original raw bytes.
+	if len(params.Patches) > 0 {
+		patched, err := applyRawPatches(originalRaw, params.Patches)
+		if err != nil {
+			return nil, 0, err
+		}
+		return patched, len(params.Patches), nil
+	}
+
+	return originalRaw, 0, nil
 }
 
 // executeDeleteSessionsResult is the structured output of the delete_sessions action.
