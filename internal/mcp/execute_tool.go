@@ -59,12 +59,12 @@ type executeParams struct {
 	Confirm       bool `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
 
 	// macro parameters (define_macro, run_macro, delete_macro)
-	Name        string            `json:"name,omitempty" jsonschema:"macro name"`
-	Description string            `json:"description,omitempty" jsonschema:"macro description"`
-	Steps       []macroStepInput  `json:"steps,omitempty" jsonschema:"macro steps for define_macro"`
-	InitialVars map[string]string `json:"initial_vars,omitempty" jsonschema:"initial KV Store entries for define_macro"`
-	MacroTimeout int              `json:"macro_timeout_ms,omitempty" jsonschema:"macro timeout in milliseconds"`
-	Vars        map[string]string `json:"vars,omitempty" jsonschema:"runtime variable overrides for run_macro"`
+	Name         string            `json:"name,omitempty" jsonschema:"macro name"`
+	Description  string            `json:"description,omitempty" jsonschema:"macro description"`
+	Steps        []macroStepInput  `json:"steps,omitempty" jsonschema:"macro steps for define_macro"`
+	InitialVars  map[string]string `json:"initial_vars,omitempty" jsonschema:"initial KV Store entries for define_macro"`
+	MacroTimeout int               `json:"macro_timeout_ms,omitempty" jsonschema:"macro timeout in milliseconds"`
+	Vars         map[string]string `json:"vars,omitempty" jsonschema:"runtime variable overrides for run_macro"`
 }
 
 // availableActions lists the valid action names for error messages.

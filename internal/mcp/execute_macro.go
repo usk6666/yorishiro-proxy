@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/usk6666/katashiro-proxy/internal/macro"
 	"github.com/usk6666/katashiro-proxy/internal/session"
@@ -134,8 +135,16 @@ func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParam
 	}
 
 	// Check if macro already exists (to determine created vs updated).
+	// Distinguish "not found" (macro is new) from real DB errors.
 	_, getErr := s.store.GetMacro(ctx, params.Name)
-	isNew := getErr != nil
+	var isNew bool
+	if getErr != nil {
+		if strings.Contains(getErr.Error(), "not found") {
+			isNew = true
+		} else {
+			return nil, fmt.Errorf("check existing macro: %w", getErr)
+		}
+	}
 
 	// Serialize config to JSON.
 	cfg := macroConfig{

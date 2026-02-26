@@ -491,8 +491,15 @@ func (s *SQLiteStore) GetMacro(ctx context.Context, name string) (*MacroRecord, 
 		return nil, fmt.Errorf("scan macro: %w", err)
 	}
 
-	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
-	rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedStr)
+	var parseErr error
+	rec.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdStr)
+	if parseErr != nil {
+		slog.Warn("failed to parse macro created_at timestamp", "macro", rec.Name, "value", createdStr, "error", parseErr)
+	}
+	rec.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedStr)
+	if parseErr != nil {
+		slog.Warn("failed to parse macro updated_at timestamp", "macro", rec.Name, "value", updatedStr, "error", parseErr)
+	}
 	return &rec, nil
 }
 
@@ -512,8 +519,15 @@ func (s *SQLiteStore) ListMacros(ctx context.Context) ([]*MacroRecord, error) {
 		if err := rows.Scan(&rec.Name, &rec.Description, &rec.ConfigJSON, &createdStr, &updatedStr); err != nil {
 			return nil, fmt.Errorf("scan macro row: %w", err)
 		}
-		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
-		rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedStr)
+		var parseErr error
+		rec.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdStr)
+		if parseErr != nil {
+			slog.Warn("failed to parse macro created_at timestamp", "macro", rec.Name, "value", createdStr, "error", parseErr)
+		}
+		rec.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedStr)
+		if parseErr != nil {
+			slog.Warn("failed to parse macro updated_at timestamp", "macro", rec.Name, "value", updatedStr, "error", parseErr)
+		}
 		records = append(records, &rec)
 	}
 	return records, rows.Err()
