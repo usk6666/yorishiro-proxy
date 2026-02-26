@@ -53,8 +53,10 @@ type executeParams struct {
 	Tag                string            `json:"tag,omitempty" jsonschema:"tag to attach to the result session"`
 
 	// resend_raw parameters
-	TargetAddr string `json:"target_addr,omitempty" jsonschema:"target address (host:port) for resend_raw"`
-	UseTLS     *bool  `json:"use_tls,omitempty" jsonschema:"use TLS for resend_raw connection"`
+	TargetAddr       string     `json:"target_addr,omitempty" jsonschema:"target address (host:port) for resend_raw"`
+	UseTLS           *bool      `json:"use_tls,omitempty" jsonschema:"use TLS for resend_raw connection"`
+	OverrideRawBase64 string    `json:"override_raw_base64,omitempty" jsonschema:"Base64-encoded raw bytes to replace entire payload (patches ignored)"`
+	Patches          []RawPatch `json:"patches,omitempty" jsonschema:"byte-level patches for resend_raw (offset, binary find/replace, text find/replace)"`
 
 	// delete_sessions parameters
 	OlderThanDays *int `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
@@ -68,6 +70,18 @@ type executeParams struct {
 	Positions   []fuzzer.Position            `json:"positions,omitempty" jsonschema:"payload positions for fuzzing"`
 	PayloadSets map[string]fuzzer.PayloadSet `json:"payload_sets,omitempty" jsonschema:"named payload sets for fuzzing"`
 
+	// fuzz execution control parameters
+	Concurrency  *int     `json:"concurrency,omitempty" jsonschema:"number of concurrent workers (default: 1)"`
+	RateLimitRPS *float64 `json:"rate_limit_rps,omitempty" jsonschema:"requests per second limit (0 = unlimited)"`
+	DelayMs      *int     `json:"delay_ms,omitempty" jsonschema:"fixed delay between requests in ms"`
+	MaxRetries   *int     `json:"max_retries,omitempty" jsonschema:"retry count per failed request"`
+
+	// fuzz stop conditions
+	StopOn *fuzzer.StopCondition `json:"stop_on,omitempty" jsonschema:"automatic stop conditions for fuzz jobs"`
+
+	// fuzz job control (fuzz_pause, fuzz_resume, fuzz_cancel)
+	FuzzID string `json:"fuzz_id,omitempty" jsonschema:"fuzz job ID for pause/resume/cancel"`
+
 	// macro parameters (define_macro, run_macro, delete_macro)
 	Name         string            `json:"name,omitempty" jsonschema:"macro name"`
 	Description  string            `json:"description,omitempty" jsonschema:"macro description"`
@@ -78,7 +92,7 @@ type executeParams struct {
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "define_macro", "run_macro", "delete_macro"}
+var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -87,12 +101,15 @@ func (s *Server) registerExecute() {
 		Description: "Execute an action on recorded proxy data. " +
 			"Available actions: " +
 			"'resend' resends a recorded HTTP request with optional mutation (method/URL/header/body overrides, body patches, dry-run); " +
-			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS; " +
+			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
 			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required); " +
 			"'release' forwards an intercepted request as-is (requires intercept_id); " +
 			"'modify_and_forward' forwards an intercepted request with mutations (same override params as resend, requires intercept_id); " +
 			"'drop' discards an intercepted request returning 502 to the client (requires intercept_id); " +
-			"'fuzz' runs a fuzz campaign against a recorded session with configurable positions, payload sets, and attack types (sequential/parallel); " +
+			"'fuzz' starts an async fuzz campaign (returns fuzz_id immediately, query fuzz_results for progress); " +
+			"'fuzz_pause' pauses a running fuzz job (requires fuzz_id); " +
+			"'fuzz_resume' resumes a paused fuzz job (requires fuzz_id); " +
+			"'fuzz_cancel' cancels a running or paused fuzz job (requires fuzz_id); " +
 			"'define_macro' saves a macro definition (upsert) with steps, extraction rules, and guards; " +
 			"'run_macro' executes a stored macro for testing; " +
 			"'delete_macro' removes a stored macro definition. " +
@@ -119,6 +136,12 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return s.handleExecuteDrop(ctx, input.Params)
 	case "fuzz":
 		return s.handleExecuteFuzz(ctx, input.Params)
+	case "fuzz_pause":
+		return s.handleExecuteFuzzPause(input.Params)
+	case "fuzz_resume":
+		return s.handleExecuteFuzzResume(input.Params)
+	case "fuzz_cancel":
+		return s.handleExecuteFuzzCancel(input.Params)
 	case "define_macro":
 		mp := paramsToMacroParams(input.Params)
 		result, err := s.handleExecuteDefineMacro(ctx, mp)
@@ -517,17 +540,41 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 
 // executeResendRawResult is the structured output of the resend_raw action.
 type executeResendRawResult struct {
+	// NewSessionID is the session ID of the resent raw request (if recorded).
+	NewSessionID string `json:"new_session_id,omitempty"`
 	// ResponseData is the raw response bytes, Base64-encoded.
 	ResponseData string `json:"response_data"`
 	// ResponseSize is the number of response bytes received.
 	ResponseSize int `json:"response_size"`
 	// DurationMs is the round-trip duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
+	// Tag is the tag attached to the result session (if specified).
+	Tag string `json:"tag,omitempty"`
+}
+
+// executeRawDryRunResult is the structured output of a dry-run resend_raw.
+type executeRawDryRunResult struct {
+	// DryRun is always true for dry-run results.
+	DryRun bool `json:"dry_run"`
+	// RawPreview contains the patched raw bytes preview.
+	RawPreview *rawPreview `json:"raw_preview"`
+}
+
+// rawPreview is the preview of patched raw bytes for dry-run mode.
+type rawPreview struct {
+	// DataBase64 is the patched raw bytes, Base64-encoded.
+	DataBase64 string `json:"data_base64"`
+	// DataSize is the size of the patched raw bytes in bytes.
+	DataSize int `json:"data_size"`
+	// PatchesApplied is the number of patches that were applied.
+	PatchesApplied int `json:"patches_applied"`
 }
 
 // handleExecuteResendRaw handles the resend_raw action within the execute tool.
-// It retrieves the session's raw request bytes and sends them directly over TCP/TLS.
-func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeResendRawResult, error) {
+// It retrieves the session's raw request bytes, applies byte-level patches,
+// and sends them directly over TCP/TLS. Supports dry-run mode, override_raw_base64,
+// and byte-level patches (offset, binary find/replace, text find/replace).
+func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
 	if s.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
@@ -554,6 +601,25 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	// Verify raw request bytes are available.
 	if len(sendMsg.RawBytes) == 0 {
 		return nil, nil, fmt.Errorf("session %s has no raw request bytes", params.SessionID)
+	}
+
+	// Build the raw bytes to send, applying patches or override.
+	rawBytes, patchCount, err := buildResendRawBytes(sendMsg.RawBytes, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Dry-run mode: return preview without sending.
+	if params.DryRun {
+		preview := &executeRawDryRunResult{
+			DryRun: true,
+			RawPreview: &rawPreview{
+				DataBase64:     base64.StdEncoding.EncodeToString(rawBytes),
+				DataSize:       len(rawBytes),
+				PatchesApplied: patchCount,
+			},
+		}
+		return nil, preview, nil
 	}
 
 	// Determine the target address.
@@ -614,8 +680,8 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		return nil, nil, fmt.Errorf("set connection deadline: %w", err)
 	}
 
-	// Send the raw request bytes exactly as captured.
-	if _, err := conn.Write(sendMsg.RawBytes); err != nil {
+	// Send the (potentially patched) raw bytes.
+	if _, err := conn.Write(rawBytes); err != nil {
 		return nil, nil, fmt.Errorf("send raw request: %w", err)
 	}
 
@@ -630,13 +696,86 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	}
 	duration := time.Since(start)
 
+	// Record the resend_raw as a new session.
+	var tags map[string]string
+	if params.Tag != "" {
+		tags = map[string]string{"tag": params.Tag}
+	}
+
+	newSess := &session.Session{
+		Protocol:    sess.Protocol,
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		Duration:    duration,
+		Tags:        tags,
+	}
+
+	if err := s.store.SaveSession(ctx, newSess); err != nil {
+		return nil, nil, fmt.Errorf("save resend_raw session: %w", err)
+	}
+
+	// Save send message with the patched raw bytes.
+	newSendMsg := &session.Message{
+		SessionID: newSess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: start,
+		RawBytes:  rawBytes,
+	}
+	if err := s.store.AppendMessage(ctx, newSendMsg); err != nil {
+		return nil, nil, fmt.Errorf("save resend_raw send message: %w", err)
+	}
+
+	// Save receive message with the raw response.
+	newRecvMsg := &session.Message{
+		SessionID: newSess.ID,
+		Sequence:  1,
+		Direction: "receive",
+		Timestamp: start.Add(duration),
+		RawBytes:  respData,
+	}
+	if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
+		return nil, nil, fmt.Errorf("save resend_raw receive message: %w", err)
+	}
+
 	result := &executeResendRawResult{
+		NewSessionID: newSess.ID,
 		ResponseData: base64.StdEncoding.EncodeToString(respData),
 		ResponseSize: len(respData),
 		DurationMs:   duration.Milliseconds(),
+		Tag:          params.Tag,
 	}
 
 	return nil, result, nil
+}
+
+// buildResendRawBytes builds the raw bytes to send after applying mutations.
+// Priority: override_raw_base64 > patches > original raw bytes.
+// Returns the final bytes and the number of patches applied.
+func buildResendRawBytes(originalRaw []byte, params executeParams) ([]byte, int, error) {
+	// Full replacement takes priority.
+	if params.OverrideRawBase64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(params.OverrideRawBase64)
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid override_raw_base64: %w", err)
+		}
+		if len(decoded) == 0 {
+			return nil, 0, fmt.Errorf("override_raw_base64 decodes to empty bytes")
+		}
+		return decoded, 0, nil
+	}
+
+	// Apply byte-level patches to the original raw bytes.
+	if len(params.Patches) > 0 {
+		patched, err := applyRawPatches(originalRaw, params.Patches)
+		if err != nil {
+			return nil, 0, err
+		}
+		return patched, len(params.Patches), nil
+	}
+
+	return originalRaw, 0, nil
 }
 
 // executeDeleteSessionsResult is the structured output of the delete_sessions action.
@@ -789,34 +928,11 @@ func (s *Server) handleExecuteDrop(_ context.Context, params executeParams) (*go
 	}, nil
 }
 
-// executeFuzzResult is the structured output of the fuzz action.
-type executeFuzzResult struct {
-	// FuzzID is the unique identifier of the fuzz job.
-	FuzzID string `json:"fuzz_id"`
-	// Status is the final job status.
-	Status string `json:"status"`
-	// Total is the total number of iterations.
-	Total int `json:"total"`
-	// Completed is the number of completed iterations.
-	Completed int `json:"completed"`
-	// Errors is the number of failed iterations.
-	Errors int `json:"errors"`
-	// Tag is the job tag (if set).
-	Tag string `json:"tag,omitempty"`
-	// Message is a human-readable summary.
-	Message string `json:"message"`
-}
-
 // handleExecuteFuzz handles the fuzz action within the execute tool.
-// It creates a fuzz engine, executes the job synchronously, and returns a summary.
-func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeFuzzResult, error) {
-	if s.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
-	}
-
-	fuzzStore, ok := s.store.(session.FuzzStore)
-	if !ok {
-		return nil, nil, fmt.Errorf("session store does not support fuzz operations")
+// It starts an asynchronous fuzz job and returns the fuzz_id immediately.
+func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *fuzzer.AsyncResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 
 	if params.SessionID == "" {
@@ -829,33 +945,122 @@ func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*
 		return nil, nil, fmt.Errorf("at least one position is required for fuzz action")
 	}
 
-	cfg := fuzzer.Config{
-		SessionID:   params.SessionID,
-		AttackType:  params.AttackType,
-		Positions:   params.Positions,
-		PayloadSets: params.PayloadSets,
-		Tag:         params.Tag,
+	cfg := fuzzer.RunConfig{
+		Config: fuzzer.Config{
+			SessionID:   params.SessionID,
+			AttackType:  params.AttackType,
+			Positions:   params.Positions,
+			PayloadSets: params.PayloadSets,
+			Tag:         params.Tag,
+		},
+		StopOn: params.StopOn,
 	}
 	if params.TimeoutMs != nil {
 		cfg.TimeoutMs = *params.TimeoutMs
 	}
+	if params.Concurrency != nil {
+		cfg.Concurrency = *params.Concurrency
+	}
+	if params.RateLimitRPS != nil {
+		cfg.RateLimitRPS = *params.RateLimitRPS
+	}
+	if params.DelayMs != nil {
+		cfg.DelayMs = *params.DelayMs
+	}
+	if params.MaxRetries != nil {
+		cfg.MaxRetries = *params.MaxRetries
+	}
 
-	// Build the HTTP client with SSRF protection.
-	httpClient := s.resendHTTPClient(params)
-
-	engine := fuzzer.NewEngine(s.store, s.store, fuzzStore, httpClient, fuzzer.DefaultWordlistBaseDir())
-	result, err := engine.Run(ctx, cfg)
+	// Use the application-level context so the job survives beyond the MCP request.
+	result, err := s.fuzzRunner.Start(s.appCtx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fuzz execution: %w", err)
 	}
 
-	return nil, &executeFuzzResult{
-		FuzzID:    result.FuzzID,
-		Status:    result.Status,
-		Total:     result.Total,
-		Completed: result.Completed,
-		Errors:    result.Errors,
-		Tag:       result.Tag,
-		Message:   fmt.Sprintf("Fuzz completed: %d/%d requests sent, %d errors", result.Completed, result.Total, result.Errors),
+	return nil, result, nil
+}
+
+// executeFuzzControlResult is the structured output of fuzz control actions.
+type executeFuzzControlResult struct {
+	// FuzzID is the ID of the fuzz job.
+	FuzzID string `json:"fuzz_id"`
+	// Action is the control action performed.
+	Action string `json:"action"`
+	// Status is the resulting job status.
+	Status string `json:"status"`
+}
+
+// handleExecuteFuzzPause handles the fuzz_pause action.
+func (s *Server) handleExecuteFuzzPause(params executeParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
+	}
+	if params.FuzzID == "" {
+		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_pause action")
+	}
+
+	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	if ctrl == nil {
+		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
+	}
+
+	if err := ctrl.Pause(); err != nil {
+		return nil, nil, fmt.Errorf("fuzz_pause: %w", err)
+	}
+
+	return nil, &executeFuzzControlResult{
+		FuzzID: params.FuzzID,
+		Action: "fuzz_pause",
+		Status: string(ctrl.Status()),
+	}, nil
+}
+
+// handleExecuteFuzzResume handles the fuzz_resume action.
+func (s *Server) handleExecuteFuzzResume(params executeParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
+	}
+	if params.FuzzID == "" {
+		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_resume action")
+	}
+
+	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	if ctrl == nil {
+		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
+	}
+
+	if err := ctrl.Resume(); err != nil {
+		return nil, nil, fmt.Errorf("fuzz_resume: %w", err)
+	}
+
+	return nil, &executeFuzzControlResult{
+		FuzzID: params.FuzzID,
+		Action: "fuzz_resume",
+		Status: string(ctrl.Status()),
+	}, nil
+}
+
+// handleExecuteFuzzCancel handles the fuzz_cancel action.
+func (s *Server) handleExecuteFuzzCancel(params executeParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
+	}
+	if params.FuzzID == "" {
+		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_cancel action")
+	}
+
+	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	if ctrl == nil {
+		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
+	}
+
+	if err := ctrl.Cancel(); err != nil {
+		return nil, nil, fmt.Errorf("fuzz_cancel: %w", err)
+	}
+
+	return nil, &executeFuzzControlResult{
+		FuzzID: params.FuzzID,
+		Action: "fuzz_cancel",
+		Status: string(ctrl.Status()),
 	}, nil
 }

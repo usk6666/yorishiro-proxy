@@ -8,7 +8,7 @@
     "action": {
       "type": "string",
       "description": "The action to execute. 'replay' and 'replay_raw' are accepted as deprecated aliases.",
-      "enum": ["resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "define_macro", "run_macro", "delete_macro", "replay", "replay_raw"]
+      "enum": ["resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "replay", "replay_raw"]
     },
     "params": {
       "type": "object",
@@ -202,6 +202,63 @@
             },
             "additionalProperties": false
           }
+        },
+        "concurrency": {
+          "type": "integer",
+          "description": "Number of concurrent fuzz workers (default: 1, max: 100).",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "rate_limit_rps": {
+          "type": "number",
+          "description": "Requests per second limit for fuzz (0 = unlimited).",
+          "minimum": 0
+        },
+        "delay_ms": {
+          "type": "integer",
+          "description": "Fixed delay between fuzz requests in milliseconds.",
+          "minimum": 0
+        },
+        "max_retries": {
+          "type": "integer",
+          "description": "Retry count per failed fuzz request (default: 0).",
+          "minimum": 0
+        },
+        "stop_on": {
+          "type": "object",
+          "description": "Automatic stop conditions for fuzz jobs.",
+          "properties": {
+            "status_codes": {
+              "type": "array",
+              "description": "Stop when any of these HTTP status codes is received.",
+              "items": { "type": "integer" }
+            },
+            "error_count": {
+              "type": "integer",
+              "description": "Stop when cumulative error count reaches this value.",
+              "minimum": 1
+            },
+            "latency_threshold_ms": {
+              "type": "integer",
+              "description": "Stop when sliding window median latency exceeds this (ms).",
+              "minimum": 1
+            },
+            "latency_baseline_multiplier": {
+              "type": "number",
+              "description": "Stop when current median exceeds baseline * multiplier.",
+              "exclusiveMinimum": 0
+            },
+            "latency_window": {
+              "type": "integer",
+              "description": "Sliding window size for latency detection (default: 10).",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "fuzz_id": {
+          "type": "string",
+          "description": "Fuzz job ID for fuzz_pause, fuzz_resume, fuzz_cancel actions."
         },
         "name": {
           "type": "string",
