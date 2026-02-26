@@ -57,6 +57,41 @@ CREATE INDEX IF NOT EXISTS idx_messages_status_code ON messages(status_code);
 `
 
 const schemaV2 = `
+-- Fuzz job management
+CREATE TABLE IF NOT EXISTS fuzz_jobs (
+	id              TEXT PRIMARY KEY,
+	session_id      TEXT NOT NULL,
+	config          TEXT NOT NULL,
+	status          TEXT NOT NULL,
+	tag             TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME NOT NULL,
+	completed_at    DATETIME,
+	total           INTEGER NOT NULL DEFAULT 0,
+	completed_count INTEGER NOT NULL DEFAULT 0,
+	error_count     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_fuzz_jobs_status ON fuzz_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_fuzz_jobs_tag ON fuzz_jobs(tag);
+
+-- Fuzz results (each payload submission result)
+CREATE TABLE IF NOT EXISTS fuzz_results (
+	id              TEXT PRIMARY KEY,
+	fuzz_id         TEXT NOT NULL REFERENCES fuzz_jobs(id) ON DELETE CASCADE,
+	index_num       INTEGER NOT NULL,
+	session_id      TEXT NOT NULL DEFAULT '',
+	payloads        TEXT NOT NULL,
+	status_code     INTEGER,
+	response_length INTEGER,
+	duration_ms     INTEGER,
+	error           TEXT,
+
+	UNIQUE(fuzz_id, index_num)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fuzz_results_fuzz_id ON fuzz_results(fuzz_id);
+CREATE INDEX IF NOT EXISTS idx_fuzz_results_status_code ON fuzz_results(status_code);
+
 CREATE TABLE IF NOT EXISTS macros (
 	name        TEXT PRIMARY KEY,
 	description TEXT NOT NULL DEFAULT '',

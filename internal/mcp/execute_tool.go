@@ -14,6 +14,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -58,6 +59,11 @@ type executeParams struct {
 	OlderThanDays *int `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
 	Confirm       bool `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
 
+	// fuzz parameters
+	AttackType  string                       `json:"attack_type,omitempty" jsonschema:"fuzz attack type: sequential or parallel"`
+	Positions   []fuzzer.Position            `json:"positions,omitempty" jsonschema:"payload positions for fuzzing"`
+	PayloadSets map[string]fuzzer.PayloadSet `json:"payload_sets,omitempty" jsonschema:"named payload sets for fuzzing"`
+
 	// macro parameters (define_macro, run_macro, delete_macro)
 	Name         string            `json:"name,omitempty" jsonschema:"macro name"`
 	Description  string            `json:"description,omitempty" jsonschema:"macro description"`
@@ -68,7 +74,7 @@ type executeParams struct {
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "delete_sessions", "define_macro", "run_macro", "delete_macro"}
+var availableActions = []string{"resend", "resend_raw", "delete_sessions", "fuzz", "define_macro", "run_macro", "delete_macro"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -79,6 +85,7 @@ func (s *Server) registerExecute() {
 			"'resend' resends a recorded HTTP request with optional mutation (method/URL/header/body overrides, body patches, dry-run); " +
 			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS; " +
 			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required); " +
+			"'fuzz' runs a fuzz campaign against a recorded session with configurable positions, payload sets, and attack types (sequential/parallel); " +
 			"'define_macro' saves a macro definition (upsert) with steps, extraction rules, and guards; " +
 			"'run_macro' executes a stored macro for testing; " +
 			"'delete_macro' removes a stored macro definition. " +
@@ -97,6 +104,8 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return s.handleExecuteResendRaw(ctx, input.Params)
 	case "delete_sessions":
 		return s.handleExecuteDeleteSessions(ctx, input.Params)
+	case "fuzz":
+		return s.handleExecuteFuzz(ctx, input.Params)
 	case "define_macro":
 		mp := paramsToMacroParams(input.Params)
 		result, err := s.handleExecuteDefineMacro(ctx, mp)
@@ -674,4 +683,75 @@ func (s *Server) handleExecuteDeleteSessions(ctx context.Context, params execute
 	}
 
 	return nil, nil, fmt.Errorf("delete_sessions requires one of: session_id, older_than_days, or confirm=true for all deletion")
+}
+
+// executeFuzzResult is the structured output of the fuzz action.
+type executeFuzzResult struct {
+	// FuzzID is the unique identifier of the fuzz job.
+	FuzzID string `json:"fuzz_id"`
+	// Status is the final job status.
+	Status string `json:"status"`
+	// Total is the total number of iterations.
+	Total int `json:"total"`
+	// Completed is the number of completed iterations.
+	Completed int `json:"completed"`
+	// Errors is the number of failed iterations.
+	Errors int `json:"errors"`
+	// Tag is the job tag (if set).
+	Tag string `json:"tag,omitempty"`
+	// Message is a human-readable summary.
+	Message string `json:"message"`
+}
+
+// handleExecuteFuzz handles the fuzz action within the execute tool.
+// It creates a fuzz engine, executes the job synchronously, and returns a summary.
+func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeFuzzResult, error) {
+	if s.store == nil {
+		return nil, nil, fmt.Errorf("session store is not initialized")
+	}
+
+	fuzzStore, ok := s.store.(session.FuzzStore)
+	if !ok {
+		return nil, nil, fmt.Errorf("session store does not support fuzz operations")
+	}
+
+	if params.SessionID == "" {
+		return nil, nil, fmt.Errorf("session_id is required for fuzz action")
+	}
+	if params.AttackType == "" {
+		return nil, nil, fmt.Errorf("attack_type is required for fuzz action")
+	}
+	if len(params.Positions) == 0 {
+		return nil, nil, fmt.Errorf("at least one position is required for fuzz action")
+	}
+
+	cfg := fuzzer.Config{
+		SessionID:   params.SessionID,
+		AttackType:  params.AttackType,
+		Positions:   params.Positions,
+		PayloadSets: params.PayloadSets,
+		Tag:         params.Tag,
+	}
+	if params.TimeoutMs != nil {
+		cfg.TimeoutMs = *params.TimeoutMs
+	}
+
+	// Build the HTTP client with SSRF protection.
+	httpClient := s.resendHTTPClient(params)
+
+	engine := fuzzer.NewEngine(s.store, s.store, fuzzStore, httpClient, fuzzer.DefaultWordlistBaseDir())
+	result, err := engine.Run(ctx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fuzz execution: %w", err)
+	}
+
+	return nil, &executeFuzzResult{
+		FuzzID:    result.FuzzID,
+		Status:    result.Status,
+		Total:     result.Total,
+		Completed: result.Completed,
+		Errors:    result.Errors,
+		Tag:       result.Tag,
+		Message:   fmt.Sprintf("Fuzz completed: %d/%d requests sent, %d errors", result.Completed, result.Total, result.Errors),
+	}, nil
 }
