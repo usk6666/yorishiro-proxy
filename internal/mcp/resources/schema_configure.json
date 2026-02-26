@@ -68,6 +68,38 @@
         }
       },
       "additionalProperties": false
+    },
+    "intercept_rules": {
+      "type": "object",
+      "description": "Intercept rules configuration.",
+      "properties": {
+        "add": {
+          "type": "array",
+          "description": "(merge) Rules to add.",
+          "items": { "$ref": "#/$defs/intercept_rule" }
+        },
+        "remove": {
+          "type": "array",
+          "description": "(merge) Rule IDs to remove.",
+          "items": { "type": "string" }
+        },
+        "enable": {
+          "type": "array",
+          "description": "(merge) Rule IDs to enable.",
+          "items": { "type": "string" }
+        },
+        "disable": {
+          "type": "array",
+          "description": "(merge) Rule IDs to disable.",
+          "items": { "type": "string" }
+        },
+        "rules": {
+          "type": "array",
+          "description": "(replace) Full list of intercept rules.",
+          "items": { "$ref": "#/$defs/intercept_rule" }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -87,6 +119,49 @@
         "method": {
           "type": "string",
           "description": "HTTP method (e.g. GET, POST)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "intercept_rule": {
+      "type": "object",
+      "description": "An intercept rule with matching conditions.",
+      "required": ["id", "enabled", "direction", "conditions"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique rule identifier."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the rule is active."
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["request", "response", "both"],
+          "description": "Applies to requests, responses, or both."
+        },
+        "conditions": { "$ref": "#/$defs/intercept_conditions" }
+      },
+      "additionalProperties": false
+    },
+    "intercept_conditions": {
+      "type": "object",
+      "description": "Matching conditions. All specified conditions are AND-ed.",
+      "properties": {
+        "url_pattern": {
+          "type": "string",
+          "description": "Regex pattern for URL path matching."
+        },
+        "methods": {
+          "type": "array",
+          "description": "HTTP method whitelist (case-insensitive).",
+          "items": { "type": "string" }
+        },
+        "header_match": {
+          "type": "object",
+          "description": "Header name to regex pattern mapping (AND logic).",
+          "additionalProperties": { "type": "string" }
         }
       },
       "additionalProperties": false

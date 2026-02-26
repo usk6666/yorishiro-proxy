@@ -1,6 +1,6 @@
 # configure
 
-Configure runtime proxy settings including capture scope and TLS passthrough. Supports incremental (merge) and full replacement (replace) operations.
+Configure runtime proxy settings including capture scope, TLS passthrough, and intercept rules. Supports incremental (merge) and full replacement (replace) operations.
 
 ## Parameters
 
@@ -90,6 +90,136 @@ Controls which domains bypass TLS interception.
 }
 ```
 
+### intercept_rules (object, optional)
+Configures intercept rules for matching requests/responses.
+
+**Merge operation fields:**
+- **add** (array of intercept rules): Rules to add.
+- **remove** (array of strings): Rule IDs to remove.
+- **enable** (array of strings): Rule IDs to enable.
+- **disable** (array of strings): Rule IDs to disable.
+
+**Replace operation fields:**
+- **rules** (array of intercept rules): Full replacement of all intercept rules.
+
+Each intercept rule has:
+- **id** (string): Unique rule identifier.
+- **enabled** (boolean): Whether the rule is active.
+- **direction** (string): `"request"`, `"response"`, or `"both"`.
+- **conditions** (object): Matching criteria:
+  - **url_pattern** (string): Regex for URL path matching.
+  - **methods** (array of strings): HTTP method whitelist.
+  - **header_match** (object): Header name to regex mapping (AND logic).
+
+## Usage Examples
+
+### Add scope rules (merge)
+```json
+{
+  "capture_scope": {
+    "add_includes": [{"hostname": "api.target.com"}],
+    "add_excludes": [{"hostname": "static.target.com"}]
+  }
+}
+```
+
+### Remove scope rules (merge)
+```json
+{
+  "capture_scope": {
+    "remove_includes": [{"hostname": "old.target.com"}]
+  }
+}
+```
+
+### Replace all scope rules
+```json
+{
+  "operation": "replace",
+  "capture_scope": {
+    "includes": [{"hostname": "new-target.com"}],
+    "excludes": []
+  }
+}
+```
+
+### Add TLS passthrough patterns
+```json
+{
+  "tls_passthrough": {
+    "add": ["*.googleapis.com", "accounts.google.com"]
+  }
+}
+```
+
+### Replace all TLS passthrough patterns
+```json
+{
+  "operation": "replace",
+  "tls_passthrough": {
+    "patterns": ["*.googleapis.com"]
+  }
+}
+```
+
+### Add intercept rules (merge)
+```json
+{
+  "intercept_rules": {
+    "add": [
+      {
+        "id": "admin-api",
+        "enabled": true,
+        "direction": "request",
+        "conditions": {
+          "url_pattern": "/api/admin.*",
+          "methods": ["POST", "PUT", "DELETE"],
+          "header_match": {"Content-Type": "application/json"}
+        }
+      }
+    ]
+  }
+}
+```
+
+### Disable/enable intercept rules (merge)
+```json
+{
+  "intercept_rules": {
+    "disable": ["admin-api"],
+    "enable": ["other-rule"]
+  }
+}
+```
+
+### Remove intercept rules (merge)
+```json
+{
+  "intercept_rules": {
+    "remove": ["admin-api"]
+  }
+}
+```
+
+### Replace all intercept rules
+```json
+{
+  "operation": "replace",
+  "intercept_rules": {
+    "rules": [
+      {
+        "id": "new-rule",
+        "enabled": true,
+        "direction": "both",
+        "conditions": {
+          "url_pattern": "/api/.*"
+        }
+      }
+    ]
+  }
+}
+```
+
 ### Combined update
 ```json
 {
@@ -98,6 +228,18 @@ Controls which domains bypass TLS interception.
   },
   "tls_passthrough": {
     "add": ["pinned.service.com"]
+  },
+  "intercept_rules": {
+    "add": [
+      {
+        "id": "json-api",
+        "enabled": true,
+        "direction": "request",
+        "conditions": {
+          "header_match": {"Content-Type": "application/json"}
+        }
+      }
+    ]
   }
 }
 ```
