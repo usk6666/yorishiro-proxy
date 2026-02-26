@@ -27,6 +27,9 @@ const defaultReplayTimeout = 30 * time.Second
 // maxReplayResponseSize is the maximum response body size (1 MB) to prevent OOM.
 const maxReplayResponseSize = 1 << 20
 
+// maxRedirects is the maximum number of HTTP redirects to follow.
+const maxRedirects = 10
+
 // allowedSchemes are the URL schemes permitted for replay requests.
 var allowedSchemes = map[string]bool{
 	"http":  true,
@@ -47,6 +50,18 @@ type rawDialer interface {
 func validateURLScheme(u *url.URL) error {
 	if !allowedSchemes[u.Scheme] {
 		return fmt.Errorf("unsupported URL scheme %q: only http and https are allowed", u.Scheme)
+	}
+	return nil
+}
+
+// safeCheckRedirect validates redirect targets when follow_redirects is enabled.
+// It enforces HTTP/HTTPS-only schemes and a maximum hop limit.
+func safeCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("too many redirects: %d", len(via))
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return fmt.Errorf("redirect to non-HTTP scheme: %s", req.URL.Scheme)
 	}
 	return nil
 }
