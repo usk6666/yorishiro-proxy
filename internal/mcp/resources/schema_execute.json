@@ -8,7 +8,7 @@
     "action": {
       "type": "string",
       "description": "The action to execute. 'replay' and 'replay_raw' are accepted as deprecated aliases.",
-      "enum": ["resend", "resend_raw", "delete_sessions", "replay", "replay_raw"]
+      "enum": ["resend", "resend_raw", "delete_sessions", "fuzz", "replay", "replay_raw"]
     },
     "params": {
       "type": "object",
@@ -111,6 +111,93 @@
         "confirm": {
           "type": "boolean",
           "description": "Confirm bulk deletion (required for older_than_days or delete-all)."
+        },
+        "attack_type": {
+          "type": "string",
+          "description": "Fuzz attack type: sequential (one position at a time) or parallel (all positions simultaneously).",
+          "enum": ["sequential", "parallel"]
+        },
+        "positions": {
+          "type": "array",
+          "description": "Payload injection positions for fuzz action.",
+          "items": {
+            "type": "object",
+            "required": ["id", "location"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique position identifier (e.g., pos-0)."
+              },
+              "location": {
+                "type": "string",
+                "description": "Injection location in the request.",
+                "enum": ["header", "path", "query", "body_regex", "body_json", "cookie"]
+              },
+              "name": {
+                "type": "string",
+                "description": "Header name, query key, or cookie name."
+              },
+              "json_path": {
+                "type": "string",
+                "description": "JSON path for body_json location (e.g., $.password)."
+              },
+              "mode": {
+                "type": "string",
+                "description": "Operation mode (default: replace).",
+                "enum": ["replace", "add", "remove"]
+              },
+              "match": {
+                "type": "string",
+                "description": "Regex pattern for partial replacement. Capture groups replace only the group."
+              },
+              "payload_set": {
+                "type": "string",
+                "description": "Name of the payload set to use."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "payload_sets": {
+          "type": "object",
+          "description": "Named payload sets for fuzz action.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "description": "Payload generation type.",
+                "enum": ["wordlist", "file", "range", "sequence"]
+              },
+              "values": {
+                "type": "array",
+                "description": "Payload strings (for wordlist type).",
+                "items": { "type": "string" }
+              },
+              "path": {
+                "type": "string",
+                "description": "Relative file path under ~/.katashiro-proxy/wordlists/ (for file type)."
+              },
+              "start": {
+                "type": "integer",
+                "description": "Range start value (for range/sequence types)."
+              },
+              "end": {
+                "type": "integer",
+                "description": "Range end value (for range/sequence types)."
+              },
+              "step": {
+                "type": "integer",
+                "description": "Range step value (for range/sequence types, default: 1)."
+              },
+              "format": {
+                "type": "string",
+                "description": "Format string for sequence type (e.g., user%04d)."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
