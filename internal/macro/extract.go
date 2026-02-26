@@ -164,10 +164,20 @@ func extractURL(rule ExtractionRule, req *SendRequest, resp *SendResponse) (stri
 }
 
 // matchRegex applies a regex pattern and returns the specified capture group.
+// Pattern length and input size are validated to mitigate ReDoS (CWE-1333).
 func matchRegex(input, pattern string, group int) (string, error) {
+	if len(pattern) > MaxRegexPatternLen {
+		return "", fmt.Errorf("regex pattern too long: %d > %d", len(pattern), MaxRegexPatternLen)
+	}
+
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return "", fmt.Errorf("invalid regex %q: %w", pattern, err)
+	}
+
+	// Cap input size to prevent CPU exhaustion on large bodies.
+	if len(input) > MaxRegexInputSize {
+		input = input[:MaxRegexInputSize]
 	}
 
 	matches := re.FindStringSubmatch(input)

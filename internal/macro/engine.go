@@ -255,10 +255,17 @@ func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[st
 		}
 	}
 
+	// Cap the body stored in step state to prevent memory exhaustion when
+	// attacker-controlled servers return large responses (CWE-770).
+	stateBody := resp.Body
+	if len(stateBody) > MaxStepBodySize {
+		stateBody = stateBody[:MaxStepBodySize]
+	}
+
 	state := &stepState{
 		StatusCode: resp.StatusCode,
 		Headers:    resp.Headers,
-		Body:       resp.Body,
+		Body:       stateBody,
 	}
 
 	return &StepResult{
@@ -271,6 +278,12 @@ func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[st
 
 // buildRequest constructs a SendRequest from a base session request, applying
 // step overrides and template expansion.
+//
+// NOTE (CWE-918): SSRF protection is the responsibility of the SendFunc
+// implementation, not the Macro engine. The engine is a library that constructs
+// requests from templates and KV Store values; it does not enforce network-level
+// restrictions. Callers MUST provide a SendFunc that validates target URLs
+// (e.g., blocking cloud metadata endpoints and internal services).
 func buildRequest(step *Step, base *SendRequest, kvStore map[string]string) (*SendRequest, error) {
 	req := &SendRequest{
 		Method:  base.Method,

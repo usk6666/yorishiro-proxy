@@ -2,6 +2,7 @@ package macro
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -201,6 +202,20 @@ func TestEvaluateGuard(t *testing.T) {
 			kvStore: kvStore,
 			wantErr: true,
 		},
+		{
+			name:    "header match pattern too long",
+			guard:   &Guard{Step: "login", HeaderMatch: map[string]string{"Location": strings.Repeat("a", MaxRegexPatternLen+1)}},
+			states:  stepStates,
+			kvStore: kvStore,
+			wantErr: true,
+		},
+		{
+			name:    "body match pattern too long",
+			guard:   &Guard{Step: "login", BodyMatch: strings.Repeat("a", MaxRegexPatternLen+1)},
+			states:  stepStates,
+			kvStore: kvStore,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -214,5 +229,33 @@ func TestEvaluateGuard(t *testing.T) {
 				t.Errorf("EvaluateGuard() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMatchBody_InputSizeCap(t *testing.T) {
+	// Create a body larger than MaxRegexInputSize with a match only after the limit.
+	prefix := make([]byte, MaxRegexInputSize)
+	for i := range prefix {
+		prefix[i] = 'x'
+	}
+	body := append(prefix, []byte("FINDME")...)
+
+	// The match is beyond the cap, so it should not be found.
+	matched, err := matchBody("FINDME", body)
+	if err != nil {
+		t.Fatalf("matchBody() unexpected error = %v", err)
+	}
+	if matched {
+		t.Error("matchBody() should not find match beyond MaxRegexInputSize")
+	}
+
+	// A match within the cap should still work.
+	body2 := append([]byte("FINDME"), prefix...)
+	matched, err = matchBody("FINDME", body2)
+	if err != nil {
+		t.Fatalf("matchBody() unexpected error = %v", err)
+	}
+	if !matched {
+		t.Error("matchBody() should find match within MaxRegexInputSize")
 	}
 }

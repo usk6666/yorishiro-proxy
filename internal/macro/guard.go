@@ -117,13 +117,21 @@ func evaluateConditions(guard *Guard, stepResults map[string]*stepState, kvStore
 }
 
 // matchHeaders checks if all header patterns match (AND evaluation).
+// Pattern length and input size are validated to mitigate ReDoS (CWE-1333).
 func matchHeaders(patterns map[string]string, headers map[string][]string) (bool, error) {
 	for headerName, pattern := range patterns {
+		if len(pattern) > MaxRegexPatternLen {
+			return false, fmt.Errorf("regex pattern too long for header %q: %d > %d", headerName, len(pattern), MaxRegexPatternLen)
+		}
 		values := findHeader(headers, headerName)
 		if len(values) == 0 {
 			return false, nil
 		}
 		combined := strings.Join(values, ", ")
+		// Cap input size to prevent CPU exhaustion.
+		if len(combined) > MaxRegexInputSize {
+			combined = combined[:MaxRegexInputSize]
+		}
 		re, err := regexp.Compile(pattern)
 		if err != nil {
 			return false, fmt.Errorf("invalid regex %q for header %q: %w", pattern, headerName, err)
@@ -136,13 +144,21 @@ func matchHeaders(patterns map[string]string, headers map[string][]string) (bool
 }
 
 // matchBody checks if the body matches the given regex pattern.
+// Pattern length and input size are validated to mitigate ReDoS (CWE-1333).
 func matchBody(pattern string, body []byte) (bool, error) {
 	if len(body) == 0 {
 		return false, nil
 	}
+	if len(pattern) > MaxRegexPatternLen {
+		return false, fmt.Errorf("regex pattern too long: %d > %d", len(pattern), MaxRegexPatternLen)
+	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return false, fmt.Errorf("invalid regex %q: %w", pattern, err)
+	}
+	// Cap input size to prevent CPU exhaustion on large bodies.
+	if len(body) > MaxRegexInputSize {
+		body = body[:MaxRegexInputSize]
 	}
 	return re.Match(body), nil
 }

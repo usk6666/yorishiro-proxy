@@ -19,6 +19,21 @@ const (
 	DefaultRetryCount = 3
 	// DefaultRetryDelayMs is the default delay between retries in milliseconds.
 	DefaultRetryDelayMs = 1000
+
+	// MaxRegexInputSize is the maximum input size (in bytes) allowed for regex
+	// matching. Inputs exceeding this limit are truncated before matching to
+	// prevent ReDoS on large attacker-controlled bodies.
+	MaxRegexInputSize = 1 << 20 // 1 MB
+
+	// MaxRegexPatternLen is the maximum allowed length (in bytes) for a
+	// user-supplied regex pattern. Overly complex patterns are rejected to
+	// limit regex compilation and matching cost.
+	MaxRegexPatternLen = 1024
+
+	// MaxStepBodySize is the maximum body size (in bytes) stored in step state
+	// for guard evaluation. Larger bodies are truncated to prevent memory
+	// exhaustion when attacker-controlled servers return large responses.
+	MaxStepBodySize = 1 << 20 // 1 MB
 )
 
 // OnError specifies how a step error is handled.
@@ -160,6 +175,11 @@ type StepResult struct {
 }
 
 // Result holds the outcome of a complete macro execution.
+//
+// NOTE (CWE-209): Error and StepResults[].Error may contain internal details
+// such as session IDs, URLs, and regex patterns. The Macro engine is an
+// internal library; callers (e.g., the MCP layer) MUST sanitize error messages
+// before exposing them to external clients.
 type Result struct {
 	// MacroName is the name of the executed macro.
 	MacroName string
@@ -203,6 +223,10 @@ type SendResponse struct {
 // It receives a context and a request, and returns a response or error.
 // This allows dependency injection for testing and integration with different
 // HTTP transport mechanisms.
+//
+// NOTE (CWE-918): SendFunc implementations MUST enforce SSRF protection by
+// validating target URLs before sending requests. The Macro engine does not
+// restrict which hosts or paths can be reached.
 type SendFunc func(ctx context.Context, req *SendRequest) (*SendResponse, error)
 
 // SessionFetcher retrieves session data needed by macro steps to build requests.

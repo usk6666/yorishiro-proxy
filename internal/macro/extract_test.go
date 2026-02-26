@@ -2,6 +2,7 @@ package macro
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -515,6 +516,20 @@ func TestMatchRegex(t *testing.T) {
 			group:   0,
 			wantErr: true,
 		},
+		{
+			name:    "pattern too long",
+			input:   "abc",
+			pattern: strings.Repeat("a", MaxRegexPatternLen+1),
+			group:   0,
+			wantErr: true,
+		},
+		{
+			name:    "pattern at max length is accepted",
+			input:   strings.Repeat("a", MaxRegexPatternLen+100),
+			pattern: strings.Repeat("a", MaxRegexPatternLen),
+			group:   0,
+			want:    strings.Repeat("a", MaxRegexPatternLen),
+		},
 	}
 
 	for _, tt := range tests {
@@ -528,6 +543,28 @@ func TestMatchRegex(t *testing.T) {
 				t.Errorf("matchRegex() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMatchRegex_InputSizeCap(t *testing.T) {
+	// Create an input larger than MaxRegexInputSize with a match only after the limit.
+	prefix := strings.Repeat("x", MaxRegexInputSize)
+	input := prefix + "FINDME"
+
+	// The match is beyond the cap, so it should not be found.
+	_, err := matchRegex(input, "FINDME", 0)
+	if err == nil {
+		t.Error("matchRegex() should not find match beyond MaxRegexInputSize")
+	}
+
+	// A match within the cap should still work.
+	input2 := "FINDME" + prefix
+	got, err := matchRegex(input2, "FINDME", 0)
+	if err != nil {
+		t.Fatalf("matchRegex() error = %v", err)
+	}
+	if got != "FINDME" {
+		t.Errorf("matchRegex() = %q, want %q", got, "FINDME")
 	}
 }
 
