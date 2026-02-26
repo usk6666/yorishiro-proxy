@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -324,6 +325,35 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	// Remove hop-by-hop headers.
 	removeHopByHopHeaders(req.Header)
+
+	// Intercept check: same as handleRequest but for HTTPS.
+	if action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, logger); intercepted {
+		switch action.Type {
+		case intercept.ActionDrop:
+			errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+			if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
+				logger.Debug("failed to write drop response", "error", writeErr)
+			}
+			logger.Info("intercepted HTTPS request dropped", "method", req.Method, "url", req.URL.String())
+			return nil
+		case intercept.ActionModifyAndForward:
+			var modErr error
+			req, modErr = applyInterceptModifications(req, action, recordReqBody)
+			if modErr != nil {
+				logger.Error("intercept modification failed", "error", modErr)
+				errResp := "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+				if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
+					logger.Debug("failed to write error response", "error", writeErr)
+				}
+				return nil
+			}
+			if action.OverrideBody != nil {
+				recordReqBody = []byte(*action.OverrideBody)
+			}
+		case intercept.ActionRelease:
+			// Continue with the original request.
+		}
+	}
 
 	// Forward request to upstream over HTTPS.
 	outReq := req.WithContext(ctx)

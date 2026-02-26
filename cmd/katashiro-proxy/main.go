@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -114,6 +115,13 @@ func run(ctx context.Context) error {
 	// Create shared capture scope for controlling session recording.
 	scope := proxy.NewCaptureScope()
 	httpHandler.SetCaptureScope(scope)
+
+	// Initialize intercept engine and queue.
+	interceptEngine := intercept.NewEngine()
+	interceptQueue := intercept.NewQueue()
+	httpHandler.SetInterceptEngine(interceptEngine)
+	httpHandler.SetInterceptQueue(interceptQueue)
+
 	detector := protocol.NewDetector(httpHandler)
 
 	// Create proxy manager for MCP tool control.
@@ -122,7 +130,7 @@ func run(ctx context.Context) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	if stdio {
-		return runStdio(ctx, ca, store, manager, passthrough, scope, cfg.DBPath, logger)
+		return runStdio(ctx, ca, store, manager, passthrough, scope, interceptEngine, interceptQueue, cfg.DBPath, logger)
 	}
 
 	return runProxy(ctx, cfg, manager, logger)
@@ -130,10 +138,16 @@ func run(ctx context.Context) error {
 
 // runStdio starts the MCP server on stdin/stdout. The proxy is not started
 // automatically; use the proxy_start tool to begin intercepting traffic.
-func runStdio(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, dbPath string, logger *slog.Logger) error {
+func runStdio(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, dbPath string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
-	mcpServer := mcp.NewServer(ctx, ca, store, manager, mcp.WithDBPath(dbPath), mcp.WithPassthroughList(passthrough), mcp.WithCaptureScope(scope))
+	mcpServer := mcp.NewServer(ctx, ca, store, manager,
+		mcp.WithDBPath(dbPath),
+		mcp.WithPassthroughList(passthrough),
+		mcp.WithCaptureScope(scope),
+		mcp.WithInterceptEngine(interceptEngine),
+		mcp.WithInterceptQueue(interceptQueue),
+	)
 	transport := &gomcp.StdioTransport{}
 
 	if err := mcpServer.Run(ctx, transport); err != nil {

@@ -3,8 +3,10 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 )
 
 // configureInput is the typed input for the configure tool.
@@ -28,6 +30,19 @@ type configureInput struct {
 	// For merge: use add/remove/enable/disable to modify individual rules.
 	// For replace: use rules to replace all rules entirely.
 	InterceptRules *configureInterceptRules `json:"intercept_rules,omitempty" jsonschema:"intercept rules configuration"`
+
+	// InterceptQueue configures the intercept queue behavior (timeout, timeout behavior).
+	InterceptQueue *configureInterceptQueue `json:"intercept_queue,omitempty" jsonschema:"intercept queue configuration"`
+}
+
+// configureInterceptQueue holds intercept queue configuration.
+type configureInterceptQueue struct {
+	// TimeoutMs is the timeout in milliseconds for blocked requests (default: 300000 = 5 minutes).
+	TimeoutMs *int `json:"timeout_ms,omitempty" jsonschema:"timeout in milliseconds for blocked requests"`
+
+	// TimeoutBehavior specifies what happens when a blocked request times out.
+	// Valid values: "auto_release" (default) or "auto_drop".
+	TimeoutBehavior string `json:"timeout_behavior,omitempty" jsonschema:"timeout behavior: auto_release (default) or auto_drop"`
 }
 
 // configureCaptureScope holds capture scope configuration for both merge and replace operations.
@@ -79,6 +94,16 @@ type configureResult struct {
 
 	// InterceptRules summarizes the current intercept rules state.
 	InterceptRules *configureInterceptResult `json:"intercept_rules,omitempty"`
+
+	// InterceptQueue summarizes the current intercept queue configuration.
+	InterceptQueue *configureInterceptQueueResult `json:"intercept_queue,omitempty"`
+}
+
+// configureInterceptQueueResult summarizes intercept queue state in the configure response.
+type configureInterceptQueueResult struct {
+	TimeoutMs       int64  `json:"timeout_ms"`
+	TimeoutBehavior string `json:"timeout_behavior"`
+	QueuedItems     int    `json:"queued_items"`
 }
 
 // configureScopeResult summarizes capture scope state in the configure response.
@@ -102,12 +127,13 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including capture scope, TLS passthrough, and intercept rules. " +
+		Description: "Configure runtime proxy settings including capture scope, TLS passthrough, intercept rules, and intercept queue. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
 			"Capture scope controls which requests are recorded (include/exclude rules with hostname, url_prefix, method). " +
 			"TLS passthrough controls which CONNECT destinations bypass MITM interception. " +
 			"Intercept rules define conditions for intercepting requests/responses (url_pattern regex, method whitelist, header regex). " +
+			"Intercept queue configures timeout and timeout behavior for blocked requests. " +
 			"All sections are optional; only specified sections are modified.",
 	}, s.handleConfigure)
 }
@@ -167,6 +193,16 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 		result.InterceptRules = s.interceptRulesResult()
 	}
 
+	if input.InterceptQueue != nil {
+		if s.interceptQueue == nil {
+			return nil, nil, fmt.Errorf("intercept queue is not initialized: proxy may not be running")
+		}
+		if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
+			return nil, nil, fmt.Errorf("intercept_queue: %w", err)
+		}
+		result.InterceptQueue = s.interceptQueueResult()
+	}
+
 	return nil, result, nil
 }
 
@@ -212,6 +248,16 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 			return nil, nil, fmt.Errorf("intercept_rules replace: %w", err)
 		}
 		result.InterceptRules = s.interceptRulesResult()
+	}
+
+	if input.InterceptQueue != nil {
+		if s.interceptQueue == nil {
+			return nil, nil, fmt.Errorf("intercept queue is not initialized: proxy may not be running")
+		}
+		if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
+			return nil, nil, fmt.Errorf("intercept_queue: %w", err)
+		}
+		result.InterceptQueue = s.interceptQueueResult()
 	}
 
 	return nil, result, nil
@@ -324,6 +370,36 @@ func (s *Server) interceptRulesResult() *configureInterceptResult {
 	return &configureInterceptResult{
 		TotalRules:   len(rules),
 		EnabledRules: enabled,
+	}
+}
+
+// applyInterceptQueueConfig applies intercept queue configuration.
+func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
+	if cfg.TimeoutMs != nil {
+		ms := *cfg.TimeoutMs
+		if ms < 1000 {
+			return fmt.Errorf("timeout_ms must be >= 1000, got %d", ms)
+		}
+		s.interceptQueue.SetTimeout(time.Duration(ms) * time.Millisecond)
+	}
+	if cfg.TimeoutBehavior != "" {
+		switch intercept.TimeoutBehavior(cfg.TimeoutBehavior) {
+		case intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop:
+			s.interceptQueue.SetTimeoutBehavior(intercept.TimeoutBehavior(cfg.TimeoutBehavior))
+		default:
+			return fmt.Errorf("invalid timeout_behavior %q: must be %q or %q",
+				cfg.TimeoutBehavior, intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop)
+		}
+	}
+	return nil
+}
+
+// interceptQueueResult returns the current intercept queue configuration state.
+func (s *Server) interceptQueueResult() *configureInterceptQueueResult {
+	return &configureInterceptQueueResult{
+		TimeoutMs:       s.interceptQueue.Timeout().Milliseconds(),
+		TimeoutBehavior: string(s.interceptQueue.TimeoutBehaviorValue()),
+		QueuedItems:     s.interceptQueue.Len(),
 	}
 }
 

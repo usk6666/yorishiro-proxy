@@ -46,18 +46,19 @@ type queryFilter struct {
 }
 
 // availableResources lists all valid resource names for error messages.
-var availableResources = []string{"sessions", "session", "messages", "status", "config", "ca_cert", "macros", "macro"}
+var availableResources = []string{"sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro"}
 
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "query",
 		Description: "Unified information query tool. Retrieve sessions, session details, messages, " +
-			"proxy status, configuration, CA certificate, or macro definitions. " +
-			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, macros, macro. " +
+			"proxy status, configuration, CA certificate, intercept queue, or macro definitions. " +
+			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, intercept_queue, macros, macro. " +
 			"The 'id' parameter is required for session, messages, and macro resources. " +
 			"The 'filter' parameter supports filtering sessions by protocol, method, url_pattern, and status_code. " +
-			"Results are paginated with limit/offset for sessions and messages resources.",
+			"Results are paginated with limit/offset for sessions and messages resources. " +
+			"'intercept_queue' returns currently blocked requests waiting for release/modify_and_forward/drop actions.",
 	}, s.handleQuery)
 }
 
@@ -76,6 +77,8 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 		return s.handleQueryConfig()
 	case "ca_cert":
 		return s.handleQueryCACert()
+	case "intercept_queue":
+		return s.handleQueryInterceptQueue(input)
 	case "macros":
 		return s.handleQueryMacros(ctx)
 	case "macro":
@@ -563,6 +566,92 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 	}
 
 	return nil, result, nil
+}
+
+// --- intercept_queue resource ---
+
+// queryInterceptQueueEntry is a single entry in the intercept queue query response.
+type queryInterceptQueueEntry struct {
+	// ID is the unique identifier for the intercepted request.
+	ID string `json:"id"`
+	// Method is the HTTP method.
+	Method string `json:"method"`
+	// URL is the request URL.
+	URL string `json:"url"`
+	// Headers are the request headers.
+	Headers map[string][]string `json:"headers"`
+	// BodyEncoding indicates the encoding of the body ("text" or "base64").
+	BodyEncoding string `json:"body_encoding"`
+	// Body is the request body as text or Base64-encoded string.
+	Body string `json:"body"`
+	// Timestamp is when the request was intercepted.
+	Timestamp string `json:"timestamp"`
+	// MatchedRules lists the IDs of the rules that matched this request.
+	MatchedRules []string `json:"matched_rules"`
+}
+
+// queryInterceptQueueResult is the response for the intercept_queue resource.
+type queryInterceptQueueResult struct {
+	// Items contains the currently blocked requests.
+	Items []queryInterceptQueueEntry `json:"items"`
+	// Count is the number of items returned.
+	Count int `json:"count"`
+}
+
+// handleQueryInterceptQueue returns the list of currently intercepted (blocked) requests.
+func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolResult, *queryInterceptQueueResult, error) {
+	if s.interceptQueue == nil {
+		return nil, nil, fmt.Errorf("intercept queue is not initialized")
+	}
+
+	items := s.interceptQueue.List()
+
+	limit := input.Limit
+	if limit <= 0 || limit > maxListLimit {
+		limit = defaultListLimit
+	}
+
+	// Sort by timestamp (oldest first) for consistent ordering.
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Timestamp.Before(items[j].Timestamp)
+	})
+
+	// Apply limit.
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	entries := make([]queryInterceptQueueEntry, 0, len(items))
+	for _, item := range items {
+		var urlStr string
+		if item.URL != nil {
+			urlStr = item.URL.String()
+		}
+
+		bodyStr, bodyEncoding := encodeBody(item.Body)
+
+		// Convert http.Header to map for JSON output.
+		headers := make(map[string][]string)
+		for k, vs := range item.Headers {
+			headers[k] = vs
+		}
+
+		entries = append(entries, queryInterceptQueueEntry{
+			ID:           item.ID,
+			Method:       item.Method,
+			URL:          urlStr,
+			Headers:      headers,
+			Body:         bodyStr,
+			BodyEncoding: bodyEncoding,
+			Timestamp:    item.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			MatchedRules: item.MatchedRules,
+		})
+	}
+
+	return nil, &queryInterceptQueueResult{
+		Items: entries,
+		Count: len(entries),
+	}, nil
 }
 
 // --- macros resource ---

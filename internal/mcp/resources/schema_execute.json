@@ -8,7 +8,7 @@
     "action": {
       "type": "string",
       "description": "The action to execute. 'replay' and 'replay_raw' are accepted as deprecated aliases.",
-      "enum": ["resend", "resend_raw", "delete_sessions", "fuzz", "define_macro", "run_macro", "delete_macro", "replay", "replay_raw"]
+      "enum": ["resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "define_macro", "run_macro", "delete_macro", "replay", "replay_raw"]
     },
     "params": {
       "type": "object",
@@ -17,6 +17,10 @@
         "session_id": {
           "type": "string",
           "description": "Session ID for resend, resend_raw, or single-session deletion."
+        },
+        "intercept_id": {
+          "type": "string",
+          "description": "Intercept ID for release, modify_and_forward, or drop actions."
         },
         "override_method": {
           "type": "string",
