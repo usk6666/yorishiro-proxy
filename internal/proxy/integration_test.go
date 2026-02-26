@@ -1071,6 +1071,19 @@ func (s *failingStore) CountMessages(_ context.Context, _ string) (int, error) {
 	return 0, errors.New("simulated DB read failure")
 }
 
+func (s *failingStore) SaveMacro(_ context.Context, _, _, _ string) error {
+	return errors.New("simulated DB write failure")
+}
+func (s *failingStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+func (s *failingStore) ListMacros(_ context.Context) ([]*session.MacroRecord, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+func (s *failingStore) DeleteMacro(_ context.Context, _ string) error {
+	return errors.New("simulated DB write failure")
+}
+
 func TestIntegration_ProxyContinuesOnSessionSaveFailure(t *testing.T) {
 	// Verifies that when session.Store.Save fails, the proxy still forwards
 	// the upstream response to the client (USK-36 fix).

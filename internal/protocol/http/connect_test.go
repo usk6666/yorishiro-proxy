@@ -170,6 +170,13 @@ func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, err
 	return count, nil
 }
 
+func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error   { return nil }
+func (m *mockStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
+	return nil, fmt.Errorf("not found")
+}
+func (m *mockStore) ListMacros(_ context.Context) ([]*session.MacroRecord, error) { return nil, nil }
+func (m *mockStore) DeleteMacro(_ context.Context, _ string) error                { return nil }
+
 // mockEntry is a convenience view of a recorded session with its send/receive messages.
 type mockEntry struct {
 	Session *session.Session
