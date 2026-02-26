@@ -91,6 +91,14 @@ CREATE TABLE IF NOT EXISTS fuzz_results (
 
 CREATE INDEX IF NOT EXISTS idx_fuzz_results_fuzz_id ON fuzz_results(fuzz_id);
 CREATE INDEX IF NOT EXISTS idx_fuzz_results_status_code ON fuzz_results(status_code);
+
+CREATE TABLE IF NOT EXISTS macros (
+	name        TEXT PRIMARY KEY,
+	description TEXT NOT NULL DEFAULT '',
+	config      TEXT NOT NULL,
+	created_at  DATETIME NOT NULL,
+	updated_at  DATETIME NOT NULL
+);
 `
 
 var migrations = map[int]string{

@@ -21,7 +21,8 @@ import (
 // executeInput is the typed input for the execute tool.
 type executeInput struct {
 	// Action specifies the action to execute.
-	// Available actions: resend, resend_raw, delete_sessions (replay, replay_raw are deprecated aliases).
+	// Available actions: resend, resend_raw, delete_sessions, define_macro, run_macro, delete_macro
+	// (replay, replay_raw are deprecated aliases).
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
 	Params executeParams `json:"params"`
@@ -62,10 +63,18 @@ type executeParams struct {
 	AttackType  string                       `json:"attack_type,omitempty" jsonschema:"fuzz attack type: sequential or parallel"`
 	Positions   []fuzzer.Position            `json:"positions,omitempty" jsonschema:"payload positions for fuzzing"`
 	PayloadSets map[string]fuzzer.PayloadSet `json:"payload_sets,omitempty" jsonschema:"named payload sets for fuzzing"`
+
+	// macro parameters (define_macro, run_macro, delete_macro)
+	Name         string            `json:"name,omitempty" jsonschema:"macro name"`
+	Description  string            `json:"description,omitempty" jsonschema:"macro description"`
+	Steps        []macroStepInput  `json:"steps,omitempty" jsonschema:"macro steps for define_macro"`
+	InitialVars  map[string]string `json:"initial_vars,omitempty" jsonschema:"initial KV Store entries for define_macro"`
+	MacroTimeout int               `json:"macro_timeout_ms,omitempty" jsonschema:"macro timeout in milliseconds"`
+	Vars         map[string]string `json:"vars,omitempty" jsonschema:"runtime variable overrides for run_macro"`
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "delete_sessions", "fuzz"}
+var availableActions = []string{"resend", "resend_raw", "delete_sessions", "fuzz", "define_macro", "run_macro", "delete_macro"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -76,7 +85,10 @@ func (s *Server) registerExecute() {
 			"'resend' resends a recorded HTTP request with optional mutation (method/URL/header/body overrides, body patches, dry-run); " +
 			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS; " +
 			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required); " +
-			"'fuzz' runs a fuzz campaign against a recorded session with configurable positions, payload sets, and attack types (sequential/parallel). " +
+			"'fuzz' runs a fuzz campaign against a recorded session with configurable positions, payload sets, and attack types (sequential/parallel); " +
+			"'define_macro' saves a macro definition (upsert) with steps, extraction rules, and guards; " +
+			"'run_macro' executes a stored macro for testing; " +
+			"'delete_macro' removes a stored macro definition. " +
 			"('replay' and 'replay_raw' are accepted as deprecated aliases for 'resend' and 'resend_raw'.)",
 	}, s.handleExecute)
 }
@@ -94,8 +106,41 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return s.handleExecuteDeleteSessions(ctx, input.Params)
 	case "fuzz":
 		return s.handleExecuteFuzz(ctx, input.Params)
+	case "define_macro":
+		mp := paramsToMacroParams(input.Params)
+		result, err := s.handleExecuteDefineMacro(ctx, mp)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result, nil
+	case "run_macro":
+		mp := paramsToMacroParams(input.Params)
+		result, err := s.handleExecuteRunMacro(ctx, mp)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result, nil
+	case "delete_macro":
+		mp := paramsToMacroParams(input.Params)
+		result, err := s.handleExecuteDeleteMacro(ctx, mp)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result, nil
 	default:
 		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableActions)
+	}
+}
+
+// paramsToMacroParams extracts macro-specific parameters from the union executeParams.
+func paramsToMacroParams(p executeParams) macroParams {
+	return macroParams{
+		Name:        p.Name,
+		Description: p.Description,
+		Steps:       p.Steps,
+		InitialVars: p.InitialVars,
+		TimeoutMs:   p.MacroTimeout,
+		Vars:        p.Vars,
 	}
 }
 
