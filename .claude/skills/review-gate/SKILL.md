@@ -229,6 +229,15 @@ if current_round > 2 and 集約判定 == CHANGES_REQUESTED:
 
 `mcp__linear-server__create_comment` で Issue にコメントを投稿する。
 
+### Phase 6: Worktree クリーンアップ
+
+レビューサイクル完了後、サブエージェントの worktree を削除する:
+
+    make worktree-clean
+
+注意: `/orchestrate` 内から呼ばれた場合は Phase 3-3 で一括削除されるため重複するが、
+冪等なので問題ない。`/review-gate` 単独実行時にのみ実質的に機能する。
+
 ---
 
 ## 並行度戦略
