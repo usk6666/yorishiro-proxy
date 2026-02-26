@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	interceptPkg "github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 )
 
 func TestSetInsecureSkipVerify_EnablesSkipVerify(t *testing.T) {
@@ -216,4 +218,97 @@ func TestWithoutInsecureSkipVerify_SelfSignedServerFails(t *testing.T) {
 	if resp.StatusCode != gohttp.StatusBadGateway {
 		t.Errorf("status = %d, want %d (502 Bad Gateway for self-signed cert)", resp.StatusCode, gohttp.StatusBadGateway)
 	}
+}
+
+func TestApplyInterceptModifications_URLSchemeValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		overrideURL string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "http scheme allowed",
+			overrideURL: "http://example.com/path",
+			wantErr:     false,
+		},
+		{
+			name:        "https scheme allowed",
+			overrideURL: "https://example.com/path",
+			wantErr:     false,
+		},
+		{
+			name:        "file scheme rejected",
+			overrideURL: "file:///etc/passwd",
+			wantErr:     true,
+			errContains: "unsupported override URL scheme",
+		},
+		{
+			name:        "ftp scheme rejected",
+			overrideURL: "ftp://example.com/file",
+			wantErr:     true,
+			errContains: "unsupported override URL scheme",
+		},
+		{
+			name:        "gopher scheme rejected",
+			overrideURL: "gopher://example.com",
+			wantErr:     true,
+			errContains: "unsupported override URL scheme",
+		},
+		{
+			name:        "javascript scheme rejected",
+			overrideURL: "javascript:alert(1)",
+			wantErr:     true,
+			errContains: "unsupported override URL scheme",
+		},
+		{
+			name:        "empty override URL is no-op",
+			overrideURL: "",
+			wantErr:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := gohttp.NewRequest("GET", "http://original.com/path", nil)
+			action := interceptPkg.InterceptAction{
+				Type:        interceptPkg.ActionModifyAndForward,
+				OverrideURL: tt.overrideURL,
+			}
+
+			result, err := applyInterceptModifications(req, action, nil)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for URL %q, got nil", tt.overrideURL)
+				}
+				if tt.errContains != "" {
+					errStr := err.Error()
+					if !containsStr(errStr, tt.errContains) {
+						t.Errorf("error %q should contain %q", errStr, tt.errContains)
+					}
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if result == nil {
+					t.Fatal("expected non-nil result")
+				}
+			}
+		})
+	}
+}
+
+// containsStr checks if s contains substr (simple helper to avoid importing strings).
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && searchStr(s, substr))
+}
+
+func searchStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

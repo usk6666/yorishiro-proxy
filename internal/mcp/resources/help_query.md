@@ -5,7 +5,7 @@ Unified information query tool. Retrieve sessions, session details, messages, pr
 ## Parameters
 
 ### resource (string, required)
-The resource to query. One of: `sessions`, `session`, `messages`, `status`, `config`, `ca_cert`, `macros`, `macro`.
+The resource to query. One of: `sessions`, `session`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`.
 
 ### id (string, conditional)
 Session ID or macro name. Required for `session`, `messages`, and `macro` resources.
@@ -61,6 +61,13 @@ Get the CA certificate PEM and metadata. No additional parameters.
 
 Returns: pem, fingerprint, subject, not_after.
 
+### intercept_queue
+List intercepted requests currently waiting in the intercept queue.
+
+Supports `limit` for limiting the number of returned items.
+
+Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, matched_rules), `count`.
+
 ## Usage Examples
 
 ### List all sessions
@@ -100,6 +107,16 @@ Returns: pem, fingerprint, subject, not_after.
 ### Export CA certificate
 ```json
 {"resource": "ca_cert"}
+```
+
+### List intercepted requests
+```json
+{"resource": "intercept_queue"}
+```
+
+### List intercepted requests with limit
+```json
+{"resource": "intercept_queue", "limit": 5}
 ```
 
 ### macros
