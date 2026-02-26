@@ -458,6 +458,85 @@ func (s *SQLiteStore) CountMessages(ctx context.Context, sessionID string) (int,
 	return count, nil
 }
 
+// SaveMacro persists a macro definition using upsert semantics.
+// If a macro with the same name exists, it is updated; otherwise a new one is created.
+func (s *SQLiteStore) SaveMacro(ctx context.Context, name, description, configJSON string) error {
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO macros (name, description, config, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(name) DO UPDATE SET description = excluded.description, config = excluded.config, updated_at = excluded.updated_at`,
+			name, description, configJSON, now, now,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert macro %q: %w", name, err)
+		}
+		return nil
+	})
+}
+
+// GetMacro retrieves a macro definition by name.
+func (s *SQLiteStore) GetMacro(ctx context.Context, name string) (*MacroRecord, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT name, description, config, created_at, updated_at FROM macros WHERE name = ?`, name)
+
+	var rec MacroRecord
+	var createdStr, updatedStr string
+	err := row.Scan(&rec.Name, &rec.Description, &rec.ConfigJSON, &createdStr, &updatedStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("macro %q not found", name)
+		}
+		return nil, fmt.Errorf("scan macro: %w", err)
+	}
+
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+	rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedStr)
+	return &rec, nil
+}
+
+// ListMacros returns all stored macro definitions ordered by name.
+func (s *SQLiteStore) ListMacros(ctx context.Context) ([]*MacroRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, description, config, created_at, updated_at FROM macros ORDER BY name ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list macros: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*MacroRecord
+	for rows.Next() {
+		var rec MacroRecord
+		var createdStr, updatedStr string
+		if err := rows.Scan(&rec.Name, &rec.Description, &rec.ConfigJSON, &createdStr, &updatedStr); err != nil {
+			return nil, fmt.Errorf("scan macro row: %w", err)
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+		rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedStr)
+		records = append(records, &rec)
+	}
+	return records, rows.Err()
+}
+
+// DeleteMacro removes a macro definition by name.
+func (s *SQLiteStore) DeleteMacro(ctx context.Context, name string) error {
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		result, err := s.db.ExecContext(ctx, "DELETE FROM macros WHERE name = ?", name)
+		if err != nil {
+			return fmt.Errorf("delete macro %q: %w", name, err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("macro %q not found", name)
+		}
+		return nil
+	})
+}
+
 // Close shuts down the writer goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
 	close(s.done)
