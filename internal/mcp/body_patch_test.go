@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -158,6 +159,18 @@ func TestApplyBodyPatches_Regex(t *testing.T) {
 			name:    "invalid regex returns error",
 			body:    "test",
 			patches: []BodyPatch{{Regex: "[invalid", Replace: "x"}},
+			wantErr: true,
+		},
+		{
+			name:    "regex pattern at max length succeeds",
+			body:    "test",
+			patches: []BodyPatch{{Regex: strings.Repeat("a", maxRegexPatternLen), Replace: "x"}},
+			want:    "test",
+		},
+		{
+			name:    "regex pattern too long returns error",
+			body:    "test",
+			patches: []BodyPatch{{Regex: strings.Repeat("a", maxRegexPatternLen+1), Replace: "x"}},
 			wantErr: true,
 		},
 	}

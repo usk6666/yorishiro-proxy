@@ -135,8 +135,15 @@ func setNestedValue(root any, keys []string, value any) error {
 	return nil
 }
 
+// maxRegexPatternLen is the maximum allowed length for regex patterns in body patches.
+// This prevents resource exhaustion from very large patterns during compilation and matching.
+const maxRegexPatternLen = 1024
+
 // applyRegexPatch applies a regex replacement to the body text.
 func applyRegexPatch(body []byte, pattern, replace string) ([]byte, error) {
+	if len(pattern) > maxRegexPatternLen {
+		return nil, fmt.Errorf("regex pattern too long: %d > %d", len(pattern), maxRegexPatternLen)
+	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("invalid regex %q: %w", pattern, err)

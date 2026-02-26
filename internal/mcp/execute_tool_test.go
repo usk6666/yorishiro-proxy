@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -959,5 +960,45 @@ func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
 	}
 	if out.DeletedCount != 0 {
 		t.Errorf("deleted_count = %d, want 0", out.DeletedCount)
+	}
+}
+
+// --- safeCheckRedirect tests ---
+
+func TestSafeCheckRedirect(t *testing.T) {
+	tests := []struct {
+		name    string
+		scheme  string
+		via     int // number of prior redirects
+		wantErr bool
+		errMsg  string
+	}{
+		{name: "http allowed", scheme: "http", via: 0, wantErr: false},
+		{name: "https allowed", scheme: "https", via: 0, wantErr: false},
+		{name: "ftp blocked", scheme: "ftp", via: 0, wantErr: true, errMsg: "non-HTTP scheme"},
+		{name: "file blocked", scheme: "file", via: 0, wantErr: true, errMsg: "non-HTTP scheme"},
+		{name: "gopher blocked", scheme: "gopher", via: 0, wantErr: true, errMsg: "non-HTTP scheme"},
+		{name: "at redirect limit", scheme: "https", via: maxRedirects, wantErr: true, errMsg: "too many redirects"},
+		{name: "within redirect limit", scheme: "https", via: maxRedirects - 1, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &http.Request{
+				URL: &url.URL{Scheme: tt.scheme, Host: "example.com"},
+			}
+			via := make([]*http.Request, tt.via)
+			for i := range via {
+				via[i] = &http.Request{}
+			}
+
+			err := safeCheckRedirect(req, via)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("safeCheckRedirect() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.errMsg)
+			}
+		})
 	}
 }

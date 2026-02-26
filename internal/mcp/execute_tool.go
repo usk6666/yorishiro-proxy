@@ -438,7 +438,7 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 		return http.ErrUseLastResponse
 	}
 	if params.FollowRedirects != nil && *params.FollowRedirects {
-		checkRedirect = nil // use Go default (follow up to 10 redirects)
+		checkRedirect = safeCheckRedirect
 	}
 
 	return &http.Client{
