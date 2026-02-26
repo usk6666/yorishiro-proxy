@@ -16,6 +16,7 @@ import (
 
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -92,13 +93,15 @@ var hopByHopHeaders = []string{
 
 // Handler processes HTTP/1.x connections.
 type Handler struct {
-	store          session.Store
-	issuer         *cert.Issuer
-	transport      *gohttp.Transport
-	logger         *slog.Logger
-	requestTimeout time.Duration
-	passthrough    *proxy.PassthroughList
-	scope          *proxy.CaptureScope
+	store           session.Store
+	issuer          *cert.Issuer
+	transport       *gohttp.Transport
+	logger          *slog.Logger
+	requestTimeout  time.Duration
+	passthrough     *proxy.PassthroughList
+	scope           *proxy.CaptureScope
+	interceptEngine *intercept.Engine
+	interceptQueue  *intercept.Queue
 }
 
 // NewHandler creates a new HTTP handler with session recording.
@@ -161,6 +164,19 @@ func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
 // CaptureScope returns the handler's capture scope, or nil if not set.
 func (h *Handler) CaptureScope() *proxy.CaptureScope {
 	return h.scope
+}
+
+// SetInterceptEngine sets the intercept rule engine used to determine which
+// requests should be intercepted. When set together with an intercept queue,
+// matching requests are held for AI agent review.
+func (h *Handler) SetInterceptEngine(engine *intercept.Engine) {
+	h.interceptEngine = engine
+}
+
+// SetInterceptQueue sets the intercept queue used to hold requests that match
+// intercept rules. The queue must be set together with an intercept engine.
+func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
+	h.interceptQueue = queue
 }
 
 func (h *Handler) effectiveRequestTimeout() time.Duration {
@@ -310,6 +326,31 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	// Remove hop-by-hop headers.
 	removeHopByHopHeaders(req.Header)
+
+	// Intercept check: if an intercept engine and queue are configured,
+	// check if the request matches any intercept rules. If so, enqueue
+	// the request and block until the AI agent responds with an action.
+	if action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, logger); intercepted {
+		switch action.Type {
+		case intercept.ActionDrop:
+			// Drop: return 502 to client.
+			errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+			if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
+				logger.Debug("failed to write drop response", "error", writeErr)
+			}
+			logger.Info("intercepted request dropped", "method", req.Method, "url", req.URL.String())
+			return nil
+		case intercept.ActionModifyAndForward:
+			// Apply modifications to the request.
+			req = applyInterceptModifications(req, action, recordReqBody)
+			// Update recordReqBody for session recording if body changed.
+			if action.OverrideBody != nil {
+				recordReqBody = []byte(*action.OverrideBody)
+			}
+		case intercept.ActionRelease:
+			// Continue with the original request.
+		}
+	}
 
 	// Forward request upstream.
 	outReq := req.WithContext(ctx)
@@ -483,4 +524,90 @@ func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
 		return err
 	}
 	return w.Flush()
+}
+
+// interceptRequest checks if the request matches any intercept rules and,
+// if so, enqueues it for AI agent review. It blocks until the agent responds
+// or the timeout expires. Returns the action and true if intercepted, or a
+// zero-value action and false if not intercepted.
+func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+	if h.interceptEngine == nil || h.interceptQueue == nil {
+		return intercept.InterceptAction{}, false
+	}
+
+	matchedRules := h.interceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
+	if len(matchedRules) == 0 {
+		return intercept.InterceptAction{}, false
+	}
+
+	logger.Info("request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
+
+	id, actionCh := h.interceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
+	defer h.interceptQueue.Remove(id) // ensure cleanup on timeout/cancel
+
+	timeout := h.interceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	select {
+	case action := <-actionCh:
+		return action, true
+	case <-timeoutCtx.Done():
+		// Timeout or context cancellation.
+		behavior := h.interceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			// Proxy shutting down — drop.
+			logger.Info("intercepted request cancelled (proxy shutdown)", "id", id)
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		}
+		logger.Info("intercepted request timed out", "id", id, "behavior", string(behavior))
+		switch behavior {
+		case intercept.TimeoutAutoDrop:
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		default:
+			// auto_release or unrecognized → release.
+			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
+		}
+	}
+}
+
+// applyInterceptModifications applies the modifications from a modify_and_forward
+// action to the HTTP request. It returns a new request with the modifications applied.
+func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) *gohttp.Request {
+	// Override method.
+	if action.OverrideMethod != "" {
+		req.Method = action.OverrideMethod
+	}
+
+	// Override URL.
+	if action.OverrideURL != "" {
+		if parsed, err := url.Parse(action.OverrideURL); err == nil {
+			req.URL = parsed
+			req.Host = parsed.Host
+		}
+	}
+
+	// Remove headers first.
+	for _, key := range action.RemoveHeaders {
+		req.Header.Del(key)
+	}
+
+	// Override headers.
+	for key, val := range action.OverrideHeaders {
+		req.Header.Set(key, val)
+	}
+
+	// Add headers.
+	for key, val := range action.AddHeaders {
+		req.Header.Add(key, val)
+	}
+
+	// Override body.
+	if action.OverrideBody != nil {
+		bodyBytes := []byte(*action.OverrideBody)
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		req.ContentLength = int64(len(bodyBytes))
+	}
+
+	return req
 }

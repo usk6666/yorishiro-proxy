@@ -8,7 +8,7 @@
     "resource": {
       "type": "string",
       "description": "The resource to query.",
-      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert"]
+      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue"]
     },
     "id": {
       "type": "string",

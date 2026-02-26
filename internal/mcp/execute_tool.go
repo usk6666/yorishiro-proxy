@@ -14,6 +14,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -56,10 +57,13 @@ type executeParams struct {
 	// delete_sessions parameters
 	OlderThanDays *int `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
 	Confirm       bool `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
+
+	// intercept queue parameters (release, modify_and_forward, drop)
+	InterceptID string `json:"intercept_id,omitempty" jsonschema:"intercepted request ID for release/modify_and_forward/drop"`
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "delete_sessions"}
+var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -69,7 +73,10 @@ func (s *Server) registerExecute() {
 			"Available actions: " +
 			"'resend' resends a recorded HTTP request with optional mutation (method/URL/header/body overrides, body patches, dry-run); " +
 			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS; " +
-			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required). " +
+			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required); " +
+			"'release' forwards an intercepted request as-is (requires intercept_id); " +
+			"'modify_and_forward' forwards an intercepted request with mutations (same override params as resend, requires intercept_id); " +
+			"'drop' discards an intercepted request returning 502 to the client (requires intercept_id). " +
 			"('replay' and 'replay_raw' are accepted as deprecated aliases for 'resend' and 'resend_raw'.)",
 	}, s.handleExecute)
 }
@@ -85,6 +92,12 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return s.handleExecuteResendRaw(ctx, input.Params)
 	case "delete_sessions":
 		return s.handleExecuteDeleteSessions(ctx, input.Params)
+	case "release":
+		return s.handleExecuteRelease(ctx, input.Params)
+	case "modify_and_forward":
+		return s.handleExecuteModifyAndForward(ctx, input.Params)
+	case "drop":
+		return s.handleExecuteDrop(ctx, input.Params)
 	default:
 		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableActions)
 	}
@@ -629,4 +642,95 @@ func (s *Server) handleExecuteDeleteSessions(ctx context.Context, params execute
 	}
 
 	return nil, nil, fmt.Errorf("delete_sessions requires one of: session_id, older_than_days, or confirm=true for all deletion")
+}
+
+// --- Intercept queue actions ---
+
+// executeInterceptResult is the structured output of intercept queue actions.
+type executeInterceptResult struct {
+	// InterceptID is the ID of the intercepted request that was acted upon.
+	InterceptID string `json:"intercept_id"`
+	// Action is the action that was performed.
+	Action string `json:"action"`
+	// Status indicates the result.
+	Status string `json:"status"`
+}
+
+// handleExecuteRelease handles the release action for an intercepted request.
+// It forwards the request as-is to the upstream server.
+func (s *Server) handleExecuteRelease(_ context.Context, params executeParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
+	if s.interceptQueue == nil {
+		return nil, nil, fmt.Errorf("intercept queue is not initialized")
+	}
+	if params.InterceptID == "" {
+		return nil, nil, fmt.Errorf("intercept_id is required for release action")
+	}
+
+	action := intercept.InterceptAction{
+		Type: intercept.ActionRelease,
+	}
+	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+		return nil, nil, fmt.Errorf("release: %w", err)
+	}
+
+	return nil, &executeInterceptResult{
+		InterceptID: params.InterceptID,
+		Action:      "release",
+		Status:      "released",
+	}, nil
+}
+
+// handleExecuteModifyAndForward handles the modify_and_forward action for an intercepted request.
+// It applies modifications (same override parameters as resend) and forwards the request.
+func (s *Server) handleExecuteModifyAndForward(_ context.Context, params executeParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
+	if s.interceptQueue == nil {
+		return nil, nil, fmt.Errorf("intercept queue is not initialized")
+	}
+	if params.InterceptID == "" {
+		return nil, nil, fmt.Errorf("intercept_id is required for modify_and_forward action")
+	}
+
+	action := intercept.InterceptAction{
+		Type:            intercept.ActionModifyAndForward,
+		OverrideMethod:  params.OverrideMethod,
+		OverrideURL:     params.OverrideURL,
+		OverrideHeaders: params.OverrideHeaders,
+		AddHeaders:      params.AddHeaders,
+		RemoveHeaders:   params.RemoveHeaders,
+		OverrideBody:    params.OverrideBody,
+	}
+
+	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	return nil, &executeInterceptResult{
+		InterceptID: params.InterceptID,
+		Action:      "modify_and_forward",
+		Status:      "forwarded",
+	}, nil
+}
+
+// handleExecuteDrop handles the drop action for an intercepted request.
+// It discards the request and returns a 502 to the client.
+func (s *Server) handleExecuteDrop(_ context.Context, params executeParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
+	if s.interceptQueue == nil {
+		return nil, nil, fmt.Errorf("intercept queue is not initialized")
+	}
+	if params.InterceptID == "" {
+		return nil, nil, fmt.Errorf("intercept_id is required for drop action")
+	}
+
+	action := intercept.InterceptAction{
+		Type: intercept.ActionDrop,
+	}
+	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+		return nil, nil, fmt.Errorf("drop: %w", err)
+	}
+
+	return nil, &executeInterceptResult{
+		InterceptID: params.InterceptID,
+		Action:      "drop",
+		Status:      "dropped",
+	}, nil
 }

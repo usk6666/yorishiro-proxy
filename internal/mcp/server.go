@@ -20,6 +20,7 @@ type Server struct {
 	passthrough     *proxy.PassthroughList
 	scope           *proxy.CaptureScope
 	interceptEngine *intercept.Engine
+	interceptQueue  *intercept.Queue
 	dbPath          string    // path to the SQLite database file for status reporting
 	replayDoer      httpDoer  // injectable HTTP client for execute(replay) testing
 	rawReplayDialer rawDialer // injectable dialer for replay_raw testing
@@ -55,6 +56,14 @@ func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
 func WithInterceptEngine(engine *intercept.Engine) ServerOption {
 	return func(s *Server) {
 		s.interceptEngine = engine
+	}
+}
+
+// WithInterceptQueue sets the intercept queue for the MCP server,
+// enabling intercept queue query and action execution via query and execute tools.
+func WithInterceptQueue(queue *intercept.Queue) ServerOption {
+	return func(s *Server) {
+		s.interceptQueue = queue
 	}
 }
 

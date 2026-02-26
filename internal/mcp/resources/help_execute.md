@@ -5,7 +5,7 @@ Execute an action on recorded proxy data. Supports resending captured requests w
 ## Parameters
 
 ### action (string, required)
-The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`.
+The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`.
 
 > **Note:** `replay` and `replay_raw` are accepted as deprecated aliases for `resend` and `resend_raw`.
 
@@ -63,6 +63,36 @@ Delete sessions by ID, by age, or all at once.
 One of `session_id`, `older_than_days`, or `confirm` (for delete-all) must be specified.
 
 Returns: deleted_count, cutoff_time (for age-based deletion).
+
+### release
+Release an intercepted request, allowing it to proceed to the upstream server unmodified.
+
+**Parameters:**
+- **intercept_id** (string, required): ID of the intercepted request from the intercept queue.
+
+Returns: intercept_id, action, status.
+
+### modify_and_forward
+Modify an intercepted request and forward it to the upstream server with the specified changes.
+
+**Parameters:**
+- **intercept_id** (string, required): ID of the intercepted request from the intercept queue.
+- **override_method** (string, optional): Override the HTTP method.
+- **override_url** (string, optional): Override the target URL.
+- **override_headers** (object, optional): Header overrides as key-value pairs.
+- **add_headers** (object, optional): Headers to add (appended to existing values).
+- **remove_headers** (array of strings, optional): Header names to remove.
+- **override_body** (string, optional): Override the request body.
+
+Returns: intercept_id, action, status.
+
+### drop
+Drop an intercepted request, returning a 502 Bad Gateway response to the client.
+
+**Parameters:**
+- **intercept_id** (string, required): ID of the intercepted request from the intercept queue.
+
+Returns: intercept_id, action, status.
 
 ## Usage Examples
 
@@ -174,5 +204,34 @@ Returns: deleted_count, cutoff_time (for age-based deletion).
 {
   "action": "delete_sessions",
   "params": {"confirm": true}
+}
+```
+
+### Release intercepted request
+```json
+{
+  "action": "release",
+  "params": {"intercept_id": "int-abc-123"}
+}
+```
+
+### Modify and forward intercepted request
+```json
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "int-abc-123",
+    "override_method": "POST",
+    "override_headers": {"Authorization": "Bearer injected-token"},
+    "override_body": "{\"role\":\"admin\"}"
+  }
+}
+```
+
+### Drop intercepted request
+```json
+{
+  "action": "drop",
+  "params": {"intercept_id": "int-abc-123"}
 }
 ```
