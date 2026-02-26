@@ -5,7 +5,7 @@ Execute an action on recorded proxy data. Supports resending captured requests w
 ## Parameters
 
 ### action (string, required)
-The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `define_macro`, `run_macro`, `delete_macro`.
+The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `fuzz`, `define_macro`, `run_macro`, `delete_macro`.
 
 > **Note:** `replay` and `replay_raw` are accepted as deprecated aliases for `resend` and `resend_raw`.
 
@@ -63,6 +63,31 @@ Delete sessions by ID, by age, or all at once.
 One of `session_id`, `older_than_days`, or `confirm` (for delete-all) must be specified.
 
 Returns: deleted_count, cutoff_time (for age-based deletion).
+
+### fuzz
+Run a fuzz campaign against a recorded session. Injects payloads at specified positions and records each iteration as a new session.
+
+**Parameters:**
+- **session_id** (string, required): ID of the template session to fuzz.
+- **attack_type** (string, required): Fuzzing strategy. `"sequential"` tests one position at a time; `"parallel"` applies payloads to all positions simultaneously (zip).
+- **positions** (array, required): Payload injection points. Each position specifies:
+  - **id** (string, required): Unique position identifier (e.g. `"pos-0"`).
+  - **location** (string, required): Where to inject: `header`, `path`, `query`, `body_regex`, `body_json`, `cookie`.
+  - **name** (string): Header name, query key, or cookie name (required for header/query/cookie).
+  - **json_path** (string): JSON path for body_json location (e.g. `"$.password"`).
+  - **mode** (string, optional): Operation mode: `replace` (default), `add`, or `remove`.
+  - **match** (string, optional): Regex pattern for partial replacement. Capture groups replace only the group.
+  - **payload_set** (string): Name of the payload set to use (not required for remove mode).
+- **payload_sets** (object, required): Named payload sets. Each set specifies:
+  - **type** (string, required): `wordlist`, `file`, `range`, or `sequence`.
+  - **values** (array): Payload strings (for wordlist).
+  - **path** (string): Relative path under `~/.katashiro-proxy/wordlists/` (for file).
+  - **start**, **end**, **step** (integer): Range parameters (for range/sequence).
+  - **format** (string): Format string (for sequence, e.g. `"user%04d"`).
+- **timeout_ms** (integer, optional): Per-request timeout in milliseconds (default: `10000`).
+- **tag** (string, optional): Tag to label the fuzz job.
+
+Returns: fuzz_id, status, total, completed, errors, tag, message.
 
 ## Usage Examples
 
@@ -174,6 +199,53 @@ Returns: deleted_count, cutoff_time (for age-based deletion).
 {
   "action": "delete_sessions",
   "params": {"confirm": true}
+}
+```
+
+### Fuzz with sequential attack
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "session_id": "abc-123",
+    "attack_type": "sequential",
+    "positions": [
+      {
+        "id": "pos-0",
+        "location": "header",
+        "name": "Authorization",
+        "mode": "replace",
+        "match": "Bearer (.*)",
+        "payload_set": "tokens"
+      }
+    ],
+    "payload_sets": {
+      "tokens": {
+        "type": "wordlist",
+        "values": ["token1", "token2", "admin-token"]
+      }
+    },
+    "tag": "auth-test"
+  }
+}
+```
+
+### Fuzz with parallel attack
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "session_id": "abc-123",
+    "attack_type": "parallel",
+    "positions": [
+      {"id": "pos-0", "location": "query", "name": "username", "payload_set": "users"},
+      {"id": "pos-1", "location": "body_json", "json_path": "$.password", "payload_set": "passwords"}
+    ],
+    "payload_sets": {
+      "users": {"type": "wordlist", "values": ["admin", "root", "user"]},
+      "passwords": {"type": "wordlist", "values": ["pass1", "pass2", "pass3"]}
+    }
+  }
 }
 ```
 
