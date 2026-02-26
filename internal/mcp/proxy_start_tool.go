@@ -34,6 +34,11 @@ type proxyStartInput struct {
 	// Supported formats: exact match ("example.com") or wildcard ("*.example.com").
 	// If omitted, no domains are passed through (all TLS is intercepted).
 	TLSPassthrough []string `json:"tls_passthrough,omitempty" jsonschema:"domain patterns that bypass TLS interception (e.g. pinned-service.com, *.googleapis.com)"`
+
+	// InterceptRules configures request/response intercept rules.
+	// Rules define conditions for intercepting traffic based on URL pattern, method, and headers.
+	// If omitted, no intercept rules are active.
+	InterceptRules []interceptRuleInput `json:"intercept_rules,omitempty" jsonschema:"intercept rules for matching requests/responses to hold"`
 }
 
 // proxyStartResult is the structured output of the proxy_start tool.
@@ -51,8 +56,9 @@ func (s *Server) registerProxyStart() {
 		Description: "Start the proxy server with optional configuration. " +
 			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS traffic. " +
 			"Accepts optional capture_scope to control which requests are recorded, " +
-			"and tls_passthrough to specify domains that bypass TLS interception. " +
-			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, scope=capture all, passthrough=empty.",
+			"tls_passthrough to specify domains that bypass TLS interception, " +
+			"and intercept_rules to define conditions for intercepting requests/responses. " +
+			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, scope=capture all, passthrough=empty, intercept_rules=empty.",
 	}, s.handleProxyStart)
 }
 
@@ -80,6 +86,13 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	if len(input.TLSPassthrough) > 0 {
 		if err := s.applyTLSPassthrough(input.TLSPassthrough); err != nil {
 			return nil, nil, fmt.Errorf("tls_passthrough: %w", err)
+		}
+	}
+
+	// Apply intercept rules if provided.
+	if len(input.InterceptRules) > 0 {
+		if err := s.applyInterceptRules(input.InterceptRules); err != nil {
+			return nil, nil, fmt.Errorf("intercept_rules: %w", err)
 		}
 	}
 

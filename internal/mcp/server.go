@@ -6,6 +6,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -18,6 +19,7 @@ type Server struct {
 	manager         *proxy.Manager
 	passthrough     *proxy.PassthroughList
 	scope           *proxy.CaptureScope
+	interceptEngine *intercept.Engine
 	dbPath          string    // path to the SQLite database file for status reporting
 	replayDoer      httpDoer  // injectable HTTP client for execute(replay) testing
 	rawReplayDialer rawDialer // injectable dialer for replay_raw testing
@@ -45,6 +47,14 @@ func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
 func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
 	return func(s *Server) {
 		s.scope = scope
+	}
+}
+
+// WithInterceptEngine sets the intercept rule engine for the MCP server,
+// enabling intercept rule configuration via proxy_start and configure tools.
+func WithInterceptEngine(engine *intercept.Engine) ServerOption {
+	return func(s *Server) {
+		s.interceptEngine = engine
 	}
 }
 
