@@ -63,7 +63,7 @@ func TestConfigure_InterceptRules_MergeAdd(t *testing.T) {
 						Enabled:   true,
 						Direction: "request",
 						Conditions: interceptConditionsInput{
-							URLPattern: "/api/admin.*",
+							PathPattern: "/api/admin.*",
 							Methods:    []string{"POST", "PUT", "DELETE"},
 							HeaderMatch: map[string]string{
 								"Content-Type": "application/json",
@@ -75,7 +75,7 @@ func TestConfigure_InterceptRules_MergeAdd(t *testing.T) {
 						Enabled:   false,
 						Direction: "both",
 						Conditions: interceptConditionsInput{
-							URLPattern: "/api/.*",
+							PathPattern: "/api/.*",
 						},
 					},
 				},
@@ -301,7 +301,7 @@ func TestConfigure_InterceptRules_Replace(t *testing.T) {
 						Enabled:   true,
 						Direction: "both",
 						Conditions: interceptConditionsInput{
-							URLPattern: "/api/.*",
+							PathPattern: "/api/.*",
 						},
 					},
 				},
@@ -447,7 +447,7 @@ func TestConfigure_InterceptRules_MergeAddInvalidPattern(t *testing.T) {
 						Enabled:   true,
 						Direction: "request",
 						Conditions: interceptConditionsInput{
-							URLPattern: "[invalid",
+							PathPattern: "[invalid",
 						},
 					},
 				},
@@ -515,7 +515,7 @@ func TestProxyStart_InterceptRulesInputSerialization(t *testing.T) {
 				Enabled:   true,
 				Direction: "request",
 				Conditions: interceptConditionsInput{
-					URLPattern: "/api/admin.*",
+					PathPattern: "/api/admin.*",
 					Methods:    []string{"POST", "PUT"},
 					HeaderMatch: map[string]string{
 						"Content-Type": "application/json",
@@ -541,8 +541,8 @@ func TestProxyStart_InterceptRulesInputSerialization(t *testing.T) {
 	if decoded.InterceptRules[0].ID != "rule-1" {
 		t.Errorf("ID = %q, want %q", decoded.InterceptRules[0].ID, "rule-1")
 	}
-	if decoded.InterceptRules[0].Conditions.URLPattern != "/api/admin.*" {
-		t.Errorf("URLPattern = %q, want %q", decoded.InterceptRules[0].Conditions.URLPattern, "/api/admin.*")
+	if decoded.InterceptRules[0].Conditions.PathPattern != "/api/admin.*" {
+		t.Errorf("PathPattern = %q, want %q", decoded.InterceptRules[0].Conditions.PathPattern, "/api/admin.*")
 	}
 }
 
@@ -552,7 +552,7 @@ func TestInterceptHelpers_ToFromRoundTrip(t *testing.T) {
 		Enabled:   true,
 		Direction: "both",
 		Conditions: interceptConditionsInput{
-			URLPattern:  "/api/.*",
+			PathPattern:  "/api/.*",
 			Methods:     []string{"POST", "PUT"},
 			HeaderMatch: map[string]string{"Content-Type": "json"},
 		},
@@ -575,8 +575,8 @@ func TestInterceptHelpers_ToFromRoundTrip(t *testing.T) {
 	if output.Direction != "both" {
 		t.Errorf("output Direction = %q, want %q", output.Direction, "both")
 	}
-	if output.Conditions.URLPattern != "/api/.*" {
-		t.Errorf("output URLPattern = %q, want %q", output.Conditions.URLPattern, "/api/.*")
+	if output.Conditions.PathPattern != "/api/.*" {
+		t.Errorf("output PathPattern = %q, want %q", output.Conditions.PathPattern, "/api/.*")
 	}
 }
 

@@ -1,6 +1,7 @@
 // Package intercept provides a rule engine for intercepting HTTP requests
 // and responses based on configurable matching conditions. Rules support
-// URL pattern (regex), HTTP method whitelist, and header matching (regex).
+// host pattern (regex), path pattern (regex), HTTP method whitelist, and
+// header matching (regex).
 package intercept
 
 import (
@@ -33,9 +34,13 @@ var validDirections = map[Direction]bool{
 // Conditions defines the matching criteria for an intercept rule.
 // All non-empty fields must match for the conditions to be satisfied (AND logic).
 type Conditions struct {
-	// URLPattern is a regular expression matched against the request URL path.
-	// An empty string matches all URLs.
-	URLPattern string `json:"url_pattern,omitempty"`
+	// HostPattern is a regular expression matched against the request hostname
+	// (port excluded). An empty string matches all hosts.
+	HostPattern string `json:"host_pattern,omitempty"`
+
+	// PathPattern is a regular expression matched against the request URL path.
+	// An empty string matches all paths.
+	PathPattern string `json:"path_pattern,omitempty"`
 
 	// Methods is a whitelist of HTTP methods (case-insensitive).
 	// An empty slice matches all methods.
@@ -68,7 +73,8 @@ type Rule struct {
 // for efficient matching.
 type compiledRule struct {
 	rule           Rule
-	urlPatternRe   *regexp.Regexp
+	hostPatternRe  *regexp.Regexp
+	pathPatternRe  *regexp.Regexp
 	headerMatchRes map[string]*regexp.Regexp // canonical header name -> compiled regex
 }
 
@@ -86,13 +92,22 @@ func compileRule(r Rule) (*compiledRule, error) {
 
 	cr := &compiledRule{rule: r}
 
-	// Compile URL pattern.
-	if r.Conditions.URLPattern != "" {
-		re, err := regexp.Compile(r.Conditions.URLPattern)
+	// Compile host pattern.
+	if r.Conditions.HostPattern != "" {
+		re, err := regexp.Compile(r.Conditions.HostPattern)
 		if err != nil {
-			return nil, fmt.Errorf("invalid url_pattern %q: %w", r.Conditions.URLPattern, err)
+			return nil, fmt.Errorf("invalid host_pattern %q: %w", r.Conditions.HostPattern, err)
 		}
-		cr.urlPatternRe = re
+		cr.hostPatternRe = re
+	}
+
+	// Compile path pattern.
+	if r.Conditions.PathPattern != "" {
+		re, err := regexp.Compile(r.Conditions.PathPattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid path_pattern %q: %w", r.Conditions.PathPattern, err)
+		}
+		cr.pathPatternRe = re
 	}
 
 	// Compile header match patterns.
@@ -115,13 +130,29 @@ func compileRule(r Rule) (*compiledRule, error) {
 // HTTP method, URL, and headers. Only applicable conditions are checked;
 // empty conditions match everything.
 func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.Header) bool {
-	// Check URL pattern.
-	if cr.urlPatternRe != nil {
+	// Check host pattern.
+	if cr.hostPatternRe != nil {
+		host := ""
+		if u != nil {
+			host = u.Hostname()
+		}
+		// For HTTPS MITM (CONNECT tunnel), u.Host may be empty.
+		// Fall back to the Host header.
+		if host == "" && headers != nil {
+			host = extractHostname(headers.Get("Host"))
+		}
+		if !cr.hostPatternRe.MatchString(host) {
+			return false
+		}
+	}
+
+	// Check path pattern.
+	if cr.pathPatternRe != nil {
 		path := ""
 		if u != nil {
 			path = u.Path
 		}
-		if !cr.urlPatternRe.MatchString(path) {
+		if !cr.pathPatternRe.MatchString(path) {
 			return false
 		}
 	}
@@ -157,10 +188,10 @@ func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.H
 }
 
 // matchesResponse evaluates whether the compiled rule matches the given
-// response status code and headers. URL pattern and method conditions
-// are not applicable to responses and are ignored.
+// response status code and headers. Host pattern, path pattern, and method
+// conditions are not applicable to responses and are ignored.
 func (cr *compiledRule) matchesResponse(statusCode int, headers http.Header) bool {
-	// For response matching, url_pattern and methods are not applicable.
+	// For response matching, host_pattern, path_pattern, and methods are not applicable.
 	// Only header_match applies.
 	if len(cr.headerMatchRes) > 0 {
 		if headers == nil {
@@ -176,4 +207,24 @@ func (cr *compiledRule) matchesResponse(statusCode int, headers http.Header) boo
 
 	_ = statusCode // reserved for future use
 	return true
+}
+
+// extractHostname extracts the hostname from a host string, stripping the
+// port if present. For example, "example.com:8080" returns "example.com".
+func extractHostname(hostport string) string {
+	if hostport == "" {
+		return ""
+	}
+	// Handle IPv6 addresses like "[::1]:8080".
+	if strings.HasPrefix(hostport, "[") {
+		if i := strings.LastIndex(hostport, "]"); i >= 0 {
+			return hostport[1:i]
+		}
+		return hostport
+	}
+	// Strip port.
+	if i := strings.LastIndex(hostport, ":"); i >= 0 {
+		return hostport[:i]
+	}
+	return hostport
 }

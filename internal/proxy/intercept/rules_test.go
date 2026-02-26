@@ -26,7 +26,8 @@ func TestCompileRule_ValidRule(t *testing.T) {
 				Enabled:   true,
 				Direction: DirectionBoth,
 				Conditions: Conditions{
-					URLPattern:  "/api/admin.*",
+					HostPattern: "api\\.example\\.com",
+					PathPattern: "/api/admin.*",
 					Methods:     []string{"POST", "PUT", "DELETE"},
 					HeaderMatch: map[string]string{"Content-Type": "application/json"},
 				},
@@ -77,17 +78,31 @@ func TestCompileRule_InvalidDirection(t *testing.T) {
 	}
 }
 
-func TestCompileRule_InvalidURLPattern(t *testing.T) {
+func TestCompileRule_InvalidPathPattern(t *testing.T) {
 	_, err := compileRule(Rule{
 		ID:        "r1",
 		Enabled:   true,
 		Direction: DirectionRequest,
 		Conditions: Conditions{
-			URLPattern: "[invalid",
+			PathPattern: "[invalid",
 		},
 	})
 	if err == nil {
-		t.Fatal("compileRule() expected error for invalid URL pattern, got nil")
+		t.Fatal("compileRule() expected error for invalid path pattern, got nil")
+	}
+}
+
+func TestCompileRule_InvalidHostPattern(t *testing.T) {
+	_, err := compileRule(Rule{
+		ID:        "r1",
+		Enabled:   true,
+		Direction: DirectionRequest,
+		Conditions: Conditions{
+			HostPattern: "[invalid",
+		},
+	})
+	if err == nil {
+		t.Fatal("compileRule() expected error for invalid host pattern, got nil")
 	}
 }
 
@@ -105,42 +120,42 @@ func TestCompileRule_InvalidHeaderPattern(t *testing.T) {
 	}
 }
 
-func TestMatchesRequest_URLPattern(t *testing.T) {
+func TestMatchesRequest_PathPattern(t *testing.T) {
 	tests := []struct {
-		name       string
-		urlPattern string
-		path       string
-		want       bool
+		name        string
+		pathPattern string
+		path        string
+		want        bool
 	}{
 		{
-			name:       "exact path match",
-			urlPattern: "^/api/admin$",
-			path:       "/api/admin",
-			want:       true,
+			name:        "exact path match",
+			pathPattern: "^/api/admin$",
+			path:        "/api/admin",
+			want:        true,
 		},
 		{
-			name:       "prefix match with wildcard",
-			urlPattern: "/api/admin.*",
-			path:       "/api/admin/users",
-			want:       true,
+			name:        "prefix match with wildcard",
+			pathPattern: "/api/admin.*",
+			path:        "/api/admin/users",
+			want:        true,
 		},
 		{
-			name:       "no match",
-			urlPattern: "^/api/admin",
-			path:       "/api/public",
-			want:       false,
+			name:        "no match",
+			pathPattern: "^/api/admin",
+			path:        "/api/public",
+			want:        false,
 		},
 		{
-			name:       "empty pattern matches all",
-			urlPattern: "",
-			path:       "/anything",
-			want:       true,
+			name:        "empty pattern matches all",
+			pathPattern: "",
+			path:        "/anything",
+			want:        true,
 		},
 		{
-			name:       "nil URL with pattern",
-			urlPattern: "/api",
-			path:       "",
-			want:       false,
+			name:        "nil URL with pattern",
+			pathPattern: "/api",
+			path:        "",
+			want:        false,
 		},
 	}
 
@@ -151,7 +166,7 @@ func TestMatchesRequest_URLPattern(t *testing.T) {
 				Enabled:   true,
 				Direction: DirectionRequest,
 				Conditions: Conditions{
-					URLPattern: tt.urlPattern,
+					PathPattern: tt.pathPattern,
 				},
 			}
 			cr, err := compileRule(r)
@@ -169,6 +184,127 @@ func TestMatchesRequest_URLPattern(t *testing.T) {
 				t.Errorf("matchesRequest() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMatchesRequest_HostPattern(t *testing.T) {
+	tests := []struct {
+		name        string
+		hostPattern string
+		host        string
+		want        bool
+	}{
+		{
+			name:        "exact host match",
+			hostPattern: "^httpbin\\.org$",
+			host:        "httpbin.org",
+			want:        true,
+		},
+		{
+			name:        "subdomain wildcard",
+			hostPattern: ".*\\.example\\.com",
+			host:        "api.example.com",
+			want:        true,
+		},
+		{
+			name:        "no match",
+			hostPattern: "^httpbin\\.org$",
+			host:        "other.com",
+			want:        false,
+		},
+		{
+			name:        "empty pattern matches all",
+			hostPattern: "",
+			host:        "anything.com",
+			want:        true,
+		},
+		{
+			name:        "host with port stripped",
+			hostPattern: "^httpbin\\.org$",
+			host:        "httpbin.org:8080",
+			want:        true,
+		},
+		{
+			name:        "nil URL with pattern falls back to Host header",
+			hostPattern: "^httpbin\\.org$",
+			host:        "", // will use Host header
+			want:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Rule{
+				ID:        "test",
+				Enabled:   true,
+				Direction: DirectionRequest,
+				Conditions: Conditions{
+					HostPattern: tt.hostPattern,
+				},
+			}
+			cr, err := compileRule(r)
+			if err != nil {
+				t.Fatalf("compileRule() error = %v", err)
+			}
+
+			var u *url.URL
+			var headers http.Header
+			if tt.host != "" {
+				u = &url.URL{Host: tt.host}
+			} else if tt.hostPattern != "" {
+				// Simulate HTTPS MITM where u.Host is empty, use Host header.
+				headers = http.Header{"Host": {"httpbin.org"}}
+			}
+
+			got := cr.matchesRequest("GET", u, headers)
+			if got != tt.want {
+				t.Errorf("matchesRequest() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchesRequest_HostPattern_HostHeaderFallback(t *testing.T) {
+	r := Rule{
+		ID:        "test",
+		Enabled:   true,
+		Direction: DirectionRequest,
+		Conditions: Conditions{
+			HostPattern: "^target\\.com$",
+		},
+	}
+	cr, err := compileRule(r)
+	if err != nil {
+		t.Fatalf("compileRule() error = %v", err)
+	}
+
+	// URL with empty host (HTTPS MITM scenario).
+	u := &url.URL{Path: "/api/test"}
+	headers := http.Header{"Host": {"target.com:443"}}
+
+	got := cr.matchesRequest("GET", u, headers)
+	if !got {
+		t.Error("matchesRequest() should match Host header fallback with port stripped")
+	}
+}
+
+func TestMatchesRequest_HostPattern_NilURLNilHeaders(t *testing.T) {
+	r := Rule{
+		ID:        "test",
+		Enabled:   true,
+		Direction: DirectionRequest,
+		Conditions: Conditions{
+			HostPattern: "anything",
+		},
+	}
+	cr, err := compileRule(r)
+	if err != nil {
+		t.Fatalf("compileRule() error = %v", err)
+	}
+
+	got := cr.matchesRequest("GET", nil, nil)
+	if got {
+		t.Error("matchesRequest() should not match when URL and headers are nil and host_pattern is set")
 	}
 }
 
@@ -320,7 +456,8 @@ func TestMatchesRequest_CombinedConditions(t *testing.T) {
 		Enabled:   true,
 		Direction: DirectionRequest,
 		Conditions: Conditions{
-			URLPattern:  "/api/admin.*",
+			HostPattern: "api\\.target\\.com",
+			PathPattern: "/api/admin.*",
 			Methods:     []string{"POST", "PUT", "DELETE"},
 			HeaderMatch: map[string]string{"Content-Type": "application/json"},
 		},
@@ -333,6 +470,7 @@ func TestMatchesRequest_CombinedConditions(t *testing.T) {
 	tests := []struct {
 		name    string
 		method  string
+		host    string
 		path    string
 		headers http.Header
 		want    bool
@@ -340,13 +478,23 @@ func TestMatchesRequest_CombinedConditions(t *testing.T) {
 		{
 			name:    "all match",
 			method:  "POST",
+			host:    "api.target.com",
 			path:    "/api/admin/users",
 			headers: http.Header{"Content-Type": {"application/json"}},
 			want:    true,
 		},
 		{
+			name:    "wrong host",
+			method:  "POST",
+			host:    "other.com",
+			path:    "/api/admin/users",
+			headers: http.Header{"Content-Type": {"application/json"}},
+			want:    false,
+		},
+		{
 			name:    "wrong method",
 			method:  "GET",
+			host:    "api.target.com",
 			path:    "/api/admin/users",
 			headers: http.Header{"Content-Type": {"application/json"}},
 			want:    false,
@@ -354,6 +502,7 @@ func TestMatchesRequest_CombinedConditions(t *testing.T) {
 		{
 			name:    "wrong path",
 			method:  "POST",
+			host:    "api.target.com",
 			path:    "/api/public",
 			headers: http.Header{"Content-Type": {"application/json"}},
 			want:    false,
@@ -361,6 +510,7 @@ func TestMatchesRequest_CombinedConditions(t *testing.T) {
 		{
 			name:    "wrong header",
 			method:  "POST",
+			host:    "api.target.com",
 			path:    "/api/admin/users",
 			headers: http.Header{"Content-Type": {"text/html"}},
 			want:    false,
@@ -369,7 +519,7 @@ func TestMatchesRequest_CombinedConditions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			u := &url.URL{Path: tt.path}
+			u := &url.URL{Host: tt.host, Path: tt.path}
 			got := cr.matchesRequest(tt.method, u, tt.headers)
 			if got != tt.want {
 				t.Errorf("matchesRequest() = %v, want %v", got, tt.want)
@@ -433,5 +583,31 @@ func TestMatchesResponse_NoConditions(t *testing.T) {
 	got := cr.matchesResponse(404, http.Header{"Content-Type": {"text/html"}})
 	if !got {
 		t.Error("matchesResponse() with no conditions should match all responses")
+	}
+}
+
+func TestExtractHostname(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"empty", "", ""},
+		{"host only", "example.com", "example.com"},
+		{"host with port", "example.com:8080", "example.com"},
+		{"ipv4 with port", "127.0.0.1:8080", "127.0.0.1"},
+		{"ipv6 with port", "[::1]:8080", "::1"},
+		{"ipv6 without port", "[::1]", "::1"},
+		{"localhost", "localhost", "localhost"},
+		{"localhost with port", "localhost:3000", "localhost"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractHostname(tt.input)
+			if got != tt.expected {
+				t.Errorf("extractHostname(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
 	}
 }
