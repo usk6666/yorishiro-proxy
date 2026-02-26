@@ -35,6 +35,11 @@ const (
 // DefaultInterceptTimeout is the default timeout for blocked requests.
 const DefaultInterceptTimeout = 5 * time.Minute
 
+// DefaultMaxQueueItems is the default maximum number of items the queue
+// can hold. When exceeded, new requests are auto-released to prevent
+// memory exhaustion (CWE-770).
+const DefaultMaxQueueItems = 100
+
 // InterceptAction represents the action to take on an intercepted request,
 // including optional modification parameters for modify_and_forward.
 type InterceptAction struct {
@@ -87,14 +92,17 @@ type Queue struct {
 	items    map[string]*InterceptedRequest
 	timeout  time.Duration
 	behavior TimeoutBehavior
+	maxItems int
 }
 
-// NewQueue creates a new Queue with default timeout and auto_release behavior.
+// NewQueue creates a new Queue with default timeout, auto_release behavior,
+// and a default max queue size of DefaultMaxQueueItems.
 func NewQueue() *Queue {
 	return &Queue{
 		items:    make(map[string]*InterceptedRequest),
 		timeout:  DefaultInterceptTimeout,
 		behavior: TimeoutAutoRelease,
+		maxItems: DefaultMaxQueueItems,
 	}
 }
 
@@ -126,12 +134,42 @@ func (q *Queue) TimeoutBehaviorValue() TimeoutBehavior {
 	return q.behavior
 }
 
+// SetMaxItems sets the maximum number of items the queue can hold.
+// When the queue is full, new requests are auto-released immediately
+// to prevent memory exhaustion. A value of 0 or negative means unlimited.
+func (q *Queue) SetMaxItems(n int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.maxItems = n
+}
+
+// MaxItems returns the current maximum queue size.
+func (q *Queue) MaxItems() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.maxItems
+}
+
 // Enqueue adds a new intercepted request to the queue and returns its ID
 // along with a channel that will receive the action to perform.
 // The caller should block on the returned channel until an action is received.
+//
+// If the queue has reached its maxItems limit, the request is immediately
+// auto-released (ActionRelease is sent on the channel) to prevent memory
+// exhaustion from unbounded queue growth.
 func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []byte, matchedRules []string) (string, <-chan InterceptAction) {
 	id := uuid.New().String()
 	actionCh := make(chan InterceptAction, 1)
+
+	// Check queue capacity under lock before doing expensive deep-copies.
+	q.mu.Lock()
+	if q.maxItems > 0 && len(q.items) >= q.maxItems {
+		q.mu.Unlock()
+		// Queue is full — auto-release immediately to prevent memory exhaustion.
+		actionCh <- InterceptAction{Type: ActionRelease}
+		return id, actionCh
+	}
+	q.mu.Unlock()
 
 	// Deep-copy URL to avoid races.
 	var urlCopy *url.URL
@@ -174,6 +212,13 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []b
 	}
 
 	q.mu.Lock()
+	// Re-check under lock in case another goroutine filled the queue
+	// between our capacity check and now.
+	if q.maxItems > 0 && len(q.items) >= q.maxItems {
+		q.mu.Unlock()
+		actionCh <- InterceptAction{Type: ActionRelease}
+		return id, actionCh
+	}
 	q.items[id] = item
 	q.mu.Unlock()
 

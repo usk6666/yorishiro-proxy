@@ -360,3 +360,142 @@ func TestQueue_TimestampSet(t *testing.T) {
 		t.Errorf("timestamp %v should be between %v and %v", item.Timestamp, before, after)
 	}
 }
+
+func TestQueue_DefaultMaxItems(t *testing.T) {
+	q := NewQueue()
+	if q.MaxItems() != DefaultMaxQueueItems {
+		t.Errorf("expected default max items %d, got %d", DefaultMaxQueueItems, q.MaxItems())
+	}
+}
+
+func TestQueue_SetMaxItems(t *testing.T) {
+	q := NewQueue()
+	q.SetMaxItems(50)
+	if q.MaxItems() != 50 {
+		t.Errorf("expected max items 50, got %d", q.MaxItems())
+	}
+}
+
+func TestQueue_MaxItemsAutoRelease(t *testing.T) {
+	q := NewQueue()
+	q.SetMaxItems(3)
+
+	// Fill the queue to capacity.
+	for i := 0; i < 3; i++ {
+		id, _ := q.Enqueue("GET", nil, nil, nil, nil)
+		if id == "" {
+			t.Fatalf("enqueue %d returned empty ID", i)
+		}
+	}
+	if q.Len() != 3 {
+		t.Fatalf("expected 3 items, got %d", q.Len())
+	}
+
+	// The 4th enqueue should auto-release: the channel should immediately
+	// provide an ActionRelease, and the item should NOT be in the queue.
+	id4, actionCh := q.Enqueue("POST", nil, nil, nil, nil)
+	if id4 == "" {
+		t.Fatal("enqueue returned empty ID for overflow item")
+	}
+
+	select {
+	case action := <-actionCh:
+		if action.Type != ActionRelease {
+			t.Errorf("expected ActionRelease for overflow item, got %v", action.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for auto-release action on overflow item")
+	}
+
+	// Queue size should still be 3 (the overflow item is not added).
+	if q.Len() != 3 {
+		t.Errorf("expected 3 items (overflow not added), got %d", q.Len())
+	}
+
+	// The overflow item should not be findable in the queue.
+	_, err := q.Get(id4)
+	if err == nil {
+		t.Error("overflow item should not be in the queue")
+	}
+}
+
+func TestQueue_MaxItemsZeroMeansUnlimited(t *testing.T) {
+	q := NewQueue()
+	q.SetMaxItems(0)
+
+	// Should be able to enqueue many items without auto-release.
+	const n = 200
+	for i := 0; i < n; i++ {
+		q.Enqueue("GET", nil, nil, nil, nil)
+	}
+	if q.Len() != n {
+		t.Errorf("expected %d items with unlimited queue, got %d", n, q.Len())
+	}
+}
+
+func TestQueue_MaxItemsResumesAfterRemoval(t *testing.T) {
+	q := NewQueue()
+	q.SetMaxItems(2)
+
+	id1, _ := q.Enqueue("GET", nil, nil, nil, nil)
+	q.Enqueue("GET", nil, nil, nil, nil)
+
+	// Queue is full. Remove one item.
+	q.Remove(id1)
+
+	// Should be able to enqueue again.
+	id3, _ := q.Enqueue("GET", nil, nil, nil, nil)
+	if q.Len() != 2 {
+		t.Errorf("expected 2 items after remove + enqueue, got %d", q.Len())
+	}
+
+	// Verify the new item is in the queue.
+	_, err := q.Get(id3)
+	if err != nil {
+		t.Errorf("new item should be in queue: %v", err)
+	}
+}
+
+func TestQueue_MaxItemsConcurrent(t *testing.T) {
+	q := NewQueue()
+	q.SetMaxItems(10)
+
+	var wg sync.WaitGroup
+	const goroutines = 50
+	autoReleased := make(chan bool, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, actionCh := q.Enqueue("GET", nil, nil, nil, nil)
+			// Check if the action is immediately available (auto-released).
+			select {
+			case action := <-actionCh:
+				autoReleased <- (action.Type == ActionRelease)
+			default:
+				autoReleased <- false
+			}
+		}()
+	}
+	wg.Wait()
+	close(autoReleased)
+
+	// Count auto-released items.
+	released := 0
+	for wasReleased := range autoReleased {
+		if wasReleased {
+			released++
+		}
+	}
+
+	// At least (goroutines - maxItems) should have been auto-released.
+	if released < goroutines-10 {
+		t.Errorf("expected at least %d auto-released items, got %d", goroutines-10, released)
+	}
+
+	// Queue should not exceed maxItems.
+	if q.Len() > 10 {
+		t.Errorf("queue size %d exceeds maxItems 10", q.Len())
+	}
+}

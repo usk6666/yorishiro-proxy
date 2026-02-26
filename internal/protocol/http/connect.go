@@ -337,7 +337,16 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 			logger.Info("intercepted HTTPS request dropped", "method", req.Method, "url", req.URL.String())
 			return nil
 		case intercept.ActionModifyAndForward:
-			req = applyInterceptModifications(req, action, recordReqBody)
+			var modErr error
+			req, modErr = applyInterceptModifications(req, action, recordReqBody)
+			if modErr != nil {
+				logger.Error("intercept modification failed", "error", modErr)
+				errResp := "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+				if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
+					logger.Debug("failed to write error response", "error", writeErr)
+				}
+				return nil
+			}
 			if action.OverrideBody != nil {
 				recordReqBody = []byte(*action.OverrideBody)
 			}

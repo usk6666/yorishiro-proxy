@@ -342,7 +342,16 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 			return nil
 		case intercept.ActionModifyAndForward:
 			// Apply modifications to the request.
-			req = applyInterceptModifications(req, action, recordReqBody)
+			var modErr error
+			req, modErr = applyInterceptModifications(req, action, recordReqBody)
+			if modErr != nil {
+				logger.Error("intercept modification failed", "error", modErr)
+				errResp := "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+				if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
+					logger.Debug("failed to write error response", "error", writeErr)
+				}
+				return nil
+			}
 			// Update recordReqBody for session recording if body changed.
 			if action.OverrideBody != nil {
 				recordReqBody = []byte(*action.OverrideBody)
@@ -572,19 +581,25 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 }
 
 // applyInterceptModifications applies the modifications from a modify_and_forward
-// action to the HTTP request. It returns a new request with the modifications applied.
-func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) *gohttp.Request {
+// action to the HTTP request. It returns the modified request and an error if
+// validation fails (e.g., invalid URL scheme).
+func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
 	// Override method.
 	if action.OverrideMethod != "" {
 		req.Method = action.OverrideMethod
 	}
 
-	// Override URL.
+	// Override URL with scheme validation to prevent SSRF (CWE-918).
 	if action.OverrideURL != "" {
-		if parsed, err := url.Parse(action.OverrideURL); err == nil {
-			req.URL = parsed
-			req.Host = parsed.Host
+		parsed, err := url.Parse(action.OverrideURL)
+		if err != nil {
+			return req, fmt.Errorf("invalid override URL: %w", err)
 		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return req, fmt.Errorf("unsupported override URL scheme %q: only http and https are allowed", parsed.Scheme)
+		}
+		req.URL = parsed
+		req.Host = parsed.Host
 	}
 
 	// Remove headers first.
@@ -609,5 +624,5 @@ func applyInterceptModifications(req *gohttp.Request, action intercept.Intercept
 		req.ContentLength = int64(len(bodyBytes))
 	}
 
-	return req
+	return req, nil
 }
