@@ -2,6 +2,7 @@ package fuzzer
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -216,7 +217,9 @@ func TestJobRegistry_RegisterGetRemove(t *testing.T) {
 	reg := NewJobRegistry()
 
 	ctrl := NewJobController(func() {})
-	reg.Register("job-1", ctrl)
+	if err := reg.Register("job-1", ctrl); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
 
 	got := reg.Get("job-1")
 	if got != ctrl {
@@ -243,10 +246,51 @@ func TestJobRegistry_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			key := "job-" + string(rune('0'+id%10))
 			ctrl := NewJobController(func() {})
-			reg.Register(key, ctrl)
+			_ = reg.Register(key, ctrl)
 			reg.Get(key)
 			reg.Remove(key)
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestJobRegistry_MaxConcurrentJobs(t *testing.T) {
+	reg := NewJobRegistry()
+
+	// Register maxConcurrentJobs active jobs.
+	for i := 0; i < maxConcurrentJobs; i++ {
+		ctrl := NewJobController(func() {})
+		if err := reg.Register(fmt.Sprintf("job-%d", i), ctrl); err != nil {
+			t.Fatalf("Register() job-%d error = %v", i, err)
+		}
+	}
+
+	// The next registration should fail.
+	ctrl := NewJobController(func() {})
+	if err := reg.Register("job-overflow", ctrl); err == nil {
+		t.Error("expected error when exceeding maxConcurrentJobs")
+	}
+
+	// After removing one job, registration should succeed.
+	reg.Remove("job-0")
+	if err := reg.Register("job-replacement", ctrl); err != nil {
+		t.Fatalf("Register() after Remove() error = %v", err)
+	}
+}
+
+func TestJobRegistry_CompletedJobsDoNotCount(t *testing.T) {
+	reg := NewJobRegistry()
+
+	// Fill up with completed jobs — they should not block new registrations.
+	for i := 0; i < maxConcurrentJobs+5; i++ {
+		ctrl := NewJobController(func() {})
+		ctrl.Complete()
+		reg.jobs[fmt.Sprintf("completed-%d", i)] = ctrl
+	}
+
+	// Should still be able to register since all existing jobs are completed.
+	ctrl := NewJobController(func() {})
+	if err := reg.Register("new-active", ctrl); err != nil {
+		t.Fatalf("Register() with only completed jobs error = %v", err)
+	}
 }

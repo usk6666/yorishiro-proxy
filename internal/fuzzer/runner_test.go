@@ -207,6 +207,35 @@ func TestRunConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "concurrency exceeds max",
+			cfg: RunConfig{
+				Config: Config{
+					SessionID:  "sess-1",
+					AttackType: "sequential",
+					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
+					PayloadSets: map[string]PayloadSet{
+						"s": {Type: "wordlist", Values: []string{"a"}},
+					},
+				},
+				Concurrency: maxConcurrency + 1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "concurrency at max",
+			cfg: RunConfig{
+				Config: Config{
+					SessionID:  "sess-1",
+					AttackType: "sequential",
+					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
+					PayloadSets: map[string]PayloadSet{
+						"s": {Type: "wordlist", Values: []string{"a"}},
+					},
+				},
+				Concurrency: maxConcurrency,
+			},
+		},
+		{
 			name: "negative rate limit",
 			cfg: RunConfig{
 				Config: Config{

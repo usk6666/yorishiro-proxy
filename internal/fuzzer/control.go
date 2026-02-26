@@ -173,6 +173,10 @@ func (jc *JobController) WaitIfPaused(ctx context.Context) error {
 	}
 }
 
+// maxConcurrentJobs is the upper bound on simultaneously active fuzz jobs.
+// This prevents resource exhaustion from starting too many concurrent jobs (CWE-770).
+const maxConcurrentJobs = 10
+
 // JobRegistry manages active fuzz job controllers, keyed by fuzz ID.
 type JobRegistry struct {
 	mu   sync.RWMutex
@@ -187,10 +191,23 @@ func NewJobRegistry() *JobRegistry {
 }
 
 // Register adds a job controller to the registry.
-func (r *JobRegistry) Register(fuzzID string, ctrl *JobController) {
+// Returns an error if the maximum number of concurrent active jobs is reached.
+func (r *JobRegistry) Register(fuzzID string, ctrl *JobController) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	activeCount := 0
+	for _, c := range r.jobs {
+		if s := c.Status(); s == StatusRunning || s == StatusPaused {
+			activeCount++
+		}
+	}
+	if activeCount >= maxConcurrentJobs {
+		return fmt.Errorf("maximum concurrent jobs (%d) reached", maxConcurrentJobs)
+	}
+
 	r.jobs[fuzzID] = ctrl
+	return nil
 }
 
 // Get retrieves a job controller by fuzz ID. Returns nil if not found.

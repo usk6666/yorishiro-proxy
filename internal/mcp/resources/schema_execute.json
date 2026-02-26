@@ -205,8 +205,9 @@
         },
         "concurrency": {
           "type": "integer",
-          "description": "Number of concurrent fuzz workers (default: 1).",
-          "minimum": 1
+          "description": "Number of concurrent fuzz workers (default: 1, max: 100).",
+          "minimum": 1,
+          "maximum": 100
         },
         "rate_limit_rps": {
           "type": "number",

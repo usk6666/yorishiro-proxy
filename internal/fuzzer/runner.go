@@ -12,6 +12,10 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
+// maxConcurrency is the upper bound on concurrent workers per fuzz job.
+// This prevents resource exhaustion from excessive goroutine creation (CWE-770).
+const maxConcurrency = 100
+
 // RunConfig extends Config with execution control and stop condition parameters.
 type RunConfig struct {
 	Config
@@ -36,6 +40,9 @@ func (rc *RunConfig) Validate() error {
 	}
 	if rc.Concurrency < 0 {
 		return fmt.Errorf("concurrency must be >= 0, got %d", rc.Concurrency)
+	}
+	if rc.Concurrency > maxConcurrency {
+		return fmt.Errorf("concurrency %d exceeds maximum %d", rc.Concurrency, maxConcurrency)
 	}
 	if rc.RateLimitRPS < 0 {
 		return fmt.Errorf("rate_limit_rps must be >= 0, got %f", rc.RateLimitRPS)
@@ -157,7 +164,10 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 
 	// Create the controller and register it.
 	ctrl := NewJobController(jobCancel)
-	r.registry.Register(job.ID, ctrl)
+	if err := r.registry.Register(job.ID, ctrl); err != nil {
+		jobCancel()
+		return nil, fmt.Errorf("register fuzz job: %w", err)
+	}
 
 	// Set up overload monitor if needed.
 	var monitor *OverloadMonitor
