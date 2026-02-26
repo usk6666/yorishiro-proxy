@@ -56,8 +56,19 @@ CREATE INDEX IF NOT EXISTS idx_messages_url ON messages(url);
 CREATE INDEX IF NOT EXISTS idx_messages_status_code ON messages(status_code);
 `
 
+const schemaV2 = `
+CREATE TABLE IF NOT EXISTS macros (
+	name        TEXT PRIMARY KEY,
+	description TEXT NOT NULL DEFAULT '',
+	config      TEXT NOT NULL,
+	created_at  DATETIME NOT NULL,
+	updated_at  DATETIME NOT NULL
+);
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
+	2: schemaV2,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -15,8 +16,8 @@ import (
 
 // queryInput is the typed input for the query tool.
 type queryInput struct {
-	// Resource specifies what to query: sessions, session, messages, status, config, ca_cert.
-	Resource string `json:"resource" jsonschema:"resource to query: sessions, session, messages, status, config, ca_cert"`
+	// Resource specifies what to query: sessions, session, messages, status, config, ca_cert, macros, macro.
+	Resource string `json:"resource" jsonschema:"resource to query: sessions, session, messages, status, config, ca_cert, macros, macro"`
 
 	// ID is required for session and messages resources.
 	// For session: the session ID. For messages: the session_id.
@@ -45,16 +46,16 @@ type queryFilter struct {
 }
 
 // availableResources lists all valid resource names for error messages.
-var availableResources = []string{"sessions", "session", "messages", "status", "config", "ca_cert"}
+var availableResources = []string{"sessions", "session", "messages", "status", "config", "ca_cert", "macros", "macro"}
 
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "query",
 		Description: "Unified information query tool. Retrieve sessions, session details, messages, " +
-			"proxy status, configuration, or CA certificate. " +
-			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert. " +
-			"The 'id' parameter is required for session and messages resources. " +
+			"proxy status, configuration, CA certificate, or macro definitions. " +
+			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, macros, macro. " +
+			"The 'id' parameter is required for session, messages, and macro resources. " +
 			"The 'filter' parameter supports filtering sessions by protocol, method, url_pattern, and status_code. " +
 			"Results are paginated with limit/offset for sessions and messages resources.",
 	}, s.handleQuery)
@@ -75,6 +76,10 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 		return s.handleQueryConfig()
 	case "ca_cert":
 		return s.handleQueryCACert()
+	case "macros":
+		return s.handleQueryMacros(ctx)
+	case "macro":
+		return s.handleQueryMacro(ctx, input)
 	case "":
 		return nil, nil, fmt.Errorf("resource is required: available resources are %s", strings.Join(availableResources, ", "))
 	default:
@@ -555,6 +560,102 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 		Fingerprint: fingerprintHex,
 		Subject:     cert.Subject.String(),
 		NotAfter:    cert.NotAfter.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+
+	return nil, result, nil
+}
+
+// --- macros resource ---
+
+// queryMacrosEntry is a single macro entry in the macros query response.
+type queryMacrosEntry struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	StepCount   int    `json:"step_count"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+// queryMacrosResult is the response for the macros resource.
+type queryMacrosResult struct {
+	Macros []queryMacrosEntry `json:"macros"`
+	Count  int                `json:"count"`
+}
+
+// handleQueryMacros returns a list of all stored macro definitions.
+func (s *Server) handleQueryMacros(ctx context.Context) (*gomcp.CallToolResult, *queryMacrosResult, error) {
+	if s.store == nil {
+		return nil, nil, fmt.Errorf("session store is not initialized")
+	}
+
+	records, err := s.store.ListMacros(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list macros: %w", err)
+	}
+
+	entries := make([]queryMacrosEntry, 0, len(records))
+	for _, rec := range records {
+		stepCount := 0
+		var cfg macroConfig
+		if err := json.Unmarshal([]byte(rec.ConfigJSON), &cfg); err == nil {
+			stepCount = len(cfg.Steps)
+		}
+
+		entries = append(entries, queryMacrosEntry{
+			Name:        rec.Name,
+			Description: rec.Description,
+			StepCount:   stepCount,
+			CreatedAt:   rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:   rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+
+	return nil, &queryMacrosResult{
+		Macros: entries,
+		Count:  len(entries),
+	}, nil
+}
+
+// --- macro resource ---
+
+// queryMacroResult is the response for the macro resource (single macro detail).
+type queryMacroResult struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Steps       []macroStepInput  `json:"steps"`
+	InitialVars map[string]string `json:"initial_vars,omitempty"`
+	TimeoutMs   int               `json:"timeout_ms,omitempty"`
+	CreatedAt   string            `json:"created_at"`
+	UpdatedAt   string            `json:"updated_at"`
+}
+
+// handleQueryMacro returns detailed information about a single macro definition.
+func (s *Server) handleQueryMacro(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMacroResult, error) {
+	if s.store == nil {
+		return nil, nil, fmt.Errorf("session store is not initialized")
+	}
+	if input.ID == "" {
+		return nil, nil, fmt.Errorf("id is required for macro resource (macro name)")
+	}
+
+	rec, err := s.store.GetMacro(ctx, input.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get macro: %w", err)
+	}
+
+	var cfg macroConfig
+	if err := json.Unmarshal([]byte(rec.ConfigJSON), &cfg); err != nil {
+		return nil, nil, fmt.Errorf("parse macro config: %w", err)
+	}
+
+	result := &queryMacroResult{
+		Name:        rec.Name,
+		Description: rec.Description,
+		Steps:       cfg.Steps,
+		InitialVars: cfg.InitialVars,
+		TimeoutMs:   cfg.TimeoutMs,
+		CreatedAt:   rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:   rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 
 	return nil, result, nil

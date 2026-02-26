@@ -5,6 +5,20 @@ import (
 	"time"
 )
 
+// MacroRecord represents a stored macro definition.
+type MacroRecord struct {
+	// Name is the unique macro identifier (primary key).
+	Name string
+	// Description is a human-readable description of the macro.
+	Description string
+	// ConfigJSON is the JSON-encoded macro configuration (steps, initial_vars, timeout_ms, etc.).
+	ConfigJSON string
+	// CreatedAt is the time the macro was first saved.
+	CreatedAt time.Time
+	// UpdatedAt is the time the macro was last saved.
+	UpdatedAt time.Time
+}
+
 // Store defines the interface for session and message persistence.
 type Store interface {
 	// SaveSession persists a new session.
@@ -47,6 +61,18 @@ type Store interface {
 
 	// CountMessages returns the number of messages for a session.
 	CountMessages(ctx context.Context, sessionID string) (int, error)
+
+	// SaveMacro persists a macro definition (upsert by name).
+	SaveMacro(ctx context.Context, name, description, configJSON string) error
+
+	// GetMacro retrieves a macro definition by name.
+	GetMacro(ctx context.Context, name string) (*MacroRecord, error)
+
+	// ListMacros returns all stored macro definitions ordered by name.
+	ListMacros(ctx context.Context) ([]*MacroRecord, error)
+
+	// DeleteMacro removes a macro definition by name.
+	DeleteMacro(ctx context.Context, name string) error
 }
 
 // ListOptions configures session listing behavior.
