@@ -220,6 +220,113 @@ Each intercept rule has:
 }
 ```
 
+### auto_transform (object, optional)
+Configures auto-transform rules for automatic request/response modification.
+
+**Merge operation fields:**
+- **add** (array of transform rules): Rules to add.
+- **remove** (array of strings): Rule IDs to remove.
+- **enable** (array of strings): Rule IDs to enable.
+- **disable** (array of strings): Rule IDs to disable.
+
+**Replace operation fields:**
+- **rules** (array of transform rules): Full replacement of all auto-transform rules.
+
+Each auto-transform rule has:
+- **id** (string): Unique rule identifier.
+- **enabled** (boolean): Whether the rule is active.
+- **priority** (integer): Execution order (lower values applied first).
+- **direction** (string): `"request"`, `"response"`, or `"both"`.
+- **conditions** (object): Matching criteria (same as intercept rules):
+  - **url_pattern** (string): Regex for URL path matching.
+  - **methods** (array of strings): HTTP method whitelist.
+  - **header_match** (object): Header name to regex mapping (AND logic).
+- **action** (object): Transformation to apply:
+  - **type** (string): `"add_header"`, `"set_header"`, `"remove_header"`, or `"replace_body"`.
+  - **header** (string): Header name (for header actions).
+  - **value** (string): Header value or replacement string.
+  - **pattern** (string): Search regex (for replace_body).
+
+### Add auto-transform rules (merge)
+```json
+{
+  "auto_transform": {
+    "add": [
+      {
+        "id": "add-auth",
+        "enabled": true,
+        "priority": 10,
+        "direction": "request",
+        "conditions": {
+          "url_pattern": "/api/.*"
+        },
+        "action": {
+          "type": "set_header",
+          "header": "Authorization",
+          "value": "Bearer <token>"
+        }
+      },
+      {
+        "id": "remove-csp",
+        "enabled": true,
+        "priority": 20,
+        "direction": "response",
+        "conditions": {},
+        "action": {
+          "type": "remove_header",
+          "header": "Content-Security-Policy"
+        }
+      }
+    ]
+  }
+}
+```
+
+### Replace body content (merge)
+```json
+{
+  "auto_transform": {
+    "add": [
+      {
+        "id": "replace-host",
+        "enabled": true,
+        "priority": 10,
+        "direction": "request",
+        "conditions": {},
+        "action": {
+          "type": "replace_body",
+          "pattern": "production-host",
+          "value": "staging-host"
+        }
+      }
+    ]
+  }
+}
+```
+
+### Replace all auto-transform rules
+```json
+{
+  "operation": "replace",
+  "auto_transform": {
+    "rules": [
+      {
+        "id": "only-rule",
+        "enabled": true,
+        "priority": 0,
+        "direction": "both",
+        "conditions": {},
+        "action": {
+          "type": "add_header",
+          "header": "X-Proxy",
+          "value": "katashiro"
+        }
+      }
+    ]
+  }
+}
+```
+
 ### Combined update
 ```json
 {
@@ -237,6 +344,22 @@ Each intercept rule has:
         "direction": "request",
         "conditions": {
           "header_match": {"Content-Type": "application/json"}
+        }
+      }
+    ]
+  },
+  "auto_transform": {
+    "add": [
+      {
+        "id": "add-auth",
+        "enabled": true,
+        "priority": 10,
+        "direction": "request",
+        "conditions": {},
+        "action": {
+          "type": "set_header",
+          "header": "Authorization",
+          "value": "Bearer test-token"
         }
       }
     ]
