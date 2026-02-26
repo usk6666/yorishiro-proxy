@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS fuzz_results (
 	id              TEXT PRIMARY KEY,
 	fuzz_id         TEXT NOT NULL REFERENCES fuzz_jobs(id) ON DELETE CASCADE,
 	index_num       INTEGER NOT NULL,
-	session_id      TEXT NOT NULL REFERENCES sessions(id),
+	session_id      TEXT NOT NULL DEFAULT '',
 	payloads        TEXT NOT NULL,
 	status_code     INTEGER,
 	response_length INTEGER,

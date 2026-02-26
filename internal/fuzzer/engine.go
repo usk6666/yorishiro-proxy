@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -160,16 +159,8 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 	sendMsg := sendMsgs[0]
 
-	// Build the base request data from the template session.
-	baseData := &RequestData{
-		Method: sendMsg.Method,
-		URL:    sendMsg.URL,
-		Body:   sendMsg.Body,
-	}
-	baseData.Headers = make(map[string][]string)
-	for k, v := range sendMsg.Headers {
-		baseData.Headers[k] = append([]string(nil), v...)
-	}
+	// Build the base request data from the template session (deep clone).
+	baseData := BuildRequestData(sendMsg)
 
 	// Resolve payload sets.
 	resolvedPayloads := make(map[string][]string)
@@ -294,14 +285,14 @@ func (e *Engine) executeFuzzCase(
 		}
 		if err := ApplyPosition(data, pos, payload); err != nil {
 			result.Error = fmt.Sprintf("apply position %s: %s", pos.ID, err.Error())
-			result.SessionID = "error"
+			// SessionID left empty for error results (no FK to sessions table).
 			return result
 		}
 	}
 
 	if data.URL == nil {
 		result.Error = "template session has no URL"
-		result.SessionID = "error"
+		// SessionID left empty for error results (no FK to sessions table).
 		return result
 	}
 
@@ -317,7 +308,7 @@ func (e *Engine) executeFuzzCase(
 	httpReq, err := http.NewRequestWithContext(reqCtx, data.Method, data.URL.String(), body)
 	if err != nil {
 		result.Error = fmt.Sprintf("create request: %s", err.Error())
-		result.SessionID = "error"
+		// SessionID left empty for error results (no FK to sessions table).
 		return result
 	}
 
@@ -338,7 +329,7 @@ func (e *Engine) executeFuzzCase(
 		duration := time.Since(start)
 		result.Error = fmt.Sprintf("send request: %s", err.Error())
 		result.DurationMs = int(duration.Milliseconds())
-		result.SessionID = "error"
+		// SessionID left empty for error results (no FK to sessions table).
 		return result
 	}
 	defer resp.Body.Close()
@@ -348,7 +339,7 @@ func (e *Engine) executeFuzzCase(
 		duration := time.Since(start)
 		result.Error = fmt.Sprintf("read response: %s", err.Error())
 		result.DurationMs = int(duration.Milliseconds())
-		result.SessionID = "error"
+		// SessionID left empty for error results (no FK to sessions table).
 		return result
 	}
 	duration := time.Since(start)
@@ -377,7 +368,7 @@ func (e *Engine) executeFuzzCase(
 
 	if err := e.sessionRecorder.SaveSession(ctx, newSess); err != nil {
 		result.Error = fmt.Sprintf("save session: %s", err.Error())
-		result.SessionID = "error"
+		// SessionID left empty for error results (no FK to sessions table).
 		return result
 	}
 
@@ -452,10 +443,3 @@ func ResolvePayloads(payloadSets map[string]PayloadSet, wordlistDir string) (map
 	return resolved, nil
 }
 
-// parseFuzzURL is a helper to parse a URL from a session message.
-func parseFuzzURL(rawURL string) (*url.URL, error) {
-	if rawURL == "" {
-		return nil, fmt.Errorf("empty URL")
-	}
-	return url.Parse(rawURL)
-}

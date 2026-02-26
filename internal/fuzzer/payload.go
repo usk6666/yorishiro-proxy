@@ -103,6 +103,10 @@ func (ps *PayloadSet) generateFromFile(baseDir string) ([]string, error) {
 	return payloads, nil
 }
 
+// maxPayloadCount is the maximum number of payloads a single set can generate
+// to prevent out-of-memory conditions from excessively large ranges.
+const maxPayloadCount = 1_000_000
+
 // generateRange produces a list of number strings from start to end (inclusive) with step.
 func (ps *PayloadSet) generateRange() ([]string, error) {
 	start := *ps.Start
@@ -116,7 +120,13 @@ func (ps *PayloadSet) generateRange() ([]string, error) {
 		return nil, fmt.Errorf("range step cannot be zero")
 	}
 
-	var payloads []string
+	// Estimate count and check against the limit.
+	count := estimateCount(start, end, step)
+	if count > maxPayloadCount {
+		return nil, fmt.Errorf("range would generate %d payloads, exceeding maximum of %d", count, maxPayloadCount)
+	}
+
+	payloads := make([]string, 0, count)
 	if step > 0 {
 		for i := start; i <= end; i += step {
 			payloads = append(payloads, strconv.Itoa(i))
@@ -143,7 +153,13 @@ func (ps *PayloadSet) generateSequence() ([]string, error) {
 		return nil, fmt.Errorf("sequence step cannot be zero")
 	}
 
-	var payloads []string
+	// Estimate count and check against the limit.
+	count := estimateCount(start, end, step)
+	if count > maxPayloadCount {
+		return nil, fmt.Errorf("sequence would generate %d payloads, exceeding maximum of %d", count, maxPayloadCount)
+	}
+
+	payloads := make([]string, 0, count)
 	if step > 0 {
 		for i := start; i <= end; i += step {
 			payloads = append(payloads, fmt.Sprintf(ps.Format, i))
@@ -155,6 +171,21 @@ func (ps *PayloadSet) generateSequence() ([]string, error) {
 	}
 
 	return payloads, nil
+}
+
+// estimateCount calculates the number of elements a range/sequence will generate.
+func estimateCount(start, end, step int) int {
+	if step > 0 {
+		if end < start {
+			return 0
+		}
+		return (end-start)/step + 1
+	}
+	// step < 0 (step == 0 is handled by caller)
+	if start < end {
+		return 0
+	}
+	return (start-end)/(-step) + 1
 }
 
 // resolveWordlistPath resolves and validates a relative wordlist path
