@@ -39,6 +39,11 @@ type proxyStartInput struct {
 	// Rules define conditions for intercepting traffic based on URL pattern, method, and headers.
 	// If omitted, no intercept rules are active.
 	InterceptRules []interceptRuleInput `json:"intercept_rules,omitempty" jsonschema:"intercept rules for matching requests/responses to hold"`
+
+	// AutoTransform configures auto-transform rules for automatic request/response modification.
+	// Rules define conditions for matching and actions for transforming (add/set/remove headers, replace body).
+	// If omitted, no auto-transform rules are active.
+	AutoTransform []transformRuleInput `json:"auto_transform,omitempty" jsonschema:"auto-transform rules for automatic request/response modification"`
 }
 
 // proxyStartResult is the structured output of the proxy_start tool.
@@ -57,8 +62,9 @@ func (s *Server) registerProxyStart() {
 			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS traffic. " +
 			"Accepts optional capture_scope to control which requests are recorded, " +
 			"tls_passthrough to specify domains that bypass TLS interception, " +
-			"and intercept_rules to define conditions for intercepting requests/responses. " +
-			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, scope=capture all, passthrough=empty, intercept_rules=empty.",
+			"intercept_rules to define conditions for intercepting requests/responses, " +
+			"and auto_transform to configure automatic request/response modification rules. " +
+			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty.",
 	}, s.handleProxyStart)
 }
 
@@ -93,6 +99,13 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	if len(input.InterceptRules) > 0 {
 		if err := s.applyInterceptRules(input.InterceptRules); err != nil {
 			return nil, nil, fmt.Errorf("intercept_rules: %w", err)
+		}
+	}
+
+	// Apply auto-transform rules if provided.
+	if len(input.AutoTransform) > 0 {
+		if err := s.applyTransformRules(input.AutoTransform); err != nil {
+			return nil, nil, fmt.Errorf("auto_transform: %w", err)
 		}
 	}
 

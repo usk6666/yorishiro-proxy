@@ -8,24 +8,26 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
 // Server wraps the MCP server and registers proxy-related tools.
 type Server struct {
-	server          *gomcp.Server
-	appCtx          context.Context
-	ca              *cert.CA
-	store           session.Store
-	manager         *proxy.Manager
-	passthrough     *proxy.PassthroughList
-	scope           *proxy.CaptureScope
-	interceptEngine *intercept.Engine
-	interceptQueue  *intercept.Queue
-	fuzzRunner      *fuzzer.Runner // async fuzz job runner
-	dbPath          string         // path to the SQLite database file for status reporting
-	replayDoer      httpDoer       // injectable HTTP client for execute(replay) testing
-	rawReplayDialer rawDialer      // injectable dialer for replay_raw testing
+	server            *gomcp.Server
+	appCtx            context.Context
+	ca                *cert.CA
+	store             session.Store
+	manager           *proxy.Manager
+	passthrough       *proxy.PassthroughList
+	scope             *proxy.CaptureScope
+	interceptEngine   *intercept.Engine
+	interceptQueue    *intercept.Queue
+	transformPipeline *rules.Pipeline
+	fuzzRunner        *fuzzer.Runner // async fuzz job runner
+	dbPath            string         // path to the SQLite database file for status reporting
+	replayDoer        httpDoer       // injectable HTTP client for execute(replay) testing
+	rawReplayDialer   rawDialer      // injectable dialer for replay_raw testing
 }
 
 // ServerOption configures a Server.
@@ -66,6 +68,14 @@ func WithInterceptEngine(engine *intercept.Engine) ServerOption {
 func WithInterceptQueue(queue *intercept.Queue) ServerOption {
 	return func(s *Server) {
 		s.interceptQueue = queue
+	}
+}
+
+// WithTransformPipeline sets the auto-transform rule pipeline for the MCP server,
+// enabling auto-transform rule configuration via proxy_start and configure tools.
+func WithTransformPipeline(pipeline *rules.Pipeline) ServerOption {
+	return func(s *Server) {
+		s.transformPipeline = pipeline
 	}
 }
 

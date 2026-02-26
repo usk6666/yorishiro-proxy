@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -93,15 +94,16 @@ var hopByHopHeaders = []string{
 
 // Handler processes HTTP/1.x connections.
 type Handler struct {
-	store           session.Store
-	issuer          *cert.Issuer
-	transport       *gohttp.Transport
-	logger          *slog.Logger
-	requestTimeout  time.Duration
-	passthrough     *proxy.PassthroughList
-	scope           *proxy.CaptureScope
-	interceptEngine *intercept.Engine
-	interceptQueue  *intercept.Queue
+	store             session.Store
+	issuer            *cert.Issuer
+	transport         *gohttp.Transport
+	logger            *slog.Logger
+	requestTimeout    time.Duration
+	passthrough       *proxy.PassthroughList
+	scope             *proxy.CaptureScope
+	interceptEngine   *intercept.Engine
+	interceptQueue    *intercept.Queue
+	transformPipeline *rules.Pipeline
 }
 
 // NewHandler creates a new HTTP handler with session recording.
@@ -177,6 +179,19 @@ func (h *Handler) SetInterceptEngine(engine *intercept.Engine) {
 // intercept rules. The queue must be set together with an intercept engine.
 func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
 	h.interceptQueue = queue
+}
+
+// SetTransformPipeline sets the auto-transform rule pipeline used to
+// automatically modify requests and responses passing through the proxy.
+// When set, matching rules are applied to request headers/body before upstream
+// forwarding and to response headers/body before client delivery.
+func (h *Handler) SetTransformPipeline(pipeline *rules.Pipeline) {
+	h.transformPipeline = pipeline
+}
+
+// TransformPipeline returns the handler's current transform pipeline, or nil.
+func (h *Handler) TransformPipeline() *rules.Pipeline {
+	return h.transformPipeline
 }
 
 func (h *Handler) effectiveRequestTimeout() time.Duration {
@@ -361,6 +376,13 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		}
 	}
 
+	// Apply auto-transform rules to the request before forwarding upstream.
+	if h.transformPipeline != nil {
+		req.Header, recordReqBody = h.transformPipeline.TransformRequest(req.Method, req.URL, req.Header, recordReqBody)
+		req.Body = io.NopCloser(bytes.NewReader(recordReqBody))
+		req.ContentLength = int64(len(recordReqBody))
+	}
+
 	// Forward request upstream.
 	outReq := req.WithContext(ctx)
 	outReq.RequestURI = ""
@@ -381,6 +403,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	fullRespBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
+	}
+
+	// Apply auto-transform rules to the response before sending to client.
+	if h.transformPipeline != nil {
+		resp.Header, fullRespBody = h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, fullRespBody)
 	}
 
 	// Capture raw response bytes by serializing the response as received.

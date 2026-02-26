@@ -33,6 +33,11 @@ type configureInput struct {
 
 	// InterceptQueue configures the intercept queue behavior (timeout, timeout behavior).
 	InterceptQueue *configureInterceptQueue `json:"intercept_queue,omitempty" jsonschema:"intercept queue configuration"`
+
+	// AutoTransform configures auto-transform rules for automatic request/response modification.
+	// For merge: use add/remove/enable/disable to modify individual rules.
+	// For replace: use rules to replace all rules entirely.
+	AutoTransform *configureAutoTransform `json:"auto_transform,omitempty" jsonschema:"auto-transform rules configuration"`
 }
 
 // configureInterceptQueue holds intercept queue configuration.
@@ -69,6 +74,18 @@ type configureTLSPassthrough struct {
 	Patterns []string `json:"patterns,omitempty" jsonschema:"(replace) full list of passthrough patterns"`
 }
 
+// configureAutoTransform holds auto-transform rule configuration for both merge and replace operations.
+type configureAutoTransform struct {
+	// Merge operation fields.
+	Add     []transformRuleInput `json:"add,omitempty" jsonschema:"(merge) rules to add"`
+	Remove  []string             `json:"remove,omitempty" jsonschema:"(merge) rule IDs to remove"`
+	Enable  []string             `json:"enable,omitempty" jsonschema:"(merge) rule IDs to enable"`
+	Disable []string             `json:"disable,omitempty" jsonschema:"(merge) rule IDs to disable"`
+
+	// Replace operation fields: full replacement.
+	Rules []transformRuleInput `json:"rules,omitempty" jsonschema:"(replace) full list of auto-transform rules"`
+}
+
 // configureInterceptRules holds intercept rule configuration for both merge and replace operations.
 type configureInterceptRules struct {
 	// Merge operation fields.
@@ -97,6 +114,9 @@ type configureResult struct {
 
 	// InterceptQueue summarizes the current intercept queue configuration.
 	InterceptQueue *configureInterceptQueueResult `json:"intercept_queue,omitempty"`
+
+	// AutoTransform summarizes the current auto-transform rules state.
+	AutoTransform *configureAutoTransformResult `json:"auto_transform,omitempty"`
 }
 
 // configureInterceptQueueResult summarizes intercept queue state in the configure response.
@@ -117,6 +137,12 @@ type configurePassthroughResult struct {
 	TotalPatterns int `json:"total_patterns"`
 }
 
+// configureAutoTransformResult summarizes auto-transform rules state in the configure response.
+type configureAutoTransformResult struct {
+	TotalRules   int `json:"total_rules"`
+	EnabledRules int `json:"enabled_rules"`
+}
+
 // configureInterceptResult summarizes intercept rules state in the configure response.
 type configureInterceptResult struct {
 	TotalRules   int `json:"total_rules"`
@@ -127,13 +153,14 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including capture scope, TLS passthrough, intercept rules, and intercept queue. " +
+		Description: "Configure runtime proxy settings including capture scope, TLS passthrough, intercept rules, intercept queue, and auto-transform rules. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
 			"Capture scope controls which requests are recorded (include/exclude rules with hostname, url_prefix, method). " +
 			"TLS passthrough controls which CONNECT destinations bypass MITM interception. " +
 			"Intercept rules define conditions for intercepting requests/responses (url_pattern regex, method whitelist, header regex). " +
 			"Intercept queue configures timeout and timeout behavior for blocked requests. " +
+			"Auto-transform rules automatically modify matching requests/responses (add/set/remove headers, replace body patterns). " +
 			"All sections are optional; only specified sections are modified.",
 	}, s.handleConfigure)
 }
@@ -203,6 +230,16 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 		result.InterceptQueue = s.interceptQueueResult()
 	}
 
+	if input.AutoTransform != nil {
+		if s.transformPipeline == nil {
+			return nil, nil, fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+		}
+		if err := s.mergeAutoTransform(input.AutoTransform); err != nil {
+			return nil, nil, fmt.Errorf("auto_transform merge: %w", err)
+		}
+		result.AutoTransform = s.autoTransformResult()
+	}
+
 	return nil, result, nil
 }
 
@@ -258,6 +295,16 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 			return nil, nil, fmt.Errorf("intercept_queue: %w", err)
 		}
 		result.InterceptQueue = s.interceptQueueResult()
+	}
+
+	if input.AutoTransform != nil {
+		if s.transformPipeline == nil {
+			return nil, nil, fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+		}
+		if err := s.replaceAutoTransform(input.AutoTransform); err != nil {
+			return nil, nil, fmt.Errorf("auto_transform replace: %w", err)
+		}
+		result.AutoTransform = s.autoTransformResult()
 	}
 
 	return nil, result, nil
@@ -400,6 +447,60 @@ func (s *Server) interceptQueueResult() *configureInterceptQueueResult {
 		TimeoutMs:       s.interceptQueue.Timeout().Milliseconds(),
 		TimeoutBehavior: string(s.interceptQueue.TimeoutBehaviorValue()),
 		QueuedItems:     s.interceptQueue.Len(),
+	}
+}
+
+// mergeAutoTransform applies delta add/remove/enable/disable operations to auto-transform rules.
+func (s *Server) mergeAutoTransform(cfg *configureAutoTransform) error {
+	// Process additions first.
+	for _, input := range cfg.Add {
+		r := toTransformRule(input)
+		if err := s.transformPipeline.AddRule(r); err != nil {
+			return err
+		}
+	}
+
+	// Process removals.
+	for _, id := range cfg.Remove {
+		if err := s.transformPipeline.RemoveRule(id); err != nil {
+			return err
+		}
+	}
+
+	// Process enable.
+	for _, id := range cfg.Enable {
+		if err := s.transformPipeline.EnableRule(id, true); err != nil {
+			return err
+		}
+	}
+
+	// Process disable.
+	for _, id := range cfg.Disable {
+		if err := s.transformPipeline.EnableRule(id, false); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// replaceAutoTransform replaces all auto-transform rules atomically.
+func (s *Server) replaceAutoTransform(cfg *configureAutoTransform) error {
+	return s.applyTransformRules(cfg.Rules)
+}
+
+// autoTransformResult returns the current auto-transform rules state.
+func (s *Server) autoTransformResult() *configureAutoTransformResult {
+	rulesList := s.transformPipeline.Rules()
+	enabled := 0
+	for _, r := range rulesList {
+		if r.Enabled {
+			enabled++
+		}
+	}
+	return &configureAutoTransformResult{
+		TotalRules:   len(rulesList),
+		EnabledRules: enabled,
 	}
 }
 

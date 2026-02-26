@@ -355,6 +355,13 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		}
 	}
 
+	// Apply auto-transform rules to the HTTPS request before forwarding upstream.
+	if h.transformPipeline != nil {
+		req.Header, recordReqBody = h.transformPipeline.TransformRequest(req.Method, req.URL, req.Header, recordReqBody)
+		req.Body = io.NopCloser(bytes.NewReader(recordReqBody))
+		req.ContentLength = int64(len(recordReqBody))
+	}
+
 	// Forward request to upstream over HTTPS.
 	outReq := req.WithContext(ctx)
 	outReq.RequestURI = ""
@@ -374,6 +381,11 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	fullRespBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
+	}
+
+	// Apply auto-transform rules to the HTTPS response before sending to client.
+	if h.transformPipeline != nil {
+		resp.Header, fullRespBody = h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, fullRespBody)
 	}
 
 	// Capture raw response bytes by serializing the response as received.
