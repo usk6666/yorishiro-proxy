@@ -20,7 +20,7 @@ import (
 // executeInput is the typed input for the execute tool.
 type executeInput struct {
 	// Action specifies the action to execute.
-	// Available actions: replay, replay_raw, delete_sessions.
+	// Available actions: resend, resend_raw, delete_sessions (replay, replay_raw are deprecated aliases).
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
 	Params executeParams `json:"params"`
@@ -29,18 +29,29 @@ type executeInput struct {
 // executeParams holds the union of all action-specific parameters.
 // Only the fields relevant to the specified action are used.
 type executeParams struct {
-	// SessionID is used by replay, replay_raw, and delete_sessions (single deletion).
-	SessionID string `json:"session_id,omitempty" jsonschema:"session ID for replay/replay_raw/delete"`
+	// SessionID is used by resend, resend_raw, and delete_sessions (single deletion).
+	SessionID string `json:"session_id,omitempty" jsonschema:"session ID for resend/resend_raw/delete"`
 
-	// replay overrides
-	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override for replay"`
-	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"URL override for replay"`
-	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides for replay"`
-	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override for replay"`
+	// resend overrides
+	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override for resend"`
+	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"URL override for resend"`
+	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides for resend"`
+	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override for resend"`
 
-	// replay_raw parameters
-	TargetAddr string `json:"target_addr,omitempty" jsonschema:"target address (host:port) for replay_raw"`
-	UseTLS     *bool  `json:"use_tls,omitempty" jsonschema:"use TLS for replay_raw connection"`
+	// resend extended mutation options
+	AddHeaders         map[string]string `json:"add_headers,omitempty" jsonschema:"headers to add (appended to existing)"`
+	RemoveHeaders      []string          `json:"remove_headers,omitempty" jsonschema:"headers to remove"`
+	OverrideBodyBase64 *string           `json:"override_body_base64,omitempty" jsonschema:"body override as Base64-encoded binary"`
+	BodyPatches        []BodyPatch       `json:"body_patches,omitempty" jsonschema:"body partial modification rules"`
+	OverrideHost       string            `json:"override_host,omitempty" jsonschema:"TCP connection target host:port (independent of URL host)"`
+	FollowRedirects    *bool             `json:"follow_redirects,omitempty" jsonschema:"follow HTTP redirects (default: false)"`
+	TimeoutMs          *int              `json:"timeout_ms,omitempty" jsonschema:"request timeout in milliseconds (default: 30000)"`
+	DryRun             bool              `json:"dry_run,omitempty" jsonschema:"preview modified request without sending"`
+	Tag                string            `json:"tag,omitempty" jsonschema:"tag to attach to the result session"`
+
+	// resend_raw parameters
+	TargetAddr string `json:"target_addr,omitempty" jsonschema:"target address (host:port) for resend_raw"`
+	UseTLS     *bool  `json:"use_tls,omitempty" jsonschema:"use TLS for resend_raw connection"`
 
 	// delete_sessions parameters
 	OlderThanDays *int `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
@@ -48,7 +59,7 @@ type executeParams struct {
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"replay", "replay_raw", "delete_sessions"}
+var availableActions = []string{"resend", "resend_raw", "delete_sessions"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -56,9 +67,10 @@ func (s *Server) registerExecute() {
 		Name: "execute",
 		Description: "Execute an action on recorded proxy data. " +
 			"Available actions: " +
-			"'replay' replays a recorded HTTP request with optional method/URL/header/body overrides; " +
-			"'replay_raw' replays raw bytes from a recorded session over TCP/TLS; " +
-			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required).",
+			"'resend' resends a recorded HTTP request with optional mutation (method/URL/header/body overrides, body patches, dry-run); " +
+			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS; " +
+			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required). " +
+			"('replay' and 'replay_raw' are accepted as deprecated aliases for 'resend' and 'resend_raw'.)",
 	}, s.handleExecute)
 }
 
@@ -67,10 +79,10 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 	switch input.Action {
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableActions, ", "))
-	case "replay":
-		return s.handleExecuteReplay(ctx, input.Params)
-	case "replay_raw":
-		return s.handleExecuteReplayRaw(ctx, input.Params)
+	case "resend", "replay": // "replay" is a deprecated alias
+		return s.handleExecuteResend(ctx, input.Params)
+	case "resend_raw", "replay_raw": // "replay_raw" is a deprecated alias
+		return s.handleExecuteResendRaw(ctx, input.Params)
 	case "delete_sessions":
 		return s.handleExecuteDeleteSessions(ctx, input.Params)
 	default:
@@ -78,9 +90,9 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 	}
 }
 
-// executeReplayResult is the structured output of the replay action.
-type executeReplayResult struct {
-	// NewSessionID is the session ID of the replayed request.
+// executeResendResult is the structured output of the resend action.
+type executeResendResult struct {
+	// NewSessionID is the session ID of the resent request.
 	NewSessionID string `json:"new_session_id"`
 	// StatusCode is the HTTP response status code.
 	StatusCode int `json:"status_code"`
@@ -92,18 +104,42 @@ type executeReplayResult struct {
 	ResponseBodyEncoding string `json:"response_body_encoding"`
 	// DurationMs is the request duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
+	// Tag is the tag attached to the result session (if specified).
+	Tag string `json:"tag,omitempty"`
 }
 
-// handleExecuteReplay handles the replay action within the execute tool.
-// It retrieves the original session, applies any overrides, sends the request,
-// and records the result as a new session.
-func (s *Server) handleExecuteReplay(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeReplayResult, error) {
+// executeDryRunResult is the structured output of a dry-run resend.
+type executeDryRunResult struct {
+	// DryRun is always true for dry-run results.
+	DryRun bool `json:"dry_run"`
+	// RequestPreview contains the modified request details.
+	RequestPreview *requestPreview `json:"request_preview"`
+}
+
+// requestPreview is the preview of a modified request for dry-run mode.
+type requestPreview struct {
+	// Method is the HTTP method.
+	Method string `json:"method"`
+	// URL is the request URL.
+	URL string `json:"url"`
+	// Headers is the request headers.
+	Headers map[string][]string `json:"headers"`
+	// Body is the request body as text or Base64-encoded string.
+	Body string `json:"body"`
+	// BodyEncoding indicates the encoding of the body ("text" or "base64").
+	BodyEncoding string `json:"body_encoding"`
+}
+
+// handleExecuteResend handles the resend action within the execute tool.
+// It retrieves the original session, applies all mutations, and either sends the request
+// or returns a dry-run preview. The result is recorded as a new session.
+func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
 	if s.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
 	if params.SessionID == "" {
-		return nil, nil, fmt.Errorf("session_id is required for replay action")
+		return nil, nil, fmt.Errorf("session_id is required for resend action")
 	}
 
 	// Retrieve the original session and its send message.
@@ -121,7 +157,7 @@ func (s *Server) handleExecuteReplay(ctx context.Context, params executeParams) 
 	}
 	sendMsg := sendMsgs[0]
 
-	// Build the replay request with overrides applied.
+	// Build the resend request with mutations applied.
 	method := sendMsg.Method
 	if params.OverrideMethod != "" {
 		method = params.OverrideMethod
@@ -136,7 +172,6 @@ func (s *Server) handleExecuteReplay(ctx context.Context, params executeParams) 
 		if parsed.Scheme == "" || parsed.Host == "" {
 			return nil, nil, fmt.Errorf("invalid override_url %q: must include scheme and host", params.OverrideURL)
 		}
-		// Validate URL scheme (http/https only) to prevent SSRF via non-HTTP protocols.
 		if err := validateURLScheme(parsed); err != nil {
 			return nil, nil, fmt.Errorf("invalid override_url %q: %w", params.OverrideURL, err)
 		}
@@ -147,57 +182,77 @@ func (s *Server) handleExecuteReplay(ctx context.Context, params executeParams) 
 		return nil, nil, fmt.Errorf("original session has no URL and no override_url was provided")
 	}
 
-	// Validate the final target URL scheme (covers both original and overridden URLs).
+	// Validate the final target URL scheme.
 	if err := validateURLScheme(targetURL); err != nil {
 		return nil, nil, err
 	}
 
+	// Validate override_host if specified (SSRF protection).
+	if params.OverrideHost != "" {
+		if err := validateOverrideHost(params.OverrideHost); err != nil {
+			return nil, nil, fmt.Errorf("invalid override_host %q: %w", params.OverrideHost, err)
+		}
+	}
+
+	// Apply body mutations.
+	reqBody, err := buildResendBody(sendMsg.Body, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Build headers: start from original, then apply mutations in order.
+	headers := buildResendHeaders(sendMsg.Headers, params)
+
+	// Dry-run mode: return preview without sending.
+	if params.DryRun {
+		bodyStr, bodyEncoding := encodeBody(reqBody)
+		preview := &executeDryRunResult{
+			DryRun: true,
+			RequestPreview: &requestPreview{
+				Method:       method,
+				URL:          targetURL.String(),
+				Headers:      headers,
+				Body:         bodyStr,
+				BodyEncoding: bodyEncoding,
+			},
+		}
+		return nil, preview, nil
+	}
+
 	var body io.Reader
-	var reqBody []byte
-	if params.OverrideBody != nil {
-		reqBody = []byte(*params.OverrideBody)
-		body = bytes.NewReader(reqBody)
-	} else if len(sendMsg.Body) > 0 {
-		reqBody = sendMsg.Body
+	if len(reqBody) > 0 {
 		body = bytes.NewReader(reqBody)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, method, targetURL.String(), body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create replay request: %w", err)
+		return nil, nil, fmt.Errorf("create resend request: %w", err)
 	}
 
-	// Copy original headers.
-	for key, values := range sendMsg.Headers {
-		for _, v := range values {
-			httpReq.Header.Add(key, v)
+	// Set headers on the request.
+	for key, values := range headers {
+		for i, v := range values {
+			if i == 0 {
+				httpReq.Header.Set(key, v)
+			} else {
+				httpReq.Header.Add(key, v)
+			}
 		}
 	}
 
-	// Apply header overrides (single-value replacement).
-	for key, value := range params.OverrideHeaders {
-		httpReq.Header.Set(key, value)
-	}
-
-	// Build the final request headers snapshot for recording.
-	recordedHeaders := make(map[string][]string)
-	for key, values := range httpReq.Header {
-		recordedHeaders[key] = values
-	}
-
-	// Execute the request.
-	client := s.httpClient()
+	// Build the HTTP client with appropriate configuration.
+	client := s.resendHTTPClient(params)
 	start := time.Now()
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return nil, nil, fmt.Errorf("replay request: %w", err)
+		return nil, nil, fmt.Errorf("resend request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// Limit response body read to prevent OOM from unbounded responses.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxReplayResponseSize))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read replay response body: %w", err)
+		return nil, nil, fmt.Errorf("read resend response body: %w", err)
 	}
 	duration := time.Since(start)
 
@@ -207,17 +262,29 @@ func (s *Server) handleExecuteReplay(ctx context.Context, params executeParams) 
 		respHeaders[key] = values
 	}
 
-	// Record the replay as a new session.
+	// Build the final request headers snapshot for recording.
+	recordedHeaders := make(map[string][]string)
+	for key, values := range httpReq.Header {
+		recordedHeaders[key] = values
+	}
+
+	// Record the resend as a new session.
+	var tags map[string]string
+	if params.Tag != "" {
+		tags = map[string]string{"tag": params.Tag}
+	}
+
 	newSess := &session.Session{
 		Protocol:    sess.Protocol,
 		SessionType: "unary",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
+		Tags:        tags,
 	}
 
 	if err := s.store.SaveSession(ctx, newSess); err != nil {
-		return nil, nil, fmt.Errorf("save replay session: %w", err)
+		return nil, nil, fmt.Errorf("save resend session: %w", err)
 	}
 
 	// Save send message.
@@ -232,7 +299,7 @@ func (s *Server) handleExecuteReplay(ctx context.Context, params executeParams) 
 		Body:      reqBody,
 	}
 	if err := s.store.AppendMessage(ctx, newSendMsg); err != nil {
-		return nil, nil, fmt.Errorf("save replay send message: %w", err)
+		return nil, nil, fmt.Errorf("save resend send message: %w", err)
 	}
 
 	// Save receive message.
@@ -246,25 +313,143 @@ func (s *Server) handleExecuteReplay(ctx context.Context, params executeParams) 
 		Body:       respBody,
 	}
 	if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
-		return nil, nil, fmt.Errorf("save replay receive message: %w", err)
+		return nil, nil, fmt.Errorf("save resend receive message: %w", err)
 	}
 
 	respBodyStr, respBodyEncoding := encodeBody(respBody)
 
-	result := &executeReplayResult{
+	result := &executeResendResult{
 		NewSessionID:         newSess.ID,
 		StatusCode:           resp.StatusCode,
 		ResponseHeaders:      respHeaders,
 		ResponseBody:         respBodyStr,
 		ResponseBodyEncoding: respBodyEncoding,
 		DurationMs:           duration.Milliseconds(),
+		Tag:                  params.Tag,
 	}
 
 	return nil, result, nil
 }
 
-// executeReplayRawResult is the structured output of the replay_raw action.
-type executeReplayRawResult struct {
+// buildResendBody builds the request body after applying mutations.
+// Priority: override_body/override_body_base64 > body_patches > original body.
+func buildResendBody(originalBody []byte, params executeParams) ([]byte, error) {
+	// Full body replacement takes priority.
+	if params.OverrideBody != nil {
+		return []byte(*params.OverrideBody), nil
+	}
+	if params.OverrideBodyBase64 != nil {
+		decoded, err := base64.StdEncoding.DecodeString(*params.OverrideBodyBase64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid override_body_base64: %w", err)
+		}
+		return decoded, nil
+	}
+
+	// Apply body patches to the original body.
+	body := originalBody
+	if len(params.BodyPatches) > 0 {
+		var err error
+		body, err = applyBodyPatches(body, params.BodyPatches)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return body, nil
+}
+
+// buildResendHeaders builds the final request headers by applying mutations
+// in the specified order: remove -> override -> add.
+func buildResendHeaders(originalHeaders map[string][]string, params executeParams) map[string][]string {
+	// Start with a copy of the original headers.
+	headers := make(map[string][]string)
+	for key, values := range originalHeaders {
+		cp := make([]string, len(values))
+		copy(cp, values)
+		headers[key] = cp
+	}
+
+	// Step 1: Remove headers.
+	for _, key := range params.RemoveHeaders {
+		// Case-insensitive removal: normalize to canonical form.
+		delete(headers, http.CanonicalHeaderKey(key))
+	}
+
+	// Step 2: Override headers (replace entire value for a key).
+	for key, value := range params.OverrideHeaders {
+		headers[http.CanonicalHeaderKey(key)] = []string{value}
+	}
+
+	// Step 3: Add headers (append to existing values).
+	for key, value := range params.AddHeaders {
+		canonical := http.CanonicalHeaderKey(key)
+		headers[canonical] = append(headers[canonical], value)
+	}
+
+	return headers
+}
+
+// validateOverrideHost validates the override_host parameter format.
+// It must be a valid host:port pair.
+func validateOverrideHost(host string) error {
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		return fmt.Errorf("must be host:port format: %w", err)
+	}
+	if h == "" {
+		return fmt.Errorf("host cannot be empty")
+	}
+	if p == "" {
+		return fmt.Errorf("port cannot be empty")
+	}
+	return nil
+}
+
+// resendHTTPClient returns an HTTP client configured for the resend action.
+// It respects follow_redirects, timeout_ms, and override_host parameters.
+func (s *Server) resendHTTPClient(params executeParams) httpDoer {
+	if s.replayDoer != nil {
+		return s.replayDoer
+	}
+
+	timeout := defaultReplayTimeout
+	if params.TimeoutMs != nil {
+		if *params.TimeoutMs > 0 {
+			timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
+		}
+	}
+
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: denyPrivateNetwork,
+	}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if params.OverrideHost != "" {
+				addr = params.OverrideHost
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	if params.FollowRedirects != nil && *params.FollowRedirects {
+		checkRedirect = nil // use Go default (follow up to 10 redirects)
+	}
+
+	return &http.Client{
+		Timeout:       timeout,
+		Transport:     transport,
+		CheckRedirect: checkRedirect,
+	}
+}
+
+// executeResendRawResult is the structured output of the resend_raw action.
+type executeResendRawResult struct {
 	// ResponseData is the raw response bytes, Base64-encoded.
 	ResponseData string `json:"response_data"`
 	// ResponseSize is the number of response bytes received.
@@ -273,15 +458,15 @@ type executeReplayRawResult struct {
 	DurationMs int64 `json:"duration_ms"`
 }
 
-// handleExecuteReplayRaw handles the replay_raw action within the execute tool.
+// handleExecuteResendRaw handles the resend_raw action within the execute tool.
 // It retrieves the session's raw request bytes and sends them directly over TCP/TLS.
-func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeReplayRawResult, error) {
+func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeResendRawResult, error) {
 	if s.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
 	if params.SessionID == "" {
-		return nil, nil, fmt.Errorf("session_id is required for replay_raw action")
+		return nil, nil, fmt.Errorf("session_id is required for resend_raw action")
 	}
 
 	// Retrieve the original session and its send message.
@@ -328,6 +513,12 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 		useTLS = *params.UseTLS
 	}
 
+	// Determine timeout.
+	timeout := defaultReplayTimeout
+	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
+		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
+	}
+
 	// Establish the connection.
 	dialer := s.rawDialerFunc()
 	start := time.Now()
@@ -352,7 +543,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 
 	// Set a deadline for the entire operation.
-	if err := conn.SetDeadline(time.Now().Add(defaultReplayTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, nil, fmt.Errorf("set connection deadline: %w", err)
 	}
 
@@ -372,7 +563,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 	duration := time.Since(start)
 
-	result := &executeReplayRawResult{
+	result := &executeResendRawResult{
 		ResponseData: base64.StdEncoding.EncodeToString(respData),
 		ResponseSize: len(respData),
 		DurationMs:   duration.Milliseconds(),

@@ -129,7 +129,7 @@ func TestExecute_Replay_Success(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeReplayResult
+	var out executeResendResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -225,7 +225,7 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeReplayResult
+	var out executeResendResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -430,7 +430,7 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeReplayRawResult
+	var out executeResendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -588,7 +588,7 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeReplayRawResult
+	var out executeResendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)

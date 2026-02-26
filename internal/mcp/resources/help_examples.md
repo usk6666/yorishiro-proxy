@@ -27,11 +27,11 @@ Install the returned PEM certificate into the client's trust store for HTTPS int
 
 ## Authentication Testing
 
-### Replay with different auth tokens
+### Resend with different auth tokens
 ```json
 // execute
 {
-  "action": "replay",
+  "action": "resend",
   "params": {
     "session_id": "<original-session-id>",
     "override_headers": {"Authorization": "Bearer <other-user-token>"}
@@ -39,11 +39,11 @@ Install the returned PEM certificate into the client's trust store for HTTPS int
 }
 ```
 
-### Test without authentication
+### Test without authentication (remove auth header)
 ```json
 // execute
 {
-  "action": "replay",
+  "action": "resend",
   "params": {
     "session_id": "<original-session-id>",
     "override_headers": {"Authorization": ""}
@@ -76,11 +76,11 @@ Install the returned PEM certificate into the client's trust store for HTTPS int
 
 ## Parameter Tampering
 
-### Replay with modified URL
+### Resend with modified URL
 ```json
 // execute
 {
-  "action": "replay",
+  "action": "resend",
   "params": {
     "session_id": "<session-id>",
     "override_url": "https://target.example.com/api/admin/users"
@@ -88,11 +88,11 @@ Install the returned PEM certificate into the client's trust store for HTTPS int
 }
 ```
 
-### Replay with modified body
+### Resend with modified body
 ```json
 // execute
 {
-  "action": "replay",
+  "action": "resend",
   "params": {
     "session_id": "<session-id>",
     "override_body": "{\"role\": \"admin\", \"user_id\": 1}"
@@ -102,11 +102,11 @@ Install the returned PEM certificate into the client's trust store for HTTPS int
 
 ## HTTP Request Smuggling Analysis
 
-### Replay raw bytes to preserve header formatting
+### Resend raw bytes to preserve header formatting
 ```json
 // execute
 {
-  "action": "replay_raw",
+  "action": "resend_raw",
   "params": {
     "session_id": "<session-id>",
     "target_addr": "target.example.com:443",

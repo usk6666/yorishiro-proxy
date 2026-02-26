@@ -369,7 +369,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	// This is expected behavior — we verify the tool ran and returned an error.
 	if !replayResult.IsError {
 		// If replay succeeded (e.g., SSRF protection is relaxed), verify the result.
-		var rr executeReplayResult
+		var rr executeResendResult
 		tc, ok := replayResult.Content[0].(*gomcp.TextContent)
 		if ok {
 			json.Unmarshal([]byte(tc.Text), &rr)
