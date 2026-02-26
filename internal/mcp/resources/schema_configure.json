@@ -100,6 +100,38 @@
         }
       },
       "additionalProperties": false
+    },
+    "auto_transform": {
+      "type": "object",
+      "description": "Auto-transform rules configuration.",
+      "properties": {
+        "add": {
+          "type": "array",
+          "description": "(merge) Rules to add.",
+          "items": { "$ref": "#/$defs/transform_rule" }
+        },
+        "remove": {
+          "type": "array",
+          "description": "(merge) Rule IDs to remove.",
+          "items": { "type": "string" }
+        },
+        "enable": {
+          "type": "array",
+          "description": "(merge) Rule IDs to enable.",
+          "items": { "type": "string" }
+        },
+        "disable": {
+          "type": "array",
+          "description": "(merge) Rule IDs to disable.",
+          "items": { "type": "string" }
+        },
+        "rules": {
+          "type": "array",
+          "description": "(replace) Full list of auto-transform rules.",
+          "items": { "$ref": "#/$defs/transform_rule" }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -162,6 +194,59 @@
           "type": "object",
           "description": "Header name to regex pattern mapping (AND logic).",
           "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "transform_rule": {
+      "type": "object",
+      "description": "An auto-transform rule with matching conditions and action.",
+      "required": ["id", "enabled", "direction", "conditions", "action"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique rule identifier."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the rule is active."
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Execution order (lower values applied first).",
+          "default": 0
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["request", "response", "both"],
+          "description": "Applies to requests, responses, or both."
+        },
+        "conditions": { "$ref": "#/$defs/intercept_conditions" },
+        "action": { "$ref": "#/$defs/transform_action" }
+      },
+      "additionalProperties": false
+    },
+    "transform_action": {
+      "type": "object",
+      "description": "Transformation action to apply.",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["add_header", "set_header", "remove_header", "replace_body"],
+          "description": "Action type."
+        },
+        "header": {
+          "type": "string",
+          "description": "Header name (for header actions)."
+        },
+        "value": {
+          "type": "string",
+          "description": "Header value or replacement string."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Search regex (for replace_body)."
         }
       },
       "additionalProperties": false
