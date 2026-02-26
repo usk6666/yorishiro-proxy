@@ -93,6 +93,11 @@ Task ツールで起動:
 
 ### Step 7: Worktree クリーンアップ
 
-結果報告後、サブエージェントの worktree を削除する:
+結果報告後、**Step 5 で起動したサブエージェントの worktree のみ**を削除する。
 
-    make worktree-clean
+Task ツールの戻り値に含まれる agent ID を使い、以下を実行:
+
+```bash
+git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+git worktree prune
+```

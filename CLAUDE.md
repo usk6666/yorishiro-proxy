@@ -119,15 +119,23 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 Claude Code の Task ツールは worktree に変更がある場合、完了後も自動削除しない。
 **呼び出し元スキルがクリーンアップの責務を持つ。**
 
+#### クリーンアップのタイミング
+
 | スキル | クリーンアップタイミング |
 |--------|------------------------|
 | `/orchestrate` | Phase 3-3（全バッチ・レビュー完了後）|
 | `/review-gate` | Phase 6（レビューサイクル完了後）|
 | `/code-review` | Step 7（結果報告後）|
 
-stale な worktree が蓄積した場合の手動クリーンアップ:
+各スキルは自分が起動したサブエージェントの agent ID を追跡し、**その worktree のみ**を削除する。
+別セッションのアクティブな worktree を破壊しないため、一括削除は行わない。
 
-    make worktree-clean
+```bash
+git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+git worktree prune
+```
+
+stale な worktree が蓄積した場合は `git worktree list` で確認し、個別に `git worktree remove` すること。
 
 ## ブランチ戦略
 
