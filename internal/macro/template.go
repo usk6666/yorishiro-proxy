@@ -1,0 +1,99 @@
+package macro
+
+import (
+	"fmt"
+	"strings"
+)
+
+// ExpandTemplate replaces all {{variable}} and {{variable | encoder1 | encoder2}}
+// expressions in the input string with values from the KV Store.
+// Unknown variables are left as-is (no error). Unknown encoders cause an error.
+func ExpandTemplate(input string, kvStore map[string]string) (string, error) {
+	var result strings.Builder
+	remaining := input
+
+	for {
+		// Find the next opening delimiter.
+		openIdx := strings.Index(remaining, "{{")
+		if openIdx == -1 {
+			result.WriteString(remaining)
+			break
+		}
+
+		// Write everything before the delimiter.
+		result.WriteString(remaining[:openIdx])
+
+		// Find the closing delimiter.
+		closeIdx := strings.Index(remaining[openIdx:], "}}")
+		if closeIdx == -1 {
+			// No closing delimiter — write the rest as literal.
+			result.WriteString(remaining[openIdx:])
+			break
+		}
+		closeIdx += openIdx // Adjust to absolute position.
+
+		// Extract the expression inside {{ }}.
+		expr := remaining[openIdx+2 : closeIdx]
+		expanded, err := expandExpression(expr, kvStore)
+		if err != nil {
+			return "", fmt.Errorf("template expression {{%s}}: %w", expr, err)
+		}
+		result.WriteString(expanded)
+
+		remaining = remaining[closeIdx+2:]
+	}
+
+	return result.String(), nil
+}
+
+// expandExpression evaluates a single template expression like "var_name" or
+// "var_name | encoder1 | encoder2".
+func expandExpression(expr string, kvStore map[string]string) (string, error) {
+	parts := strings.Split(expr, "|")
+	varName := strings.TrimSpace(parts[0])
+
+	if varName == "" {
+		return "", fmt.Errorf("empty variable name")
+	}
+
+	value, ok := kvStore[varName]
+	if !ok {
+		// Unknown variable — return the original expression unchanged.
+		return "{{" + expr + "}}", nil
+	}
+
+	// Apply encoder chain if present.
+	if len(parts) > 1 {
+		encoderNames := make([]string, 0, len(parts)-1)
+		for _, p := range parts[1:] {
+			name := strings.TrimSpace(p)
+			if name == "" {
+				return "", fmt.Errorf("empty encoder name in pipe chain")
+			}
+			encoderNames = append(encoderNames, name)
+		}
+		var err error
+		value, err = ApplyEncoders(value, encoderNames)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return value, nil
+}
+
+// ExpandHeaders applies template expansion to each header value.
+func ExpandHeaders(headers map[string]string, kvStore map[string]string) (map[string]string, error) {
+	if len(headers) == 0 {
+		return headers, nil
+	}
+	result := make(map[string]string, len(headers))
+	for k, v := range headers {
+		expanded, err := ExpandTemplate(v, kvStore)
+		if err != nil {
+			return nil, fmt.Errorf("header %q: %w", k, err)
+		}
+		result[k] = expanded
+	}
+	return result, nil
+}
