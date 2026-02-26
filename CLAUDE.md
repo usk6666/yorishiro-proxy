@@ -114,6 +114,21 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 1. 全てのサブエージェントは原則 `isolation: "worktree"` を使用する
 2. 起動元のスキル（`.claude/skills/*/SKILL.md`）に isolation 設定を明記
 
+### Worktree クリーンアップ
+
+Claude Code の Task ツールは worktree に変更がある場合、完了後も自動削除しない。
+**呼び出し元スキルがクリーンアップの責務を持つ。**
+
+| スキル | クリーンアップタイミング |
+|--------|------------------------|
+| `/orchestrate` | Phase 3-3（全バッチ・レビュー完了後）|
+| `/review-gate` | Phase 6（レビューサイクル完了後）|
+| `/code-review` | Step 7（結果報告後）|
+
+stale な worktree が蓄積した場合の手動クリーンアップ:
+
+    make worktree-clean
+
 ## ブランチ戦略
 
 - `main` — 常にビルド・テスト通過状態を維持

@@ -8,11 +8,11 @@
     "resource": {
       "type": "string",
       "description": "The resource to query.",
-      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue"]
+      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro"]
     },
     "id": {
       "type": "string",
-      "description": "Session ID. Required for session and messages resources."
+      "description": "Session ID or macro name. Required for session, messages, and macro resources."
     },
     "filter": {
       "type": "object",

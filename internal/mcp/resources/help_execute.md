@@ -5,7 +5,7 @@ Execute an action on recorded proxy data. Supports resending captured requests w
 ## Parameters
 
 ### action (string, required)
-The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`.
+The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`, `fuzz`, `define_macro`, `run_macro`, `delete_macro`.
 
 > **Note:** `replay` and `replay_raw` are accepted as deprecated aliases for `resend` and `resend_raw`.
 
@@ -93,6 +93,31 @@ Drop an intercepted request, returning a 502 Bad Gateway response to the client.
 - **intercept_id** (string, required): ID of the intercepted request from the intercept queue.
 
 Returns: intercept_id, action, status.
+
+### fuzz
+Run a fuzz campaign against a recorded session. Injects payloads at specified positions and records each iteration as a new session.
+
+**Parameters:**
+- **session_id** (string, required): ID of the template session to fuzz.
+- **attack_type** (string, required): Fuzzing strategy. `"sequential"` tests one position at a time; `"parallel"` applies payloads to all positions simultaneously (zip).
+- **positions** (array, required): Payload injection points. Each position specifies:
+  - **id** (string, required): Unique position identifier (e.g. `"pos-0"`).
+  - **location** (string, required): Where to inject: `header`, `path`, `query`, `body_regex`, `body_json`, `cookie`.
+  - **name** (string): Header name, query key, or cookie name (required for header/query/cookie).
+  - **json_path** (string): JSON path for body_json location (e.g. `"$.password"`).
+  - **mode** (string, optional): Operation mode: `replace` (default), `add`, or `remove`.
+  - **match** (string, optional): Regex pattern for partial replacement. Capture groups replace only the group.
+  - **payload_set** (string): Name of the payload set to use (not required for remove mode).
+- **payload_sets** (object, required): Named payload sets. Each set specifies:
+  - **type** (string, required): `wordlist`, `file`, `range`, or `sequence`.
+  - **values** (array): Payload strings (for wordlist).
+  - **path** (string): Relative path under `~/.katashiro-proxy/wordlists/` (for file).
+  - **start**, **end**, **step** (integer): Range parameters (for range/sequence).
+  - **format** (string): Format string (for sequence, e.g. `"user%04d"`).
+- **timeout_ms** (integer, optional): Per-request timeout in milliseconds (default: `10000`).
+- **tag** (string, optional): Tag to label the fuzz job.
+
+Returns: fuzz_id, status, total, completed, errors, tag, message.
 
 ## Usage Examples
 
@@ -233,5 +258,157 @@ Returns: intercept_id, action, status.
 {
   "action": "drop",
   "params": {"intercept_id": "int-abc-123"}
+}
+```
+
+### Fuzz with sequential attack
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "session_id": "abc-123",
+    "attack_type": "sequential",
+    "positions": [
+      {
+        "id": "pos-0",
+        "location": "header",
+        "name": "Authorization",
+        "mode": "replace",
+        "match": "Bearer (.*)",
+        "payload_set": "tokens"
+      }
+    ],
+    "payload_sets": {
+      "tokens": {
+        "type": "wordlist",
+        "values": ["token1", "token2", "admin-token"]
+      }
+    },
+    "tag": "auth-test"
+  }
+}
+```
+
+### Fuzz with parallel attack
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "session_id": "abc-123",
+    "attack_type": "parallel",
+    "positions": [
+      {"id": "pos-0", "location": "query", "name": "username", "payload_set": "users"},
+      {"id": "pos-1", "location": "body_json", "json_path": "$.password", "payload_set": "passwords"}
+    ],
+    "payload_sets": {
+      "users": {"type": "wordlist", "values": ["admin", "root", "user"]},
+      "passwords": {"type": "wordlist", "values": ["pass1", "pass2", "pass3"]}
+    }
+  }
+}
+```
+
+### define_macro
+Save a macro definition (upsert) with steps, extraction rules, and guards. If a macro with the same name exists, it is updated.
+
+**Parameters:**
+- **name** (string, required): Unique macro identifier.
+- **description** (string, optional): Human-readable description.
+- **steps** (array, required): Ordered list of macro steps. Each step:
+  - **id** (string, required): Unique step identifier within the macro.
+  - **session_id** (string, required): Recorded session to use as a template.
+  - **override_method** (string, optional): Override HTTP method.
+  - **override_url** (string, optional): Override request URL. Supports `{{variable}}` templates.
+  - **override_headers** (object, optional): Header overrides as key-value pairs. Supports templates.
+  - **override_body** (string, optional): Override request body. Supports templates.
+  - **on_error** (string, optional): Error handling: `"abort"` (default), `"skip"`, or `"retry"`.
+  - **retry_count** (integer, optional): Retry count when on_error is "retry" (default: 3).
+  - **retry_delay_ms** (integer, optional): Delay between retries in ms (default: 1000).
+  - **timeout_ms** (integer, optional): Step timeout in ms (default: 60000).
+  - **extract** (array, optional): Value extraction rules. Each rule: `name`, `from` ("request"/"response"), `source` ("header"/"body"/"body_json"/"status"/"url"), `header_name`, `regex`, `group`, `json_path`, `default`, `required`.
+  - **when** (object, optional): Step guard condition: `step`, `status_code`, `status_code_range`, `header_match`, `body_match`, `extracted_var`, `negate`.
+- **initial_vars** (object, optional): Pre-populated KV Store entries.
+- **macro_timeout_ms** (integer, optional): Overall macro timeout in ms (default: 300000).
+
+Returns: name, step_count, created (true if new, false if updated).
+
+### run_macro
+Execute a stored macro for testing. The macro is loaded from DB and run with the macro engine.
+
+**Parameters:**
+- **name** (string, required): Name of the macro to run.
+- **vars** (object, optional): Runtime variable overrides for the KV Store.
+
+Returns: macro_name, status ("completed"/"error"/"timeout"), steps_executed, kv_store, step_results[], error.
+
+### delete_macro
+Remove a stored macro definition.
+
+**Parameters:**
+- **name** (string, required): Name of the macro to delete.
+
+Returns: name, deleted.
+
+## Macro Examples
+
+### Define a macro
+```json
+{
+  "action": "define_macro",
+  "params": {
+    "name": "auth-flow",
+    "description": "Login and get CSRF token",
+    "steps": [
+      {
+        "id": "login",
+        "session_id": "recorded-login-session",
+        "override_body": "username=admin&password={{password}}",
+        "extract": [
+          {
+            "name": "session_cookie",
+            "from": "response",
+            "source": "header",
+            "header_name": "Set-Cookie",
+            "regex": "PHPSESSID=([^;]+)",
+            "group": 1
+          }
+        ]
+      },
+      {
+        "id": "get-csrf",
+        "session_id": "recorded-csrf-session",
+        "override_headers": {"Cookie": "PHPSESSID={{session_cookie}}"},
+        "extract": [
+          {
+            "name": "csrf_token",
+            "from": "response",
+            "source": "body",
+            "regex": "name=\"csrf\" value=\"([^\"]+)\"",
+            "group": 1
+          }
+        ]
+      }
+    ],
+    "initial_vars": {"password": "admin123"}
+  }
+}
+```
+
+### Run a macro
+```json
+{
+  "action": "run_macro",
+  "params": {
+    "name": "auth-flow",
+    "vars": {"password": "override-password"}
+  }
+}
+```
+
+### Delete a macro
+```json
+{
+  "action": "delete_macro",
+  "params": {"name": "auth-flow"}
 }
 ```

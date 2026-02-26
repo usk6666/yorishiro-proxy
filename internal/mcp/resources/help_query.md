@@ -5,10 +5,10 @@ Unified information query tool. Retrieve sessions, session details, messages, pr
 ## Parameters
 
 ### resource (string, required)
-The resource to query. One of: `sessions`, `session`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`.
+The resource to query. One of: `sessions`, `session`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`.
 
 ### id (string, conditional)
-Session ID. Required for `session` and `messages` resources.
+Session ID or macro name. Required for `session`, `messages`, and `macro` resources.
 
 ### filter (object, optional)
 Filter options for the `sessions` resource.
@@ -117,4 +117,26 @@ Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, ma
 ### List intercepted requests with limit
 ```json
 {"resource": "intercept_queue", "limit": 5}
+```
+
+### macros
+List all stored macro definitions with summary information.
+
+Returns: `macros[]` (name, description, step_count, created_at, updated_at), `count`.
+
+### macro
+Get full details of a single macro definition including all steps, extraction rules, and guards.
+
+Requires: `id` (macro name).
+
+Returns: name, description, steps[], initial_vars, timeout_ms, created_at, updated_at.
+
+### List all macros
+```json
+{"resource": "macros"}
+```
+
+### Get macro details
+```json
+{"resource": "macro", "id": "auth-flow"}
 ```
