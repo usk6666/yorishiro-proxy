@@ -233,7 +233,8 @@ func cloneRule(r Rule) Rule {
 		Enabled:   r.Enabled,
 		Direction: r.Direction,
 		Conditions: Conditions{
-			URLPattern: r.Conditions.URLPattern,
+			HostPattern: r.Conditions.HostPattern,
+			PathPattern: r.Conditions.PathPattern,
 		},
 	}
 	if len(r.Conditions.Methods) > 0 {

@@ -132,7 +132,7 @@ func (s *Server) registerConfigure() {
 			"'replace' replaces entire configuration sections. " +
 			"Capture scope controls which requests are recorded (include/exclude rules with hostname, url_prefix, method). " +
 			"TLS passthrough controls which CONNECT destinations bypass MITM interception. " +
-			"Intercept rules define conditions for intercepting requests/responses (url_pattern regex, method whitelist, header regex). " +
+			"Intercept rules define conditions for intercepting requests/responses (host_pattern regex, path_pattern regex, method whitelist, header regex). " +
 			"Intercept queue configures timeout and timeout behavior for blocked requests. " +
 			"All sections are optional; only specified sections are modified.",
 	}, s.handleConfigure)

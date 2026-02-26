@@ -16,7 +16,7 @@ func TestEngine_AddRule(t *testing.T) {
 		Enabled:   true,
 		Direction: DirectionRequest,
 		Conditions: Conditions{
-			URLPattern: "/api/.*",
+			PathPattern: "/api/.*",
 			Methods:    []string{"POST"},
 		},
 	})
@@ -133,7 +133,7 @@ func TestEngine_GetRule(t *testing.T) {
 		Enabled:   true,
 		Direction: DirectionRequest,
 		Conditions: Conditions{
-			URLPattern:  "/api/.*",
+			PathPattern:  "/api/.*",
 			Methods:     []string{"POST", "PUT"},
 			HeaderMatch: map[string]string{"Content-Type": "application/json"},
 		},
@@ -148,8 +148,8 @@ func TestEngine_GetRule(t *testing.T) {
 	if got.ID != original.ID {
 		t.Errorf("ID = %q, want %q", got.ID, original.ID)
 	}
-	if got.Conditions.URLPattern != original.Conditions.URLPattern {
-		t.Errorf("URLPattern = %q, want %q", got.Conditions.URLPattern, original.Conditions.URLPattern)
+	if got.Conditions.PathPattern != original.Conditions.PathPattern {
+		t.Errorf("PathPattern = %q, want %q", got.Conditions.PathPattern, original.Conditions.PathPattern)
 	}
 
 	// Verify it's a copy by modifying the returned rule.
@@ -276,7 +276,7 @@ func TestEngine_MatchesRequest_ORLogic(t *testing.T) {
 		Enabled:   true,
 		Direction: DirectionRequest,
 		Conditions: Conditions{
-			URLPattern: "/api/admin.*",
+			PathPattern: "/api/admin.*",
 		},
 	})
 	e.AddRule(Rule{
@@ -343,7 +343,7 @@ func TestEngine_MatchesRequest_DisabledRuleSkipped(t *testing.T) {
 		Enabled:   false,
 		Direction: DirectionRequest,
 		Conditions: Conditions{
-			URLPattern: ".*",
+			PathPattern: ".*",
 		},
 	})
 
@@ -380,7 +380,7 @@ func TestEngine_MatchesRequest_BothDirection(t *testing.T) {
 		Enabled:   true,
 		Direction: DirectionBoth,
 		Conditions: Conditions{
-			URLPattern: "/api/.*",
+			PathPattern: "/api/.*",
 		},
 	})
 
@@ -448,7 +448,7 @@ func TestEngine_MatchRequestRules(t *testing.T) {
 
 	e.AddRule(Rule{
 		ID: "r1", Enabled: true, Direction: DirectionRequest,
-		Conditions: Conditions{URLPattern: "/api/.*"},
+		Conditions: Conditions{PathPattern: "/api/.*"},
 	})
 	e.AddRule(Rule{
 		ID: "r2", Enabled: true, Direction: DirectionRequest,
@@ -456,7 +456,7 @@ func TestEngine_MatchRequestRules(t *testing.T) {
 	})
 	e.AddRule(Rule{
 		ID: "r3", Enabled: false, Direction: DirectionRequest,
-		Conditions: Conditions{URLPattern: ".*"},
+		Conditions: Conditions{PathPattern: ".*"},
 	})
 
 	u := &url.URL{Path: "/api/users"}
@@ -524,7 +524,7 @@ func TestEngine_ConcurrentAccess(t *testing.T) {
 			Enabled:   true,
 			Direction: DirectionRequest,
 			Conditions: Conditions{
-				URLPattern: "/api/.*",
+				PathPattern: "/api/.*",
 			},
 		})
 	}

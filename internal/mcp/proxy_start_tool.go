@@ -36,7 +36,7 @@ type proxyStartInput struct {
 	TLSPassthrough []string `json:"tls_passthrough,omitempty" jsonschema:"domain patterns that bypass TLS interception (e.g. pinned-service.com, *.googleapis.com)"`
 
 	// InterceptRules configures request/response intercept rules.
-	// Rules define conditions for intercepting traffic based on URL pattern, method, and headers.
+	// Rules define conditions for intercepting traffic based on host pattern, path pattern, method, and headers.
 	// If omitted, no intercept rules are active.
 	InterceptRules []interceptRuleInput `json:"intercept_rules,omitempty" jsonschema:"intercept rules for matching requests/responses to hold"`
 }

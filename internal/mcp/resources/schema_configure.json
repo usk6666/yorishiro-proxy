@@ -149,7 +149,11 @@
       "type": "object",
       "description": "Matching conditions. All specified conditions are AND-ed.",
       "properties": {
-        "url_pattern": {
+        "host_pattern": {
+          "type": "string",
+          "description": "Regex pattern for hostname matching (port excluded)."
+        },
+        "path_pattern": {
           "type": "string",
           "description": "Regex pattern for URL path matching."
         },
