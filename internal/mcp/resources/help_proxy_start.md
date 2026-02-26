@@ -28,6 +28,20 @@ Domain patterns that bypass TLS interception (no MITM). Useful for certificate-p
 - Exact match: `"pinned-service.com"`
 - Wildcard: `"*.googleapis.com"`
 
+### intercept_rules (array of intercept rules, optional)
+Rules for intercepting requests/responses. If omitted, no intercept rules are active.
+
+Each intercept rule has:
+- **id** (string, required): Unique rule identifier.
+- **enabled** (boolean, required): Whether the rule is active.
+- **direction** (string, required): `"request"`, `"response"`, or `"both"`.
+- **conditions** (object, required): Matching criteria (all conditions are AND-ed):
+  - **url_pattern** (string, optional): Regex pattern for URL path matching.
+  - **methods** (array of strings, optional): HTTP method whitelist (case-insensitive).
+  - **header_match** (object, optional): Maps header names to regex patterns (AND logic).
+
+Multiple rules use OR logic: a request/response is intercepted if any enabled rule matches.
+
 ## Usage Examples
 
 ### Start with defaults
@@ -56,5 +70,23 @@ Domain patterns that bypass TLS interception (no MITM). Useful for certificate-p
     ]
   },
   "tls_passthrough": ["*.googleapis.com", "accounts.google.com"]
+}
+```
+
+### Start with intercept rules
+```json
+{
+  "intercept_rules": [
+    {
+      "id": "admin-api",
+      "enabled": true,
+      "direction": "request",
+      "conditions": {
+        "url_pattern": "/api/admin.*",
+        "methods": ["POST", "PUT", "DELETE"],
+        "header_match": {"Content-Type": "application/json"}
+      }
+    }
+  ]
 }
 ```

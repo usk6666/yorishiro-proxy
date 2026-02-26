@@ -23,6 +23,11 @@ type configureInput struct {
 	// For merge: use add/remove arrays.
 	// For replace: use a string array to replace all patterns.
 	TLSPassthrough *configureTLSPassthrough `json:"tls_passthrough,omitempty" jsonschema:"TLS passthrough configuration"`
+
+	// InterceptRules configures intercept rules.
+	// For merge: use add/remove/enable/disable to modify individual rules.
+	// For replace: use rules to replace all rules entirely.
+	InterceptRules *configureInterceptRules `json:"intercept_rules,omitempty" jsonschema:"intercept rules configuration"`
 }
 
 // configureCaptureScope holds capture scope configuration for both merge and replace operations.
@@ -49,6 +54,18 @@ type configureTLSPassthrough struct {
 	Patterns []string `json:"patterns,omitempty" jsonschema:"(replace) full list of passthrough patterns"`
 }
 
+// configureInterceptRules holds intercept rule configuration for both merge and replace operations.
+type configureInterceptRules struct {
+	// Merge operation fields.
+	Add     []interceptRuleInput `json:"add,omitempty" jsonschema:"(merge) rules to add"`
+	Remove  []string             `json:"remove,omitempty" jsonschema:"(merge) rule IDs to remove"`
+	Enable  []string             `json:"enable,omitempty" jsonschema:"(merge) rule IDs to enable"`
+	Disable []string             `json:"disable,omitempty" jsonschema:"(merge) rule IDs to disable"`
+
+	// Replace operation fields: full replacement.
+	Rules []interceptRuleInput `json:"rules,omitempty" jsonschema:"(replace) full list of intercept rules"`
+}
+
 // configureResult is the structured output of the configure tool.
 type configureResult struct {
 	// Status indicates the result of the operation.
@@ -59,6 +76,9 @@ type configureResult struct {
 
 	// TLSPassthrough summarizes the current TLS passthrough state.
 	TLSPassthrough *configurePassthroughResult `json:"tls_passthrough,omitempty"`
+
+	// InterceptRules summarizes the current intercept rules state.
+	InterceptRules *configureInterceptResult `json:"intercept_rules,omitempty"`
 }
 
 // configureScopeResult summarizes capture scope state in the configure response.
@@ -72,16 +92,23 @@ type configurePassthroughResult struct {
 	TotalPatterns int `json:"total_patterns"`
 }
 
+// configureInterceptResult summarizes intercept rules state in the configure response.
+type configureInterceptResult struct {
+	TotalRules   int `json:"total_rules"`
+	EnabledRules int `json:"enabled_rules"`
+}
+
 // registerConfigure registers the configure MCP tool.
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including capture scope and TLS passthrough. " +
+		Description: "Configure runtime proxy settings including capture scope, TLS passthrough, and intercept rules. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
 			"Capture scope controls which requests are recorded (include/exclude rules with hostname, url_prefix, method). " +
 			"TLS passthrough controls which CONNECT destinations bypass MITM interception. " +
-			"Both sections are optional; only specified sections are modified.",
+			"Intercept rules define conditions for intercepting requests/responses (url_pattern regex, method whitelist, header regex). " +
+			"All sections are optional; only specified sections are modified.",
 	}, s.handleConfigure)
 }
 
@@ -130,6 +157,16 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 		}
 	}
 
+	if input.InterceptRules != nil {
+		if s.interceptEngine == nil {
+			return nil, nil, fmt.Errorf("intercept engine is not initialized: proxy may not be running")
+		}
+		if err := s.mergeInterceptRules(input.InterceptRules); err != nil {
+			return nil, nil, fmt.Errorf("intercept_rules merge: %w", err)
+		}
+		result.InterceptRules = s.interceptRulesResult()
+	}
+
 	return nil, result, nil
 }
 
@@ -165,6 +202,16 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		result.TLSPassthrough = &configurePassthroughResult{
 			TotalPatterns: s.passthrough.Len(),
 		}
+	}
+
+	if input.InterceptRules != nil {
+		if s.interceptEngine == nil {
+			return nil, nil, fmt.Errorf("intercept engine is not initialized: proxy may not be running")
+		}
+		if err := s.replaceInterceptRules(input.InterceptRules); err != nil {
+			return nil, nil, fmt.Errorf("intercept_rules replace: %w", err)
+		}
+		result.InterceptRules = s.interceptRulesResult()
 	}
 
 	return nil, result, nil
@@ -221,5 +268,62 @@ func validateScopeRules(kind string, rules []scopeRuleInput) error {
 		}
 	}
 	return nil
+}
+
+// mergeInterceptRules applies delta add/remove/enable/disable operations to intercept rules.
+func (s *Server) mergeInterceptRules(cfg *configureInterceptRules) error {
+	// Process additions first.
+	for _, input := range cfg.Add {
+		r := toInterceptRule(input)
+		if err := s.interceptEngine.AddRule(r); err != nil {
+			return err
+		}
+	}
+
+	// Process removals.
+	for _, id := range cfg.Remove {
+		if err := s.interceptEngine.RemoveRule(id); err != nil {
+			return err
+		}
+	}
+
+	// Process enable.
+	for _, id := range cfg.Enable {
+		if err := s.interceptEngine.EnableRule(id, true); err != nil {
+			return err
+		}
+	}
+
+	// Process disable.
+	for _, id := range cfg.Disable {
+		if err := s.interceptEngine.EnableRule(id, false); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// replaceInterceptRules replaces all intercept rules atomically.
+func (s *Server) replaceInterceptRules(cfg *configureInterceptRules) error {
+	rules := make([]interceptRuleInput, len(cfg.Rules))
+	copy(rules, cfg.Rules)
+
+	return s.applyInterceptRules(rules)
+}
+
+// interceptRulesResult returns the current intercept rules state.
+func (s *Server) interceptRulesResult() *configureInterceptResult {
+	rules := s.interceptEngine.Rules()
+	enabled := 0
+	for _, r := range rules {
+		if r.Enabled {
+			enabled++
+		}
+	}
+	return &configureInterceptResult{
+		TotalRules:   len(rules),
+		EnabledRules: enabled,
+	}
 }
 
