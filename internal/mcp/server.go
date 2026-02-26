@@ -13,19 +13,19 @@ import (
 
 // Server wraps the MCP server and registers proxy-related tools.
 type Server struct {
-	server          *gomcp.Server
-	appCtx          context.Context
-	ca              *cert.CA
-	store           session.Store
-	manager         *proxy.Manager
-	passthrough     *proxy.PassthroughList
-	scope           *proxy.CaptureScope
-	interceptEngine    *intercept.Engine
-	interceptQueue     *intercept.Queue
-	transformPipeline  *rules.Pipeline
-	dbPath             string    // path to the SQLite database file for status reporting
-	replayDoer      httpDoer  // injectable HTTP client for execute(replay) testing
-	rawReplayDialer rawDialer // injectable dialer for replay_raw testing
+	server            *gomcp.Server
+	appCtx            context.Context
+	ca                *cert.CA
+	store             session.Store
+	manager           *proxy.Manager
+	passthrough       *proxy.PassthroughList
+	scope             *proxy.CaptureScope
+	interceptEngine   *intercept.Engine
+	interceptQueue    *intercept.Queue
+	transformPipeline *rules.Pipeline
+	dbPath            string    // path to the SQLite database file for status reporting
+	replayDoer        httpDoer  // injectable HTTP client for execute(replay) testing
+	rawReplayDialer   rawDialer // injectable dialer for replay_raw testing
 }
 
 // ServerOption configures a Server.

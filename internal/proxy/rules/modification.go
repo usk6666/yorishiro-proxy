@@ -12,6 +12,12 @@ import (
 	"strings"
 )
 
+// maxRegexPatternLen is the maximum allowed length (in bytes) for regex
+// patterns in auto-transform rules. This prevents ReDoS (CWE-1333) by
+// limiting the complexity of user-supplied patterns. Consistent with the
+// limits in the macro, body_patch, and fuzzer packages.
+const maxRegexPatternLen = 1024
+
 // Direction specifies whether a rule applies to requests, responses, or both.
 type Direction string
 
@@ -150,6 +156,9 @@ func compileRule(r Rule) (*compiledRule, error) {
 
 	// Compile URL pattern.
 	if r.Conditions.URLPattern != "" {
+		if len(r.Conditions.URLPattern) > maxRegexPatternLen {
+			return nil, fmt.Errorf("url_pattern too long: %d > %d", len(r.Conditions.URLPattern), maxRegexPatternLen)
+		}
 		re, err := regexp.Compile(r.Conditions.URLPattern)
 		if err != nil {
 			return nil, fmt.Errorf("invalid url_pattern %q: %w", r.Conditions.URLPattern, err)
@@ -161,6 +170,9 @@ func compileRule(r Rule) (*compiledRule, error) {
 	if len(r.Conditions.HeaderMatch) > 0 {
 		cr.headerMatchRes = make(map[string]*regexp.Regexp, len(r.Conditions.HeaderMatch))
 		for name, pattern := range r.Conditions.HeaderMatch {
+			if len(pattern) > maxRegexPatternLen {
+				return nil, fmt.Errorf("header_match pattern for %q too long: %d > %d", name, len(pattern), maxRegexPatternLen)
+			}
 			re, err := regexp.Compile(pattern)
 			if err != nil {
 				return nil, fmt.Errorf("invalid header_match pattern for %q: %w", name, err)
@@ -172,6 +184,9 @@ func compileRule(r Rule) (*compiledRule, error) {
 
 	// Compile body replacement pattern.
 	if r.Action.Type == ActionReplaceBody && r.Action.Pattern != "" {
+		if len(r.Action.Pattern) > maxRegexPatternLen {
+			return nil, fmt.Errorf("body replacement pattern too long: %d > %d", len(r.Action.Pattern), maxRegexPatternLen)
+		}
 		re, err := regexp.Compile(r.Action.Pattern)
 		if err != nil {
 			return nil, fmt.Errorf("invalid body replacement pattern %q: %w", r.Action.Pattern, err)
@@ -182,6 +197,13 @@ func compileRule(r Rule) (*compiledRule, error) {
 	return cr, nil
 }
 
+// containsCRLF reports whether s contains any CR (\r) or LF (\n) characters.
+// This is used to prevent HTTP header injection (CWE-113) by rejecting header
+// names and values that contain line terminators.
+func containsCRLF(s string) bool {
+	return strings.ContainsAny(s, "\r\n")
+}
+
 // validateAction checks that the action fields are valid for the given action type.
 func validateAction(a Action) error {
 	switch a.Type {
@@ -189,9 +211,18 @@ func validateAction(a Action) error {
 		if a.Header == "" {
 			return fmt.Errorf("action %q requires header name", a.Type)
 		}
+		if containsCRLF(a.Header) {
+			return fmt.Errorf("action %q: header name contains invalid CR/LF characters", a.Type)
+		}
+		if containsCRLF(a.Value) {
+			return fmt.Errorf("action %q: header value contains invalid CR/LF characters", a.Type)
+		}
 	case ActionRemoveHeader:
 		if a.Header == "" {
 			return fmt.Errorf("action %q requires header name", a.Type)
+		}
+		if containsCRLF(a.Header) {
+			return fmt.Errorf("action %q: header name contains invalid CR/LF characters", a.Type)
 		}
 	case ActionReplaceBody:
 		if a.Pattern == "" {

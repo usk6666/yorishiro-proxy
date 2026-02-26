@@ -3,6 +3,7 @@ package rules
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -491,6 +492,36 @@ func TestValidateAction(t *testing.T) {
 			action:  Action{Type: ActionAddHeader, Header: "X-Test"},
 			wantErr: false,
 		},
+		{
+			name:    "add_header CRLF in header name",
+			action:  Action{Type: ActionAddHeader, Header: "X-Test\r\nInjected", Value: "val"},
+			wantErr: true,
+		},
+		{
+			name:    "add_header LF in header name",
+			action:  Action{Type: ActionAddHeader, Header: "X-Test\nInjected", Value: "val"},
+			wantErr: true,
+		},
+		{
+			name:    "add_header CR in header value",
+			action:  Action{Type: ActionAddHeader, Header: "X-Test", Value: "val\rinjected"},
+			wantErr: true,
+		},
+		{
+			name:    "add_header LF in header value",
+			action:  Action{Type: ActionAddHeader, Header: "X-Test", Value: "val\ninjected: evil"},
+			wantErr: true,
+		},
+		{
+			name:    "set_header CRLF in value",
+			action:  Action{Type: ActionSetHeader, Header: "X-Test", Value: "val\r\nX-Injected: evil"},
+			wantErr: true,
+		},
+		{
+			name:    "remove_header CRLF in header name",
+			action:  Action{Type: ActionRemoveHeader, Header: "X-Test\r\nInjected"},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -498,6 +529,101 @@ func TestValidateAction(t *testing.T) {
 			err := validateAction(tt.action)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateAction() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestContainsCRLF(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"normal-value", false},
+		{"", false},
+		{"value\r\ninjected", true},
+		{"value\ninjected", true},
+		{"value\rinjected", true},
+		{"\r", true},
+		{"\n", true},
+	}
+
+	for _, tt := range tests {
+		got := containsCRLF(tt.input)
+		if got != tt.want {
+			t.Errorf("containsCRLF(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCompileRule_RegexPatternTooLong(t *testing.T) {
+	longPattern := strings.Repeat("a", maxRegexPatternLen+1)
+	exactPattern := strings.Repeat("a", maxRegexPatternLen)
+
+	tests := []struct {
+		name    string
+		rule    Rule
+		wantErr bool
+	}{
+		{
+			name: "url_pattern at limit",
+			rule: Rule{
+				ID: "t1", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: exactPattern},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "url_pattern exceeds limit",
+			rule: Rule{
+				ID: "t2", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: longPattern},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "header_match pattern exceeds limit",
+			rule: Rule{
+				ID: "t3", Direction: DirectionRequest,
+				Conditions: Conditions{HeaderMatch: map[string]string{"X-Test": longPattern}},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "header_match pattern at limit",
+			rule: Rule{
+				ID: "t4", Direction: DirectionRequest,
+				Conditions: Conditions{HeaderMatch: map[string]string{"X-Test": exactPattern}},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "body replacement pattern exceeds limit",
+			rule: Rule{
+				ID: "t5", Direction: DirectionRequest,
+				Action: Action{Type: ActionReplaceBody, Pattern: longPattern, Value: "new"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "body replacement pattern at limit",
+			rule: Rule{
+				ID: "t6", Direction: DirectionRequest,
+				Action: Action{Type: ActionReplaceBody, Pattern: exactPattern, Value: "new"},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileRule(tt.rule)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("compileRule() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

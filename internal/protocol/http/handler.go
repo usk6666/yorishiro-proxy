@@ -94,16 +94,16 @@ var hopByHopHeaders = []string{
 
 // Handler processes HTTP/1.x connections.
 type Handler struct {
-	store           session.Store
-	issuer          *cert.Issuer
-	transport       *gohttp.Transport
-	logger          *slog.Logger
-	requestTimeout  time.Duration
-	passthrough     *proxy.PassthroughList
-	scope           *proxy.CaptureScope
-	interceptEngine    *intercept.Engine
-	interceptQueue     *intercept.Queue
-	transformPipeline  *rules.Pipeline
+	store             session.Store
+	issuer            *cert.Issuer
+	transport         *gohttp.Transport
+	logger            *slog.Logger
+	requestTimeout    time.Duration
+	passthrough       *proxy.PassthroughList
+	scope             *proxy.CaptureScope
+	interceptEngine   *intercept.Engine
+	interceptQueue    *intercept.Queue
+	transformPipeline *rules.Pipeline
 }
 
 // NewHandler creates a new HTTP handler with session recording.
