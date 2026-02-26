@@ -408,11 +408,22 @@ pr_review_results[PR番号] = {
 - 実装成功 + レビューエスカレーション: "In Review" に更新し、未解決所見をコメントに記録
 - 実装失敗: "In Progress" のまま維持し、`mcp__linear-server__create_comment` でエラー詳細を記録
 
-#### 3-3. 後処理
+#### 3-3. Worktree クリーンアップ
 
-- 成功したサブエージェントの worktree は自動クリーンアップされる
-- 失敗した worktree はユーザーが手動確認できるよう残す
-- 次に実行可能なマイルストーン/Batch を提案する
+Claude Code の Task ツールは worktree に変更がある場合、完了後も自動削除しない。
+オーケストレーター（呼び出し元）が明示的に削除する。
+
+全バッチ・レビューサイクルが完了した後、以下を実行して全 worktree を削除する:
+
+    make worktree-clean
+
+- 成功・失敗を問わず全 worktree を削除する（変更は remote に push 済み）
+- 失敗した Issue のデバッグ情報は Linear コメントと `git checkout <branch-name>` で参照可能
+- `git worktree remove` はディレクトリのみ削除し、ブランチ・コミットは保持される
+
+#### 3-4. 次ステップ提案
+
+次に実行可能なマイルストーン/Batch を提案する。
 
 ---
 

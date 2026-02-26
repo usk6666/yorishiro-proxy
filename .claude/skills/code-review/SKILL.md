@@ -90,3 +90,9 @@ Task ツールで起動:
 
 - CRITICAL: X, HIGH: X, MEDIUM: X, LOW: X, NIT: X
 ```
+
+### Step 7: Worktree クリーンアップ
+
+結果報告後、サブエージェントの worktree を削除する:
+
+    make worktree-clean
