@@ -53,10 +53,10 @@ type executeParams struct {
 	Tag                string            `json:"tag,omitempty" jsonschema:"tag to attach to the result session"`
 
 	// resend_raw parameters
-	TargetAddr       string     `json:"target_addr,omitempty" jsonschema:"target address (host:port) for resend_raw"`
-	UseTLS           *bool      `json:"use_tls,omitempty" jsonschema:"use TLS for resend_raw connection"`
-	OverrideRawBase64 string    `json:"override_raw_base64,omitempty" jsonschema:"Base64-encoded raw bytes to replace entire payload (patches ignored)"`
-	Patches          []RawPatch `json:"patches,omitempty" jsonschema:"byte-level patches for resend_raw (offset, binary find/replace, text find/replace)"`
+	TargetAddr        string     `json:"target_addr,omitempty" jsonschema:"target address (host:port) for resend_raw"`
+	UseTLS            *bool      `json:"use_tls,omitempty" jsonschema:"use TLS for resend_raw connection"`
+	OverrideRawBase64 string     `json:"override_raw_base64,omitempty" jsonschema:"Base64-encoded raw bytes to replace entire payload (patches ignored)"`
+	Patches           []RawPatch `json:"patches,omitempty" jsonschema:"byte-level patches for resend_raw (offset, binary find/replace, text find/replace)"`
 
 	// delete_sessions parameters
 	OlderThanDays *int `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
@@ -81,6 +81,9 @@ type executeParams struct {
 
 	// fuzz job control (fuzz_pause, fuzz_resume, fuzz_cancel)
 	FuzzID string `json:"fuzz_id,omitempty" jsonschema:"fuzz job ID for pause/resume/cancel"`
+
+	// hooks parameters (resend, fuzz)
+	Hooks *hooksInput `json:"hooks,omitempty" jsonschema:"pre_send/post_receive hooks for macro integration"`
 
 	// macro parameters (define_macro, run_macro, delete_macro)
 	Name         string            `json:"name,omitempty" jsonschema:"macro name"`
@@ -223,6 +226,9 @@ type requestPreview struct {
 // handleExecuteResend handles the resend action within the execute tool.
 // It retrieves the original session, applies all mutations, and either sends the request
 // or returns a dry-run preview. The result is recorded as a new session.
+// When hooks are configured, pre_send hooks execute before mutation application
+// (providing KV Store values for template expansion), and post_receive hooks
+// execute after the response is received.
 func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
 	if s.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
@@ -230,6 +236,30 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 
 	if params.SessionID == "" {
 		return nil, nil, fmt.Errorf("session_id is required for resend action")
+	}
+
+	// Validate hooks if present.
+	if err := validateHooks(params.Hooks); err != nil {
+		return nil, nil, fmt.Errorf("invalid hooks: %w", err)
+	}
+
+	// Execute pre_send hook if configured.
+	var kvStore map[string]string
+	if params.Hooks != nil && params.Hooks.PreSend != nil {
+		state := &hookState{}
+		executor := newHookExecutor(s, params.Hooks, state)
+		var err error
+		kvStore, err = executor.executePreSend(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Apply template expansion from hook KV Store to override parameters.
+	if len(kvStore) > 0 {
+		if err := expandParamsWithKVStore(&params, kvStore); err != nil {
+			return nil, nil, fmt.Errorf("template expansion: %w", err)
+		}
 	}
 
 	// Retrieve the original session and its send message.
@@ -404,6 +434,15 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	}
 	if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
 		return nil, nil, fmt.Errorf("save resend receive message: %w", err)
+	}
+
+	// Execute post_receive hook if configured.
+	if params.Hooks != nil && params.Hooks.PostReceive != nil {
+		state := &hookState{}
+		executor := newHookExecutor(s, params.Hooks, state)
+		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	respBodyStr, respBodyEncoding := encodeBody(respBody)
@@ -930,6 +969,8 @@ func (s *Server) handleExecuteDrop(_ context.Context, params executeParams) (*go
 
 // handleExecuteFuzz handles the fuzz action within the execute tool.
 // It starts an asynchronous fuzz job and returns the fuzz_id immediately.
+// When hooks are configured, they are passed to the fuzzer as callbacks
+// that execute at each iteration.
 func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *fuzzer.AsyncResult, error) {
 	if s.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
@@ -943,6 +984,11 @@ func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*
 	}
 	if len(params.Positions) == 0 {
 		return nil, nil, fmt.Errorf("at least one position is required for fuzz action")
+	}
+
+	// Validate hooks if present.
+	if err := validateHooks(params.Hooks); err != nil {
+		return nil, nil, fmt.Errorf("invalid hooks: %w", err)
 	}
 
 	cfg := fuzzer.RunConfig{
@@ -969,6 +1015,11 @@ func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*
 	}
 	if params.MaxRetries != nil {
 		cfg.MaxRetries = *params.MaxRetries
+	}
+
+	// Set up hooks callbacks if configured.
+	if params.Hooks != nil {
+		cfg.Hooks = newFuzzHookCallbacks(s, params.Hooks)
 	}
 
 	// Use the application-level context so the job survives beyond the MCP request.
