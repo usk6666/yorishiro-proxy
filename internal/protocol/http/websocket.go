@@ -97,6 +97,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 
 	// Validate 101 Switching Protocols response.
 	if resp.StatusCode != gohttp.StatusSwitchingProtocols {
+		defer resp.Body.Close()
 		logger.Warn("websocket upgrade rejected by upstream", "status", resp.StatusCode)
 		// Forward the non-101 response to the client.
 		if writeErr := resp.Write(conn); writeErr != nil {
@@ -116,8 +117,9 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	}
 
 	// Delegate to the WebSocket handler for frame relay.
+	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
 	wsHandler := ws.NewHandler(h.store, logger)
-	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, req, resp, connID, clientAddr, connInfo)
+	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
 // handleWebSocketTLS processes a WebSocket upgrade request in HTTPS MITM mode (WSS).
@@ -206,8 +208,8 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	// Validate 101 Switching Protocols response.
 	if resp.StatusCode != gohttp.StatusSwitchingProtocols {
 		logger.Warn("wss websocket upgrade rejected by upstream", "status", resp.StatusCode)
-		// Read and forward the full response body.
-		body, _ := io.ReadAll(resp.Body)
+		// Read and forward the response body (limited to 1MB to prevent OOM from malicious upstream).
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		writeResponse(conn, resp, body)
 		return nil
@@ -228,6 +230,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	}
 
 	// Delegate to the WebSocket handler for frame relay.
+	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
 	wsHandler := ws.NewHandler(h.store, logger)
-	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, req, resp, connID, clientAddr, connInfo)
+	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }

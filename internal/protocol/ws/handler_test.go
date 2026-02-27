@@ -170,7 +170,7 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-1", "127.0.0.1:1234", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-1", "127.0.0.1:1234", nil)
 	}()
 
 	// Client sends a text frame through the proxy.
@@ -315,7 +315,7 @@ func TestHandleUpgrade_BinaryFrame(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-2", "127.0.0.1:2345", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-2", "127.0.0.1:2345", nil)
 	}()
 
 	// Client sends a binary frame.
@@ -394,7 +394,7 @@ func TestHandleUpgrade_PingPongRelay(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-3", "127.0.0.1:3456", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-3", "127.0.0.1:3456", nil)
 	}()
 
 	// Server sends a ping.
@@ -493,7 +493,7 @@ func TestHandleUpgrade_FragmentedMessage(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-4", "127.0.0.1:4567", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-4", "127.0.0.1:4567", nil)
 	}()
 
 	// Client sends fragmented text message: "Hello" + " World"
@@ -584,7 +584,7 @@ func TestHandleUpgrade_CloseFrameEndsRelay(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-5", "127.0.0.1:5678", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-5", "127.0.0.1:5678", nil)
 	}()
 
 	// Server sends close frame immediately.
@@ -644,7 +644,7 @@ func TestHandleUpgrade_ContextCancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-6", "127.0.0.1:6789", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-6", "127.0.0.1:6789", nil)
 	}()
 
 	// Give the relay time to start.
@@ -682,7 +682,7 @@ func TestHandleUpgrade_NilStore(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-7", "127.0.0.1:7890", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-7", "127.0.0.1:7890", nil)
 	}()
 
 	// Send a text frame and close.
@@ -733,7 +733,7 @@ func TestHandleUpgrade_ConnInfoRecorded(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-8", "10.0.0.1:12345", connInfo)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-8", "10.0.0.1:12345", connInfo)
 	}()
 
 	// Close immediately.
@@ -787,7 +787,7 @@ func TestHandleUpgrade_MultipleMessages(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-9", "127.0.0.1:9012", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-9", "127.0.0.1:9012", nil)
 	}()
 
 	// Exchange multiple messages.
@@ -893,7 +893,7 @@ func TestHandleUpgrade_ConnectionDrop(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, req, resp, "conn-10", "127.0.0.1:1234", nil)
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-10", "127.0.0.1:1234", nil)
 	}()
 
 	// Give relay time to start.

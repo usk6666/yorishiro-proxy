@@ -20,6 +20,10 @@ import (
 // Payloads exceeding this size are truncated in the session store.
 const maxRecordPayloadSize = 1 << 20 // 1MB
 
+// maxMessageSize limits the total assembled size of a fragmented WebSocket message.
+// This prevents unbounded memory growth from continuation frame accumulation (CWE-400).
+const maxMessageSize = 64 << 20 // 64MB
+
 // Handler manages a WebSocket connection relay between client and upstream.
 // It is not a ProtocolHandler — it is invoked from the HTTP handler when
 // an Upgrade: websocket request is detected.
@@ -44,12 +48,14 @@ func NewHandler(store session.Store, logger *slog.Logger) *Handler {
 //   - ctx: context for cancellation
 //   - clientConn: the client-side connection (may be a tls.Conn for WSS)
 //   - upstreamConn: the upstream connection to the WebSocket server
+//   - upstreamBufReader: optional bufio.Reader wrapping upstreamConn that may contain
+//     buffered bytes from HTTP response parsing. If nil, a new bufio.Reader is created.
 //   - upgradeReq: the original HTTP Upgrade request
 //   - upgradeResp: the 101 Switching Protocols response from upstream
 //   - connID: connection identifier for log correlation
 //   - clientAddr: client's remote address
 //   - connInfo: optional connection metadata (TLS info etc.)
-func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, upgradeReq *gohttp.Request, upgradeResp *gohttp.Response, connID, clientAddr string, connInfo *session.ConnectionInfo) error {
+func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, upgradeReq *gohttp.Request, upgradeResp *gohttp.Response, connID, clientAddr string, connInfo *session.ConnectionInfo) error {
 	start := time.Now()
 
 	// Create the WebSocket session record.
@@ -76,7 +82,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	)
 
 	// Run bidirectional frame relay.
-	err := h.relayFrames(ctx, clientConn, upstreamConn, sess.ID, start)
+	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, sess.ID, start)
 
 	// Update session state to complete.
 	duration := time.Since(start)
@@ -105,7 +111,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 // between the client and upstream server. Each frame is recorded to the
 // session store. The relay stops when a Close frame is received, a connection
 // error occurs, or the context is cancelled.
-func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, sessionID string, start time.Time) error {
+func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, sessionID string, start time.Time) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -121,7 +127,12 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	errCh := make(chan error, 2)
 
 	clientReader := bufio.NewReader(clientConn)
-	upstreamReader := bufio.NewReader(upstreamConn)
+	// Reuse the upstream bufio.Reader if provided (preserves buffered bytes from HTTP
+	// response parsing). Otherwise create a new one.
+	upstreamReader := upstreamBufReader
+	if upstreamReader == nil {
+		upstreamReader = bufio.NewReader(upstreamConn)
+	}
 
 	// Client -> Upstream relay (direction: "send").
 	wg.Add(1)
@@ -156,6 +167,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 
 // relayDirection reads frames from src, records them, and writes them to dst.
 // It handles fragmentation by assembling continuation frames into complete messages.
+// Fragment accumulation is capped at maxMessageSize to prevent OOM (CWE-400).
 func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, sessionID, direction string, seq *atomic.Int64, start time.Time) error {
 	// Fragment assembly state.
 	var fragmentBuf []byte
@@ -217,12 +229,14 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 				// Record what we have and start fresh.
 				h.logger.Warn("websocket protocol violation: new data frame while fragment pending",
 					"session_id", sessionID, "direction", direction)
+				fragmentBuf = nil
+				inFragment = false
 			}
 			if frame.Fin {
 				// Single unfragmented message.
 				h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, sessionID, direction, seq, start)
 			} else {
-				// First fragment: start accumulating.
+				// First fragment: start accumulating (cap checked on continuation).
 				fragmentOpcode = frame.Opcode
 				fragmentBuf = make([]byte, len(frame.Payload))
 				copy(fragmentBuf, frame.Payload)
@@ -234,6 +248,21 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 				h.logger.Warn("websocket protocol violation: continuation frame without initial fragment",
 					"session_id", sessionID, "direction", direction)
 				continue
+			}
+			if int64(len(fragmentBuf))+int64(len(frame.Payload)) > maxMessageSize {
+				h.logger.Warn("websocket message size limit exceeded, closing connection",
+					"session_id", sessionID, "direction", direction,
+					"accumulated", len(fragmentBuf), "incoming", len(frame.Payload),
+					"limit", maxMessageSize)
+				// Discard fragment buffer and send Close frame (1009 = message too big).
+				fragmentBuf = nil
+				inFragment = false
+				closePayload := make([]byte, 2)
+				closePayload[0] = 0x03
+				closePayload[1] = 0xF1 // 1009
+				closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Payload: closePayload}
+				_ = WriteFrame(dst, closeFrame)
+				return fmt.Errorf("fragmented message exceeded maxMessageSize (%d bytes)", maxMessageSize)
 			}
 			fragmentBuf = append(fragmentBuf, frame.Payload...)
 			if frame.Fin {
