@@ -332,12 +332,20 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	// Dry-run mode: return preview without sending.
 	if params.DryRun {
 		bodyStr, bodyEncoding := encodeBody(reqBody)
+		// Filter out empty-slice headers (removed headers) from the preview
+		// since they represent suppressed headers that won't be sent.
+		previewHeaders := make(map[string][]string)
+		for k, v := range headers {
+			if len(v) > 0 {
+				previewHeaders[k] = v
+			}
+		}
 		preview := &executeDryRunResult{
 			DryRun: true,
 			RequestPreview: &requestPreview{
 				Method:       method,
 				URL:          targetURL.String(),
-				Headers:      headers,
+				Headers:      previewHeaders,
 				Body:         bodyStr,
 				BodyEncoding: bodyEncoding,
 			},
@@ -357,6 +365,12 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 
 	// Set headers on the request.
 	for key, values := range headers {
+		if len(values) == 0 {
+			// Empty slice suppresses Go's net/http default header auto-addition
+			// (e.g., User-Agent: Go-http-client/1.1).
+			httpReq.Header[key] = values
+			continue
+		}
 		for i, v := range values {
 			if i == 0 {
 				httpReq.Header.Set(key, v)
@@ -506,9 +520,11 @@ func buildResendHeaders(originalHeaders map[string][]string, params executeParam
 	}
 
 	// Step 1: Remove headers.
+	// Use empty slice (not delete) to suppress Go's net/http default headers
+	// (e.g., User-Agent: Go-http-client/1.1) that are auto-added when the key is absent.
 	for _, key := range params.RemoveHeaders {
 		// Case-insensitive removal: normalize to canonical form.
-		delete(headers, http.CanonicalHeaderKey(key))
+		headers[http.CanonicalHeaderKey(key)] = []string{}
 	}
 
 	// Step 2: Override headers (replace entire value for a key).
