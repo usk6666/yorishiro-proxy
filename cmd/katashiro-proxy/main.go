@@ -18,6 +18,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
+	prototcp "github.com/usk6666/katashiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
@@ -137,7 +138,10 @@ func run(ctx context.Context) error {
 	fuzzRegistry := fuzzer.NewJobRegistry()
 	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
 
-	detector := protocol.NewDetector(httpHandler)
+	// Raw TCP fallback handler: must be last since Detect() always returns true.
+	tcpHandler := prototcp.NewHandler(store, nil, logger)
+
+	detector := protocol.NewDetector(httpHandler, tcpHandler)
 
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)
