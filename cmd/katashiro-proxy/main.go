@@ -19,6 +19,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
 	protohttp2 "github.com/usk6666/katashiro-proxy/internal/protocol/http2"
+	prototcp "github.com/usk6666/katashiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
@@ -146,8 +147,11 @@ func run(ctx context.Context) error {
 	fuzzRegistry := fuzzer.NewJobRegistry()
 	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
 
-	// Register h2c handler before HTTP/1.x to detect HTTP/2 connection preface first.
-	detector := protocol.NewDetector(http2Handler, httpHandler)
+	// Raw TCP fallback handler: must be last since Detect() always returns true.
+	tcpHandler := prototcp.NewHandler(store, nil, logger)
+
+	// Register handlers in priority order: h2c → HTTP/1.x → raw TCP fallback.
+	detector := protocol.NewDetector(http2Handler, httpHandler, tcpHandler)
 
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)
