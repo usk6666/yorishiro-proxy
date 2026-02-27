@@ -787,9 +787,11 @@ func TestBuildResendHeaders(t *testing.T) {
 
 	got := buildResendHeaders(original, params)
 
-	// X-Remove-Me should be gone.
-	if _, exists := got["X-Remove-Me"]; exists {
-		t.Error("X-Remove-Me should have been removed")
+	// X-Remove-Me should be present with an empty slice to suppress Go's defaults.
+	if vals, exists := got["X-Remove-Me"]; !exists {
+		t.Error("X-Remove-Me should be present with empty slice")
+	} else if len(vals) != 0 {
+		t.Errorf("X-Remove-Me = %v, want empty slice", vals)
 	}
 
 	// Authorization should be overridden.
@@ -824,9 +826,11 @@ func TestBuildResendHeaders_CaseInsensitiveRemove(t *testing.T) {
 
 	got := buildResendHeaders(original, params)
 
-	// Content-Type should be removed even though the case doesn't match.
-	if _, exists := got["Content-Type"]; exists {
-		t.Error("Content-Type should have been removed (case-insensitive)")
+	// Content-Type should be present with empty slice even though the case doesn't match.
+	if vals, exists := got["Content-Type"]; !exists {
+		t.Error("Content-Type should be present with empty slice (case-insensitive)")
+	} else if len(vals) != 0 {
+		t.Errorf("Content-Type = %v, want empty slice", vals)
 	}
 }
 
@@ -993,6 +997,176 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 	}
 	if patchedBody["user"] != "modified" {
 		t.Errorf("user = %q, want modified", patchedBody["user"])
+	}
+}
+
+// TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults verifies that remove_headers
+// completely suppresses headers including Go's auto-added defaults (e.g., User-Agent).
+// This is the regression test for USK-95.
+func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/remove-headers-test")
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers: map[string][]string{
+				"User-Agent": {"curl/7.88.1"},
+				"Accept":     {"*/*"},
+			},
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	// Remove User-Agent header and actually send the request.
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"session_id":     entry.Session.ID,
+			"remove_headers": []any{"User-Agent"},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out executeResendResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Parse the echo server response to check actual headers received.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo: %v", err)
+	}
+
+	// The echo server returns headers as map[string][]string.
+	echoHeaders, ok := echo["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("echo headers is not a map: %v", echo["headers"])
+	}
+
+	// User-Agent should NOT be present at all (not even Go's default "Go-http-client/1.1").
+	if ua, exists := echoHeaders["User-Agent"]; exists {
+		t.Errorf("User-Agent header should be absent, but got: %v", ua)
+	}
+
+	// Accept header should still be present since it was not removed.
+	if _, exists := echoHeaders["Accept"]; !exists {
+		t.Error("Accept header should still be present")
+	}
+}
+
+// TestExecute_Resend_RemoveHeaders_DryRun verifies that removed headers do not
+// appear in the dry-run preview.
+func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/remove-headers-dryrun")
+	entry := saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers: map[string][]string{
+				"User-Agent": {"curl/7.88.1"},
+				"Accept":     {"*/*"},
+			},
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"session_id":     entry.Session.ID,
+			"remove_headers": []any{"User-Agent"},
+			"dry_run":        true,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out executeDryRunResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// User-Agent should not appear in the dry-run preview.
+	if _, exists := out.RequestPreview.Headers["User-Agent"]; exists {
+		t.Error("User-Agent should not appear in dry-run preview when removed")
+	}
+
+	// Accept should still be present.
+	if _, exists := out.RequestPreview.Headers["Accept"]; !exists {
+		t.Error("Accept header should still be present in dry-run preview")
+	}
+}
+
+// TestBuildResendHeaders_RemoveHeaders_EmptySlice verifies that removed headers
+// are set to empty slices (not deleted) to suppress Go's net/http defaults.
+func TestBuildResendHeaders_RemoveHeaders_EmptySlice(t *testing.T) {
+	original := map[string][]string{
+		"User-Agent":   {"curl/7.88.1"},
+		"Content-Type": {"application/json"},
+	}
+
+	params := executeParams{
+		RemoveHeaders: []string{"User-Agent"},
+	}
+
+	got := buildResendHeaders(original, params)
+
+	// User-Agent should be present with an empty slice, not deleted.
+	if vals, exists := got["User-Agent"]; !exists {
+		t.Error("User-Agent should be present with empty slice")
+	} else if len(vals) != 0 {
+		t.Errorf("User-Agent = %v, want empty slice", vals)
+	}
+
+	// Content-Type should be unchanged.
+	if v := got["Content-Type"]; len(v) != 1 || v[0] != "application/json" {
+		t.Errorf("Content-Type = %v, want [application/json]", v)
 	}
 }
 
