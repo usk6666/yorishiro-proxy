@@ -8,15 +8,19 @@
     "resource": {
       "type": "string",
       "description": "The resource to query.",
-      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro"]
+      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"]
     },
     "id": {
       "type": "string",
       "description": "Session ID or macro name. Required for session, messages, and macro resources."
     },
+    "fuzz_id": {
+      "type": "string",
+      "description": "Fuzz job ID. Required for fuzz_results resource."
+    },
     "filter": {
       "type": "object",
-      "description": "Filter options for the sessions resource.",
+      "description": "Filter options for sessions, fuzz_jobs, and fuzz_results resources.",
       "properties": {
         "protocol": {
           "type": "string",
@@ -33,9 +37,32 @@
         "status_code": {
           "type": "integer",
           "description": "HTTP response status code filter."
+        },
+        "body_contains": {
+          "type": "string",
+          "description": "Response body substring filter (fuzz_results)."
+        },
+        "status": {
+          "type": "string",
+          "description": "Fuzz job status filter (e.g. running, completed)."
+        },
+        "tag": {
+          "type": "string",
+          "description": "Fuzz job tag filter (exact match)."
         }
       },
       "additionalProperties": false
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of field names to include in the response (fuzz_jobs, fuzz_results)."
+    },
+    "sort_by": {
+      "type": "string",
+      "description": "Field to sort results by (fuzz_results: index_num, status_code, duration_ms, response_length)."
     },
     "limit": {
       "type": "integer",

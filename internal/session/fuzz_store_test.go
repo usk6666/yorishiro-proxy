@@ -325,3 +325,343 @@ func TestSchemaV2_Migration(t *testing.T) {
 		t.Fatalf("fuzz_jobs table not created: %v", err)
 	}
 }
+
+// --- ListFuzzJobs tests ---
+
+func TestListFuzzJobs_Empty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	jobs, err := store.ListFuzzJobs(ctx, FuzzJobListOptions{})
+	if err != nil {
+		t.Fatalf("ListFuzzJobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("got %d jobs, want 0", len(jobs))
+	}
+}
+
+func TestListFuzzJobs_WithData(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create jobs with different statuses and tags.
+	for _, tc := range []struct {
+		status string
+		tag    string
+	}{
+		{"running", "scan-1"},
+		{"completed", "scan-1"},
+		{"running", "scan-2"},
+		{"error", ""},
+	} {
+		job := &FuzzJob{
+			SessionID: "sess-1",
+			Config:    `{}`,
+			Status:    tc.status,
+			Tag:       tc.tag,
+			CreatedAt: time.Now().UTC(),
+			Total:     10,
+		}
+		if err := store.SaveFuzzJob(ctx, job); err != nil {
+			t.Fatalf("SaveFuzzJob: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name     string
+		opts     FuzzJobListOptions
+		wantLen  int
+		wantDesc string
+	}{
+		{
+			name:    "no filter",
+			opts:    FuzzJobListOptions{},
+			wantLen: 4,
+		},
+		{
+			name:    "filter by status running",
+			opts:    FuzzJobListOptions{Status: "running"},
+			wantLen: 2,
+		},
+		{
+			name:    "filter by status completed",
+			opts:    FuzzJobListOptions{Status: "completed"},
+			wantLen: 1,
+		},
+		{
+			name:    "filter by tag scan-1",
+			opts:    FuzzJobListOptions{Tag: "scan-1"},
+			wantLen: 2,
+		},
+		{
+			name:    "filter by status and tag",
+			opts:    FuzzJobListOptions{Status: "running", Tag: "scan-1"},
+			wantLen: 1,
+		},
+		{
+			name:    "limit",
+			opts:    FuzzJobListOptions{Limit: 2},
+			wantLen: 2,
+		},
+		{
+			name:    "offset",
+			opts:    FuzzJobListOptions{Limit: 2, Offset: 3},
+			wantLen: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jobs, err := store.ListFuzzJobs(ctx, tt.opts)
+			if err != nil {
+				t.Fatalf("ListFuzzJobs: %v", err)
+			}
+			if len(jobs) != tt.wantLen {
+				t.Errorf("got %d jobs, want %d", len(jobs), tt.wantLen)
+			}
+		})
+	}
+}
+
+func TestCountFuzzJobs(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, status := range []string{"running", "completed", "running"} {
+		job := &FuzzJob{
+			SessionID: "sess-1",
+			Config:    `{}`,
+			Status:    status,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := store.SaveFuzzJob(ctx, job); err != nil {
+			t.Fatalf("SaveFuzzJob: %v", err)
+		}
+	}
+
+	count, err := store.CountFuzzJobs(ctx, FuzzJobListOptions{})
+	if err != nil {
+		t.Fatalf("CountFuzzJobs: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("count = %d, want 3", count)
+	}
+
+	count, err = store.CountFuzzJobs(ctx, FuzzJobListOptions{Status: "running"})
+	if err != nil {
+		t.Fatalf("CountFuzzJobs(running): %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count(running) = %d, want 2", count)
+	}
+}
+
+// --- CountFuzzResults tests ---
+
+func TestCountFuzzResults(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	job := &FuzzJob{
+		SessionID: sess.ID,
+		Config:    `{}`,
+		Status:    "completed",
+		CreatedAt: time.Now().UTC(),
+		Total:     3,
+	}
+	if err := store.SaveFuzzJob(ctx, job); err != nil {
+		t.Fatalf("SaveFuzzJob: %v", err)
+	}
+
+	for i := range 3 {
+		s := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+		if err := store.SaveSession(ctx, s); err != nil {
+			t.Fatalf("SaveSession: %v", err)
+		}
+		statusCode := 200
+		if i == 1 {
+			statusCode = 401
+		}
+		r := &FuzzResult{
+			FuzzID: job.ID, IndexNum: i, SessionID: s.ID,
+			Payloads: `{}`, StatusCode: statusCode,
+		}
+		if err := store.SaveFuzzResult(ctx, r); err != nil {
+			t.Fatalf("SaveFuzzResult: %v", err)
+		}
+	}
+
+	count, err := store.CountFuzzResults(ctx, job.ID, FuzzResultListOptions{})
+	if err != nil {
+		t.Fatalf("CountFuzzResults: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("count = %d, want 3", count)
+	}
+
+	count, err = store.CountFuzzResults(ctx, job.ID, FuzzResultListOptions{StatusCode: 200})
+	if err != nil {
+		t.Fatalf("CountFuzzResults(200): %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count(200) = %d, want 2", count)
+	}
+}
+
+// --- SortBy and BodyContains tests ---
+
+func TestListFuzzResults_SortBy(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	job := &FuzzJob{
+		SessionID: sess.ID,
+		Config:    `{}`,
+		Status:    "completed",
+		CreatedAt: time.Now().UTC(),
+		Total:     3,
+	}
+	if err := store.SaveFuzzJob(ctx, job); err != nil {
+		t.Fatalf("SaveFuzzJob: %v", err)
+	}
+
+	// Create results with varying status codes.
+	for i, sc := range []int{500, 200, 301} {
+		s := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+		if err := store.SaveSession(ctx, s); err != nil {
+			t.Fatalf("SaveSession: %v", err)
+		}
+		r := &FuzzResult{
+			FuzzID: job.ID, IndexNum: i, SessionID: s.ID,
+			Payloads: `{}`, StatusCode: sc, DurationMs: (3 - i) * 100,
+		}
+		if err := store.SaveFuzzResult(ctx, r); err != nil {
+			t.Fatalf("SaveFuzzResult: %v", err)
+		}
+	}
+
+	// Sort by status_code.
+	got, err := store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{SortBy: "status_code"})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d results, want 3", len(got))
+	}
+	if got[0].StatusCode != 200 {
+		t.Errorf("results[0].StatusCode = %d, want 200", got[0].StatusCode)
+	}
+	if got[1].StatusCode != 301 {
+		t.Errorf("results[1].StatusCode = %d, want 301", got[1].StatusCode)
+	}
+	if got[2].StatusCode != 500 {
+		t.Errorf("results[2].StatusCode = %d, want 500", got[2].StatusCode)
+	}
+
+	// Sort by duration_ms.
+	got, err = store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{SortBy: "duration_ms"})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if got[0].DurationMs > got[1].DurationMs || got[1].DurationMs > got[2].DurationMs {
+		t.Errorf("results not sorted by duration_ms: %d, %d, %d", got[0].DurationMs, got[1].DurationMs, got[2].DurationMs)
+	}
+
+	// Invalid sort_by falls back to index_num.
+	got, err = store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{SortBy: "invalid"})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if got[0].IndexNum != 0 || got[1].IndexNum != 1 || got[2].IndexNum != 2 {
+		t.Errorf("expected default index_num sort, got indices: %d, %d, %d", got[0].IndexNum, got[1].IndexNum, got[2].IndexNum)
+	}
+}
+
+func TestListFuzzResults_BodyContains(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	job := &FuzzJob{
+		SessionID: sess.ID,
+		Config:    `{}`,
+		Status:    "completed",
+		CreatedAt: time.Now().UTC(),
+		Total:     3,
+	}
+	if err := store.SaveFuzzJob(ctx, job); err != nil {
+		t.Fatalf("SaveFuzzJob: %v", err)
+	}
+
+	// Create results with sessions that have response messages containing different bodies.
+	bodies := []string{`{"role":"admin","ok":true}`, `{"role":"user","ok":true}`, `{"error":"denied"}`}
+	for i, body := range bodies {
+		s := &Session{Protocol: "HTTP/1.x", SessionType: "unary", State: "complete", Timestamp: time.Now()}
+		if err := store.SaveSession(ctx, s); err != nil {
+			t.Fatalf("SaveSession: %v", err)
+		}
+
+		// Append a receive message with the body.
+		msg := &Message{
+			ID:        s.ID + "-recv",
+			SessionID: s.ID,
+			Sequence:  0,
+			Direction: "receive",
+			Timestamp: time.Now(),
+			Body:      []byte(body),
+		}
+		if err := store.AppendMessage(ctx, msg); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+
+		r := &FuzzResult{
+			FuzzID: job.ID, IndexNum: i, SessionID: s.ID,
+			Payloads: `{}`, StatusCode: 200,
+		}
+		if err := store.SaveFuzzResult(ctx, r); err != nil {
+			t.Fatalf("SaveFuzzResult: %v", err)
+		}
+	}
+
+	// Filter by body_contains "admin".
+	got, err := store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{BodyContains: "admin"})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d results with body_contains=admin, want 1", len(got))
+	}
+
+	// Filter by body_contains "ok".
+	got, err = store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{BodyContains: "ok"})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d results with body_contains=ok, want 2", len(got))
+	}
+
+	// No match.
+	got, err = store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{BodyContains: "nonexistent"})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d results with body_contains=nonexistent, want 0", len(got))
+	}
+}

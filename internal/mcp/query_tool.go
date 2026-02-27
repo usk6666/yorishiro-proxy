@@ -16,15 +16,25 @@ import (
 
 // queryInput is the typed input for the query tool.
 type queryInput struct {
-	// Resource specifies what to query: sessions, session, messages, status, config, ca_cert, macros, macro.
-	Resource string `json:"resource" jsonschema:"resource to query: sessions, session, messages, status, config, ca_cert, macros, macro"`
+	// Resource specifies what to query: sessions, session, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results.
+	Resource string `json:"resource" jsonschema:"resource to query: sessions, session, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results"`
 
 	// ID is required for session and messages resources.
 	// For session: the session ID. For messages: the session_id.
 	ID string `json:"id,omitempty" jsonschema:"session ID (required for session and messages resources)"`
 
-	// Filter is used with the sessions resource for filtering results.
-	Filter *queryFilter `json:"filter,omitempty" jsonschema:"filter options for sessions resource"`
+	// FuzzID is required for the fuzz_results resource (fuzz job ID).
+	FuzzID string `json:"fuzz_id,omitempty" jsonschema:"fuzz job ID (required for fuzz_results resource)"`
+
+	// Filter is used with the sessions and fuzz resources for filtering results.
+	Filter *queryFilter `json:"filter,omitempty" jsonschema:"filter options for sessions and fuzz resources"`
+
+	// Fields controls which fields are returned in the response.
+	// If empty, all fields are returned.
+	Fields []string `json:"fields,omitempty" jsonschema:"list of field names to include in the response"`
+
+	// SortBy specifies the field to sort results by (used by fuzz_results).
+	SortBy string `json:"sort_by,omitempty" jsonschema:"field name to sort results by"`
 
 	// Limit is the maximum number of items to return (default 50, max 1000).
 	Limit int `json:"limit,omitempty" jsonschema:"maximum number of items to return (default 50, max 1000)"`
@@ -33,7 +43,7 @@ type queryInput struct {
 	Offset int `json:"offset,omitempty" jsonschema:"number of items to skip for pagination (must be >= 0)"`
 }
 
-// queryFilter contains filter options for the sessions resource.
+// queryFilter contains filter options for the sessions and fuzz resources.
 type queryFilter struct {
 	// Protocol filters sessions by protocol (e.g. "HTTP/1.x", "HTTPS").
 	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS)"`
@@ -41,23 +51,33 @@ type queryFilter struct {
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`
 	// URLPattern filters sessions by URL using a substring search pattern.
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
-	// StatusCode filters sessions by HTTP response status code.
+	// StatusCode filters sessions/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
+	// BodyContains filters fuzz_results by response body substring.
+	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
+	// Status filters fuzz_jobs by status (e.g. "running", "completed").
+	Status string `json:"status,omitempty" jsonschema:"fuzz job status filter (e.g. running, completed)"`
+	// Tag filters fuzz_jobs by tag (exact match).
+	Tag string `json:"tag,omitempty" jsonschema:"fuzz job tag filter (exact match)"`
 }
 
 // availableResources lists all valid resource names for error messages.
-var availableResources = []string{"sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro"}
+var availableResources = []string{"sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"}
 
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "query",
 		Description: "Unified information query tool. Retrieve sessions, session details, messages, " +
-			"proxy status, configuration, CA certificate, intercept queue, or macro definitions. " +
-			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, intercept_queue, macros, macro. " +
+			"proxy status, configuration, CA certificate, intercept queue, macro definitions, or fuzz results. " +
+			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
 			"The 'id' parameter is required for session, messages, and macro resources. " +
-			"The 'filter' parameter supports filtering sessions by protocol, method, url_pattern, and status_code. " +
-			"Results are paginated with limit/offset for sessions and messages resources. " +
+			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
+			"The 'filter' parameter supports filtering sessions by protocol, method, url_pattern, and status_code; " +
+			"fuzz_jobs by status and tag; fuzz_results by status_code and body_contains. " +
+			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
+			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
+			"Results are paginated with limit/offset for sessions, messages, fuzz_jobs, and fuzz_results resources. " +
 			"'intercept_queue' returns currently blocked requests waiting for release/modify_and_forward/drop actions.",
 	}, s.handleQuery)
 }
@@ -83,6 +103,10 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 		return s.handleQueryMacros(ctx)
 	case "macro":
 		return s.handleQueryMacro(ctx, input)
+	case "fuzz_jobs":
+		return s.handleQueryFuzzJobs(ctx, input)
+	case "fuzz_results":
+		return s.handleQueryFuzzResults(ctx, input)
 	case "":
 		return nil, nil, fmt.Errorf("resource is required: available resources are %s", strings.Join(availableResources, ", "))
 	default:
