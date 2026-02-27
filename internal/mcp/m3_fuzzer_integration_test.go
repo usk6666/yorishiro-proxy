@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,9 +411,9 @@ func TestM3_Fuzz_Cancel(t *testing.T) {
 func TestM3_Fuzz_StopOnStatusCode(t *testing.T) {
 	store := newFuzzTestStore(t)
 
-	requestCount := 0
+	var requestCount atomic.Int32
 	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requestCount.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
 		json.Unmarshal(body, &parsed)
@@ -491,8 +492,8 @@ func TestM3_Fuzz_StopOnStatusCode(t *testing.T) {
 done:
 	// The job should have stopped early (not all 5 payloads processed).
 	// It could have processed at most 3 (admin, test, forbidden).
-	if requestCount > 4 {
-		t.Errorf("requestCount = %d, expected <= 4 (stop-on 403 should halt early)", requestCount)
+	if rc := requestCount.Load(); rc > 4 {
+		t.Errorf("requestCount = %d, expected <= 4 (stop-on 403 should halt early)", rc)
 	}
 }
 
