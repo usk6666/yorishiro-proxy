@@ -5,7 +5,7 @@ Execute an action on recorded proxy data. Supports resending captured requests w
 ## Parameters
 
 ### action (string, required)
-The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`, `fuzz`, `fuzz_pause`, `fuzz_resume`, `fuzz_cancel`, `define_macro`, `run_macro`, `delete_macro`.
+The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`, `fuzz`, `fuzz_pause`, `fuzz_resume`, `fuzz_cancel`, `define_macro`, `run_macro`, `delete_macro`, `regenerate_ca_cert`.
 
 > **Note:** `replay` and `replay_raw` are accepted as deprecated aliases for `resend` and `resend_raw`.
 
@@ -152,6 +152,17 @@ Cancel a running or paused fuzz job. The job will be terminated and marked as ca
 - **fuzz_id** (string, required): ID of the fuzz job to cancel.
 
 Returns: fuzz_id, action, status.
+
+### regenerate_ca_cert
+Regenerate the CA certificate. Behavior depends on the CA initialization mode:
+
+- **Auto-persist mode** (default): Generates a new CA and saves it to the default path (`~/.katashiro-proxy/ca/`). Users must re-install the CA certificate.
+- **Ephemeral mode** (`--ca-ephemeral`): Generates a new CA in memory only. Lost on restart.
+- **Explicit mode** (`-ca-cert`/`-ca-key`): Returns an error. User-provided CA files are not overwritten.
+
+No parameters required.
+
+Returns: fingerprint, subject, not_after, persisted, cert_path, install_hint.
 
 ## Usage Examples
 
@@ -444,5 +455,13 @@ Returns: name, deleted.
 {
   "action": "delete_macro",
   "params": {"name": "auth-flow"}
+}
+```
+
+### Regenerate CA certificate
+```json
+{
+  "action": "regenerate_ca_cert",
+  "params": {}
 }
 ```

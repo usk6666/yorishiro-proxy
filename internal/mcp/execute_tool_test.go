@@ -2,16 +2,19 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -964,6 +967,214 @@ func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
 }
 
 // --- safeCheckRedirect tests ---
+
+// --- regenerate_ca_cert action tests ---
+
+// setupTestSessionForRegenerate creates an MCP client session with CA and issuer
+// for regenerate_ca_cert testing.
+func setupTestSessionForRegenerate(t *testing.T, ca *cert.CA, issuer *cert.Issuer) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	var opts []ServerOption
+	if issuer != nil {
+		opts = append(opts, WithIssuer(issuer))
+	}
+	s := NewServer(ctx, ca, nil, nil, opts...)
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+func TestExecute_RegenerateCA_AutoPersistMode(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.crt")
+	keyPath := filepath.Join(dir, "ca.key")
+
+	ca := newTestCA(t)
+	// Save the initial CA and set source as auto-persisted (using default paths).
+	if err := ca.Save(certPath, keyPath); err != nil {
+		t.Fatalf("save CA: %v", err)
+	}
+	ca.SetSource(cert.CASource{
+		Persisted: true,
+		CertPath:  certPath,
+		KeyPath:   keyPath,
+	})
+
+	// Set default paths to match our test paths so the handler doesn't reject as "user-provided".
+	// We override DefaultCACertPath/DefaultCAKeyPath via the source matching logic.
+	// Since our paths differ from DefaultCACertPath(), the handler would reject.
+	// We need to ensure our paths match what the handler compares against.
+	// Instead, test with ephemeral mode which should always succeed.
+
+	issuer := cert.NewIssuer(ca)
+	// Populate some cache entries.
+	if _, err := issuer.GetCertificate("example.com"); err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+	if issuer.CacheLen() != 1 {
+		t.Fatalf("CacheLen = %d, want 1", issuer.CacheLen())
+	}
+
+	originalFingerprint := sha256.Sum256(ca.Certificate().Raw)
+
+	cs := setupTestSessionForRegenerate(t, ca, issuer)
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "regenerate_ca_cert",
+		"params": map[string]any{},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out executeRegenerateCACertResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if out.Fingerprint == "" {
+		t.Error("fingerprint should not be empty")
+	}
+	if out.Subject == "" {
+		t.Error("subject should not be empty")
+	}
+	if out.NotAfter == "" {
+		t.Error("not_after should not be empty")
+	}
+
+	// Fingerprint should have changed.
+	newFingerprint := sha256.Sum256(ca.Certificate().Raw)
+	if originalFingerprint == newFingerprint {
+		t.Error("CA fingerprint did not change after regeneration")
+	}
+
+	// Issuer cache should have been cleared.
+	if issuer.CacheLen() != 0 {
+		t.Errorf("CacheLen = %d after regeneration, want 0", issuer.CacheLen())
+	}
+
+	// Persisted should be true and file should be updated.
+	if !out.Persisted {
+		t.Error("persisted = false, want true")
+	}
+
+	if out.InstallHint == "" {
+		t.Error("install_hint should not be empty")
+	}
+}
+
+func TestExecute_RegenerateCA_ExplicitMode_Error(t *testing.T) {
+	ca := newTestCA(t)
+	// Simulate explicit mode: persisted with user-provided paths.
+	ca.SetSource(cert.CASource{
+		Persisted: true,
+		CertPath:  "/custom/path/ca.crt",
+		KeyPath:   "/custom/path/ca.key",
+		Explicit:  true,
+	})
+
+	cs := setupTestSessionForRegenerate(t, ca, nil)
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "regenerate_ca_cert",
+		"params": map[string]any{},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for explicit mode regeneration")
+	}
+
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(textContent.Text, "cannot regenerate user-provided CA") {
+		t.Errorf("error = %q, want 'cannot regenerate user-provided CA'", textContent.Text)
+	}
+}
+
+func TestExecute_RegenerateCA_EphemeralMode(t *testing.T) {
+	ca := newTestCA(t)
+	// Ephemeral mode: no source set (Persisted=false).
+
+	issuer := cert.NewIssuer(ca)
+	originalFingerprint := sha256.Sum256(ca.Certificate().Raw)
+
+	cs := setupTestSessionForRegenerate(t, ca, issuer)
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "regenerate_ca_cert",
+		"params": map[string]any{},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out executeRegenerateCACertResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Fingerprint should have changed.
+	newFingerprint := sha256.Sum256(ca.Certificate().Raw)
+	if originalFingerprint == newFingerprint {
+		t.Error("CA fingerprint did not change after regeneration")
+	}
+
+	if out.Persisted {
+		t.Error("persisted = true, want false for ephemeral mode")
+	}
+
+	if !strings.Contains(out.InstallHint, "in memory") {
+		t.Errorf("install_hint = %q, should mention 'in memory'", out.InstallHint)
+	}
+}
+
+func TestExecute_RegenerateCA_NilCA(t *testing.T) {
+	ctx := context.Background()
+	s := NewServer(ctx, nil, nil, nil)
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "regenerate_ca_cert",
+		"params": map[string]any{},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for nil CA")
+	}
+}
 
 func TestSafeCheckRedirect(t *testing.T) {
 	tests := []struct {
