@@ -280,6 +280,12 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 // handleHTTPSRequest forwards a single decrypted HTTPS request to the upstream
 // server, records the session, and writes the response back to the client.
 func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, tlsMeta tlsMetadata, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+	// Check for WebSocket upgrade before processing as normal HTTPS.
+	// This must happen before hop-by-hop headers are removed.
+	if isWebSocketUpgrade(req) {
+		return h.handleWebSocketTLS(ctx, conn, connectHost, req, tlsMeta)
+	}
+
 	start := time.Now()
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)

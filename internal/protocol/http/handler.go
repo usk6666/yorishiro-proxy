@@ -294,6 +294,12 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 }
 
 func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, smuggling *smugglingFlags, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+	// Check for WebSocket upgrade before processing as normal HTTP.
+	// This must happen before hop-by-hop headers are removed.
+	if isWebSocketUpgrade(req) {
+		return h.handleWebSocket(ctx, conn, req)
+	}
+
 	start := time.Now()
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
