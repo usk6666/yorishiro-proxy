@@ -28,9 +28,15 @@ type relay struct {
 // run performs the bidirectional relay until one side closes, an error occurs,
 // or the context is cancelled.
 func (r *relay) run(ctx context.Context, client, upstream net.Conn) error {
+	// Wrap ctx in a relay-scoped cancel context so the watcher goroutine
+	// exits when the relay terminates normally (e.g., peer EOF), not only
+	// when the parent context is cancelled.
+	relayCtx, relayCancel := context.WithCancel(ctx)
+	defer relayCancel()
+
 	// Watch for context cancellation and interrupt blocking reads.
 	go func() {
-		<-ctx.Done()
+		<-relayCtx.Done()
 		client.SetReadDeadline(time.Now())
 		upstream.SetReadDeadline(time.Now())
 	}()
