@@ -18,6 +18,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
+	protohttp2 "github.com/usk6666/katashiro-proxy/internal/protocol/http2"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
@@ -130,6 +131,14 @@ func run(ctx context.Context) error {
 	pipeline := rules.NewPipeline()
 	httpHandler.SetTransformPipeline(pipeline)
 
+	// Build HTTP/2 handler for h2c detection and h2 (TLS ALPN) delegation.
+	http2Handler := protohttp2.NewHandler(store, logger)
+	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
+	http2Handler.SetCaptureScope(scope)
+
+	// Link the HTTP/2 handler to the HTTP handler for h2 ALPN delegation.
+	httpHandler.SetH2Handler(http2Handler)
+
 	// Initialize fuzzer components for async fuzz job execution.
 	// Use a hardened HTTP client with SSRF protection, explicit timeout,
 	// and redirect suppression — never http.DefaultClient.
@@ -137,7 +146,8 @@ func run(ctx context.Context) error {
 	fuzzRegistry := fuzzer.NewJobRegistry()
 	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
 
-	detector := protocol.NewDetector(httpHandler)
+	// Register h2c handler before HTTP/1.x to detect HTTP/2 connection preface first.
+	detector := protocol.NewDetector(http2Handler, httpHandler)
 
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)

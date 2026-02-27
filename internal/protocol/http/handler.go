@@ -92,6 +92,13 @@ var hopByHopHeaders = []string{
 	"Upgrade",
 }
 
+// H2Handler defines the interface for delegating HTTP/2 connections
+// after TLS ALPN negotiation selects "h2". This avoids a circular import
+// between the HTTP/1.x and HTTP/2 packages.
+type H2Handler interface {
+	HandleH2(ctx context.Context, tlsConn *tls.Conn, connectAuthority string, tlsVersion, tlsCipher, tlsALPN string) error
+}
+
 // Handler processes HTTP/1.x connections.
 type Handler struct {
 	store             session.Store
@@ -104,6 +111,7 @@ type Handler struct {
 	interceptEngine   *intercept.Engine
 	interceptQueue    *intercept.Queue
 	transformPipeline *rules.Pipeline
+	h2Handler         H2Handler
 }
 
 // NewHandler creates a new HTTP handler with session recording.
@@ -192,6 +200,12 @@ func (h *Handler) SetTransformPipeline(pipeline *rules.Pipeline) {
 // TransformPipeline returns the handler's current transform pipeline, or nil.
 func (h *Handler) TransformPipeline() *rules.Pipeline {
 	return h.transformPipeline
+}
+
+// SetH2Handler sets the HTTP/2 handler used for connections where ALPN
+// negotiates "h2" during the TLS handshake in a CONNECT tunnel.
+func (h *Handler) SetH2Handler(handler H2Handler) {
+	h.h2Handler = handler
 }
 
 func (h *Handler) effectiveRequestTimeout() time.Duration {
