@@ -31,6 +31,11 @@ type RunConfig struct {
 
 	// StopOn defines automatic stop conditions.
 	StopOn *StopCondition `json:"stop_on,omitempty"`
+
+	// Hooks provides optional macro hook callbacks for each fuzz iteration.
+	// When set, pre_send hooks run before each iteration and post_receive hooks
+	// run after. The hooks field is not serialized to JSON (set at runtime only).
+	Hooks HookCallbacks `json:"-"`
 }
 
 // Validate checks that a RunConfig is well-formed.
@@ -247,6 +252,12 @@ func (r *Runner) execute(
 		defer rateTicker.Stop()
 	}
 
+	// Create a shared hook state per job (tracks cross-iteration state like "once", "every_n").
+	var hookState *HookState
+	if cfg.Hooks != nil {
+		hookState = &HookState{}
+	}
+
 	// Worker pool.
 	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
@@ -281,7 +292,7 @@ func (r *Runner) execute(
 				var result *session.FuzzResult
 				attempts := 1 + cfg.MaxRetries
 				for attempt := 0; attempt < attempts; attempt++ {
-					result = r.engine.executeFuzzCase(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID)
+					result = r.engine.executeFuzzCaseWithHooks(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID, cfg.Hooks, hookState)
 					if result.Error == "" {
 						break
 					}
@@ -302,6 +313,14 @@ func (r *Runner) execute(
 					errorCount.Add(1)
 				} else {
 					completedCount.Add(1)
+				}
+
+				// Update hook state after request completion.
+				if cfg.Hooks != nil && hookState != nil {
+					hookState.Mu.Lock()
+					hadError := result.Error != ""
+					cfg.Hooks.UpdateState(hookState, result.StatusCode, hadError)
+					hookState.Mu.Unlock()
 				}
 
 				// Update progress in DB.
