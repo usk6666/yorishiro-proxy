@@ -116,6 +116,13 @@ func (iss *Issuer) ClearCache() {
 // generate creates a new ECDSA P-256 server certificate for the given hostname,
 // signed by the CA. It returns the TLS certificate and its expiration time.
 func (iss *Issuer) generate(hostname string) (*tls.Certificate, time.Time, error) {
+	// Take a consistent snapshot of the CA signing pair under read lock
+	// to avoid data races during CA regeneration.
+	caCert, caKey := iss.ca.SigningPair()
+	if caCert == nil || caKey == nil {
+		return nil, time.Time{}, fmt.Errorf("CA not initialized for signing %s", hostname)
+	}
+
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("generate server key for %s: %w", hostname, err)
@@ -149,7 +156,7 @@ func (iss *Issuer) generate(hostname string) (*tls.Certificate, time.Time, error
 		template.DNSNames = []string{hostname}
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, iss.ca.cert, &privKey.PublicKey, iss.ca.privKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &privKey.PublicKey, caKey)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("create server certificate for %s: %w", hostname, err)
 	}

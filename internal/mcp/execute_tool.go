@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
@@ -1161,9 +1163,14 @@ func (s *Server) handleExecuteRegenerateCA() (*gomcp.CallToolResult, *executeReg
 	// If the CA was persisted, save the new CA to the same paths.
 	if source.Persisted && source.CertPath != "" {
 		if err := s.ca.Save(source.CertPath, source.KeyPath); err != nil {
-			return nil, nil, fmt.Errorf("save regenerated CA: %w", err)
+			// Save failed but the CA has already been regenerated in memory.
+			// Clear source metadata so the CA is treated as ephemeral.
+			slog.Warn("failed to save regenerated CA, continuing with ephemeral CA",
+				"cert_path", source.CertPath, "error", err)
+			s.ca.SetSource(cert.CASource{})
+		} else {
+			s.ca.SetSource(source) // preserve source metadata
 		}
-		s.ca.SetSource(source) // preserve source metadata
 	}
 
 	newCert := s.ca.Certificate()

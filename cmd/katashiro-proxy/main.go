@@ -254,6 +254,8 @@ func initCAAutoPersist(cfg *config.Config, logger *slog.Logger) (*cert.CA, error
 		})
 		logger.Info("loaded persisted CA certificate", "cert_path", certPath)
 		return ca, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("check CA certificate file %s: %w", certPath, err)
 	}
 
 	// Generate a new CA.
