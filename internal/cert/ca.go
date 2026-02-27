@@ -10,17 +10,29 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sync"
 	"time"
 )
 
 // caValidity is the validity period for a generated CA certificate.
 const caValidity = 10 * 365 * 24 * time.Hour // ~10 years
 
+// CASource tracks the persistence state of a CA.
+type CASource struct {
+	Persisted bool
+	CertPath  string
+	KeyPath   string
+	Explicit  bool // true when CA was loaded from user-provided -ca-cert/-ca-key flags
+}
+
 // CA manages the root certificate authority for TLS interception.
+// All exported methods are safe for concurrent use.
 type CA struct {
+	mu      sync.RWMutex
 	cert    *x509.Certificate
 	privKey *ecdsa.PrivateKey
 	certPEM []byte
+	source  CASource
 }
 
 // Generate creates a new self-signed root CA certificate and ECDSA P-256 private key.
@@ -67,9 +79,11 @@ func (ca *CA) Generate() error {
 		Bytes: certDER,
 	})
 
+	ca.mu.Lock()
 	ca.cert = cert
 	ca.privKey = privKey
 	ca.certPEM = certPEM
+	ca.mu.Unlock()
 
 	return nil
 }
@@ -119,9 +133,11 @@ func (ca *CA) Load(certPath, keyPath string) error {
 		return fmt.Errorf("CA certificate and private key do not match")
 	}
 
+	ca.mu.Lock()
 	ca.cert = cert
 	ca.privKey = privKey
 	ca.certPEM = certPEMData
+	ca.mu.Unlock()
 
 	return nil
 }
@@ -130,12 +146,18 @@ func (ca *CA) Load(certPath, keyPath string) error {
 // Files are created with restrictive permissions: 0644 for the certificate
 // and 0600 for the private key.
 func (ca *CA) Save(certPath, keyPath string) error {
-	if ca.cert == nil || ca.privKey == nil {
+	ca.mu.RLock()
+	cert := ca.cert
+	privKey := ca.privKey
+	certPEM := ca.certPEM
+	ca.mu.RUnlock()
+
+	if cert == nil || privKey == nil {
 		return fmt.Errorf("save CA: no certificate or key to save (call Generate or Load first)")
 	}
 
 	// Encode private key to PEM.
-	keyDER, err := x509.MarshalECPrivateKey(ca.privKey)
+	keyDER, err := x509.MarshalECPrivateKey(privKey)
 	if err != nil {
 		return fmt.Errorf("marshal CA private key: %w", err)
 	}
@@ -146,7 +168,7 @@ func (ca *CA) Save(certPath, keyPath string) error {
 	})
 
 	// Write certificate file (world-readable).
-	if err := os.WriteFile(certPath, ca.certPEM, 0644); err != nil {
+	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
 		return fmt.Errorf("write CA certificate file %s: %w", certPath, err)
 	}
 
@@ -160,12 +182,45 @@ func (ca *CA) Save(certPath, keyPath string) error {
 
 // Certificate returns the CA's parsed x509 certificate, or nil if not loaded/generated.
 func (ca *CA) Certificate() *x509.Certificate {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
 	return ca.cert
+}
+
+// PrivateKey returns the CA's ECDSA private key, or nil if not loaded/generated.
+func (ca *CA) PrivateKey() *ecdsa.PrivateKey {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	return ca.privKey
 }
 
 // CertPEM returns the PEM-encoded CA certificate bytes, or nil if not loaded/generated.
 func (ca *CA) CertPEM() []byte {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
 	return ca.certPEM
+}
+
+// SigningPair returns a consistent snapshot of the CA certificate and private key.
+// This is used by Issuer to avoid reading cert and privKey at different times.
+func (ca *CA) SigningPair() (*x509.Certificate, *ecdsa.PrivateKey) {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	return ca.cert, ca.privKey
+}
+
+// Source returns the persistence metadata for this CA.
+func (ca *CA) Source() CASource {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	return ca.source
+}
+
+// SetSource sets the persistence metadata for this CA.
+func (ca *CA) SetSource(s CASource) {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	ca.source = s
 }
 
 // generateSerialNumber creates a random 128-bit serial number for certificates.

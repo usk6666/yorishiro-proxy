@@ -60,6 +60,14 @@ type Config struct {
 	//   - Exact match: "example.com"
 	//   - Wildcard: "*.example.com" (matches any subdomain)
 	TLSPassthrough []string `json:"tls_passthrough"`
+
+	// CAEphemeral forces in-memory-only CA generation with no file persistence.
+	// When true, a new CA is generated on each startup.
+	CAEphemeral bool `json:"ca_ephemeral"`
+
+	// CADataDir overrides the default CA data directory (~/.katashiro-proxy/ca/).
+	// Used for testing; excluded from JSON serialization.
+	CADataDir string `json:"-"`
 }
 
 // Default returns a Config with sensible defaults.

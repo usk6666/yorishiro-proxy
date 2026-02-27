@@ -71,9 +71,13 @@ Get current configuration including capture scope and TLS passthrough. No additi
 Returns: capture_scope (includes, excludes), tls_passthrough (patterns, count).
 
 ### ca_cert
-Get the CA certificate PEM and metadata. No additional parameters.
+Get the CA certificate PEM, metadata, and persistence state. No additional parameters.
 
-Returns: pem, fingerprint, subject, not_after.
+Returns: pem, fingerprint, subject, not_after, persisted, cert_path, install_hint.
+
+- **persisted** (boolean): Whether the CA certificate is saved to disk.
+- **cert_path** (string): File path of the persisted CA certificate (empty if ephemeral).
+- **install_hint** (string): Guidance for installing the CA certificate into the trust store (empty if ephemeral).
 
 ### intercept_queue
 List intercepted requests currently waiting in the intercept queue.

@@ -17,6 +17,7 @@ type Server struct {
 	server            *gomcp.Server
 	appCtx            context.Context
 	ca                *cert.CA
+	issuer            *cert.Issuer
 	store             session.Store
 	manager           *proxy.Manager
 	passthrough       *proxy.PassthroughList
@@ -93,6 +94,14 @@ func WithFuzzRunner(runner *fuzzer.Runner) ServerOption {
 func WithFuzzStore(fs session.FuzzStore) ServerOption {
 	return func(s *Server) {
 		s.fuzzStore = fs
+	}
+}
+
+// WithIssuer sets the certificate issuer for the MCP server,
+// enabling cache clearing on CA regeneration.
+func WithIssuer(iss *cert.Issuer) ServerOption {
+	return func(s *Server) {
+		s.issuer = iss
 	}
 }
 

@@ -698,6 +698,60 @@ func TestGenerate_KeyCurveIsP256(t *testing.T) {
 	}
 }
 
+func TestCASource_DefaultZeroValue(t *testing.T) {
+	ca := &CA{}
+	source := ca.Source()
+	if source.Persisted {
+		t.Error("new CA should have Persisted=false")
+	}
+	if source.CertPath != "" {
+		t.Errorf("new CA CertPath = %q, want empty", source.CertPath)
+	}
+	if source.KeyPath != "" {
+		t.Errorf("new CA KeyPath = %q, want empty", source.KeyPath)
+	}
+}
+
+func TestCASource_SetAndGet(t *testing.T) {
+	ca := &CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	expected := CASource{
+		Persisted: true,
+		CertPath:  "/tmp/ca.crt",
+		KeyPath:   "/tmp/ca.key",
+	}
+	ca.SetSource(expected)
+
+	got := ca.Source()
+	if got != expected {
+		t.Errorf("Source() = %+v, want %+v", got, expected)
+	}
+}
+
+func TestCASource_PreservedAfterGenerate(t *testing.T) {
+	ca := &CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("first Generate: %v", err)
+	}
+
+	ca.SetSource(CASource{Persisted: true, CertPath: "/test/ca.crt"})
+
+	// Generate again — source should be reset to zero value since Generate doesn't preserve source.
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("second Generate: %v", err)
+	}
+
+	// Source is NOT automatically reset by Generate; it's the caller's responsibility.
+	// This tests that SetSource is independent of Generate.
+	source := ca.Source()
+	if !source.Persisted {
+		t.Error("Source was unexpectedly reset after Generate")
+	}
+}
+
 func TestSaveAndLoad_PreservesSigningCapability(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "ca.crt")

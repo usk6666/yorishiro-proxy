@@ -534,6 +534,53 @@ func TestGetCertificate_CacheEviction(t *testing.T) {
 	}
 }
 
+func TestClearCache_RemovesAllEntries(t *testing.T) {
+	ca := newTestCA(t)
+	iss := NewIssuer(ca, WithMaxCacheSize(10))
+
+	// Populate the cache with some certificates.
+	for i := 0; i < 5; i++ {
+		hostname := fmt.Sprintf("host-%d.example.com", i)
+		if _, err := iss.GetCertificate(hostname); err != nil {
+			t.Fatalf("GetCertificate(%q): %v", hostname, err)
+		}
+	}
+
+	if iss.CacheLen() != 5 {
+		t.Fatalf("CacheLen = %d before clear, want 5", iss.CacheLen())
+	}
+
+	iss.ClearCache()
+
+	if iss.CacheLen() != 0 {
+		t.Errorf("CacheLen = %d after ClearCache, want 0", iss.CacheLen())
+	}
+
+	// Verify that getting a previously cached hostname generates a new cert.
+	cert1, err := iss.GetCertificate("host-0.example.com")
+	if err != nil {
+		t.Fatalf("GetCertificate after clear: %v", err)
+	}
+	if cert1 == nil {
+		t.Fatal("GetCertificate returned nil after clear")
+	}
+	if iss.CacheLen() != 1 {
+		t.Errorf("CacheLen = %d after re-generation, want 1", iss.CacheLen())
+	}
+}
+
+func TestClearCache_EmptyCache(t *testing.T) {
+	ca := newTestCA(t)
+	iss := NewIssuer(ca)
+
+	// Clearing an empty cache should not panic.
+	iss.ClearCache()
+
+	if iss.CacheLen() != 0 {
+		t.Errorf("CacheLen = %d after clearing empty cache, want 0", iss.CacheLen())
+	}
+}
+
 func TestCacheLen_ReflectsCacheState(t *testing.T) {
 	ca := newTestCA(t)
 	iss := NewIssuer(ca, WithMaxCacheSize(10))
