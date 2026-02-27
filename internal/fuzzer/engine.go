@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -413,6 +415,127 @@ func (e *Engine) executeFuzzCase(
 	return result
 }
 
+// executeFuzzCaseWithHooks wraps executeFuzzCase with pre_send and post_receive hook execution.
+// If hooks is nil, it delegates directly to executeFuzzCase.
+// Pre_send hooks can provide KV Store values that are expanded in the cloned request data.
+// Post_receive hooks receive the response status code and body.
+func (e *Engine) executeFuzzCaseWithHooks(
+	ctx context.Context,
+	baseData *RequestData,
+	positions []Position,
+	fc FuzzCase,
+	protocol string,
+	timeout time.Duration,
+	fuzzID string,
+	hooks HookCallbacks,
+	hookState *HookState,
+) *session.FuzzResult {
+	if hooks == nil {
+		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID)
+	}
+
+	// Execute pre_send hook.
+	kvStore, err := hooks.PreSend(ctx, hookState)
+	if err != nil {
+		return &session.FuzzResult{
+			FuzzID:   fuzzID,
+			IndexNum: fc.Index,
+			Payloads: session.PayloadsToJSON(fc.Payloads),
+			Error:    fmt.Sprintf("pre_send hook: %s", err.Error()),
+		}
+	}
+
+	// If pre_send hook returned KV Store values, create a modified baseData
+	// with template expansion applied.
+	effectiveBaseData := baseData
+	if len(kvStore) > 0 {
+		effectiveBaseData = expandRequestData(baseData, kvStore)
+	}
+
+	// Execute the fuzz case with the (potentially modified) base data.
+	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID)
+
+	// Execute post_receive hook if the request succeeded (has a response).
+	if result.Error == "" && result.StatusCode != 0 {
+		// Retrieve the response body from the recorded session for the hook.
+		respBody := e.fetchResponseBody(ctx, result.SessionID)
+		if err := hooks.PostSend(ctx, hookState, result.StatusCode, respBody); err != nil {
+			// Post-receive hook errors are recorded but don't fail the fuzz result.
+			result.Error = fmt.Sprintf("post_receive hook: %s", err.Error())
+		}
+	}
+
+	return result
+}
+
+// expandRequestData creates a clone of baseData with template expansion applied
+// to the URL, headers, and body using the KV Store values.
+// It obtains the raw URL string from the original baseData before cloning,
+// because Clone() re-encodes the query string (escaping {{ }}).
+func expandRequestData(baseData *RequestData, kvStore map[string]string) *RequestData {
+	// Get the raw URL string before cloning (Clone re-encodes query params).
+	var rawURL string
+	if baseData.URL != nil {
+		rawURL = baseData.URL.String()
+	}
+
+	data := baseData.Clone()
+
+	// Expand URL using the raw string from the original.
+	if rawURL != "" {
+		expanded := expandSimpleTemplate(rawURL, kvStore)
+		if expanded != rawURL {
+			if u, err := url.Parse(expanded); err == nil {
+				data.URL = u
+			}
+		}
+	}
+
+	// Expand headers.
+	for key, values := range data.Headers {
+		for i, v := range values {
+			data.Headers[key][i] = expandSimpleTemplate(v, kvStore)
+		}
+	}
+
+	// Expand body.
+	if len(data.Body) > 0 {
+		bodyStr := string(data.Body)
+		expanded := expandSimpleTemplate(bodyStr, kvStore)
+		if expanded != bodyStr {
+			data.Body = []byte(expanded)
+		}
+	}
+
+	return data
+}
+
+// expandSimpleTemplate replaces {{var}} placeholders in the input string
+// with values from the KV Store. It ignores encoder pipes (those are handled
+// by the macro.ExpandTemplate function in the MCP layer).
+// This is a lightweight expansion for the fuzzer layer.
+func expandSimpleTemplate(input string, kvStore map[string]string) string {
+	result := input
+	for k, v := range kvStore {
+		placeholder := "{{" + k + "}}"
+		result = strings.ReplaceAll(result, placeholder, v)
+	}
+	return result
+}
+
+// fetchResponseBody retrieves the response body from a recorded session.
+// Returns nil if the session or response body cannot be retrieved.
+func (e *Engine) fetchResponseBody(ctx context.Context, sessionID string) []byte {
+	if sessionID == "" {
+		return nil
+	}
+	msgs, err := e.sessionFetcher.GetMessages(ctx, sessionID, session.MessageListOptions{Direction: "receive"})
+	if err != nil || len(msgs) == 0 {
+		return nil
+	}
+	return msgs[0].Body
+}
+
 // BuildRequestData extracts mutable request data from a session's send message.
 func BuildRequestData(sendMsg *session.Message) *RequestData {
 	data := &RequestData{
@@ -442,4 +565,3 @@ func ResolvePayloads(payloadSets map[string]PayloadSet, wordlistDir string) (map
 	}
 	return resolved, nil
 }
-
