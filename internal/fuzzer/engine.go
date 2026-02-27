@@ -419,6 +419,8 @@ func (e *Engine) executeFuzzCase(
 // If hooks is nil, it delegates directly to executeFuzzCase.
 // Pre_send hooks can provide KV Store values that are expanded in the cloned request data.
 // Post_receive hooks receive the response status code and body.
+// The hookState.Mu is acquired around PreSend and PostSend calls to prevent data races
+// when multiple worker goroutines share the same HookState (CWE-362).
 func (e *Engine) executeFuzzCaseWithHooks(
 	ctx context.Context,
 	baseData *RequestData,
@@ -434,8 +436,10 @@ func (e *Engine) executeFuzzCaseWithHooks(
 		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID)
 	}
 
-	// Execute pre_send hook.
+	// Hold the lock for the full PreSend read-execute-writeback cycle (F-2).
+	hookState.Mu.Lock()
 	kvStore, err := hooks.PreSend(ctx, hookState)
+	hookState.Mu.Unlock()
 	if err != nil {
 		return &session.FuzzResult{
 			FuzzID:   fuzzID,
@@ -453,15 +457,19 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	}
 
 	// Execute the fuzz case with the (potentially modified) base data.
+	// The lock is NOT held here to allow concurrent HTTP requests.
 	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID)
 
 	// Execute post_receive hook if the request succeeded (has a response).
 	if result.Error == "" && result.StatusCode != 0 {
 		// Retrieve the response body from the recorded session for the hook.
 		respBody := e.fetchResponseBody(ctx, result.SessionID)
-		if err := hooks.PostSend(ctx, hookState, result.StatusCode, respBody); err != nil {
+		hookState.Mu.Lock()
+		postErr := hooks.PostSend(ctx, hookState, result.StatusCode, respBody)
+		hookState.Mu.Unlock()
+		if postErr != nil {
 			// Post-receive hook errors are recorded but don't fail the fuzz result.
-			result.Error = fmt.Sprintf("post_receive hook: %s", err.Error())
+			result.Error = fmt.Sprintf("post_receive hook: %s", postErr.Error())
 		}
 	}
 

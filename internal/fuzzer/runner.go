@@ -317,8 +317,10 @@ func (r *Runner) execute(
 
 				// Update hook state after request completion.
 				if cfg.Hooks != nil && hookState != nil {
+					hookState.Mu.Lock()
 					hadError := result.Error != ""
 					cfg.Hooks.UpdateState(hookState, result.StatusCode, hadError)
+					hookState.Mu.Unlock()
 				}
 
 				// Update progress in DB.

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"testing"
 	"time"
 
@@ -225,7 +226,12 @@ func TestShouldRunPostReceive_OnStatus(t *testing.T) {
 
 func TestShouldRunPostReceive_OnMatch(t *testing.T) {
 	he := &hookExecutor{state: &hookState{}}
-	h := &hookConfig{Macro: "m", RunInterval: "on_match", MatchPattern: `"error":\s*true`}
+	h := &hookConfig{
+		Macro:           "m",
+		RunInterval:     "on_match",
+		MatchPattern:    `"error":\s*true`,
+		compiledPattern: regexp.MustCompile(`"error":\s*true`),
+	}
 
 	if he.shouldRunPostReceive(h, 200, []byte(`{"ok":true}`)) {
 		t.Error("shouldRunPostReceive(on_match, no match) = true, want false")

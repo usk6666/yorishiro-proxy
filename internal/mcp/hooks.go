@@ -34,6 +34,9 @@ type hookConfig struct {
 	StatusCodes []int `json:"status_codes,omitempty"`
 	// MatchPattern is the regex pattern for "on_match" run_interval.
 	MatchPattern string `json:"match_pattern,omitempty"`
+	// compiledPattern is the pre-compiled regexp for MatchPattern.
+	// Set during validation to avoid recompilation on every invocation.
+	compiledPattern *regexp.Regexp
 	// PassResponse passes the main request's response to the macro when true.
 	// Only applicable to post_receive hooks.
 	PassResponse bool `json:"pass_response,omitempty"`
@@ -109,9 +112,11 @@ func validatePostReceiveHook(h *hookConfig) error {
 		return fmt.Errorf("match_pattern is required for on_match run_interval")
 	}
 	if h.MatchPattern != "" {
-		if _, err := regexp.Compile(h.MatchPattern); err != nil {
+		re, err := regexp.Compile(h.MatchPattern)
+		if err != nil {
 			return fmt.Errorf("invalid match_pattern: %w", err)
 		}
+		h.compiledPattern = re
 	}
 	return nil
 }
@@ -267,11 +272,7 @@ func (he *hookExecutor) shouldRunPostReceive(h *hookConfig, statusCode int, resp
 		}
 		return false
 	case "on_match":
-		if h.MatchPattern == "" {
-			return false
-		}
-		re, err := regexp.Compile(h.MatchPattern)
-		if err != nil {
+		if h.compiledPattern == nil {
 			return false
 		}
 		// Limit the body size for regex matching to prevent ReDoS.
@@ -279,7 +280,7 @@ func (he *hookExecutor) shouldRunPostReceive(h *hookConfig, statusCode int, resp
 		if len(body) > macro.MaxRegexInputSize {
 			body = body[:macro.MaxRegexInputSize]
 		}
-		return re.Match(body)
+		return h.compiledPattern.Match(body)
 	default:
 		return false
 	}
