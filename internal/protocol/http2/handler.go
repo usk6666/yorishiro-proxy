@@ -14,6 +14,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -127,20 +128,38 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 
 	// Track all in-flight request goroutines so we can wait for them
 	// before returning (and closing the connection).
-	var wg sync.WaitGroup
+	//
+	// We use an atomic counter + mutex/cond instead of sync.WaitGroup
+	// because http2.Server.ServeConn dispatches handler goroutines
+	// internally, and wg.Add(1) inside the handler has a race window
+	// with wg.Wait() after ServeConn returns. (F-2)
+	var active atomic.Int64
+	var mu sync.Mutex
+	cond := sync.NewCond(&mu)
 
 	h2Server := &http2.Server{}
 	handler := gohttp.HandlerFunc(func(w gohttp.ResponseWriter, req *gohttp.Request) {
-		wg.Add(1)
-		defer wg.Done()
+		active.Add(1)
+		defer func() {
+			if active.Add(-1) == 0 {
+				cond.Signal()
+			}
+		}()
 		h.handleStream(ctx, w, req, connID, clientAddr, connectAuthority, tlsMeta, logger)
 	})
 
 	// http2.Server.ServeConn blocks until the connection is closed or an error occurs.
 	// Use a context-cancellation watcher to close the connection on shutdown.
+	// A done channel ensures the goroutine exits when serveHTTP2 returns
+	// normally, preventing a goroutine leak. (F-3)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-ctx.Done()
-		conn.SetReadDeadline(time.Now())
+		select {
+		case <-ctx.Done():
+			conn.SetReadDeadline(time.Now())
+		case <-done:
+		}
 	}()
 
 	opts := &http2.ServeConnOpts{
@@ -151,7 +170,14 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 
 	// Wait for all in-flight handlers to complete before returning,
 	// so that session recording finishes before the connection is closed.
-	wg.Wait()
+	// We must check after ServeConn returns because new handlers cannot
+	// be dispatched after that point, making the counter monotonically
+	// decreasing from here. (F-2)
+	mu.Lock()
+	for active.Load() > 0 {
+		cond.Wait()
+	}
+	mu.Unlock()
 
 	logger.Debug("HTTP/2 connection closed")
 	return nil
