@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,12 +14,14 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/config"
+	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
 	"github.com/usk6666/katashiro-proxy/internal/logging"
 	"github.com/usk6666/katashiro-proxy/internal/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -124,6 +127,15 @@ func run(ctx context.Context) error {
 	httpHandler.SetInterceptEngine(interceptEngine)
 	httpHandler.SetInterceptQueue(interceptQueue)
 
+	// Initialize auto-transform pipeline for request/response modification.
+	pipeline := rules.NewPipeline()
+	httpHandler.SetTransformPipeline(pipeline)
+
+	// Initialize fuzzer components for async fuzz job execution.
+	fuzzEngine := fuzzer.NewEngine(store, store, store, http.DefaultClient, "")
+	fuzzRegistry := fuzzer.NewJobRegistry()
+	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
+
 	detector := protocol.NewDetector(httpHandler)
 
 	// Create proxy manager for MCP tool control.
@@ -132,7 +144,7 @@ func run(ctx context.Context) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	if stdio {
-		return runStdio(ctx, ca, issuer, store, manager, passthrough, scope, interceptEngine, interceptQueue, cfg.DBPath, logger)
+		return runStdio(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, logger)
 	}
 
 	return runProxy(ctx, cfg, manager, logger)
@@ -140,7 +152,7 @@ func run(ctx context.Context) error {
 
 // runStdio starts the MCP server on stdin/stdout. The proxy is not started
 // automatically; use the proxy_start tool to begin intercepting traffic.
-func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, dbPath string, logger *slog.Logger) error {
+func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager,
@@ -149,6 +161,9 @@ func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store sessi
 		mcp.WithCaptureScope(scope),
 		mcp.WithInterceptEngine(interceptEngine),
 		mcp.WithInterceptQueue(interceptQueue),
+		mcp.WithTransformPipeline(pipeline),
+		mcp.WithFuzzRunner(fuzzRunner),
+		mcp.WithFuzzStore(fuzzStore),
 		mcp.WithIssuer(issuer),
 	)
 	transport := &gomcp.StdioTransport{}

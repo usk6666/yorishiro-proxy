@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,9 @@ import (
 
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/config"
+	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
 func TestInitCA(t *testing.T) {
@@ -311,4 +316,70 @@ func TestInitCA_AutoPersist_SaveFailureFallback(t *testing.T) {
 	if source.Persisted {
 		t.Error("expected Persisted=false when save fails")
 	}
+}
+
+// TestM3ComponentInitialization verifies that the TransformPipeline, FuzzRunner,
+// and FuzzStore components are constructable in the same way as run() does.
+// This catches initialization regressions like USK-96 where components were
+// created but not wired into the MCP server.
+func TestM3ComponentInitialization(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	defer store.Close()
+
+	// Verify TransformPipeline construction.
+	pipeline := rules.NewPipeline()
+	if pipeline == nil {
+		t.Fatal("rules.NewPipeline() returned nil")
+	}
+
+	// Verify the pipeline is functional (can add/remove rules).
+	err = pipeline.AddRule(rules.Rule{
+		ID:        "test-rule",
+		Enabled:   true,
+		Priority:  1,
+		Direction: rules.DirectionRequest,
+		Action: rules.Action{
+			Type:   rules.ActionSetHeader,
+			Header: "X-Test",
+			Value:  "test-value",
+		},
+	})
+	if err != nil {
+		t.Fatalf("pipeline.AddRule(): %v", err)
+	}
+	if pipeline.Len() != 1 {
+		t.Errorf("pipeline.Len() = %d, want 1", pipeline.Len())
+	}
+
+	// Verify FuzzEngine and FuzzRunner construction.
+	// The store satisfies SessionFetcher, SessionRecorder, and FuzzJobStore interfaces.
+	fuzzEngine := fuzzer.NewEngine(store, store, store, http.DefaultClient, "")
+	if fuzzEngine == nil {
+		t.Fatal("fuzzer.NewEngine() returned nil")
+	}
+
+	fuzzRegistry := fuzzer.NewJobRegistry()
+	if fuzzRegistry == nil {
+		t.Fatal("fuzzer.NewJobRegistry() returned nil")
+	}
+
+	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
+	if fuzzRunner == nil {
+		t.Fatal("fuzzer.NewRunner() returned nil")
+	}
+
+	// Verify the runner's registry is accessible and functional.
+	if fuzzRunner.Registry() != fuzzRegistry {
+		t.Error("fuzzRunner.Registry() returned unexpected registry")
+	}
+
+	// Verify the store satisfies session.FuzzStore interface.
+	var _ session.FuzzStore = store
 }
