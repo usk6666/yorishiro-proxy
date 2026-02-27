@@ -5,23 +5,37 @@ Unified information query tool. Retrieve sessions, session details, messages, pr
 ## Parameters
 
 ### resource (string, required)
-The resource to query. One of: `sessions`, `session`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`.
+The resource to query. One of: `sessions`, `session`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`, `fuzz_jobs`, `fuzz_results`.
 
 ### id (string, conditional)
 Session ID or macro name. Required for `session`, `messages`, and `macro` resources.
 
+### fuzz_id (string, conditional)
+Fuzz job ID. Required for `fuzz_results` resource.
+
 ### filter (object, optional)
-Filter options for the `sessions` resource.
-- **protocol** (string): Protocol filter (e.g. `"HTTP/1.x"`, `"HTTPS"`).
-- **method** (string): HTTP method filter (e.g. `"GET"`, `"POST"`).
-- **url_pattern** (string): URL substring match (e.g. `"/api/"`).
-- **status_code** (integer): HTTP status code filter (e.g. `200`, `404`).
+Filter options for the `sessions`, `fuzz_jobs`, and `fuzz_results` resources.
+- **protocol** (string): Protocol filter for sessions (e.g. `"HTTP/1.x"`, `"HTTPS"`).
+- **method** (string): HTTP method filter for sessions (e.g. `"GET"`, `"POST"`).
+- **url_pattern** (string): URL substring match for sessions (e.g. `"/api/"`).
+- **status_code** (integer): HTTP status code filter for sessions and fuzz_results (e.g. `200`, `404`).
+- **body_contains** (string): Response body substring filter for fuzz_results.
+- **status** (string): Job status filter for fuzz_jobs (e.g. `"running"`, `"completed"`).
+- **tag** (string): Job tag filter for fuzz_jobs (exact match).
+
+### fields (array of strings, optional)
+Controls which fields are returned in the response for `fuzz_jobs` and `fuzz_results` resources.
+If omitted, all fields are returned. Metadata fields (`count`, `total`, `summary`) are always included.
+
+### sort_by (string, optional)
+Field to sort results by for the `fuzz_results` resource.
+Supported values: `index_num` (default), `status_code`, `duration_ms`, `response_length`.
 
 ### limit (integer, optional)
-Maximum number of items to return. Default: 50, max: 1000. Applies to `sessions` and `messages`.
+Maximum number of items to return. Default: 50, max: 1000. Applies to `sessions`, `messages`, `fuzz_jobs`, and `fuzz_results`.
 
 ### offset (integer, optional)
-Number of items to skip for pagination. Must be >= 0. Applies to `sessions` and `messages`.
+Number of items to skip for pagination. Must be >= 0. Applies to `sessions`, `messages`, `fuzz_jobs`, and `fuzz_results`.
 
 ## Resource Details
 
@@ -139,4 +153,41 @@ Returns: name, description, steps[], initial_vars, timeout_ms, created_at, updat
 ### Get macro details
 ```json
 {"resource": "macro", "id": "auth-flow"}
+```
+
+### fuzz_jobs
+List fuzz jobs with optional filtering by status and tag.
+
+Supports `filter.status`, `filter.tag`, `fields`, `limit`, and `offset`.
+
+Returns: `jobs[]` (id, session_id, status, tag, total, completed_count, error_count, created_at, completed_at), `count`, `total`.
+
+### fuzz_results
+Get results for a specific fuzz job with filtering, sorting, pagination, and aggregate summary.
+
+Requires: `fuzz_id` (fuzz job ID). Supports `filter.status_code`, `filter.body_contains`, `fields`, `sort_by`, `limit`, and `offset`.
+
+Returns: `results[]` (id, fuzz_id, index, session_id, payloads, status_code, response_length, duration_ms, error), `count`, `total`, `summary` (status_distribution, avg_duration_ms, total_duration_ms).
+
+### List fuzz jobs
+```json
+{"resource": "fuzz_jobs"}
+```
+
+### List running fuzz jobs
+```json
+{"resource": "fuzz_jobs", "filter": {"status": "running"}}
+```
+
+### Get fuzz results with filtering
+```json
+{
+  "resource": "fuzz_results",
+  "fuzz_id": "fuzz-789",
+  "filter": {"status_code": 200, "body_contains": "admin"},
+  "fields": ["index", "session_id", "payloads", "status_code", "duration_ms"],
+  "sort_by": "status_code",
+  "limit": 50,
+  "offset": 0
+}
 ```

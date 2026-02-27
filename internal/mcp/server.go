@@ -24,8 +24,9 @@ type Server struct {
 	interceptEngine   *intercept.Engine
 	interceptQueue    *intercept.Queue
 	transformPipeline *rules.Pipeline
-	fuzzRunner        *fuzzer.Runner // async fuzz job runner
-	dbPath            string         // path to the SQLite database file for status reporting
+	fuzzRunner        *fuzzer.Runner      // async fuzz job runner
+	fuzzStore         session.FuzzStore   // fuzz job/result persistence for query tool
+	dbPath            string              // path to the SQLite database file for status reporting
 	replayDoer        httpDoer       // injectable HTTP client for execute(replay) testing
 	rawReplayDialer   rawDialer      // injectable dialer for replay_raw testing
 }
@@ -84,6 +85,14 @@ func WithTransformPipeline(pipeline *rules.Pipeline) ServerOption {
 func WithFuzzRunner(runner *fuzzer.Runner) ServerOption {
 	return func(s *Server) {
 		s.fuzzRunner = runner
+	}
+}
+
+// WithFuzzStore sets the fuzz store for the MCP server,
+// enabling fuzz_jobs and fuzz_results query resources.
+func WithFuzzStore(fs session.FuzzStore) ServerOption {
+	return func(s *Server) {
+		s.fuzzStore = fs
 	}
 }
 

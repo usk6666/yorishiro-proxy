@@ -67,20 +67,49 @@ type FuzzStore interface {
 	// GetFuzzJob retrieves a fuzz job by ID.
 	GetFuzzJob(ctx context.Context, id string) (*FuzzJob, error)
 
+	// ListFuzzJobs retrieves fuzz jobs with optional filtering and pagination.
+	ListFuzzJobs(ctx context.Context, opts FuzzJobListOptions) ([]*FuzzJob, error)
+
+	// CountFuzzJobs returns the total number of fuzz jobs matching the given options,
+	// ignoring Limit and Offset.
+	CountFuzzJobs(ctx context.Context, opts FuzzJobListOptions) (int, error)
+
 	// SaveFuzzResult persists a single fuzz result.
 	SaveFuzzResult(ctx context.Context, result *FuzzResult) error
 
 	// ListFuzzResults retrieves results for a fuzz job with optional filtering.
 	ListFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) ([]*FuzzResult, error)
+
+	// CountFuzzResults returns the total number of results for a fuzz job
+	// matching the given filter options, ignoring Limit and Offset.
+	CountFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) (int, error)
 }
 
 // FuzzResultListOptions configures fuzz result listing behavior.
 type FuzzResultListOptions struct {
 	// StatusCode filters results by HTTP status code (0 means no filter).
 	StatusCode int
+	// BodyContains filters results whose response body (in the linked session message)
+	// contains this substring. Empty string means no filter.
+	BodyContains string
+	// SortBy specifies the column to sort results by (e.g. "status_code", "duration_ms", "index_num").
+	// Default is "index_num".
+	SortBy string
 	// Limit is the maximum number of results to return (0 means no limit).
 	Limit int
 	// Offset is the number of results to skip for pagination.
+	Offset int
+}
+
+// FuzzJobListOptions configures fuzz job listing behavior.
+type FuzzJobListOptions struct {
+	// Status filters jobs by status (e.g. "running", "completed").
+	Status string
+	// Tag filters jobs by tag (exact match).
+	Tag string
+	// Limit is the maximum number of jobs to return (0 means no limit).
+	Limit int
+	// Offset is the number of jobs to skip for pagination.
 	Offset int
 }
 
@@ -177,17 +206,50 @@ func (s *SQLiteStore) SaveFuzzResult(ctx context.Context, result *FuzzResult) er
 	})
 }
 
-// ListFuzzResults retrieves results for a fuzz job with optional filtering.
-func (s *SQLiteStore) ListFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) ([]*FuzzResult, error) {
-	query := `SELECT id, fuzz_id, index_num, session_id, payloads, status_code, response_length, duration_ms, error FROM fuzz_results WHERE fuzz_id = ?`
+// validFuzzResultSortColumns maps allowed sort_by values to SQL column names.
+var validFuzzResultSortColumns = map[string]string{
+	"index_num":       "index_num",
+	"status_code":     "status_code",
+	"duration_ms":     "duration_ms",
+	"response_length": "response_length",
+}
+
+// fuzzResultWhereClause builds the WHERE clause and args for fuzz result queries.
+func fuzzResultWhereClause(fuzzID string, opts FuzzResultListOptions) (string, []interface{}) {
+	where := " WHERE fuzz_id = ?"
 	args := []interface{}{fuzzID}
 
 	if opts.StatusCode != 0 {
-		query += " AND status_code = ?"
+		where += " AND status_code = ?"
 		args = append(args, opts.StatusCode)
 	}
+	if opts.BodyContains != "" {
+		// Join with messages table to filter by response body content.
+		// Use CAST to convert BLOB body to TEXT for substring matching.
+		where += ` AND EXISTS (
+			SELECT 1 FROM messages m
+			WHERE m.session_id = fuzz_results.session_id
+			  AND m.direction = 'receive'
+			  AND INSTR(CAST(m.body AS TEXT), ?) > 0
+		)`
+		args = append(args, opts.BodyContains)
+	}
+	return where, args
+}
 
-	query += " ORDER BY index_num ASC"
+// fuzzResultOrderClause returns the ORDER BY clause for fuzz result queries.
+func fuzzResultOrderClause(sortBy string) string {
+	if col, ok := validFuzzResultSortColumns[sortBy]; ok {
+		return " ORDER BY " + col + " ASC"
+	}
+	return " ORDER BY index_num ASC"
+}
+
+// ListFuzzResults retrieves results for a fuzz job with optional filtering.
+func (s *SQLiteStore) ListFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) ([]*FuzzResult, error) {
+	where, args := fuzzResultWhereClause(fuzzID, opts)
+	query := `SELECT id, fuzz_id, index_num, session_id, payloads, status_code, response_length, duration_ms, error FROM fuzz_results` + where
+	query += fuzzResultOrderClause(opts.SortBy)
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -211,6 +273,81 @@ func (s *SQLiteStore) ListFuzzResults(ctx context.Context, fuzzID string, opts F
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// CountFuzzResults returns the total number of results for a fuzz job
+// matching the given filter options, ignoring Limit and Offset.
+func (s *SQLiteStore) CountFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) (int, error) {
+	where, args := fuzzResultWhereClause(fuzzID, opts)
+	query := `SELECT COUNT(*) FROM fuzz_results` + where
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count fuzz results: %w", err)
+	}
+	return count, nil
+}
+
+// ListFuzzJobs retrieves fuzz jobs with optional filtering and pagination.
+func (s *SQLiteStore) ListFuzzJobs(ctx context.Context, opts FuzzJobListOptions) ([]*FuzzJob, error) {
+	query := `SELECT id, session_id, config, status, tag, created_at, completed_at, total, completed_count, error_count FROM fuzz_jobs WHERE 1=1`
+	args := []interface{}{}
+
+	if opts.Status != "" {
+		query += " AND status = ?"
+		args = append(args, opts.Status)
+	}
+	if opts.Tag != "" {
+		query += " AND tag = ?"
+		args = append(args, opts.Tag)
+	}
+
+	query += " ORDER BY created_at DESC"
+
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
+	}
+	if opts.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", opts.Offset)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list fuzz jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []*FuzzJob
+	for rows.Next() {
+		j, err := scanFuzzJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
+}
+
+// CountFuzzJobs returns the total number of fuzz jobs matching the given options,
+// ignoring Limit and Offset.
+func (s *SQLiteStore) CountFuzzJobs(ctx context.Context, opts FuzzJobListOptions) (int, error) {
+	query := `SELECT COUNT(*) FROM fuzz_jobs WHERE 1=1`
+	args := []interface{}{}
+
+	if opts.Status != "" {
+		query += " AND status = ?"
+		args = append(args, opts.Status)
+	}
+	if opts.Tag != "" {
+		query += " AND tag = ?"
+		args = append(args, opts.Tag)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count fuzz jobs: %w", err)
+	}
+	return count, nil
 }
 
 func scanFuzzJob(row scannable) (*FuzzJob, error) {
