@@ -80,7 +80,15 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	tlsMeta := extractTLSMetadata(tlsConn)
 
 	logger.Info("CONNECT tunnel established", "host", connectAuthority,
-		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite)
+		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite,
+		"alpn", tlsMeta.ALPN)
+
+	// If the client negotiated HTTP/2 via ALPN and we have an h2 handler,
+	// delegate to it instead of the HTTP/1.x loop.
+	if tlsMeta.ALPN == "h2" && h.h2Handler != nil {
+		return h.h2Handler.HandleH2(ctx, tlsConn, connectAuthority,
+			tlsMeta.Version, tlsMeta.CipherSuite, tlsMeta.ALPN)
+	}
 
 	// Process HTTPS requests over the decrypted TLS connection.
 	// Pass the full authority (host:port) for URL reconstruction.
@@ -175,9 +183,16 @@ func parseConnectHost(hostPort string) (string, error) {
 
 // tlsHandshake performs a TLS server handshake on the client connection,
 // presenting a dynamically generated certificate for the given hostname.
+// When an h2Handler is configured, ALPN advertises both "h2" and "http/1.1"
+// so that clients can negotiate HTTP/2 over TLS.
 func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (*tls.Conn, error) {
 	tlsConfig := &tls.Config{
 		GetCertificate: h.issuer.GetCertificateForClientHello,
+	}
+
+	// Advertise HTTP/2 and HTTP/1.1 via ALPN when an h2 handler is available.
+	if h.h2Handler != nil {
+		tlsConfig.NextProtos = []string{"h2", "http/1.1"}
 	}
 
 	tlsConn := tls.Server(conn, tlsConfig)
@@ -280,6 +295,12 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 // handleHTTPSRequest forwards a single decrypted HTTPS request to the upstream
 // server, records the session, and writes the response back to the client.
 func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, tlsMeta tlsMetadata, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+	// Check for WebSocket upgrade before processing as normal HTTPS.
+	// This must happen before hop-by-hop headers are removed.
+	if isWebSocketUpgrade(req) {
+		return h.handleWebSocketTLS(ctx, conn, connectHost, req, tlsMeta)
+	}
+
 	start := time.Now()
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)

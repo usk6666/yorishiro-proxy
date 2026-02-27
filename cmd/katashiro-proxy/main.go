@@ -18,6 +18,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
+	protohttp2 "github.com/usk6666/katashiro-proxy/internal/protocol/http2"
 	prototcp "github.com/usk6666/katashiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
@@ -131,6 +132,14 @@ func run(ctx context.Context) error {
 	pipeline := rules.NewPipeline()
 	httpHandler.SetTransformPipeline(pipeline)
 
+	// Build HTTP/2 handler for h2c detection and h2 (TLS ALPN) delegation.
+	http2Handler := protohttp2.NewHandler(store, logger)
+	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
+	http2Handler.SetCaptureScope(scope)
+
+	// Link the HTTP/2 handler to the HTTP handler for h2 ALPN delegation.
+	httpHandler.SetH2Handler(http2Handler)
+
 	// Initialize fuzzer components for async fuzz job execution.
 	// Use a hardened HTTP client with SSRF protection, explicit timeout,
 	// and redirect suppression — never http.DefaultClient.
@@ -141,7 +150,8 @@ func run(ctx context.Context) error {
 	// Raw TCP fallback handler: must be last since Detect() always returns true.
 	tcpHandler := prototcp.NewHandler(store, nil, logger)
 
-	detector := protocol.NewDetector(httpHandler, tcpHandler)
+	// Register handlers in priority order: h2c → HTTP/1.x → raw TCP fallback.
+	detector := protocol.NewDetector(http2Handler, httpHandler, tcpHandler)
 
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)
