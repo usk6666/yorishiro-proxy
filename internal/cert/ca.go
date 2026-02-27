@@ -16,11 +16,20 @@ import (
 // caValidity is the validity period for a generated CA certificate.
 const caValidity = 10 * 365 * 24 * time.Hour // ~10 years
 
+// CASource tracks the persistence state of a CA.
+type CASource struct {
+	Persisted bool
+	CertPath  string
+	KeyPath   string
+	Explicit  bool // true when CA was loaded from user-provided -ca-cert/-ca-key flags
+}
+
 // CA manages the root certificate authority for TLS interception.
 type CA struct {
 	cert    *x509.Certificate
 	privKey *ecdsa.PrivateKey
 	certPEM []byte
+	source  CASource
 }
 
 // Generate creates a new self-signed root CA certificate and ECDSA P-256 private key.
@@ -166,6 +175,16 @@ func (ca *CA) Certificate() *x509.Certificate {
 // CertPEM returns the PEM-encoded CA certificate bytes, or nil if not loaded/generated.
 func (ca *CA) CertPEM() []byte {
 	return ca.certPEM
+}
+
+// Source returns the persistence metadata for this CA.
+func (ca *CA) Source() CASource {
+	return ca.source
+}
+
+// SetSource sets the persistence metadata for this CA.
+func (ca *CA) SetSource(s CASource) {
+	ca.source = s
 }
 
 // generateSerialNumber creates a random 128-bit serial number for certificates.

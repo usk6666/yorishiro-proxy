@@ -557,10 +557,13 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 
 // queryCACertResult is the response for the ca_cert resource.
 type queryCACertResult struct {
-	PEM         string `json:"pem"`
-	Fingerprint string `json:"fingerprint"`
-	Subject     string `json:"subject"`
-	NotAfter    string `json:"not_after"`
+	PEM          string `json:"pem"`
+	Fingerprint  string `json:"fingerprint"`
+	Subject      string `json:"subject"`
+	NotAfter     string `json:"not_after"`
+	Persisted    bool   `json:"persisted"`
+	CertPath     string `json:"cert_path,omitempty"`
+	InstallHint  string `json:"install_hint,omitempty"`
 }
 
 // handleQueryCACert returns the CA certificate PEM and metadata.
@@ -582,11 +585,18 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 	fingerprint := sha256.Sum256(cert.Raw)
 	fingerprintHex := formatFingerprint(fingerprint[:])
 
+	source := s.ca.Source()
 	result := &queryCACertResult{
 		PEM:         string(certPEM),
 		Fingerprint: fingerprintHex,
 		Subject:     cert.Subject.String(),
 		NotAfter:    cert.NotAfter.UTC().Format("2006-01-02T15:04:05Z"),
+		Persisted:   source.Persisted,
+		CertPath:    source.CertPath,
+	}
+
+	if source.Persisted && source.CertPath != "" {
+		result.InstallHint = "Install the CA certificate from " + source.CertPath + " into your OS/browser trust store for HTTPS interception"
 	}
 
 	return nil, result, nil

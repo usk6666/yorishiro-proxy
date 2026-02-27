@@ -107,6 +107,12 @@ func (iss *Issuer) CacheLen() int {
 	return iss.cache.Len()
 }
 
+// ClearCache removes all cached certificates. This should be called after
+// the CA is regenerated to ensure subsequent TLS handshakes use the new CA.
+func (iss *Issuer) ClearCache() {
+	iss.cache.Clear()
+}
+
 // generate creates a new ECDSA P-256 server certificate for the given hostname,
 // signed by the CA. It returns the TLS certificate and its expiration time.
 func (iss *Issuer) generate(hostname string) (*tls.Certificate, time.Time, error) {

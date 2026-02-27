@@ -23,7 +23,29 @@ Set `HTTP_PROXY=http://127.0.0.1:8080` and `HTTPS_PROXY=http://127.0.0.1:8080` i
 // query
 {"resource": "ca_cert"}
 ```
-Install the returned PEM certificate into the client's trust store for HTTPS interception.
+The response includes `persisted`, `cert_path`, and `install_hint` fields.
+If `persisted` is true, install the certificate from `cert_path` into the client's trust store.
+The CA is automatically saved to `~/.katashiro-proxy/ca/ca.crt` on first startup, so subsequent restarts reuse the same CA without re-installation.
+
+## CA Certificate Rotation
+
+### Regenerate the CA certificate
+```json
+// execute
+{
+  "action": "regenerate_ca_cert",
+  "params": {}
+}
+```
+After regeneration, re-install the CA certificate from `cert_path` in the response.
+In ephemeral mode (`--ca-ephemeral`), the new CA exists only in memory.
+
+### Verify the new CA
+```json
+// query
+{"resource": "ca_cert"}
+```
+Confirm the fingerprint has changed and `persisted` is true.
 
 ## Authentication Testing
 

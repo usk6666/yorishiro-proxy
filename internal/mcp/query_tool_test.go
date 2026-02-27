@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
@@ -885,6 +886,101 @@ func TestQuery_Sessions_FilterByStatusCode(t *testing.T) {
 	}
 	if out.Sessions[0].ID != "err-1" {
 		t.Errorf("id = %q, want err-1", out.Sessions[0].ID)
+	}
+}
+
+// --- Test: ca_cert resource with persisted source ---
+
+func TestQuery_CACert_PersistedFields(t *testing.T) {
+	store := newTestStore(t)
+	ca := newTestCA(t)
+	ca.SetSource(cert.CASource{
+		Persisted: true,
+		CertPath:  "/tmp/test/ca.crt",
+		KeyPath:   "/tmp/test/ca.key",
+	})
+
+	ctx := context.Background()
+	s := NewServer(ctx, ca, store, nil)
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "ca_cert"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryCACertResult
+	unmarshalQueryResult(t, result, &out)
+
+	if !out.Persisted {
+		t.Error("persisted = false, want true")
+	}
+	if out.CertPath != "/tmp/test/ca.crt" {
+		t.Errorf("cert_path = %q, want /tmp/test/ca.crt", out.CertPath)
+	}
+	if out.InstallHint == "" {
+		t.Error("install_hint should not be empty for persisted CA")
+	}
+	if !strings.Contains(out.InstallHint, "/tmp/test/ca.crt") {
+		t.Errorf("install_hint = %q, should contain cert path", out.InstallHint)
+	}
+}
+
+func TestQuery_CACert_EphemeralFields(t *testing.T) {
+	store := newTestStore(t)
+	ca := newTestCA(t)
+	// No SetSource — defaults to ephemeral (Persisted=false).
+
+	ctx := context.Background()
+	s := NewServer(ctx, ca, store, nil)
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "ca_cert"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryCACertResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Persisted {
+		t.Error("persisted = true, want false for ephemeral CA")
+	}
+	if out.CertPath != "" {
+		t.Errorf("cert_path = %q, want empty for ephemeral CA", out.CertPath)
+	}
+	if out.InstallHint != "" {
+		t.Errorf("install_hint = %q, want empty for ephemeral CA", out.InstallHint)
 	}
 }
 

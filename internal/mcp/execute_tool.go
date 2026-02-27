@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -95,7 +96,7 @@ type executeParams struct {
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro"}
+var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -115,7 +116,8 @@ func (s *Server) registerExecute() {
 			"'fuzz_cancel' cancels a running or paused fuzz job (requires fuzz_id); " +
 			"'define_macro' saves a macro definition (upsert) with steps, extraction rules, and guards; " +
 			"'run_macro' executes a stored macro for testing; " +
-			"'delete_macro' removes a stored macro definition. " +
+			"'delete_macro' removes a stored macro definition; " +
+			"'regenerate_ca_cert' regenerates the CA certificate (auto-persist mode: saves to disk; ephemeral mode: in-memory only; explicit mode: error). " +
 			"('replay' and 'replay_raw' are accepted as deprecated aliases for 'resend' and 'resend_raw'.)",
 	}, s.handleExecute)
 }
@@ -166,6 +168,8 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 			return nil, nil, err
 		}
 		return nil, result, nil
+	case "regenerate_ca_cert":
+		return s.handleExecuteRegenerateCA()
 	default:
 		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableActions)
 	}
@@ -1114,4 +1118,72 @@ func (s *Server) handleExecuteFuzzCancel(params executeParams) (*gomcp.CallToolR
 		Action: "fuzz_cancel",
 		Status: string(ctrl.Status()),
 	}, nil
+}
+
+// --- regenerate_ca_cert action ---
+
+// executeRegenerateCACertResult is the structured output of the regenerate_ca_cert action.
+type executeRegenerateCACertResult struct {
+	Fingerprint string `json:"fingerprint"`
+	Subject     string `json:"subject"`
+	NotAfter    string `json:"not_after"`
+	Persisted   bool   `json:"persisted"`
+	CertPath    string `json:"cert_path,omitempty"`
+	InstallHint string `json:"install_hint,omitempty"`
+}
+
+// handleExecuteRegenerateCA regenerates the CA certificate.
+// In auto-persist mode, the new CA is saved to the default path.
+// In ephemeral mode, the new CA exists only in memory.
+// In explicit mode (user-provided paths), regeneration is rejected.
+func (s *Server) handleExecuteRegenerateCA() (*gomcp.CallToolResult, *executeRegenerateCACertResult, error) {
+	if s.ca == nil {
+		return nil, nil, fmt.Errorf("CA is not initialized")
+	}
+
+	source := s.ca.Source()
+
+	// Reject regeneration in explicit mode (user-provided CA via -ca-cert/-ca-key).
+	if source.Explicit {
+		return nil, nil, fmt.Errorf("cannot regenerate user-provided CA (loaded from %s); provide new files via -ca-cert/-ca-key flags instead", source.CertPath)
+	}
+
+	// Generate a new CA.
+	if err := s.ca.Generate(); err != nil {
+		return nil, nil, fmt.Errorf("regenerate CA: %w", err)
+	}
+
+	// Clear the issuer cache so new TLS handshakes use the new CA.
+	if s.issuer != nil {
+		s.issuer.ClearCache()
+	}
+
+	// If the CA was persisted, save the new CA to the same paths.
+	if source.Persisted && source.CertPath != "" {
+		if err := s.ca.Save(source.CertPath, source.KeyPath); err != nil {
+			return nil, nil, fmt.Errorf("save regenerated CA: %w", err)
+		}
+		s.ca.SetSource(source) // preserve source metadata
+	}
+
+	newCert := s.ca.Certificate()
+	fingerprint := sha256.Sum256(newCert.Raw)
+	fingerprintHex := formatFingerprint(fingerprint[:])
+
+	newSource := s.ca.Source()
+	result := &executeRegenerateCACertResult{
+		Fingerprint: fingerprintHex,
+		Subject:     newCert.Subject.String(),
+		NotAfter:    newCert.NotAfter.UTC().Format("2006-01-02T15:04:05Z"),
+		Persisted:   newSource.Persisted,
+		CertPath:    newSource.CertPath,
+	}
+
+	if newSource.Persisted && newSource.CertPath != "" {
+		result.InstallHint = "CA certificate has been regenerated. Please re-install the CA from " + newSource.CertPath + " into your trust store"
+	} else {
+		result.InstallHint = "CA certificate has been regenerated in memory. It will be lost on restart"
+	}
+
+	return nil, result, nil
 }

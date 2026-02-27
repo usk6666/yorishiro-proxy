@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -49,6 +50,7 @@ func run(ctx context.Context) error {
 	flag.IntVar(&cfg.RetentionMaxSessions, "retention-max-sessions", cfg.RetentionMaxSessions, "max sessions to retain (0 = unlimited)")
 	flag.DurationVar(&cfg.RetentionMaxAge, "retention-max-age", cfg.RetentionMaxAge, "max session age (e.g. 720h for 30 days, 0 = unlimited)")
 	flag.DurationVar(&cfg.CleanupInterval, "cleanup-interval", cfg.CleanupInterval, "interval between automatic cleanup runs (0 = disabled)")
+	flag.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (no file persistence)")
 	flag.Parse()
 
 	// Initialize logger.
@@ -130,7 +132,7 @@ func run(ctx context.Context) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	if stdio {
-		return runStdio(ctx, ca, store, manager, passthrough, scope, interceptEngine, interceptQueue, cfg.DBPath, logger)
+		return runStdio(ctx, ca, issuer, store, manager, passthrough, scope, interceptEngine, interceptQueue, cfg.DBPath, logger)
 	}
 
 	return runProxy(ctx, cfg, manager, logger)
@@ -138,7 +140,7 @@ func run(ctx context.Context) error {
 
 // runStdio starts the MCP server on stdin/stdout. The proxy is not started
 // automatically; use the proxy_start tool to begin intercepting traffic.
-func runStdio(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, dbPath string, logger *slog.Logger) error {
+func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, dbPath string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager,
@@ -147,6 +149,7 @@ func runStdio(ctx context.Context, ca *cert.CA, store session.Store, manager *pr
 		mcp.WithCaptureScope(scope),
 		mcp.WithInterceptEngine(interceptEngine),
 		mcp.WithInterceptQueue(interceptQueue),
+		mcp.WithIssuer(issuer),
 	)
 	transport := &gomcp.StdioTransport{}
 
@@ -177,9 +180,12 @@ func runProxy(ctx context.Context, cfg *config.Config, manager *proxy.Manager, l
 	return nil
 }
 
-// initCA initializes the CA for TLS interception. If certificate and key paths
-// are configured, it loads the CA from files. Otherwise, it generates an
-// ephemeral CA that lasts for the lifetime of the process.
+// initCA initializes the CA for TLS interception using one of three modes:
+//
+//  1. Explicit: -ca-cert and -ca-key flags specify paths (loaded from files).
+//  2. Auto-persist (default): CA is stored in ~/.katashiro-proxy/ca/.
+//     If files exist, the CA is loaded; otherwise a new CA is generated and saved.
+//  3. Ephemeral: --ca-ephemeral generates an in-memory CA with no file persistence.
 func initCA(cfg *config.Config, logger *slog.Logger) (*cert.CA, error) {
 	hasCert := cfg.CACertPath != ""
 	hasKey := cfg.CAKeyPath != ""
@@ -187,19 +193,95 @@ func initCA(cfg *config.Config, logger *slog.Logger) (*cert.CA, error) {
 		return nil, fmt.Errorf("both -ca-cert and -ca-key must be specified together")
 	}
 
-	ca := &cert.CA{}
-
+	// Explicit mode: user-specified paths.
 	if hasCert && hasKey {
+		if cfg.CAEphemeral {
+			return nil, fmt.Errorf("--ca-ephemeral cannot be used with -ca-cert/-ca-key")
+		}
+		ca := &cert.CA{}
 		if err := ca.Load(cfg.CACertPath, cfg.CAKeyPath); err != nil {
 			return nil, fmt.Errorf("load CA from %s / %s: %w", cfg.CACertPath, cfg.CAKeyPath, err)
 		}
+		ca.SetSource(cert.CASource{
+			Persisted: true,
+			CertPath:  cfg.CACertPath,
+			KeyPath:   cfg.CAKeyPath,
+			Explicit:  true,
+		})
 		logger.Info("loaded CA certificate", "cert_path", cfg.CACertPath)
 		return ca, nil
 	}
 
-	if err := ca.Generate(); err != nil {
-		return nil, fmt.Errorf("generate ephemeral CA: %w", err)
+	// Ephemeral mode: in-memory only.
+	if cfg.CAEphemeral {
+		ca := &cert.CA{}
+		if err := ca.Generate(); err != nil {
+			return nil, fmt.Errorf("generate ephemeral CA: %w", err)
+		}
+		logger.Info("generated ephemeral CA certificate (in-memory only)")
+		return ca, nil
 	}
-	logger.Info("generated ephemeral CA certificate")
+
+	// Auto-persist mode (default).
+	return initCAAutoPersist(cfg, logger)
+}
+
+// initCAAutoPersist implements the auto-persist CA mode.
+// It loads an existing CA from the default path, or generates and saves a new one.
+func initCAAutoPersist(cfg *config.Config, logger *slog.Logger) (*cert.CA, error) {
+	caDir := cert.DefaultCADir()
+	certPath := cert.DefaultCACertPath()
+	keyPath := cert.DefaultCAKeyPath()
+
+	// Allow test override of the data directory.
+	if cfg.CADataDir != "" {
+		caDir = cfg.CADataDir
+		certPath = filepath.Join(caDir, "ca.crt")
+		keyPath = filepath.Join(caDir, "ca.key")
+	}
+
+	ca := &cert.CA{}
+
+	// Try loading existing CA files.
+	if _, err := os.Stat(certPath); err == nil {
+		if err := ca.Load(certPath, keyPath); err != nil {
+			return nil, fmt.Errorf("load persisted CA from %s: %w", certPath, err)
+		}
+		ca.SetSource(cert.CASource{
+			Persisted: true,
+			CertPath:  certPath,
+			KeyPath:   keyPath,
+		})
+		logger.Info("loaded persisted CA certificate", "cert_path", certPath)
+		return ca, nil
+	}
+
+	// Generate a new CA.
+	if err := ca.Generate(); err != nil {
+		return nil, fmt.Errorf("generate CA: %w", err)
+	}
+
+	// Create CA directory with restrictive permissions.
+	if err := os.MkdirAll(caDir, 0700); err != nil {
+		logger.Warn("failed to create CA directory, continuing with ephemeral CA",
+			"dir", caDir, "error", err)
+		return ca, nil
+	}
+
+	// Save the CA files.
+	if err := ca.Save(certPath, keyPath); err != nil {
+		logger.Warn("failed to save CA certificate, continuing with ephemeral CA",
+			"cert_path", certPath, "error", err)
+		return ca, nil
+	}
+
+	ca.SetSource(cert.CASource{
+		Persisted: true,
+		CertPath:  certPath,
+		KeyPath:   keyPath,
+	})
+	logger.Info("generated and saved CA certificate",
+		"cert_path", certPath,
+		"install_hint", "Install the CA certificate from the path above into your OS/browser trust store for HTTPS interception")
 	return ca, nil
 }

@@ -107,6 +107,14 @@ func (c *lruCache) Len() int {
 	return c.eviction.Len()
 }
 
+// Clear removes all entries from the cache.
+func (c *lruCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]*list.Element)
+	c.eviction.Init()
+}
+
 // removeLocked removes an element from both the list and the map.
 // Caller must hold c.mu.
 func (c *lruCache) removeLocked(elem *list.Element) {
