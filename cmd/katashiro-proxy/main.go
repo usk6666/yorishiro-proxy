@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -132,7 +131,9 @@ func run(ctx context.Context) error {
 	httpHandler.SetTransformPipeline(pipeline)
 
 	// Initialize fuzzer components for async fuzz job execution.
-	fuzzEngine := fuzzer.NewEngine(store, store, store, http.DefaultClient, "")
+	// Use a hardened HTTP client with SSRF protection, explicit timeout,
+	// and redirect suppression — never http.DefaultClient.
+	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewHardenedHTTPClient(), "")
 	fuzzRegistry := fuzzer.NewJobRegistry()
 	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/config"
 	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
+	"github.com/usk6666/katashiro-proxy/internal/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
@@ -360,7 +360,8 @@ func TestM3ComponentInitialization(t *testing.T) {
 
 	// Verify FuzzEngine and FuzzRunner construction.
 	// The store satisfies SessionFetcher, SessionRecorder, and FuzzJobStore interfaces.
-	fuzzEngine := fuzzer.NewEngine(store, store, store, http.DefaultClient, "")
+	// Use the hardened HTTP client (never http.DefaultClient) to prevent SSRF.
+	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewHardenedHTTPClient(), "")
 	if fuzzEngine == nil {
 		t.Fatal("fuzzer.NewEngine() returned nil")
 	}
