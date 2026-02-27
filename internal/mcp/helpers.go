@@ -83,6 +83,26 @@ func denyPrivateNetwork(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// NewHardenedHTTPClient returns an *http.Client with SSRF protection
+// (denyPrivateNetwork), an explicit timeout, and redirect suppression.
+// This should be used for all outbound HTTP requests initiated by user input
+// (fuzz, resend, macro, etc.) to prevent SSRF pivoting and connection-hold DoS.
+func NewHardenedHTTPClient() *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: defaultReplayTimeout,
+			Control: denyPrivateNetwork,
+		}).DialContext,
+	}
+	return &http.Client{
+		Timeout:   defaultReplayTimeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // httpClient returns the HTTP client to use for replay requests.
 // If a custom doer is set (for testing), it wraps it; otherwise,
 // it returns a client with the default replay timeout and SSRF protection.
