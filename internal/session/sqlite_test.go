@@ -418,6 +418,96 @@ func TestSQLiteStore_DeleteSessionsOlderThan(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_DeleteSessionsByProtocol(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
+	saveTestSession(t, store, "HTTP/1.x", now, "POST", "http://a.com/2", 201, nil, nil)
+	saveTestSession(t, store, "HTTPS", now, "GET", "https://a.com/3", 200, nil, nil)
+	saveTestSession(t, store, "TCP", now, "GET", "http://a.com/4", 200, nil, nil)
+
+	tests := []struct {
+		name          string
+		protocol      string
+		wantDeleted   int64
+		wantRemaining int
+	}{
+		{
+			name:          "delete TCP sessions",
+			protocol:      "TCP",
+			wantDeleted:   1,
+			wantRemaining: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n, err := store.DeleteSessionsByProtocol(ctx, tt.protocol)
+			if err != nil {
+				t.Fatalf("DeleteSessionsByProtocol: %v", err)
+			}
+			if n != tt.wantDeleted {
+				t.Errorf("deleted %d, want %d", n, tt.wantDeleted)
+			}
+			remaining, _ := store.ListSessions(ctx, ListOptions{})
+			if len(remaining) != tt.wantRemaining {
+				t.Errorf("expected %d remaining, got %d", tt.wantRemaining, len(remaining))
+			}
+		})
+	}
+}
+
+func TestSQLiteStore_DeleteSessionsByProtocol_NoMatches(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
+
+	n, err := store.DeleteSessionsByProtocol(ctx, "WebSocket")
+	if err != nil {
+		t.Fatalf("DeleteSessionsByProtocol: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("deleted %d, want 0", n)
+	}
+
+	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	if len(remaining) != 1 {
+		t.Errorf("expected 1 remaining, got %d", len(remaining))
+	}
+}
+
+func TestSQLiteStore_DeleteSessionsByProtocol_CascadeMessages(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	sess := saveTestSession(t, store, "TCP", now, "GET", "http://a.com/tcp", 200, nil, nil)
+
+	// Verify messages exist before deletion.
+	count, _ := store.CountMessages(ctx, sess.ID)
+	if count != 2 {
+		t.Fatalf("expected 2 messages before delete, got %d", count)
+	}
+
+	n, err := store.DeleteSessionsByProtocol(ctx, "TCP")
+	if err != nil {
+		t.Fatalf("DeleteSessionsByProtocol: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("deleted %d, want 1", n)
+	}
+
+	// Messages should be cascade-deleted.
+	count, _ = store.CountMessages(ctx, sess.ID)
+	if count != 0 {
+		t.Errorf("expected 0 messages after cascade delete, got %d", count)
+	}
+}
+
 func TestSQLiteStore_DeleteExcessSessions(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

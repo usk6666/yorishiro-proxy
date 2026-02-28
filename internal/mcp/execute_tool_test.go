@@ -919,6 +919,202 @@ func TestExecute_EmptyAction(t *testing.T) {
 	}
 }
 
+func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
+	store := newTestStore(t)
+	ca := newTestCA(t)
+	cs := setupTestSession(t, ca, store)
+
+	u, _ := url.Parse("http://example.com/api/test")
+	// Create sessions with different protocols.
+	for i := 0; i < 2; i++ {
+		saveTestEntry(t, store,
+			&session.Session{
+				Protocol:  "HTTP/1.x",
+				Timestamp: time.Now(),
+				Duration:  100 * time.Millisecond,
+			},
+			&session.Message{
+				Sequence:  0,
+				Direction: "send",
+				Timestamp: time.Now(),
+				Method:    "GET",
+				URL:       u,
+				Headers:   map[string][]string{},
+			},
+			&session.Message{
+				Sequence:   1,
+				Direction:  "receive",
+				Timestamp:  time.Now(),
+				StatusCode: 200,
+				Headers:    map[string][]string{},
+				Body:       []byte("ok"),
+			},
+		)
+	}
+	saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "TCP",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "",
+			URL:       u,
+			Headers:   map[string][]string{},
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 0,
+			Headers:    map[string][]string{},
+			Body:       []byte("raw data"),
+		},
+	)
+	saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "WebSocket",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 101,
+			Headers:    map[string][]string{},
+			Body:       []byte("ws data"),
+		},
+	)
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "delete_sessions",
+		"params": map[string]any{
+			"protocol": "TCP",
+			"confirm":  true,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out executeDeleteSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.DeletedCount != 1 {
+		t.Errorf("deleted_count = %d, want 1", out.DeletedCount)
+	}
+
+	// Verify only TCP sessions were deleted, others remain.
+	remaining, err := store.ListSessions(context.Background(), session.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(remaining) != 3 {
+		t.Errorf("expected 3 remaining sessions, got %d", len(remaining))
+	}
+	// Verify no TCP sessions remain.
+	for _, s := range remaining {
+		if s.Protocol == "TCP" {
+			t.Error("found TCP session after protocol-based deletion")
+		}
+	}
+}
+
+func TestExecute_DeleteSessions_ByProtocol_RequiresConfirm(t *testing.T) {
+	store := newTestStore(t)
+	ca := newTestCA(t)
+	cs := setupTestSession(t, ca, store)
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "delete_sessions",
+		"params": map[string]any{
+			"protocol": "TCP",
+			"confirm":  false,
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for protocol deletion without confirm")
+	}
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(textContent.Text, "confirm must be true") {
+		t.Errorf("error = %q, want to contain 'confirm must be true'", textContent.Text)
+	}
+}
+
+func TestExecute_DeleteSessions_ByProtocol_NoMatches(t *testing.T) {
+	store := newTestStore(t)
+	ca := newTestCA(t)
+	cs := setupTestSession(t, ca, store)
+
+	u, _ := url.Parse("http://example.com/api/test")
+	saveTestEntry(t, store,
+		&session.Session{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&session.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+		},
+		&session.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "delete_sessions",
+		"params": map[string]any{
+			"protocol": "gRPC",
+			"confirm":  true,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out executeDeleteSessionsResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.DeletedCount != 0 {
+		t.Errorf("deleted_count = %d, want 0", out.DeletedCount)
+	}
+
+	// Verify no sessions were deleted.
+	remaining, err := store.ListSessions(context.Background(), session.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Errorf("expected 1 remaining session, got %d", len(remaining))
+	}
+}
+
 func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)

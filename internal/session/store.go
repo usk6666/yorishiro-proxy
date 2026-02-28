@@ -44,6 +44,11 @@ type Store interface {
 	// number of deleted sessions.
 	DeleteAllSessions(ctx context.Context) (int64, error)
 
+	// DeleteSessionsByProtocol removes sessions matching the given protocol,
+	// returning the number of deleted sessions.
+	// Associated messages are cascade-deleted.
+	DeleteSessionsByProtocol(ctx context.Context, protocol string) (int64, error)
+
 	// DeleteSessionsOlderThan removes sessions with timestamps before the
 	// given cutoff, returning the number of deleted sessions.
 	// Associated messages are cascade-deleted.
