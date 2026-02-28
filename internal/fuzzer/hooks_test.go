@@ -209,7 +209,7 @@ func TestExecuteFuzzCaseWithHooks_NilHooks(t *testing.T) {
 
 	fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
 
-	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", nil, nil)
+	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", nil, nil, nil)
 
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
@@ -245,7 +245,7 @@ func TestExecuteFuzzCaseWithHooks_WithPreSend(t *testing.T) {
 
 	fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
 
-	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState)
+	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState, nil)
 
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
@@ -279,7 +279,7 @@ func TestExecuteFuzzCaseWithHooks_PreSendError(t *testing.T) {
 
 	fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
 
-	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState)
+	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState, nil)
 
 	if result.Error == "" {
 		t.Fatal("expected error from pre_send hook")
@@ -314,7 +314,7 @@ func TestExecuteFuzzCaseWithHooks_PostSendError(t *testing.T) {
 
 	fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
 
-	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState)
+	result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState, nil)
 
 	// Post-receive errors are recorded in the result.
 	if result.Error == "" {
