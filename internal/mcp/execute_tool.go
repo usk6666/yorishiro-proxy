@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -99,10 +100,28 @@ type executeParams struct {
 	InitialVars  map[string]string `json:"initial_vars,omitempty" jsonschema:"initial KV Store entries for define_macro"`
 	MacroTimeout int               `json:"macro_timeout_ms,omitempty" jsonschema:"macro timeout in milliseconds"`
 	Vars         map[string]string `json:"vars,omitempty" jsonschema:"runtime variable overrides for run_macro"`
+
+	// export_sessions parameters
+	Format       string        `json:"format,omitempty" jsonschema:"export format (jsonl)"`
+	Filter       *exportFilter `json:"filter,omitempty" jsonschema:"session filter for export"`
+	IncludeBodies *bool        `json:"include_bodies,omitempty" jsonschema:"include message bodies in export (default: true)"`
+	OutputPath   string        `json:"output_path,omitempty" jsonschema:"file path to write export data"`
+
+	// import_sessions parameters
+	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data"`
+	OnConflict string `json:"on_conflict,omitempty" jsonschema:"conflict policy: skip or replace (default: skip)"`
+}
+
+// exportFilter holds filter parameters for the export_sessions action.
+type exportFilter struct {
+	Protocol   string `json:"protocol,omitempty"`
+	URLPattern string `json:"url_pattern,omitempty"`
+	TimeAfter  string `json:"time_after,omitempty"`
+	TimeBefore string `json:"time_before,omitempty"`
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "tcp_replay", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert"}
+var availableActions = []string{"resend", "resend_raw", "tcp_replay", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert", "export_sessions", "import_sessions"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -125,7 +144,9 @@ func (s *Server) registerExecute() {
 			"'define_macro' saves a macro definition (upsert) with steps, extraction rules, and guards; " +
 			"'run_macro' executes a stored macro for testing; " +
 			"'delete_macro' removes a stored macro definition; " +
-			"'regenerate_ca_cert' regenerates the CA certificate (auto-persist mode: saves to disk; ephemeral mode: in-memory only; explicit mode: error). " +
+			"'regenerate_ca_cert' regenerates the CA certificate (auto-persist mode: saves to disk; ephemeral mode: in-memory only; explicit mode: error); " +
+			"'export_sessions' exports sessions to JSONL format (optionally filtered, with or without bodies, to file or inline); " +
+			"'import_sessions' imports sessions from a JSONL file (supports skip/replace on ID conflict). " +
 			"('replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'.)",
 	}, s.handleExecute)
 }
@@ -180,6 +201,18 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return nil, result, nil
 	case "regenerate_ca_cert":
 		return s.handleExecuteRegenerateCA()
+	case "export_sessions":
+		result, err := s.handleExecuteExportSessions(ctx, input.Params)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result, nil
+	case "import_sessions":
+		result, err := s.handleExecuteImportSessions(ctx, input.Params)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result, nil
 	default:
 		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableActions)
 	}
@@ -1235,4 +1268,139 @@ func (s *Server) handleExecuteRegenerateCA() (*gomcp.CallToolResult, *executeReg
 	}
 
 	return nil, result, nil
+}
+
+// executeExportSessionsResult is the structured output of the export_sessions action.
+type executeExportSessionsResult struct {
+	ExportedCount int    `json:"exported_count"`
+	Format        string `json:"format"`
+	OutputPath    string `json:"output_path,omitempty"`
+	Data          string `json:"data,omitempty"`
+}
+
+// handleExecuteExportSessions handles the export_sessions action within the execute tool.
+func (s *Server) handleExecuteExportSessions(ctx context.Context, params executeParams) (*executeExportSessionsResult, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("session store is not initialized")
+	}
+
+	format := params.Format
+	if format == "" {
+		format = "jsonl"
+	}
+	if format != "jsonl" {
+		return nil, fmt.Errorf("unsupported export format %q: only \"jsonl\" is supported", format)
+	}
+
+	includeBodies := true
+	if params.IncludeBodies != nil {
+		includeBodies = *params.IncludeBodies
+	}
+
+	opts := session.ExportOptions{
+		IncludeBodies: includeBodies,
+	}
+
+	if params.Filter != nil {
+		opts.Filter.Protocol = params.Filter.Protocol
+		opts.Filter.URLPattern = params.Filter.URLPattern
+
+		if params.Filter.TimeAfter != "" {
+			t, err := time.Parse(time.RFC3339, params.Filter.TimeAfter)
+			if err != nil {
+				return nil, fmt.Errorf("invalid time_after format (expected RFC3339): %w", err)
+			}
+			opts.Filter.TimeAfter = &t
+		}
+		if params.Filter.TimeBefore != "" {
+			t, err := time.Parse(time.RFC3339, params.Filter.TimeBefore)
+			if err != nil {
+				return nil, fmt.Errorf("invalid time_before format (expected RFC3339): %w", err)
+			}
+			opts.Filter.TimeBefore = &t
+		}
+	}
+
+	if params.OutputPath != "" {
+		f, err := os.Create(params.OutputPath)
+		if err != nil {
+			return nil, fmt.Errorf("create output file: %w", err)
+		}
+		defer f.Close()
+
+		n, err := session.ExportSessions(ctx, s.store, f, opts)
+		if err != nil {
+			return nil, fmt.Errorf("export sessions: %w", err)
+		}
+
+		return &executeExportSessionsResult{
+			ExportedCount: n,
+			Format:        format,
+			OutputPath:    params.OutputPath,
+		}, nil
+	}
+
+	// No output_path: return data inline in the MCP response.
+	var buf bytes.Buffer
+	n, err := session.ExportSessions(ctx, s.store, &buf, opts)
+	if err != nil {
+		return nil, fmt.Errorf("export sessions: %w", err)
+	}
+
+	return &executeExportSessionsResult{
+		ExportedCount: n,
+		Format:        format,
+		Data:          buf.String(),
+	}, nil
+}
+
+// executeImportSessionsResult is the structured output of the import_sessions action.
+type executeImportSessionsResult struct {
+	Imported int    `json:"imported"`
+	Skipped  int    `json:"skipped"`
+	Errors   int    `json:"errors"`
+	Source   string `json:"source"`
+}
+
+// handleExecuteImportSessions handles the import_sessions action within the execute tool.
+func (s *Server) handleExecuteImportSessions(ctx context.Context, params executeParams) (*executeImportSessionsResult, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("session store is not initialized")
+	}
+
+	if params.InputPath == "" {
+		return nil, fmt.Errorf("input_path is required for import_sessions action")
+	}
+
+	conflict := session.ConflictSkip
+	if params.OnConflict != "" {
+		switch params.OnConflict {
+		case "skip":
+			conflict = session.ConflictSkip
+		case "replace":
+			conflict = session.ConflictReplace
+		default:
+			return nil, fmt.Errorf("invalid on_conflict value %q: must be \"skip\" or \"replace\"", params.OnConflict)
+		}
+	}
+
+	f, err := os.Open(params.InputPath)
+	if err != nil {
+		return nil, fmt.Errorf("open input file: %w", err)
+	}
+	defer f.Close()
+
+	result, err := session.ImportSessions(ctx, s.store, f, session.ImportOptions{
+		OnConflict: conflict,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("import sessions: %w", err)
+	}
+
+	return &executeImportSessionsResult{
+		Imported: result.Imported,
+		Skipped:  result.Skipped,
+		Errors:   result.Errors,
+		Source:   params.InputPath,
+	}, nil
 }
