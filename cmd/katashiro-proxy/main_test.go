@@ -388,7 +388,10 @@ func TestM3ComponentInitialization(t *testing.T) {
 }
 
 // registerTestFlags registers all CLI flags on fs in the same way as runWithFlags.
-func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) {
+// It returns a pointer to the config file path variable for use with applyEnvFallback.
+func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) *string {
+	var configFile string
+	fs.StringVar(&configFile, "config", "", "")
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "")
 	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "")
 	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "")
@@ -399,6 +402,7 @@ func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) {
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "")
 	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "")
+	return &configFile
 }
 
 func TestApplyEnvFallback_Priority(t *testing.T) {
@@ -500,13 +504,13 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			registerTestFlags(fs, cfg)
+			cfgFile := registerTestFlags(fs, cfg)
 
 			if err := fs.Parse(tt.flagArgs); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs, cfg)
+			applyEnvFallback(fs, cfg, cfgFile)
 
 			got := getStringConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -540,13 +544,13 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			registerTestFlags(fs, cfg)
+			cfgFile := registerTestFlags(fs, cfg)
 
 			if err := fs.Parse(nil); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs, cfg)
+			applyEnvFallback(fs, cfg, cfgFile)
 
 			got := getBoolConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -696,5 +700,66 @@ func getBoolConfigField(cfg *config.Config, field string) bool {
 		return cfg.CAEphemeral
 	default:
 		return false
+	}
+}
+
+func TestConfigFlag_EnvVarFallback(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"listen_addr": "127.0.0.1:9090"}`), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	t.Setenv("KP_CONFIG", cfgPath)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := config.Default()
+	cfgFile := registerTestFlags(fs, cfg)
+
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("flag.Parse: %v", err)
+	}
+
+	applyEnvFallback(fs, cfg, cfgFile)
+
+	if *cfgFile != cfgPath {
+		t.Errorf("configFile = %q, want %q", *cfgFile, cfgPath)
+	}
+}
+
+func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.json")
+	flagPath := filepath.Join(dir, "flag.json")
+	if err := os.WriteFile(envPath, []byte(`{"listen_addr": "127.0.0.1:9090"}`), 0644); err != nil {
+		t.Fatalf("write env config: %v", err)
+	}
+	if err := os.WriteFile(flagPath, []byte(`{"listen_addr": "127.0.0.1:7070"}`), 0644); err != nil {
+		t.Fatalf("write flag config: %v", err)
+	}
+
+	t.Setenv("KP_CONFIG", envPath)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := config.Default()
+	cfgFile := registerTestFlags(fs, cfg)
+
+	if err := fs.Parse([]string{"-config", flagPath}); err != nil {
+		t.Fatalf("flag.Parse: %v", err)
+	}
+
+	applyEnvFallback(fs, cfg, cfgFile)
+
+	// CLI flag should take precedence over KP_CONFIG env var.
+	if *cfgFile != flagPath {
+		t.Errorf("configFile = %q, want %q (CLI should override env)", *cfgFile, flagPath)
+	}
+}
+
+func TestConfigFlag_FileNotFound(t *testing.T) {
+	// Verify that LoadFile returns an error for nonexistent paths.
+	_, err := config.LoadFile("/nonexistent/config.json")
+	if err == nil {
+		t.Fatal("expected error for nonexistent config file, got nil")
 	}
 }
