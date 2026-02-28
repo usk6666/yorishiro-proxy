@@ -2,6 +2,11 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
@@ -132,6 +137,52 @@ func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *p
 // Run starts the MCP server on the given transport.
 func (s *Server) Run(ctx context.Context, transport gomcp.Transport) error {
 	return s.server.Run(ctx, transport)
+}
+
+// shutdownTimeout is the maximum time to wait for the HTTP server to shut
+// down gracefully. Exported as a variable for testing.
+var shutdownTimeout = 30 * time.Second
+
+// RunHTTP starts the MCP server as a Streamable HTTP endpoint on the given address.
+// It creates a StreamableHTTPHandler backed by the underlying gomcp.Server and
+// serves it via http.Server. The server shuts down gracefully when ctx is cancelled,
+// waiting up to 30 seconds for active MCP sessions to complete.
+func (s *Server) RunHTTP(ctx context.Context, addr string) error {
+	handler := gomcp.NewStreamableHTTPHandler(func(_ *http.Request) *gomcp.Server {
+		return s.server
+	}, nil)
+
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+		BaseContext: func(_ net.Listener) context.Context {
+			return ctx
+		},
+	}
+
+	// Start shutdown goroutine that waits for context cancellation.
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		slog.Info("shutting down MCP HTTP server", "addr", addr)
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("MCP HTTP server shutdown error", "error", err)
+		}
+	}()
+
+	slog.Info("starting MCP HTTP server", "addr", addr)
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("MCP HTTP server: %w", err)
+	}
+
+	// Wait for the shutdown goroutine to finish.
+	<-shutdownDone
+	return nil
 }
 
 func (s *Server) registerTools() {
