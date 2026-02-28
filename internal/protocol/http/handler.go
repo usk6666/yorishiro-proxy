@@ -12,6 +12,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/usk6666/katashiro-proxy/internal/cert"
@@ -112,6 +113,10 @@ type Handler struct {
 	interceptQueue    *intercept.Queue
 	transformPipeline *rules.Pipeline
 	h2Handler         H2Handler
+
+	// upstreamMu protects upstreamProxy for concurrent access.
+	upstreamMu    sync.RWMutex
+	upstreamProxy *url.URL
 }
 
 // NewHandler creates a new HTTP handler with session recording.
@@ -206,6 +211,24 @@ func (h *Handler) TransformPipeline() *rules.Pipeline {
 // negotiates "h2" during the TLS handshake in a CONNECT tunnel.
 func (h *Handler) SetH2Handler(handler H2Handler) {
 	h.h2Handler = handler
+}
+
+// SetUpstreamProxy configures the upstream proxy for outgoing connections.
+// Pass nil to disable the upstream proxy (direct connections).
+// This method is safe to call concurrently and updates both the transport's
+// Proxy function (for HTTP/HTTPS requests) and the stored URL (for CONNECT tunnels).
+func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
+	h.upstreamMu.Lock()
+	defer h.upstreamMu.Unlock()
+	h.upstreamProxy = proxyURL
+	h.transport.Proxy = proxy.TransportProxyFunc(proxyURL)
+}
+
+// UpstreamProxy returns the current upstream proxy URL, or nil if not set.
+func (h *Handler) UpstreamProxy() *url.URL {
+	h.upstreamMu.RLock()
+	defer h.upstreamMu.RUnlock()
+	return h.upstreamProxy
 }
 
 func (h *Handler) effectiveRequestTimeout() time.Duration {

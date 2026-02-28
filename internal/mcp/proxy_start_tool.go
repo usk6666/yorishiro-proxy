@@ -6,6 +6,7 @@ import (
 	"net"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
 )
 
 // captureScopeInput is the JSON representation of capture scope configuration
@@ -25,6 +26,13 @@ type proxyStartInput struct {
 	// ListenAddr is the TCP address to listen on (e.g. "127.0.0.1:8080", "127.0.0.1:9090").
 	// Defaults to "127.0.0.1:8080" if empty.
 	ListenAddr string `json:"listen_addr,omitempty" jsonschema:"TCP address to listen on, defaults to 127.0.0.1:8080 if omitted"`
+
+	// UpstreamProxy is the URL of an upstream proxy to route all outgoing traffic through.
+	// Supported schemes: http://host:port (HTTP CONNECT proxy), socks5://host:port (SOCKS5 proxy).
+	// Authentication: http://user:pass@host:port (Basic auth), socks5://user:pass@host:port.
+	// If omitted, traffic is sent directly to the target (no upstream proxy).
+	// This setting takes precedence over HTTP_PROXY/HTTPS_PROXY environment variables.
+	UpstreamProxy string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL (http://host:port or socks5://host:port) for chaining proxies"`
 
 	// CaptureScope configures which requests are recorded to the session store.
 	// If omitted, all requests are captured (default behavior).
@@ -75,13 +83,14 @@ func (s *Server) registerProxyStart() {
 		Name: "proxy_start",
 		Description: "Start the proxy server with optional configuration. " +
 			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS traffic. " +
-			"Accepts optional capture_scope to control which requests are recorded, " +
+			"Accepts optional upstream_proxy to route all traffic through an upstream proxy (http://host:port or socks5://[user:pass@]host:port), " +
+			"capture_scope to control which requests are recorded, " +
 			"tls_passthrough to specify domains that bypass TLS interception, " +
 			"intercept_rules to define conditions for intercepting requests/responses, " +
 			"auto_transform to configure automatic request/response modification rules, " +
 			"tcp_forwards to map local ports to upstream TCP addresses for Raw TCP forwarding, " +
 			"and protocols to specify which protocols are enabled for detection. " +
-			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all.",
+			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all.",
 	}, s.handleProxyStart)
 }
 
@@ -95,6 +104,13 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	if input.ListenAddr != "" {
 		if err := validateLoopbackAddr(input.ListenAddr); err != nil {
 			return nil, nil, err
+		}
+	}
+
+	// Validate and apply upstream proxy if provided.
+	if input.UpstreamProxy != "" {
+		if err := s.applyUpstreamProxy(input.UpstreamProxy); err != nil {
+			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
 		}
 	}
 
@@ -263,6 +279,27 @@ func validateProtocols(protocols []string) error {
 			return fmt.Errorf("unknown protocol %q: valid protocols are %v", p, valid)
 		}
 	}
+	return nil
+}
+
+// applyUpstreamProxy validates the upstream proxy URL and configures it on
+// the manager and all registered protocol handlers.
+func (s *Server) applyUpstreamProxy(rawURL string) error {
+	proxyURL, err := proxy.ParseUpstreamProxy(rawURL)
+	if err != nil {
+		return err
+	}
+
+	// Store in manager for status reporting.
+	if s.manager != nil {
+		s.manager.SetUpstreamProxy(rawURL)
+	}
+
+	// Apply to all registered protocol handlers.
+	for _, setter := range s.upstreamProxySetters {
+		setter.SetUpstreamProxy(proxyURL)
+	}
+
 	return nil
 }
 

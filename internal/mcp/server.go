@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -37,8 +38,9 @@ type Server struct {
 	rawReplayDialer   rawDialer      // injectable dialer for replay_raw testing
 	tcpForwards       map[string]string    // TCP forward mappings (port -> target)
 	tcpHandler        tcpForwardHandler    // TCP handler for forward listeners
-	enabledProtocols  []string              // enabled protocols for detection
-	httpMiddleware    func(http.Handler) http.Handler // optional middleware wrapping the HTTP handler
+	enabledProtocols      []string              // enabled protocols for detection
+	httpMiddleware        func(http.Handler) http.Handler // optional middleware wrapping the HTTP handler
+	upstreamProxySetters  []upstreamProxySetter // protocol handlers to update when upstream proxy changes
 }
 
 // tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
@@ -46,6 +48,12 @@ type Server struct {
 type tcpForwardHandler interface {
 	proxy.ProtocolHandler
 	SetForwards(forwards map[string]string)
+}
+
+// upstreamProxySetter is implemented by protocol handlers that support upstream
+// proxy configuration (HTTP/1.x and HTTP/2 handlers).
+type upstreamProxySetter interface {
+	SetUpstreamProxy(proxyURL *url.URL)
 }
 
 // ServerOption configures a Server.
@@ -135,6 +143,15 @@ func WithTCPHandler(h tcpForwardHandler) ServerOption {
 func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
 	return func(s *Server) {
 		s.httpMiddleware = mw
+	}
+}
+
+// WithUpstreamProxySetter registers a protocol handler that should be updated
+// when the upstream proxy configuration changes. Call this for each handler
+// that implements the upstreamProxySetter interface (e.g., HTTP/1.x, HTTP/2).
+func WithUpstreamProxySetter(setter upstreamProxySetter) ServerOption {
+	return func(s *Server) {
+		s.upstreamProxySetters = append(s.upstreamProxySetters, setter)
 	}
 }
 

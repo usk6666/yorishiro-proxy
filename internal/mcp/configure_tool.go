@@ -6,6 +6,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 )
 
@@ -15,6 +16,12 @@ type configureInput struct {
 	// "merge" (default) applies add/remove deltas to existing config.
 	// "replace" replaces the specified fields entirely.
 	Operation string `json:"operation,omitempty" jsonschema:"operation type: merge (default) or replace"`
+
+	// UpstreamProxy configures the upstream proxy URL.
+	// Set to a proxy URL (e.g. "http://proxy:3128" or "socks5://proxy:1080") to route traffic through it.
+	// Set to empty string "" to disable (direct connection).
+	// If omitted (nil pointer), the setting is not changed.
+	UpstreamProxy *string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL (empty string to disable, omit to keep current)"`
 
 	// CaptureScope configures request capture scope rules.
 	// For merge: use add_includes/remove_includes/add_excludes/remove_excludes.
@@ -103,6 +110,9 @@ type configureResult struct {
 	// Status indicates the result of the operation.
 	Status string `json:"status"`
 
+	// UpstreamProxy shows the current upstream proxy URL (empty string means direct).
+	UpstreamProxy *string `json:"upstream_proxy,omitempty"`
+
 	// CaptureScope summarizes the current capture scope state.
 	CaptureScope *configureScopeResult `json:"capture_scope,omitempty"`
 
@@ -153,9 +163,10 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including capture scope, TLS passthrough, intercept rules, intercept queue, and auto-transform rules. " +
+		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, and auto-transform rules. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
+			"Upstream proxy routes all outgoing traffic through an HTTP CONNECT or SOCKS5 proxy; set to empty string to disable. " +
 			"Capture scope controls which requests are recorded (include/exclude rules with hostname, url_prefix, method). " +
 			"TLS passthrough controls which CONNECT destinations bypass MITM interception. " +
 			"Intercept rules define conditions for intercepting requests/responses (host_pattern regex, path_pattern regex, method whitelist, header regex). " +
@@ -185,6 +196,17 @@ func (s *Server) handleConfigure(_ context.Context, _ *gomcp.CallToolRequest, in
 // handleConfigureMerge applies delta changes (add/remove) to existing configuration.
 func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResult, *configureResult, error) {
 	result := &configureResult{Status: "configured"}
+
+	if input.UpstreamProxy != nil {
+		if err := s.applyUpstreamProxy(*input.UpstreamProxy); err != nil {
+			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
+		}
+		current := ""
+		if s.manager != nil {
+			current = proxy.RedactProxyURL(s.manager.UpstreamProxy())
+		}
+		result.UpstreamProxy = &current
+	}
 
 	if input.CaptureScope != nil {
 		if s.scope == nil {
@@ -246,6 +268,17 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 // handleConfigureReplace replaces entire configuration sections.
 func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolResult, *configureResult, error) {
 	result := &configureResult{Status: "configured"}
+
+	if input.UpstreamProxy != nil {
+		if err := s.applyUpstreamProxy(*input.UpstreamProxy); err != nil {
+			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
+		}
+		current := ""
+		if s.manager != nil {
+			current = proxy.RedactProxyURL(s.manager.UpstreamProxy())
+		}
+		result.UpstreamProxy = &current
+	}
 
 	if input.CaptureScope != nil {
 		if s.scope == nil {
