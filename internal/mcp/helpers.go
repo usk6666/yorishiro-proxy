@@ -107,6 +107,24 @@ func denyPrivateNetwork(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// newPermissiveHTTPClient returns an *http.Client without SSRF protection,
+// suitable for use when allow_private_networks is enabled.
+// It uses the same timeout and redirect settings as NewHardenedHTTPClient.
+func newPermissiveHTTPClient() *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: defaultReplayTimeout,
+		}).DialContext,
+	}
+	return &http.Client{
+		Timeout:   defaultReplayTimeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // NewHardenedHTTPClient returns an *http.Client with SSRF protection
 // (denyPrivateNetwork), an explicit timeout, and redirect suppression.
 // This should be used for all outbound HTTP requests initiated by user input
@@ -156,13 +174,23 @@ func (s *Server) httpClient() httpDoer {
 // If a custom dialer is set (for testing), it is returned; otherwise,
 // a dialer with SSRF protection is returned.
 func (s *Server) rawDialerFunc() rawDialer {
+	return s.rawDialerFuncWithOpts(false)
+}
+
+// rawDialerFuncWithOpts returns the raw dialer to use for replay_raw connections.
+// When allowPrivateNetworks is true, SSRF protection is skipped to allow
+// connections to localhost and private networks.
+func (s *Server) rawDialerFuncWithOpts(allowPrivateNetworks bool) rawDialer {
 	if s.rawReplayDialer != nil {
 		return s.rawReplayDialer
 	}
-	return &net.Dialer{
+	dialer := &net.Dialer{
 		Timeout: defaultReplayTimeout,
-		Control: denyPrivateNetwork,
 	}
+	if !allowPrivateNetworks {
+		dialer.Control = denyPrivateNetwork
+	}
+	return dialer
 }
 
 // encodeBody returns the body as a string with its encoding type.
