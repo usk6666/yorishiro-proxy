@@ -367,6 +367,11 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		}
 	}
 
+	// Validate header overrides for CRLF injection (CWE-113).
+	if err := validateResendHeaders(params); err != nil {
+		return nil, nil, err
+	}
+
 	// Apply body mutations.
 	reqBody, err := buildResendBody(sendMsg.Body, params)
 	if err != nil {
@@ -553,6 +558,21 @@ func buildResendBody(originalBody []byte, params executeParams) ([]byte, error) 
 	}
 
 	return body, nil
+}
+
+// validateResendHeaders checks override_headers, add_headers, and remove_headers
+// for CRLF injection (CWE-113). This must be called before buildResendHeaders.
+func validateResendHeaders(params executeParams) error {
+	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
+		return fmt.Errorf("override_headers: %w", err)
+	}
+	if err := validateHeaderValues(params.AddHeaders); err != nil {
+		return fmt.Errorf("add_headers: %w", err)
+	}
+	if err := validateHeaderKeys(params.RemoveHeaders); err != nil {
+		return fmt.Errorf("remove_headers: %w", err)
+	}
+	return nil
 }
 
 // buildResendHeaders builds the final request headers by applying mutations
@@ -775,7 +795,8 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		host, _, _ := net.SplitHostPort(targetAddr)
 		tlsConn := tls.Client(conn, &tls.Config{
 			ServerName:         host,
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: true, //nolint:gosec // resend_raw intentionally uses raw bytes for security testing
+			MinVersion:         tls.VersionTLS12,
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return nil, nil, fmt.Errorf("TLS handshake with %s: %w", targetAddr, err)
@@ -1002,6 +1023,17 @@ func (s *Server) handleExecuteModifyAndForward(_ context.Context, params execute
 	}
 	if params.InterceptID == "" {
 		return nil, nil, fmt.Errorf("intercept_id is required for modify_and_forward action")
+	}
+
+	// Validate header overrides for CRLF injection (CWE-113).
+	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
+		return nil, nil, fmt.Errorf("override_headers: %w", err)
+	}
+	if err := validateHeaderValues(params.AddHeaders); err != nil {
+		return nil, nil, fmt.Errorf("add_headers: %w", err)
+	}
+	if err := validateHeaderKeys(params.RemoveHeaders); err != nil {
+		return nil, nil, fmt.Errorf("remove_headers: %w", err)
 	}
 
 	action := intercept.InterceptAction{

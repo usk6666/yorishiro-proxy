@@ -82,7 +82,9 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 	if skip {
 		h.logger.Warn("HTTP/2 upstream TLS certificate verification is disabled")
 		if h.transport.TLSClientConfig == nil {
-			h.transport.TLSClientConfig = &tls.Config{}
+			h.transport.TLSClientConfig = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			}
 		}
 		h.transport.TLSClientConfig.InsecureSkipVerify = true
 	}
