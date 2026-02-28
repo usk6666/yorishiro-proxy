@@ -432,6 +432,97 @@ func TestApplyInterceptModifications_NoChanges(t *testing.T) {
 	}
 }
 
+func TestApplyInterceptModifications_CRLFValidation(t *testing.T) {
+	tests := []struct {
+		name            string
+		overrideHeaders map[string]string
+		addHeaders      map[string]string
+		removeHeaders   []string
+		wantErr         bool
+		errContains     string
+	}{
+		{
+			name:            "override header value with CR",
+			overrideHeaders: map[string]string{"X-Test": "val\rue"},
+			wantErr:         true,
+			errContains:     "CR/LF",
+		},
+		{
+			name:            "override header value with LF",
+			overrideHeaders: map[string]string{"X-Test": "val\nue"},
+			wantErr:         true,
+			errContains:     "CR/LF",
+		},
+		{
+			name:            "override header key with CRLF",
+			overrideHeaders: map[string]string{"X-Te\r\nst": "value"},
+			wantErr:         true,
+			errContains:     "CR/LF",
+		},
+		{
+			name:       "add header value with LF",
+			addHeaders: map[string]string{"X-Add": "val\nue"},
+			wantErr:    true,
+			errContains: "CR/LF",
+		},
+		{
+			name:          "remove header key with CR",
+			removeHeaders: []string{"X-Remove\rInjection"},
+			wantErr:       true,
+			errContains:   "CR/LF",
+		},
+		{
+			name:          "remove header key with LF",
+			removeHeaders: []string{"X-Remove\nInjection"},
+			wantErr:       true,
+			errContains:   "CR/LF",
+		},
+		{
+			name:            "valid headers pass",
+			overrideHeaders: map[string]string{"X-Valid": "safe-value"},
+			addHeaders:      map[string]string{"X-Also-Valid": "also-safe"},
+			removeHeaders:   []string{"X-Clean-Key"},
+			wantErr:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+			action := intercept.InterceptAction{
+				Type:            intercept.ActionModifyAndForward,
+				OverrideHeaders: tt.overrideHeaders,
+				AddHeaders:      tt.addHeaders,
+				RemoveHeaders:   tt.removeHeaders,
+			}
+
+			_, err := applyInterceptModifications(req, action, nil)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				errStr := err.Error()
+				if tt.errContains != "" {
+					found := false
+					for i := 0; i <= len(errStr)-len(tt.errContains); i++ {
+						if errStr[i:i+len(tt.errContains)] == tt.errContains {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("error %q should contain %q", errStr, tt.errContains)
+					}
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // --- End-to-end intercept tests via handleStream ---
 
 func TestHandleStream_InterceptRelease(t *testing.T) {

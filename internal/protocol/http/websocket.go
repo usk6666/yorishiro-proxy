@@ -162,6 +162,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	}
 	tlsConfig := &tls.Config{
 		ServerName: hostname,
+		MinVersion: tls.VersionTLS12,
 	}
 	if h.transport != nil && h.transport.TLSClientConfig != nil {
 		tlsConfig.InsecureSkipVerify = h.transport.TLSClientConfig.InsecureSkipVerify

@@ -188,6 +188,7 @@ func parseConnectHost(hostPort string) (string, error) {
 func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (*tls.Conn, error) {
 	tlsConfig := &tls.Config{
 		GetCertificate: h.issuer.GetCertificateForClientHello,
+		MinVersion:     tls.VersionTLS12,
 	}
 
 	// Advertise HTTP/2 and HTTP/1.1 via ALPN when an h2 handler is available.
@@ -398,8 +399,8 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	}
 	defer resp.Body.Close()
 
-	// Read the full response body so the client receives uncorrupted data.
-	fullRespBody, err := io.ReadAll(resp.Body)
+	// Read the response body with a size limit to prevent OOM (CWE-770).
+	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
 	}

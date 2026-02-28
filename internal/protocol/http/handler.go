@@ -12,6 +12,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,11 @@ const maxBodyRecordSize = 1 << 20 // 1MB
 // maxRawCaptureSize limits the size of raw request/response bytes captured.
 // This prevents excessive memory use for very large requests.
 const maxRawCaptureSize = 2 << 20 // 2MB
+
+// maxResponseBodySize limits the size of upstream response bodies read into memory.
+// Responses larger than this are truncated. This prevents OOM from oversized
+// upstream responses (CWE-770).
+const maxResponseBodySize = 64 << 20 // 64MB
 
 const defaultRequestTimeout = 60 * time.Second
 
@@ -147,7 +153,9 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 	if skip {
 		h.logger.Warn("upstream TLS certificate verification is disabled — connections to upstream servers will not verify certificates")
 		if h.transport.TLSClientConfig == nil {
-			h.transport.TLSClientConfig = &tls.Config{}
+			h.transport.TLSClientConfig = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			}
 		}
 		h.transport.TLSClientConfig.InsecureSkipVerify = true
 	}
@@ -451,8 +459,8 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	defer resp.Body.Close()
 
-	// Read the full response body so the client receives uncorrupted data.
-	fullRespBody, err := io.ReadAll(resp.Body)
+	// Read the response body with a size limit to prevent OOM (CWE-770).
+	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
 	}
@@ -661,7 +669,7 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 
 // applyInterceptModifications applies the modifications from a modify_and_forward
 // action to the HTTP request. It returns the modified request and an error if
-// validation fails (e.g., invalid URL scheme).
+// validation fails (e.g., invalid URL scheme, CRLF injection).
 func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
 	// Override method.
 	if action.OverrideMethod != "" {
@@ -679,6 +687,25 @@ func applyInterceptModifications(req *gohttp.Request, action intercept.Intercept
 		}
 		req.URL = parsed
 		req.Host = parsed.Host
+	}
+
+	// Validate header values for CRLF injection (CWE-113).
+	for key, val := range action.OverrideHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for key, val := range action.AddHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+
+	// Validate RemoveHeaders keys for CRLF injection (CWE-113).
+	for _, key := range action.RemoveHeaders {
+		if strings.ContainsAny(key, "\r\n") {
+			return req, fmt.Errorf("remove header key %q contains CR/LF characters (header injection attempt)", key)
+		}
 	}
 
 	// Remove headers first.
