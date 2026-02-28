@@ -299,6 +299,87 @@ func TestApplyInterceptModifications_URLSchemeValidation(t *testing.T) {
 	}
 }
 
+func TestApplyInterceptModifications_CRLFValidation(t *testing.T) {
+	tests := []struct {
+		name            string
+		overrideHeaders map[string]string
+		addHeaders      map[string]string
+		removeHeaders   []string
+		wantErr         bool
+		errContains     string
+	}{
+		{
+			name:            "override header value with CR",
+			overrideHeaders: map[string]string{"X-Test": "val\rue"},
+			wantErr:         true,
+			errContains:     "CR/LF",
+		},
+		{
+			name:            "override header value with LF",
+			overrideHeaders: map[string]string{"X-Test": "val\nue"},
+			wantErr:         true,
+			errContains:     "CR/LF",
+		},
+		{
+			name:            "override header key with CRLF",
+			overrideHeaders: map[string]string{"X-Te\r\nst": "value"},
+			wantErr:         true,
+			errContains:     "CR/LF",
+		},
+		{
+			name:       "add header value with LF",
+			addHeaders: map[string]string{"X-Add": "val\nue"},
+			wantErr:    true,
+			errContains: "CR/LF",
+		},
+		{
+			name:          "remove header key with CR",
+			removeHeaders: []string{"X-Remove\rInjection"},
+			wantErr:       true,
+			errContains:   "CR/LF",
+		},
+		{
+			name:          "remove header key with LF",
+			removeHeaders: []string{"X-Remove\nInjection"},
+			wantErr:       true,
+			errContains:   "CR/LF",
+		},
+		{
+			name:            "valid headers pass",
+			overrideHeaders: map[string]string{"X-Valid": "safe-value"},
+			addHeaders:      map[string]string{"X-Also-Valid": "also-safe"},
+			removeHeaders:   []string{"X-Clean-Key"},
+			wantErr:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+			action := interceptPkg.InterceptAction{
+				Type:            interceptPkg.ActionModifyAndForward,
+				OverrideHeaders: tt.overrideHeaders,
+				AddHeaders:      tt.addHeaders,
+				RemoveHeaders:   tt.removeHeaders,
+			}
+
+			_, err := applyInterceptModifications(req, action, nil)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errContains != "" && !containsStr(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // containsStr checks if s contains substr (simple helper to avoid importing strings).
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && searchStr(s, substr))

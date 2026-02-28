@@ -701,6 +701,13 @@ func applyInterceptModifications(req *gohttp.Request, action intercept.Intercept
 		}
 	}
 
+	// Validate RemoveHeaders keys for CRLF injection (CWE-113).
+	for _, key := range action.RemoveHeaders {
+		if strings.ContainsAny(key, "\r\n") {
+			return req, fmt.Errorf("remove header key %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+
 	// Remove headers first.
 	for _, key := range action.RemoveHeaders {
 		req.Header.Del(key)

@@ -99,7 +99,8 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 		host, _, _ := net.SplitHostPort(targetAddr)
 		tlsConn := tls.Client(conn, &tls.Config{
 			ServerName:         host,
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: true, //nolint:gosec // tcp_replay intentionally targets test servers
+			MinVersion:         tls.VersionTLS12,
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return nil, nil, fmt.Errorf("TLS handshake with %s: %w", targetAddr, err)
@@ -305,7 +306,8 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 		host, _, _ := net.SplitHostPort(targetAddr)
 		tlsConn := tls.Client(conn, &tls.Config{
 			ServerName:         host,
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: true, //nolint:gosec // WebSocket resend intentionally targets test servers
+			MinVersion:         tls.VersionTLS12,
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return nil, nil, fmt.Errorf("TLS handshake: %w", err)

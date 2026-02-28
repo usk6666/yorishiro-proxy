@@ -33,6 +33,11 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 
 const maxBodyRecordSize = 1 << 20 // 1MB
 
+// maxResponseBodySize limits the size of upstream response bodies read into memory.
+// Responses larger than this are truncated. This prevents OOM from oversized
+// upstream responses (CWE-770).
+const maxResponseBodySize = 64 << 20 // 64MB
+
 // Handler processes HTTP/2 connections (h2c cleartext).
 // For h2 (TLS), the HTTP handler's CONNECT flow calls HandleH2 after ALPN negotiation.
 type Handler struct {
@@ -340,8 +345,8 @@ func (h *Handler) handleStream(
 	}
 	defer resp.Body.Close()
 
-	// Read full response body.
-	fullRespBody, err := io.ReadAll(resp.Body)
+	// Read the response body with a size limit to prevent OOM (CWE-770).
+	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		logger.Warn("HTTP/2 failed to read response body", "error", err)
 	}
@@ -589,6 +594,23 @@ func applyInterceptModifications(req *gohttp.Request, action intercept.Intercept
 		}
 		req.URL = parsed
 		req.Host = parsed.Host
+	}
+
+	// Validate header values for CRLF injection (CWE-113).
+	for key, val := range action.OverrideHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for key, val := range action.AddHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for _, key := range action.RemoveHeaders {
+		if strings.ContainsAny(key, "\r\n") {
+			return req, fmt.Errorf("remove header key %q contains CR/LF characters (header injection attempt)", key)
+		}
 	}
 
 	// Remove headers first.
