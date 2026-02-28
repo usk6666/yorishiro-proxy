@@ -119,6 +119,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	defer logCleanup()
 	slog.SetDefault(logger)
 
+	// Ensure the database directory exists (e.g. ~/.katashiro-proxy/).
+	if err := config.EnsureDBDir(cfg.DBPath); err != nil {
+		return fmt.Errorf("ensure db directory: %w", err)
+	}
+
 	// Initialize SQLite session store.
 	store, err := session.NewSQLiteStore(ctx, cfg.DBPath, logger)
 	if err != nil {
