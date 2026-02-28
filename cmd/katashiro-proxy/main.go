@@ -43,6 +43,7 @@ func main() {
 
 // envVarMap maps flag names to their corresponding KP_ environment variable names.
 var envVarMap = map[string]string{
+	"config":         "KP_CONFIG",
 	"db":             "KP_DB",
 	"ca-cert":        "KP_CA_CERT",
 	"ca-key":         "KP_CA_KEY",
@@ -65,6 +66,10 @@ func run(ctx context.Context) error {
 func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	cfg := config.Default()
 
+	// Config file path — loaded early to provide defaults for proxy_start.
+	var configFile string
+	fs.StringVar(&configFile, "config", "", "JSON config file path for proxy defaults (env: KP_CONFIG)")
+
 	// Define flags — only those requiring startup-time decisions.
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (env: KP_DB)")
 	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "CA certificate file path (env: KP_CA_CERT)")
@@ -85,10 +90,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
 		fmt.Fprintf(fs.Output(), "  All flags accept a KP_ prefixed environment variable as fallback.\n")
-		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > default value.\n")
+		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > config file > default value.\n")
 		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> KP_LOG_LEVEL).\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy -config proxy.json               # load proxy config from file\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
 		fmt.Fprintf(fs.Output(), "  KP_DB=/data/proxy.db katashiro-proxy              # custom DB via env var\n")
 		fmt.Fprintf(fs.Output(), "  KP_INSECURE=true katashiro-proxy                  # skip TLS verification\n")
@@ -103,7 +109,17 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	// Apply environment variable fallback for flags not explicitly set.
-	applyEnvFallback(fs, cfg)
+	applyEnvFallback(fs, cfg, &configFile)
+
+	// Load proxy config file if specified.
+	var proxyCfg *config.ProxyConfig
+	if configFile != "" {
+		var err error
+		proxyCfg, err = config.LoadFile(configFile)
+		if err != nil {
+			return fmt.Errorf("load config file: %w", err)
+		}
+	}
 
 	// Initialize logger.
 	// Logs go to stderr by default (the logging package never writes to stdout),
@@ -217,13 +233,13 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
 // set on the command line, it falls back to the corresponding KP_ environment
-// variable. Priority: CLI flag > environment variable > default value.
-func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config) {
+// variable. Priority: CLI flag > environment variable > config file > default value.
+func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string) {
 	// Collect flags that were explicitly set on the command line.
 	flagSet := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -239,6 +255,10 @@ func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config) {
 			continue
 		}
 		switch flagName {
+		case "config":
+			if configFile != nil && *configFile == "" {
+				*configFile = v
+			}
 		case "db":
 			cfg.DBPath = v
 		case "ca-cert":
@@ -287,7 +307,7 @@ func parseBool(s string) bool {
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	// Build MCP server options.
@@ -304,6 +324,12 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 		mcp.WithTCPHandler(tcpHandler),
 		mcp.WithUpstreamProxySetter(httpHandler),
 		mcp.WithUpstreamProxySetter(http2Handler),
+	}
+
+	// Pass proxy config file defaults to the MCP server.
+	if proxyCfg != nil {
+		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
+		logger.Info("loaded proxy config file defaults")
 	}
 
 	// Set up Bearer token authentication middleware for HTTP transport.
