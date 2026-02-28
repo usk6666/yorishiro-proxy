@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -22,6 +23,7 @@ import (
 
 	protogrpc "github.com/usk6666/katashiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -42,6 +44,12 @@ type Handler struct {
 
 	// scope controls which requests are recorded.
 	scope *proxy.CaptureScope
+
+	// interceptEngine evaluates intercept rules against HTTP/2 requests.
+	interceptEngine *intercept.Engine
+
+	// interceptQueue holds intercepted requests waiting for AI agent actions.
+	interceptQueue *intercept.Queue
 
 	// grpcHandler processes gRPC session recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
@@ -88,6 +96,20 @@ func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
 // sessions with parsed service/method metadata instead of plain HTTP/2.
 func (h *Handler) SetGRPCHandler(gh *protogrpc.Handler) {
 	h.grpcHandler = gh
+}
+
+// SetInterceptEngine sets the intercept rule engine used to determine which
+// HTTP/2 requests should be intercepted. When set together with an intercept
+// queue, matching requests are held for AI agent review.
+func (h *Handler) SetInterceptEngine(engine *intercept.Engine) {
+	h.interceptEngine = engine
+}
+
+// SetInterceptQueue sets the intercept queue used to hold HTTP/2 requests
+// that match intercept rules. The queue must be set together with an intercept
+// engine.
+func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
+	h.interceptQueue = queue
 }
 
 // Name returns the protocol name for h2c (cleartext HTTP/2).
@@ -265,6 +287,34 @@ func (h *Handler) handleStream(
 		outReq.Header[key] = vals
 	}
 	removeHTTP2HopByHop(outReq.Header)
+
+	// Intercept check: if an intercept engine and queue are configured,
+	// check if the request matches any intercept rules. If so, enqueue
+	// the request and block until the AI agent responds with an action.
+	if action, intercepted := h.interceptRequest(ctx, req, recordReqBody, logger); intercepted {
+		switch action.Type {
+		case intercept.ActionDrop:
+			// Drop: return 502 to client.
+			w.WriteHeader(gohttp.StatusBadGateway)
+			logger.Info("intercepted HTTP/2 request dropped", "method", req.Method, "url", outURL.String())
+			return
+		case intercept.ActionModifyAndForward:
+			// Apply modifications to the outbound request.
+			var modErr error
+			outReq, modErr = applyInterceptModifications(outReq, action, reqBody)
+			if modErr != nil {
+				logger.Error("HTTP/2 intercept modification failed", "error", modErr)
+				w.WriteHeader(gohttp.StatusBadRequest)
+				return
+			}
+			// Update recordReqBody for session recording if body changed.
+			if action.OverrideBody != nil {
+				recordReqBody = []byte(*action.OverrideBody)
+			}
+		case intercept.ActionRelease:
+			// Continue with the original request.
+		}
+	}
 
 	// Forward to upstream.
 	resp, serverAddr, err := h.roundTripWithTrace(outReq)
@@ -452,6 +502,98 @@ func (h *Handler) shouldCapture(method string, u *url.URL) bool {
 // falling back to the handler's logger.
 func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 	return proxy.LoggerFromContext(ctx, h.logger)
+}
+
+// interceptRequest checks if the request matches any intercept rules and,
+// if so, enqueues it for AI agent review. It blocks until the agent responds
+// or the timeout expires. Returns the action and true if intercepted, or a
+// zero-value action and false if not intercepted.
+func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+	if h.interceptEngine == nil || h.interceptQueue == nil {
+		return intercept.InterceptAction{}, false
+	}
+
+	matchedRules := h.interceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
+	if len(matchedRules) == 0 {
+		return intercept.InterceptAction{}, false
+	}
+
+	logger.Info("HTTP/2 request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
+
+	id, actionCh := h.interceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
+	defer h.interceptQueue.Remove(id) // ensure cleanup on timeout/cancel
+
+	timeout := h.interceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	select {
+	case action := <-actionCh:
+		return action, true
+	case <-timeoutCtx.Done():
+		// Timeout or context cancellation.
+		behavior := h.interceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			// Proxy shutting down — drop.
+			logger.Info("intercepted HTTP/2 request cancelled (proxy shutdown)", "id", id)
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		}
+		logger.Info("intercepted HTTP/2 request timed out", "id", id, "behavior", string(behavior))
+		switch behavior {
+		case intercept.TimeoutAutoDrop:
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		default:
+			// auto_release or unrecognized → release.
+			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
+		}
+	}
+}
+
+// applyInterceptModifications applies the modifications from a modify_and_forward
+// action to the HTTP/2 request. It returns the modified request and an error if
+// validation fails (e.g., invalid URL scheme).
+func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
+	// Override method.
+	if action.OverrideMethod != "" {
+		req.Method = action.OverrideMethod
+	}
+
+	// Override URL with scheme validation to prevent SSRF (CWE-918).
+	if action.OverrideURL != "" {
+		parsed, err := url.Parse(action.OverrideURL)
+		if err != nil {
+			return req, fmt.Errorf("invalid override URL: %w", err)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return req, fmt.Errorf("unsupported override URL scheme %q: only http and https are allowed", parsed.Scheme)
+		}
+		req.URL = parsed
+		req.Host = parsed.Host
+	}
+
+	// Remove headers first.
+	for _, key := range action.RemoveHeaders {
+		req.Header.Del(key)
+	}
+
+	// Override headers.
+	for key, val := range action.OverrideHeaders {
+		req.Header.Set(key, val)
+	}
+
+	// Add headers.
+	for key, val := range action.AddHeaders {
+		req.Header.Add(key, val)
+	}
+
+	// Override body.
+	if action.OverrideBody != nil {
+		bodyBytes := []byte(*action.OverrideBody)
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		req.ContentLength = int64(len(bodyBytes))
+	}
+
+	return req, nil
 }
 
 // isGRPCContentType reports whether the Content-Type indicates a gRPC request.
