@@ -982,6 +982,324 @@ func TestApplyCaptureScope(t *testing.T) {
 	}
 }
 
+// --- Tests for max_connections, peek_timeout_ms, request_timeout_ms ---
+
+func TestProxyStart_WithMaxConnections(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":    "127.0.0.1:0",
+		"max_connections": 500,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+
+	// Verify max connections was set on the manager.
+	if got := manager.MaxConnections(); got != 500 {
+		t.Errorf("MaxConnections = %d, want 500", got)
+	}
+}
+
+func TestProxyStart_WithPeekTimeoutMs(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"peek_timeout_ms": 5000,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	if got := manager.PeekTimeout(); got != 5*time.Second {
+		t.Errorf("PeekTimeout = %v, want 5s", got)
+	}
+}
+
+func TestProxyStart_WithRequestTimeoutMs(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	// Create a mock request timeout setter to verify propagation.
+	setter := &mockRequestTimeoutSetter{}
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+		WithRequestTimeoutSetters(setter),
+	)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":       "127.0.0.1:0",
+		"request_timeout_ms": 10000,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	// Verify request timeout was propagated to the setter.
+	if got := setter.RequestTimeout(); got != 10*time.Second {
+		t.Errorf("RequestTimeout = %v, want 10s", got)
+	}
+}
+
+func TestProxyStart_MaxConnections_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "minimum valid", value: 1, wantErr: false},
+		{name: "normal value", value: 1024, wantErr: false},
+		{name: "maximum valid", value: 100000, wantErr: false},
+		{name: "below minimum", value: 0, wantErr: true},
+		{name: "negative", value: -1, wantErr: true},
+		{name: "above maximum", value: 100001, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := newTestLogger()
+			detector := &stubDetector{}
+			manager := proxy.NewManager(detector, logger)
+			t.Cleanup(func() { manager.Stop(context.Background()) })
+
+			cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+			result, err := callProxyStart(t, cs, map[string]any{
+				"listen_addr":    "127.0.0.1:0",
+				"max_connections": tt.value,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+
+			if tt.wantErr && !result.IsError {
+				t.Fatalf("expected error for max_connections=%d", tt.value)
+			}
+			if !tt.wantErr && result.IsError {
+				t.Fatalf("expected success for max_connections=%d, got error: %v", tt.value, result.Content)
+			}
+		})
+	}
+}
+
+func TestProxyStart_PeekTimeoutMs_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "minimum valid", value: 100, wantErr: false},
+		{name: "normal value", value: 30000, wantErr: false},
+		{name: "maximum valid", value: 600000, wantErr: false},
+		{name: "below minimum", value: 99, wantErr: true},
+		{name: "zero", value: 0, wantErr: true},
+		{name: "negative", value: -1, wantErr: true},
+		{name: "above maximum", value: 600001, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := newTestLogger()
+			detector := &stubDetector{}
+			manager := proxy.NewManager(detector, logger)
+			t.Cleanup(func() { manager.Stop(context.Background()) })
+
+			cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+			result, err := callProxyStart(t, cs, map[string]any{
+				"listen_addr":     "127.0.0.1:0",
+				"peek_timeout_ms": tt.value,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+
+			if tt.wantErr && !result.IsError {
+				t.Fatalf("expected error for peek_timeout_ms=%d", tt.value)
+			}
+			if !tt.wantErr && result.IsError {
+				t.Fatalf("expected success for peek_timeout_ms=%d, got error: %v", tt.value, result.Content)
+			}
+		})
+	}
+}
+
+func TestProxyStart_RequestTimeoutMs_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "minimum valid", value: 100, wantErr: false},
+		{name: "normal value", value: 60000, wantErr: false},
+		{name: "maximum valid", value: 600000, wantErr: false},
+		{name: "below minimum", value: 99, wantErr: true},
+		{name: "zero", value: 0, wantErr: true},
+		{name: "negative", value: -1, wantErr: true},
+		{name: "above maximum", value: 600001, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := newTestLogger()
+			detector := &stubDetector{}
+			manager := proxy.NewManager(detector, logger)
+			t.Cleanup(func() { manager.Stop(context.Background()) })
+
+			setter := &mockRequestTimeoutSetter{}
+			cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+				WithRequestTimeoutSetters(setter),
+			)
+
+			result, err := callProxyStart(t, cs, map[string]any{
+				"listen_addr":       "127.0.0.1:0",
+				"request_timeout_ms": tt.value,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+
+			if tt.wantErr && !result.IsError {
+				t.Fatalf("expected error for request_timeout_ms=%d", tt.value)
+			}
+			if !tt.wantErr && result.IsError {
+				t.Fatalf("expected success for request_timeout_ms=%d, got error: %v", tt.value, result.Content)
+			}
+		})
+	}
+}
+
+func TestProxyStart_AllLimitsAndTimeouts(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	setter := &mockRequestTimeoutSetter{}
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+		WithRequestTimeoutSetters(setter),
+	)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":       "127.0.0.1:0",
+		"max_connections":    2048,
+		"peek_timeout_ms":   15000,
+		"request_timeout_ms": 90000,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+
+	if got := manager.MaxConnections(); got != 2048 {
+		t.Errorf("MaxConnections = %d, want 2048", got)
+	}
+	if got := manager.PeekTimeout(); got != 15*time.Second {
+		t.Errorf("PeekTimeout = %v, want 15s", got)
+	}
+	if got := setter.RequestTimeout(); got != 90*time.Second {
+		t.Errorf("RequestTimeout = %v, want 90s", got)
+	}
+}
+
+func TestProxyStart_InvalidMaxConnections_DoesNotStartProxy(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	// Invalid max_connections should prevent proxy from starting.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":    "127.0.0.1:0",
+		"max_connections": 0,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid max_connections")
+	}
+
+	// Verify proxy did NOT start.
+	running, _ := manager.Status()
+	if running {
+		t.Error("proxy should not be running after validation failure")
+		manager.Stop(context.Background())
+	}
+}
+
+// setupProxyStartTestSessionWithOptions creates an MCP client session with
+// arbitrary ServerOption values for testing.
+func setupProxyStartTestSessionWithOptions(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList, extraOpts ...ServerOption) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	var opts []ServerOption
+	if scope != nil {
+		opts = append(opts, WithCaptureScope(scope))
+	}
+	if pl != nil {
+		opts = append(opts, WithPassthroughList(pl))
+	}
+	opts = append(opts, extraOpts...)
+
+	s := NewServer(ctx, nil, nil, manager, opts...)
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
 func TestApplyTLSPassthrough(t *testing.T) {
 	tests := []struct {
 		name     string

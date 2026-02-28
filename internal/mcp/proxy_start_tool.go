@@ -5,9 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
+)
+
+const (
+	// minMaxConnections is the minimum allowed value for max_connections.
+	minMaxConnections = 1
+	// maxMaxConnections is the maximum allowed value for max_connections.
+	maxMaxConnections = 100000
+	// minTimeoutMs is the minimum allowed timeout in milliseconds.
+	minTimeoutMs = 100
+	// maxTimeoutMs is the maximum allowed timeout in milliseconds (10 minutes).
+	maxTimeoutMs = 600000
 )
 
 // captureScopeInput is the JSON representation of capture scope configuration
@@ -64,6 +76,18 @@ type proxyStartInput struct {
 	// Valid values: "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP".
 	// If omitted, all protocols are enabled (default behavior).
 	Protocols []string `json:"protocols,omitempty" jsonschema:"enabled protocol list (default: all protocols enabled)"`
+
+	// MaxConnections is the maximum number of concurrent proxy connections.
+	// Defaults to 1024 if omitted or zero.
+	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (default: 1024)"`
+
+	// PeekTimeoutMs is the timeout in milliseconds for protocol detection on new connections.
+	// Defaults to 30000 (30s) if omitted or zero.
+	PeekTimeoutMs *int `json:"peek_timeout_ms,omitempty" jsonschema:"protocol detection timeout in milliseconds (default: 30000)"`
+
+	// RequestTimeoutMs is the timeout in milliseconds for reading HTTP request headers.
+	// Defaults to 60000 (60s) if omitted or zero.
+	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (default: 60000)"`
 }
 
 // proxyStartResult is the structured output of the proxy_start tool.
@@ -90,8 +114,11 @@ func (s *Server) registerProxyStart() {
 			"intercept_rules to define conditions for intercepting requests/responses, " +
 			"auto_transform to configure automatic request/response modification rules, " +
 			"tcp_forwards to map local ports to upstream TCP addresses for Raw TCP forwarding, " +
-			"and protocols to specify which protocols are enabled for detection. " +
-			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all.",
+			"protocols to specify which protocols are enabled for detection, " +
+			"max_connections to set the concurrent connection limit (default: 1024), " +
+			"peek_timeout_ms for protocol detection timeout (default: 30000ms), " +
+			"and request_timeout_ms for HTTP request header read timeout (default: 60000ms). " +
+			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, max_connections=1024, peek_timeout_ms=30000, request_timeout_ms=60000.",
 	}, s.handleProxyStart)
 }
 
@@ -163,6 +190,29 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 			return nil, nil, fmt.Errorf("protocols: %w", err)
 		}
 		s.enabledProtocols = input.Protocols
+	}
+
+	// Apply connection limits and timeouts if provided.
+	if input.MaxConnections != nil {
+		n := *input.MaxConnections
+		if n < minMaxConnections || n > maxMaxConnections {
+			return nil, nil, fmt.Errorf("max_connections must be between %d and %d, got %d", minMaxConnections, maxMaxConnections, n)
+		}
+		s.manager.SetMaxConnections(n)
+	}
+	if input.PeekTimeoutMs != nil {
+		ms := *input.PeekTimeoutMs
+		if ms < minTimeoutMs || ms > maxTimeoutMs {
+			return nil, nil, fmt.Errorf("peek_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
+		}
+		s.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
+	}
+	if input.RequestTimeoutMs != nil {
+		ms := *input.RequestTimeoutMs
+		if ms < minTimeoutMs || ms > maxTimeoutMs {
+			return nil, nil, fmt.Errorf("request_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
+		}
+		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
 	}
 
 	if err := s.manager.Start(s.appCtx, input.ListenAddr); err != nil {
@@ -373,5 +423,21 @@ func (s *Server) applyTLSPassthrough(patterns []string) error {
 		}
 	}
 	return nil
+}
+
+// applyRequestTimeout updates the request timeout on all registered protocol handlers.
+func (s *Server) applyRequestTimeout(d time.Duration) {
+	for _, setter := range s.requestTimeoutSetters {
+		setter.SetRequestTimeout(d)
+	}
+}
+
+// currentRequestTimeout returns the effective request timeout from the first
+// registered handler, or 0 if none is registered.
+func (s *Server) currentRequestTimeout() time.Duration {
+	if len(s.requestTimeoutSetters) > 0 {
+		return s.requestTimeoutSetters[0].RequestTimeout()
+	}
+	return 0
 }
 
