@@ -83,6 +83,25 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 	return sess
 }
 
+func TestNewSQLiteStore_BusyTimeout(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "busy_timeout_test.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	var timeout int
+	err = store.db.QueryRow("PRAGMA busy_timeout").Scan(&timeout)
+	if err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", timeout)
+	}
+}
+
 func TestSQLiteStore_SaveAndGetSession(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
