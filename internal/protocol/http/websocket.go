@@ -65,8 +65,8 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 
 	logger.Info("websocket upgrade detected", "url", req.URL.String(), "host", host)
 
-	// Dial the upstream server.
-	upstreamConn, err := net.DialTimeout("tcp", host, 30*time.Second)
+	// Dial the upstream server, optionally via upstream proxy.
+	upstreamConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
 		logger.Error("websocket upstream dial failed", "host", host, "error", err)
 		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -145,8 +145,8 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 
 	logger.Info("wss websocket upgrade detected", "url", req.URL.String(), "host", host)
 
-	// Dial the upstream server.
-	rawConn, err := net.DialTimeout("tcp", host, 30*time.Second)
+	// Dial the upstream server, optionally via upstream proxy.
+	rawConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
 		logger.Error("wss upstream dial failed", "host", host, "error", err)
 		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"

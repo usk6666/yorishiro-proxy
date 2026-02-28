@@ -102,8 +102,8 @@ func (h *Handler) handlePassthrough(ctx context.Context, clientConn net.Conn, au
 	logger := h.connLogger(ctx)
 	logger.Info("TLS passthrough", "host", authority)
 
-	// Connect to the upstream server.
-	upstream, err := net.DialTimeout("tcp", authority, 30*time.Second)
+	// Connect to the upstream server, optionally via upstream proxy.
+	upstream, err := h.dialUpstream(ctx, authority, 30*time.Second)
 	if err != nil {
 		logger.Error("passthrough upstream dial failed", "host", authority, "error", err)
 		if _, err := clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
@@ -497,4 +497,15 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	logger.Info("https request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 
 	return nil
+}
+
+// dialUpstream dials the target address, optionally routing through the
+// configured upstream proxy. If no upstream proxy is set, it dials directly.
+func (h *Handler) dialUpstream(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	proxyURL := h.UpstreamProxy()
+	if proxyURL != nil {
+		return proxy.DialViaUpstreamProxy(ctx, proxyURL, addr, timeout)
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	return dialer.DialContext(ctx, "tcp", addr)
 }

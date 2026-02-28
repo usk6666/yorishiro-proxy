@@ -42,6 +42,9 @@ type Handler struct {
 	// transport is used for upstream HTTP/2 requests.
 	transport *gohttp.Transport
 
+	// upstreamMu protects upstreamProxy for concurrent access.
+	upstreamMu sync.RWMutex
+
 	// scope controls which requests are recorded.
 	scope *proxy.CaptureScope
 
@@ -110,6 +113,15 @@ func (h *Handler) SetInterceptEngine(engine *intercept.Engine) {
 // engine.
 func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
 	h.interceptQueue = queue
+}
+
+// SetUpstreamProxy configures the upstream proxy for outgoing HTTP/2 connections.
+// Pass nil to disable the upstream proxy (direct connections).
+// This method is safe to call concurrently.
+func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
+	h.upstreamMu.Lock()
+	defer h.upstreamMu.Unlock()
+	h.transport.Proxy = proxy.TransportProxyFunc(proxyURL)
 }
 
 // Name returns the protocol name for h2c (cleartext HTTP/2).
@@ -485,7 +497,13 @@ func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, str
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
+	// Hold a read lock while accessing transport.Proxy via RoundTrip to
+	// prevent a data race with concurrent SetUpstreamProxy writes.
+	h.upstreamMu.RLock()
 	resp, err := h.transport.RoundTrip(req)
+	h.upstreamMu.RUnlock()
+
 	return resp, serverAddr, err
 }
 
