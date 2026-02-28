@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
@@ -22,6 +23,7 @@ type Handler struct {
 	store    session.Store
 	forwards map[string]string // listen port -> forward address
 	logger   *slog.Logger
+	mu       sync.Mutex
 }
 
 // NewHandler creates a new raw TCP handler.
@@ -43,6 +45,28 @@ func NewHandler(store session.Store, forwards map[string]string, logger *slog.Lo
 // Name returns the protocol name.
 func (h *Handler) Name() string {
 	return "TCP"
+}
+
+// SetForwards merges the given forward mappings into the existing map so that
+// previously configured forwards remain active. This is safe for concurrent use.
+func (h *Handler) SetForwards(forwards map[string]string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for port, target := range forwards {
+		h.forwards[port] = target
+	}
+}
+
+// Forwards returns a snapshot of the current forward mappings.
+// The returned map is a copy and safe to modify.
+func (h *Handler) Forwards() map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]string, len(h.forwards))
+	for k, v := range h.forwards {
+		out[k] = v
+	}
+	return out
 }
 
 // Detect always returns true. This handler is intended as a fallback and must
@@ -67,7 +91,9 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("parse local address %s: %w", localAddr, err)
 	}
 
+	h.mu.Lock()
 	target, ok := h.forwards[port]
+	h.mu.Unlock()
 	if !ok {
 		logger.Warn("no TCP forward configured for port, closing connection", "port", port)
 		return nil
