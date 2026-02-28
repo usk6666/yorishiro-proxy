@@ -35,9 +35,17 @@ type Server struct {
 	dbPath            string              // path to the SQLite database file for status reporting
 	replayDoer        httpDoer       // injectable HTTP client for execute(replay) testing
 	rawReplayDialer   rawDialer      // injectable dialer for replay_raw testing
-	tcpForwards       map[string]string // TCP forward mappings (port -> target)
-	enabledProtocols  []string          // enabled protocols for detection
+	tcpForwards       map[string]string    // TCP forward mappings (port -> target)
+	tcpHandler        tcpForwardHandler    // TCP handler for forward listeners
+	enabledProtocols  []string              // enabled protocols for detection
 	httpMiddleware    func(http.Handler) http.Handler // optional middleware wrapping the HTTP handler
+}
+
+// tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
+// forward mappings at runtime. This interface is satisfied by tcp.Handler.
+type tcpForwardHandler interface {
+	proxy.ProtocolHandler
+	SetForwards(forwards map[string]string)
 }
 
 // ServerOption configures a Server.
@@ -110,6 +118,14 @@ func WithFuzzStore(fs session.FuzzStore) ServerOption {
 func WithIssuer(iss *cert.Issuer) ServerOption {
 	return func(s *Server) {
 		s.issuer = iss
+	}
+}
+
+// WithTCPHandler sets the TCP handler for the MCP server, enabling TCP
+// forward listener creation via the proxy_start tool's tcp_forwards parameter.
+func WithTCPHandler(h tcpForwardHandler) ServerOption {
+	return func(s *Server) {
+		s.tcpHandler = h
 	}
 }
 

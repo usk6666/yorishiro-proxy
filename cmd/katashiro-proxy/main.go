@@ -210,7 +210,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -280,7 +280,7 @@ func parseBool(s string) bool {
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	// Build MCP server options.
@@ -294,6 +294,7 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 		mcp.WithFuzzRunner(fuzzRunner),
 		mcp.WithFuzzStore(fuzzStore),
 		mcp.WithIssuer(issuer),
+		mcp.WithTCPHandler(tcpHandler),
 	}
 
 	// Set up Bearer token authentication middleware for HTTP transport.

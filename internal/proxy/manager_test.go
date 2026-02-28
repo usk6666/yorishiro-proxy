@@ -340,3 +340,147 @@ func TestManager_ConcurrentStatus(t *testing.T) {
 		<-done
 	}
 }
+
+func TestManager_StartTCPForwards(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	ctx := context.Background()
+	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer manager.Stop(context.Background())
+
+	handler := &echoHandler{}
+	forwards := map[string]string{
+		"0": "127.0.0.1:9999", // port 0 = random
+	}
+
+	if err := manager.StartTCPForwards(ctx, forwards, handler); err != nil {
+		t.Fatalf("StartTCPForwards: %v", err)
+	}
+
+	// Verify forward addrs are populated.
+	addrs := manager.TCPForwardAddrs()
+	if addrs == nil {
+		t.Fatal("expected non-nil TCPForwardAddrs")
+	}
+	if _, ok := addrs["0"]; !ok {
+		t.Error("expected addrs to contain port '0'")
+	}
+}
+
+func TestManager_StartTCPForwards_NotRunning(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	handler := &echoHandler{}
+	forwards := map[string]string{
+		"0": "127.0.0.1:9999",
+	}
+
+	err := manager.StartTCPForwards(context.Background(), forwards, handler)
+	if err == nil {
+		t.Fatal("expected error when not running")
+	}
+	if err != proxy.ErrNotRunning {
+		t.Errorf("expected ErrNotRunning, got %v", err)
+	}
+}
+
+func TestManager_StartTCPForwards_Connectable(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	ctx := context.Background()
+	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer manager.Stop(context.Background())
+
+	handler := &echoHandler{}
+	forwards := map[string]string{
+		"0": "127.0.0.1:9999",
+	}
+
+	if err := manager.StartTCPForwards(ctx, forwards, handler); err != nil {
+		t.Fatalf("StartTCPForwards: %v", err)
+	}
+
+	// Get the actual address and connect.
+	addrs := manager.TCPForwardAddrs()
+	addr := addrs["0"]
+	if addr == "" {
+		t.Fatal("expected non-empty forward address")
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial tcp forward: %v", err)
+	}
+	conn.Close()
+}
+
+func TestManager_StopCleansUpTCPForwards(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	ctx := context.Background()
+	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	handler := &echoHandler{}
+	forwards := map[string]string{
+		"0": "127.0.0.1:9999",
+	}
+
+	if err := manager.StartTCPForwards(ctx, forwards, handler); err != nil {
+		t.Fatalf("StartTCPForwards: %v", err)
+	}
+
+	// Get the forward address before stopping.
+	addrs := manager.TCPForwardAddrs()
+	fwdAddr := addrs["0"]
+
+	// Stop should clean up TCP forwards.
+	if err := manager.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// TCPForwardAddrs should be nil after stop.
+	if got := manager.TCPForwardAddrs(); got != nil {
+		t.Errorf("TCPForwardAddrs after stop = %v, want nil", got)
+	}
+
+	// The forward listener should no longer be accepting connections.
+	conn, err := net.DialTimeout("tcp", fwdAddr, 500*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		t.Error("expected dial to fail after stop, but it succeeded")
+	}
+}
+
+func TestManager_TCPForwardAddrs_NotRunning(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	if got := manager.TCPForwardAddrs(); got != nil {
+		t.Errorf("TCPForwardAddrs when not running = %v, want nil", got)
+	}
+}
+
+// echoHandler is a simple protocol handler that echoes data for testing.
+type echoHandler struct{}
+
+func (h *echoHandler) Name() string          { return "echo" }
+func (h *echoHandler) Detect(_ []byte) bool   { return true }
+func (h *echoHandler) Handle(_ context.Context, conn net.Conn) error {
+	_, err := io.Copy(conn, conn)
+	return err
+}
