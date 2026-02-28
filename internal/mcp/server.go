@@ -37,6 +37,7 @@ type Server struct {
 	rawReplayDialer   rawDialer      // injectable dialer for replay_raw testing
 	tcpForwards       map[string]string // TCP forward mappings (port -> target)
 	enabledProtocols  []string          // enabled protocols for detection
+	httpMiddleware    func(http.Handler) http.Handler // optional middleware wrapping the HTTP handler
 }
 
 // ServerOption configures a Server.
@@ -112,6 +113,15 @@ func WithIssuer(iss *cert.Issuer) ServerOption {
 	}
 }
 
+// WithMiddleware sets an HTTP middleware that wraps the Streamable HTTP
+// handler in RunHTTP. This is used to inject Bearer token authentication
+// or other request-level middleware around the MCP HTTP transport.
+func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
+	return func(s *Server) {
+		s.httpMiddleware = mw
+	}
+}
+
 // NewServer creates a new MCP server with proxy tools registered.
 // The ctx parameter is the application-level context that controls the proxy lifecycle;
 // when ctx is cancelled, the proxy started via proxy_start will shut down.
@@ -157,13 +167,18 @@ func (s *Server) RunHTTP(ctx context.Context, addr string) error {
 		return fmt.Errorf("MCP HTTP server: %w", err)
 	}
 
-	handler := gomcp.NewStreamableHTTPHandler(func(_ *http.Request) *gomcp.Server {
+	var h http.Handler = gomcp.NewStreamableHTTPHandler(func(_ *http.Request) *gomcp.Server {
 		return s.server
 	}, nil)
 
+	// Apply optional middleware (e.g. Bearer token authentication).
+	if s.httpMiddleware != nil {
+		h = s.httpMiddleware(h)
+	}
+
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: handler,
+		Handler: h,
 		// ReadHeaderTimeout protects against Slowloris attacks (CWE-400).
 		// ReadTimeout is intentionally not set to avoid breaking SSE streams.
 		ReadHeaderTimeout: 30 * time.Second,

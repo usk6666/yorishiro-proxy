@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -58,11 +59,16 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.CleanupInterval, "cleanup-interval", cfg.CleanupInterval, "interval between automatic cleanup runs (0 = disabled)")
 	flag.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (no file persistence)")
 	flag.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "MCP Streamable HTTP server listen address (e.g. :3000)")
+	flag.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "Bearer token for MCP HTTP authentication (default: auto-generated)")
 	flag.Parse()
 
 	// Allow KP_MCP_HTTP_ADDR environment variable as fallback when no flag is set.
 	if cfg.MCPHTTPAddr == "" {
 		cfg.MCPHTTPAddr = os.Getenv("KP_MCP_HTTP_ADDR")
+	}
+	// Allow KP_MCP_HTTP_TOKEN environment variable as fallback when no flag is set.
+	if cfg.MCPHTTPToken == "" {
+		cfg.MCPHTTPToken = os.Getenv("KP_MCP_HTTP_TOKEN")
 	}
 
 	// Initialize logger.
@@ -171,7 +177,7 @@ func run(ctx context.Context) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	if stdio {
-		return runStdio(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, logger)
+		return runStdio(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
 	}
 
 	return runProxy(ctx, cfg, manager, logger)
@@ -182,10 +188,11 @@ func run(ctx context.Context) error {
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, logger *slog.Logger) error {
+func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
-	mcpServer := mcp.NewServer(ctx, ca, store, manager,
+	// Build MCP server options.
+	opts := []mcp.ServerOption{
 		mcp.WithDBPath(dbPath),
 		mcp.WithPassthroughList(passthrough),
 		mcp.WithCaptureScope(scope),
@@ -195,7 +202,20 @@ func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store sessi
 		mcp.WithFuzzRunner(fuzzRunner),
 		mcp.WithFuzzStore(fuzzStore),
 		mcp.WithIssuer(issuer),
-	)
+	}
+
+	// Set up Bearer token authentication middleware for HTTP transport.
+	if mcpHTTPAddr != "" {
+		token, err := resolveHTTPToken(mcpHTTPToken, logger)
+		if err != nil {
+			return fmt.Errorf("MCP HTTP token: %w", err)
+		}
+		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
+			return mcp.BearerAuthMiddleware(next, token)
+		}))
+	}
+
+	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -229,6 +249,24 @@ func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store sessi
 	}
 
 	return g.Wait()
+}
+
+// resolveHTTPToken returns the Bearer token to use for MCP HTTP authentication.
+// If token is non-empty it is returned as-is. Otherwise a random token is
+// generated and logged to stderr so the operator can retrieve it.
+func resolveHTTPToken(token string, logger *slog.Logger) (string, error) {
+	if token != "" {
+		return token, nil
+	}
+	generated, err := mcp.GenerateToken()
+	if err != nil {
+		return "", err
+	}
+	// Log the auto-generated token to stderr so the operator can use it.
+	// This is the only time the token value appears in logs.
+	logger.Info("generated MCP HTTP Bearer token (use this to authenticate)",
+		"token", generated)
+	return generated, nil
 }
 
 // runProxy starts the proxy directly without an MCP server.

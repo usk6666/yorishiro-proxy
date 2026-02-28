@@ -15,6 +15,12 @@ type Config struct {
 	// Can also be set via KP_MCP_HTTP_ADDR environment variable.
 	MCPHTTPAddr string `json:"mcp_http_addr"`
 
+	// MCPHTTPToken is the Bearer token for authenticating MCP Streamable HTTP
+	// requests. When empty, a random token is generated at startup and logged
+	// to stderr. Can also be set via KP_MCP_HTTP_TOKEN environment variable.
+	// CLI flag: -mcp-http-token
+	MCPHTTPToken string `json:"-"`
+
 	// CAKeyPath is the path to the CA private key file.
 	CAKeyPath string `json:"ca_key_path"`
 
