@@ -1140,8 +1140,17 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure(t *testing.T) {
 	}
 
 	// Verify that SaveSession was actually called (and failed).
-	if store.saveCallCount.Load() == 0 {
-		t.Error("expected SaveSession to be called at least once, but it was not")
+	// SaveSession is invoked asynchronously after the response is forwarded,
+	// so we poll with a bounded deadline instead of asserting immediately.
+	deadline := time.After(2 * time.Second)
+	for store.saveCallCount.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("expected SaveSession to be called at least once, but it was not after 2s")
+			return
+		case <-time.After(10 * time.Millisecond):
+			// retry
+		}
 	}
 }
 
