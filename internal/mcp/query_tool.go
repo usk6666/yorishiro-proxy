@@ -525,6 +525,9 @@ type queryStatusResult struct {
 	ListenAddr        string `json:"listen_addr"`
 	UpstreamProxy     string `json:"upstream_proxy"`
 	ActiveConnections int    `json:"active_connections"`
+	MaxConnections    int    `json:"max_connections"`
+	PeekTimeoutMs     int64  `json:"peek_timeout_ms"`
+	RequestTimeoutMs  int64  `json:"request_timeout_ms"`
 	TotalSessions     int    `json:"total_sessions"`
 	DBSizeBytes       int64  `json:"db_size_bytes"`
 	UptimeSeconds     int64  `json:"uptime_seconds"`
@@ -543,7 +546,17 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.ListenAddr = addr
 		result.UpstreamProxy = proxy.RedactProxyURL(s.manager.UpstreamProxy())
 		result.ActiveConnections = s.manager.ActiveConnections()
+		result.MaxConnections = s.manager.MaxConnections()
+		result.PeekTimeoutMs = s.manager.PeekTimeout().Milliseconds()
 		result.UptimeSeconds = int64(s.manager.Uptime().Seconds())
+	}
+
+	// Report request timeout from the first registered handler.
+	if rt := s.currentRequestTimeout(); rt > 0 {
+		result.RequestTimeoutMs = rt.Milliseconds()
+	} else {
+		// Default request timeout when no handler is registered.
+		result.RequestTimeoutMs = 60000
 	}
 
 	if s.store != nil {

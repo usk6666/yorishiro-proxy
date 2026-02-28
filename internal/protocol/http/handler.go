@@ -157,6 +157,12 @@ func (h *Handler) SetRequestTimeout(d time.Duration) {
 	h.requestTimeout = d
 }
 
+// RequestTimeout returns the effective request timeout.
+// If no timeout has been explicitly set, it returns the default (60s).
+func (h *Handler) RequestTimeout() time.Duration {
+	return h.effectiveRequestTimeout()
+}
+
 // SetPassthroughList sets the TLS passthrough list used to determine which
 // CONNECT destinations should bypass MITM interception. When a CONNECT target
 // matches a pattern in the list, the proxy relays encrypted bytes directly
