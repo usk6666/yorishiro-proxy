@@ -112,6 +112,12 @@ func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
 	h.interceptQueue = queue
 }
 
+// SetUpstreamProxy configures the upstream proxy for outgoing HTTP/2 connections.
+// Pass nil to disable the upstream proxy (direct connections).
+func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
+	h.transport.Proxy = proxy.TransportProxyFunc(proxyURL)
+}
+
 // Name returns the protocol name for h2c (cleartext HTTP/2).
 func (h *Handler) Name() string {
 	return "HTTP/2 (h2c)"

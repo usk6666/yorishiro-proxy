@@ -522,6 +522,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 type queryStatusResult struct {
 	Running           bool   `json:"running"`
 	ListenAddr        string `json:"listen_addr"`
+	UpstreamProxy     string `json:"upstream_proxy"`
 	ActiveConnections int    `json:"active_connections"`
 	TotalSessions     int    `json:"total_sessions"`
 	DBSizeBytes       int64  `json:"db_size_bytes"`
@@ -539,6 +540,7 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		running, addr := s.manager.Status()
 		result.Running = running
 		result.ListenAddr = addr
+		result.UpstreamProxy = s.manager.UpstreamProxy()
 		result.ActiveConnections = s.manager.ActiveConnections()
 		result.UptimeSeconds = int64(s.manager.Uptime().Seconds())
 	}
@@ -569,6 +571,7 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 
 // queryConfigResult is the response for the config resource.
 type queryConfigResult struct {
+	UpstreamProxy    string                  `json:"upstream_proxy"`
 	CaptureScope     *queryScopeResult       `json:"capture_scope"`
 	TLSPassthrough   *queryPassthroughResult `json:"tls_passthrough"`
 	TCPForwards      map[string]string       `json:"tcp_forwards,omitempty"`
@@ -590,6 +593,10 @@ type queryPassthroughResult struct {
 // handleQueryConfig returns the current configuration (capture scope + TLS passthrough).
 func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult, error) {
 	result := &queryConfigResult{}
+
+	if s.manager != nil {
+		result.UpstreamProxy = s.manager.UpstreamProxy()
+	}
 
 	if s.scope != nil {
 		includes, excludes := s.scope.Rules()
