@@ -184,6 +184,8 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	http2Handler := protohttp2.NewHandler(store, logger)
 	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	http2Handler.SetCaptureScope(scope)
+	http2Handler.SetInterceptEngine(interceptEngine)
+	http2Handler.SetInterceptQueue(interceptQueue)
 
 	// Build gRPC handler and attach to the HTTP/2 handler for gRPC-specific recording.
 	grpcHandler := protogrpc.NewHandler(store, logger)
