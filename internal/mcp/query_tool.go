@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
 
@@ -540,7 +541,7 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		running, addr := s.manager.Status()
 		result.Running = running
 		result.ListenAddr = addr
-		result.UpstreamProxy = s.manager.UpstreamProxy()
+		result.UpstreamProxy = proxy.RedactProxyURL(s.manager.UpstreamProxy())
 		result.ActiveConnections = s.manager.ActiveConnections()
 		result.UptimeSeconds = int64(s.manager.Uptime().Seconds())
 	}
@@ -595,7 +596,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 	result := &queryConfigResult{}
 
 	if s.manager != nil {
-		result.UpstreamProxy = s.manager.UpstreamProxy()
+		result.UpstreamProxy = proxy.RedactProxyURL(s.manager.UpstreamProxy())
 	}
 
 	if s.scope != nil {

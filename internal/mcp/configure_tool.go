@@ -6,6 +6,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 )
 
@@ -202,7 +203,7 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 		}
 		current := ""
 		if s.manager != nil {
-			current = s.manager.UpstreamProxy()
+			current = proxy.RedactProxyURL(s.manager.UpstreamProxy())
 		}
 		result.UpstreamProxy = &current
 	}
@@ -274,7 +275,7 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		}
 		current := ""
 		if s.manager != nil {
-			current = s.manager.UpstreamProxy()
+			current = proxy.RedactProxyURL(s.manager.UpstreamProxy())
 		}
 		result.UpstreamProxy = &current
 	}

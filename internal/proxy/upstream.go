@@ -7,6 +7,7 @@ import (
 	"net"
 	gohttp "net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -51,6 +52,27 @@ func ParseUpstreamProxy(rawURL string) (*url.URL, error) {
 	return u, nil
 }
 
+// RedactProxyURL returns a copy of the raw proxy URL string with the password
+// portion of userinfo replaced by "xxxxx". If the URL cannot be parsed or has
+// no password, it is returned unchanged.
+func RedactProxyURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if u.User == nil {
+		return rawURL
+	}
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		return rawURL
+	}
+	u.User = url.UserPassword(u.User.Username(), "xxxxx")
+	return u.String()
+}
+
 // TransportProxyFunc returns an HTTP transport-compatible Proxy function for the
 // given upstream proxy URL. Returns nil (direct connection) when proxyURL is nil.
 // For HTTP proxies, the standard library's transport handles CONNECT automatically.
@@ -87,6 +109,11 @@ func DialViaUpstreamProxy(ctx context.Context, proxyURL *url.URL, targetAddr str
 
 // dialViaHTTPProxy dials the target through an HTTP CONNECT proxy.
 func dialViaHTTPProxy(ctx context.Context, proxyURL *url.URL, targetAddr string, timeout time.Duration) (net.Conn, error) {
+	// Validate targetAddr to prevent CRLF injection (CWE-93) in the CONNECT request line.
+	if strings.ContainsAny(targetAddr, "\r\n") {
+		return nil, fmt.Errorf("invalid target address: contains CR/LF characters")
+	}
+
 	dialer := &net.Dialer{Timeout: timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", proxyURL.Host)
 	if err != nil {
@@ -105,6 +132,13 @@ func dialViaHTTPProxy(ctx context.Context, proxyURL *url.URL, targetAddr string,
 	}
 
 	connectReq += "\r\n"
+
+	// Set a deadline for the CONNECT handshake to prevent indefinite blocking
+	// if the proxy accepts the TCP connection but hangs during the HTTP exchange.
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set CONNECT deadline on proxy %s: %w", proxyURL.Host, err)
+	}
 
 	if _, err := conn.Write([]byte(connectReq)); err != nil {
 		conn.Close()
@@ -149,6 +183,13 @@ func dialViaHTTPProxy(ctx context.Context, proxyURL *url.URL, targetAddr string,
 			truncated = truncated[:64]
 		}
 		return nil, fmt.Errorf("CONNECT to %s via proxy %s failed: %s", targetAddr, proxyURL.Host, truncated)
+	}
+
+	// Clear the deadline so subsequent I/O on the tunneled connection is not
+	// constrained by the CONNECT handshake timeout.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("reset deadline after CONNECT to proxy %s: %w", proxyURL.Host, err)
 	}
 
 	return conn, nil
