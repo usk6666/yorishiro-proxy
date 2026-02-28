@@ -272,13 +272,63 @@ func (m *Manager) Stop(ctx context.Context) error {
 }
 
 // SetPeekTimeout sets the protocol detection timeout for new connections.
+// If the proxy is already running, the change takes effect immediately
+// for the next incoming connection.
 func (m *Manager) SetPeekTimeout(d time.Duration) {
+	m.mu.Lock()
 	m.peekTimeout = d
+	l := m.listener
+	m.mu.Unlock()
+	if l != nil {
+		l.SetPeekTimeout(d)
+	}
 }
 
 // SetMaxConnections sets the maximum number of concurrent connections.
+// If the proxy is already running, the change takes effect immediately
+// for the next incoming connection. Existing connections are not interrupted.
 func (m *Manager) SetMaxConnections(n int) {
+	m.mu.Lock()
 	m.maxConnections = n
+	l := m.listener
+	m.mu.Unlock()
+	if l != nil {
+		l.SetMaxConnections(n)
+	}
+}
+
+// MaxConnections returns the configured maximum connections limit.
+// When the proxy is running, returns the listener's current value.
+// Otherwise returns the stored configuration value.
+func (m *Manager) MaxConnections() int {
+	m.mu.Lock()
+	l := m.listener
+	maxConns := m.maxConnections
+	m.mu.Unlock()
+	if l != nil {
+		return l.MaxConnections()
+	}
+	if maxConns == 0 {
+		return defaultMaxConnections
+	}
+	return maxConns
+}
+
+// PeekTimeout returns the configured protocol detection timeout.
+// When the proxy is running, returns the listener's current value.
+// Otherwise returns the stored configuration value.
+func (m *Manager) PeekTimeout() time.Duration {
+	m.mu.Lock()
+	l := m.listener
+	pt := m.peekTimeout
+	m.mu.Unlock()
+	if l != nil {
+		return l.PeekTimeout()
+	}
+	if pt == 0 {
+		return defaultPeekTimeout
+	}
+	return pt
 }
 
 // SetUpstreamProxy sets the upstream proxy URL. An empty string disables

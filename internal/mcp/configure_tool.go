@@ -45,6 +45,18 @@ type configureInput struct {
 	// For merge: use add/remove/enable/disable to modify individual rules.
 	// For replace: use rules to replace all rules entirely.
 	AutoTransform *configureAutoTransform `json:"auto_transform,omitempty" jsonschema:"auto-transform rules configuration"`
+
+	// MaxConnections dynamically changes the maximum number of concurrent proxy connections.
+	// Existing connections exceeding the new limit are not interrupted.
+	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (1-100000)"`
+
+	// PeekTimeoutMs dynamically changes the protocol detection timeout in milliseconds.
+	// Takes effect for the next incoming connection.
+	PeekTimeoutMs *int `json:"peek_timeout_ms,omitempty" jsonschema:"protocol detection timeout in milliseconds (100-600000)"`
+
+	// RequestTimeoutMs dynamically changes the HTTP request header read timeout in milliseconds.
+	// Takes effect for the next incoming request.
+	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (100-600000)"`
 }
 
 // configureInterceptQueue holds intercept queue configuration.
@@ -127,6 +139,15 @@ type configureResult struct {
 
 	// AutoTransform summarizes the current auto-transform rules state.
 	AutoTransform *configureAutoTransformResult `json:"auto_transform,omitempty"`
+
+	// MaxConnections is the current max connections value (set when changed).
+	MaxConnections *int `json:"max_connections,omitempty"`
+
+	// PeekTimeoutMs is the current peek timeout in milliseconds (set when changed).
+	PeekTimeoutMs *int64 `json:"peek_timeout_ms,omitempty"`
+
+	// RequestTimeoutMs is the current request timeout in milliseconds (set when changed).
+	RequestTimeoutMs *int64 `json:"request_timeout_ms,omitempty"`
 }
 
 // configureInterceptQueueResult summarizes intercept queue state in the configure response.
@@ -163,7 +184,7 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, and auto-transform rules. " +
+		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, auto-transform rules, and connection limits/timeouts. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
 			"Upstream proxy routes all outgoing traffic through an HTTP CONNECT or SOCKS5 proxy; set to empty string to disable. " +
@@ -172,6 +193,8 @@ func (s *Server) registerConfigure() {
 			"Intercept rules define conditions for intercepting requests/responses (host_pattern regex, path_pattern regex, method whitelist, header regex). " +
 			"Intercept queue configures timeout and timeout behavior for blocked requests. " +
 			"Auto-transform rules automatically modify matching requests/responses (add/set/remove headers, replace body patterns). " +
+			"max_connections dynamically changes the concurrent connection limit. " +
+			"peek_timeout_ms and request_timeout_ms dynamically change protocol detection and HTTP request timeouts. " +
 			"All sections are optional; only specified sections are modified.",
 	}, s.handleConfigure)
 }
@@ -262,6 +285,10 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 		result.AutoTransform = s.autoTransformResult()
 	}
 
+	if err := s.applyConnectionLimits(input, result); err != nil {
+		return nil, nil, err
+	}
+
 	return nil, result, nil
 }
 
@@ -340,7 +367,51 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		result.AutoTransform = s.autoTransformResult()
 	}
 
+	if err := s.applyConnectionLimits(input, result); err != nil {
+		return nil, nil, err
+	}
+
 	return nil, result, nil
+}
+
+// applyConnectionLimits validates and applies max_connections, peek_timeout_ms,
+// and request_timeout_ms from the configure input. It modifies the result to
+// include the new values. This is shared between merge and replace handlers
+// since these fields are scalar values, not collections.
+func (s *Server) applyConnectionLimits(input configureInput, result *configureResult) error {
+	if input.MaxConnections != nil {
+		if s.manager == nil {
+			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
+		}
+		n := *input.MaxConnections
+		if n < minMaxConnections || n > maxMaxConnections {
+			return fmt.Errorf("max_connections must be between %d and %d, got %d", minMaxConnections, maxMaxConnections, n)
+		}
+		s.manager.SetMaxConnections(n)
+		result.MaxConnections = &n
+	}
+	if input.PeekTimeoutMs != nil {
+		if s.manager == nil {
+			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
+		}
+		ms := *input.PeekTimeoutMs
+		if ms < minTimeoutMs || ms > maxTimeoutMs {
+			return fmt.Errorf("peek_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
+		}
+		s.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
+		msVal := int64(ms)
+		result.PeekTimeoutMs = &msVal
+	}
+	if input.RequestTimeoutMs != nil {
+		ms := *input.RequestTimeoutMs
+		if ms < minTimeoutMs || ms > maxTimeoutMs {
+			return fmt.Errorf("request_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
+		}
+		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
+		msVal := int64(ms)
+		result.RequestTimeoutMs = &msVal
+	}
+	return nil
 }
 
 // mergeScope applies delta add/remove operations to the capture scope.

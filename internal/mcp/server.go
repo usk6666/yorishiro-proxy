@@ -39,10 +39,11 @@ type Server struct {
 	rawReplayDialer   rawDialer      // injectable dialer for replay_raw testing
 	tcpForwards       map[string]string    // TCP forward mappings (port -> target)
 	tcpHandler        tcpForwardHandler    // TCP handler for forward listeners
-	enabledProtocols      []string              // enabled protocols for detection
-	httpMiddleware        func(http.Handler) http.Handler // optional middleware wrapping the HTTP handler
-	proxyDefaults         *config.ProxyConfig  // default proxy config from config file
-	upstreamProxySetters  []upstreamProxySetter // protocol handlers to update when upstream proxy changes
+	enabledProtocols       []string              // enabled protocols for detection
+	httpMiddleware         func(http.Handler) http.Handler // optional middleware wrapping the HTTP handler
+	proxyDefaults          *config.ProxyConfig  // default proxy config from config file
+	upstreamProxySetters   []upstreamProxySetter // protocol handlers to update when upstream proxy changes
+	requestTimeoutSetters  []requestTimeoutSetter // protocol handlers to update when request timeout changes
 }
 
 // tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
@@ -56,6 +57,13 @@ type tcpForwardHandler interface {
 // proxy configuration (HTTP/1.x and HTTP/2 handlers).
 type upstreamProxySetter interface {
 	SetUpstreamProxy(proxyURL *url.URL)
+}
+
+// requestTimeoutSetter is implemented by protocol handlers that support
+// request timeout configuration (HTTP/1.x and HTTP/2 handlers).
+type requestTimeoutSetter interface {
+	SetRequestTimeout(d time.Duration)
+	RequestTimeout() time.Duration
 }
 
 // ServerOption configures a Server.
@@ -163,6 +171,15 @@ func WithProxyDefaults(cfg *config.ProxyConfig) ServerOption {
 func WithUpstreamProxySetter(setter upstreamProxySetter) ServerOption {
 	return func(s *Server) {
 		s.upstreamProxySetters = append(s.upstreamProxySetters, setter)
+	}
+}
+
+// WithRequestTimeoutSetters registers protocol handlers that support request
+// timeout configuration. When request_timeout_ms is changed via proxy_start
+// or configure, all registered setters are updated.
+func WithRequestTimeoutSetters(setters ...requestTimeoutSetter) ServerOption {
+	return func(s *Server) {
+		s.requestTimeoutSetters = append(s.requestTimeoutSetters, setters...)
 	}
 }
 

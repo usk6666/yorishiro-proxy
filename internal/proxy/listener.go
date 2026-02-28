@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,7 +35,7 @@ type Listener struct {
 	addr           string
 	detector       ProtocolDetector
 	logger         *slog.Logger
-	peekTimeout    time.Duration
+	peekTimeoutNs  atomic.Int64 // nanoseconds; read/written atomically
 	maxConnections int
 
 	mu       sync.Mutex
@@ -42,6 +43,7 @@ type Listener struct {
 	ready    chan struct{}
 	wg       sync.WaitGroup
 	sem      chan struct{} // nil if unlimited
+	semMu    sync.RWMutex // protects sem during dynamic resize
 }
 
 // NewListener creates a new TCP listener with the given configuration.
@@ -58,15 +60,16 @@ func NewListener(cfg ListenerConfig) *Listener {
 	if maxConns > 0 {
 		sem = make(chan struct{}, maxConns)
 	}
-	return &Listener{
+	l := &Listener{
 		addr:           cfg.Addr,
 		detector:       cfg.Detector,
 		logger:         cfg.Logger,
-		peekTimeout:    peekTimeout,
 		maxConnections: maxConns,
 		ready:          make(chan struct{}),
 		sem:            sem,
 	}
+	l.peekTimeoutNs.Store(int64(peekTimeout))
+	return l
 }
 
 // Start begins accepting connections. It blocks until the context is cancelled.
@@ -101,21 +104,28 @@ func (l *Listener) Start(ctx context.Context) error {
 			}
 		}
 		// Non-blocking semaphore acquire: reject if at capacity.
-		if l.sem != nil {
+		// Use RLock to allow concurrent Accept while preventing races
+		// with SetMaxConnections which swaps the semaphore channel.
+		l.semMu.RLock()
+		sem := l.sem
+		maxConns := l.maxConnections
+		l.semMu.RUnlock()
+
+		if sem != nil {
 			select {
-			case l.sem <- struct{}{}:
+			case sem <- struct{}{}:
 			default:
 				l.logger.Warn("connection rejected: at capacity",
 					"remote_addr", conn.RemoteAddr().String(),
-					"max_connections", l.maxConnections)
+					"max_connections", maxConns)
 				conn.Close()
 				continue
 			}
 		}
 
 		l.wg.Go(func() {
-			if l.sem != nil {
-				defer func() { <-l.sem }()
+			if sem != nil {
+				defer func() { <-sem }()
 			}
 			l.handleConn(ctx, conn)
 		})
@@ -138,8 +148,9 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	ctx = ContextWithLogger(ctx, connLogger)
 
 	// Set read deadline for protocol detection (Slowloris protection).
-	if l.peekTimeout > 0 {
-		conn.SetReadDeadline(time.Now().Add(l.peekTimeout))
+	peekTimeout := time.Duration(l.peekTimeoutNs.Load())
+	if peekTimeout > 0 {
+		conn.SetReadDeadline(time.Now().Add(peekTimeout))
 	}
 
 	peek, err := pc.Peek(peekSize)
@@ -182,8 +193,47 @@ func (l *Listener) Ready() <-chan struct{} {
 // ActiveConnections returns the number of connections currently being handled.
 // It returns 0 if the semaphore is not configured (unlimited connections).
 func (l *Listener) ActiveConnections() int {
-	if l.sem == nil {
+	l.semMu.RLock()
+	sem := l.sem
+	l.semMu.RUnlock()
+	if sem == nil {
 		return 0
 	}
-	return len(l.sem)
+	return len(sem)
+}
+
+// MaxConnections returns the current maximum number of concurrent connections.
+func (l *Listener) MaxConnections() int {
+	l.semMu.RLock()
+	defer l.semMu.RUnlock()
+	return l.maxConnections
+}
+
+// PeekTimeout returns the current protocol detection timeout.
+func (l *Listener) PeekTimeout() time.Duration {
+	return time.Duration(l.peekTimeoutNs.Load())
+}
+
+// SetMaxConnections dynamically changes the maximum number of concurrent connections.
+// The new limit takes effect for the next incoming connection. Existing connections
+// that exceed the new limit are not interrupted; they drain naturally.
+// n must be > 0; otherwise the call is ignored.
+func (l *Listener) SetMaxConnections(n int) {
+	if n <= 0 {
+		return
+	}
+	l.semMu.Lock()
+	defer l.semMu.Unlock()
+	l.maxConnections = n
+	l.sem = make(chan struct{}, n)
+}
+
+// SetPeekTimeout dynamically changes the protocol detection timeout.
+// The new timeout takes effect for the next incoming connection.
+// d must be > 0; otherwise the call is ignored.
+func (l *Listener) SetPeekTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	l.peekTimeoutNs.Store(int64(d))
 }
