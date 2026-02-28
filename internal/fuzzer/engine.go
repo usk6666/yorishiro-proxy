@@ -227,7 +227,7 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 		default:
 		}
 
-		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, sess.Protocol, timeout, job.ID)
+		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, sess.Protocol, timeout, job.ID, nil)
 		if err := e.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
 			// Log and continue; don't abort the entire job for a DB write failure.
 			errorCount++
@@ -271,6 +271,7 @@ func (e *Engine) executeFuzzCase(
 	protocol string,
 	timeout time.Duration,
 	fuzzID string,
+	doerOverride HTTPDoer,
 ) *session.FuzzResult {
 	result := &session.FuzzResult{
 		FuzzID:   fuzzID,
@@ -325,8 +326,12 @@ func (e *Engine) executeFuzzCase(
 	}
 
 	// Send request and measure duration.
+	doer := e.httpDoer
+	if doerOverride != nil {
+		doer = doerOverride
+	}
 	start := time.Now()
-	resp, err := e.httpDoer.Do(httpReq)
+	resp, err := doer.Do(httpReq)
 	if err != nil {
 		duration := time.Since(start)
 		result.Error = fmt.Sprintf("send request: %s", err.Error())
@@ -431,9 +436,10 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	fuzzID string,
 	hooks HookCallbacks,
 	hookState *HookState,
+	doerOverride HTTPDoer,
 ) *session.FuzzResult {
 	if hooks == nil {
-		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID)
+		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride)
 	}
 
 	// Hold the lock for the full PreSend read-execute-writeback cycle (F-2).
@@ -458,7 +464,7 @@ func (e *Engine) executeFuzzCaseWithHooks(
 
 	// Execute the fuzz case with the (potentially modified) base data.
 	// The lock is NOT held here to allow concurrent HTTP requests.
-	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID)
+	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID, doerOverride)
 
 	// Execute post_receive hook if the request succeeded (has a response).
 	if result.Error == "" && result.StatusCode != 0 {

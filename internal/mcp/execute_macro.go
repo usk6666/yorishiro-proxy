@@ -170,7 +170,8 @@ func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParam
 
 // handleExecuteRunMacro handles the run_macro action.
 // It loads the macro from DB, creates a macro.Engine, and runs it.
-func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) (*executeRunMacroResult, error) {
+// When allowPrivateNetworks is true, SSRF protection is disabled.
+func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams, allowPrivateNetworks bool) (*executeRunMacroResult, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("session store is not initialized")
 	}
@@ -196,8 +197,8 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 		return nil, fmt.Errorf("build macro from config: %w", err)
 	}
 
-	// Create engine with SSRF-protected HTTP client and session fetcher.
-	sendFunc := s.macroSendFunc()
+	// Create engine with HTTP client and session fetcher.
+	sendFunc := s.macroSendFunc(allowPrivateNetworks)
 	fetcher := &storeSessionFetcher{store: s.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
@@ -381,18 +382,23 @@ func validateMacroDefinition(m *macro.Macro) error {
 	return nil
 }
 
-// macroSendFunc returns a macro.SendFunc with SSRF protection for macro step execution.
-func (s *Server) macroSendFunc() macro.SendFunc {
+// macroSendFunc returns a macro.SendFunc for macro step execution.
+// When allowPrivateNetworks is true, SSRF protection is disabled to allow
+// connections to localhost and private networks.
+func (s *Server) macroSendFunc(allowPrivateNetworks bool) macro.SendFunc {
 	return func(ctx context.Context, req *macro.SendRequest) (*macro.SendResponse, error) {
 		var client httpDoer
 		if s.replayDoer != nil {
 			client = s.replayDoer
 		} else {
+			dialer := &net.Dialer{
+				Timeout: defaultReplayTimeout,
+			}
+			if !allowPrivateNetworks {
+				dialer.Control = denyPrivateNetwork
+			}
 			transport := &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout: defaultReplayTimeout,
-					Control: denyPrivateNetwork,
-				}).DialContext,
+				DialContext: dialer.DialContext,
 			}
 			client = &http.Client{
 				Timeout:   defaultReplayTimeout,

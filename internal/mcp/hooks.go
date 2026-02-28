@@ -137,9 +137,10 @@ type hookState struct {
 // hookExecutor provides methods to execute pre_send and post_receive hooks
 // using the macro engine. It is created per resend call or per fuzz iteration batch.
 type hookExecutor struct {
-	server *Server
-	hooks  *hooksInput
-	state  *hookState
+	server               *Server
+	hooks                *hooksInput
+	state                *hookState
+	allowPrivateNetworks bool
 }
 
 // newHookExecutor creates a new hook executor.
@@ -311,8 +312,8 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 		return nil, fmt.Errorf("build macro from config: %w", err)
 	}
 
-	// Create engine with SSRF-protected HTTP client and session fetcher.
-	sendFunc := s.macroSendFunc()
+	// Create engine with HTTP client and session fetcher.
+	sendFunc := s.macroSendFunc(he.allowPrivateNetworks)
 	fetcher := &storeSessionFetcher{store: s.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)

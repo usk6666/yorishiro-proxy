@@ -36,6 +36,12 @@ type RunConfig struct {
 	// When set, pre_send hooks run before each iteration and post_receive hooks
 	// run after. The hooks field is not serialized to JSON (set at runtime only).
 	Hooks HookCallbacks `json:"-"`
+
+	// HTTPDoer overrides the engine's default HTTP client for this job.
+	// When set, this client is used instead of the engine's httpDoer.
+	// This allows per-job SSRF protection control (e.g., allow_private_networks).
+	// Not serialized to JSON (set at runtime only).
+	HTTPDoer HTTPDoer `json:"-"`
 }
 
 // Validate checks that a RunConfig is well-formed.
@@ -292,7 +298,7 @@ func (r *Runner) execute(
 				var result *session.FuzzResult
 				attempts := 1 + cfg.MaxRetries
 				for attempt := 0; attempt < attempts; attempt++ {
-					result = r.engine.executeFuzzCaseWithHooks(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID, cfg.Hooks, hookState)
+					result = r.engine.executeFuzzCaseWithHooks(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID, cfg.Hooks, hookState, cfg.HTTPDoer)
 					if result.Error == "" {
 						break
 					}
