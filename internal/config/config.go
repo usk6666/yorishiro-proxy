@@ -10,6 +10,11 @@ type Config struct {
 	// MCPAddr is the address the MCP server listens on.
 	MCPAddr string `json:"mcp_addr"`
 
+	// MCPHTTPAddr is the address the MCP Streamable HTTP server listens on.
+	// When set, an HTTP transport is started in addition to stdio.
+	// Can also be set via KP_MCP_HTTP_ADDR environment variable.
+	MCPHTTPAddr string `json:"mcp_http_addr"`
+
 	// CAKeyPath is the path to the CA private key file.
 	CAKeyPath string `json:"ca_key_path"`
 
