@@ -31,6 +31,9 @@ type ExportOptions struct {
 	// IncludeBodies controls whether message body and raw_bytes are included.
 	// If false, only metadata fields are exported.
 	IncludeBodies bool
+	// MaxSessions limits the number of sessions exported.
+	// 0 means no limit.
+	MaxSessions int
 }
 
 // ExportRecord represents a single JSONL line in the export format.
@@ -102,6 +105,11 @@ func ExportSessions(ctx context.Context, store Store, w io.Writer, opts ExportOp
 	for _, sess := range sessions {
 		if err := ctx.Err(); err != nil {
 			return exported, err
+		}
+
+		// S-4: enforce session count limit when set.
+		if opts.MaxSessions > 0 && exported >= opts.MaxSessions {
+			break
 		}
 
 		// Apply time-based filters (not supported by ListOptions).

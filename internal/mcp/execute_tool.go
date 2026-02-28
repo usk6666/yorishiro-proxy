@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -1270,6 +1271,41 @@ func (s *Server) handleExecuteRegenerateCA() (*gomcp.CallToolResult, *executeReg
 	return nil, result, nil
 }
 
+// maxInlineExportSessions is the maximum number of sessions returned inline
+// (without output_path) to prevent unbounded memory usage (S-4: CWE-400).
+const maxInlineExportSessions = 100
+
+// maxImportScannerBuffer is the maximum per-line buffer size for the import
+// scanner. 4 MB is generous for JSONL session records while preventing
+// excessive memory allocation (S-6: CWE-400).
+const maxImportScannerBuffer = 4 * 1024 * 1024
+
+// validateFilePath sanitises and validates a user-supplied file path.
+// It rejects empty paths, normalises via filepath.Abs + filepath.Clean,
+// and checks that existing targets are not symbolic links (S-3: CWE-61).
+func validateFilePath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("file path must not be empty")
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute path: %w", err)
+	}
+	cleaned := filepath.Clean(abs)
+
+	// If the path already exists, reject symbolic links.
+	info, err := os.Lstat(cleaned)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("file path must not be a symbolic link: %s", cleaned)
+		}
+	}
+	// If the path does not exist, that is fine -- the caller may create it.
+
+	return cleaned, nil
+}
+
 // executeExportSessionsResult is the structured output of the export_sessions action.
 type executeExportSessionsResult struct {
 	ExportedCount int    `json:"exported_count"`
@@ -1322,25 +1358,67 @@ func (s *Server) handleExecuteExportSessions(ctx context.Context, params execute
 	}
 
 	if params.OutputPath != "" {
-		f, err := os.Create(params.OutputPath)
+		// S-1/S-2: validate and normalise file path.
+		cleanPath, err := validateFilePath(params.OutputPath)
 		if err != nil {
-			return nil, fmt.Errorf("create output file: %w", err)
+			return nil, fmt.Errorf("invalid output_path: %w", err)
 		}
-		defer f.Close()
 
-		n, err := session.ExportSessions(ctx, s.store, f, opts)
+		// M-1: write to a temp file in the same directory, then rename
+		// for atomic writes. This prevents partial files on failure.
+		dir := filepath.Dir(cleanPath)
+		// S-8: create temp file with 0600 permissions.
+		tmpFile, err := os.CreateTemp(dir, ".katashiro-export-*.tmp")
+		if err != nil {
+			return nil, fmt.Errorf("create temp file for export: %w", err)
+		}
+		tmpPath := tmpFile.Name()
+		// Ensure temp file is cleaned up on any error path.
+		success := false
+		defer func() {
+			tmpFile.Close()
+			if !success {
+				os.Remove(tmpPath)
+			}
+		}()
+
+		// S-8: restrict permissions to owner-only.
+		if err := tmpFile.Chmod(0600); err != nil {
+			return nil, fmt.Errorf("set file permissions: %w", err)
+		}
+
+		n, err := session.ExportSessions(ctx, s.store, tmpFile, opts)
 		if err != nil {
 			return nil, fmt.Errorf("export sessions: %w", err)
 		}
 
+		if err := tmpFile.Close(); err != nil {
+			return nil, fmt.Errorf("close temp file: %w", err)
+		}
+
+		// S-3: reject if the final destination is now a symlink
+		// (TOCTOU mitigation -- re-check after write completes).
+		if info, statErr := os.Lstat(cleanPath); statErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
+			}
+		}
+
+		if err := os.Rename(tmpPath, cleanPath); err != nil {
+			return nil, fmt.Errorf("rename temp file to output: %w", err)
+		}
+		success = true
+
 		return &executeExportSessionsResult{
 			ExportedCount: n,
 			Format:        format,
-			OutputPath:    params.OutputPath,
+			OutputPath:    cleanPath,
 		}, nil
 	}
 
 	// No output_path: return data inline in the MCP response.
+	// S-4: limit inline export to prevent unbounded memory usage.
+	opts.MaxSessions = maxInlineExportSessions
 	var buf bytes.Buffer
 	n, err := session.ExportSessions(ctx, s.store, &buf, opts)
 	if err != nil {
@@ -1372,6 +1450,12 @@ func (s *Server) handleExecuteImportSessions(ctx context.Context, params execute
 		return nil, fmt.Errorf("input_path is required for import_sessions action")
 	}
 
+	// S-2: validate and normalise file path.
+	cleanPath, err := validateFilePath(params.InputPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid input_path: %w", err)
+	}
+
 	conflict := session.ConflictSkip
 	if params.OnConflict != "" {
 		switch params.OnConflict {
@@ -1384,14 +1468,16 @@ func (s *Server) handleExecuteImportSessions(ctx context.Context, params execute
 		}
 	}
 
-	f, err := os.Open(params.InputPath)
+	f, err := os.Open(cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("open input file: %w", err)
 	}
 	defer f.Close()
 
 	result, err := session.ImportSessions(ctx, s.store, f, session.ImportOptions{
-		OnConflict: conflict,
+		OnConflict:       conflict,
+		MaxScannerBuffer: maxImportScannerBuffer,
+		ValidateIDs:      true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("import sessions: %w", err)
@@ -1401,6 +1487,6 @@ func (s *Server) handleExecuteImportSessions(ctx context.Context, params execute
 		Imported: result.Imported,
 		Skipped:  result.Skipped,
 		Errors:   result.Errors,
-		Source:   params.InputPath,
+		Source:   cleanPath,
 	}, nil
 }

@@ -700,3 +700,166 @@ func TestExportCombinedFilters(t *testing.T) {
 	}
 }
 
+func TestExportMaxSessions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+
+	// Create 10 sessions
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("sess-max-%02d", i)
+		makeTestSession(t, store, id, "HTTPS", fmt.Sprintf("https://example.com/%d", i), ts.Add(time.Duration(i)*time.Second), nil)
+	}
+
+	// Export with limit of 3
+	var buf bytes.Buffer
+	n, err := ExportSessions(ctx, store, &buf, ExportOptions{
+		IncludeBodies: true,
+		MaxSessions:   3,
+	})
+	if err != nil {
+		t.Fatalf("ExportSessions: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("expected 3 exported with MaxSessions=3, got %d", n)
+	}
+
+	// Count JSONL lines
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Errorf("expected 3 JSONL lines, got %d", len(lines))
+	}
+}
+
+func TestExportMaxSessionsZeroMeansNoLimit(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("sess-nolimit-%02d", i)
+		makeTestSession(t, store, id, "HTTPS", fmt.Sprintf("https://example.com/%d", i), ts.Add(time.Duration(i)*time.Second), nil)
+	}
+
+	var buf bytes.Buffer
+	n, err := ExportSessions(ctx, store, &buf, ExportOptions{
+		IncludeBodies: true,
+		MaxSessions:   0,
+	})
+	if err != nil {
+		t.Fatalf("ExportSessions: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("expected 5 exported with MaxSessions=0 (no limit), got %d", n)
+	}
+}
+
+func TestImportValidateIDs_ValidUUIDs(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Use valid UUIDs
+	data := `{"session":{"id":"550e8400-e29b-41d4-a716-446655440000","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[{"id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8","session_id":"550e8400-e29b-41d4-a716-446655440000","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z"}],"version":"1"}`
+	result, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
+	if err != nil {
+		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Errorf("expected 1 imported with valid UUIDs, got %d", result.Imported)
+	}
+	if result.Errors != 0 {
+		t.Errorf("expected 0 errors, got %d", result.Errors)
+	}
+}
+
+func TestImportValidateIDs_InvalidSessionID(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Session ID is not a valid UUID
+	data := `{"session":{"id":"not-a-uuid","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`
+	result, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
+	if err != nil {
+		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Imported != 0 {
+		t.Errorf("expected 0 imported with invalid session UUID, got %d", result.Imported)
+	}
+	if result.Errors != 1 {
+		t.Errorf("expected 1 error for invalid session UUID, got %d", result.Errors)
+	}
+}
+
+func TestImportValidateIDs_InvalidMessageID(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Session ID is valid UUID, but message ID is not
+	data := `{"session":{"id":"550e8400-e29b-41d4-a716-446655440000","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[{"id":"bad-msg-id","session_id":"550e8400-e29b-41d4-a716-446655440000","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z"}],"version":"1"}`
+	result, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
+	if err != nil {
+		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Imported != 0 {
+		t.Errorf("expected 0 imported with invalid message UUID, got %d", result.Imported)
+	}
+	if result.Errors != 1 {
+		t.Errorf("expected 1 error for invalid message UUID, got %d", result.Errors)
+	}
+}
+
+func TestImportValidateIDs_DisabledByDefault(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Non-UUID IDs should be accepted when ValidateIDs is false (default)
+	data := `{"session":{"id":"custom-id","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`
+	result, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: false})
+	if err != nil {
+		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Errorf("expected 1 imported with ValidateIDs=false, got %d", result.Imported)
+	}
+}
+
+func TestImportMaxScannerBuffer(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a JSONL line that definitely exceeds the small buffer limit (256 bytes).
+	// The base JSON structure alone is ~200 bytes; adding a long body ensures it exceeds 256.
+	longBody := strings.Repeat("A", 512)
+	data := fmt.Sprintf(`{"session":{"id":"sess-buf","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[{"id":"msg-buf","session_id":"sess-buf","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z","body":"%s"}],"version":"1"}`, longBody)
+
+	if len(data) <= 256 {
+		t.Fatalf("test data should exceed 256 bytes, got %d", len(data))
+	}
+
+	// With a very small buffer, the scanner should fail
+	_, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{
+		MaxScannerBuffer: 256,
+	})
+	if err == nil {
+		t.Fatal("expected error with small scanner buffer, got nil")
+	}
+	if !strings.Contains(err.Error(), "read import data") {
+		t.Errorf("expected scanner error, got: %v", err)
+	}
+}
+
+func TestImportDefaultScannerBuffer(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Normal data should work with default buffer
+	data := `{"session":{"id":"sess-defbuf","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`
+	result, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{})
+	if err != nil {
+		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Errorf("expected 1 imported, got %d", result.Imported)
+	}
+}
+

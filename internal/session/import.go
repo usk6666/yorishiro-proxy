@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/url"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ConflictPolicy determines behavior when an imported session ID already exists.
@@ -25,6 +27,11 @@ const (
 type ImportOptions struct {
 	// OnConflict determines behavior for duplicate session IDs.
 	OnConflict ConflictPolicy
+	// MaxScannerBuffer is the maximum per-line buffer size in bytes for the
+	// JSONL scanner. 0 uses the default (64 MB).
+	MaxScannerBuffer int
+	// ValidateIDs when true requires session and message IDs to be valid UUIDs.
+	ValidateIDs bool
 }
 
 // ImportResult summarizes the outcome of an import operation.
@@ -37,6 +44,12 @@ type ImportResult struct {
 	Errors int `json:"errors"`
 }
 
+// isValidUUID checks whether s is a valid UUID (RFC 4122) string.
+func isValidUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
+}
+
 // ImportSessions reads JSONL-formatted session data from r and persists it to the store.
 // Each line must be a valid ExportRecord JSON object.
 func ImportSessions(ctx context.Context, store Store, r io.Reader, opts ImportOptions) (*ImportResult, error) {
@@ -46,8 +59,17 @@ func ImportSessions(ctx context.Context, store Store, r io.Reader, opts ImportOp
 
 	result := &ImportResult{}
 	scanner := bufio.NewScanner(r)
-	// Allow up to 64 MB per line for large session bodies.
-	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+	// S-6: use caller-supplied buffer limit, default to 4 MB if not set.
+	maxBuf := opts.MaxScannerBuffer
+	if maxBuf <= 0 {
+		maxBuf = 4 * 1024 * 1024
+	}
+	// Initial buffer size must not exceed maxBuf.
+	initBuf := 64 * 1024
+	if initBuf > maxBuf {
+		initBuf = maxBuf
+	}
+	scanner.Buffer(make([]byte, 0, initBuf), maxBuf)
 
 	lineNum := 0
 	for scanner.Scan() {
@@ -77,10 +99,31 @@ func ImportSessions(ctx context.Context, store Store, r io.Reader, opts ImportOp
 			continue
 		}
 
+		// S-5: validate session ID is a valid UUID.
+		if opts.ValidateIDs && !isValidUUID(record.Session.ID) {
+			result.Errors++
+			continue
+		}
+
 		sess, err := exportToSession(record.Session)
 		if err != nil {
 			result.Errors++
 			continue
+		}
+
+		// S-5: validate message IDs are valid UUIDs.
+		if opts.ValidateIDs {
+			invalidMsg := false
+			for _, em := range record.Messages {
+				if !isValidUUID(em.ID) {
+					invalidMsg = true
+					break
+				}
+			}
+			if invalidMsg {
+				result.Errors++
+				continue
+			}
 		}
 
 		// Check for existing session.
