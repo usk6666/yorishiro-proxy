@@ -36,6 +36,7 @@ func TestDefault_FieldsHaveSensibleDefaults(t *testing.T) {
 		{"RetentionMaxAge", cfg.RetentionMaxAge, true},
 		{"CleanupInterval", cfg.CleanupInterval, false},
 		{"MCPHTTPAddr", cfg.MCPHTTPAddr, true},
+		{"MCPHTTPToken", cfg.MCPHTTPToken, true},
 	}
 
 	for _, tt := range tests {
