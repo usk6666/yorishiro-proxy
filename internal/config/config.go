@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -118,6 +119,89 @@ func DefaultDBPath() string {
 func EnsureDBDir(dbPath string) error {
 	dir := filepath.Dir(dbPath)
 	return os.MkdirAll(dir, 0700)
+}
+
+// ResolveDBPath applies smart resolution to the given -db flag value:
+//
+//   - Absolute path (/path/to/db.db): used as-is.
+//   - Project name (my-project): resolved to ~/.katashiro-proxy/my-project.db.
+//     A project name has no extension and no path separator.
+//   - Relative path with extension (./data.db, subdir/data.db): used as CWD-relative
+//     for backward compatibility.
+//
+// An empty value returns DefaultDBPath(). An error is returned if the value
+// looks like a project name but contains invalid characters.
+func ResolveDBPath(value string) (string, error) {
+	if value == "" {
+		return DefaultDBPath(), nil
+	}
+
+	// Absolute path: use as-is.
+	if filepath.IsAbs(value) {
+		return value, nil
+	}
+
+	// Check whether the value looks like a bare project name:
+	// no file extension AND no path separator.
+	ext := filepath.Ext(value)
+	hasPathSep := strings.ContainsAny(value, `/\`)
+
+	if ext == "" && !hasPathSep {
+		// Validate project name characters.
+		if err := validateProjectName(value); err != nil {
+			return "", err
+		}
+
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve project DB path: %w", err)
+		}
+		return filepath.Join(home, ".katashiro-proxy", value+".db"), nil
+	}
+
+	// Otherwise treat as a CWD-relative path (backward compatible).
+	return value, nil
+}
+
+// validateProjectName checks that a project name contains only safe characters.
+// Allowed characters: alphanumeric, hyphen, underscore, and dot (but not leading dot
+// or "." / ".." which are path traversals).
+func validateProjectName(name string) error {
+	if name == "" {
+		return fmt.Errorf("project name must not be empty")
+	}
+
+	// Reject path traversal patterns.
+	if name == "." || name == ".." {
+		return fmt.Errorf("invalid project name %q: path traversal not allowed", name)
+	}
+
+	// Reject names starting with a dot (hidden files).
+	if strings.HasPrefix(name, ".") {
+		return fmt.Errorf("invalid project name %q: must not start with a dot", name)
+	}
+
+	// Reject names containing ".." anywhere (traversal sequences like "foo..bar").
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("invalid project name %q: must not contain \"..\"", name)
+	}
+
+	for _, r := range name {
+		if !isValidProjectNameRune(r) {
+			return fmt.Errorf("invalid project name %q: character %q is not allowed", name, string(r))
+		}
+	}
+
+	return nil
+}
+
+// isValidProjectNameRune returns true if the rune is allowed in a project name.
+// Allowed: ASCII letters, digits, hyphen, underscore, dot.
+func isValidProjectNameRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') ||
+		r == '-' || r == '_' || r == '.'
 }
 
 // ProxyConfig holds the proxy configuration loaded from a JSON config file.
