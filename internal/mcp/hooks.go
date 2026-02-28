@@ -178,7 +178,14 @@ func (he *hookExecutor) executePreSend(ctx context.Context) (map[string]string, 
 
 // executePostReceive runs the post_receive hook if configured and the run_interval condition is met.
 // The statusCode and responseBody are from the main request's response.
-func (he *hookExecutor) executePostReceive(ctx context.Context, statusCode int, responseBody []byte) error {
+// The kvStore parameter carries KV Store values from the preceding pre_send hook execution.
+// When merging vars, the priority order is:
+//  1. pre_send KV Store (highest priority)
+//  2. hook config vars (lowest priority)
+//
+// This ensures that values produced by pre_send (e.g., auth_session) take precedence
+// over static hook config vars when the same key exists in both.
+func (he *hookExecutor) executePostReceive(ctx context.Context, statusCode int, responseBody []byte, kvStore map[string]string) error {
 	if he.hooks == nil || he.hooks.PostReceive == nil {
 		return nil
 	}
@@ -188,8 +195,14 @@ func (he *hookExecutor) executePostReceive(ctx context.Context, statusCode int, 
 		return nil
 	}
 
+	// Start with hook config vars as the base.
 	vars := make(map[string]string)
 	for k, v := range h.Vars {
+		vars[k] = v
+	}
+
+	// Merge pre_send KV Store values. These take precedence over hook config vars.
+	for k, v := range kvStore {
 		vars[k] = v
 	}
 
