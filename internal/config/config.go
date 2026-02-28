@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -89,16 +90,34 @@ type Config struct {
 // Default returns a Config with sensible defaults.
 func Default() *Config {
 	return &Config{
-		ListenAddr:     "127.0.0.1:8080",
-		MCPAddr:        ":3000",
-		DBPath:         "katashiro.db",
-		LogLevel:       "info",
-		LogFormat:      "text",
-		PeekTimeout:    30 * time.Second,
-		RequestTimeout: 60 * time.Second,
+		ListenAddr:      "127.0.0.1:8080",
+		MCPAddr:         ":3000",
+		DBPath:          DefaultDBPath(),
+		LogLevel:        "info",
+		LogFormat:       "text",
+		PeekTimeout:     30 * time.Second,
+		RequestTimeout:  60 * time.Second,
 		MaxConnections:  1024,
 		CleanupInterval: time.Hour,
 	}
+}
+
+// DefaultDBPath returns the default SQLite database path: ~/.katashiro-proxy/katashiro.db.
+// If the user's home directory cannot be resolved, it falls back to ./katashiro.db.
+func DefaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "katashiro.db"
+	}
+	return filepath.Join(home, ".katashiro-proxy", "katashiro.db")
+}
+
+// EnsureDBDir creates the parent directory of the given database path if it does
+// not already exist, using permission mode 0700. This is a no-op when the
+// directory already exists.
+func EnsureDBDir(dbPath string) error {
+	dir := filepath.Dir(dbPath)
+	return os.MkdirAll(dir, 0700)
 }
 
 // ProxyConfig holds the proxy configuration loaded from a JSON config file.

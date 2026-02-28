@@ -71,6 +71,105 @@ func isZeroValue(v any) bool {
 	}
 }
 
+func TestDefaultDBPath_ResolvesToHomeDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot resolve home directory: %v", err)
+	}
+
+	got := DefaultDBPath()
+	want := filepath.Join(home, ".katashiro-proxy", "katashiro.db")
+	if got != want {
+		t.Errorf("DefaultDBPath() = %q, want %q", got, want)
+	}
+}
+
+func TestDefault_DBPathUsesHomeDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot resolve home directory: %v", err)
+	}
+
+	cfg := Default()
+	if !strings.HasPrefix(cfg.DBPath, home) {
+		t.Errorf("Default().DBPath = %q, want prefix %q", cfg.DBPath, home)
+	}
+	if !strings.HasSuffix(cfg.DBPath, filepath.Join(".katashiro-proxy", "katashiro.db")) {
+		t.Errorf("Default().DBPath = %q, want suffix %q", cfg.DBPath,
+			filepath.Join(".katashiro-proxy", "katashiro.db"))
+	}
+}
+
+func TestEnsureDBDir_CreatesDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "subdir", "nested", "test.db")
+
+	if err := EnsureDBDir(dbPath); err != nil {
+		t.Fatalf("EnsureDBDir(%q): %v", dbPath, err)
+	}
+
+	dir := filepath.Dir(dbPath)
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("directory not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("%q is not a directory", dir)
+	}
+	// Check permission bits (mask out OS-specific bits).
+	perm := info.Mode().Perm()
+	if perm != 0700 {
+		t.Errorf("directory permission = %o, want 0700", perm)
+	}
+}
+
+func TestEnsureDBDir_ExistingDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	// Directory already exists (tmpDir).
+	if err := EnsureDBDir(dbPath); err != nil {
+		t.Fatalf("EnsureDBDir(%q): %v", dbPath, err)
+	}
+}
+
+func TestEnsureDBDir_AbsolutePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "data", "katashiro.db")
+
+	if err := EnsureDBDir(dbPath); err != nil {
+		t.Fatalf("EnsureDBDir(%q): %v", dbPath, err)
+	}
+
+	dir := filepath.Dir(dbPath)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("directory not created: %v", err)
+	}
+}
+
+func TestEnsureDBDir_RelativePath(t *testing.T) {
+	// Save and restore CWD to avoid test pollution.
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	tmpDir := t.TempDir()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+
+	dbPath := filepath.Join("mydata", "test.db")
+	if err := EnsureDBDir(dbPath); err != nil {
+		t.Fatalf("EnsureDBDir(%q): %v", dbPath, err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "mydata")); err != nil {
+		t.Fatalf("directory not created: %v", err)
+	}
+}
+
 func TestLoadFile_ValidConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

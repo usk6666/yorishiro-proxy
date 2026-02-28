@@ -135,6 +135,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	defer logCleanup()
 	slog.SetDefault(logger)
 
+	// Ensure the database directory exists (e.g. ~/.katashiro-proxy/).
+	if err := config.EnsureDBDir(cfg.DBPath); err != nil {
+		return fmt.Errorf("ensure db directory: %w", err)
+	}
+
 	// Initialize SQLite session store.
 	store, err := session.NewSQLiteStore(ctx, cfg.DBPath, logger)
 	if err != nil {
@@ -228,7 +233,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -302,7 +307,7 @@ func parseBool(s string) bool {
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	// Build MCP server options.
@@ -317,6 +322,8 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 		mcp.WithFuzzStore(fuzzStore),
 		mcp.WithIssuer(issuer),
 		mcp.WithTCPHandler(tcpHandler),
+		mcp.WithUpstreamProxySetter(httpHandler),
+		mcp.WithUpstreamProxySetter(http2Handler),
 	}
 
 	// Pass proxy config file defaults to the MCP server.

@@ -47,6 +47,13 @@ func NewSQLiteStore(ctx context.Context, path string, logger *slog.Logger) (*SQL
 		return nil, fmt.Errorf("enable WAL mode: %w", err)
 	}
 
+	// Set busy timeout to 5 seconds to avoid immediate SQLITE_BUSY errors
+	// when multiple processes access the same database file.
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+
 	// Enable foreign keys for cascade delete.
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()

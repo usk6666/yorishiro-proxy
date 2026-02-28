@@ -36,6 +36,10 @@ type Manager struct {
 
 	// tcpForwards tracks active TCP forward listeners keyed by local port.
 	tcpForwards map[string]*tcpForwardEntry
+
+	// upstreamProxy holds the current upstream proxy URL.
+	// Access is protected by mu.
+	upstreamProxy string
 }
 
 // tcpForwardEntry tracks a single TCP forward listener and its done channel.
@@ -275,6 +279,23 @@ func (m *Manager) SetPeekTimeout(d time.Duration) {
 // SetMaxConnections sets the maximum number of concurrent connections.
 func (m *Manager) SetMaxConnections(n int) {
 	m.maxConnections = n
+}
+
+// SetUpstreamProxy sets the upstream proxy URL. An empty string disables
+// upstream proxy (direct connections). This can be called while the proxy
+// is running to dynamically change the upstream proxy.
+func (m *Manager) SetUpstreamProxy(proxyURL string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.upstreamProxy = proxyURL
+}
+
+// UpstreamProxy returns the current upstream proxy URL.
+// Returns an empty string when no upstream proxy is configured.
+func (m *Manager) UpstreamProxy() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.upstreamProxy
 }
 
 // Status returns whether the proxy is running and its listen address.
