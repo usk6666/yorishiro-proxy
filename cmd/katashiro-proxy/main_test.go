@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -383,4 +385,316 @@ func TestM3ComponentInitialization(t *testing.T) {
 
 	// Verify the store satisfies session.FuzzStore interface.
 	var _ session.FuzzStore = store
+}
+
+// registerTestFlags registers all CLI flags on fs in the same way as runWithFlags.
+func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) {
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "")
+	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "")
+	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "")
+	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "")
+	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "")
+	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "")
+	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "")
+	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "")
+	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "")
+}
+
+func TestApplyEnvFallback_Priority(t *testing.T) {
+	// Table-driven tests for env var fallback with priority:
+	// CLI flag > env var > default value.
+	tests := []struct {
+		name     string
+		flagArgs []string
+		envVars  map[string]string
+		field    string
+		want     string
+	}{
+		{
+			name:  "default value when no flag or env",
+			field: "LogLevel",
+			want:  "info",
+		},
+		{
+			name:    "env var overrides default",
+			envVars: map[string]string{"KP_LOG_LEVEL": "debug"},
+			field:   "LogLevel",
+			want:    "debug",
+		},
+		{
+			name:     "flag overrides env var",
+			flagArgs: []string{"-log-level", "error"},
+			envVars:  map[string]string{"KP_LOG_LEVEL": "debug"},
+			field:    "LogLevel",
+			want:     "error",
+		},
+		{
+			name:     "flag overrides default",
+			flagArgs: []string{"-log-level", "warn"},
+			field:    "LogLevel",
+			want:     "warn",
+		},
+		{
+			name:    "db env var fallback",
+			envVars: map[string]string{"KP_DB": "/tmp/test.db"},
+			field:   "DBPath",
+			want:    "/tmp/test.db",
+		},
+		{
+			name:     "db flag overrides env",
+			flagArgs: []string{"-db", "/opt/db.sqlite"},
+			envVars:  map[string]string{"KP_DB": "/tmp/test.db"},
+			field:    "DBPath",
+			want:     "/opt/db.sqlite",
+		},
+		{
+			name:    "log-format env var fallback",
+			envVars: map[string]string{"KP_LOG_FORMAT": "json"},
+			field:   "LogFormat",
+			want:    "json",
+		},
+		{
+			name:    "log-file env var fallback",
+			envVars: map[string]string{"KP_LOG_FILE": "/var/log/proxy.log"},
+			field:   "LogFile",
+			want:    "/var/log/proxy.log",
+		},
+		{
+			name:    "ca-cert env var fallback",
+			envVars: map[string]string{"KP_CA_CERT": "/certs/ca.crt"},
+			field:   "CACertPath",
+			want:    "/certs/ca.crt",
+		},
+		{
+			name:    "ca-key env var fallback",
+			envVars: map[string]string{"KP_CA_KEY": "/certs/ca.key"},
+			field:   "CAKeyPath",
+			want:    "/certs/ca.key",
+		},
+		{
+			name:    "mcp-http-addr env var fallback",
+			envVars: map[string]string{"KP_MCP_HTTP_ADDR": "127.0.0.1:3000"},
+			field:   "MCPHTTPAddr",
+			want:    "127.0.0.1:3000",
+		},
+		{
+			name:    "mcp-http-token env var fallback",
+			envVars: map[string]string{"KP_MCP_HTTP_TOKEN": "secret-token"},
+			field:   "MCPHTTPToken",
+			want:    "secret-token",
+		},
+		{
+			name:    "empty env var does not override default",
+			envVars: map[string]string{"KP_LOG_LEVEL": ""},
+			field:   "LogLevel",
+			want:    "info",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			cfg := config.Default()
+			registerTestFlags(fs, cfg)
+
+			if err := fs.Parse(tt.flagArgs); err != nil {
+				t.Fatalf("flag.Parse: %v", err)
+			}
+
+			applyEnvFallback(fs, cfg)
+
+			got := getStringConfigField(cfg, tt.field)
+			if got != tt.want {
+				t.Errorf("%s = %q, want %q", tt.field, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyEnvFallback_BoolFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVar   string
+		envValue string
+		field    string
+		want     bool
+	}{
+		{"insecure true", "KP_INSECURE", "true", "InsecureSkipVerify", true},
+		{"insecure false", "KP_INSECURE", "false", "InsecureSkipVerify", false},
+		{"insecure 1", "KP_INSECURE", "1", "InsecureSkipVerify", true},
+		{"insecure 0", "KP_INSECURE", "0", "InsecureSkipVerify", false},
+		{"ca-ephemeral true", "KP_CA_EPHEMERAL", "true", "CAEphemeral", true},
+		{"ca-ephemeral TRUE", "KP_CA_EPHEMERAL", "TRUE", "CAEphemeral", true},
+		{"ca-ephemeral false", "KP_CA_EPHEMERAL", "false", "CAEphemeral", false},
+		{"insecure invalid", "KP_INSECURE", "invalid", "InsecureSkipVerify", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.envVar, tt.envValue)
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			cfg := config.Default()
+			registerTestFlags(fs, cfg)
+
+			if err := fs.Parse(nil); err != nil {
+				t.Fatalf("flag.Parse: %v", err)
+			}
+
+			applyEnvFallback(fs, cfg)
+
+			got := getBoolConfigField(cfg, tt.field)
+			if got != tt.want {
+				t.Errorf("%s = %v, want %v", tt.field, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeprecatedFlagsNotRegistered(t *testing.T) {
+	deprecatedFlags := []string{
+		"stdio",
+		"listen",
+		"max-connections",
+		"peek-timeout",
+		"request-timeout",
+		"retention-max-sessions",
+		"retention-max-age",
+		"cleanup-interval",
+	}
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := config.Default()
+	registerTestFlags(fs, cfg)
+
+	for _, name := range deprecatedFlags {
+		if f := fs.Lookup(name); f != nil {
+			t.Errorf("deprecated flag %q should not be registered, but found: %v", name, f.Usage)
+		}
+	}
+}
+
+func TestParseBool(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"true", true},
+		{"TRUE", true},
+		{"True", true},
+		{"1", true},
+		{"false", false},
+		{"FALSE", false},
+		{"False", false},
+		{"0", false},
+		{"t", true},
+		{"f", false},
+		{"", false},
+		{"invalid", false},
+		{"  true  ", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := parseBool(tt.input)
+			if got != tt.want {
+				t.Errorf("parseBool(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnvVarMap_AllFlagsHaveMapping(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := config.Default()
+	registerTestFlags(fs, cfg)
+
+	fs.VisitAll(func(f *flag.Flag) {
+		if _, ok := envVarMap[f.Name]; !ok {
+			t.Errorf("flag %q has no entry in envVarMap", f.Name)
+		}
+	})
+}
+
+func TestUsageOutput(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := config.Default()
+
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (env: KP_DB)")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level (env: KP_LOG_LEVEL)")
+	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: KP_MCP_HTTP_ADDR)")
+
+	var buf strings.Builder
+	fs.SetOutput(&buf)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy [flags]\n\n")
+		fmt.Fprintf(fs.Output(), "katashiro-proxy is an AI agent network proxy (MCP server).\n")
+		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
+		fmt.Fprintf(fs.Output(), "Flags:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
+		fmt.Fprintf(fs.Output(), "  All flags accept a KP_ prefixed environment variable as fallback.\n")
+		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > default value.\n")
+		fmt.Fprintf(fs.Output(), "\nExamples:\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
+	}
+	fs.Usage()
+
+	output := buf.String()
+	mustContain := []string{
+		"Usage: katashiro-proxy",
+		"MCP server",
+		"KP_DB",
+		"KP_LOG_LEVEL",
+		"KP_MCP_HTTP_ADDR",
+		"Examples:",
+		"MCP stdio mode",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(output, s) {
+			t.Errorf("usage output missing %q", s)
+		}
+	}
+}
+
+// getStringConfigField returns the string value of a named config field.
+func getStringConfigField(cfg *config.Config, field string) string {
+	switch field {
+	case "DBPath":
+		return cfg.DBPath
+	case "LogLevel":
+		return cfg.LogLevel
+	case "LogFormat":
+		return cfg.LogFormat
+	case "LogFile":
+		return cfg.LogFile
+	case "CACertPath":
+		return cfg.CACertPath
+	case "CAKeyPath":
+		return cfg.CAKeyPath
+	case "MCPHTTPAddr":
+		return cfg.MCPHTTPAddr
+	case "MCPHTTPToken":
+		return cfg.MCPHTTPToken
+	default:
+		return ""
+	}
+}
+
+// getBoolConfigField returns the bool value of a named config field.
+func getBoolConfigField(cfg *config.Config, field string) bool {
+	switch field {
+	case "InsecureSkipVerify":
+		return cfg.InsecureSkipVerify
+	case "CAEphemeral":
+		return cfg.CAEphemeral
+	default:
+		return false
+	}
 }
