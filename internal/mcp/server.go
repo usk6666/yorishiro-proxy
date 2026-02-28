@@ -147,7 +147,14 @@ var shutdownTimeout = 30 * time.Second
 // It creates a StreamableHTTPHandler backed by the underlying gomcp.Server and
 // serves it via http.Server. The server shuts down gracefully when ctx is cancelled,
 // waiting up to 30 seconds for active MCP sessions to complete.
+//
+// The addr must be a loopback address (e.g. "127.0.0.1:3000") to prevent
+// unauthenticated exposure on the network.
 func (s *Server) RunHTTP(ctx context.Context, addr string) error {
+	if err := validateLoopbackAddr(addr); err != nil {
+		return fmt.Errorf("MCP HTTP server: %w", err)
+	}
+
 	handler := gomcp.NewStreamableHTTPHandler(func(_ *http.Request) *gomcp.Server {
 		return s.server
 	}, nil)
@@ -155,6 +162,9 @@ func (s *Server) RunHTTP(ctx context.Context, addr string) error {
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: handler,
+		// ReadHeaderTimeout protects against Slowloris attacks (CWE-400).
+		// ReadTimeout is intentionally not set to avoid breaking SSE streams.
+		ReadHeaderTimeout: 30 * time.Second,
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
 		},

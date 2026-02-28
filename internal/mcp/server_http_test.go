@@ -106,6 +106,30 @@ func TestRunHTTP_InvalidAddress(t *testing.T) {
 	}
 }
 
+func TestRunHTTP_RejectsNonLoopbackAddress(t *testing.T) {
+	s := NewServer(context.Background(), nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tests := []struct {
+		name string
+		addr string
+	}{
+		{"all_interfaces", ":3000"},
+		{"explicit_all", "0.0.0.0:3000"},
+		{"external_ip", "192.168.1.1:3000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := s.RunHTTP(ctx, tt.addr)
+			if err == nil {
+				t.Fatalf("RunHTTP(%q) should reject non-loopback address", tt.addr)
+			}
+		})
+	}
+}
+
 func TestRunHTTP_GracefulShutdownTimeout(t *testing.T) {
 	// Override the shutdown timeout for this test.
 	origTimeout := shutdownTimeout
