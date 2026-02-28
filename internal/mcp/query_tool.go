@@ -519,19 +519,29 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 
 // --- status resource ---
 
+// queryListenerStatusEntry is a single listener entry in the status response.
+type queryListenerStatusEntry struct {
+	Name              string `json:"name"`
+	ListenAddr        string `json:"listen_addr"`
+	ActiveConnections int    `json:"active_connections"`
+	UptimeSeconds     int64  `json:"uptime_seconds"`
+}
+
 // queryStatusResult is the response for the status resource.
 type queryStatusResult struct {
-	Running           bool   `json:"running"`
-	ListenAddr        string `json:"listen_addr"`
-	UpstreamProxy     string `json:"upstream_proxy"`
-	ActiveConnections int    `json:"active_connections"`
-	MaxConnections    int    `json:"max_connections"`
-	PeekTimeoutMs     int64  `json:"peek_timeout_ms"`
-	RequestTimeoutMs  int64  `json:"request_timeout_ms"`
-	TotalSessions     int    `json:"total_sessions"`
-	DBSizeBytes       int64  `json:"db_size_bytes"`
-	UptimeSeconds     int64  `json:"uptime_seconds"`
-	CAInitialized     bool   `json:"ca_initialized"`
+	Running           bool                       `json:"running"`
+	ListenAddr        string                     `json:"listen_addr"`
+	Listeners         []queryListenerStatusEntry  `json:"listeners,omitempty"`
+	ListenerCount     int                        `json:"listener_count"`
+	UpstreamProxy     string                     `json:"upstream_proxy"`
+	ActiveConnections int                        `json:"active_connections"`
+	MaxConnections    int                        `json:"max_connections"`
+	PeekTimeoutMs     int64                      `json:"peek_timeout_ms"`
+	RequestTimeoutMs  int64                      `json:"request_timeout_ms"`
+	TotalSessions     int                        `json:"total_sessions"`
+	DBSizeBytes       int64                      `json:"db_size_bytes"`
+	UptimeSeconds     int64                      `json:"uptime_seconds"`
+	CAInitialized     bool                       `json:"ca_initialized"`
 }
 
 // handleQueryStatus returns the current proxy status and health metrics.
@@ -549,6 +559,25 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.MaxConnections = s.manager.MaxConnections()
 		result.PeekTimeoutMs = s.manager.PeekTimeout().Milliseconds()
 		result.UptimeSeconds = int64(s.manager.Uptime().Seconds())
+		result.ListenerCount = s.manager.ListenerCount()
+
+		// Populate per-listener statuses.
+		statuses := s.manager.ListenerStatuses()
+		if len(statuses) > 0 {
+			result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
+			for _, st := range statuses {
+				result.Listeners = append(result.Listeners, queryListenerStatusEntry{
+					Name:              st.Name,
+					ListenAddr:        st.ListenAddr,
+					ActiveConnections: st.ActiveConnections,
+					UptimeSeconds:     st.UptimeSeconds,
+				})
+			}
+			// Update Running to true if any listener is running (not just default).
+			if !result.Running && len(statuses) > 0 {
+				result.Running = true
+			}
+		}
 	}
 
 	// Report request timeout from the first registered handler.
