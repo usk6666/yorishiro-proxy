@@ -45,14 +45,16 @@ type queryInput struct {
 
 // queryFilter contains filter options for the sessions and fuzz resources.
 type queryFilter struct {
-	// Protocol filters sessions by protocol (e.g. "HTTP/1.x", "HTTPS").
-	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS)"`
+	// Protocol filters sessions by protocol (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP").
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)"`
 	// Method filters sessions by HTTP method (e.g. "GET", "POST").
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`
 	// URLPattern filters sessions by URL using a substring search pattern.
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
 	// StatusCode filters sessions/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
+	// Direction filters messages by direction ("send" or "receive").
+	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
 	// BodyContains filters fuzz_results by response body substring.
 	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
 	// Status filters fuzz_jobs by status (e.g. "running", "completed").
@@ -73,8 +75,12 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
 			"The 'id' parameter is required for session, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering sessions by protocol, method, url_pattern, and status_code; " +
+			"The 'filter' parameter supports filtering sessions by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP), method, url_pattern, and status_code; " +
+			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code and body_contains. " +
+			"Sessions include protocol_summary with protocol-specific information. " +
+			"Streaming sessions (session_type != unary) include message_preview with the first 10 messages. " +
+			"Messages include metadata with protocol-specific fields (e.g. WebSocket opcode, gRPC service/method/grpc_status). " +
 			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
 			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
 			"Results are paginated with limit/offset for sessions, messages, fuzz_jobs, and fuzz_results resources. " +
@@ -118,16 +124,17 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 
 // querySessionsEntry is a single session entry in the sessions query response.
 type querySessionsEntry struct {
-	ID           string `json:"id"`
-	Protocol     string `json:"protocol"`
-	SessionType  string `json:"session_type"`
-	State        string `json:"state"`
-	Method       string `json:"method"`
-	URL          string `json:"url"`
-	StatusCode   int    `json:"status_code"`
-	MessageCount int    `json:"message_count"`
-	Timestamp    string `json:"timestamp"`
-	DurationMs   int64  `json:"duration_ms"`
+	ID              string            `json:"id"`
+	Protocol        string            `json:"protocol"`
+	SessionType     string            `json:"session_type"`
+	State           string            `json:"state"`
+	Method          string            `json:"method"`
+	URL             string            `json:"url"`
+	StatusCode      int               `json:"status_code"`
+	MessageCount    int               `json:"message_count"`
+	ProtocolSummary map[string]string `json:"protocol_summary,omitempty"`
+	Timestamp       string            `json:"timestamp"`
+	DurationMs      int64             `json:"duration_ms"`
 }
 
 // querySessionsResult is the response for the sessions resource.
@@ -195,17 +202,20 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 			}
 		}
 
+		summary := buildProtocolSummary(sess.Protocol, sess.SessionType, msgs)
+
 		entries = append(entries, querySessionsEntry{
-			ID:           sess.ID,
-			Protocol:     sess.Protocol,
-			SessionType:  sess.SessionType,
-			State:        sess.State,
-			Method:       method,
-			URL:          urlStr,
-			StatusCode:   statusCode,
-			MessageCount: len(msgs),
-			Timestamp:    sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-			DurationMs:   sess.Duration.Milliseconds(),
+			ID:              sess.ID,
+			Protocol:        sess.Protocol,
+			SessionType:     sess.SessionType,
+			State:           sess.State,
+			Method:          method,
+			URL:             urlStr,
+			StatusCode:      statusCode,
+			MessageCount:    len(msgs),
+			ProtocolSummary: summary,
+			Timestamp:       sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			DurationMs:      sess.Duration.Milliseconds(),
 		})
 	}
 
@@ -244,7 +254,12 @@ type querySessionResult struct {
 	RawResponse           string              `json:"raw_response,omitempty"`
 	ConnInfo              *connInfoResult     `json:"conn_info,omitempty"`
 	MessageCount          int                 `json:"message_count"`
+	ProtocolSummary       map[string]string   `json:"protocol_summary,omitempty"`
+	MessagePreview        []queryMessageEntry `json:"message_preview,omitempty"`
 }
+
+// streamPreviewLimit is the maximum number of messages to include in a streaming session preview.
+const streamPreviewLimit = 10
 
 // handleQuerySession returns detailed information about a single session.
 func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *querySessionResult, error) {
@@ -320,6 +335,8 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		}
 	}
 
+	summary := buildProtocolSummary(sess.Protocol, sess.SessionType, msgs)
+
 	result := &querySessionResult{
 		ID:                    sess.ID,
 		ConnID:                sess.ConnID,
@@ -344,6 +361,38 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		RawResponse:           rawRespStr,
 		ConnInfo:              connInfo,
 		MessageCount:          len(msgs),
+		ProtocolSummary:       summary,
+	}
+
+	// For streaming sessions, include a message preview instead of full request/response.
+	if sess.SessionType != "unary" {
+		previewLimit := streamPreviewLimit
+		if previewLimit > len(msgs) {
+			previewLimit = len(msgs)
+		}
+		preview := make([]queryMessageEntry, 0, previewLimit)
+		for _, msg := range msgs[:previewLimit] {
+			bodyStr, bodyEnc := encodeBody(msg.Body)
+			var msgURLStr string
+			if msg.URL != nil {
+				msgURLStr = msg.URL.String()
+			}
+			entry := queryMessageEntry{
+				ID:           msg.ID,
+				Sequence:     msg.Sequence,
+				Direction:    msg.Direction,
+				Method:       msg.Method,
+				URL:          msgURLStr,
+				StatusCode:   msg.StatusCode,
+				Headers:      msg.Headers,
+				Body:         bodyStr,
+				BodyEncoding: bodyEnc,
+				Timestamp:    msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+				Metadata:     msg.Metadata,
+			}
+			preview = append(preview, entry)
+		}
+		result.MessagePreview = preview
 	}
 
 	return nil, result, nil
@@ -362,6 +411,7 @@ type queryMessageEntry struct {
 	Headers      map[string][]string `json:"headers,omitempty"`
 	Body         string              `json:"body"`
 	BodyEncoding string              `json:"body_encoding"`
+	Metadata     map[string]string   `json:"metadata,omitempty"`
 	Timestamp    string              `json:"timestamp"`
 }
 
@@ -397,10 +447,25 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		return nil, nil, fmt.Errorf("count messages: %w", err)
 	}
 
-	// Fetch all messages (store does not support limit/offset natively for messages).
-	allMsgs, err := s.store.GetMessages(ctx, input.ID, session.MessageListOptions{})
+	// Build message list options with direction filter if specified.
+	msgOpts := session.MessageListOptions{}
+	if input.Filter != nil && input.Filter.Direction != "" {
+		if input.Filter.Direction != "send" && input.Filter.Direction != "receive" {
+			return nil, nil, fmt.Errorf("direction filter must be \"send\" or \"receive\", got %q", input.Filter.Direction)
+		}
+		msgOpts.Direction = input.Filter.Direction
+	}
+
+	// Fetch messages with optional direction filter.
+	allMsgs, err := s.store.GetMessages(ctx, input.ID, msgOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
+	}
+
+	// Use filtered count as total for pagination when direction filter is active.
+	filteredTotal := total
+	if msgOpts.Direction != "" {
+		filteredTotal = len(allMsgs)
 	}
 
 	// Apply pagination in-memory.
@@ -438,6 +503,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 			Headers:      msg.Headers,
 			Body:         bodyStr,
 			BodyEncoding: bodyEnc,
+			Metadata:     msg.Metadata,
 			Timestamp:    msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		})
 	}
@@ -445,7 +511,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	result := &queryMessagesResult{
 		Messages: entries,
 		Count:    len(entries),
-		Total:    total,
+		Total:    filteredTotal,
 	}
 	return nil, result, nil
 }
@@ -503,8 +569,10 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 
 // queryConfigResult is the response for the config resource.
 type queryConfigResult struct {
-	CaptureScope  *queryScopeResult       `json:"capture_scope"`
-	TLSPassthrough *queryPassthroughResult `json:"tls_passthrough"`
+	CaptureScope     *queryScopeResult       `json:"capture_scope"`
+	TLSPassthrough   *queryPassthroughResult `json:"tls_passthrough"`
+	TCPForwards      map[string]string       `json:"tcp_forwards,omitempty"`
+	EnabledProtocols []string                `json:"enabled_protocols,omitempty"`
 }
 
 // queryScopeResult holds capture scope rules in the config response.
@@ -548,6 +616,13 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 			Patterns: []string{},
 			Count:    0,
 		}
+	}
+
+	if len(s.tcpForwards) > 0 {
+		result.TCPForwards = s.tcpForwards
+	}
+	if len(s.enabledProtocols) > 0 {
+		result.EnabledProtocols = s.enabledProtocols
 	}
 
 	return nil, result, nil
