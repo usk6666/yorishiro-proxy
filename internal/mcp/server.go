@@ -30,6 +30,8 @@ type Server struct {
 	dbPath            string              // path to the SQLite database file for status reporting
 	replayDoer        httpDoer       // injectable HTTP client for execute(replay) testing
 	rawReplayDialer   rawDialer      // injectable dialer for replay_raw testing
+	tcpForwards       map[string]string // TCP forward mappings (port -> target)
+	enabledProtocols  []string          // enabled protocols for detection
 }
 
 // ServerOption configures a Server.

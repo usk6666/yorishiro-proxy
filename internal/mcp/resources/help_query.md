@@ -14,11 +14,12 @@ Session ID or macro name. Required for `session`, `messages`, and `macro` resour
 Fuzz job ID. Required for `fuzz_results` resource.
 
 ### filter (object, optional)
-Filter options for the `sessions`, `fuzz_jobs`, and `fuzz_results` resources.
-- **protocol** (string): Protocol filter for sessions (e.g. `"HTTP/1.x"`, `"HTTPS"`).
+Filter options for the `sessions`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
+- **protocol** (string): Protocol filter for sessions (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`).
 - **method** (string): HTTP method filter for sessions (e.g. `"GET"`, `"POST"`).
 - **url_pattern** (string): URL substring match for sessions (e.g. `"/api/"`).
 - **status_code** (integer): HTTP status code filter for sessions and fuzz_results (e.g. `200`, `404`).
+- **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
 - **status** (string): Job status filter for fuzz_jobs (e.g. `"running"`, `"completed"`).
 - **tag** (string): Job tag filter for fuzz_jobs (exact match).
@@ -42,23 +43,37 @@ Number of items to skip for pagination. Must be >= 0. Applies to `sessions`, `me
 ### sessions
 List recorded proxy sessions with optional filtering and pagination.
 
-Returns: `sessions[]` (id, protocol, session_type, state, method, url, status_code, message_count, timestamp, duration_ms), `count`, `total`.
+Each session entry includes a `protocol_summary` field with protocol-specific information:
+- **WebSocket**: `message_count`, `last_frame_type` (Text/Binary/Close/Ping/Pong)
+- **HTTP/2**: `stream_count`, `scheme`
+- **gRPC**: `service`, `method`, `grpc_status`, `grpc_status_name`
+- **TCP**: `send_bytes`, `receive_bytes`
+
+Returns: `sessions[]` (id, protocol, session_type, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
 
 ### session
 Get full details of a single session including request/response headers, bodies, and connection info.
 
+For streaming sessions (`session_type` != `"unary"`), the response includes:
+- `message_preview`: The first 10 messages with full details (body, metadata, etc.)
+- `message_count`: Total number of messages in the session
+- `protocol_summary`: Protocol-specific summary information
+
+Use the `messages` resource with `limit`/`offset` to page through all messages.
+
 Requires: `id` (session ID).
 
-Returns: id, conn_id, protocol, session_type, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, timestamps.
+Returns: id, conn_id, protocol, session_type, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), timestamps.
 
 ### messages
-Get paginated messages within a session.
+Get paginated messages within a session. Supports direction filtering for streaming protocols.
 
-Requires: `id` (session ID). Supports `limit` and `offset`.
+Requires: `id` (session ID). Supports `limit`, `offset`, and `filter.direction`.
 
-Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, timestamp), `count`, `total`.
+Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, metadata, timestamp), `count`, `total`.
 
 - **body_encoding**: `"text"` for UTF-8 safe bodies, `"base64"` for binary content.
+- **metadata**: Protocol-specific fields (e.g. WebSocket `opcode`, gRPC `service`/`method`/`grpc_status`).
 
 ### status
 Get current proxy status and health metrics. No additional parameters.
@@ -66,9 +81,9 @@ Get current proxy status and health metrics. No additional parameters.
 Returns: running, listen_addr, active_connections, total_sessions, db_size_bytes, uptime_seconds, ca_initialized.
 
 ### config
-Get current configuration including capture scope and TLS passthrough. No additional parameters.
+Get current configuration including capture scope, TLS passthrough, TCP forwards, and enabled protocols. No additional parameters.
 
-Returns: capture_scope (includes, excludes), tls_passthrough (patterns, count).
+Returns: capture_scope (includes, excludes), tls_passthrough (patterns, count), tcp_forwards (port->target map), enabled_protocols (list).
 
 ### ca_cert
 Get the CA certificate PEM, metadata, and persistence state. No additional parameters.
@@ -93,6 +108,22 @@ Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, ma
 {"resource": "sessions"}
 ```
 
+### Filter sessions by protocol
+```json
+{
+  "resource": "sessions",
+  "filter": {"protocol": "WebSocket"}
+}
+```
+
+### Filter gRPC sessions
+```json
+{
+  "resource": "sessions",
+  "filter": {"protocol": "gRPC"}
+}
+```
+
 ### Filter sessions by method and URL
 ```json
 {
@@ -110,6 +141,16 @@ Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, ma
 ### Get session messages with pagination
 ```json
 {"resource": "messages", "id": "abc-123", "limit": 20, "offset": 0}
+```
+
+### Filter messages by direction (send only)
+```json
+{
+  "resource": "messages",
+  "id": "abc-123",
+  "filter": {"direction": "send"},
+  "limit": 50
+}
 ```
 
 ### Check proxy status

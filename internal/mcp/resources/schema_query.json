@@ -24,7 +24,12 @@
       "properties": {
         "protocol": {
           "type": "string",
-          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS)."
+          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)."
+        },
+        "direction": {
+          "type": "string",
+          "description": "Message direction filter for messages resource (send or receive).",
+          "enum": ["send", "receive"]
         },
         "method": {
           "type": "string",

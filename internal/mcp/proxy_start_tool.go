@@ -44,6 +44,17 @@ type proxyStartInput struct {
 	// Rules define conditions for matching and actions for transforming (add/set/remove headers, replace body).
 	// If omitted, no auto-transform rules are active.
 	AutoTransform []transformRuleInput `json:"auto_transform,omitempty" jsonschema:"auto-transform rules for automatic request/response modification"`
+
+	// TCPForwards maps local listen ports to upstream TCP addresses for the Raw TCP handler.
+	// Format: {"port": "upstream_host:port"} (e.g. {"3306": "db.example.com:3306"}).
+	// Connections arriving on a mapped port are forwarded to the specified upstream.
+	// If omitted, Raw TCP forwarding is not configured.
+	TCPForwards map[string]string `json:"tcp_forwards,omitempty" jsonschema:"Raw TCP forwarding map: local port -> upstream host:port"`
+
+	// Protocols specifies which protocols are enabled for detection.
+	// Valid values: "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP".
+	// If omitted, all protocols are enabled (default behavior).
+	Protocols []string `json:"protocols,omitempty" jsonschema:"enabled protocol list (default: all protocols enabled)"`
 }
 
 // proxyStartResult is the structured output of the proxy_start tool.
@@ -52,6 +63,10 @@ type proxyStartResult struct {
 	ListenAddr string `json:"listen_addr"`
 	// Status indicates the proxy state after the operation.
 	Status string `json:"status"`
+	// TCPForwards is the configured TCP forwarding map (if any).
+	TCPForwards map[string]string `json:"tcp_forwards,omitempty"`
+	// Protocols lists the enabled protocols (if explicitly configured).
+	Protocols []string `json:"protocols,omitempty"`
 }
 
 // registerProxyStart registers the proxy_start MCP tool.
@@ -63,8 +78,10 @@ func (s *Server) registerProxyStart() {
 			"Accepts optional capture_scope to control which requests are recorded, " +
 			"tls_passthrough to specify domains that bypass TLS interception, " +
 			"intercept_rules to define conditions for intercepting requests/responses, " +
-			"and auto_transform to configure automatic request/response modification rules. " +
-			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty.",
+			"auto_transform to configure automatic request/response modification rules, " +
+			"tcp_forwards to map local ports to upstream TCP addresses for Raw TCP forwarding, " +
+			"and protocols to specify which protocols are enabled for detection. " +
+			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all.",
 	}, s.handleProxyStart)
 }
 
@@ -109,6 +126,22 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		}
 	}
 
+	// Validate and store TCP forwards if provided.
+	if len(input.TCPForwards) > 0 {
+		if err := validateTCPForwards(input.TCPForwards); err != nil {
+			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
+		}
+		s.tcpForwards = input.TCPForwards
+	}
+
+	// Validate and store enabled protocols if provided.
+	if len(input.Protocols) > 0 {
+		if err := validateProtocols(input.Protocols); err != nil {
+			return nil, nil, fmt.Errorf("protocols: %w", err)
+		}
+		s.enabledProtocols = input.Protocols
+	}
+
 	if err := s.manager.Start(s.appCtx, input.ListenAddr); err != nil {
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
 	}
@@ -116,8 +149,10 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	_, addr := s.manager.Status()
 
 	result := &proxyStartResult{
-		ListenAddr: addr,
-		Status:     "running",
+		ListenAddr:  addr,
+		Status:      "running",
+		TCPForwards: input.TCPForwards,
+		Protocols:   input.Protocols,
 	}
 	return nil, result, nil
 }
@@ -164,6 +199,54 @@ func (s *Server) applyCaptureScope(input *captureScopeInput) error {
 	excludes := toScopeRules(input.Excludes)
 
 	s.scope.SetRules(includes, excludes)
+	return nil
+}
+
+// validProtocols is the set of protocol names accepted by the protocols parameter.
+var validProtocols = map[string]bool{
+	"HTTP/1.x":  true,
+	"HTTPS":     true,
+	"WebSocket": true,
+	"HTTP/2":    true,
+	"gRPC":      true,
+	"TCP":       true,
+}
+
+// validateTCPForwards validates tcp_forwards entries.
+func validateTCPForwards(forwards map[string]string) error {
+	for port, target := range forwards {
+		if port == "" {
+			return fmt.Errorf("port key cannot be empty")
+		}
+		if target == "" {
+			return fmt.Errorf("target for port %q cannot be empty", port)
+		}
+		// Validate target is host:port format.
+		host, p, err := net.SplitHostPort(target)
+		if err != nil {
+			return fmt.Errorf("invalid target %q for port %q: must be host:port format", target, port)
+		}
+		if host == "" {
+			return fmt.Errorf("invalid target %q for port %q: host cannot be empty", target, port)
+		}
+		if p == "" {
+			return fmt.Errorf("invalid target %q for port %q: port cannot be empty", target, port)
+		}
+	}
+	return nil
+}
+
+// validateProtocols validates that all protocol names are recognized.
+func validateProtocols(protocols []string) error {
+	for _, p := range protocols {
+		if !validProtocols[p] {
+			valid := make([]string, 0, len(validProtocols))
+			for k := range validProtocols {
+				valid = append(valid, k)
+			}
+			return fmt.Errorf("unknown protocol %q: valid protocols are %v", p, valid)
+		}
+	}
 	return nil
 }
 
