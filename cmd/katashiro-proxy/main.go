@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -38,36 +40,69 @@ func main() {
 	}
 }
 
-func run(ctx context.Context) error {
-	cfg := config.Default()
-	var stdio bool
-	flag.BoolVar(&stdio, "stdio", false, "run as MCP server on stdin/stdout")
-	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "proxy listen address")
-	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path")
-	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level (debug, info, warn, error)")
-	flag.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format (text, json)")
-	flag.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file (default: stderr)")
-	flag.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "CA certificate file path")
-	flag.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path")
-	flag.DurationVar(&cfg.PeekTimeout, "peek-timeout", cfg.PeekTimeout, "protocol detection timeout")
-	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "HTTP request read timeout")
-	flag.IntVar(&cfg.MaxConnections, "max-connections", cfg.MaxConnections, "max concurrent connections (default 1024)")
-	flag.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "skip TLS certificate verification for upstream connections")
-	flag.IntVar(&cfg.RetentionMaxSessions, "retention-max-sessions", cfg.RetentionMaxSessions, "max sessions to retain (0 = unlimited)")
-	flag.DurationVar(&cfg.RetentionMaxAge, "retention-max-age", cfg.RetentionMaxAge, "max session age (e.g. 720h for 30 days, 0 = unlimited)")
-	flag.DurationVar(&cfg.CleanupInterval, "cleanup-interval", cfg.CleanupInterval, "interval between automatic cleanup runs (0 = disabled)")
-	flag.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (no file persistence)")
-	flag.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "MCP Streamable HTTP server listen address (e.g. :3000)")
-	flag.Parse()
+// envVarMap maps flag names to their corresponding KP_ environment variable names.
+var envVarMap = map[string]string{
+	"db":             "KP_DB",
+	"ca-cert":        "KP_CA_CERT",
+	"ca-key":         "KP_CA_KEY",
+	"ca-ephemeral":   "KP_CA_EPHEMERAL",
+	"insecure":       "KP_INSECURE",
+	"log-level":      "KP_LOG_LEVEL",
+	"log-format":     "KP_LOG_FORMAT",
+	"log-file":       "KP_LOG_FILE",
+	"mcp-http-addr":  "KP_MCP_HTTP_ADDR",
+	"mcp-http-token": "KP_MCP_HTTP_TOKEN",
+}
 
-	// Allow KP_MCP_HTTP_ADDR environment variable as fallback when no flag is set.
-	if cfg.MCPHTTPAddr == "" {
-		cfg.MCPHTTPAddr = os.Getenv("KP_MCP_HTTP_ADDR")
+func run(ctx context.Context) error {
+	return runWithFlags(ctx, flag.CommandLine, os.Args[1:])
+}
+
+// runWithFlags implements the main logic using the provided FlagSet.
+// This separation allows testing flag parsing and env var fallback
+// without affecting the global flag.CommandLine state.
+func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
+	cfg := config.Default()
+
+	// Define flags — only those requiring startup-time decisions.
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (env: KP_DB)")
+	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "CA certificate file path (env: KP_CA_CERT)")
+	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path (env: KP_CA_KEY)")
+	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (env: KP_CA_EPHEMERAL)")
+	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "skip upstream TLS verification (env: KP_INSECURE)")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn, error (env: KP_LOG_LEVEL)")
+	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: text, json (env: KP_LOG_FORMAT)")
+	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file, default stderr (env: KP_LOG_FILE)")
+	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: KP_MCP_HTTP_ADDR)")
+	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: KP_MCP_HTTP_TOKEN)")
+
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy [flags]\n\n")
+		fmt.Fprintf(fs.Output(), "katashiro-proxy is an AI agent network proxy (MCP server).\n")
+		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
+		fmt.Fprintf(fs.Output(), "Flags:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
+		fmt.Fprintf(fs.Output(), "  All flags accept a KP_ prefixed environment variable as fallback.\n")
+		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > default value.\n")
+		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> KP_LOG_LEVEL).\n")
+		fmt.Fprintf(fs.Output(), "\nExamples:\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
+		fmt.Fprintf(fs.Output(), "  KP_DB=/data/proxy.db katashiro-proxy              # custom DB via env var\n")
+		fmt.Fprintf(fs.Output(), "  KP_INSECURE=true katashiro-proxy                  # skip TLS verification\n")
 	}
 
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Apply environment variable fallback for flags not explicitly set.
+	applyEnvFallback(fs, cfg)
+
 	// Initialize logger.
-	// In stdio mode, logs go to stderr by default (the logging package never
-	// writes to stdout), keeping stdout clean for MCP JSON-RPC messages.
+	// Logs go to stderr by default (the logging package never writes to stdout),
+	// keeping stdout clean for MCP JSON-RPC messages.
 	logger, logCleanup, err := logging.Setup(logging.Config{
 		Level:  cfg.LogLevel,
 		Format: cfg.LogFormat,
@@ -162,7 +197,7 @@ func run(ctx context.Context) error {
 	// Raw TCP fallback handler: must be last since Detect() always returns true.
 	tcpHandler := prototcp.NewHandler(store, nil, logger)
 
-	// Register handlers in priority order: h2c → HTTP/1.x → raw TCP fallback.
+	// Register handlers in priority order: h2c -> HTTP/1.x -> raw TCP fallback.
 	detector := protocol.NewDetector(http2Handler, httpHandler, tcpHandler)
 
 	// Create proxy manager for MCP tool control.
@@ -170,19 +205,77 @@ func run(ctx context.Context) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	if stdio {
-		return runStdio(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, logger)
-	}
-
-	return runProxy(ctx, cfg, manager, logger)
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, logger)
 }
 
-// runStdio starts the MCP server on stdin/stdout. When mcpHTTPAddr is non-empty,
+// applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
+// set on the command line, it falls back to the corresponding KP_ environment
+// variable. Priority: CLI flag > environment variable > default value.
+func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config) {
+	// Collect flags that were explicitly set on the command line.
+	flagSet := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		flagSet[f.Name] = true
+	})
+
+	for flagName, envVar := range envVarMap {
+		if flagSet[flagName] {
+			continue
+		}
+		v := os.Getenv(envVar)
+		if v == "" {
+			continue
+		}
+		switch flagName {
+		case "db":
+			cfg.DBPath = v
+		case "ca-cert":
+			cfg.CACertPath = v
+		case "ca-key":
+			cfg.CAKeyPath = v
+		case "ca-ephemeral":
+			cfg.CAEphemeral = parseBool(v)
+		case "insecure":
+			cfg.InsecureSkipVerify = parseBool(v)
+		case "log-level":
+			cfg.LogLevel = v
+		case "log-format":
+			cfg.LogFormat = v
+		case "log-file":
+			cfg.LogFile = v
+		case "mcp-http-addr":
+			cfg.MCPHTTPAddr = v
+		case "mcp-http-token":
+			cfg.MCPHTTPToken = v
+		}
+	}
+}
+
+// parseBool parses a boolean string, accepting "true", "false", "1", "0".
+// Returns false for unrecognized values.
+func parseBool(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	default:
+		// Fallback to strconv for broader coverage (e.g. "t", "f", "yes", "no").
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			return false
+		}
+		return v
+	}
+}
+
+// runMCP starts the MCP server on stdin/stdout. When mcpHTTPAddr is non-empty,
 // a Streamable HTTP transport is also started concurrently on that address.
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager,
@@ -229,21 +322,6 @@ func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store sessi
 	}
 
 	return g.Wait()
-}
-
-// runProxy starts the proxy directly without an MCP server.
-func runProxy(ctx context.Context, cfg *config.Config, manager *proxy.Manager, logger *slog.Logger) error {
-	if err := manager.Start(ctx, cfg.ListenAddr); err != nil {
-		return fmt.Errorf("start proxy: %w", err)
-	}
-
-	<-ctx.Done()
-	logger.Info("shutting down")
-
-	if err := manager.Stop(context.Background()); err != nil {
-		logger.Warn("proxy stop error", "error", err)
-	}
-	return nil
 }
 
 // initCA initializes the CA for TLS interception using one of three modes:
