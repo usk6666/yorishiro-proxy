@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -91,6 +92,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
 		fmt.Fprintf(fs.Output(), "  KP_DB=/data/proxy.db katashiro-proxy              # custom DB via env var\n")
 		fmt.Fprintf(fs.Output(), "  KP_INSECURE=true katashiro-proxy                  # skip TLS verification\n")
+	}
+	// Allow KP_MCP_HTTP_TOKEN environment variable as fallback when no flag is set.
+	if cfg.MCPHTTPToken == "" {
+		cfg.MCPHTTPToken = os.Getenv("KP_MCP_HTTP_TOKEN")
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -205,7 +210,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, logger)
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -275,10 +280,11 @@ func parseBool(s string) bool {
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
-	mcpServer := mcp.NewServer(ctx, ca, store, manager,
+	// Build MCP server options.
+	opts := []mcp.ServerOption{
 		mcp.WithDBPath(dbPath),
 		mcp.WithPassthroughList(passthrough),
 		mcp.WithCaptureScope(scope),
@@ -288,7 +294,20 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 		mcp.WithFuzzRunner(fuzzRunner),
 		mcp.WithFuzzStore(fuzzStore),
 		mcp.WithIssuer(issuer),
-	)
+	}
+
+	// Set up Bearer token authentication middleware for HTTP transport.
+	if mcpHTTPAddr != "" {
+		token, err := resolveHTTPToken(mcpHTTPToken, logger)
+		if err != nil {
+			return fmt.Errorf("MCP HTTP token: %w", err)
+		}
+		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
+			return mcp.BearerAuthMiddleware(next, token)
+		}))
+	}
+
+	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -322,6 +341,24 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 	}
 
 	return g.Wait()
+}
+
+// resolveHTTPToken returns the Bearer token to use for MCP HTTP authentication.
+// If token is non-empty it is returned as-is. Otherwise a random token is
+// generated and logged to stderr so the operator can retrieve it.
+func resolveHTTPToken(token string, logger *slog.Logger) (string, error) {
+	if token != "" {
+		return token, nil
+	}
+	generated, err := mcp.GenerateToken()
+	if err != nil {
+		return "", err
+	}
+	// Log the auto-generated token to stderr so the operator can use it.
+	// This is the only time the token value appears in logs.
+	logger.Info("generated MCP HTTP Bearer token (use this to authenticate)",
+		"token", generated)
+	return generated, nil
 }
 
 // initCA initializes the CA for TLS interception using one of three modes:
