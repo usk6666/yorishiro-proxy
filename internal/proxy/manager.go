@@ -12,30 +12,43 @@ import (
 // shutdownTimeout is the maximum time to wait for graceful shutdown.
 const shutdownTimeout = 30 * time.Second
 
+// DefaultListenerName is the name used for the default listener when no name is specified.
+const DefaultListenerName = "default"
+
 // ErrAlreadyRunning is returned when Start is called while the proxy is already running.
 var ErrAlreadyRunning = errors.New("proxy is already running")
 
 // ErrNotRunning is returned when Stop is called while the proxy is not running.
 var ErrNotRunning = errors.New("proxy is not running")
 
-// Manager controls the lifecycle of a proxy Listener and TCP forward listeners.
-// It provides Start/Stop methods with thread-safe state management.
+// ErrListenerExists is returned when StartNamed is called with a name that is already in use.
+var ErrListenerExists = errors.New("listener with this name already exists")
+
+// ErrListenerNotFound is returned when StopNamed is called with a name that does not exist.
+var ErrListenerNotFound = errors.New("listener not found")
+
+// listenerEntry tracks a single named proxy listener and its lifecycle state.
+type listenerEntry struct {
+	listener   *Listener
+	cancel     context.CancelFunc
+	done       chan struct{}
+	listenAddr string
+	startedAt  time.Time
+	// tcpForwards tracks active TCP forward listeners keyed by local port.
+	tcpForwards map[string]*tcpForwardEntry
+}
+
+// Manager controls the lifecycle of proxy listeners and TCP forward listeners.
+// It supports multiple named listeners running simultaneously.
+// Start/Stop/Status methods operate on the "default" listener for backward compatibility.
 type Manager struct {
 	detector       ProtocolDetector
 	logger         *slog.Logger
 	peekTimeout    time.Duration
 	maxConnections int
 
-	mu         sync.Mutex
-	running    bool
-	listenAddr string
-	listener   *Listener
-	cancel     context.CancelFunc
-	done       chan struct{}
-	startedAt  time.Time // zero value when not running
-
-	// tcpForwards tracks active TCP forward listeners keyed by local port.
-	tcpForwards map[string]*tcpForwardEntry
+	mu        sync.Mutex
+	listeners map[string]*listenerEntry
 
 	// upstreamProxy holds the current upstream proxy URL.
 	// Access is protected by mu.
@@ -52,20 +65,36 @@ type tcpForwardEntry struct {
 // NewManager creates a new Manager with the given protocol detector and logger.
 func NewManager(detector ProtocolDetector, logger *slog.Logger) *Manager {
 	return &Manager{
-		detector: detector,
-		logger:   logger,
+		detector:  detector,
+		logger:    logger,
+		listeners: make(map[string]*listenerEntry),
 	}
 }
 
-// Start begins the proxy on the specified listen address.
+// Start begins the proxy on the specified listen address using the default listener name.
 // If listenAddr is empty, it defaults to "127.0.0.1:8080".
-// Returns ErrAlreadyRunning if the proxy is already started.
+// Returns ErrAlreadyRunning if the default listener is already started.
 func (m *Manager) Start(ctx context.Context, listenAddr string) error {
+	return m.StartNamed(ctx, DefaultListenerName, listenAddr)
+}
+
+// StartNamed begins a named proxy listener on the specified listen address.
+// If listenAddr is empty, it defaults to "127.0.0.1:8080".
+// Returns ErrListenerExists if a listener with the given name already exists.
+func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string) error {
+	if name == "" {
+		name = DefaultListenerName
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.running {
-		return ErrAlreadyRunning
+	if _, exists := m.listeners[name]; exists {
+		// Return ErrAlreadyRunning for the default listener to maintain backward compatibility.
+		if name == DefaultListenerName {
+			return ErrAlreadyRunning
+		}
+		return fmt.Errorf("listener %q: %w", name, ErrListenerExists)
 	}
 
 	if listenAddr == "" {
@@ -96,49 +125,62 @@ func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 	case err := <-errCh:
 		cancel()
 		if err != nil {
-			return fmt.Errorf("start proxy: %w", err)
+			return fmt.Errorf("start proxy %q: %w", name, err)
 		}
-		return fmt.Errorf("start proxy: listener exited unexpectedly")
+		return fmt.Errorf("start proxy %q: listener exited unexpectedly", name)
 	}
 
-	m.running = true
-	m.listenAddr = listener.Addr()
-	m.listener = listener
-	m.cancel = cancel
-	m.done = done
-	m.startedAt = time.Now()
+	entry := &listenerEntry{
+		listener:   listener,
+		cancel:     cancel,
+		done:       done,
+		listenAddr: listener.Addr(),
+		startedAt:  time.Now(),
+	}
+	m.listeners[name] = entry
 
-	m.logger.Info("proxy started", "listen_addr", m.listenAddr)
+	m.logger.Info("proxy started", "name", name, "listen_addr", entry.listenAddr)
 
 	return nil
 }
 
 // StartTCPForwards creates and starts a TCP forward listener for each entry in
-// the forwards map. The map keys are local port numbers and values are upstream
+// the forwards map on the default listener.
+// The map keys are local port numbers and values are upstream
 // addresses in "host:port" format. The handler is the protocol handler that
 // will process connections on each forward listener (typically the raw TCP handler).
 //
-// This method must be called while the Manager is running (after Start).
-// All forward listeners share the Manager's lifecycle and are stopped when Stop is called.
+// This method must be called while the default listener is running (after Start).
+// All forward listeners share the listener's lifecycle and are stopped when Stop is called.
 // If any listener fails to start, all previously started listeners in this call are
 // cleaned up and an error is returned.
 func (m *Manager) StartTCPForwards(ctx context.Context, forwards map[string]string, handler ProtocolHandler) error {
+	return m.StartTCPForwardsNamed(ctx, DefaultListenerName, forwards, handler)
+}
+
+// StartTCPForwardsNamed creates and starts TCP forward listeners associated with the named listener.
+func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, forwards map[string]string, handler ProtocolHandler) error {
+	if name == "" {
+		name = DefaultListenerName
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.running {
+	entry, exists := m.listeners[name]
+	if !exists {
 		return ErrNotRunning
 	}
 
-	if m.tcpForwards == nil {
-		m.tcpForwards = make(map[string]*tcpForwardEntry)
+	if entry.tcpForwards == nil {
+		entry.tcpForwards = make(map[string]*tcpForwardEntry)
 	}
 
 	// Track newly started listeners for rollback on failure.
 	var started []string
 
 	for port := range forwards {
-		if _, exists := m.tcpForwards[port]; exists {
+		if _, exists := entry.tcpForwards[port]; exists {
 			// Skip ports that already have a forward listener.
 			continue
 		}
@@ -162,148 +204,192 @@ func (m *Manager) StartTCPForwards(ctx context.Context, forwards map[string]stri
 		case err := <-errCh:
 			flCancel()
 			// Rollback previously started listeners.
-			m.stopTCPForwardsLocked(started)
+			m.stopTCPForwardsLocked(entry, started)
 			if err != nil {
 				return fmt.Errorf("start tcp forward on port %s: %w", port, err)
 			}
 			return fmt.Errorf("start tcp forward on port %s: listener exited unexpectedly", port)
 		}
 
-		m.tcpForwards[port] = &tcpForwardEntry{
+		entry.tcpForwards[port] = &tcpForwardEntry{
 			listener: fl,
 			cancel:   flCancel,
 			done:     done,
 		}
 		started = append(started, port)
 
-		m.logger.Info("tcp forward listener started", "port", port, "upstream", forwards[port], "listen_addr", fl.Addr())
+		m.logger.Info("tcp forward listener started", "name", name, "port", port, "upstream", forwards[port], "listen_addr", fl.Addr())
 	}
 
 	return nil
 }
 
-// stopTCPForwardsLocked stops the specified TCP forward listeners.
+// stopTCPForwardsLocked stops the specified TCP forward listeners on the given entry.
 // Must be called with m.mu held.
-func (m *Manager) stopTCPForwardsLocked(ports []string) {
+func (m *Manager) stopTCPForwardsLocked(entry *listenerEntry, ports []string) {
 	for _, port := range ports {
-		entry, ok := m.tcpForwards[port]
+		fwd, ok := entry.tcpForwards[port]
 		if !ok {
 			continue
 		}
-		entry.cancel()
-		<-entry.done
-		delete(m.tcpForwards, port)
+		fwd.cancel()
+		<-fwd.done
+		delete(entry.tcpForwards, port)
 	}
 }
 
 // TCPForwardAddrs returns a map of port -> actual listen address for all active
-// TCP forward listeners. Returns nil when no forwards are active.
+// TCP forward listeners on the default listener. Returns nil when no forwards are active.
 func (m *Manager) TCPForwardAddrs() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.tcpForwards) == 0 {
+
+	entry, exists := m.listeners[DefaultListenerName]
+	if !exists || len(entry.tcpForwards) == 0 {
 		return nil
 	}
-	addrs := make(map[string]string, len(m.tcpForwards))
-	for port, entry := range m.tcpForwards {
-		addrs[port] = entry.listener.Addr()
+	addrs := make(map[string]string, len(entry.tcpForwards))
+	for port, fwd := range entry.tcpForwards {
+		addrs[port] = fwd.listener.Addr()
 	}
 	return addrs
 }
 
-// Stop gracefully shuts down the proxy and all TCP forward listeners.
-// It cancels the listener context and waits for existing connections to
-// complete, with a timeout.
-// Returns ErrNotRunning if the proxy is not started.
+// Stop gracefully shuts down the default listener and its TCP forward listeners.
+// Returns ErrNotRunning if the default listener is not started.
 func (m *Manager) Stop(ctx context.Context) error {
-	m.mu.Lock()
+	return m.StopNamed(ctx, DefaultListenerName)
+}
 
-	if !m.running {
-		m.mu.Unlock()
-		return ErrNotRunning
+// StopNamed gracefully shuts down a named listener and its TCP forward listeners.
+// Returns ErrListenerNotFound if the named listener does not exist.
+// Returns ErrNotRunning for the default listener to maintain backward compatibility.
+func (m *Manager) StopNamed(ctx context.Context, name string) error {
+	if name == "" {
+		name = DefaultListenerName
 	}
 
-	cancel := m.cancel
-	done := m.done
-	addr := m.listenAddr
+	m.mu.Lock()
 
-	// Collect TCP forward entries for shutdown.
-	tcpEntries := m.tcpForwards
+	entry, exists := m.listeners[name]
+	if !exists {
+		m.mu.Unlock()
+		// Return ErrNotRunning for the default listener to maintain backward compatibility.
+		if name == DefaultListenerName {
+			return ErrNotRunning
+		}
+		return fmt.Errorf("listener %q: %w", name, ErrListenerNotFound)
+	}
 
-	// Clear state before releasing the lock to prevent double-stop races.
-	m.running = false
-	m.listenAddr = ""
-	m.listener = nil
-	m.cancel = nil
-	m.done = nil
-	m.startedAt = time.Time{}
-	m.tcpForwards = nil
+	// Remove from map before releasing the lock to prevent double-stop races.
+	delete(m.listeners, name)
 
 	m.mu.Unlock()
 
+	return m.shutdownEntry(ctx, name, entry)
+}
+
+// StopAll gracefully shuts down all running listeners.
+// Returns nil if no listeners are running.
+func (m *Manager) StopAll(ctx context.Context) error {
+	m.mu.Lock()
+
+	if len(m.listeners) == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+
+	// Snapshot and clear all entries.
+	entries := m.listeners
+	m.listeners = make(map[string]*listenerEntry)
+
+	m.mu.Unlock()
+
+	var firstErr error
+	for name, entry := range entries {
+		if err := m.shutdownEntry(ctx, name, entry); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// shutdownEntry performs the actual shutdown of a listener entry.
+// It cancels TCP forwards and the main listener, then waits for completion.
+func (m *Manager) shutdownEntry(ctx context.Context, name string, entry *listenerEntry) error {
 	// Cancel all TCP forward listeners first.
-	for _, entry := range tcpEntries {
-		entry.cancel()
+	for _, fwd := range entry.tcpForwards {
+		fwd.cancel()
 	}
 
 	// Cancel the main listener context to initiate shutdown.
-	cancel()
+	entry.cancel()
 
 	// Wait for TCP forward listener goroutines to complete.
-	for port, entry := range tcpEntries {
+	for port, fwd := range entry.tcpForwards {
 		select {
-		case <-entry.done:
-			m.logger.Info("tcp forward listener stopped", "port", port)
+		case <-fwd.done:
+			m.logger.Info("tcp forward listener stopped", "name", name, "port", port)
 		case <-time.After(shutdownTimeout):
-			m.logger.Warn("tcp forward listener shutdown timed out", "port", port)
+			m.logger.Warn("tcp forward listener shutdown timed out", "name", name, "port", port)
 		}
 	}
 
 	// Wait for the main listener goroutine to complete, with a timeout.
 	select {
-	case <-done:
-		m.logger.Info("proxy stopped", "listen_addr", addr)
+	case <-entry.done:
+		m.logger.Info("proxy stopped", "name", name, "listen_addr", entry.listenAddr)
 		return nil
 	case <-time.After(shutdownTimeout):
-		return fmt.Errorf("stop proxy: shutdown timed out after %v", shutdownTimeout)
+		return fmt.Errorf("stop proxy %q: shutdown timed out after %v", name, shutdownTimeout)
 	case <-ctx.Done():
-		return fmt.Errorf("stop proxy: %w", ctx.Err())
+		return fmt.Errorf("stop proxy %q: %w", name, ctx.Err())
 	}
 }
 
 // SetPeekTimeout sets the protocol detection timeout for new connections.
-// If the proxy is already running, the change takes effect immediately
-// for the next incoming connection.
+// If any listeners are already running, the change takes effect immediately
+// for the next incoming connection on all listeners.
 func (m *Manager) SetPeekTimeout(d time.Duration) {
 	m.mu.Lock()
 	m.peekTimeout = d
-	l := m.listener
+	listeners := make([]*Listener, 0, len(m.listeners))
+	for _, entry := range m.listeners {
+		listeners = append(listeners, entry.listener)
+	}
 	m.mu.Unlock()
-	if l != nil {
+	for _, l := range listeners {
 		l.SetPeekTimeout(d)
 	}
 }
 
 // SetMaxConnections sets the maximum number of concurrent connections.
-// If the proxy is already running, the change takes effect immediately
-// for the next incoming connection. Existing connections are not interrupted.
+// If any listeners are already running, the change takes effect immediately
+// for the next incoming connection on all listeners. Existing connections are not interrupted.
 func (m *Manager) SetMaxConnections(n int) {
 	m.mu.Lock()
 	m.maxConnections = n
-	l := m.listener
+	listeners := make([]*Listener, 0, len(m.listeners))
+	for _, entry := range m.listeners {
+		listeners = append(listeners, entry.listener)
+	}
 	m.mu.Unlock()
-	if l != nil {
+	for _, l := range listeners {
 		l.SetMaxConnections(n)
 	}
 }
 
 // MaxConnections returns the configured maximum connections limit.
-// When the proxy is running, returns the listener's current value.
+// When any listener is running, returns the first listener's current value.
 // Otherwise returns the stored configuration value.
 func (m *Manager) MaxConnections() int {
 	m.mu.Lock()
-	l := m.listener
 	maxConns := m.maxConnections
+	var l *Listener
+	for _, entry := range m.listeners {
+		l = entry.listener
+		break
+	}
 	m.mu.Unlock()
 	if l != nil {
 		return l.MaxConnections()
@@ -315,12 +401,16 @@ func (m *Manager) MaxConnections() int {
 }
 
 // PeekTimeout returns the configured protocol detection timeout.
-// When the proxy is running, returns the listener's current value.
+// When any listener is running, returns the first listener's current value.
 // Otherwise returns the stored configuration value.
 func (m *Manager) PeekTimeout() time.Duration {
 	m.mu.Lock()
-	l := m.listener
 	pt := m.peekTimeout
+	var l *Listener
+	for _, entry := range m.listeners {
+		l = entry.listener
+		break
+	}
 	m.mu.Unlock()
 	if l != nil {
 		return l.PeekTimeout()
@@ -348,32 +438,84 @@ func (m *Manager) UpstreamProxy() string {
 	return m.upstreamProxy
 }
 
-// Status returns whether the proxy is running and its listen address.
+// Status returns whether the default listener is running and its listen address.
+// For backward compatibility with single-listener callers.
 func (m *Manager) Status() (running bool, listenAddr string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.running, m.listenAddr
+	entry, exists := m.listeners[DefaultListenerName]
+	if !exists {
+		return false, ""
+	}
+	return true, entry.listenAddr
 }
 
-// ActiveConnections returns the number of connections currently being handled.
-// Returns 0 when the proxy is not running.
+// ListenerStatus holds the status information for a single named listener.
+type ListenerStatus struct {
+	Name              string `json:"name"`
+	ListenAddr        string `json:"listen_addr"`
+	ActiveConnections int    `json:"active_connections"`
+	UptimeSeconds     int64  `json:"uptime_seconds"`
+}
+
+// ListenerStatuses returns the status of all running listeners.
+// Returns nil when no listeners are running.
+func (m *Manager) ListenerStatuses() []ListenerStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.listeners) == 0 {
+		return nil
+	}
+
+	statuses := make([]ListenerStatus, 0, len(m.listeners))
+	for name, entry := range m.listeners {
+		var uptime int64
+		if !entry.startedAt.IsZero() {
+			uptime = int64(time.Since(entry.startedAt).Seconds())
+		}
+		statuses = append(statuses, ListenerStatus{
+			Name:              name,
+			ListenAddr:        entry.listenAddr,
+			ActiveConnections: entry.listener.ActiveConnections(),
+			UptimeSeconds:     uptime,
+		})
+	}
+	return statuses
+}
+
+// ListenerCount returns the number of currently running listeners.
+func (m *Manager) ListenerCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.listeners)
+}
+
+// ActiveConnections returns the total number of connections currently being handled
+// across all running listeners. Returns 0 when no listeners are running.
 func (m *Manager) ActiveConnections() int {
 	m.mu.Lock()
-	l := m.listener
-	m.mu.Unlock()
-	if l == nil {
-		return 0
+	entries := make([]*listenerEntry, 0, len(m.listeners))
+	for _, entry := range m.listeners {
+		entries = append(entries, entry)
 	}
-	return l.ActiveConnections()
+	m.mu.Unlock()
+
+	total := 0
+	for _, entry := range entries {
+		total += entry.listener.ActiveConnections()
+	}
+	return total
 }
 
-// Uptime returns the duration since the proxy was started.
-// Returns 0 when the proxy is not running.
+// Uptime returns the duration since the default listener was started.
+// Returns 0 when the default listener is not running.
 func (m *Manager) Uptime() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.running || m.startedAt.IsZero() {
+	entry, exists := m.listeners[DefaultListenerName]
+	if !exists || entry.startedAt.IsZero() {
 		return 0
 	}
-	return time.Since(m.startedAt)
+	return time.Since(entry.startedAt)
 }
