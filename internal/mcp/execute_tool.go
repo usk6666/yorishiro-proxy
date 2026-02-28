@@ -25,8 +25,8 @@ import (
 // executeInput is the typed input for the execute tool.
 type executeInput struct {
 	// Action specifies the action to execute.
-	// Available actions: resend, resend_raw, delete_sessions, define_macro, run_macro, delete_macro
-	// (replay, replay_raw are deprecated aliases).
+	// Available actions: resend, resend_raw, tcp_replay, delete_sessions, define_macro, run_macro, delete_macro
+	// (replay is a deprecated alias for resend; replay_raw is a deprecated alias for resend_raw).
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
 	Params executeParams `json:"params"`
@@ -37,6 +37,9 @@ type executeInput struct {
 type executeParams struct {
 	// SessionID is used by resend, resend_raw, and delete_sessions (single deletion).
 	SessionID string `json:"session_id,omitempty" jsonschema:"session ID for resend/resend_raw/delete"`
+
+	// MessageSequence specifies a specific message within a session for WebSocket/streaming resend.
+	MessageSequence *int `json:"message_sequence,omitempty" jsonschema:"message sequence number for WebSocket/streaming resend"`
 
 	// resend overrides
 	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override for resend"`
@@ -98,7 +101,7 @@ type executeParams struct {
 }
 
 // availableActions lists the valid action names for error messages.
-var availableActions = []string{"resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert"}
+var availableActions = []string{"resend", "resend_raw", "tcp_replay", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert"}
 
 // registerExecute registers the execute MCP tool.
 func (s *Server) registerExecute() {
@@ -106,8 +109,10 @@ func (s *Server) registerExecute() {
 		Name: "execute",
 		Description: "Execute an action on recorded proxy data. " +
 			"Available actions: " +
-			"'resend' resends a recorded HTTP request with optional mutation (method/URL/header/body overrides, body patches, dry-run); " +
+			"'resend' resends a recorded HTTP/HTTP2/WebSocket request with optional mutation (method/URL/header/body overrides, body patches, dry-run). " +
+			"For WebSocket sessions, use message_sequence to specify which message to resend as a raw TCP frame; " +
 			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
+			"'tcp_replay' replays a Raw TCP session by sending all 'send' messages sequentially to the target; " +
 			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required); " +
 			"'release' forwards an intercepted request as-is (requires intercept_id); " +
 			"'modify_and_forward' forwards an intercepted request with mutations (same override params as resend, requires intercept_id); " +
@@ -120,7 +125,7 @@ func (s *Server) registerExecute() {
 			"'run_macro' executes a stored macro for testing; " +
 			"'delete_macro' removes a stored macro definition; " +
 			"'regenerate_ca_cert' regenerates the CA certificate (auto-persist mode: saves to disk; ephemeral mode: in-memory only; explicit mode: error). " +
-			"('replay' and 'replay_raw' are accepted as deprecated aliases for 'resend' and 'resend_raw'.)",
+			"('replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'.)",
 	}, s.handleExecute)
 }
 
@@ -133,6 +138,8 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return s.handleExecuteResend(ctx, input.Params)
 	case "resend_raw", "replay_raw": // "replay_raw" is a deprecated alias
 		return s.handleExecuteResendRaw(ctx, input.Params)
+	case "tcp_replay":
+		return s.handleExecuteReplayRaw(ctx, input.Params)
 	case "delete_sessions":
 		return s.handleExecuteDeleteSessions(ctx, input.Params)
 	case "release":
@@ -272,6 +279,11 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	sess, err := s.store.GetSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
+	}
+
+	// WebSocket sessions use a different resend path.
+	if sess.Protocol == "WebSocket" {
+		return s.handleWebSocketResend(ctx, sess, params)
 	}
 
 	sendMsgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})

@@ -7,8 +7,8 @@
   "properties": {
     "action": {
       "type": "string",
-      "description": "The action to execute. 'replay' and 'replay_raw' are accepted as deprecated aliases.",
-      "enum": ["resend", "resend_raw", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert", "replay", "replay_raw"]
+      "description": "The action to execute. 'replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'.",
+      "enum": ["resend", "resend_raw", "tcp_replay", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert", "replay", "replay_raw"]
     },
     "params": {
       "type": "object",
@@ -16,7 +16,11 @@
       "properties": {
         "session_id": {
           "type": "string",
-          "description": "Session ID for resend, resend_raw, or single-session deletion."
+          "description": "Session ID for resend, resend_raw, tcp_replay, or single-session deletion."
+        },
+        "message_sequence": {
+          "type": "integer",
+          "description": "Message sequence number for WebSocket/streaming resend. Required for WebSocket sessions."
         },
         "intercept_id": {
           "type": "string",

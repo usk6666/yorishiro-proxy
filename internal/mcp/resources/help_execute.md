@@ -5,9 +5,9 @@ Execute an action on recorded proxy data. Supports resending captured requests w
 ## Parameters
 
 ### action (string, required)
-The action to execute. One of: `resend`, `resend_raw`, `delete_sessions`, `release`, `modify_and_forward`, `drop`, `fuzz`, `fuzz_pause`, `fuzz_resume`, `fuzz_cancel`, `define_macro`, `run_macro`, `delete_macro`, `regenerate_ca_cert`.
+The action to execute. One of: `resend`, `resend_raw`, `tcp_replay`, `delete_sessions`, `release`, `modify_and_forward`, `drop`, `fuzz`, `fuzz_pause`, `fuzz_resume`, `fuzz_cancel`, `define_macro`, `run_macro`, `delete_macro`, `regenerate_ca_cert`.
 
-> **Note:** `replay` and `replay_raw` are accepted as deprecated aliases for `resend` and `resend_raw`.
+> **Note:** `replay` is a deprecated alias for `resend`; `replay_raw` is a deprecated alias for `resend_raw`.
 
 ### params (object, required)
 Action-specific parameters (see below).
@@ -15,10 +15,16 @@ Action-specific parameters (see below).
 ## Actions
 
 ### resend
-Resend a recorded HTTP request with optional mutations. Records the result as a new session.
+Resend a recorded HTTP/HTTP2/WebSocket request with optional mutations. Records the result as a new session.
+
+**Multi-protocol support:**
+- **HTTP/1.x and HTTPS**: Standard HTTP resend with full mutation support.
+- **HTTP/2**: Resends the request using HTTP/1.1 (fallback). All mutation options apply.
+- **WebSocket**: Requires `message_sequence` to identify the message to resend. Sends the message body over a raw TCP connection. Supports `override_body`, `override_body_base64`, `target_addr`, and `use_tls`.
 
 **Parameters:**
 - **session_id** (string, required): ID of the session to resend.
+- **message_sequence** (integer, optional): Message sequence number for WebSocket/streaming resend. Required for WebSocket sessions.
 - **override_method** (string, optional): Override the HTTP method (e.g. `"POST"`).
 - **override_url** (string, optional): Override the target URL. Must include scheme and host (e.g. `"https://other.target.com/api/v2"`).
 - **override_headers** (object, optional): Header overrides as key-value pairs. Replaces matching headers.
@@ -51,6 +57,18 @@ Resend the raw bytes from a recorded session over TCP/TLS. Useful for testing HT
 - **timeout_ms** (integer, optional): Request timeout in milliseconds (default: `30000`).
 
 Returns: response_data (base64), response_size, duration_ms.
+
+### tcp_replay
+Replay a Raw TCP session by sending all recorded send messages sequentially to the target. Records the exchange as a new TCP session.
+
+**Parameters:**
+- **session_id** (string, required): ID of the TCP session to replay.
+- **target_addr** (string, optional): Target address as `"host:port"`. Defaults to the original session's server address.
+- **use_tls** (boolean, optional): Use TLS for the connection. Default: `false`.
+- **timeout_ms** (integer, optional): Connection timeout in milliseconds (default: `30000`).
+- **tag** (string, optional): Tag to attach to the result session.
+
+Returns: new_session_id, messages_sent, messages_received, total_bytes_sent, total_bytes_received, duration_ms, tag.
 
 ### delete_sessions
 Delete sessions by ID, by age, or all at once.
@@ -455,6 +473,42 @@ Returns: name, deleted.
 {
   "action": "delete_macro",
   "params": {"name": "auth-flow"}
+}
+```
+
+### Resend WebSocket message
+```json
+{
+  "action": "resend",
+  "params": {
+    "session_id": "ws-session-123",
+    "message_sequence": 2,
+    "target_addr": "ws.target.com:443",
+    "use_tls": true
+  }
+}
+```
+
+### Replay Raw TCP session
+```json
+{
+  "action": "tcp_replay",
+  "params": {
+    "session_id": "tcp-session-456",
+    "target_addr": "db.target.com:3306",
+    "tag": "tcp-replay"
+  }
+}
+```
+
+### Resend HTTP/2 request (HTTP/1.1 fallback)
+```json
+{
+  "action": "resend",
+  "params": {
+    "session_id": "h2-session-789",
+    "override_headers": {"Authorization": "Bearer new-token"}
+  }
 }
 ```
 

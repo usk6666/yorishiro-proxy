@@ -38,6 +38,19 @@
       "type": "array",
       "description": "Intercept rules for matching requests/responses. If omitted, no rules are active.",
       "items": { "$ref": "#/$defs/intercept_rule" }
+    },
+    "tcp_forwards": {
+      "type": "object",
+      "description": "Maps local listen ports to upstream TCP addresses for Raw TCP forwarding (e.g. {\"3306\": \"db.example.com:3306\"}).",
+      "additionalProperties": { "type": "string" }
+    },
+    "protocols": {
+      "type": "array",
+      "description": "Protocols to enable for detection. If omitted, all protocols are enabled.",
+      "items": {
+        "type": "string",
+        "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP"]
+      }
     }
   },
   "additionalProperties": false,

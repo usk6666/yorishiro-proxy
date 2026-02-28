@@ -43,6 +43,18 @@ Each intercept rule has:
 
 Multiple rules use OR logic: a request/response is intercepted if any enabled rule matches.
 
+### tcp_forwards (object, optional)
+Maps local listen ports to upstream TCP addresses for Raw TCP forwarding.
+- Format: `{"port": "upstream_host:port"}` (e.g. `{"3306": "db.example.com:3306"}`)
+- Connections arriving on a mapped port are forwarded to the specified upstream
+- If omitted, Raw TCP forwarding is not configured
+
+### protocols (array of strings, optional)
+Specifies which protocols are enabled for detection.
+- Valid values: `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`
+- If omitted, all protocols are enabled (default behavior)
+- Restricting protocols can improve performance and reduce noise
+
 ## Usage Examples
 
 ### Start with defaults
@@ -71,6 +83,25 @@ Multiple rules use OR logic: a request/response is intercepted if any enabled ru
     ]
   },
   "tls_passthrough": ["*.googleapis.com", "accounts.google.com"]
+}
+```
+
+### Start with TCP forwards
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "tcp_forwards": {
+    "3306": "db.example.com:3306",
+    "6379": "redis.example.com:6379"
+  }
+}
+```
+
+### Start with specific protocols
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "protocols": ["HTTP/1.x", "HTTPS", "gRPC"]
 }
 ```
 
