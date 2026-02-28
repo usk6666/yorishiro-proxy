@@ -678,6 +678,75 @@ func TestRelay_DataIsolation(t *testing.T) {
 	}
 }
 
+// --- SetForwards tests ---
+
+func TestHandler_SetForwards(t *testing.T) {
+	h := NewHandler(nil, nil, testLogger(t))
+
+	// Initially empty.
+	if len(h.Forwards()) != 0 {
+		t.Errorf("initial forwards = %v, want empty", h.Forwards())
+	}
+
+	// Set forwards.
+	h.SetForwards(map[string]string{
+		"3306": "db.example.com:3306",
+		"6379": "redis.example.com:6379",
+	})
+
+	got := h.Forwards()
+	if len(got) != 2 {
+		t.Fatalf("forwards len = %d, want 2", len(got))
+	}
+	if got["3306"] != "db.example.com:3306" {
+		t.Errorf("forwards[3306] = %q, want %q", got["3306"], "db.example.com:3306")
+	}
+	if got["6379"] != "redis.example.com:6379" {
+		t.Errorf("forwards[6379] = %q, want %q", got["6379"], "redis.example.com:6379")
+	}
+}
+
+func TestHandler_SetForwards_Merge(t *testing.T) {
+	// SetForwards should merge into existing entries.
+	initial := map[string]string{
+		"3306": "db.example.com:3306",
+	}
+	h := NewHandler(nil, initial, testLogger(t))
+
+	// Add a new entry.
+	h.SetForwards(map[string]string{
+		"6379": "redis.example.com:6379",
+	})
+
+	got := h.Forwards()
+	if len(got) != 2 {
+		t.Fatalf("forwards len = %d, want 2", len(got))
+	}
+	if got["3306"] != "db.example.com:3306" {
+		t.Errorf("forwards[3306] = %q, want %q", got["3306"], "db.example.com:3306")
+	}
+	if got["6379"] != "redis.example.com:6379" {
+		t.Errorf("forwards[6379] = %q, want %q", got["6379"], "redis.example.com:6379")
+	}
+}
+
+func TestHandler_SetForwards_Override(t *testing.T) {
+	// SetForwards should override existing entries.
+	initial := map[string]string{
+		"3306": "old-db.example.com:3306",
+	}
+	h := NewHandler(nil, initial, testLogger(t))
+
+	h.SetForwards(map[string]string{
+		"3306": "new-db.example.com:3306",
+	})
+
+	got := h.Forwards()
+	if got["3306"] != "new-db.example.com:3306" {
+		t.Errorf("forwards[3306] = %q, want %q", got["3306"], "new-db.example.com:3306")
+	}
+}
+
 // --- Helpers ---
 
 func mustParsePort(t *testing.T, port string) int {

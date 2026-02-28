@@ -18,7 +18,7 @@ var ErrAlreadyRunning = errors.New("proxy is already running")
 // ErrNotRunning is returned when Stop is called while the proxy is not running.
 var ErrNotRunning = errors.New("proxy is not running")
 
-// Manager controls the lifecycle of a proxy Listener.
+// Manager controls the lifecycle of a proxy Listener and TCP forward listeners.
 // It provides Start/Stop methods with thread-safe state management.
 type Manager struct {
 	detector       ProtocolDetector
@@ -33,6 +33,16 @@ type Manager struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	startedAt  time.Time // zero value when not running
+
+	// tcpForwards tracks active TCP forward listeners keyed by local port.
+	tcpForwards map[string]*tcpForwardEntry
+}
+
+// tcpForwardEntry tracks a single TCP forward listener and its done channel.
+type tcpForwardEntry struct {
+	listener *TCPForwardListener
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 // NewManager creates a new Manager with the given protocol detector and logger.
@@ -99,8 +109,107 @@ func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 	return nil
 }
 
-// Stop gracefully shuts down the proxy. It cancels the listener context and
-// waits for existing connections to complete, with a timeout.
+// StartTCPForwards creates and starts a TCP forward listener for each entry in
+// the forwards map. The map keys are local port numbers and values are upstream
+// addresses in "host:port" format. The handler is the protocol handler that
+// will process connections on each forward listener (typically the raw TCP handler).
+//
+// This method must be called while the Manager is running (after Start).
+// All forward listeners share the Manager's lifecycle and are stopped when Stop is called.
+// If any listener fails to start, all previously started listeners in this call are
+// cleaned up and an error is returned.
+func (m *Manager) StartTCPForwards(ctx context.Context, forwards map[string]string, handler ProtocolHandler) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.running {
+		return ErrNotRunning
+	}
+
+	if m.tcpForwards == nil {
+		m.tcpForwards = make(map[string]*tcpForwardEntry)
+	}
+
+	// Track newly started listeners for rollback on failure.
+	var started []string
+
+	for port := range forwards {
+		if _, exists := m.tcpForwards[port]; exists {
+			// Skip ports that already have a forward listener.
+			continue
+		}
+
+		addr := fmt.Sprintf("127.0.0.1:%s", port)
+		fl := NewTCPForwardListener(addr, handler, m.logger)
+		flCtx, flCancel := context.WithCancel(ctx)
+
+		done := make(chan struct{})
+		errCh := make(chan error, 1)
+
+		go func() {
+			defer close(done)
+			errCh <- fl.Start(flCtx)
+		}()
+
+		// Wait for the listener to be ready or fail.
+		select {
+		case <-fl.Ready():
+			// Listener is accepting connections.
+		case err := <-errCh:
+			flCancel()
+			// Rollback previously started listeners.
+			m.stopTCPForwardsLocked(started)
+			if err != nil {
+				return fmt.Errorf("start tcp forward on port %s: %w", port, err)
+			}
+			return fmt.Errorf("start tcp forward on port %s: listener exited unexpectedly", port)
+		}
+
+		m.tcpForwards[port] = &tcpForwardEntry{
+			listener: fl,
+			cancel:   flCancel,
+			done:     done,
+		}
+		started = append(started, port)
+
+		m.logger.Info("tcp forward listener started", "port", port, "upstream", forwards[port], "listen_addr", fl.Addr())
+	}
+
+	return nil
+}
+
+// stopTCPForwardsLocked stops the specified TCP forward listeners.
+// Must be called with m.mu held.
+func (m *Manager) stopTCPForwardsLocked(ports []string) {
+	for _, port := range ports {
+		entry, ok := m.tcpForwards[port]
+		if !ok {
+			continue
+		}
+		entry.cancel()
+		<-entry.done
+		delete(m.tcpForwards, port)
+	}
+}
+
+// TCPForwardAddrs returns a map of port -> actual listen address for all active
+// TCP forward listeners. Returns nil when no forwards are active.
+func (m *Manager) TCPForwardAddrs() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.tcpForwards) == 0 {
+		return nil
+	}
+	addrs := make(map[string]string, len(m.tcpForwards))
+	for port, entry := range m.tcpForwards {
+		addrs[port] = entry.listener.Addr()
+	}
+	return addrs
+}
+
+// Stop gracefully shuts down the proxy and all TCP forward listeners.
+// It cancels the listener context and waits for existing connections to
+// complete, with a timeout.
 // Returns ErrNotRunning if the proxy is not started.
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
@@ -114,6 +223,9 @@ func (m *Manager) Stop(ctx context.Context) error {
 	done := m.done
 	addr := m.listenAddr
 
+	// Collect TCP forward entries for shutdown.
+	tcpEntries := m.tcpForwards
+
 	// Clear state before releasing the lock to prevent double-stop races.
 	m.running = false
 	m.listenAddr = ""
@@ -121,13 +233,29 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.cancel = nil
 	m.done = nil
 	m.startedAt = time.Time{}
+	m.tcpForwards = nil
 
 	m.mu.Unlock()
 
-	// Cancel the listener context to initiate shutdown.
+	// Cancel all TCP forward listeners first.
+	for _, entry := range tcpEntries {
+		entry.cancel()
+	}
+
+	// Cancel the main listener context to initiate shutdown.
 	cancel()
 
-	// Wait for the listener goroutine to complete, with a timeout.
+	// Wait for TCP forward listener goroutines to complete.
+	for port, entry := range tcpEntries {
+		select {
+		case <-entry.done:
+			m.logger.Info("tcp forward listener stopped", "port", port)
+		case <-time.After(shutdownTimeout):
+			m.logger.Warn("tcp forward listener shutdown timed out", "port", port)
+		}
+	}
+
+	// Wait for the main listener goroutine to complete, with a timeout.
 	select {
 	case <-done:
 		m.logger.Info("proxy stopped", "listen_addr", addr)

@@ -131,6 +131,9 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		if err := validateTCPForwards(input.TCPForwards); err != nil {
 			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
 		}
+		if s.tcpHandler == nil {
+			return nil, nil, fmt.Errorf("tcp_forwards: TCP handler is not initialized")
+		}
 		s.tcpForwards = input.TCPForwards
 	}
 
@@ -144,6 +147,19 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 
 	if err := s.manager.Start(s.appCtx, input.ListenAddr); err != nil {
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
+	}
+
+	// Start TCP forward listeners if configured.
+	if len(input.TCPForwards) > 0 {
+		// Update the TCP handler's forward mappings so it knows which
+		// upstream to connect to for each local port.
+		s.tcpHandler.SetForwards(input.TCPForwards)
+
+		if err := s.manager.StartTCPForwards(s.appCtx, input.TCPForwards, s.tcpHandler); err != nil {
+			// Stop the main proxy since forward listeners failed.
+			s.manager.Stop(ctx)
+			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
+		}
 	}
 
 	_, addr := s.manager.Status()

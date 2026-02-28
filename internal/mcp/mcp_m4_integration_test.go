@@ -731,13 +731,13 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 // --- Test: proxy_start with tcp_forwards and protocols parameters ---
 
 func TestM4_ProxyStart_TCPForwards(t *testing.T) {
-	env := setupIntegrationEnv(t)
+	tcpHandler := &mockTCPHandler{}
+	env := setupIntegrationEnvWithOpts(t, WithTCPHandler(tcpHandler))
 
 	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
 		"listen_addr": "127.0.0.1:0",
 		"tcp_forwards": map[string]any{
-			"3306": "db.example.com:3306",
-			"6379": "redis.example.com:6379",
+			"0": "db.example.com:3306",
 		},
 	})
 	if startResult.Status != "running" {
@@ -746,11 +746,14 @@ func TestM4_ProxyStart_TCPForwards(t *testing.T) {
 	if startResult.TCPForwards == nil {
 		t.Fatal("tcp_forwards should not be nil in result")
 	}
-	if startResult.TCPForwards["3306"] != "db.example.com:3306" {
-		t.Errorf("tcp_forwards[3306] = %q, want db.example.com:3306", startResult.TCPForwards["3306"])
+	if startResult.TCPForwards["0"] != "db.example.com:3306" {
+		t.Errorf("tcp_forwards[0] = %q, want db.example.com:3306", startResult.TCPForwards["0"])
 	}
-	if startResult.TCPForwards["6379"] != "redis.example.com:6379" {
-		t.Errorf("tcp_forwards[6379] = %q, want redis.example.com:6379", startResult.TCPForwards["6379"])
+
+	// Verify forward listeners are actually running.
+	addrs := env.manager.TCPForwardAddrs()
+	if addrs == nil {
+		t.Fatal("expected non-nil TCPForwardAddrs")
 	}
 }
 
@@ -801,13 +804,14 @@ func TestM4_ProxyStart_InvalidTCPForwards(t *testing.T) {
 // --- Test: Query config reflects tcp_forwards and enabled_protocols ---
 
 func TestM4_QueryConfig_TCPForwardsAndProtocols(t *testing.T) {
-	env := setupIntegrationEnv(t)
+	tcpHandler := &mockTCPHandler{}
+	env := setupIntegrationEnvWithOpts(t, WithTCPHandler(tcpHandler))
 
 	// Start proxy with tcp_forwards and protocols.
 	_ = callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
 		"listen_addr": "127.0.0.1:0",
 		"tcp_forwards": map[string]any{
-			"5432": "postgres.example.com:5432",
+			"0": "postgres.example.com:5432",
 		},
 		"protocols": []any{"HTTP/1.x", "HTTPS", "TCP"},
 	})
@@ -819,8 +823,8 @@ func TestM4_QueryConfig_TCPForwardsAndProtocols(t *testing.T) {
 	if cfgResult.TCPForwards == nil {
 		t.Fatal("tcp_forwards should not be nil in config")
 	}
-	if cfgResult.TCPForwards["5432"] != "postgres.example.com:5432" {
-		t.Errorf("tcp_forwards[5432] = %q, want postgres.example.com:5432", cfgResult.TCPForwards["5432"])
+	if cfgResult.TCPForwards["0"] != "postgres.example.com:5432" {
+		t.Errorf("tcp_forwards[0] = %q, want postgres.example.com:5432", cfgResult.TCPForwards["0"])
 	}
 	if len(cfgResult.EnabledProtocols) != 3 {
 		t.Fatalf("enabled_protocols len = %d, want 3", len(cfgResult.EnabledProtocols))

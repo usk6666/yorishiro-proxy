@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
@@ -716,6 +718,168 @@ func TestProxyStart_PassthroughAppliedBeforeStart(t *testing.T) {
 		t.Error("proxy should not be running after passthrough validation failure")
 		manager.Stop(context.Background())
 	}
+}
+
+// mockTCPHandler satisfies the tcpForwardHandler interface for testing.
+type mockTCPHandler struct {
+	forwards map[string]string
+}
+
+func (h *mockTCPHandler) Name() string                                { return "TCP" }
+func (h *mockTCPHandler) Detect(_ []byte) bool                        { return true }
+func (h *mockTCPHandler) Handle(_ context.Context, conn net.Conn) error {
+	// Simple echo for testing.
+	buf := make([]byte, 1024)
+	n, _ := conn.Read(buf)
+	if n > 0 {
+		conn.Write(buf[:n])
+	}
+	return nil
+}
+func (h *mockTCPHandler) SetForwards(forwards map[string]string) {
+	if h.forwards == nil {
+		h.forwards = make(map[string]string)
+	}
+	for k, v := range forwards {
+		h.forwards[k] = v
+	}
+}
+
+func TestProxyStart_WithTCPForwards(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	tcpHandler := &mockTCPHandler{}
+	cs := setupProxyStartTestSessionWithTCPHandler(t, manager, nil, nil, tcpHandler)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"tcp_forwards": map[string]any{
+			"0": "127.0.0.1:9999",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+	if len(out.TCPForwards) == 0 {
+		t.Error("expected non-empty tcp_forwards in result")
+	}
+
+	// Verify forward mappings were set on the handler.
+	if tcpHandler.forwards["0"] != "127.0.0.1:9999" {
+		t.Errorf("tcpHandler forwards[0] = %q, want %q", tcpHandler.forwards["0"], "127.0.0.1:9999")
+	}
+
+	// Verify the forward listener is accessible.
+	addrs := manager.TCPForwardAddrs()
+	if addrs == nil {
+		t.Fatal("expected non-nil TCPForwardAddrs")
+	}
+	fwdAddr := addrs["0"]
+	if fwdAddr == "" {
+		t.Fatal("expected non-empty forward address for port 0")
+	}
+
+	// Verify we can connect to the forward listener.
+	conn, dialErr := net.DialTimeout("tcp", fwdAddr, 2*time.Second)
+	if dialErr != nil {
+		t.Fatalf("dial tcp forward: %v", dialErr)
+	}
+	conn.Close()
+}
+
+func TestProxyStart_WithTCPForwards_NilHandler(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	// No TCP handler configured.
+	cs := setupProxyStartTestSession(t, manager, nil, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"tcp_forwards": map[string]any{
+			"0": "127.0.0.1:9999",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when TCP handler is not initialized")
+	}
+}
+
+func TestProxyStart_WithTCPForwards_InvalidTarget(t *testing.T) {
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+
+	tcpHandler := &mockTCPHandler{}
+	cs := setupProxyStartTestSessionWithTCPHandler(t, manager, nil, nil, tcpHandler)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"tcp_forwards": map[string]any{
+			"0": "invalid-target", // missing port
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid tcp_forwards target")
+	}
+}
+
+// setupProxyStartTestSessionWithTCPHandler creates an MCP client session with Manager,
+// CaptureScope, PassthroughList, and TCP handler for testing the proxy_start tool.
+func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	var opts []ServerOption
+	if scope != nil {
+		opts = append(opts, WithCaptureScope(scope))
+	}
+	if pl != nil {
+		opts = append(opts, WithPassthroughList(pl))
+	}
+	if tcpHandler != nil {
+		opts = append(opts, WithTCPHandler(tcpHandler))
+	}
+
+	s := NewServer(ctx, nil, nil, manager, opts...)
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
 }
 
 func TestValidateLoopbackAddr(t *testing.T) {
