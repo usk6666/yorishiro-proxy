@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
 )
@@ -133,6 +134,25 @@ func fromTransformRules(rulesList []rules.Rule) []transformRuleOutput {
 	return out
 }
 
+// validateTransformRuleInput checks a transform rule for CRLF injection in
+// header names and values (CWE-113).
+func validateTransformRuleInput(input transformRuleInput) error {
+	switch input.Action.Type {
+	case "add_header", "set_header":
+		if strings.ContainsAny(input.Action.Header, "\r\n") {
+			return fmt.Errorf("rule %q: header name contains CR/LF characters", input.ID)
+		}
+		if strings.ContainsAny(input.Action.Value, "\r\n") {
+			return fmt.Errorf("rule %q: header value contains CR/LF characters", input.ID)
+		}
+	case "remove_header":
+		if strings.ContainsAny(input.Action.Header, "\r\n") {
+			return fmt.Errorf("rule %q: header name contains CR/LF characters", input.ID)
+		}
+	}
+	return nil
+}
+
 // applyTransformRules validates and sets auto-transform rules from the input.
 func (s *Server) applyTransformRules(inputs []transformRuleInput) error {
 	if s.transformPipeline == nil {
@@ -141,6 +161,9 @@ func (s *Server) applyTransformRules(inputs []transformRuleInput) error {
 
 	rulesList := make([]rules.Rule, len(inputs))
 	for i, input := range inputs {
+		if err := validateTransformRuleInput(input); err != nil {
+			return err
+		}
 		rulesList[i] = toTransformRule(input)
 	}
 

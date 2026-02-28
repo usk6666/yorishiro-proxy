@@ -36,6 +36,30 @@ var allowedSchemes = map[string]bool{
 	"https": true,
 }
 
+// validateHeaderValues checks that header keys and values do not contain CR or LF
+// characters, which would enable HTTP header injection (CWE-113).
+func validateHeaderValues(headers map[string]string) error {
+	for k, v := range headers {
+		if strings.ContainsAny(k, "\r\n") {
+			return fmt.Errorf("header key %q contains CR/LF characters", k)
+		}
+		if strings.ContainsAny(v, "\r\n") {
+			return fmt.Errorf("header value for %q contains CR/LF characters", k)
+		}
+	}
+	return nil
+}
+
+// validateHeaderKeys checks that header key names do not contain CR or LF characters.
+func validateHeaderKeys(keys []string) error {
+	for _, k := range keys {
+		if strings.ContainsAny(k, "\r\n") {
+			return fmt.Errorf("header key %q contains CR/LF characters", k)
+		}
+	}
+	return nil
+}
+
 // httpDoer abstracts HTTP request execution for testability.
 type httpDoer interface {
 	Do(req *http.Request) (*http.Response, error)
