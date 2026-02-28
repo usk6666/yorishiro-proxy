@@ -25,6 +25,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/katashiro-proxy/internal/session"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -56,7 +57,13 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.RetentionMaxAge, "retention-max-age", cfg.RetentionMaxAge, "max session age (e.g. 720h for 30 days, 0 = unlimited)")
 	flag.DurationVar(&cfg.CleanupInterval, "cleanup-interval", cfg.CleanupInterval, "interval between automatic cleanup runs (0 = disabled)")
 	flag.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (no file persistence)")
+	flag.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "MCP Streamable HTTP server listen address (e.g. :3000)")
 	flag.Parse()
+
+	// Allow KP_MCP_HTTP_ADDR environment variable as fallback when no flag is set.
+	if cfg.MCPHTTPAddr == "" {
+		cfg.MCPHTTPAddr = os.Getenv("KP_MCP_HTTP_ADDR")
+	}
 
 	// Initialize logger.
 	// In stdio mode, logs go to stderr by default (the logging package never
@@ -164,15 +171,18 @@ func run(ctx context.Context) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	if stdio {
-		return runStdio(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, logger)
+		return runStdio(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, cfg.DBPath, cfg.MCPHTTPAddr, logger)
 	}
 
 	return runProxy(ctx, cfg, manager, logger)
 }
 
-// runStdio starts the MCP server on stdin/stdout. The proxy is not started
-// automatically; use the proxy_start tool to begin intercepting traffic.
-func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, logger *slog.Logger) error {
+// runStdio starts the MCP server on stdin/stdout. When mcpHTTPAddr is non-empty,
+// a Streamable HTTP transport is also started concurrently on that address.
+// Both transports share the same MCP server instance, Manager, Store, and CA.
+// The proxy is not started automatically; use the proxy_start tool to begin
+// intercepting traffic.
+func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, dbPath string, mcpHTTPAddr string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager,
@@ -186,18 +196,39 @@ func runStdio(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store sessi
 		mcp.WithFuzzStore(fuzzStore),
 		mcp.WithIssuer(issuer),
 	)
-	transport := &gomcp.StdioTransport{}
 
-	if err := mcpServer.Run(ctx, transport); err != nil {
-		// Context cancellation is expected during graceful shutdown.
-		if ctx.Err() != nil {
-			logger.Info("MCP server stopped")
-			return nil
+	g, gctx := errgroup.WithContext(ctx)
+
+	// Always start stdio transport (single session via Server.Run).
+	g.Go(func() error {
+		transport := &gomcp.StdioTransport{}
+		if err := mcpServer.Run(gctx, transport); err != nil {
+			// Context cancellation is expected during graceful shutdown.
+			if gctx.Err() != nil {
+				logger.Info("MCP stdio server stopped")
+				return nil
+			}
+			return fmt.Errorf("MCP stdio server: %w", err)
 		}
-		return fmt.Errorf("MCP server: %w", err)
+		return nil
+	})
+
+	// Optionally start Streamable HTTP transport (multi-session via Server.Connect).
+	if mcpHTTPAddr != "" {
+		g.Go(func() error {
+			if err := mcpServer.RunHTTP(gctx, mcpHTTPAddr); err != nil {
+				// Context cancellation is expected during graceful shutdown.
+				if gctx.Err() != nil {
+					logger.Info("MCP HTTP server stopped")
+					return nil
+				}
+				return err
+			}
+			return nil
+		})
 	}
 
-	return nil
+	return g.Wait()
 }
 
 // runProxy starts the proxy directly without an MCP server.
