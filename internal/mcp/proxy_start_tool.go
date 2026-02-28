@@ -36,6 +36,11 @@ type captureScopeInput struct {
 
 // proxyStartInput is the input for the proxy_start tool.
 type proxyStartInput struct {
+	// Name is an optional name for this listener instance.
+	// Allows running multiple listeners simultaneously with different names.
+	// Defaults to "default" if empty.
+	Name string `json:"name,omitempty" jsonschema:"listener name for multi-listener support, defaults to 'default' if omitted"`
+
 	// ListenAddr is the TCP address to listen on (e.g. "127.0.0.1:8080", "127.0.0.1:9090").
 	// Defaults to "127.0.0.1:8080" if empty.
 	ListenAddr string `json:"listen_addr,omitempty" jsonschema:"TCP address to listen on, defaults to 127.0.0.1:8080 if omitted"`
@@ -92,6 +97,8 @@ type proxyStartInput struct {
 
 // proxyStartResult is the structured output of the proxy_start tool.
 type proxyStartResult struct {
+	// Name is the listener name.
+	Name string `json:"name"`
 	// ListenAddr is the actual address the proxy is listening on.
 	ListenAddr string `json:"listen_addr"`
 	// Status indicates the proxy state after the operation.
@@ -106,9 +113,11 @@ type proxyStartResult struct {
 func (s *Server) registerProxyStart() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "proxy_start",
-		Description: "Start the proxy server with optional configuration. " +
+		Description: "Start a proxy listener with optional configuration. " +
+			"Supports multiple simultaneous listeners with different names (use 'name' parameter). " +
 			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS traffic. " +
-			"Accepts optional upstream_proxy to route all traffic through an upstream proxy (http://host:port or socks5://[user:pass@]host:port), " +
+			"Accepts optional name to identify this listener (default: 'default'), " +
+			"upstream_proxy to route all traffic through an upstream proxy (http://host:port or socks5://[user:pass@]host:port), " +
 			"capture_scope to control which requests are recorded, " +
 			"tls_passthrough to specify domains that bypass TLS interception, " +
 			"intercept_rules to define conditions for intercepting requests/responses, " +
@@ -118,7 +127,7 @@ func (s *Server) registerProxyStart() {
 			"max_connections to set the concurrent connection limit (default: 1024), " +
 			"peek_timeout_ms for protocol detection timeout (default: 30000ms), " +
 			"and request_timeout_ms for HTTP request header read timeout (default: 60000ms). " +
-			"All fields are optional; defaults: listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, max_connections=1024, peek_timeout_ms=30000, request_timeout_ms=60000.",
+			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, max_connections=1024, peek_timeout_ms=30000, request_timeout_ms=60000.",
 	}, s.handleProxyStart)
 }
 
@@ -215,7 +224,13 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
 	}
 
-	if err := s.manager.Start(s.appCtx, input.ListenAddr); err != nil {
+	// Resolve listener name (default: "default").
+	listenerName := input.Name
+	if listenerName == "" {
+		listenerName = proxy.DefaultListenerName
+	}
+
+	if err := s.manager.StartNamed(s.appCtx, listenerName, input.ListenAddr); err != nil {
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
 	}
 
@@ -225,16 +240,27 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		// upstream to connect to for each local port.
 		s.tcpHandler.SetForwards(input.TCPForwards)
 
-		if err := s.manager.StartTCPForwards(s.appCtx, input.TCPForwards, s.tcpHandler); err != nil {
-			// Stop the main proxy since forward listeners failed.
-			s.manager.Stop(ctx)
+		if err := s.manager.StartTCPForwardsNamed(s.appCtx, listenerName, input.TCPForwards, s.tcpHandler); err != nil {
+			// Stop the listener since forward listeners failed.
+			s.manager.StopNamed(ctx, listenerName)
 			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
 		}
 	}
 
 	_, addr := s.manager.Status()
+	// For named listeners that are not the default, get address from ListenerStatuses.
+	if listenerName != proxy.DefaultListenerName {
+		statuses := s.manager.ListenerStatuses()
+		for _, st := range statuses {
+			if st.Name == listenerName {
+				addr = st.ListenAddr
+				break
+			}
+		}
+	}
 
 	result := &proxyStartResult{
+		Name:        listenerName,
 		ListenAddr:  addr,
 		Status:      "running",
 		TCPForwards: input.TCPForwards,
