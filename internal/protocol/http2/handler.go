@@ -13,12 +13,14 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
 
+	protogrpc "github.com/usk6666/katashiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/session"
 )
@@ -40,6 +42,10 @@ type Handler struct {
 
 	// scope controls which requests are recorded.
 	scope *proxy.CaptureScope
+
+	// grpcHandler processes gRPC session recording when Content-Type: application/grpc
+	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
+	grpcHandler *protogrpc.Handler
 }
 
 // NewHandler creates a new HTTP/2 handler with session recording.
@@ -75,6 +81,13 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 // are recorded to the session store.
 func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
 	h.scope = scope
+}
+
+// SetGRPCHandler sets the gRPC handler used for gRPC-specific session recording.
+// When set, streams with Content-Type: application/grpc are recorded as gRPC
+// sessions with parsed service/method metadata instead of plain HTTP/2.
+func (h *Handler) SetGRPCHandler(gh *protogrpc.Handler) {
+	h.grpcHandler = gh
 }
 
 // Name returns the protocol name for h2c (cleartext HTTP/2).
@@ -300,9 +313,6 @@ func (h *Handler) handleStream(
 		tlsCertSubject = resp.TLS.PeerCertificates[0].Subject.String()
 	}
 
-	// Determine protocol label for session recording.
-	protocol := "HTTP/2"
-
 	// Record session.
 	reqURL := &url.URL{
 		Scheme:   scheme,
@@ -312,58 +322,101 @@ func (h *Handler) handleStream(
 		Fragment: req.URL.Fragment,
 	}
 
-	if h.store != nil && h.shouldCapture(req.Method, reqURL) {
-		sess := &session.Session{
-			ConnID:      connID,
-			Protocol:    protocol,
-			SessionType: "unary",
-			State:       "complete",
-			Timestamp:   start,
-			Duration:    duration,
-			ConnInfo: &session.ConnectionInfo{
+	if h.shouldCapture(req.Method, reqURL) {
+		// Check if this is a gRPC request and delegate to the gRPC handler.
+		isGRPC := h.grpcHandler != nil && isGRPCContentType(req.Header.Get("Content-Type"))
+
+		if isGRPC {
+			// Collect trailers from the response.
+			var trailers map[string][]string
+			if resp.Trailer != nil {
+				trailers = make(map[string][]string, len(resp.Trailer))
+				for k, vals := range resp.Trailer {
+					trailers[k] = vals
+				}
+			}
+
+			info := &protogrpc.StreamInfo{
+				ConnID:               connID,
 				ClientAddr:           clientAddr,
 				ServerAddr:           serverAddr,
+				Method:               req.Method,
+				URL:                  reqURL,
+				RequestHeaders:       req.Header,
+				ResponseHeaders:      resp.Header,
+				Trailers:             trailers,
+				RequestBody:          reqBody,
+				ResponseBody:         fullRespBody,
+				StatusCode:           resp.StatusCode,
+				Start:                start,
+				Duration:             duration,
 				TLSVersion:           tlsMeta.Version,
 				TLSCipher:            tlsMeta.CipherSuite,
 				TLSALPN:              tlsMeta.ALPN,
 				TLSServerCertSubject: tlsCertSubject,
-			},
-		}
-		if err := h.store.SaveSession(ctx, sess); err != nil {
-			logger.Error("HTTP/2 session save failed", "error", err)
-		} else {
-			sendMsg := &session.Message{
-				SessionID:     sess.ID,
-				Sequence:      0,
-				Direction:     "send",
-				Timestamp:     start,
-				Method:        req.Method,
-				URL:           reqURL,
-				Headers:       req.Header,
-				Body:          recordReqBody,
-				BodyTruncated: reqTruncated,
 			}
-			if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
-				logger.Error("HTTP/2 send message save failed", "error", err)
+			if err := h.grpcHandler.RecordSession(ctx, info); err != nil {
+				logger.Error("gRPC session recording failed", "error", err)
 			}
+		} else if h.store != nil {
+			// Standard HTTP/2 session recording.
+			protocol := "HTTP/2"
+			sess := &session.Session{
+				ConnID:      connID,
+				Protocol:    protocol,
+				SessionType: "unary",
+				State:       "complete",
+				Timestamp:   start,
+				Duration:    duration,
+				ConnInfo: &session.ConnectionInfo{
+					ClientAddr:           clientAddr,
+					ServerAddr:           serverAddr,
+					TLSVersion:           tlsMeta.Version,
+					TLSCipher:            tlsMeta.CipherSuite,
+					TLSALPN:              tlsMeta.ALPN,
+					TLSServerCertSubject: tlsCertSubject,
+				},
+			}
+			if err := h.store.SaveSession(ctx, sess); err != nil {
+				logger.Error("HTTP/2 session save failed", "error", err)
+			} else {
+				sendMsg := &session.Message{
+					SessionID:     sess.ID,
+					Sequence:      0,
+					Direction:     "send",
+					Timestamp:     start,
+					Method:        req.Method,
+					URL:           reqURL,
+					Headers:       req.Header,
+					Body:          recordReqBody,
+					BodyTruncated: reqTruncated,
+				}
+				if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+					logger.Error("HTTP/2 send message save failed", "error", err)
+				}
 
-			recvMsg := &session.Message{
-				SessionID:     sess.ID,
-				Sequence:      1,
-				Direction:     "receive",
-				Timestamp:     start.Add(duration),
-				StatusCode:    resp.StatusCode,
-				Headers:       resp.Header,
-				Body:          recordRespBody,
-				BodyTruncated: respTruncated,
-			}
-			if err := h.store.AppendMessage(ctx, recvMsg); err != nil {
-				logger.Error("HTTP/2 receive message save failed", "error", err)
+				recvMsg := &session.Message{
+					SessionID:     sess.ID,
+					Sequence:      1,
+					Direction:     "receive",
+					Timestamp:     start.Add(duration),
+					StatusCode:    resp.StatusCode,
+					Headers:       resp.Header,
+					Body:          recordRespBody,
+					BodyTruncated: respTruncated,
+				}
+				if err := h.store.AppendMessage(ctx, recvMsg); err != nil {
+					logger.Error("HTTP/2 receive message save failed", "error", err)
+				}
 			}
 		}
 	}
 
-	logger.Info("http/2 request",
+	logProtocol := "http/2"
+	if h.grpcHandler != nil && isGRPCContentType(req.Header.Get("Content-Type")) {
+		logProtocol = "grpc"
+	}
+	logger.Info(logProtocol+" request",
 		"method", req.Method,
 		"url", outURL.String(),
 		"status", resp.StatusCode,
@@ -399,6 +452,15 @@ func (h *Handler) shouldCapture(method string, u *url.URL) bool {
 // falling back to the handler's logger.
 func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 	return proxy.LoggerFromContext(ctx, h.logger)
+}
+
+// isGRPCContentType reports whether the Content-Type indicates a gRPC request.
+func isGRPCContentType(ct string) bool {
+	ct = strings.TrimSpace(ct)
+	if idx := strings.Index(ct, ";"); idx != -1 {
+		ct = strings.TrimSpace(ct[:idx])
+	}
+	return ct == "application/grpc" || strings.HasPrefix(ct, "application/grpc+")
 }
 
 // removeHTTP2HopByHop removes HTTP/2 hop-by-hop and connection-specific

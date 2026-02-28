@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/logging"
 	"github.com/usk6666/katashiro-proxy/internal/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/protocol"
+	protogrpc "github.com/usk6666/katashiro-proxy/internal/protocol/grpc"
 	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
 	protohttp2 "github.com/usk6666/katashiro-proxy/internal/protocol/http2"
 	prototcp "github.com/usk6666/katashiro-proxy/internal/protocol/tcp"
@@ -136,6 +137,10 @@ func run(ctx context.Context) error {
 	http2Handler := protohttp2.NewHandler(store, logger)
 	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	http2Handler.SetCaptureScope(scope)
+
+	// Build gRPC handler and attach to the HTTP/2 handler for gRPC-specific recording.
+	grpcHandler := protogrpc.NewHandler(store, logger)
+	http2Handler.SetGRPCHandler(grpcHandler)
 
 	// Link the HTTP/2 handler to the HTTP handler for h2 ALPN delegation.
 	httpHandler.SetH2Handler(http2Handler)
