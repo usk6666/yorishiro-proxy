@@ -71,7 +71,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&configFile, "config", "", "JSON config file path for proxy defaults (env: KP_CONFIG)")
 
 	// Define flags — only those requiring startup-time decisions.
-	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (env: KP_DB)")
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath,
+		"SQLite database path or project name (env: KP_DB)\n"+
+			"    project name (no ext, no path sep) -> ~/.katashiro-proxy/<name>.db\n"+
+			"    absolute path                      -> used as-is\n"+
+			"    relative path with extension        -> CWD-relative")
 	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "CA certificate file path (env: KP_CA_CERT)")
 	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path (env: KP_CA_KEY)")
 	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (env: KP_CA_EPHEMERAL)")
@@ -94,9 +98,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> KP_LOG_LEVEL).\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy -db pentest-2026                 # project DB: ~/.katashiro-proxy/pentest-2026.db\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy -db /data/project.db             # absolute path: used as-is\n")
+		fmt.Fprintf(fs.Output(), "  KP_DB=client-audit katashiro-proxy               # project name via env var\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy -config proxy.json               # load proxy config from file\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
-		fmt.Fprintf(fs.Output(), "  KP_DB=/data/proxy.db katashiro-proxy              # custom DB via env var\n")
 		fmt.Fprintf(fs.Output(), "  KP_INSECURE=true katashiro-proxy                  # skip TLS verification\n")
 	}
 	// Allow KP_MCP_HTTP_TOKEN environment variable as fallback when no flag is set.
@@ -120,6 +126,13 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 			return fmt.Errorf("load config file: %w", err)
 		}
 	}
+
+	// Apply smart DB path resolution: project name -> ~/.katashiro-proxy/<name>.db.
+	resolvedDBPath, err := config.ResolveDBPath(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("resolve db path: %w", err)
+	}
+	cfg.DBPath = resolvedDBPath
 
 	// Initialize logger.
 	// Logs go to stderr by default (the logging package never writes to stdout),

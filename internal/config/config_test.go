@@ -339,6 +339,187 @@ func TestLoadFile_CaptureScope_RawMessage(t *testing.T) {
 	}
 }
 
+func TestResolveDBPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot resolve home directory: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+		errSub  string // substring expected in error message
+	}{
+		// Empty input -> default path.
+		{
+			name:  "empty returns default path",
+			input: "",
+			want:  filepath.Join(home, ".katashiro-proxy", "katashiro.db"),
+		},
+		// Absolute paths: used as-is.
+		{
+			name:  "absolute path with .db extension",
+			input: "/data/project.db",
+			want:  "/data/project.db",
+		},
+		{
+			name:  "absolute path without extension",
+			input: "/data/myproject",
+			want:  "/data/myproject",
+		},
+		{
+			name:  "absolute path nested",
+			input: "/home/user/katashiro-data/test.sqlite",
+			want:  "/home/user/katashiro-data/test.sqlite",
+		},
+		// Project names: no extension, no path separator.
+		{
+			name:  "simple project name",
+			input: "pentest-2026",
+			want:  filepath.Join(home, ".katashiro-proxy", "pentest-2026.db"),
+		},
+		{
+			name:  "project name with underscores",
+			input: "client_audit_2026",
+			want:  filepath.Join(home, ".katashiro-proxy", "client_audit_2026.db"),
+		},
+		{
+			name:  "project name alphanumeric",
+			input: "project123",
+			want:  filepath.Join(home, ".katashiro-proxy", "project123.db"),
+		},
+		// Names with dots have an extension, so they are CWD-relative (not project names).
+		{
+			name:  "name with dot is CWD-relative (has extension)",
+			input: "pentest.v2",
+			want:  "pentest.v2",
+		},
+		// Relative paths with extensions: CWD-relative (backward compat).
+		{
+			name:  "relative path with .db extension",
+			input: "my-data.db",
+			want:  "my-data.db",
+		},
+		{
+			name:  "relative path with subdirectory and extension",
+			input: "subdir/data.db",
+			want:  "subdir/data.db",
+		},
+		{
+			name:  "relative path with .sqlite extension",
+			input: "test.sqlite",
+			want:  "test.sqlite",
+		},
+		{
+			name:  "relative path dot-slash prefix",
+			input: "./local.db",
+			want:  "./local.db",
+		},
+		// Dot-prefixed names have extensions, so they fall to CWD-relative (not project names).
+		{
+			name:  "dot-dot treated as CWD-relative (has extension)",
+			input: "..",
+			want:  "..",
+		},
+		{
+			name:  "single dot treated as CWD-relative (has extension)",
+			input: ".",
+			want:  ".",
+		},
+		{
+			name:  "leading dot treated as CWD-relative (has extension)",
+			input: ".secret",
+			want:  ".secret",
+		},
+		{
+			name:  "double dot in name treated as CWD-relative (has extension)",
+			input: "foo..bar",
+			want:  "foo..bar",
+		},
+		// Invalid project names: no extension, no path separator, but bad characters.
+		{
+			name:    "contains space",
+			input:   "my project",
+			wantErr: true,
+			errSub:  "not allowed",
+		},
+		{
+			name:    "contains special characters",
+			input:   "proj@2026",
+			wantErr: true,
+			errSub:  "not allowed",
+		},
+		{
+			name:    "contains shell metacharacter",
+			input:   "proj;rm",
+			wantErr: true,
+			errSub:  "not allowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveDBPath(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveDBPath(%q) = %q, want error", tt.input, got)
+				}
+				if tt.errSub != "" && !strings.Contains(err.Error(), tt.errSub) {
+					t.Errorf("error = %q, want substring %q", err.Error(), tt.errSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveDBPath(%q) unexpected error: %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveDBPath(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateProjectName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"valid simple", "myproject", false},
+		{"valid with hyphens", "my-project", false},
+		{"valid with underscores", "my_project", false},
+		{"valid with digits", "project2026", false},
+		{"valid with dots", "v1.0.0", false},
+		{"valid mixed", "client-audit_2026.v2", false},
+		{"valid uppercase", "MyProject", false},
+
+		{"invalid empty", "", true},
+		{"invalid dot", ".", true},
+		{"invalid dotdot", "..", true},
+		{"invalid leading dot", ".hidden", true},
+		{"invalid double dot", "foo..bar", true},
+		{"invalid space", "my project", true},
+		{"invalid slash", "path/name", true},   // won't reach here (has separator)
+		{"invalid at sign", "user@host", true},
+		{"invalid dollar", "price$100", true},
+		{"invalid unicode", "proje\u00e9t", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateProjectName(tt.input)
+			if tt.wantErr && err == nil {
+				t.Errorf("validateProjectName(%q) = nil, want error", tt.input)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("validateProjectName(%q) = %v, want nil", tt.input, err)
+			}
+		})
+	}
+}
+
 func TestLoadFile_UnknownFieldsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "extra.json")
