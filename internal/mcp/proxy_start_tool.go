@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 
@@ -90,6 +91,9 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	if s.manager == nil {
 		return nil, nil, fmt.Errorf("proxy manager is not initialized")
 	}
+
+	// Merge config file defaults for fields not explicitly provided by the caller.
+	s.applyProxyDefaults(&input)
 
 	// Validate listen address format if provided.
 	if input.ListenAddr != "" {
@@ -264,6 +268,49 @@ func validateProtocols(protocols []string) error {
 		}
 	}
 	return nil
+}
+
+// applyProxyDefaults merges config file defaults into the proxy_start input.
+// Fields explicitly provided by the caller (non-zero values) take precedence
+// over config file defaults.
+func (s *Server) applyProxyDefaults(input *proxyStartInput) {
+	if s.proxyDefaults == nil {
+		return
+	}
+	d := s.proxyDefaults
+
+	if input.ListenAddr == "" && d.ListenAddr != "" {
+		input.ListenAddr = d.ListenAddr
+	}
+
+	if input.CaptureScope == nil && len(d.CaptureScope) > 0 {
+		var scope captureScopeInput
+		if json.Unmarshal(d.CaptureScope, &scope) == nil {
+			input.CaptureScope = &scope
+		}
+	}
+
+	if len(input.TLSPassthrough) == 0 && len(d.TLSPassthrough) > 0 {
+		input.TLSPassthrough = d.TLSPassthrough
+	}
+
+	if len(input.InterceptRules) == 0 && len(d.InterceptRules) > 0 {
+		var rules []interceptRuleInput
+		if json.Unmarshal(d.InterceptRules, &rules) == nil {
+			input.InterceptRules = rules
+		}
+	}
+
+	if len(input.AutoTransform) == 0 && len(d.AutoTransform) > 0 {
+		var transforms []transformRuleInput
+		if json.Unmarshal(d.AutoTransform, &transforms) == nil {
+			input.AutoTransform = transforms
+		}
+	}
+
+	if len(input.TCPForwards) == 0 && len(d.TCPForwards) > 0 {
+		input.TCPForwards = d.TCPForwards
+	}
 }
 
 // applyTLSPassthrough validates and adds the TLS passthrough patterns.

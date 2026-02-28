@@ -10,6 +10,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/katashiro-proxy/internal/cert"
+	"github.com/usk6666/katashiro-proxy/internal/config"
 	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
@@ -39,6 +40,7 @@ type Server struct {
 	tcpHandler        tcpForwardHandler    // TCP handler for forward listeners
 	enabledProtocols  []string              // enabled protocols for detection
 	httpMiddleware    func(http.Handler) http.Handler // optional middleware wrapping the HTTP handler
+	proxyDefaults     *config.ProxyConfig  // default proxy config from config file
 }
 
 // tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
@@ -135,6 +137,15 @@ func WithTCPHandler(h tcpForwardHandler) ServerOption {
 func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
 	return func(s *Server) {
 		s.httpMiddleware = mw
+	}
+}
+
+// WithProxyDefaults sets the default proxy configuration loaded from a config file.
+// These defaults are applied to proxy_start invocations when the caller does not
+// explicitly provide a value for a given field.
+func WithProxyDefaults(cfg *config.ProxyConfig) ServerOption {
+	return func(s *Server) {
+		s.proxyDefaults = cfg
 	}
 }
 

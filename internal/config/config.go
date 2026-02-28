@@ -1,6 +1,11 @@
 package config
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"time"
+)
 
 // Config holds the application configuration.
 type Config struct {
@@ -94,4 +99,56 @@ func Default() *Config {
 		MaxConnections:  1024,
 		CleanupInterval: time.Hour,
 	}
+}
+
+// ProxyConfig holds the proxy configuration loaded from a JSON config file.
+// The JSON format is identical to the proxy_start tool's input format,
+// so users can reuse the same JSON structure for both file-based configuration
+// and runtime proxy_start invocations.
+//
+// Complex nested fields (capture_scope, intercept_rules, auto_transform) are
+// stored as json.RawMessage to defer parsing to the MCP layer, avoiding
+// circular dependencies between the config and mcp packages.
+type ProxyConfig struct {
+	// ListenAddr is the TCP address the proxy listens on (e.g. "127.0.0.1:8080").
+	ListenAddr string `json:"listen_addr,omitempty"`
+
+	// CaptureScope configures which requests are recorded to the session store.
+	CaptureScope json.RawMessage `json:"capture_scope,omitempty"`
+
+	// TLSPassthrough is a list of domain patterns that bypass TLS interception.
+	TLSPassthrough []string `json:"tls_passthrough,omitempty"`
+
+	// InterceptRules configures request/response intercept rules.
+	InterceptRules json.RawMessage `json:"intercept_rules,omitempty"`
+
+	// AutoTransform configures auto-transform rules for automatic modification.
+	AutoTransform json.RawMessage `json:"auto_transform,omitempty"`
+
+	// TCPForwards maps local listen ports to upstream TCP addresses.
+	TCPForwards map[string]string `json:"tcp_forwards,omitempty"`
+
+	// UpstreamProxy is the upstream proxy URL for proxy chaining.
+	UpstreamProxy string `json:"upstream_proxy,omitempty"`
+}
+
+// LoadFile reads and parses a JSON config file from the given path.
+// It returns an error if the file does not exist or contains invalid JSON.
+func LoadFile(path string) (*ProxyConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config file %s: %w", path, err)
+	}
+
+	// Validate that the file contains valid JSON before unmarshalling.
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("parse config file %s: invalid JSON", path)
+	}
+
+	var cfg ProxyConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config file %s: %w", path, err)
+	}
+
+	return &cfg, nil
 }

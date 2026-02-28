@@ -8,6 +8,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/katashiro-proxy/internal/config"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 )
 
@@ -1023,5 +1024,359 @@ func TestApplyTLSPassthrough(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Tests for proxy config file default merging via applyProxyDefaults.
+
+func TestApplyProxyDefaults_NilDefaults(t *testing.T) {
+	s := &Server{proxyDefaults: nil}
+	input := proxyStartInput{ListenAddr: "127.0.0.1:0"}
+
+	s.applyProxyDefaults(&input)
+
+	// Should not modify anything when no defaults are set.
+	if input.ListenAddr != "127.0.0.1:0" {
+		t.Errorf("ListenAddr = %q, want %q", input.ListenAddr, "127.0.0.1:0")
+	}
+}
+
+func TestApplyProxyDefaults_ListenAddr(t *testing.T) {
+	s := &Server{
+		proxyDefaults: &config.ProxyConfig{
+			ListenAddr: "127.0.0.1:9090",
+		},
+	}
+
+	t.Run("uses default when not specified", func(t *testing.T) {
+		input := proxyStartInput{}
+		s.applyProxyDefaults(&input)
+		if input.ListenAddr != "127.0.0.1:9090" {
+			t.Errorf("ListenAddr = %q, want %q", input.ListenAddr, "127.0.0.1:9090")
+		}
+	})
+
+	t.Run("caller value takes precedence", func(t *testing.T) {
+		input := proxyStartInput{ListenAddr: "127.0.0.1:7070"}
+		s.applyProxyDefaults(&input)
+		if input.ListenAddr != "127.0.0.1:7070" {
+			t.Errorf("ListenAddr = %q, want %q", input.ListenAddr, "127.0.0.1:7070")
+		}
+	})
+}
+
+func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
+	s := &Server{
+		proxyDefaults: &config.ProxyConfig{
+			TLSPassthrough: []string{"pinned.com", "*.googleapis.com"},
+		},
+	}
+
+	t.Run("uses default when not specified", func(t *testing.T) {
+		input := proxyStartInput{}
+		s.applyProxyDefaults(&input)
+		if len(input.TLSPassthrough) != 2 {
+			t.Fatalf("TLSPassthrough = %v, want 2 entries", input.TLSPassthrough)
+		}
+		if input.TLSPassthrough[0] != "pinned.com" {
+			t.Errorf("TLSPassthrough[0] = %q, want %q", input.TLSPassthrough[0], "pinned.com")
+		}
+	})
+
+	t.Run("caller value takes precedence", func(t *testing.T) {
+		input := proxyStartInput{TLSPassthrough: []string{"custom.com"}}
+		s.applyProxyDefaults(&input)
+		if len(input.TLSPassthrough) != 1 || input.TLSPassthrough[0] != "custom.com" {
+			t.Errorf("TLSPassthrough = %v, want [custom.com]", input.TLSPassthrough)
+		}
+	})
+}
+
+func TestApplyProxyDefaults_TCPForwards(t *testing.T) {
+	s := &Server{
+		proxyDefaults: &config.ProxyConfig{
+			TCPForwards: map[string]string{"3306": "db.example.com:3306"},
+		},
+	}
+
+	t.Run("uses default when not specified", func(t *testing.T) {
+		input := proxyStartInput{}
+		s.applyProxyDefaults(&input)
+		if input.TCPForwards["3306"] != "db.example.com:3306" {
+			t.Errorf("TCPForwards[3306] = %q, want %q", input.TCPForwards["3306"], "db.example.com:3306")
+		}
+	})
+
+	t.Run("caller value takes precedence", func(t *testing.T) {
+		input := proxyStartInput{
+			TCPForwards: map[string]string{"5432": "pg.example.com:5432"},
+		}
+		s.applyProxyDefaults(&input)
+		if _, ok := input.TCPForwards["3306"]; ok {
+			t.Error("default TCPForwards[3306] should not be applied when caller specifies forwards")
+		}
+		if input.TCPForwards["5432"] != "pg.example.com:5432" {
+			t.Errorf("TCPForwards[5432] = %q, want %q", input.TCPForwards["5432"], "pg.example.com:5432")
+		}
+	})
+}
+
+func TestApplyProxyDefaults_CaptureScope(t *testing.T) {
+	scopeJSON := json.RawMessage(`{
+		"includes": [{"hostname": "*.target.com"}],
+		"excludes": [{"hostname": "cdn.example.com"}]
+	}`)
+	s := &Server{
+		proxyDefaults: &config.ProxyConfig{
+			CaptureScope: scopeJSON,
+		},
+	}
+
+	t.Run("uses default when not specified", func(t *testing.T) {
+		input := proxyStartInput{}
+		s.applyProxyDefaults(&input)
+		if input.CaptureScope == nil {
+			t.Fatal("CaptureScope is nil, want non-nil")
+		}
+		if len(input.CaptureScope.Includes) != 1 {
+			t.Errorf("CaptureScope.Includes = %d, want 1", len(input.CaptureScope.Includes))
+		}
+		if input.CaptureScope.Includes[0].Hostname != "*.target.com" {
+			t.Errorf("includes[0].hostname = %q, want %q", input.CaptureScope.Includes[0].Hostname, "*.target.com")
+		}
+	})
+
+	t.Run("caller value takes precedence", func(t *testing.T) {
+		callerScope := &captureScopeInput{
+			Includes: []scopeRuleInput{{Hostname: "custom.com"}},
+		}
+		input := proxyStartInput{CaptureScope: callerScope}
+		s.applyProxyDefaults(&input)
+		if len(input.CaptureScope.Includes) != 1 || input.CaptureScope.Includes[0].Hostname != "custom.com" {
+			t.Errorf("CaptureScope should not be overridden by defaults")
+		}
+	})
+}
+
+func TestApplyProxyDefaults_InterceptRules(t *testing.T) {
+	rulesJSON := json.RawMessage(`[{
+		"id": "default-rule",
+		"enabled": true,
+		"direction": "request",
+		"conditions": {"host_pattern": ".*"}
+	}]`)
+	s := &Server{
+		proxyDefaults: &config.ProxyConfig{
+			InterceptRules: rulesJSON,
+		},
+	}
+
+	t.Run("uses default when not specified", func(t *testing.T) {
+		input := proxyStartInput{}
+		s.applyProxyDefaults(&input)
+		if len(input.InterceptRules) != 1 {
+			t.Fatalf("InterceptRules = %d, want 1", len(input.InterceptRules))
+		}
+		if input.InterceptRules[0].ID != "default-rule" {
+			t.Errorf("InterceptRules[0].ID = %q, want %q", input.InterceptRules[0].ID, "default-rule")
+		}
+	})
+
+	t.Run("caller value takes precedence", func(t *testing.T) {
+		input := proxyStartInput{
+			InterceptRules: []interceptRuleInput{{ID: "custom-rule"}},
+		}
+		s.applyProxyDefaults(&input)
+		if len(input.InterceptRules) != 1 || input.InterceptRules[0].ID != "custom-rule" {
+			t.Error("InterceptRules should not be overridden by defaults")
+		}
+	})
+}
+
+func TestApplyProxyDefaults_AutoTransform(t *testing.T) {
+	transformJSON := json.RawMessage(`[{
+		"id": "default-transform",
+		"enabled": true,
+		"priority": 1,
+		"direction": "request",
+		"conditions": {},
+		"action": {"type": "set_header", "header": "X-Default", "value": "true"}
+	}]`)
+	s := &Server{
+		proxyDefaults: &config.ProxyConfig{
+			AutoTransform: transformJSON,
+		},
+	}
+
+	t.Run("uses default when not specified", func(t *testing.T) {
+		input := proxyStartInput{}
+		s.applyProxyDefaults(&input)
+		if len(input.AutoTransform) != 1 {
+			t.Fatalf("AutoTransform = %d, want 1", len(input.AutoTransform))
+		}
+		if input.AutoTransform[0].ID != "default-transform" {
+			t.Errorf("AutoTransform[0].ID = %q, want %q", input.AutoTransform[0].ID, "default-transform")
+		}
+	})
+
+	t.Run("caller value takes precedence", func(t *testing.T) {
+		input := proxyStartInput{
+			AutoTransform: []transformRuleInput{{ID: "custom-transform"}},
+		}
+		s.applyProxyDefaults(&input)
+		if len(input.AutoTransform) != 1 || input.AutoTransform[0].ID != "custom-transform" {
+			t.Error("AutoTransform should not be overridden by defaults")
+		}
+	})
+}
+
+func TestApplyProxyDefaults_InvalidJSON(t *testing.T) {
+	// Invalid JSON in defaults should be silently ignored (not crash).
+	s := &Server{
+		proxyDefaults: &config.ProxyConfig{
+			CaptureScope:  json.RawMessage(`{invalid`),
+			InterceptRules: json.RawMessage(`[{invalid`),
+			AutoTransform: json.RawMessage(`[{invalid`),
+		},
+	}
+
+	input := proxyStartInput{}
+	s.applyProxyDefaults(&input)
+
+	// All fields should remain at zero values.
+	if input.CaptureScope != nil {
+		t.Error("CaptureScope should be nil for invalid default JSON")
+	}
+	if len(input.InterceptRules) != 0 {
+		t.Error("InterceptRules should be empty for invalid default JSON")
+	}
+	if len(input.AutoTransform) != 0 {
+		t.Error("AutoTransform should be empty for invalid default JSON")
+	}
+}
+
+func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
+	// Integration test: verify that config defaults are applied when proxy_start
+	// is called without arguments via the MCP protocol.
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+
+	proxyCfg := &config.ProxyConfig{
+		ListenAddr:     "127.0.0.1:0",
+		TLSPassthrough: []string{"default-pinned.com"},
+	}
+
+	ctx := context.Background()
+	s := NewServer(ctx, nil, nil, manager,
+		WithCaptureScope(scope),
+		WithPassthroughList(pl),
+		WithProxyDefaults(proxyCfg),
+	)
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	// Call proxy_start without any arguments — defaults from config should apply.
+	result, err := callProxyStart(t, cs, nil)
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	out := unmarshalProxyStartResult(t, result)
+	if out.Status != "running" {
+		t.Errorf("status = %q, want %q", out.Status, "running")
+	}
+
+	// Verify TLS passthrough defaults were applied.
+	if pl.Len() != 1 {
+		t.Errorf("passthrough len = %d, want 1", pl.Len())
+	}
+	if !pl.Contains("default-pinned.com") {
+		t.Error("expected passthrough to contain default-pinned.com from config defaults")
+	}
+}
+
+func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
+	// Integration test: verify that caller arguments override config file defaults.
+	logger := newTestLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+
+	proxyCfg := &config.ProxyConfig{
+		ListenAddr:     "127.0.0.1:0",
+		TLSPassthrough: []string{"default-pinned.com"},
+	}
+
+	ctx := context.Background()
+	s := NewServer(ctx, nil, nil, manager,
+		WithCaptureScope(scope),
+		WithPassthroughList(pl),
+		WithProxyDefaults(proxyCfg),
+	)
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	// Call proxy_start WITH explicit tls_passthrough — should override config defaults.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"tls_passthrough": []any{"caller-pinned.com"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	// Verify caller's passthrough was applied, NOT the default.
+	if pl.Len() != 1 {
+		t.Errorf("passthrough len = %d, want 1", pl.Len())
+	}
+	if !pl.Contains("caller-pinned.com") {
+		t.Error("expected passthrough to contain caller-pinned.com")
+	}
+	if pl.Contains("default-pinned.com") {
+		t.Error("default-pinned.com from config should not be applied when caller specifies passthrough")
 	}
 }
