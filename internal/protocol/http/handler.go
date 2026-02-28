@@ -13,6 +13,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/usk6666/katashiro-proxy/internal/cert"
@@ -106,7 +107,7 @@ type Handler struct {
 	issuer            *cert.Issuer
 	transport         *gohttp.Transport
 	logger            *slog.Logger
-	requestTimeout    time.Duration
+	requestTimeoutNs  atomic.Int64 // nanoseconds; read/written atomically
 	passthrough       *proxy.PassthroughList
 	scope             *proxy.CaptureScope
 	interceptEngine   *intercept.Engine
@@ -153,8 +154,10 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 }
 
 // SetRequestTimeout sets the timeout for reading HTTP request headers.
+// The value is stored atomically so it can be changed concurrently
+// while connections are being processed.
 func (h *Handler) SetRequestTimeout(d time.Duration) {
-	h.requestTimeout = d
+	h.requestTimeoutNs.Store(int64(d))
 }
 
 // RequestTimeout returns the effective request timeout.
@@ -238,8 +241,8 @@ func (h *Handler) UpstreamProxy() *url.URL {
 }
 
 func (h *Handler) effectiveRequestTimeout() time.Duration {
-	if h.requestTimeout > 0 {
-		return h.requestTimeout
+	if d := time.Duration(h.requestTimeoutNs.Load()); d > 0 {
+		return d
 	}
 	return defaultRequestTimeout
 }
