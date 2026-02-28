@@ -1051,6 +1051,10 @@ func (s *failingStore) DeleteAllSessions(_ context.Context) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
+func (s *failingStore) DeleteSessionsByProtocol(_ context.Context, _ string) (int64, error) {
+	return 0, errors.New("simulated DB write failure")
+}
+
 func (s *failingStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }

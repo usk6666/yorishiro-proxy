@@ -65,8 +65,9 @@ type executeParams struct {
 	Patches           []RawPatch `json:"patches,omitempty" jsonschema:"byte-level patches for resend_raw (offset, binary find/replace, text find/replace)"`
 
 	// delete_sessions parameters
-	OlderThanDays *int `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
-	Confirm       bool `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
+	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
+	Confirm       bool   `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
+	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_sessions (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)"`
 
 	// intercept queue parameters (release, modify_and_forward, drop)
 	InterceptID string `json:"intercept_id,omitempty" jsonschema:"intercepted request ID for release/modify_and_forward/drop"`
@@ -113,7 +114,7 @@ func (s *Server) registerExecute() {
 			"For WebSocket sessions, use message_sequence to specify which message to resend as a raw TCP frame; " +
 			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
 			"'tcp_replay' replays a Raw TCP session by sending all 'send' messages sequentially to the target; " +
-			"'delete_sessions' deletes sessions by ID, by age (older_than_days), or all (confirm required); " +
+			"'delete_sessions' deletes sessions by ID, by age (older_than_days), by protocol, or all (confirm required); " +
 			"'release' forwards an intercepted request as-is (requires intercept_id); " +
 			"'modify_and_forward' forwards an intercepted request with mutations (same override params as resend, requires intercept_id); " +
 			"'drop' discards an intercepted request returning 502 to the client (requires intercept_id); " +
@@ -860,7 +861,8 @@ type executeDeleteSessionsResult struct {
 }
 
 // handleExecuteDeleteSessions handles the delete_sessions action within the execute tool.
-// It supports single ID deletion, all-session deletion (with confirm), and age-based deletion.
+// It supports single ID deletion, protocol-based deletion, all-session deletion (with confirm),
+// and age-based deletion.
 func (s *Server) handleExecuteDeleteSessions(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeDeleteSessionsResult, error) {
 	if s.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
@@ -898,6 +900,18 @@ func (s *Server) handleExecuteDeleteSessions(ctx context.Context, params execute
 		return nil, &executeDeleteSessionsResult{DeletedCount: 1}, nil
 	}
 
+	// Protocol-based deletion (requires confirm).
+	if params.Protocol != "" {
+		if !params.Confirm {
+			return nil, nil, fmt.Errorf("confirm must be true to proceed with protocol-based deletion")
+		}
+		n, err := s.store.DeleteSessionsByProtocol(ctx, params.Protocol)
+		if err != nil {
+			return nil, nil, fmt.Errorf("delete sessions by protocol: %w", err)
+		}
+		return nil, &executeDeleteSessionsResult{DeletedCount: n}, nil
+	}
+
 	// All-session deletion (requires confirm).
 	if params.Confirm {
 		n, err := s.store.DeleteAllSessions(ctx)
@@ -907,7 +921,7 @@ func (s *Server) handleExecuteDeleteSessions(ctx context.Context, params execute
 		return nil, &executeDeleteSessionsResult{DeletedCount: n}, nil
 	}
 
-	return nil, nil, fmt.Errorf("delete_sessions requires one of: session_id, older_than_days, or confirm=true for all deletion")
+	return nil, nil, fmt.Errorf("delete_sessions requires one of: session_id, older_than_days, protocol (with confirm), or confirm=true for all deletion")
 }
 
 // --- Intercept queue actions ---

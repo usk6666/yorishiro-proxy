@@ -327,6 +327,20 @@ func (s *SQLiteStore) DeleteAllSessions(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// DeleteSessionsByProtocol removes sessions matching the given protocol.
+func (s *SQLiteStore) DeleteSessionsByProtocol(ctx context.Context, protocol string) (int64, error) {
+	result, err := s.db.ExecContext(ctx,
+		"DELETE FROM sessions WHERE protocol = ?", protocol)
+	if err != nil {
+		return 0, fmt.Errorf("delete sessions by protocol %q: %w", protocol, err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // DeleteSessionsOlderThan removes sessions with timestamps before the given cutoff.
 func (s *SQLiteStore) DeleteSessionsOlderThan(ctx context.Context, before time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx,

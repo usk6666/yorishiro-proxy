@@ -88,6 +88,10 @@ func (m *mockStore) DeleteSession(_ context.Context, id string) error { return n
 
 func (m *mockStore) DeleteAllSessions(_ context.Context) (int64, error) { return 0, nil }
 
+func (m *mockStore) DeleteSessionsByProtocol(_ context.Context, _ string) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
