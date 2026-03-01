@@ -156,7 +156,7 @@ func newHTTPMCPClient(t *testing.T, ctx context.Context, addr, token string) *go
 	}
 
 	transport := &gomcp.StreamableClientTransport{
-		Endpoint:            fmt.Sprintf("http://%s/", addr),
+		Endpoint:            fmt.Sprintf("http://%s/mcp", addr),
 		HTTPClient:          httpClient,
 		MaxRetries:          -1,   // disable retries for tests
 		DisableStandaloneSSE: true, // simpler for tests
@@ -438,7 +438,7 @@ func TestM5_BearerTokenAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req, err := http.NewRequest(http.MethodPost,
-				fmt.Sprintf("http://%s/", env.addr),
+				fmt.Sprintf("http://%s/mcp", env.addr),
 				strings.NewReader(initPayload))
 			if err != nil {
 				t.Fatalf("create request: %v", err)
@@ -493,7 +493,7 @@ func TestM5_BearerTokenAuth_MCPClientConnect(t *testing.T) {
 		},
 	}
 	badTransport := &gomcp.StreamableClientTransport{
-		Endpoint:            fmt.Sprintf("http://%s/", env.addr),
+		Endpoint:            fmt.Sprintf("http://%s/mcp", env.addr),
 		HTTPClient:          badHTTPClient,
 		MaxRetries:          -1,
 		DisableStandaloneSSE: true,

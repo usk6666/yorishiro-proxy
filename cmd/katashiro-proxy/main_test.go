@@ -402,6 +402,7 @@ func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) *string {
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "")
 	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "")
+	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "")
 	return &configFile
 }
 
@@ -487,6 +488,19 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 			envVars: map[string]string{"KP_MCP_HTTP_TOKEN": "secret-token"},
 			field:   "MCPHTTPToken",
 			want:    "secret-token",
+		},
+		{
+			name:    "ui-dir env var fallback",
+			envVars: map[string]string{"KP_UI_DIR": "/tmp/webui"},
+			field:   "UIDir",
+			want:    "/tmp/webui",
+		},
+		{
+			name:     "ui-dir flag overrides env",
+			flagArgs: []string{"-ui-dir", "/opt/ui"},
+			envVars:  map[string]string{"KP_UI_DIR": "/tmp/webui"},
+			field:    "UIDir",
+			want:     "/opt/ui",
 		},
 		{
 			name:    "empty env var does not override default",
@@ -686,6 +700,8 @@ func getStringConfigField(cfg *config.Config, field string) string {
 		return cfg.MCPHTTPAddr
 	case "MCPHTTPToken":
 		return cfg.MCPHTTPToken
+	case "UIDir":
+		return cfg.UIDir
 	default:
 		return ""
 	}
