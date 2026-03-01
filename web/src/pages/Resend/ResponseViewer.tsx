@@ -1,17 +1,8 @@
 import { useState } from "react";
 import type { SessionDetailResult } from "../../lib/mcp/types.js";
+import type { ResendResult } from "./ResendPage.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import "./ResponseViewer.css";
-
-/** Resend result shape. */
-interface ResendResult {
-  response_status_code?: number;
-  response_headers?: Record<string, string[]>;
-  response_body?: string;
-  response_body_encoding?: string;
-  duration_ms?: number;
-  dry_run?: boolean;
-}
 
 /** Tabs for the response viewer. */
 const RESPONSE_TABS = [
@@ -38,7 +29,9 @@ export function ResponseViewer({ response, originalSession }: ResponseViewerProp
         {activeTab === "body" && (
           <div className="response-body-view">
             <pre className="response-body-content">
-              {response.response_body || "(empty body)"}
+              {response.response_body_encoding === "base64"
+                ? "(Binary content, base64 encoded)"
+                : response.response_body || "(empty body)"}
             </pre>
           </div>
         )}

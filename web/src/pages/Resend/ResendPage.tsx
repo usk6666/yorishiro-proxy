@@ -35,7 +35,7 @@ const REQUEST_TABS = [
 ];
 
 /** Resend result from MCP execute. */
-interface ResendResult {
+export interface ResendResult {
   session_id?: string;
   method?: string;
   url?: string;
@@ -146,10 +146,14 @@ export function ResendPage() {
       }
 
       // Build override_headers from the key-value pairs.
+      // Merge duplicate header names by joining values with ", ".
       const overrideHeaders: Record<string, string> = {};
       for (const h of headers) {
-        if (h.key.trim()) {
-          overrideHeaders[h.key.trim()] = h.value;
+        const key = h.key.trim();
+        if (key) {
+          overrideHeaders[key] = key in overrideHeaders
+            ? `${overrideHeaders[key]}, ${h.value}`
+            : h.value;
         }
       }
 
