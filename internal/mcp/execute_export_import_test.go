@@ -11,7 +11,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // --- validateFilePath unit tests ---
@@ -303,7 +303,7 @@ func TestExportSessionsAction_AtomicWrite(t *testing.T) {
 		t.Fatalf("ReadDir: %v", err)
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".katashiro-export-") && strings.HasSuffix(e.Name(), ".tmp") {
+		if strings.HasPrefix(e.Name(), ".yorishiro-export-") && strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("temp file not cleaned up: %s", e.Name())
 		}
 	}

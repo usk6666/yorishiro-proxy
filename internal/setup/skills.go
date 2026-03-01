@@ -12,11 +12,11 @@ import (
 //go:embed skilldata
 var skillFS embed.FS
 
-// InstallSkills copies embedded katashiro skill files to the project's
-// .claude/skills/katashiro/ directory. If the directory already exists,
+// InstallSkills copies embedded yorishiro skill files to the project's
+// .claude/skills/yorishiro/ directory. If the directory already exists,
 // existing files are backed up before overwriting.
 func InstallSkills(projectDir string, now time.Time) (installed []string, backupPath string, err error) {
-	targetDir := filepath.Join(projectDir, ".claude", "skills", "katashiro")
+	targetDir := filepath.Join(projectDir, ".claude", "skills", "yorishiro")
 
 	// Check if skills already exist and back up if needed.
 	if info, statErr := os.Stat(targetDir); statErr == nil && info.IsDir() {

@@ -3,7 +3,7 @@ package mcp
 import (
 	"context"
 
-	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 )
 
 // fuzzHookCallbacks implements fuzzer.HookCallbacks by delegating to the

@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 )
 
 // setupTransformTestSession creates a connected MCP client session for auto-transform rule tests.
@@ -335,7 +335,7 @@ func TestConfigure_AutoTransform_Replace(t *testing.T) {
 						Action: transformActionInput{
 							Type:   "set_header",
 							Header: "X-Proxy",
-							Value:  "katashiro",
+							Value:  "yorishiro",
 						},
 					},
 				},

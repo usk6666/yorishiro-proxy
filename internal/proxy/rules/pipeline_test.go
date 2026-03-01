@@ -476,7 +476,7 @@ func TestPipeline_TransformRequest_BothDirection(t *testing.T) {
 		Action: Action{
 			Type:   ActionAddHeader,
 			Header: "X-Proxy",
-			Value:  "katashiro",
+			Value:  "yorishiro",
 		},
 	})
 
@@ -485,7 +485,7 @@ func TestPipeline_TransformRequest_BothDirection(t *testing.T) {
 
 	headers, _ = p.TransformRequest("GET", u, headers, nil)
 
-	if got := headers.Get("X-Proxy"); got != "katashiro" {
+	if got := headers.Get("X-Proxy"); got != "yorishiro" {
 		t.Errorf("both-direction rule should apply to requests, got %q", got)
 	}
 }
@@ -648,13 +648,13 @@ func TestPipeline_TransformResponse_BothDirection(t *testing.T) {
 
 	p.AddRule(Rule{
 		ID: "both-dir", Enabled: true, Priority: 0, Direction: DirectionBoth,
-		Action: Action{Type: ActionAddHeader, Header: "X-Proxy", Value: "katashiro"},
+		Action: Action{Type: ActionAddHeader, Header: "X-Proxy", Value: "yorishiro"},
 	})
 
 	headers := http.Header{}
 	headers, _ = p.TransformResponse(200, headers, nil)
 
-	if got := headers.Get("X-Proxy"); got != "katashiro" {
+	if got := headers.Get("X-Proxy"); got != "yorishiro" {
 		t.Errorf("both-direction rule should apply to responses, got %q", got)
 	}
 }

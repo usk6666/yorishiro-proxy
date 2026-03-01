@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // defaultListLimit is the default number of sessions returned when limit is not specified.

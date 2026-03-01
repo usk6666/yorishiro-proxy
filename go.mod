@@ -1,4 +1,4 @@
-module github.com/usk6666/katashiro-proxy
+module github.com/usk6666/yorishiro-proxy
 
 go 1.25.4
 

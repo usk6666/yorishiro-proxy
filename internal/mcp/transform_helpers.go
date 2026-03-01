@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 )
 
 // transformRuleInput is the JSON representation of an auto-transform rule for MCP tool input.

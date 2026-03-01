@@ -1,11 +1,11 @@
 ---
-description: "katashiro-proxy を使った脆弱性検証ワークフロー"
+description: "yorishiro-proxy を使った脆弱性検証ワークフロー"
 user-invokable: true
 ---
 
-# /katashiro
+# /yorishiro
 
-katashiro-proxy (MCP プロキシ) を使った脆弱性検証を支援するスキル。
+yorishiro-proxy (MCP プロキシ) を使った脆弱性検証を支援するスキル。
 ソースコードレビューで検出された脆弱性を実環境で検証するユースケースに特化。
 
 ## トリガー
@@ -20,7 +20,7 @@ katashiro-proxy (MCP プロキシ) を使った脆弱性検証を支援するス
 
 ## MCP ツール概要
 
-katashiro-proxy は 5 つの MCP ツールを提供する:
+yorishiro-proxy は 5 つの MCP ツールを提供する:
 
 | ツール | 用途 |
 |--------|------|

@@ -18,10 +18,10 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/cert"
-	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // executeInput is the typed input for the execute tool.
@@ -1431,7 +1431,7 @@ func (s *Server) handleExecuteExportSessions(ctx context.Context, params execute
 		// for atomic writes. This prevents partial files on failure.
 		dir := filepath.Dir(cleanPath)
 		// S-8: create temp file with 0600 permissions.
-		tmpFile, err := os.CreateTemp(dir, ".katashiro-export-*.tmp")
+		tmpFile, err := os.CreateTemp(dir, ".yorishiro-export-*.tmp")
 		if err != nil {
 			return nil, fmt.Errorf("create temp file for export: %w", err)
 		}

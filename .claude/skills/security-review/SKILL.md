@@ -5,7 +5,7 @@ user-invokable: true
 
 # /security-review
 
-katashiro-proxy のコードに対してセキュリティレビューを実施するスキル。
+yorishiro-proxy のコードに対してセキュリティレビューを実施するスキル。
 
 ## 引数パターン
 

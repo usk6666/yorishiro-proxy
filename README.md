@@ -1,4 +1,4 @@
-# katashiro-proxy
+# yorishiro-proxy
 
 **Status**: Proprietary / In Development
 
@@ -37,9 +37,9 @@ Designed for use with Claude Code and other MCP-compatible AI agents: the agent 
 ### 1. Build
 
 ```bash
-git clone https://github.com/usk6666/katashiro-proxy.git
-cd katashiro-proxy
-make build    # outputs bin/katashiro-proxy
+git clone https://github.com/usk6666/yorishiro-proxy.git
+cd yorishiro-proxy
+make build    # outputs bin/yorishiro-proxy
 ```
 
 ### 2. Configure MCP
@@ -49,8 +49,8 @@ Add the following to your `.mcp.json` (Claude Code) or equivalent MCP client con
 ```json
 {
   "mcpServers": {
-    "katashiro-proxy": {
-      "command": "/path/to/bin/katashiro-proxy",
+    "yorishiro-proxy": {
+      "command": "/path/to/bin/yorishiro-proxy",
       "args": []
     }
   }
@@ -62,15 +62,15 @@ Common flag combinations:
 ```json
 {
   "mcpServers": {
-    "katashiro-proxy": {
-      "command": "/path/to/bin/katashiro-proxy",
-      "args": ["-db", "my-project", "-log-file", "/tmp/katashiro-proxy.log"]
+    "yorishiro-proxy": {
+      "command": "/path/to/bin/yorishiro-proxy",
+      "args": ["-db", "my-project", "-log-file", "/tmp/yorishiro-proxy.log"]
     }
   }
 }
 ```
 
-The proxy starts as an MCP server on stdin/stdout. No additional setup is required -- the CA certificate is automatically generated and persisted to `~/.katashiro-proxy/ca/` on first run.
+The proxy starts as an MCP server on stdin/stdout. No additional setup is required -- the CA certificate is automatically generated and persisted to `~/.yorishiro-proxy/ca/` on first run.
 
 ### 3. First Capture
 
@@ -100,20 +100,20 @@ All proxy operations are exposed through five MCP tools:
 
 | Flag | Env Variable | Default | Description |
 |------|-------------|---------|-------------|
-| `-db` | `KP_DB` | `~/.katashiro-proxy/katashiro.db` | SQLite database path or project name |
-| `-ca-cert` / `-ca-key` | `KP_CA_CERT` / `KP_CA_KEY` | (empty) | CA certificate and private key paths |
-| `-ca-ephemeral` | `KP_CA_EPHEMERAL` | `false` | Use ephemeral in-memory CA |
-| `-insecure` | `KP_INSECURE` | `false` | Skip upstream TLS verification |
-| `-config` | `KP_CONFIG` | (empty) | JSON config file path for proxy defaults |
-| `-log-level` | `KP_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
-| `-log-format` | `KP_LOG_FORMAT` | `text` | Log format: text, json |
-| `-log-file` | `KP_LOG_FILE` | (stderr) | Log output file |
-| `-mcp-http-addr` | `KP_MCP_HTTP_ADDR` | (empty) | Streamable HTTP listen address |
-| `-mcp-http-token` | `KP_MCP_HTTP_TOKEN` | (auto-generated) | HTTP Bearer auth token |
+| `-db` | `YP_DB` | `~/.yorishiro-proxy/yorishiro.db` | SQLite database path or project name |
+| `-ca-cert` / `-ca-key` | `YP_CA_CERT` / `YP_CA_KEY` | (empty) | CA certificate and private key paths |
+| `-ca-ephemeral` | `YP_CA_EPHEMERAL` | `false` | Use ephemeral in-memory CA |
+| `-insecure` | `YP_INSECURE` | `false` | Skip upstream TLS verification |
+| `-config` | `YP_CONFIG` | (empty) | JSON config file path for proxy defaults |
+| `-log-level` | `YP_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
+| `-log-format` | `YP_LOG_FORMAT` | `text` | Log format: text, json |
+| `-log-file` | `YP_LOG_FILE` | (stderr) | Log output file |
+| `-mcp-http-addr` | `YP_MCP_HTTP_ADDR` | (empty) | Streamable HTTP listen address |
+| `-mcp-http-token` | `YP_MCP_HTTP_TOKEN` | (auto-generated) | HTTP Bearer auth token |
 
 Priority: CLI flag > environment variable > config file > default value.
 
-The `-db` flag accepts either an absolute path, a relative path with extension, or a plain project name. A project name (e.g., `my-project`) resolves to `~/.katashiro-proxy/my-project.db`, making it easy to maintain separate databases per engagement.
+The `-db` flag accepts either an absolute path, a relative path with extension, or a plain project name. A project name (e.g., `my-project`) resolves to `~/.yorishiro-proxy/my-project.db`, making it easy to maintain separate databases per engagement.
 
 ## Architecture
 

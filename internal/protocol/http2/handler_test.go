@@ -19,8 +19,8 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/google/uuid"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // --- test helpers ---

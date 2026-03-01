@@ -3,7 +3,7 @@ package mcp
 import (
 	"testing"
 
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 func TestBuildProtocolSummary_WebSocket(t *testing.T) {

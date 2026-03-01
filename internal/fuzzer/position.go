@@ -1,4 +1,4 @@
-// Package fuzzer implements the fuzz testing engine for katashiro-proxy.
+// Package fuzzer implements the fuzz testing engine for yorishiro-proxy.
 // It provides payload position management, payload generation, attack type
 // iteration, and orchestration of fuzz campaigns against recorded HTTP sessions.
 package fuzzer

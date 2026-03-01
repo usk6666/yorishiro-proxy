@@ -1,10 +1,10 @@
 # Playwright-CLI 連携キャプチャ手順
 
-katashiro-proxy と playwright-cli を組み合わせて、ブラウザ操作のトラフィックをキャプチャする。
+yorishiro-proxy と playwright-cli を組み合わせて、ブラウザ操作のトラフィックをキャプチャする。
 
 ## 前提条件
 
-- `katashiro-proxy setup` が実行済み (CA 証明書インストール済み、`.playwright/cli.config.json` のプロキシ設定済み)
+- `yorishiro-proxy setup` が実行済み (CA 証明書インストール済み、`.playwright/cli.config.json` のプロキシ設定済み)
 - playwright-cli スキルがインストール済み
 
 ## Step 1: プロキシ起動
@@ -36,7 +36,7 @@ katashiro-proxy と playwright-cli を組み合わせて、ブラウザ操作の
 ## Step 2: playwright-cli でブラウザ操作
 
 playwright-cli を使って対象アプリケーションの操作を行う。
-プロキシ設定は `katashiro-proxy setup` で `.playwright/cli.config.json` に自動設定済み。
+プロキシ設定は `yorishiro-proxy setup` で `.playwright/cli.config.json` に自動設定済み。
 
 操作例:
 1. ログインページにアクセスしてログイン

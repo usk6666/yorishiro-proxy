@@ -247,8 +247,8 @@ func TestRunHTTP_ServesWebUI(t *testing.T) {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "katashiro-proxy") {
-		t.Errorf("GET / body does not contain 'katashiro-proxy': %s", body)
+	if !strings.Contains(string(body), "yorishiro-proxy") {
+		t.Errorf("GET / body does not contain 'yorishiro-proxy': %s", body)
 	}
 }
 
@@ -286,8 +286,8 @@ func TestRunHTTP_WebUI_SPAFallback(t *testing.T) {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "katashiro-proxy") {
-		t.Errorf("GET /nonexistent/path body does not contain 'katashiro-proxy': %s", body)
+	if !strings.Contains(string(body), "yorishiro-proxy") {
+		t.Errorf("GET /nonexistent/path body does not contain 'yorishiro-proxy': %s", body)
 	}
 }
 

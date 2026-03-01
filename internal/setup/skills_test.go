@@ -31,7 +31,7 @@ func TestInstallSkills_NewInstallation(t *testing.T) {
 	}
 
 	// Verify file exists on disk.
-	skillPath := filepath.Join(dir, ".claude", "skills", "katashiro", "SKILL.md")
+	skillPath := filepath.Join(dir, ".claude", "skills", "yorishiro", "SKILL.md")
 	if _, err := os.Stat(skillPath); err != nil {
 		t.Errorf("skill file not found: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestInstallSkills_ReferencesSubdirectory(t *testing.T) {
 	}
 
 	// Verify each file exists on disk and has content.
-	baseDir := filepath.Join(dir, ".claude", "skills", "katashiro")
+	baseDir := filepath.Join(dir, ".claude", "skills", "yorishiro")
 	for _, relPath := range wantFiles {
 		fullPath := filepath.Join(baseDir, relPath)
 		info, err := os.Stat(fullPath)
@@ -99,7 +99,7 @@ func TestInstallSkills_ExistingSkills_BackedUp(t *testing.T) {
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
 
 	// Create existing skills directory.
-	existingDir := filepath.Join(dir, ".claude", "skills", "katashiro")
+	existingDir := filepath.Join(dir, ".claude", "skills", "yorishiro")
 	if err := os.MkdirAll(existingDir, 0755); err != nil {
 		t.Fatalf("create existing dir: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestInstallSkills_ExistingSkills_BackedUp(t *testing.T) {
 	}
 
 	// Verify new skills were installed.
-	skillPath := filepath.Join(dir, ".claude", "skills", "katashiro", "SKILL.md")
+	skillPath := filepath.Join(dir, ".claude", "skills", "yorishiro", "SKILL.md")
 	if _, err := os.Stat(skillPath); err != nil {
 		t.Errorf("new skill file not found: %v", err)
 	}

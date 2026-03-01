@@ -1,11 +1,11 @@
 # Getting Started
 
-This guide walks you through installing katashiro-proxy, connecting it to Claude Code as an MCP server, and capturing your first HTTP traffic. By the end, you will have a working proxy setup ready for vulnerability assessment workflows.
+This guide walks you through installing yorishiro-proxy, connecting it to Claude Code as an MCP server, and capturing your first HTTP traffic. By the end, you will have a working proxy setup ready for vulnerability assessment workflows.
 
 ## Prerequisites
 
 - **Go 1.25+** -- required for building from source
-- **Claude Code** -- katashiro-proxy operates as an MCP server for Claude Code
+- **Claude Code** -- yorishiro-proxy operates as an MCP server for Claude Code
 - **playwright-cli** (optional) -- for automated browser-based traffic capture
 
 ## Installation
@@ -15,30 +15,30 @@ This guide walks you through installing katashiro-proxy, connecting it to Claude
 Clone the repository and build:
 
 ```bash
-git clone https://github.com/usk6666/katashiro-proxy.git
-cd katashiro-proxy
+git clone https://github.com/usk6666/yorishiro-proxy.git
+cd yorishiro-proxy
 make build
 ```
 
-This produces the binary at `bin/katashiro-proxy`.
+This produces the binary at `bin/yorishiro-proxy`.
 
 ### Install with `go install`
 
 ```bash
-go install github.com/usk6666/katashiro-proxy/cmd/katashiro-proxy@latest
+go install github.com/usk6666/yorishiro-proxy/cmd/yorishiro-proxy@latest
 ```
 
-The binary is placed in `$GOPATH/bin/katashiro-proxy` (or `$HOME/go/bin/katashiro-proxy` if `GOPATH` is not set).
+The binary is placed in `$GOPATH/bin/yorishiro-proxy` (or `$HOME/go/bin/yorishiro-proxy` if `GOPATH` is not set).
 
 Verify the installation:
 
 ```bash
-katashiro-proxy -h
+yorishiro-proxy -h
 ```
 
 ## MCP Server Setup
 
-katashiro-proxy runs as an MCP server communicating over stdin/stdout. To connect it to Claude Code, create a `.mcp.json` file in your project root (or home directory).
+yorishiro-proxy runs as an MCP server communicating over stdin/stdout. To connect it to Claude Code, create a `.mcp.json` file in your project root (or home directory).
 
 ### Manual configuration
 
@@ -47,18 +47,18 @@ Create `.mcp.json` with the following content:
 ```json
 {
   "mcpServers": {
-    "katashiro-proxy": {
-      "command": "/path/to/bin/katashiro-proxy",
-      "args": ["-insecure", "-log-file", "/tmp/katashiro-proxy.log"]
+    "yorishiro-proxy": {
+      "command": "/path/to/bin/yorishiro-proxy",
+      "args": ["-insecure", "-log-file", "/tmp/yorishiro-proxy.log"]
     }
   }
 }
 ```
 
-Replace `/path/to/bin/katashiro-proxy` with the actual path to the binary. For example:
+Replace `/path/to/bin/yorishiro-proxy` with the actual path to the binary. For example:
 
-- If built from source: `"/home/user/katashiro-proxy/bin/katashiro-proxy"`
-- If installed with `go install`: `"/home/user/go/bin/katashiro-proxy"`
+- If built from source: `"/home/user/yorishiro-proxy/bin/yorishiro-proxy"`
+- If installed with `go install`: `"/home/user/go/bin/yorishiro-proxy"`
 
 ### Configuration options
 
@@ -67,14 +67,14 @@ Common CLI flags to include in `args`:
 | Flag | Description |
 |------|-------------|
 | `-insecure` | Skip upstream TLS certificate verification (useful for testing) |
-| `-log-file /tmp/katashiro-proxy.log` | Write logs to a file instead of stderr (keeps MCP stdio clean) |
+| `-log-file /tmp/yorishiro-proxy.log` | Write logs to a file instead of stderr (keeps MCP stdio clean) |
 | `-log-level debug` | Set log verbosity (`debug`, `info`, `warn`, `error`) |
-| `-db <name-or-path>` | SQLite database path or project name (e.g., `-db pentest-2026` creates `~/.katashiro-proxy/pentest-2026.db`) |
+| `-db <name-or-path>` | SQLite database path or project name (e.g., `-db pentest-2026` creates `~/.yorishiro-proxy/pentest-2026.db`) |
 | `-ca-ephemeral` | Use an ephemeral in-memory CA (no persistent certificate files) |
 
-All flags also accept environment variables with the `KP_` prefix (e.g., `KP_INSECURE=true`, `KP_LOG_LEVEL=debug`). Priority: CLI flag > environment variable > config file > default value.
+All flags also accept environment variables with the `YP_` prefix (e.g., `YP_INSECURE=true`, `YP_LOG_LEVEL=debug`). Priority: CLI flag > environment variable > config file > default value.
 
-> **Note:** A future `katashiro-proxy setup` command will automate this configuration. For now, manual `.mcp.json` setup is required.
+> **Note:** A future `yorishiro-proxy setup` command will automate this configuration. For now, manual `.mcp.json` setup is required.
 
 ### Verify the connection
 
@@ -88,7 +88,7 @@ After creating `.mcp.json`, restart Claude Code. You should see five MCP tools b
 
 ## CA Certificate Installation
 
-katashiro-proxy performs HTTPS interception (MITM) by dynamically generating server certificates signed by its own CA. On first startup, the CA certificate is automatically generated and saved to `~/.katashiro-proxy/ca/ca.crt`.
+yorishiro-proxy performs HTTPS interception (MITM) by dynamically generating server certificates signed by its own CA. On first startup, the CA certificate is automatically generated and saved to `~/.yorishiro-proxy/ca/ca.crt`.
 
 To intercept HTTPS traffic, you must install this CA certificate in your operating system or browser trust store.
 
@@ -108,21 +108,21 @@ The response includes `cert_path` (file path) and `fingerprint` (SHA-256 hash) f
 ```bash
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain \
-  ~/.katashiro-proxy/ca/ca.crt
+  ~/.yorishiro-proxy/ca/ca.crt
 ```
 
 ### Linux
 
 ```bash
-sudo cp ~/.katashiro-proxy/ca/ca.crt \
-  /usr/local/share/ca-certificates/katashiro-proxy.crt
+sudo cp ~/.yorishiro-proxy/ca/ca.crt \
+  /usr/local/share/ca-certificates/yorishiro-proxy.crt
 sudo update-ca-certificates
 ```
 
 ### Windows
 
 ```cmd
-certutil -addstore "Root" %USERPROFILE%\.katashiro-proxy\ca\ca.crt
+certutil -addstore "Root" %USERPROFILE%\.yorishiro-proxy\ca\ca.crt
 ```
 
 Run the command prompt as Administrator.
@@ -237,7 +237,7 @@ Use playwright-cli to open a browser that routes through the proxy:
 playwright-cli open https://httpbin.org/get
 ```
 
-All browser traffic flows through katashiro-proxy and is recorded as sessions.
+All browser traffic flows through yorishiro-proxy and is recorded as sessions.
 
 ### Step 4: View captured sessions
 

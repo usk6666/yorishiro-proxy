@@ -153,8 +153,8 @@ func TestGetCertificate_CertificateProperties(t *testing.T) {
 			name: "signed by CA",
 			check: func(t *testing.T) {
 				t.Helper()
-				if x509Cert.Issuer.CommonName != "katashiro-proxy CA" {
-					t.Errorf("Issuer.CommonName = %q, want %q", x509Cert.Issuer.CommonName, "katashiro-proxy CA")
+				if x509Cert.Issuer.CommonName != "yorishiro-proxy CA" {
+					t.Errorf("Issuer.CommonName = %q, want %q", x509Cert.Issuer.CommonName, "yorishiro-proxy CA")
 				}
 			},
 		},

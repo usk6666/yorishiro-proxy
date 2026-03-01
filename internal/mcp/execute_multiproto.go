@@ -10,7 +10,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // executeReplayRawResult is the structured output of the tcp_replay action.

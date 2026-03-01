@@ -17,7 +17,7 @@ type Options struct {
 	// SkipPlaywright skips playwright-cli integration.
 	SkipPlaywright bool
 
-	// SkipSkills skips katashiro skill installation.
+	// SkipSkills skips yorishiro skill installation.
 	SkipSkills bool
 
 	// BinaryPath overrides the auto-detected binary path for testing.

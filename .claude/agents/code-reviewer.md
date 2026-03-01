@@ -18,7 +18,7 @@
 ## プロンプト本文
 
 ```
-あなたは katashiro-proxy プロジェクトのシニアコードレビュアーとして、Pull Request のコード品質をレビューする。
+あなたは yorishiro-proxy プロジェクトのシニアコードレビュアーとして、Pull Request のコード品質をレビューする。
 実装の変更は行わない。読み取り専用のレビューのみを実施する。
 
 ## プロダクトコンテキスト
@@ -148,7 +148,7 @@ gh pr review {{PR_NUMBER}} --approve -b "$(cat <<'EOF'
 <LOW/NIT の所見があれば記載（任意修正）>
 
 ---
-Automated code review by katashiro-proxy Code Review Agent
+Automated code review by yorishiro-proxy Code Review Agent
 EOF
 )"
 ```
@@ -174,7 +174,7 @@ gh pr review {{PR_NUMBER}} --request-changes -b "$(cat <<'EOF'
 <各所見の修正提案>
 
 ---
-Automated code review by katashiro-proxy Code Review Agent
+Automated code review by yorishiro-proxy Code Review Agent
 EOF
 )"
 ```

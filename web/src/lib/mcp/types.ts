@@ -1,5 +1,5 @@
 /**
- * TypeScript type definitions for katashiro-proxy's 5 MCP tools.
+ * TypeScript type definitions for yorishiro-proxy's 5 MCP tools.
  * These types mirror the Go structs in internal/mcp/.
  */
 

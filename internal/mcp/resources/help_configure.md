@@ -329,7 +329,7 @@ Each auto-transform rule has:
         "action": {
           "type": "add_header",
           "header": "X-Proxy",
-          "value": "katashiro"
+          "value": "yorishiro"
         }
       }
     ]

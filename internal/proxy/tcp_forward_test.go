@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // echoHandler is defined in manager_test.go

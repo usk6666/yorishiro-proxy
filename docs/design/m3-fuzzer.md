@@ -36,7 +36,7 @@
 | 8 | ポジション指定方法 | 構造化指定 (location + name + match) | AI エージェントが JSON を組み立てる前提に適合 |
 | 9 | 攻撃タイプ | `sequential` + `parallel` の 2 タイプ | sniper → sequential、pitchfork → parallel にリネーム。battering_ram / cluster_bomb は不採用 |
 | 10 | ポジション操作モード | `replace` / `add` / `remove` | パラメータ・ヘッダの追加/削除テストに対応 |
-| 11 | ペイロード file のセキュリティ | `~/.katashiro-proxy/wordlists/` に制限。相対パス指定 | シンボリックリンク解決後のパス検証。フルパス不可 |
+| 11 | ペイロード file のセキュリティ | `~/.yorishiro-proxy/wordlists/` に制限。相対パス指定 | シンボリックリンク解決後のパス検証。フルパス不可 |
 | 12 | 過負荷検知アルゴリズム | 複合方式 (絶対閾値 OR ベースライン比率) | スライディングウィンドウの中央値で判定。単発外れ値に耐性 |
 
 ## コア概念
@@ -253,7 +253,7 @@ Fuzz は非同期実行。即時レスポンスで `fuzz_id` を返す。
 
 ### ファイル配置ルール
 
-- ベースディレクトリ: `${HOME}/.katashiro-proxy/wordlists/`
+- ベースディレクトリ: `${HOME}/.yorishiro-proxy/wordlists/`
 - `path` パラメータは**相対パス**のみ受け付ける (フルパス不可)
 - サブディレクトリ可: `"path": "sqli/error-based.txt"`
 - 初回起動時にベースディレクトリが無ければ自動作成
@@ -317,7 +317,7 @@ Fuzz は非同期実行。即時レスポンスで `fuzz_id` を返す。
 - concurrency / rate_limit のデフォルト値は保守的に設定
 - タイムアウト制御
 - ターゲットサーバへの影響を最小化するデフォルト設定
-- ペイロード `file` タイプ: `~/.katashiro-proxy/wordlists/` に制限、シンボリックリンク解決後のパス検証
+- ペイロード `file` タイプ: `~/.yorishiro-proxy/wordlists/` に制限、シンボリックリンク解決後のパス検証
 
 ## データモデル拡張
 

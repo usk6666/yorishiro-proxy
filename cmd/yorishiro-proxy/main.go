@@ -14,20 +14,20 @@ import (
 	"syscall"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/cert"
-	"github.com/usk6666/katashiro-proxy/internal/config"
-	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
-	"github.com/usk6666/katashiro-proxy/internal/logging"
-	"github.com/usk6666/katashiro-proxy/internal/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/protocol"
-	protogrpc "github.com/usk6666/katashiro-proxy/internal/protocol/grpc"
-	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
-	protohttp2 "github.com/usk6666/katashiro-proxy/internal/protocol/http2"
-	prototcp "github.com/usk6666/katashiro-proxy/internal/protocol/tcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/logging"
+	"github.com/usk6666/yorishiro-proxy/internal/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol"
+	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
+	protohttp2 "github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
+	prototcp "github.com/usk6666/yorishiro-proxy/internal/protocol/tcp"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -41,21 +41,21 @@ func main() {
 	}
 }
 
-// envVarMap maps flag names to their corresponding KP_ environment variable names.
+// envVarMap maps flag names to their corresponding YP_ environment variable names.
 var envVarMap = map[string]string{
-	"config":         "KP_CONFIG",
-	"db":             "KP_DB",
-	"ca-cert":        "KP_CA_CERT",
-	"ca-key":         "KP_CA_KEY",
-	"ca-ephemeral":   "KP_CA_EPHEMERAL",
-	"insecure":                "KP_INSECURE",
-	"allow-private-networks": "KP_ALLOW_PRIVATE_NETWORKS",
-	"log-level":      "KP_LOG_LEVEL",
-	"log-format":     "KP_LOG_FORMAT",
-	"log-file":       "KP_LOG_FILE",
-	"mcp-http-addr":  "KP_MCP_HTTP_ADDR",
-	"mcp-http-token": "KP_MCP_HTTP_TOKEN",
-	"ui-dir":         "KP_UI_DIR",
+	"config":         "YP_CONFIG",
+	"db":             "YP_DB",
+	"ca-cert":        "YP_CA_CERT",
+	"ca-key":         "YP_CA_KEY",
+	"ca-ephemeral":   "YP_CA_EPHEMERAL",
+	"insecure":                "YP_INSECURE",
+	"allow-private-networks": "YP_ALLOW_PRIVATE_NETWORKS",
+	"log-level":      "YP_LOG_LEVEL",
+	"log-format":     "YP_LOG_FORMAT",
+	"log-file":       "YP_LOG_FILE",
+	"mcp-http-addr":  "YP_MCP_HTTP_ADDR",
+	"mcp-http-token": "YP_MCP_HTTP_TOKEN",
+	"ui-dir":         "YP_UI_DIR",
 }
 
 func run(ctx context.Context) error {
@@ -74,53 +74,53 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	// Config file path — loaded early to provide defaults for proxy_start.
 	var configFile string
-	fs.StringVar(&configFile, "config", "", "JSON config file path for proxy defaults (env: KP_CONFIG)")
+	fs.StringVar(&configFile, "config", "", "JSON config file path for proxy defaults (env: YP_CONFIG)")
 
 	// Define flags — only those requiring startup-time decisions.
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath,
-		"SQLite database path or project name (env: KP_DB)\n"+
-			"    project name (no ext, no path sep) -> ~/.katashiro-proxy/<name>.db\n"+
+		"SQLite database path or project name (env: YP_DB)\n"+
+			"    project name (no ext, no path sep) -> ~/.yorishiro-proxy/<name>.db\n"+
 			"    absolute path                      -> used as-is\n"+
 			"    relative path with extension        -> CWD-relative")
-	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "CA certificate file path (env: KP_CA_CERT)")
-	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path (env: KP_CA_KEY)")
-	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (env: KP_CA_EPHEMERAL)")
-	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "skip upstream TLS verification (env: KP_INSECURE)")
-	fs.BoolVar(&cfg.AllowPrivateNetworks, "allow-private-networks", cfg.AllowPrivateNetworks, "disable SSRF protection globally, allow private/loopback networks (env: KP_ALLOW_PRIVATE_NETWORKS)")
-	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn, error (env: KP_LOG_LEVEL)")
-	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: text, json (env: KP_LOG_FORMAT)")
-	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file, default stderr (env: KP_LOG_FILE)")
-	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: KP_MCP_HTTP_ADDR)")
-	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: KP_MCP_HTTP_TOKEN)")
-	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: KP_UI_DIR)")
+	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "CA certificate file path (env: YP_CA_CERT)")
+	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path (env: YP_CA_KEY)")
+	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (env: YP_CA_EPHEMERAL)")
+	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "skip upstream TLS verification (env: YP_INSECURE)")
+	fs.BoolVar(&cfg.AllowPrivateNetworks, "allow-private-networks", cfg.AllowPrivateNetworks, "disable SSRF protection globally, allow private/loopback networks (env: YP_ALLOW_PRIVATE_NETWORKS)")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn, error (env: YP_LOG_LEVEL)")
+	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: text, json (env: YP_LOG_FORMAT)")
+	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file, default stderr (env: YP_LOG_FILE)")
+	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: YP_MCP_HTTP_ADDR)")
+	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: YP_MCP_HTTP_TOKEN)")
+	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
 
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy [flags]\n")
-		fmt.Fprintf(fs.Output(), "       katashiro-proxy setup [setup-flags]\n\n")
-		fmt.Fprintf(fs.Output(), "katashiro-proxy is an AI agent network proxy (MCP server).\n")
+		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n")
+		fmt.Fprintf(fs.Output(), "       yorishiro-proxy setup [setup-flags]\n\n")
+		fmt.Fprintf(fs.Output(), "yorishiro-proxy is an AI agent network proxy (MCP server).\n")
 		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
 		fmt.Fprintf(fs.Output(), "Subcommands:\n")
 		fmt.Fprintf(fs.Output(), "  setup    Interactive setup wizard for Claude Code integration\n\n")
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
-		fmt.Fprintf(fs.Output(), "  All flags accept a KP_ prefixed environment variable as fallback.\n")
+		fmt.Fprintf(fs.Output(), "  All flags accept a YP_ prefixed environment variable as fallback.\n")
 		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > config file > default value.\n")
-		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> KP_LOG_LEVEL).\n")
+		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> YP_LOG_LEVEL).\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy                                  # MCP stdio mode (default)\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy setup                            # interactive setup wizard\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy setup --non-interactive           # setup with defaults\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy -db pentest-2026                 # project DB: ~/.katashiro-proxy/pentest-2026.db\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy -db /data/project.db             # absolute path: used as-is\n")
-		fmt.Fprintf(fs.Output(), "  KP_DB=client-audit katashiro-proxy               # project name via env var\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy -config proxy.json               # load proxy config from file\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
-		fmt.Fprintf(fs.Output(), "  KP_INSECURE=true katashiro-proxy                  # skip TLS verification\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy setup                            # interactive setup wizard\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy setup --non-interactive           # setup with defaults\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -db pentest-2026                 # project DB: ~/.yorishiro-proxy/pentest-2026.db\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -db /data/project.db             # absolute path: used as-is\n")
+		fmt.Fprintf(fs.Output(), "  YP_DB=client-audit yorishiro-proxy               # project name via env var\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -config proxy.json               # load proxy config from file\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
+		fmt.Fprintf(fs.Output(), "  YP_INSECURE=true yorishiro-proxy                  # skip TLS verification\n")
 	}
-	// Allow KP_MCP_HTTP_TOKEN environment variable as fallback when no flag is set.
+	// Allow YP_MCP_HTTP_TOKEN environment variable as fallback when no flag is set.
 	if cfg.MCPHTTPToken == "" {
-		cfg.MCPHTTPToken = os.Getenv("KP_MCP_HTTP_TOKEN")
+		cfg.MCPHTTPToken = os.Getenv("YP_MCP_HTTP_TOKEN")
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -140,7 +140,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		}
 	}
 
-	// Apply smart DB path resolution: project name -> ~/.katashiro-proxy/<name>.db.
+	// Apply smart DB path resolution: project name -> ~/.yorishiro-proxy/<name>.db.
 	resolvedDBPath, err := config.ResolveDBPath(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("resolve db path: %w", err)
@@ -161,7 +161,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	defer logCleanup()
 	slog.SetDefault(logger)
 
-	// Ensure the database directory exists (e.g. ~/.katashiro-proxy/).
+	// Ensure the database directory exists (e.g. ~/.yorishiro-proxy/).
 	if err := config.EnsureDBDir(cfg.DBPath); err != nil {
 		return fmt.Errorf("ensure db directory: %w", err)
 	}
@@ -263,7 +263,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
-// set on the command line, it falls back to the corresponding KP_ environment
+// set on the command line, it falls back to the corresponding YP_ environment
 // variable. Priority: CLI flag > environment variable > config file > default value.
 func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string) {
 	// Collect flags that were explicitly set on the command line.
@@ -443,7 +443,7 @@ func resolveHTTPToken(token string, logger *slog.Logger) (string, error) {
 // initCA initializes the CA for TLS interception using one of three modes:
 //
 //  1. Explicit: -ca-cert and -ca-key flags specify paths (loaded from files).
-//  2. Auto-persist (default): CA is stored in ~/.katashiro-proxy/ca/.
+//  2. Auto-persist (default): CA is stored in ~/.yorishiro-proxy/ca/.
 //     If files exist, the CA is loaded; otherwise a new CA is generated and saved.
 //  3. Ephemeral: --ca-ephemeral generates an in-memory CA with no file persistence.
 func initCA(cfg *config.Config, logger *slog.Logger) (*cert.CA, error) {

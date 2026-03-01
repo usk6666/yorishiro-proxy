@@ -2,7 +2,7 @@
  * MCP Streamable HTTP client wrapper.
  *
  * Uses the official MCP TypeScript SDK's Client and StreamableHTTPClientTransport
- * to connect to katashiro-proxy's /mcp endpoint via Streamable HTTP.
+ * to connect to yorishiro-proxy's /mcp endpoint via Streamable HTTP.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -39,7 +39,7 @@ export type McpClientEventListener = (event: McpClientEvent) => void;
 
 /**
  * McpClient wraps the MCP SDK Client to provide typed access
- * to katashiro-proxy's 5 MCP tools.
+ * to yorishiro-proxy's 5 MCP tools.
  */
 export class McpClient {
   private client: Client | null = null;
@@ -115,7 +115,7 @@ export class McpClient {
       });
 
       this.client = new Client({
-        name: "katashiro-proxy-webui",
+        name: "yorishiro-proxy-webui",
         version: "0.0.0",
       });
 

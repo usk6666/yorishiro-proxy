@@ -29,7 +29,7 @@ export function Header({ onToggleSidebar, sidebarCollapsed }: HeaderProps) {
           <MenuIcon />
         </button>
         <div className="header-logo">
-          <span className="header-logo-text">katashiro</span>
+          <span className="header-logo-text">yorishiro</span>
           <span className="header-logo-accent">-proxy</span>
         </div>
       </div>

@@ -1,4 +1,4 @@
-# katashiro-proxy
+# yorishiro-proxy
 
 AI エージェント向けネットワークプロキシツール — AI のための PacketProxy。
 MCP (Model Context Protocol) サーバとして動作し、脆弱性診断のためのトラフィック傍受・記録・リプレイ機能を提供する。
@@ -22,7 +22,7 @@ Layer 4 TCP リスナ
 ## パッケージレイアウト
 
 ```
-cmd/katashiro-proxy/       # エントリポイント
+cmd/yorishiro-proxy/       # エントリポイント
 internal/
   mcp/                     # MCP サーバ・ツール定義・ハンドラ
   proxy/
@@ -45,7 +45,7 @@ internal/
 ## ビルド・テスト
 
 ```bash
-make build          # bin/katashiro-proxy にビルド
+make build          # bin/yorishiro-proxy にビルド
 make test           # go test -race -v ./...
 make test-cover     # カバレッジレポート付きテスト
 make vet            # go vet ./...
@@ -161,4 +161,4 @@ type: `feat`, `fix`, `refactor`, `test`, `docs`, `ci`, `chore`
 ## Linear
 
 - チーム: Usk6666
-- プロジェクト: katashiro-proxy
+- プロジェクト: yorishiro-proxy
