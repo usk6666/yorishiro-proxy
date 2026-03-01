@@ -1,0 +1,19 @@
+/**
+ * Shared styles for page components.
+ */
+
+.page {
+  max-width: 1400px;
+}
+
+.page-title {
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-xs);
+}
+
+.page-description {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
