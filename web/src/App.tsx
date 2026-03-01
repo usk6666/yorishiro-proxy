@@ -1,5 +1,6 @@
 import { Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout/index.js";
+import { DashboardPage } from "./pages/Dashboard/DashboardPage.js";
 import { SessionsPage } from "./pages/Sessions/SessionsPage.js";
 import { SessionDetailPage } from "./pages/SessionDetail/SessionDetailPage.js";
 import { InterceptPage } from "./pages/Intercept/InterceptPage.js";
@@ -14,6 +15,7 @@ function App() {
       <Route element={<Layout />}>
         <Route index element={<SessionsPage />} />
         <Route path="sessions/:id" element={<SessionDetailPage />} />
+        <Route path="dashboard" element={<DashboardPage />} />
         <Route path="intercept" element={<InterceptPage />} />
         <Route path="resend" element={<ResendPage />} />
         <Route path="resend/:sessionId" element={<ResendPage />} />

@@ -410,3 +410,103 @@
   justify-content: flex-end;
   gap: var(--space-sm);
 }
+
+/* CA Certificate panel */
+.ca-cert-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.ca-cert-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ca-cert-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ca-cert-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.ca-cert-fingerprint {
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.02em;
+}
+
+.ca-cert-expiring {
+  color: var(--accent-warning);
+}
+
+.ca-cert-path {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+/* Installation instructions */
+.ca-cert-install {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ca-cert-install-section {
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.ca-cert-install-section:last-child {
+  border-bottom: none;
+}
+
+.ca-cert-install-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-md) 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  text-align: left;
+}
+
+.ca-cert-install-toggle:hover {
+  color: var(--accent-primary);
+}
+
+.ca-cert-install-arrow {
+  font-size: var(--font-size-xs);
+  width: 12px;
+  color: var(--text-muted);
+}
+
+.ca-cert-install-platform {
+  font-weight: 600;
+}
+
+.ca-cert-install-steps {
+  padding: 0 0 var(--space-md) var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ca-cert-install-step {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
