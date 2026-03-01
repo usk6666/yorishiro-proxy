@@ -46,6 +46,54 @@ func TestInstallSkills_NewInstallation(t *testing.T) {
 	}
 }
 
+func TestInstallSkills_ReferencesSubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
+
+	installed, _, err := InstallSkills(dir, now)
+	if err != nil {
+		t.Fatalf("InstallSkills() error: %v", err)
+	}
+
+	// Verify that reference files are included in the installed list.
+	wantFiles := []string{
+		"SKILL.md",
+		filepath.Join("references", "self-contained-iteration.md"),
+		filepath.Join("references", "playwright-capture.md"),
+		filepath.Join("references", "verify-vulnerability.md"),
+		filepath.Join("references", "payload-patterns.md"),
+	}
+	for _, want := range wantFiles {
+		if !slices.Contains(installed, want) {
+			t.Errorf("%s not found in installed files: %v", want, installed)
+		}
+	}
+
+	// Verify each file exists on disk and has content.
+	baseDir := filepath.Join(dir, ".claude", "skills", "katashiro")
+	for _, relPath := range wantFiles {
+		fullPath := filepath.Join(baseDir, relPath)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			t.Errorf("file not found on disk: %s: %v", relPath, err)
+			continue
+		}
+		if info.Size() == 0 {
+			t.Errorf("file is empty: %s", relPath)
+		}
+	}
+
+	// Verify references directory exists.
+	refsDir := filepath.Join(baseDir, "references")
+	info, err := os.Stat(refsDir)
+	if err != nil {
+		t.Fatalf("references directory not found: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("references is not a directory")
+	}
+}
+
 func TestInstallSkills_ExistingSkills_BackedUp(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
