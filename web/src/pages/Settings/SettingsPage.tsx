@@ -7,6 +7,7 @@ import { TlsPassthrough } from "./TlsPassthrough.js";
 import { InterceptRules } from "./InterceptRules.js";
 import { AutoTransformRules } from "./AutoTransformRules.js";
 import { ConnectionSettings } from "./ConnectionSettings.js";
+import { CACertPanel } from "./CACertPanel.js";
 import "./SettingsPage.css";
 
 const TABS = [
@@ -16,6 +17,7 @@ const TABS = [
   { id: "intercept", label: "Intercept Rules" },
   { id: "transform", label: "Auto-Transform" },
   { id: "connection", label: "Connection" },
+  { id: "ca-cert", label: "CA Certificate" },
 ];
 
 /**
@@ -102,6 +104,9 @@ export function SettingsPage() {
         }
         if (!statusData) return null;
         return <ConnectionSettings status={statusData} onRefresh={handleRefresh} />;
+
+      case "ca-cert":
+        return <CACertPanel onRefresh={handleRefresh} />;
 
       default:
         return null;
