@@ -57,6 +57,10 @@ var envVarMap = map[string]string{
 }
 
 func run(ctx context.Context) error {
+	// Check for subcommands before parsing flags.
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		return runSetup(ctx, os.Args[2:])
+	}
 	return runWithFlags(ctx, flag.CommandLine, os.Args[1:])
 }
 
@@ -87,9 +91,12 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: KP_MCP_HTTP_TOKEN)")
 
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy [flags]\n\n")
+		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy [flags]\n")
+		fmt.Fprintf(fs.Output(), "       katashiro-proxy setup [setup-flags]\n\n")
 		fmt.Fprintf(fs.Output(), "katashiro-proxy is an AI agent network proxy (MCP server).\n")
 		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
+		fmt.Fprintf(fs.Output(), "Subcommands:\n")
+		fmt.Fprintf(fs.Output(), "  setup    Interactive setup wizard for Claude Code integration\n\n")
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
@@ -98,6 +105,8 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> KP_LOG_LEVEL).\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy setup                            # interactive setup wizard\n")
+		fmt.Fprintf(fs.Output(), "  katashiro-proxy setup --non-interactive           # setup with defaults\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy -db pentest-2026                 # project DB: ~/.katashiro-proxy/pentest-2026.db\n")
 		fmt.Fprintf(fs.Output(), "  katashiro-proxy -db /data/project.db             # absolute path: used as-is\n")
 		fmt.Fprintf(fs.Output(), "  KP_DB=client-audit katashiro-proxy               # project name via env var\n")
