@@ -1,5 +1,63 @@
-.intercept-page .page-placeholder {
+/**
+ * Intercept page styles.
+ */
+
+/* Page header with title and queue count */
+.intercept-header {
   display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-xs);
+}
+
+.intercept-header .page-title {
+  margin-bottom: 0;
+}
+
+/* Tabs section */
+.intercept-tabs {
+  margin-top: var(--space-lg);
+}
+
+/* Queue table */
+.intercept-queue-table .table td {
+  font-family: var(--font-mono);
+}
+
+.intercept-queue-table .table tbody tr {
+  cursor: pointer;
+}
+
+.intercept-queue-table .table tbody tr.intercept-row--selected {
+  background-color: var(--sidebar-active);
+}
+
+.intercept-queue-url {
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.intercept-queue-host {
+  color: var(--text-secondary);
+}
+
+.intercept-queue-time {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.intercept-queue-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+/* Empty state */
+.intercept-empty {
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 200px;
@@ -7,5 +65,260 @@
   border-radius: var(--radius-md);
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+  gap: var(--space-sm);
+}
+
+.intercept-empty-icon {
+  font-size: var(--font-size-xl);
+}
+
+/* Detail panel */
+.intercept-detail {
   margin-top: var(--space-lg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-secondary);
+}
+
+.intercept-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.intercept-detail-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.intercept-detail-actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.intercept-detail-body {
+  padding: var(--space-lg);
+}
+
+/* Request line editor (method + URL) */
+.intercept-request-line {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-lg);
+}
+
+.intercept-method-select {
+  width: 100px;
+  height: 32px;
+  padding: 0 var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  appearance: none;
+}
+
+.intercept-method-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+}
+
+.intercept-url-input {
+  flex: 1;
+}
+
+/* Header editor */
+.intercept-section {
+  margin-bottom: var(--space-lg);
+}
+
+.intercept-section-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-sm);
+}
+
+.intercept-header-row {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+  align-items: flex-start;
+}
+
+.intercept-header-name {
+  width: 200px;
+  flex-shrink: 0;
+}
+
+.intercept-header-value {
+  flex: 1;
+}
+
+.intercept-header-remove {
+  flex-shrink: 0;
+  margin-top: 0;
+}
+
+.intercept-add-header {
+  margin-top: var(--space-sm);
+}
+
+/* Body editor */
+.intercept-body-editor {
+  width: 100%;
+  min-height: 150px;
+  padding: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.intercept-body-editor:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+}
+
+/* Rules panel */
+.intercept-rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.intercept-rule {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-secondary);
+}
+
+.intercept-rule--disabled {
+  opacity: 0.5;
+}
+
+.intercept-rule-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.intercept-rule-id {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.intercept-rule-conditions {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.intercept-rule-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* Toggle switch */
+.intercept-toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+}
+
+.intercept-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.intercept-toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  transition: background-color var(--transition-fast);
+}
+
+.intercept-toggle-slider::before {
+  content: "";
+  position: absolute;
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  bottom: 2px;
+  background-color: var(--text-secondary);
+  border-radius: 50%;
+  transition: transform var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.intercept-toggle input:checked + .intercept-toggle-slider {
+  background-color: rgba(88, 166, 255, 0.2);
+  border-color: var(--accent-primary);
+}
+
+.intercept-toggle input:checked + .intercept-toggle-slider::before {
+  transform: translateX(16px);
+  background-color: var(--accent-primary);
+}
+
+.intercept-toggle input:disabled + .intercept-toggle-slider {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Loading state */
+.intercept-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+/* Error state */
+.intercept-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: var(--accent-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* No rules empty state */
+.intercept-rules-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
