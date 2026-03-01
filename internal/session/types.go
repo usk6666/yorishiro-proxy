@@ -33,6 +33,10 @@ type Session struct {
 	// ConnInfo holds network and TLS connection metadata.
 	// May be nil for sessions recorded without connection information.
 	ConnInfo *ConnectionInfo
+	// BlockedBy indicates which subsystem blocked this request.
+	// Empty string means the request was not blocked.
+	// "target_scope" means it was blocked by the target scope rules.
+	BlockedBy string
 }
 
 // ConnectionInfo holds network-level and TLS metadata for a proxy session.

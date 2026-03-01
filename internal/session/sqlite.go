@@ -167,8 +167,8 @@ func (s *SQLiteStore) saveSessionSync(ctx context.Context, sess *Session) error 
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID,
 		sess.ConnID,
 		sess.Protocol,
@@ -183,6 +183,7 @@ func (s *SQLiteStore) saveSessionSync(ctx context.Context, sess *Session) error 
 		tlsCipher,
 		tlsALPN,
 		tlsCertSubject,
+		sess.BlockedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -235,7 +236,7 @@ func (s *SQLiteStore) GetSession(ctx context.Context, id string) (*Session, erro
 }
 
 // sessionColumns is the list of columns selected in session queries.
-const sessionColumns = `id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject`
+const sessionColumns = `id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by`
 
 // buildSessionWhereClause constructs a SQL WHERE clause from ListOptions.
 // Method, URLPattern, and StatusCode are matched via EXISTS subqueries on messages.
@@ -259,6 +260,10 @@ func buildSessionWhereClause(opts ListOptions) (string, []interface{}) {
 	if opts.StatusCode != 0 {
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
 		args = append(args, opts.StatusCode)
+	}
+	if opts.BlockedBy != "" {
+		conditions = append(conditions, "s.blocked_by = ?")
+		args = append(args, opts.BlockedBy)
 	}
 
 	clause := ""
@@ -595,6 +600,7 @@ func scanSession(row scannable) (*Session, error) {
 		tlsCipher      string
 		tlsALPN        string
 		tlsCertSubject string
+		blockedBy      string
 	)
 
 	err := row.Scan(
@@ -612,6 +618,7 @@ func scanSession(row scannable) (*Session, error) {
 		&tlsCipher,
 		&tlsALPN,
 		&tlsCertSubject,
+		&blockedBy,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -644,6 +651,8 @@ func scanSession(row scannable) (*Session, error) {
 			TLSServerCertSubject: tlsCertSubject,
 		}
 	}
+
+	sess.BlockedBy = blockedBy
 
 	return &sess, nil
 }

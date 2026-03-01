@@ -54,6 +54,7 @@ type ExportSession struct {
 	DurationMs  int64             `json:"duration_ms"`
 	Tags        map[string]string `json:"tags,omitempty"`
 	ConnInfo    *ExportConnInfo   `json:"conn_info,omitempty"`
+	BlockedBy   string            `json:"blocked_by,omitempty"`
 }
 
 // ExportConnInfo is the JSON-serializable representation of ConnectionInfo.
@@ -151,6 +152,7 @@ func sessionToExport(s *Session) *ExportSession {
 		Timestamp:   s.Timestamp.UTC().Format(time.RFC3339Nano),
 		DurationMs:  s.Duration.Milliseconds(),
 		Tags:        s.Tags,
+		BlockedBy:   s.BlockedBy,
 	}
 	if s.ConnInfo != nil {
 		es.ConnInfo = &ExportConnInfo{
