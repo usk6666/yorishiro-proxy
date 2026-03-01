@@ -92,6 +92,9 @@ type ListOptions struct {
 	// StatusCode filters sessions that have a receive message with this
 	// HTTP response status code.
 	StatusCode int
+	// BlockedBy filters sessions by their blocked_by value.
+	// When set, only sessions with a matching blocked_by value are returned.
+	BlockedBy string
 	// Limit is the maximum number of sessions to return.
 	Limit int
 	// Offset is the number of sessions to skip for pagination.

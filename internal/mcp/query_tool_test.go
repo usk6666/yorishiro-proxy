@@ -984,3 +984,177 @@ func TestQuery_CACert_EphemeralFields(t *testing.T) {
 	}
 }
 
+// --- Test: blocked_by in sessions and session resources ---
+
+// seedBlockedSession creates a blocked session with only a send message (no response).
+func seedBlockedSession(t *testing.T, store session.Store, id, protocol, method, urlStr, blockedBy string) {
+	t.Helper()
+	ctx := context.Background()
+
+	sess := &session.Session{
+		ID:          id,
+		ConnID:      "conn-" + id,
+		Protocol:    protocol,
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   time.Now().UTC(),
+		Duration:    0,
+		BlockedBy:   blockedBy,
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession(%s): %v", id, err)
+	}
+
+	parsedURL, _ := url.Parse(urlStr)
+	sendMsg := &session.Message{
+		ID:        id + "-send",
+		SessionID: id,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    method,
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"evil.com"}},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+}
+
+func TestQuery_Sessions_FilterByBlockedBy(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "normal-1", "HTTPS", "GET", "https://example.com/ok", 200)
+	seedBlockedSession(t, store, "blocked-1", "HTTPS", "GET", "https://evil.com/admin", "target_scope")
+	seedBlockedSession(t, store, "blocked-2", "HTTPS", "POST", "https://evil.com/api", "target_scope")
+
+	cs := setupQueryTestSession(t, store)
+
+	// Filter for blocked sessions only.
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Filter:   &queryFilter{BlockedBy: "target_scope"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 2 {
+		t.Errorf("count = %d, want 2", out.Count)
+	}
+	if out.Total != 2 {
+		t.Errorf("total = %d, want 2", out.Total)
+	}
+	for _, s := range out.Sessions {
+		if s.BlockedBy != "target_scope" {
+			t.Errorf("session %s blocked_by = %q, want %q", s.ID, s.BlockedBy, "target_scope")
+		}
+	}
+}
+
+func TestQuery_Sessions_BlockedByFieldInResponse(t *testing.T) {
+	store := newTestStore(t)
+	seedBlockedSession(t, store, "blocked-resp", "HTTPS", "GET", "https://evil.com/secret", "target_scope")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Fatalf("count = %d, want 1", out.Count)
+	}
+	if out.Sessions[0].BlockedBy != "target_scope" {
+		t.Errorf("blocked_by = %q, want %q", out.Sessions[0].BlockedBy, "target_scope")
+	}
+}
+
+func TestQuery_Sessions_NormalSessionHasEmptyBlockedBy(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "normal-check", "HTTPS", "GET", "https://example.com/page", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Fatalf("count = %d, want 1", out.Count)
+	}
+	if out.Sessions[0].BlockedBy != "" {
+		t.Errorf("blocked_by = %q, want empty string", out.Sessions[0].BlockedBy)
+	}
+}
+
+func TestQuery_Session_BlockedByInDetail(t *testing.T) {
+	store := newTestStore(t)
+	seedBlockedSession(t, store, "blocked-detail", "HTTPS", "GET", "https://evil.com/admin", "target_scope")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "blocked-detail",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.ID != "blocked-detail" {
+		t.Errorf("id = %q, want blocked-detail", out.ID)
+	}
+	if out.BlockedBy != "target_scope" {
+		t.Errorf("blocked_by = %q, want %q", out.BlockedBy, "target_scope")
+	}
+	if out.Method != "GET" {
+		t.Errorf("method = %q, want GET", out.Method)
+	}
+	if out.URL != "https://evil.com/admin" {
+		t.Errorf("url = %q, want https://evil.com/admin", out.URL)
+	}
+	// Blocked session has no response.
+	if out.ResponseStatusCode != 0 {
+		t.Errorf("response_status_code = %d, want 0", out.ResponseStatusCode)
+	}
+	if out.MessageCount != 1 {
+		t.Errorf("message_count = %d, want 1 (send only)", out.MessageCount)
+	}
+}
+
+func TestQuery_Session_NormalHasNoBlockedBy(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "normal-detail", "HTTPS", "GET", "https://example.com/ok", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "normal-detail",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.BlockedBy != "" {
+		t.Errorf("blocked_by = %q, want empty string", out.BlockedBy)
+	}
+}
+
