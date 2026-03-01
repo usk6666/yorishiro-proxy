@@ -467,11 +467,13 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID, doerOverride)
 
 	// Execute post_receive hook if the request succeeded (has a response).
+	// Pass the kvStore from PreSend so that post_receive hooks can access
+	// values produced by pre_send (e.g., auth_session for logout).
 	if result.Error == "" && result.StatusCode != 0 {
 		// Retrieve the response body from the recorded session for the hook.
 		respBody := e.fetchResponseBody(ctx, result.SessionID)
 		hookState.Mu.Lock()
-		postErr := hooks.PostSend(ctx, hookState, result.StatusCode, respBody)
+		postErr := hooks.PostSend(ctx, hookState, result.StatusCode, respBody, kvStore)
 		hookState.Mu.Unlock()
 		if postErr != nil {
 			// Post-receive hook errors are recorded but don't fail the fuzz result.

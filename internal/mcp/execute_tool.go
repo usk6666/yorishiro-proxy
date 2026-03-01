@@ -516,11 +516,13 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	}
 
 	// Execute post_receive hook if configured.
+	// Pass the kvStore from pre_send so that post_receive hooks can access
+	// values produced by pre_send (e.g., auth_session for logout).
 	if params.Hooks != nil && params.Hooks.PostReceive != nil {
 		state := &hookState{}
 		executor := newHookExecutor(s, params.Hooks, state)
 		executor.allowPrivateNetworks = params.AllowPrivateNetworks
-		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody); err != nil {
+		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody, kvStore); err != nil {
 			return nil, nil, err
 		}
 	}

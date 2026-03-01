@@ -48,7 +48,9 @@ func (f *fuzzHookCallbacks) PreSend(ctx context.Context, state *fuzzer.HookState
 
 // PostSend implements fuzzer.HookCallbacks.
 // It creates a hookExecutor and executes the post_receive hook.
-func (f *fuzzHookCallbacks) PostSend(ctx context.Context, state *fuzzer.HookState, statusCode int, responseBody []byte) error {
+// The kvStore parameter carries KV Store values from the preceding PreSend call,
+// enabling post_receive hooks to access values produced by pre_send.
+func (f *fuzzHookCallbacks) PostSend(ctx context.Context, state *fuzzer.HookState, statusCode int, responseBody []byte, kvStore map[string]string) error {
 	if f.hooks == nil || f.hooks.PostReceive == nil {
 		return nil
 	}
@@ -57,7 +59,7 @@ func (f *fuzzHookCallbacks) PostSend(ctx context.Context, state *fuzzer.HookStat
 	executor := newHookExecutor(f.server, f.hooks, hs)
 	executor.allowPrivateNetworks = f.allowPrivateNetworks
 
-	return executor.executePostReceive(ctx, statusCode, responseBody)
+	return executor.executePostReceive(ctx, statusCode, responseBody, kvStore)
 }
 
 // UpdateState implements fuzzer.HookCallbacks.
