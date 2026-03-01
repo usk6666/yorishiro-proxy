@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
@@ -195,6 +196,31 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams, 
 	m, err := configToMacro(rec.Name, rec.Description, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("build macro from config: %w", err)
+	}
+
+	// Target scope enforcement: check each step's target URL before running.
+	if s.targetScope != nil && s.targetScope.HasRules() {
+		for _, step := range cfg.Steps {
+			// Check override_url if specified.
+			if step.OverrideURL != "" {
+				u, parseErr := url.Parse(step.OverrideURL)
+				if parseErr == nil && u.Host != "" {
+					if scopeErr := s.checkTargetScopeURL(u); scopeErr != nil {
+						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
+					}
+				}
+			}
+			// Check the session's URL for this step.
+			sendMsgs, msgErr := s.store.GetMessages(ctx, step.SessionID, session.MessageListOptions{Direction: "send"})
+			if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
+				// Only check session URL if no override_url (override takes precedence).
+				if step.OverrideURL == "" {
+					if scopeErr := s.checkTargetScopeURL(sendMsgs[0].URL); scopeErr != nil {
+						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
+					}
+				}
+			}
+		}
 	}
 
 	// Create engine with HTTP client and session fetcher.
