@@ -281,7 +281,7 @@ func TestWriteMCPConfig_ExistingFile_PreservesOtherServers(t *testing.T) {
 	}
 }
 
-func TestWriteMCPConfig_ExistingFile_UpdatesKatashiroEntry(t *testing.T) {
+func TestWriteMCPConfig_ExistingFile_UpdatesYorishiroEntry(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mcp.json")
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
