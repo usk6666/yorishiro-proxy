@@ -47,6 +47,7 @@ type Server struct {
 	requestTimeoutSetters  []requestTimeoutSetter // protocol handlers to update when request timeout changes
 	uiDir                  string               // optional filesystem path for WebUI static files
 	allowPrivateNetworks   bool                 // global SSRF protection override
+	targetScope            *proxy.TargetScope   // target scope rules for security tool
 }
 
 // tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
@@ -177,6 +178,14 @@ func WithAllowPrivateNetworks(allow bool) ServerOption {
 	}
 }
 
+// WithTargetScope sets the target scope for the security tool,
+// enabling target scope rule management via the security MCP tool.
+func WithTargetScope(ts *proxy.TargetScope) ServerOption {
+	return func(s *Server) {
+		s.targetScope = ts
+	}
+}
+
 // WithProxyDefaults sets the default proxy configuration loaded from a config file.
 // These defaults are applied to proxy_start invocations when the caller does not
 // explicitly provide a value for a given field.
@@ -222,6 +231,10 @@ func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *p
 	s := &Server{server: server, appCtx: ctx, ca: ca, store: store, manager: manager}
 	for _, opt := range opts {
 		opt(s)
+	}
+	// Initialize default TargetScope if not provided via WithTargetScope.
+	if s.targetScope == nil {
+		s.targetScope = proxy.NewTargetScope()
 	}
 	s.registerTools()
 	s.registerResources()
@@ -316,4 +329,5 @@ func (s *Server) registerTools() {
 	s.registerConfigure()
 	s.registerQuery()
 	s.registerExecute()
+	s.registerSecurity()
 }
