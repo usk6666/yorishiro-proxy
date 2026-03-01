@@ -132,7 +132,6 @@ Layer 4 TCP Listener
 ## Documentation
 
 - [Getting Started Guide](docs/getting-started.md) -- Detailed setup and usage walkthrough
-- [CLI Reference](docs/cli-reference.md) -- Complete flag and environment variable reference
 
 ## License
 
