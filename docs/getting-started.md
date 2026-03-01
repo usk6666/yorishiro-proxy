@@ -4,7 +4,7 @@ This guide walks you through installing katashiro-proxy, connecting it to Claude
 
 ## Prerequisites
 
-- **Go 1.22+** -- required for building from source
+- **Go 1.25+** -- required for building from source
 - **Claude Code** -- katashiro-proxy operates as an MCP server for Claude Code
 - **playwright-cli** (optional) -- for automated browser-based traffic capture
 
