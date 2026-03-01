@@ -14,11 +14,6 @@ type mcpServerEntry struct {
 	Args    []string `json:"args"`
 }
 
-// mcpConfig represents the top-level structure of .mcp.json.
-type mcpConfig struct {
-	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
-}
-
 // MCPConfigPath returns the file path for MCP configuration based on the scope.
 // "project" returns .mcp.json in the given directory.
 // "user" returns ~/.claude/settings.json.

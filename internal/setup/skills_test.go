@@ -3,6 +3,7 @@ package setup
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -25,14 +26,7 @@ func TestInstallSkills_NewInstallation(t *testing.T) {
 	}
 
 	// Check that SKILL.md was installed.
-	found := false
-	for _, f := range installed {
-		if f == "SKILL.md" {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(installed, "SKILL.md") {
 		t.Error("SKILL.md not found in installed files")
 	}
 

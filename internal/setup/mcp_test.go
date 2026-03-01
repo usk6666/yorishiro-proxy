@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -159,24 +160,11 @@ func TestBuildMCPEntry(t *testing.T) {
 }
 
 func joinArgs(args []string) string {
-	result := ""
-	for _, a := range args {
-		result += a + " "
-	}
-	return result
+	return strings.Join(args, " ")
 }
 
 func containsStr(s, sub string) bool {
-	return len(s) >= len(sub) && indexOf(s, sub) >= 0
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
+	return strings.Contains(s, sub)
 }
 
 func TestWriteMCPConfig_NewFile(t *testing.T) {
