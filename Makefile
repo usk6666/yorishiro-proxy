@@ -2,10 +2,16 @@ BINARY := katashiro-proxy
 BINDIR := bin
 MODULE := github.com/usk6666/katashiro-proxy
 
-.PHONY: build test test-cover vet clean bench bench-compare
+.PHONY: build build-ui dev-ui test test-cover vet clean bench bench-compare
 
-build: vet
+build: build-ui vet
 	go build -o $(BINDIR)/$(BINARY) ./cmd/katashiro-proxy
+
+build-ui:
+	cd web && pnpm install --frozen-lockfile && pnpm run build
+
+dev-ui:
+	cd web && pnpm run dev
 
 test:
 	go test -race -v ./...

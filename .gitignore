@@ -35,6 +35,9 @@ go.work.sum
 # Build output
 bin/
 
+# Node.js
+node_modules/
+
 # Editor/IDE
 .idea/
 .vscode/
