@@ -86,6 +86,12 @@ type Config struct {
 	// CADataDir overrides the default CA data directory (~/.katashiro-proxy/ca/).
 	// Used for testing; excluded from JSON serialization.
 	CADataDir string `json:"-"`
+
+	// UIDir is an optional filesystem path for WebUI static files.
+	// When set, static files are served from this directory instead of
+	// the embedded defaults. Excluded from JSON serialization.
+	// CLI flag: -ui-dir, env: KP_UI_DIR.
+	UIDir string `json:"-"`
 }
 
 // Default returns a Config with sensible defaults.

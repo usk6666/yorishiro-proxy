@@ -54,6 +54,7 @@ var envVarMap = map[string]string{
 	"log-file":       "KP_LOG_FILE",
 	"mcp-http-addr":  "KP_MCP_HTTP_ADDR",
 	"mcp-http-token": "KP_MCP_HTTP_TOKEN",
+	"ui-dir":         "KP_UI_DIR",
 }
 
 func run(ctx context.Context) error {
@@ -85,6 +86,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file, default stderr (env: KP_LOG_FILE)")
 	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: KP_MCP_HTTP_ADDR)")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: KP_MCP_HTTP_TOKEN)")
+	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: KP_UI_DIR)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy [flags]\n\n")
@@ -246,7 +248,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, logger)
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, cfg.UIDir, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -292,6 +294,8 @@ func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string) 
 			cfg.MCPHTTPAddr = v
 		case "mcp-http-token":
 			cfg.MCPHTTPToken = v
+		case "ui-dir":
+			cfg.UIDir = v
 		}
 	}
 }
@@ -320,7 +324,7 @@ func parseBool(s string) bool {
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, uiDir string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	// Build MCP server options.
@@ -343,6 +347,11 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 	if proxyCfg != nil {
 		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
 		logger.Info("loaded proxy config file defaults")
+	}
+
+	// Set up WebUI override directory if specified.
+	if uiDir != "" {
+		opts = append(opts, mcp.WithUIDir(uiDir))
 	}
 
 	// Set up Bearer token authentication middleware for HTTP transport.
