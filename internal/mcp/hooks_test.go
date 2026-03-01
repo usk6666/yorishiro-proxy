@@ -920,6 +920,336 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 	}
 }
 
+// --- executePostReceive KV Store merge tests ---
+
+func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
+	// Create a macro step server that echoes back received headers.
+	macroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		// Echo back the Cookie header value to verify template expansion.
+		fmt.Fprintf(w, "cookie=%s", r.Header.Get("Cookie"))
+	}))
+	defer macroServer.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Save macro step session.
+	macroURL, _ := url.Parse(macroServer.URL + "/logout")
+	macroSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, macroSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
+		Headers: map[string][]string{"Cookie": {"{{auth_session}}"}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	// Define logout macro that uses {{auth_session}} from its vars.
+	callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "logout-macro",
+			"steps": []any{
+				map[string]any{
+					"id":         "logout",
+					"session_id": macroSess.ID,
+				},
+			},
+		},
+	})
+
+	// Create the hook executor with post_receive hook that has its own vars.
+	s := NewServer(context.Background(), nil, store, nil)
+	hooks := &hooksInput{
+		PostReceive: &hookConfig{
+			Macro:       "logout-macro",
+			RunInterval: "always",
+			Vars:        map[string]string{"auth_session": "config-session-value"},
+		},
+	}
+	state := &hookState{}
+	executor := newHookExecutor(s, hooks, state)
+	executor.allowPrivateNetworks = true
+
+	// Call executePostReceive with KV Store from pre_send that has the same key.
+	// pre_send KV Store should take precedence over hook config vars.
+	kvStore := map[string]string{"auth_session": "pre-send-session-value"}
+	err := executor.executePostReceive(ctx, 200, []byte("ok"), kvStore)
+	if err != nil {
+		t.Fatalf("executePostReceive: %v", err)
+	}
+}
+
+func TestExecutePostReceive_NilKVStore(t *testing.T) {
+	// When kvStore is nil, only hook config vars should be used.
+	macroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer macroServer.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	macroURL, _ := url.Parse(macroServer.URL + "/cleanup")
+	macroSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, macroSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "cleanup-macro",
+			"steps": []any{
+				map[string]any{
+					"id":         "cleanup",
+					"session_id": macroSess.ID,
+				},
+			},
+		},
+	})
+
+	s := NewServer(context.Background(), nil, store, nil)
+	hooks := &hooksInput{
+		PostReceive: &hookConfig{
+			Macro:       "cleanup-macro",
+			RunInterval: "always",
+			Vars:        map[string]string{"key": "value"},
+		},
+	}
+	state := &hookState{}
+	executor := newHookExecutor(s, hooks, state)
+	executor.allowPrivateNetworks = true
+
+	// Call with nil kvStore — should not panic or error.
+	err := executor.executePostReceive(ctx, 200, []byte("ok"), nil)
+	if err != nil {
+		t.Fatalf("executePostReceive with nil kvStore: %v", err)
+	}
+}
+
+func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
+	// When kvStore is empty, only hook config vars should be used.
+	macroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer macroServer.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	macroURL, _ := url.Parse(macroServer.URL + "/cleanup")
+	macroSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, macroSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "cleanup-macro-2",
+			"steps": []any{
+				map[string]any{
+					"id":         "cleanup",
+					"session_id": macroSess.ID,
+				},
+			},
+		},
+	})
+
+	s := NewServer(context.Background(), nil, store, nil)
+	hooks := &hooksInput{
+		PostReceive: &hookConfig{
+			Macro:       "cleanup-macro-2",
+			RunInterval: "always",
+			Vars:        map[string]string{"key": "value"},
+		},
+	}
+	state := &hookState{}
+	executor := newHookExecutor(s, hooks, state)
+	executor.allowPrivateNetworks = true
+
+	// Call with empty kvStore — should not modify behavior.
+	err := executor.executePostReceive(ctx, 200, []byte("ok"), map[string]string{})
+	if err != nil {
+		t.Fatalf("executePostReceive with empty kvStore: %v", err)
+	}
+}
+
+// TestExecute_Resend_KVStorePropagationToPostReceive is an integration test verifying
+// that the pre_send hook's KV Store is propagated to the post_receive hook via the
+// resend flow in execute_tool.go.
+func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
+	store := newTestStore(t)
+
+	// Login server: returns an auth session cookie.
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session=abc123; Path=/")
+		w.WriteHeader(200)
+		w.Write([]byte("logged in"))
+	}))
+	defer loginServer.Close()
+
+	// Target server: the main request.
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer targetServer.Close()
+
+	// Logout server: verifies it receives the auth_session from pre_send KV Store.
+	var logoutCookie string
+	logoutServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logoutCookie = r.Header.Get("Cookie")
+		w.WriteHeader(200)
+		w.Write([]byte("logged out"))
+	}))
+	defer logoutServer.Close()
+
+	ctx := context.Background()
+
+	// Save login session (for pre_send macro).
+	loginURL, _ := url.Parse(loginServer.URL + "/login")
+	loginSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, loginSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: loginSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Save logout session (for post_receive macro).
+	logoutURL, _ := url.Parse(logoutServer.URL + "/logout")
+	logoutSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, logoutSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: logoutSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: logoutURL,
+		Headers: map[string][]string{"Cookie": {"{{auth_session}}"}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Save target session.
+	targetURL, _ := url.Parse(targetServer.URL + "/api")
+	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, targetSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	// Define pre_send macro: login and extract session cookie.
+	callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "login-macro",
+			"steps": []any{
+				map[string]any{
+					"id":         "login",
+					"session_id": loginSess.ID,
+					"extract": []any{
+						map[string]any{
+							"name":        "auth_session",
+							"from":        "response",
+							"source":      "header",
+							"header_name": "Set-Cookie",
+							"regex":       "^(session=[^;]+)",
+							"group":       1,
+						},
+					},
+				},
+			},
+		},
+	})
+
+	// Define post_receive macro: logout using auth_session via override_headers.
+	// Note: template expansion only applies to step overrides, not base session headers.
+	callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "logout-macro-e2e",
+			"steps": []any{
+				map[string]any{
+					"id":               "logout",
+					"session_id":       logoutSess.ID,
+					"override_headers": map[string]any{"Cookie": "{{auth_session}}"},
+				},
+			},
+		},
+	})
+
+	// Resend with both pre_send and post_receive hooks.
+	// The key test: post_receive should receive auth_session from pre_send's KV Store.
+	result := callExecute(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"session_id": targetSess.ID,
+			"hooks": map[string]any{
+				"pre_send": map[string]any{
+					"macro": "login-macro",
+				},
+				"post_receive": map[string]any{
+					"macro": "logout-macro-e2e",
+				},
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("resend with both hooks failed: %v", result.Content)
+	}
+
+	var out executeResendResult
+	unmarshalExecuteResult(t, result, &out)
+	if out.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", out.StatusCode)
+	}
+
+	// Verify that the logout macro received the auth_session from pre_send.
+	if logoutCookie != "session=abc123" {
+		t.Errorf("logout received Cookie = %q, want %q", logoutCookie, "session=abc123")
+	}
+}
+
 // stringPtr returns a pointer to a string value.
 func stringPtr(s string) *string {
 	return &s

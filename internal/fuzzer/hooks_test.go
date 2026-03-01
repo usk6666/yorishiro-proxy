@@ -14,12 +14,13 @@ import (
 
 // mockHookCallbacks implements HookCallbacks for testing.
 type mockHookCallbacks struct {
-	preSendKVStore map[string]string
-	preSendErr     error
-	preSendCalls   int
-	postSendCalls  int
-	postSendErr    error
-	updateCalls    int
+	preSendKVStore    map[string]string
+	preSendErr        error
+	preSendCalls      int
+	postSendCalls     int
+	postSendErr       error
+	postSendKVStore   map[string]string // captured kvStore passed to PostSend
+	updateCalls       int
 }
 
 func (m *mockHookCallbacks) PreSend(_ context.Context, _ *HookState) (map[string]string, error) {
@@ -27,8 +28,9 @@ func (m *mockHookCallbacks) PreSend(_ context.Context, _ *HookState) (map[string
 	return m.preSendKVStore, m.preSendErr
 }
 
-func (m *mockHookCallbacks) PostSend(_ context.Context, _ *HookState, _ int, _ []byte) error {
+func (m *mockHookCallbacks) PostSend(_ context.Context, _ *HookState, _ int, _ []byte, kvStore map[string]string) error {
 	m.postSendCalls++
+	m.postSendKVStore = kvStore
 	return m.postSendErr
 }
 
@@ -258,6 +260,84 @@ func TestExecuteFuzzCaseWithHooks_WithPreSend(t *testing.T) {
 	}
 	if hooks.postSendCalls != 1 {
 		t.Errorf("postSendCalls = %d, want 1", hooks.postSendCalls)
+	}
+}
+
+func TestExecuteFuzzCaseWithHooks_KVStorePropagation(t *testing.T) {
+	tests := []struct {
+		name           string
+		preSendKVStore map[string]string
+		wantKVStore    map[string]string
+	}{
+		{
+			name:           "kvstore_propagated_to_post_send",
+			preSendKVStore: map[string]string{"auth_session": "session=abc", "item_id": "4"},
+			wantKVStore:    map[string]string{"auth_session": "session=abc", "item_id": "4"},
+		},
+		{
+			name:           "nil_kvstore_propagated_as_nil",
+			preSendKVStore: nil,
+			wantKVStore:    nil,
+		},
+		{
+			name:           "empty_kvstore_propagated_as_empty",
+			preSendKVStore: map[string]string{},
+			wantKVStore:    map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+				w.Write([]byte("ok"))
+			}))
+			defer server.Close()
+
+			u, _ := url.Parse(server.URL + "/test")
+			store := newMemStore()
+			engine := NewEngine(store, store, store, &http.Client{Timeout: 5 * time.Second}, "")
+
+			baseData := &RequestData{
+				Method:  "GET",
+				URL:     u,
+				Headers: map[string][]string{},
+			}
+
+			hooks := &mockHookCallbacks{
+				preSendKVStore: tt.preSendKVStore,
+			}
+			hookState := &HookState{}
+			fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
+
+			result := engine.executeFuzzCaseWithHooks(context.Background(), baseData, nil, fc, "HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState, nil)
+
+			if result.Error != "" {
+				t.Fatalf("unexpected error: %s", result.Error)
+			}
+			if hooks.postSendCalls != 1 {
+				t.Fatalf("postSendCalls = %d, want 1", hooks.postSendCalls)
+			}
+
+			// Verify the kvStore was propagated to PostSend.
+			if tt.wantKVStore == nil {
+				if hooks.postSendKVStore != nil {
+					t.Errorf("postSendKVStore = %v, want nil", hooks.postSendKVStore)
+				}
+			} else {
+				if len(hooks.postSendKVStore) != len(tt.wantKVStore) {
+					t.Errorf("postSendKVStore length = %d, want %d", len(hooks.postSendKVStore), len(tt.wantKVStore))
+				}
+				for k, want := range tt.wantKVStore {
+					got, ok := hooks.postSendKVStore[k]
+					if !ok {
+						t.Errorf("postSendKVStore missing key %q", k)
+					} else if got != want {
+						t.Errorf("postSendKVStore[%q] = %q, want %q", k, got, want)
+					}
+				}
+			}
+		})
 	}
 }
 

@@ -500,6 +500,56 @@ Returns: name, deleted.
 }
 ```
 
+## Hooks (pre_send / post_receive)
+
+The `resend` and `fuzz` actions support optional hooks that execute macros before sending the request (`pre_send`) and after receiving the response (`post_receive`). Hooks are specified via the `hooks` parameter.
+
+**Hook parameters:**
+- **hooks.pre_send** (object, optional): Hook executed before the main request.
+  - **macro** (string, required): Name of the stored macro to execute.
+  - **vars** (object, optional): Runtime variable overrides for the macro.
+  - **run_interval** (string, optional): When the hook fires. For pre_send: `"always"` (default), `"once"`, `"every_n"`, `"on_error"`.
+  - **n** (integer): Interval count for `"every_n"`.
+- **hooks.post_receive** (object, optional): Hook executed after the main response.
+  - **macro** (string, required): Name of the stored macro to execute.
+  - **vars** (object, optional): Runtime variable overrides for the macro.
+  - **run_interval** (string, optional): When the hook fires. For post_receive: `"always"` (default), `"on_status"`, `"on_match"`.
+  - **status_codes** (array of integers): Status codes for `"on_status"`.
+  - **match_pattern** (string): Regex pattern for `"on_match"`.
+  - **pass_response** (boolean, optional): Pass `__response_status` and `__response_body` as vars to the macro.
+
+### KV Store sharing between hooks
+
+Within a single iteration (resend call or fuzz iteration), the KV Store produced by the `pre_send` hook is automatically passed to the `post_receive` hook. This enables workflows where pre_send acquires resources that post_receive needs to clean up.
+
+**Priority when merging vars:** If the pre_send KV Store and the post_receive hook's `vars` config contain the same key, the **pre_send KV Store value takes precedence**.
+
+**Example: Login before each request, logout after**
+
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "session_id": "delete-endpoint",
+    "attack_type": "sequential",
+    "positions": [{"id": "pos-0", "location": "path", "match": "/items/(\\d+)", "payload_set": "ids"}],
+    "payload_sets": {"ids": {"type": "range", "start": 1, "end": 100}},
+    "hooks": {
+      "pre_send": {
+        "macro": "csrf-login",
+        "run_interval": "always"
+      },
+      "post_receive": {
+        "macro": "logout",
+        "run_interval": "always"
+      }
+    }
+  }
+}
+```
+
+In this example, the `csrf-login` macro extracts `auth_session` into its KV Store. The fuzz request uses `{{auth_session}}` for template expansion. After the response, the `logout` macro also receives `auth_session` from the shared KV Store, enabling it to log out with the correct session cookie.
+
 ### Resend WebSocket message
 ```json
 {
