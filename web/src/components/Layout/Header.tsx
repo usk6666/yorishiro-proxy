@@ -15,7 +15,7 @@ const STATUS_BADGE_VARIANT = {
 } as const;
 
 export function Header({ onToggleSidebar, sidebarCollapsed }: HeaderProps) {
-  const { status, connected, reconnect } = useMcpClient();
+  const { status, error, connected, reconnect } = useMcpClient();
 
   return (
     <header className="header">
@@ -38,18 +38,41 @@ export function Header({ onToggleSidebar, sidebarCollapsed }: HeaderProps) {
           <Badge variant={STATUS_BADGE_VARIANT[status]}>
             {connected ? "MCP Connected" : `MCP: ${status}`}
           </Badge>
-          {status === "error" && (
-            <button
-              className="header-reconnect"
-              onClick={() => void reconnect()}
-              title="Reconnect"
-            >
-              retry
-            </button>
-          )}
+          {status === "error" && <ErrorAction error={error} reconnect={reconnect} />}
         </div>
       </div>
     </header>
+  );
+}
+
+function ErrorAction({
+  error,
+  reconnect,
+}: {
+  error: Error | null;
+  reconnect: () => Promise<void>;
+}) {
+  const authError =
+    error != null &&
+    "code" in error &&
+    (error as { code: unknown }).code === 401;
+
+  if (authError) {
+    return (
+      <span className="header-auth-hint">
+        Re-open using the token URL from server logs
+      </span>
+    );
+  }
+
+  return (
+    <button
+      className="header-reconnect"
+      onClick={() => void reconnect()}
+      title="Reconnect"
+    >
+      retry
+    </button>
   );
 }
 
