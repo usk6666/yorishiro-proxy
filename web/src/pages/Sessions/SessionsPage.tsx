@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
@@ -86,9 +86,9 @@ function formatTimestamp(ts: string): string {
   }
 }
 
-/** Format byte size to a human-readable string. */
-function formatSize(messageCount: number): string {
-  return String(messageCount);
+/** Format a message count for display. */
+function formatMessageCount(count: number): string {
+  return String(count);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ export function SessionsPage() {
 
   // --- Filter state ---
   const [showFilters, setShowFilters] = useState(false);
-  const [selectedProtocols, setSelectedProtocols] = useState<Set<string>>(new Set());
+  const [selectedProtocol, setSelectedProtocol] = useState<string>("");
   const [selectedMethod, setSelectedMethod] = useState<string>("");
   const [statusCodeRange, setStatusCodeRange] = useState<string>("");
   const [urlPattern, setUrlPattern] = useState<string>("");
@@ -121,8 +121,8 @@ export function SessionsPage() {
   const filter = useMemo<QueryFilter | undefined>(() => {
     const f: QueryFilter = {};
     // Protocol filter: query tool accepts a single protocol string
-    if (selectedProtocols.size === 1) {
-      f.protocol = [...selectedProtocols][0];
+    if (selectedProtocol) {
+      f.protocol = selectedProtocol;
     }
     if (selectedMethod) {
       f.method = selectedMethod;
@@ -137,7 +137,7 @@ export function SessionsPage() {
       }
     }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocols, selectedMethod, urlPattern, statusCodeRange]);
+  }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange]);
 
   // --- Query sessions ---
   const { data, loading, error, refetch } = useQuery("sessions", {
@@ -150,24 +150,28 @@ export function SessionsPage() {
   const sessions = data?.sessions ?? [];
   const total = data?.total ?? 0;
 
+  // Trigger refetch when filter/pagination options change.
+  // useQuery stores options in a ref so changing them does not automatically
+  // re-execute the query. This effect ensures an explicit refetch fires.
+  const prevFilterKey = useRef("");
+  useEffect(() => {
+    const key = JSON.stringify({ filter, limit: pageSize, offset });
+    if (prevFilterKey.current && prevFilterKey.current !== key) {
+      refetch();
+    }
+    prevFilterKey.current = key;
+  }, [filter, pageSize, offset, refetch]);
+
   // Reset offset when filter changes
   const handleFilterChange = useCallback(() => {
     setOffset(0);
     setSelectedIds(new Set());
   }, []);
 
-  // --- Protocol checkbox toggle ---
-  const toggleProtocol = useCallback(
+  // --- Protocol radio select ---
+  const selectProtocol = useCallback(
     (protocol: string) => {
-      setSelectedProtocols((prev) => {
-        const next = new Set(prev);
-        if (next.has(protocol)) {
-          next.delete(protocol);
-        } else {
-          next.add(protocol);
-        }
-        return next;
-      });
+      setSelectedProtocol(protocol);
       handleFilterChange();
     },
     [handleFilterChange],
@@ -236,6 +240,11 @@ export function SessionsPage() {
     if (selectedIds.size === 0) return;
 
     const count = selectedIds.size;
+    const confirmed = window.confirm(
+      `Are you sure you want to delete ${count} session(s)? This action cannot be undone.`,
+    );
+    if (!confirmed) return;
+
     try {
       for (const id of selectedIds) {
         await execute({
@@ -355,12 +364,22 @@ export function SessionsPage() {
           <div className="sessions-filter-group">
             <span className="sessions-filter-label">Protocol</span>
             <div className="sessions-filter-checkboxes">
+              <label className="sessions-filter-checkbox">
+                <input
+                  type="radio"
+                  name="protocol-filter"
+                  checked={selectedProtocol === ""}
+                  onChange={() => selectProtocol("")}
+                />
+                All
+              </label>
               {PROTOCOLS.map((proto) => (
                 <label key={proto} className="sessions-filter-checkbox">
                   <input
-                    type="checkbox"
-                    checked={selectedProtocols.has(proto)}
-                    onChange={() => toggleProtocol(proto)}
+                    type="radio"
+                    name="protocol-filter"
+                    checked={selectedProtocol === proto}
+                    onChange={() => selectProtocol(proto)}
                   />
                   {proto}
                 </label>
@@ -392,10 +411,10 @@ export function SessionsPage() {
               onChange={handleStatusCodeChange}
             >
               <option value="">All</option>
-              <option value="200">2xx</option>
-              <option value="301">3xx</option>
-              <option value="400">4xx</option>
-              <option value="500">5xx</option>
+              <option value="200">200 OK</option>
+              <option value="301">301 Redirect</option>
+              <option value="400">400 Bad Request</option>
+              <option value="500">500 Server Error</option>
             </select>
           </div>
 
@@ -521,7 +540,7 @@ export function SessionsPage() {
                       )}
                     </td>
                     <td className="sessions-cell-size">
-                      {formatSize(session.message_count)}
+                      {formatMessageCount(session.message_count)}
                     </td>
                     <td className="sessions-cell-duration">
                       {formatDuration(session.duration_ms)}
