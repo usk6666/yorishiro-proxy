@@ -372,6 +372,8 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
 			return mcp.BearerAuthMiddleware(next, token)
 		}))
+		logger.Info("WebUI available",
+			"url", fmt.Sprintf("http://%s/?token=%s", mcpHTTPAddr, token))
 	}
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
