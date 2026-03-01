@@ -13,6 +13,7 @@ import (
 	"github.com/usk6666/katashiro-proxy/internal/cert"
 	"github.com/usk6666/katashiro-proxy/internal/config"
 	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
+	"github.com/usk6666/katashiro-proxy/internal/mcp/webui"
 	"github.com/usk6666/katashiro-proxy/internal/proxy"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
@@ -44,6 +45,7 @@ type Server struct {
 	proxyDefaults          *config.ProxyConfig  // default proxy config from config file
 	upstreamProxySetters   []upstreamProxySetter // protocol handlers to update when upstream proxy changes
 	requestTimeoutSetters  []requestTimeoutSetter // protocol handlers to update when request timeout changes
+	uiDir                  string               // optional filesystem path for WebUI static files
 }
 
 // tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
@@ -156,6 +158,14 @@ func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
 	}
 }
 
+// WithUIDir sets a filesystem directory from which to serve WebUI static files,
+// overriding the default embedded assets.
+func WithUIDir(dir string) ServerOption {
+	return func(s *Server) {
+		s.uiDir = dir
+	}
+}
+
 // WithProxyDefaults sets the default proxy configuration loaded from a config file.
 // These defaults are applied to proxy_start invocations when the caller does not
 // explicitly provide a value for a given field.
@@ -228,18 +238,34 @@ func (s *Server) RunHTTP(ctx context.Context, addr string) error {
 		return fmt.Errorf("MCP HTTP server: %w", err)
 	}
 
-	var h http.Handler = gomcp.NewStreamableHTTPHandler(func(_ *http.Request) *gomcp.Server {
+	// Build MCP handler with auth middleware.
+	var mcpHandler http.Handler = gomcp.NewStreamableHTTPHandler(func(_ *http.Request) *gomcp.Server {
 		return s.server
 	}, nil)
-
-	// Apply optional middleware (e.g. Bearer token authentication).
 	if s.httpMiddleware != nil {
-		h = s.httpMiddleware(h)
+		mcpHandler = s.httpMiddleware(mcpHandler)
 	}
+
+	// Build WebUI handler.
+	var uiHandler http.Handler
+	if s.uiDir != "" {
+		var err error
+		uiHandler, err = webui.NewFSHandler(s.uiDir)
+		if err != nil {
+			return fmt.Errorf("MCP HTTP server: %w", err)
+		}
+	} else {
+		uiHandler = webui.DefaultHandler()
+	}
+
+	// Route: /mcp -> MCP handler, / -> WebUI handler.
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/", uiHandler)
 
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: h,
+		Handler: mux,
 		// ReadHeaderTimeout protects against Slowloris attacks (CWE-400).
 		// ReadTimeout is intentionally not set to avoid breaking SSE streams.
 		ReadHeaderTimeout: 30 * time.Second,
