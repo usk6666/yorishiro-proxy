@@ -19,12 +19,12 @@ type Config struct {
 
 	// MCPHTTPAddr is the address the MCP Streamable HTTP server listens on.
 	// When set, an HTTP transport is started in addition to stdio.
-	// Can also be set via KP_MCP_HTTP_ADDR environment variable.
+	// Can also be set via YP_MCP_HTTP_ADDR environment variable.
 	MCPHTTPAddr string `json:"mcp_http_addr"`
 
 	// MCPHTTPToken is the Bearer token for authenticating MCP Streamable HTTP
 	// requests. When empty, a random token is generated at startup and logged
-	// to stderr. Can also be set via KP_MCP_HTTP_TOKEN environment variable.
+	// to stderr. Can also be set via YP_MCP_HTTP_TOKEN environment variable.
 	// CLI flag: -mcp-http-token
 	MCPHTTPToken string `json:"-"`
 
@@ -67,7 +67,7 @@ type Config struct {
 	// This is useful for local development/testing where the target runs on
 	// localhost. Per-request allow_private_networks parameter still works
 	// independently; either being true disables SSRF protection.
-	// CLI flag: -allow-private-networks, env: KP_ALLOW_PRIVATE_NETWORKS.
+	// CLI flag: -allow-private-networks, env: YP_ALLOW_PRIVATE_NETWORKS.
 	// WARNING: Do not enable in production environments.
 	AllowPrivateNetworks bool `json:"allow_private_networks"`
 
@@ -93,14 +93,14 @@ type Config struct {
 	// When true, a new CA is generated on each startup.
 	CAEphemeral bool `json:"ca_ephemeral"`
 
-	// CADataDir overrides the default CA data directory (~/.katashiro-proxy/ca/).
+	// CADataDir overrides the default CA data directory (~/.yorishiro-proxy/ca/).
 	// Used for testing; excluded from JSON serialization.
 	CADataDir string `json:"-"`
 
 	// UIDir is an optional filesystem path for WebUI static files.
 	// When set, static files are served from this directory instead of
 	// the embedded defaults. Excluded from JSON serialization.
-	// CLI flag: -ui-dir, env: KP_UI_DIR.
+	// CLI flag: -ui-dir, env: YP_UI_DIR.
 	UIDir string `json:"-"`
 }
 
@@ -119,14 +119,14 @@ func Default() *Config {
 	}
 }
 
-// DefaultDBPath returns the default SQLite database path: ~/.katashiro-proxy/katashiro.db.
-// If the user's home directory cannot be resolved, it falls back to ./katashiro.db.
+// DefaultDBPath returns the default SQLite database path: ~/.yorishiro-proxy/yorishiro.db.
+// If the user's home directory cannot be resolved, it falls back to ./yorishiro.db.
 func DefaultDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "katashiro.db"
+		return "yorishiro.db"
 	}
-	return filepath.Join(home, ".katashiro-proxy", "katashiro.db")
+	return filepath.Join(home, ".yorishiro-proxy", "yorishiro.db")
 }
 
 // EnsureDBDir creates the parent directory of the given database path if it does
@@ -140,7 +140,7 @@ func EnsureDBDir(dbPath string) error {
 // ResolveDBPath applies smart resolution to the given -db flag value:
 //
 //   - Absolute path (/path/to/db.db): used as-is.
-//   - Project name (my-project): resolved to ~/.katashiro-proxy/my-project.db.
+//   - Project name (my-project): resolved to ~/.yorishiro-proxy/my-project.db.
 //     A project name has no extension and no path separator.
 //   - Relative path with extension (./data.db, subdir/data.db): used as CWD-relative
 //     for backward compatibility.
@@ -172,7 +172,7 @@ func ResolveDBPath(value string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve project DB path: %w", err)
 		}
-		return filepath.Join(home, ".katashiro-proxy", value+".db"), nil
+		return filepath.Join(home, ".yorishiro-proxy", value+".db"), nil
 	}
 
 	// Otherwise treat as a CWD-relative path (backward compatible).

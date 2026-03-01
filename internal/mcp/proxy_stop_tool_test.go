@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 func TestProxyStop_Success(t *testing.T) {

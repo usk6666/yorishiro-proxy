@@ -1,6 +1,6 @@
 # Vulnerability Assessment Workflow Examples
 
-Common workflows for using katashiro-proxy as an AI-driven vulnerability assessment tool.
+Common workflows for using yorishiro-proxy as an AI-driven vulnerability assessment tool.
 
 ## Basic Setup
 
@@ -25,7 +25,7 @@ Set `HTTP_PROXY=http://127.0.0.1:8080` and `HTTPS_PROXY=http://127.0.0.1:8080` i
 ```
 The response includes `persisted`, `cert_path`, and `install_hint` fields.
 If `persisted` is true, install the certificate from `cert_path` into the client's trust store.
-The CA is automatically saved to `~/.katashiro-proxy/ca/ca.crt` on first startup, so subsequent restarts reuse the same CA without re-installation.
+The CA is automatically saved to `~/.yorishiro-proxy/ca/ca.crt` on first startup, so subsequent restarts reuse the same CA without re-installation.
 
 ## CA Certificate Rotation
 

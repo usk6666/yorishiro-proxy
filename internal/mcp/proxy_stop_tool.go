@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // proxyStopInput is the input for the proxy_stop tool.

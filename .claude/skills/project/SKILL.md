@@ -11,7 +11,7 @@ user-invokable: true
 ## 固定パラメータ
 
 - **チーム**: Usk6666
-- **プロジェクト**: katashiro-proxy
+- **プロジェクト**: yorishiro-proxy
 - **ロードマップ doc ID**: d413edd7-d296-433a-ab94-11d4dd57d883
 
 ## サブコマンド
@@ -28,11 +28,11 @@ user-invokable: true
 
 ### 手順
 
-1. `mcp__linear-server__list_milestones(project=katashiro-proxy)` で全マイルストーンの進捗を取得
+1. `mcp__linear-server__list_milestones(project=yorishiro-proxy)` で全マイルストーンの進捗を取得
 2. 以下を **並行で** 取得:
-   - `mcp__linear-server__list_issues(team=Usk6666, project=katashiro-proxy, state=started)`
-   - `mcp__linear-server__list_issues(team=Usk6666, project=katashiro-proxy, state=backlog)`
-   - `mcp__linear-server__list_issues(team=Usk6666, project=katashiro-proxy, state=unstarted)`
+   - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=started)`
+   - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=backlog)`
+   - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=unstarted)`
 3. Issue を `projectMilestone` フィールドでグループ化
 4. 以下を報告:
 
@@ -77,7 +77,7 @@ orchestrate の前提条件を整える最も重要なサブコマンド。
 1. `mcp__linear-server__get_document(id=d413edd7-d296-433a-ab94-11d4dd57d883)` でロードマップ文書を取得
 2. 対象マイルストーンセクションの Issue テーブルを解析
    - Issue ID、タイトル、説明、優先度、依存関係を抽出
-3. `mcp__linear-server__list_issues(team=Usk6666, project=katashiro-proxy)` で当該マイルストーンの既存 Issue を取得
+3. `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy)` で当該マイルストーンの既存 Issue を取得
    - `milestone` パラメータでフィルタリングできない場合は全件取得後にフィルタ
 4. ギャップ分析:
    - **ロードマップにあるが Linear にない** → Issue 作成を提案
@@ -134,10 +134,10 @@ N 件の Issue を作成し、M 件を更新しますか?
 ### 手順
 
 1. `mcp__linear-server__get_document(id=d413edd7-d296-433a-ab94-11d4dd57d883)` でロードマップ文書を取得
-2. `mcp__linear-server__list_milestones(project=katashiro-proxy)` で最新の進捗を取得
+2. `mcp__linear-server__list_milestones(project=yorishiro-proxy)` で最新の進捗を取得
 3. 以下を **並行で** 取得:
-   - `mcp__linear-server__list_issues(team=Usk6666, project=katashiro-proxy, state=completed)`
-   - `mcp__linear-server__list_issues(team=Usk6666, project=katashiro-proxy, state=started)`
+   - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=completed)`
+   - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=started)`
 4. ロードマップの各マイルストーンセクションを更新:
    - Issue テーブルのステータスマーカーを更新 (✅ 完了, 🔄 進行中, ⏳ 未着手)
    - マイルストーン進捗サマリーを更新

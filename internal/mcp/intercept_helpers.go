@@ -3,7 +3,7 @@ package mcp
 import (
 	"fmt"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // interceptRuleInput is the JSON representation of an intercept rule for MCP tool input.

@@ -10,14 +10,14 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/cert"
-	"github.com/usk6666/katashiro-proxy/internal/config"
-	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
-	"github.com/usk6666/katashiro-proxy/internal/mcp/webui"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // Server wraps the MCP server and registers proxy-related tools.
@@ -215,7 +215,7 @@ func WithRequestTimeoutSetters(setters ...requestTimeoutSetter) ServerOption {
 // If manager is nil, those tools will return an error when called.
 func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
 	server := gomcp.NewServer(&gomcp.Implementation{
-		Name:    "katashiro-proxy",
+		Name:    "yorishiro-proxy",
 		Version: "0.0.1",
 	}, nil)
 

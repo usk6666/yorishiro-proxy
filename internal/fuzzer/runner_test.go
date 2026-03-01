@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // threadSafeMockFuzzJobStore is a thread-safe version of mockFuzzJobStore.

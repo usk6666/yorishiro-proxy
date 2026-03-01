@@ -1,7 +1,7 @@
 /**
- * MCP Client SDK for katashiro-proxy Web UI.
+ * MCP Client SDK for yorishiro-proxy Web UI.
  *
- * Provides typed access to katashiro-proxy's 5 MCP tools:
+ * Provides typed access to yorishiro-proxy's 5 MCP tools:
  * - proxy_start: Start proxy listeners
  * - proxy_stop: Stop proxy listeners
  * - configure: Configure runtime proxy settings

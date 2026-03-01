@@ -65,7 +65,7 @@ func (r *Runner) SetNowFunc(fn func() time.Time) {
 
 // Run executes the full setup flow.
 func (r *Runner) Run(ctx context.Context) error {
-	r.printf("\n=== katashiro-proxy setup ===\n\n")
+	r.printf("\n=== yorishiro-proxy setup ===\n\n")
 
 	// Resolve binary path.
 	binaryPath := r.opts.BinaryPath
@@ -113,7 +113,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	r.printf("=== Setup complete! ===\n")
-	r.printf("Restart Claude Code to activate the katashiro-proxy MCP server.\n\n")
+	r.printf("Restart Claude Code to activate the yorishiro-proxy MCP server.\n\n")
 
 	return nil
 }
@@ -247,7 +247,7 @@ func (r *Runner) stepSkills() error {
 	r.printf("--- Step 4: Skill installation ---\n\n")
 
 	if !r.opts.NonInteractive {
-		answer, err := r.prompter.Prompt("  Install katashiro skills to .claude/skills/katashiro/? [Y/n]: ")
+		answer, err := r.prompter.Prompt("  Install yorishiro skills to .claude/skills/yorishiro/? [Y/n]: ")
 		if err != nil {
 			return fmt.Errorf("prompt skills: %w", err)
 		}
@@ -271,7 +271,7 @@ func (r *Runner) stepSkills() error {
 		r.printf("  Backed up existing skills to: %s\n", backupPath)
 	}
 	for _, f := range installed {
-		r.printf("  Installed: .claude/skills/katashiro/%s\n", f)
+		r.printf("  Installed: .claude/skills/yorishiro/%s\n", f)
 	}
 	r.printf("\n")
 

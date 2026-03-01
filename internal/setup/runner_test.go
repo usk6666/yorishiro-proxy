@@ -38,7 +38,7 @@ func TestRunner_NonInteractive(t *testing.T) {
 		NonInteractive: true,
 		SkipPlaywright: true,
 		SkipSkills:     true,
-		BinaryPath:     "/usr/bin/katashiro-proxy",
+		BinaryPath:     "/usr/bin/yorishiro-proxy",
 	}
 
 	runner := NewRunner(opts, &mockPrompter{}, &out)
@@ -58,7 +58,7 @@ func TestRunner_NonInteractive(t *testing.T) {
 
 	// Check output contains expected steps.
 	expectedSubstrings := []string{
-		"katashiro-proxy setup",
+		"yorishiro-proxy setup",
 		"Step 1: MCP configuration",
 		"Step 2: CA certificate",
 		"Step 3: playwright-cli integration (skipped)",
@@ -90,7 +90,7 @@ func TestRunner_InteractiveScope(t *testing.T) {
 	opts := Options{
 		ListenAddr:     "127.0.0.1:8080",
 		SkipPlaywright: true,
-		BinaryPath:     "/usr/bin/katashiro-proxy",
+		BinaryPath:     "/usr/bin/yorishiro-proxy",
 	}
 
 	runner := NewRunner(opts, prompter, &out)
@@ -126,7 +126,7 @@ func TestRunner_UserScope(t *testing.T) {
 	opts := Options{
 		ListenAddr:     "127.0.0.1:8080",
 		SkipPlaywright: true,
-		BinaryPath:     "/usr/bin/katashiro-proxy",
+		BinaryPath:     "/usr/bin/yorishiro-proxy",
 	}
 
 	runner := NewRunner(opts, prompter, &out)

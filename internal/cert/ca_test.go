@@ -32,8 +32,8 @@ func TestGenerate_CertificateFields(t *testing.T) {
 			name: "subject common name",
 			check: func(t *testing.T) {
 				t.Helper()
-				if cert.Subject.CommonName != "katashiro-proxy CA" {
-					t.Errorf("Subject.CommonName = %q, want %q", cert.Subject.CommonName, "katashiro-proxy CA")
+				if cert.Subject.CommonName != "yorishiro-proxy CA" {
+					t.Errorf("Subject.CommonName = %q, want %q", cert.Subject.CommonName, "yorishiro-proxy CA")
 				}
 			},
 		},
@@ -180,8 +180,8 @@ func TestGenerate_CertPEM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse PEM certificate: %v", err)
 	}
-	if cert.Subject.CommonName != "katashiro-proxy CA" {
-		t.Errorf("parsed cert CN = %q, want %q", cert.Subject.CommonName, "katashiro-proxy CA")
+	if cert.Subject.CommonName != "yorishiro-proxy CA" {
+		t.Errorf("parsed cert CN = %q, want %q", cert.Subject.CommonName, "yorishiro-proxy CA")
 	}
 }
 

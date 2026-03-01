@@ -148,10 +148,10 @@ func TestCreateBackup(t *testing.T) {
 }
 
 func TestBuildMCPEntry(t *testing.T) {
-	entry := BuildMCPEntry("/usr/local/bin/katashiro-proxy")
+	entry := BuildMCPEntry("/usr/local/bin/yorishiro-proxy")
 
-	if entry.Command != "/usr/local/bin/katashiro-proxy" {
-		t.Errorf("Command = %q, want %q", entry.Command, "/usr/local/bin/katashiro-proxy")
+	if entry.Command != "/usr/local/bin/yorishiro-proxy" {
+		t.Errorf("Command = %q, want %q", entry.Command, "/usr/local/bin/yorishiro-proxy")
 	}
 
 	if len(entry.Args) == 0 {
@@ -169,8 +169,8 @@ func TestBuildMCPEntry(t *testing.T) {
 	if containsStr(argsStr, "-insecure") {
 		t.Error("-insecure should not be included by default")
 	}
-	if !containsStr(argsStr, ".katashiro-proxy") {
-		t.Error("expected log path under .katashiro-proxy")
+	if !containsStr(argsStr, ".yorishiro-proxy") {
+		t.Error("expected log path under .yorishiro-proxy")
 	}
 }
 
@@ -187,7 +187,7 @@ func TestWriteMCPConfig_NewFile(t *testing.T) {
 	configPath := filepath.Join(dir, ".mcp.json")
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
 
-	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
+	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/yorishiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -218,13 +218,13 @@ func TestWriteMCPConfig_NewFile(t *testing.T) {
 		t.Fatalf("parse mcpServers: %v", err)
 	}
 
-	entry, ok := servers["katashiro-proxy"]
+	entry, ok := servers["yorishiro-proxy"]
 	if !ok {
-		t.Fatal("missing katashiro-proxy entry")
+		t.Fatal("missing yorishiro-proxy entry")
 	}
 
-	if entry.Command != "/usr/bin/katashiro-proxy" {
-		t.Errorf("command = %q, want %q", entry.Command, "/usr/bin/katashiro-proxy")
+	if entry.Command != "/usr/bin/yorishiro-proxy" {
+		t.Errorf("command = %q, want %q", entry.Command, "/usr/bin/yorishiro-proxy")
 	}
 }
 
@@ -247,7 +247,7 @@ func TestWriteMCPConfig_ExistingFile_PreservesOtherServers(t *testing.T) {
 		t.Fatalf("write existing: %v", err)
 	}
 
-	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
+	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/yorishiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -276,8 +276,8 @@ func TestWriteMCPConfig_ExistingFile_PreservesOtherServers(t *testing.T) {
 	if _, ok := servers["other-server"]; !ok {
 		t.Error("existing other-server entry was lost")
 	}
-	if _, ok := servers["katashiro-proxy"]; !ok {
-		t.Error("katashiro-proxy entry not added")
+	if _, ok := servers["yorishiro-proxy"]; !ok {
+		t.Error("yorishiro-proxy entry not added")
 	}
 }
 
@@ -286,11 +286,11 @@ func TestWriteMCPConfig_ExistingFile_UpdatesKatashiroEntry(t *testing.T) {
 	configPath := filepath.Join(dir, ".mcp.json")
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
 
-	// Create existing config with an old katashiro-proxy entry.
+	// Create existing config with an old yorishiro-proxy entry.
 	existing := `{
   "mcpServers": {
-    "katashiro-proxy": {
-      "command": "/old/path/katashiro-proxy",
+    "yorishiro-proxy": {
+      "command": "/old/path/yorishiro-proxy",
       "args": []
     }
   }
@@ -300,7 +300,7 @@ func TestWriteMCPConfig_ExistingFile_UpdatesKatashiroEntry(t *testing.T) {
 		t.Fatalf("write existing: %v", err)
 	}
 
-	_, err := WriteMCPConfig(configPath, "/new/path/katashiro-proxy", now)
+	_, err := WriteMCPConfig(configPath, "/new/path/yorishiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -321,8 +321,8 @@ func TestWriteMCPConfig_ExistingFile_UpdatesKatashiroEntry(t *testing.T) {
 		t.Fatalf("parse mcpServers: %v", err)
 	}
 
-	if servers["katashiro-proxy"].Command != "/new/path/katashiro-proxy" {
-		t.Errorf("command not updated: got %q", servers["katashiro-proxy"].Command)
+	if servers["yorishiro-proxy"].Command != "/new/path/yorishiro-proxy" {
+		t.Errorf("command not updated: got %q", servers["yorishiro-proxy"].Command)
 	}
 }
 
@@ -331,7 +331,7 @@ func TestWriteMCPConfig_CreatesParentDir(t *testing.T) {
 	configPath := filepath.Join(dir, "subdir", "config.json")
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
 
-	_, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
+	_, err := WriteMCPConfig(configPath, "/usr/bin/yorishiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestWriteMCPConfig_PreservesExtraFields(t *testing.T) {
 		t.Fatalf("write existing: %v", err)
 	}
 
-	_, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
+	_, err := WriteMCPConfig(configPath, "/usr/bin/yorishiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}

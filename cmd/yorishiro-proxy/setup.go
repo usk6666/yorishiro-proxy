@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/usk6666/katashiro-proxy/internal/setup"
+	"github.com/usk6666/yorishiro-proxy/internal/setup"
 )
 
 // runSetup handles the "setup" subcommand.
@@ -23,7 +23,7 @@ func runSetup(ctx context.Context, args []string) error {
 	fs.BoolVar(&opts.SkipSkills, "skip-skills", false, "skip skill installation")
 
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy setup [flags]\n\n")
+		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy setup [flags]\n\n")
 		fmt.Fprintf(fs.Output(), "Interactive setup wizard for Claude Code integration.\n")
 		fmt.Fprintf(fs.Output(), "Configures MCP server, CA certificate, and optional integrations.\n\n")
 		fmt.Fprintf(fs.Output(), "Flags:\n")

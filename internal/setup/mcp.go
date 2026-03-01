@@ -57,16 +57,16 @@ func CreateBackup(path string, now time.Time) (string, error) {
 	return backupFile, nil
 }
 
-// defaultLogFilePath returns the default log file path under ~/.katashiro-proxy/.
+// defaultLogFilePath returns the default log file path under ~/.yorishiro-proxy/.
 func defaultLogFilePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".", ".katashiro-proxy", "katashiro-proxy.log")
+		return filepath.Join(".", ".yorishiro-proxy", "yorishiro-proxy.log")
 	}
-	return filepath.Join(home, ".katashiro-proxy", "katashiro-proxy.log")
+	return filepath.Join(home, ".yorishiro-proxy", "yorishiro-proxy.log")
 }
 
-// BuildMCPEntry creates a katashiro-proxy MCP server entry for the given binary path.
+// BuildMCPEntry creates a yorishiro-proxy MCP server entry for the given binary path.
 func BuildMCPEntry(binaryPath string) mcpServerEntry {
 	args := []string{
 		"-log-file", defaultLogFilePath(),
@@ -78,7 +78,7 @@ func BuildMCPEntry(binaryPath string) mcpServerEntry {
 }
 
 // WriteMCPConfig writes or updates the MCP configuration file at the given path.
-// If the file already exists, the katashiro-proxy entry is added or updated
+// If the file already exists, the yorishiro-proxy entry is added or updated
 // while preserving other MCP server entries.
 func WriteMCPConfig(path, binaryPath string, now time.Time) (backupPath string, err error) {
 	entry := BuildMCPEntry(binaryPath)
@@ -117,12 +117,12 @@ func WriteMCPConfig(path, binaryPath string, now time.Time) (backupPath string, 
 		servers = make(map[string]json.RawMessage)
 	}
 
-	// Add/update katashiro-proxy entry.
+	// Add/update yorishiro-proxy entry.
 	entryJSON, err := json.Marshal(entry)
 	if err != nil {
-		return backupPath, fmt.Errorf("marshal katashiro-proxy entry: %w", err)
+		return backupPath, fmt.Errorf("marshal yorishiro-proxy entry: %w", err)
 	}
-	servers["katashiro-proxy"] = entryJSON
+	servers["yorishiro-proxy"] = entryJSON
 
 	// Write back servers.
 	serversJSON, err := json.Marshal(servers)

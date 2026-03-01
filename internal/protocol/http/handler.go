@@ -17,11 +17,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/cert"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 const maxBodyRecordSize = 1 << 20 // 1MB

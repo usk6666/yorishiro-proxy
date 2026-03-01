@@ -13,7 +13,7 @@ Go プロジェクトをビルドするスキル。
 make build
 ```
 
-これは内部的に `go vet ./...` → `go build -o bin/katashiro-proxy ./cmd/katashiro-proxy` を実行する。
+これは内部的に `go vet ./...` → `go build -o bin/yorishiro-proxy ./cmd/yorishiro-proxy` を実行する。
 
 ## 引数パターン
 

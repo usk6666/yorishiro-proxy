@@ -78,7 +78,7 @@ func TestDefaultDBPath_ResolvesToHomeDir(t *testing.T) {
 	}
 
 	got := DefaultDBPath()
-	want := filepath.Join(home, ".katashiro-proxy", "katashiro.db")
+	want := filepath.Join(home, ".yorishiro-proxy", "yorishiro.db")
 	if got != want {
 		t.Errorf("DefaultDBPath() = %q, want %q", got, want)
 	}
@@ -94,9 +94,9 @@ func TestDefault_DBPathUsesHomeDir(t *testing.T) {
 	if !strings.HasPrefix(cfg.DBPath, home) {
 		t.Errorf("Default().DBPath = %q, want prefix %q", cfg.DBPath, home)
 	}
-	if !strings.HasSuffix(cfg.DBPath, filepath.Join(".katashiro-proxy", "katashiro.db")) {
+	if !strings.HasSuffix(cfg.DBPath, filepath.Join(".yorishiro-proxy", "yorishiro.db")) {
 		t.Errorf("Default().DBPath = %q, want suffix %q", cfg.DBPath,
-			filepath.Join(".katashiro-proxy", "katashiro.db"))
+			filepath.Join(".yorishiro-proxy", "yorishiro.db"))
 	}
 }
 
@@ -135,7 +135,7 @@ func TestEnsureDBDir_ExistingDirectory(t *testing.T) {
 
 func TestEnsureDBDir_AbsolutePath(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "data", "katashiro.db")
+	dbPath := filepath.Join(tmpDir, "data", "yorishiro.db")
 
 	if err := EnsureDBDir(dbPath); err != nil {
 		t.Fatalf("EnsureDBDir(%q): %v", dbPath, err)
@@ -356,7 +356,7 @@ func TestResolveDBPath(t *testing.T) {
 		{
 			name:  "empty returns default path",
 			input: "",
-			want:  filepath.Join(home, ".katashiro-proxy", "katashiro.db"),
+			want:  filepath.Join(home, ".yorishiro-proxy", "yorishiro.db"),
 		},
 		// Absolute paths: used as-is.
 		{
@@ -371,24 +371,24 @@ func TestResolveDBPath(t *testing.T) {
 		},
 		{
 			name:  "absolute path nested",
-			input: "/home/user/katashiro-data/test.sqlite",
-			want:  "/home/user/katashiro-data/test.sqlite",
+			input: "/home/user/yorishiro-data/test.sqlite",
+			want:  "/home/user/yorishiro-data/test.sqlite",
 		},
 		// Project names: no extension, no path separator.
 		{
 			name:  "simple project name",
 			input: "pentest-2026",
-			want:  filepath.Join(home, ".katashiro-proxy", "pentest-2026.db"),
+			want:  filepath.Join(home, ".yorishiro-proxy", "pentest-2026.db"),
 		},
 		{
 			name:  "project name with underscores",
 			input: "client_audit_2026",
-			want:  filepath.Join(home, ".katashiro-proxy", "client_audit_2026.db"),
+			want:  filepath.Join(home, ".yorishiro-proxy", "client_audit_2026.db"),
 		},
 		{
 			name:  "project name alphanumeric",
 			input: "project123",
-			want:  filepath.Join(home, ".katashiro-proxy", "project123.db"),
+			want:  filepath.Join(home, ".yorishiro-proxy", "project123.db"),
 		},
 		// Names with dots have an extension, so they are CWD-relative (not project names).
 		{

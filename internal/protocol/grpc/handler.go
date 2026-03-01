@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // maxBodyRecordSize limits the body size recorded per message to 1MB.

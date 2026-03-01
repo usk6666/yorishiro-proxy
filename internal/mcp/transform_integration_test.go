@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 )
 
 // --- M3 Integration: Auto-Transform ---
@@ -212,7 +212,7 @@ func TestM3_Transform_ReplaceAll(t *testing.T) {
 						Action: transformActionInput{
 							Type:   "set_header",
 							Header: "X-Proxy",
-							Value:  "katashiro",
+							Value:  "yorishiro",
 						},
 					},
 				},

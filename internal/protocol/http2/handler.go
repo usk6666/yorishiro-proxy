@@ -1,4 +1,4 @@
-// Package http2 implements an HTTP/2 protocol handler for the katashiro-proxy.
+// Package http2 implements an HTTP/2 protocol handler for the yorishiro-proxy.
 // It supports both h2 (TLS via ALPN) and h2c (cleartext) HTTP/2 connections.
 // Each HTTP/2 stream is recorded as an individual unary session.
 package http2
@@ -21,10 +21,10 @@ import (
 
 	"golang.org/x/net/http2"
 
-	protogrpc "github.com/usk6666/katashiro-proxy/internal/protocol/grpc"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // http2Preface is the HTTP/2 connection preface sent by clients.

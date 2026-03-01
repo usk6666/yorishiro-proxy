@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	interceptPkg "github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
+	interceptPkg "github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 func TestSetInsecureSkipVerify_EnablesSkipVerify(t *testing.T) {

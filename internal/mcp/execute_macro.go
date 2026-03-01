@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/usk6666/katashiro-proxy/internal/macro"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // macroParams holds parameters for macro-related execute actions.

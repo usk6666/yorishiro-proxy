@@ -6,7 +6,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // benchHandler is a benchmark-oriented protocol handler stub.

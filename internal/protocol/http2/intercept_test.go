@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // --- SetInterceptEngine / SetInterceptQueue tests ---

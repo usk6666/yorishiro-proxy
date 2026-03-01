@@ -7,7 +7,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // setupTestSessionWithInterceptQueue creates an MCP client session with an intercept queue.

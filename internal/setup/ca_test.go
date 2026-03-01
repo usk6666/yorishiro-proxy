@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/usk6666/katashiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
 )
 
 func TestCAInstallInstructions(t *testing.T) {
-	certPath := "/home/user/.katashiro-proxy/ca/ca.crt"
+	certPath := "/home/user/.yorishiro-proxy/ca/ca.crt"
 	quotedPath := "'" + certPath + "'"
 
 	tests := []struct {
@@ -75,8 +75,8 @@ func TestShellQuote(t *testing.T) {
 	}{
 		{
 			name:  "simple path",
-			input: "/home/user/.katashiro-proxy/ca/ca.crt",
-			want:  "'/home/user/.katashiro-proxy/ca/ca.crt'",
+			input: "/home/user/.yorishiro-proxy/ca/ca.crt",
+			want:  "'/home/user/.yorishiro-proxy/ca/ca.crt'",
 		},
 		{
 			name:  "path with spaces",

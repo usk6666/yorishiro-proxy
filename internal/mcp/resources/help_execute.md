@@ -129,7 +129,7 @@ Start an asynchronous fuzz campaign against a recorded session. Returns fuzz_id 
 - **payload_sets** (object, required): Named payload sets. Each set specifies:
   - **type** (string, required): `wordlist`, `file`, `range`, or `sequence`.
   - **values** (array): Payload strings (for wordlist).
-  - **path** (string): Relative path under `~/.katashiro-proxy/wordlists/` (for file).
+  - **path** (string): Relative path under `~/.yorishiro-proxy/wordlists/` (for file).
   - **start**, **end**, **step** (integer): Range parameters (for range/sequence).
   - **format** (string): Format string (for sequence, e.g. `"user%04d"`).
 - **concurrency** (integer, optional): Number of concurrent workers (default: `1`).
@@ -174,7 +174,7 @@ Returns: fuzz_id, action, status.
 ### regenerate_ca_cert
 Regenerate the CA certificate. Behavior depends on the CA initialization mode:
 
-- **Auto-persist mode** (default): Generates a new CA and saves it to the default path (`~/.katashiro-proxy/ca/`). Users must re-install the CA certificate.
+- **Auto-persist mode** (default): Generates a new CA and saves it to the default path (`~/.yorishiro-proxy/ca/`). Users must re-install the CA certificate.
 - **Ephemeral mode** (`--ca-ephemeral`): Generates a new CA in memory only. Lost on restart.
 - **Explicit mode** (`-ca-cert`/`-ca-key`): Returns an error. User-provided CA files are not overwritten.
 
