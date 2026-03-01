@@ -16,6 +16,7 @@ import {
 } from "react";
 import { McpClient, type McpClientConfig } from "./client.js";
 import type { ConnectionStatus } from "./types.js";
+import { clearStoredToken } from "../auth.js";
 
 /** Values exposed by the MCP context. */
 export interface McpContextValue {
@@ -75,7 +76,10 @@ export function McpProvider({ config, children }: McpProviderProps) {
 
     try {
       await client.connect();
-    } catch {
+    } catch (err) {
+      if (isAuthError(err)) {
+        clearStoredToken();
+      }
       // Error is already set via the event listener.
     }
   }, []);
@@ -114,4 +118,17 @@ export function useMcpContext(): McpContextValue {
     throw new Error("useMcpContext must be used within a McpProvider");
   }
   return context;
+}
+
+/**
+ * Check if an error is an HTTP 401 authentication error.
+ * StreamableHTTPClientTransport throws StreamableHTTPError with code 401.
+ */
+function isAuthError(err: unknown): boolean {
+  return (
+    err != null &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code: unknown }).code === 401
+  );
 }
