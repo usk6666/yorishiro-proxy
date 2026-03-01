@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -17,13 +18,16 @@ type CAInfo struct {
 	Generated   bool // true if the CA was newly generated during setup
 }
 
-// EnsureCA ensures a CA certificate exists at the default path.
+// EnsureCA ensures a CA certificate exists at the given directory.
+// If caDir is empty, the default path (~/.katashiro-proxy/ca/) is used.
 // If the CA already exists, it loads it. Otherwise, it generates a new one.
 // Returns CAInfo with the certificate path and fingerprint.
-func EnsureCA() (*CAInfo, error) {
-	caDir := cert.DefaultCADir()
-	certPath := cert.DefaultCACertPath()
-	keyPath := cert.DefaultCAKeyPath()
+func EnsureCA(caDir string) (*CAInfo, error) {
+	if caDir == "" {
+		caDir = cert.DefaultCADir()
+	}
+	certPath := filepath.Join(caDir, "ca.crt")
+	keyPath := filepath.Join(caDir, "ca.key")
 
 	ca := &cert.CA{}
 	generated := false
@@ -71,6 +75,9 @@ func CAInstallInstructions(certPath string) string {
 func caInstallInstructionsForOS(certPath, goos string) string {
 	var b strings.Builder
 
+	// Shell-quote the cert path to prevent injection via special characters.
+	quoted := shellQuote(certPath)
+
 	b.WriteString("Install the CA certificate in your OS trust store:\n\n")
 
 	switch goos {
@@ -78,21 +85,29 @@ func caInstallInstructionsForOS(certPath, goos string) string {
 		b.WriteString("  macOS:\n")
 		fmt.Fprintf(&b, "    sudo security add-trusted-cert -d -r trustRoot \\\n")
 		fmt.Fprintf(&b, "      -k /Library/Keychains/System.keychain \\\n")
-		fmt.Fprintf(&b, "      %s\n", certPath)
+		fmt.Fprintf(&b, "      %s\n", quoted)
 	case "linux":
 		b.WriteString("  Linux (Debian/Ubuntu):\n")
-		fmt.Fprintf(&b, "    sudo cp %s \\\n", certPath)
+		fmt.Fprintf(&b, "    sudo cp %s \\\n", quoted)
 		b.WriteString("      /usr/local/share/ca-certificates/katashiro-proxy.crt\n")
 		b.WriteString("    sudo update-ca-certificates\n")
 	case "windows":
 		b.WriteString("  Windows (run as Administrator):\n")
-		fmt.Fprintf(&b, "    certutil -addstore \"Root\" %s\n", certPath)
+		fmt.Fprintf(&b, "    certutil -addstore \"Root\" %s\n", quoted)
 	default:
 		b.WriteString("  Copy the CA certificate to your OS trust store.\n")
 		fmt.Fprintf(&b, "  CA certificate path: %s\n", certPath)
 	}
 
 	return b.String()
+}
+
+// shellQuote wraps a string in single quotes, escaping any embedded single quotes.
+// This prevents shell injection when the string is used in displayed shell commands.
+func shellQuote(s string) string {
+	// Replace each ' with '\'' (end quote, escaped quote, start quote).
+	escaped := strings.ReplaceAll(s, "'", "'\\''")
+	return "'" + escaped + "'"
 }
 
 // formatFingerprint formats a byte slice as a colon-separated uppercase hex string.

@@ -125,6 +125,15 @@ func TestCreateBackup(t *testing.T) {
 		if string(data) != content {
 			t.Errorf("backup content = %q, want %q", string(data), content)
 		}
+
+		// Verify restrictive permissions.
+		info, err := os.Stat(backupFile)
+		if err != nil {
+			t.Fatalf("stat backup: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("backup permissions = %o, want 0600", perm)
+		}
 	})
 
 	t.Run("returns empty for non-existent file", func(t *testing.T) {
@@ -139,7 +148,7 @@ func TestCreateBackup(t *testing.T) {
 }
 
 func TestBuildMCPEntry(t *testing.T) {
-	entry := BuildMCPEntry("/usr/local/bin/katashiro-proxy", "127.0.0.1:8080")
+	entry := BuildMCPEntry("/usr/local/bin/katashiro-proxy")
 
 	if entry.Command != "/usr/local/bin/katashiro-proxy" {
 		t.Errorf("Command = %q, want %q", entry.Command, "/usr/local/bin/katashiro-proxy")
@@ -149,13 +158,19 @@ func TestBuildMCPEntry(t *testing.T) {
 		t.Fatal("expected non-empty Args")
 	}
 
-	// Check that -insecure and -log-file are in args.
+	// Check that -log-file is in args and points to user-scoped path.
 	argsStr := joinArgs(entry.Args)
-	if !containsStr(argsStr, "-insecure") {
-		t.Error("expected -insecure in args")
-	}
 	if !containsStr(argsStr, "-log-file") {
 		t.Error("expected -log-file in args")
+	}
+	if containsStr(argsStr, "/tmp/") {
+		t.Error("-log-file should not use /tmp")
+	}
+	if containsStr(argsStr, "-insecure") {
+		t.Error("-insecure should not be included by default")
+	}
+	if !containsStr(argsStr, ".katashiro-proxy") {
+		t.Error("expected log path under .katashiro-proxy")
 	}
 }
 
@@ -172,7 +187,7 @@ func TestWriteMCPConfig_NewFile(t *testing.T) {
 	configPath := filepath.Join(dir, ".mcp.json")
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
 
-	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", "127.0.0.1:8080", now)
+	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -232,7 +247,7 @@ func TestWriteMCPConfig_ExistingFile_PreservesOtherServers(t *testing.T) {
 		t.Fatalf("write existing: %v", err)
 	}
 
-	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", "127.0.0.1:8080", now)
+	backupPath, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -285,7 +300,7 @@ func TestWriteMCPConfig_ExistingFile_UpdatesKatashiroEntry(t *testing.T) {
 		t.Fatalf("write existing: %v", err)
 	}
 
-	_, err := WriteMCPConfig(configPath, "/new/path/katashiro-proxy", "127.0.0.1:8080", now)
+	_, err := WriteMCPConfig(configPath, "/new/path/katashiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -316,7 +331,7 @@ func TestWriteMCPConfig_CreatesParentDir(t *testing.T) {
 	configPath := filepath.Join(dir, "subdir", "config.json")
 	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
 
-	_, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", "127.0.0.1:8080", now)
+	_, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}
@@ -341,7 +356,7 @@ func TestWriteMCPConfig_PreservesExtraFields(t *testing.T) {
 		t.Fatalf("write existing: %v", err)
 	}
 
-	_, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", "127.0.0.1:8080", now)
+	_, err := WriteMCPConfig(configPath, "/usr/bin/katashiro-proxy", now)
 	if err != nil {
 		t.Fatalf("WriteMCPConfig() error: %v", err)
 	}

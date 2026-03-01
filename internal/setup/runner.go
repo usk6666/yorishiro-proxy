@@ -149,7 +149,7 @@ func (r *Runner) stepMCPConfig(binaryPath string) error {
 		return err
 	}
 
-	backupPath, err := WriteMCPConfig(configPath, binaryPath, r.opts.ListenAddr, r.now())
+	backupPath, err := WriteMCPConfig(configPath, binaryPath, r.now())
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func (r *Runner) stepMCPConfig(binaryPath string) error {
 func (r *Runner) stepCACert() (*CAInfo, error) {
 	r.printf("--- Step 2: CA certificate ---\n\n")
 
-	caInfo, err := EnsureCA()
+	caInfo, err := EnsureCA("")
 	if err != nil {
 		return nil, err
 	}

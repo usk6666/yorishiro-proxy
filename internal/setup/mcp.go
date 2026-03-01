@@ -51,20 +51,26 @@ func CreateBackup(path string, now time.Time) (string, error) {
 	}
 
 	backupFile := BackupPath(path, now)
-	if err := os.WriteFile(backupFile, data, 0644); err != nil {
+	if err := os.WriteFile(backupFile, data, 0600); err != nil {
 		return "", fmt.Errorf("write backup file: %w", err)
 	}
 	return backupFile, nil
 }
 
-// BuildMCPEntry creates a katashiro-proxy MCP server entry for the given binary path
-// and listen address.
-func BuildMCPEntry(binaryPath, listenAddr string) mcpServerEntry {
-	args := []string{
-		"-insecure",
-		"-log-file", "/tmp/katashiro-proxy.log",
+// defaultLogFilePath returns the default log file path under ~/.katashiro-proxy/.
+func defaultLogFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".katashiro-proxy", "katashiro-proxy.log")
 	}
-	_ = listenAddr // listen addr is a proxy_start parameter, not a CLI arg
+	return filepath.Join(home, ".katashiro-proxy", "katashiro-proxy.log")
+}
+
+// BuildMCPEntry creates a katashiro-proxy MCP server entry for the given binary path.
+func BuildMCPEntry(binaryPath string) mcpServerEntry {
+	args := []string{
+		"-log-file", defaultLogFilePath(),
+	}
 	return mcpServerEntry{
 		Command: binaryPath,
 		Args:    args,
@@ -74,8 +80,8 @@ func BuildMCPEntry(binaryPath, listenAddr string) mcpServerEntry {
 // WriteMCPConfig writes or updates the MCP configuration file at the given path.
 // If the file already exists, the katashiro-proxy entry is added or updated
 // while preserving other MCP server entries.
-func WriteMCPConfig(path, binaryPath, listenAddr string, now time.Time) (backupPath string, err error) {
-	entry := BuildMCPEntry(binaryPath, listenAddr)
+func WriteMCPConfig(path, binaryPath string, now time.Time) (backupPath string, err error) {
+	entry := BuildMCPEntry(binaryPath)
 
 	// Read existing config if present.
 	existingData, readErr := os.ReadFile(path)

@@ -11,6 +11,7 @@ import (
 
 func TestCAInstallInstructions(t *testing.T) {
 	certPath := "/home/user/.katashiro-proxy/ca/ca.crt"
+	quotedPath := "'" + certPath + "'"
 
 	tests := []struct {
 		name     string
@@ -23,7 +24,7 @@ func TestCAInstallInstructions(t *testing.T) {
 			contains: []string{
 				"macOS",
 				"security add-trusted-cert",
-				certPath,
+				quotedPath,
 			},
 		},
 		{
@@ -32,7 +33,7 @@ func TestCAInstallInstructions(t *testing.T) {
 			contains: []string{
 				"Linux",
 				"update-ca-certificates",
-				certPath,
+				quotedPath,
 			},
 		},
 		{
@@ -41,7 +42,7 @@ func TestCAInstallInstructions(t *testing.T) {
 			contains: []string{
 				"Windows",
 				"certutil",
-				certPath,
+				quotedPath,
 			},
 		},
 		{
@@ -49,7 +50,7 @@ func TestCAInstallInstructions(t *testing.T) {
 			goos: "plan9",
 			contains: []string{
 				"CA certificate path",
-				certPath,
+				certPath, // default case uses unquoted path for display
 			},
 		},
 	}
@@ -61,6 +62,39 @@ func TestCAInstallInstructions(t *testing.T) {
 				if !strings.Contains(result, s) {
 					t.Errorf("instructions for %s missing %q\ngot: %s", tt.goos, s, result)
 				}
+			}
+		})
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "simple path",
+			input: "/home/user/.katashiro-proxy/ca/ca.crt",
+			want:  "'/home/user/.katashiro-proxy/ca/ca.crt'",
+		},
+		{
+			name:  "path with spaces",
+			input: "/home/my user/ca.crt",
+			want:  "'/home/my user/ca.crt'",
+		},
+		{
+			name:  "path with single quote",
+			input: "/home/user's/ca.crt",
+			want:  "'/home/user'\\''s/ca.crt'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellQuote(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -123,14 +157,43 @@ func TestEnsureCA_ExistingCA(t *testing.T) {
 		t.Fatalf("save CA: %v", err)
 	}
 
-	// EnsureCA uses cert.DefaultCACertPath() which reads $HOME.
-	// We can't easily override that without modifying the function, so we test
-	// the underlying logic indirectly via the EnsureCA function when the
-	// default path exists. For a true unit test, we test the helper functions.
+	// EnsureCA with explicit caDir should load the existing CA.
+	info, err := EnsureCA(caDir)
+	if err != nil {
+		t.Fatalf("EnsureCA() error: %v", err)
+	}
+	if info.Generated {
+		t.Error("expected Generated=false for existing CA")
+	}
+	if info.CertPath != certPath {
+		t.Errorf("CertPath = %q, want %q", info.CertPath, certPath)
+	}
+	if info.Fingerprint == "" {
+		t.Error("expected non-empty fingerprint")
+	}
+}
 
-	// Test that the fingerprint formatting works correctly with a real CA.
-	info := formatFingerprint([]byte{0x01, 0x02, 0x03})
-	if info != "01:02:03" {
-		t.Errorf("unexpected fingerprint format: %s", info)
+func TestEnsureCA_NewCA(t *testing.T) {
+	// Use an empty temp directory so EnsureCA generates a new CA.
+	dir := t.TempDir()
+	caDir := filepath.Join(dir, "ca")
+
+	info, err := EnsureCA(caDir)
+	if err != nil {
+		t.Fatalf("EnsureCA() error: %v", err)
+	}
+	if !info.Generated {
+		t.Error("expected Generated=true for new CA")
+	}
+	if info.Fingerprint == "" {
+		t.Error("expected non-empty fingerprint")
+	}
+
+	// Verify the files were created.
+	if _, err := os.Stat(filepath.Join(caDir, "ca.crt")); err != nil {
+		t.Errorf("ca.crt not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(caDir, "ca.key")); err != nil {
+		t.Errorf("ca.key not created: %v", err)
 	}
 }
