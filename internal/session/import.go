@@ -195,6 +195,7 @@ func exportToSession(es *ExportSession) (*Session, error) {
 		Timestamp:   ts,
 		Duration:    time.Duration(es.DurationMs) * time.Millisecond,
 		Tags:        es.Tags,
+		BlockedBy:   es.BlockedBy,
 	}
 
 	if es.ConnInfo != nil {

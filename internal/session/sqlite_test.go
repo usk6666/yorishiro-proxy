@@ -810,3 +810,286 @@ func TestSQLiteStore_DBFileCreated(t *testing.T) {
 		t.Errorf("database file was not created at %s", dbPath)
 	}
 }
+
+func TestSQLiteStore_BlockedBy_SaveAndGet(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		blockedBy string
+	}{
+		{"not blocked", ""},
+		{"blocked by target_scope", "target_scope"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := &Session{
+				Protocol:  "HTTPS",
+				Timestamp: time.Now().UTC(),
+				BlockedBy: tt.blockedBy,
+			}
+			if err := store.SaveSession(ctx, sess); err != nil {
+				t.Fatalf("SaveSession: %v", err)
+			}
+
+			got, err := store.GetSession(ctx, sess.ID)
+			if err != nil {
+				t.Fatalf("GetSession: %v", err)
+			}
+
+			if got.BlockedBy != tt.blockedBy {
+				t.Errorf("BlockedBy = %q, want %q", got.BlockedBy, tt.blockedBy)
+			}
+		})
+	}
+}
+
+func TestSQLiteStore_BlockedBy_ListFilter(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Save a normal session.
+	normalSess := &Session{
+		Protocol:  "HTTPS",
+		Timestamp: now,
+	}
+	if err := store.SaveSession(ctx, normalSess); err != nil {
+		t.Fatalf("SaveSession(normal): %v", err)
+	}
+
+	// Save a blocked session.
+	blockedSess := &Session{
+		Protocol:  "HTTPS",
+		Timestamp: now,
+		BlockedBy: "target_scope",
+	}
+	if err := store.SaveSession(ctx, blockedSess); err != nil {
+		t.Fatalf("SaveSession(blocked): %v", err)
+	}
+
+	tests := []struct {
+		name string
+		opts ListOptions
+		want int
+	}{
+		{"no filter returns all", ListOptions{}, 2},
+		{"filter by target_scope", ListOptions{BlockedBy: "target_scope"}, 1},
+		{"filter by nonexistent blocker", ListOptions{BlockedBy: "nonexistent"}, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions, err := store.ListSessions(ctx, tt.opts)
+			if err != nil {
+				t.Fatalf("ListSessions: %v", err)
+			}
+			if len(sessions) != tt.want {
+				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
+			}
+		})
+	}
+}
+
+func TestSQLiteStore_BlockedBy_CountFilter(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Save two normal sessions and one blocked.
+	for i := 0; i < 2; i++ {
+		if err := store.SaveSession(ctx, &Session{
+			Protocol:  "HTTPS",
+			Timestamp: now,
+		}); err != nil {
+			t.Fatalf("SaveSession(normal %d): %v", i, err)
+		}
+	}
+	if err := store.SaveSession(ctx, &Session{
+		Protocol:  "HTTPS",
+		Timestamp: now,
+		BlockedBy: "target_scope",
+	}); err != nil {
+		t.Fatalf("SaveSession(blocked): %v", err)
+	}
+
+	count, err := store.CountSessions(ctx, ListOptions{BlockedBy: "target_scope"})
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
+	}
+
+	total, err := store.CountSessions(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want 3", total)
+	}
+}
+
+func TestSQLiteStore_BlockedBy_DefaultEmpty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Save a session without setting BlockedBy — it should default to "".
+	sess := &Session{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	got, err := store.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.BlockedBy != "" {
+		t.Errorf("BlockedBy = %q, want empty string", got.BlockedBy)
+	}
+}
+
+func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// A blocked session: has a send message (the request that was attempted)
+	// but no receive message (because it was blocked).
+	sess := &Session{
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   now,
+		BlockedBy:   "target_scope",
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	sendMsg := &Message{
+		SessionID: sess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: now,
+		Method:    "GET",
+		URL:       mustParseURL("https://evil.com/admin"),
+		Headers:   map[string][]string{"Host": {"evil.com"}},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	// Retrieve and verify.
+	got, err := store.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.BlockedBy != "target_scope" {
+		t.Errorf("BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
+	}
+
+	msgs, err := store.GetMessages(ctx, sess.ID, MessageListOptions{})
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Errorf("expected 1 message (send only), got %d", len(msgs))
+	}
+	if msgs[0].Direction != "send" {
+		t.Errorf("message direction = %q, want %q", msgs[0].Direction, "send")
+	}
+}
+
+func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "v2_migrate.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	// Create a V2 database manually (simulate a pre-existing database).
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, bootstrapSQL); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, schemaV1); err != nil {
+		t.Fatalf("schema v1: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (1)"); err != nil {
+		t.Fatalf("insert version 1: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, schemaV2); err != nil {
+		t.Fatalf("schema v2: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE schema_version SET version = 2"); err != nil {
+		t.Fatalf("update version 2: %v", err)
+	}
+
+	// Insert a session into the V2 schema (no blocked_by column yet).
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO sessions (id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"old-session-id", "conn-1", "HTTPS", "unary", "complete",
+		time.Now().UTC().Format(time.RFC3339Nano), 100, "{}", "", "", "", "", "", "",
+	); err != nil {
+		t.Fatalf("insert V2 session: %v", err)
+	}
+	db.Close()
+
+	// Open with migration — should add blocked_by column.
+	store, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore (migration): %v", err)
+	}
+	defer store.Close()
+
+	// Verify the old session has empty blocked_by.
+	sess, err := store.GetSession(ctx, "old-session-id")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess.BlockedBy != "" {
+		t.Errorf("old session BlockedBy = %q, want empty", sess.BlockedBy)
+	}
+
+	// Verify we can save a new session with blocked_by.
+	newSess := &Session{
+		Protocol:  "HTTPS",
+		Timestamp: time.Now().UTC(),
+		BlockedBy: "target_scope",
+	}
+	if err := store.SaveSession(ctx, newSess); err != nil {
+		t.Fatalf("SaveSession(new): %v", err)
+	}
+
+	got, err := store.GetSession(ctx, newSess.ID)
+	if err != nil {
+		t.Fatalf("GetSession(new): %v", err)
+	}
+	if got.BlockedBy != "target_scope" {
+		t.Errorf("new session BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
+	}
+
+	// Verify schema version is now 3.
+	checkDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open check db: %v", err)
+	}
+	defer checkDB.Close()
+
+	var version int
+	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if version != 3 {
+		t.Errorf("schema version = %d, want 3", version)
+	}
+}

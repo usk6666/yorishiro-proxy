@@ -101,9 +101,15 @@ CREATE TABLE IF NOT EXISTS macros (
 );
 `
 
+const schemaV3 = `
+ALTER TABLE sessions ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_sessions_blocked_by ON sessions(blocked_by);
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
 	2: schemaV2,
+	3: schemaV3,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

@@ -54,6 +54,8 @@ type queryFilter struct {
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
 	// StatusCode filters sessions/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
+	// BlockedBy filters sessions by blocked_by value (e.g. "target_scope").
+	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope)"`
 	// Direction filters messages by direction ("send" or "receive").
 	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
 	// BodyContains filters fuzz_results by response body substring.
@@ -133,6 +135,7 @@ type querySessionsEntry struct {
 	URL             string            `json:"url"`
 	StatusCode      int               `json:"status_code"`
 	MessageCount    int               `json:"message_count"`
+	BlockedBy       string            `json:"blocked_by,omitempty"`
 	ProtocolSummary map[string]string `json:"protocol_summary,omitempty"`
 	Timestamp       string            `json:"timestamp"`
 	DurationMs      int64             `json:"duration_ms"`
@@ -169,6 +172,7 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 		opts.Method = input.Filter.Method
 		opts.URLPattern = input.Filter.URLPattern
 		opts.StatusCode = input.Filter.StatusCode
+		opts.BlockedBy = input.Filter.BlockedBy
 	}
 
 	sessionList, err := s.store.ListSessions(ctx, opts)
@@ -214,6 +218,7 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 			URL:             urlStr,
 			StatusCode:      statusCode,
 			MessageCount:    len(msgs),
+			BlockedBy:       sess.BlockedBy,
 			ProtocolSummary: summary,
 			Timestamp:       sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			DurationMs:      sess.Duration.Milliseconds(),
@@ -251,6 +256,7 @@ type querySessionResult struct {
 	Timestamp             string              `json:"timestamp"`
 	DurationMs            int64               `json:"duration_ms"`
 	Tags                  map[string]string   `json:"tags,omitempty"`
+	BlockedBy             string              `json:"blocked_by,omitempty"`
 	RawRequest            string              `json:"raw_request,omitempty"`
 	RawResponse           string              `json:"raw_response,omitempty"`
 	ConnInfo              *connInfoResult     `json:"conn_info,omitempty"`
@@ -358,6 +364,7 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		Timestamp:             sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		DurationMs:            sess.Duration.Milliseconds(),
 		Tags:                  sess.Tags,
+		BlockedBy:             sess.BlockedBy,
 		RawRequest:            rawReqStr,
 		RawResponse:           rawRespStr,
 		ConnInfo:              connInfo,
