@@ -1,0 +1,19 @@
+.session-detail-page .page-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  margin-top: var(--space-lg);
+}
+
+.session-detail-page code {
+  padding: 2px var(--space-xs);
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--accent-info);
+}
