@@ -54,12 +54,12 @@ func TestListResources_AllRegistered(t *testing.T) {
 
 	// Verify all expected help resources are present.
 	expectedHelpURIs := []string{
-		"katashiro://help/proxy_start",
-		"katashiro://help/proxy_stop",
-		"katashiro://help/query",
-		"katashiro://help/execute",
-		"katashiro://help/configure",
-		"katashiro://help/examples",
+		"yorishiro://help/proxy_start",
+		"yorishiro://help/proxy_stop",
+		"yorishiro://help/query",
+		"yorishiro://help/execute",
+		"yorishiro://help/configure",
+		"yorishiro://help/examples",
 	}
 	for _, uri := range expectedHelpURIs {
 		if !gotURIs[uri] {
@@ -69,10 +69,10 @@ func TestListResources_AllRegistered(t *testing.T) {
 
 	// Verify all expected schema resources are present.
 	expectedSchemaURIs := []string{
-		"katashiro://schema/proxy_start",
-		"katashiro://schema/query",
-		"katashiro://schema/execute",
-		"katashiro://schema/configure",
+		"yorishiro://schema/proxy_start",
+		"yorishiro://schema/query",
+		"yorishiro://schema/execute",
+		"yorishiro://schema/configure",
 	}
 	for _, uri := range expectedSchemaURIs {
 		if !gotURIs[uri] {
@@ -99,37 +99,37 @@ func TestReadResource_HelpResources(t *testing.T) {
 	}{
 		{
 			name:         "help/proxy_start",
-			uri:          "katashiro://help/proxy_start",
+			uri:          "yorishiro://help/proxy_start",
 			wantMIMEType: "text/markdown",
 			wantContains: "proxy_start",
 		},
 		{
 			name:         "help/proxy_stop",
-			uri:          "katashiro://help/proxy_stop",
+			uri:          "yorishiro://help/proxy_stop",
 			wantMIMEType: "text/markdown",
 			wantContains: "proxy_stop",
 		},
 		{
 			name:         "help/query",
-			uri:          "katashiro://help/query",
+			uri:          "yorishiro://help/query",
 			wantMIMEType: "text/markdown",
 			wantContains: "sessions",
 		},
 		{
 			name:         "help/execute",
-			uri:          "katashiro://help/execute",
+			uri:          "yorishiro://help/execute",
 			wantMIMEType: "text/markdown",
 			wantContains: "replay",
 		},
 		{
 			name:         "help/configure",
-			uri:          "katashiro://help/configure",
+			uri:          "yorishiro://help/configure",
 			wantMIMEType: "text/markdown",
 			wantContains: "merge",
 		},
 		{
 			name:         "help/examples",
-			uri:          "katashiro://help/examples",
+			uri:          "yorishiro://help/examples",
 			wantMIMEType: "text/markdown",
 			wantContains: "Workflow",
 		},
@@ -179,25 +179,25 @@ func TestReadResource_SchemaResources(t *testing.T) {
 	}{
 		{
 			name:         "schema/proxy_start",
-			uri:          "katashiro://schema/proxy_start",
+			uri:          "yorishiro://schema/proxy_start",
 			wantMIMEType: "application/json",
 			wantTitle:    "proxy_start input",
 		},
 		{
 			name:         "schema/query",
-			uri:          "katashiro://schema/query",
+			uri:          "yorishiro://schema/query",
 			wantMIMEType: "application/json",
 			wantTitle:    "query input",
 		},
 		{
 			name:         "schema/execute",
-			uri:          "katashiro://schema/execute",
+			uri:          "yorishiro://schema/execute",
 			wantMIMEType: "application/json",
 			wantTitle:    "execute input",
 		},
 		{
 			name:         "schema/configure",
-			uri:          "katashiro://schema/configure",
+			uri:          "yorishiro://schema/configure",
 			wantMIMEType: "application/json",
 			wantTitle:    "configure input",
 		},
@@ -259,7 +259,7 @@ func TestReadResource_ContentAccuracy(t *testing.T) {
 
 	// Verify help/query mentions all available resources.
 	result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "katashiro://help/query",
+		URI: "yorishiro://help/query",
 	})
 	if err != nil {
 		t.Fatalf("ReadResource: %v", err)
@@ -274,7 +274,7 @@ func TestReadResource_ContentAccuracy(t *testing.T) {
 
 	// Verify help/execute mentions all available actions.
 	result, err = cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "katashiro://help/execute",
+		URI: "yorishiro://help/execute",
 	})
 	if err != nil {
 		t.Fatalf("ReadResource: %v", err)
@@ -293,7 +293,7 @@ func TestReadResource_SchemaFieldConsistency(t *testing.T) {
 
 	// Verify schema/query lists the correct resource enum values.
 	result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "katashiro://schema/query",
+		URI: "yorishiro://schema/query",
 	})
 	if err != nil {
 		t.Fatalf("ReadResource: %v", err)
@@ -322,7 +322,7 @@ func TestReadResource_SchemaFieldConsistency(t *testing.T) {
 
 	// Verify schema/execute lists the correct action enum values.
 	result, err = cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "katashiro://schema/execute",
+		URI: "yorishiro://schema/execute",
 	})
 	if err != nil {
 		t.Fatalf("ReadResource: %v", err)
@@ -374,8 +374,8 @@ func TestResourceMetadata(t *testing.T) {
 			}
 
 			// Verify URI scheme.
-			if !strings.HasPrefix(r.URI, "katashiro://") {
-				t.Errorf("URI %q does not start with katashiro://", r.URI)
+			if !strings.HasPrefix(r.URI, "yorishiro://") {
+				t.Errorf("URI %q does not start with yorishiro://", r.URI)
 			}
 
 			// Verify MIME type is valid.
@@ -397,7 +397,7 @@ func TestResourceMetadata(t *testing.T) {
 
 func TestMakeResourceHandler_ReturnsContent(t *testing.T) {
 	// Unit test the handler factory function directly.
-	handler := makeResourceHandler("katashiro://test/resource", "text/plain", "resources/help_proxy_stop.md")
+	handler := makeResourceHandler("yorishiro://test/resource", "text/plain", "resources/help_proxy_stop.md")
 
 	result, err := handler(context.Background(), &gomcp.ReadResourceRequest{})
 	if err != nil {
@@ -409,8 +409,8 @@ func TestMakeResourceHandler_ReturnsContent(t *testing.T) {
 	}
 
 	c := result.Contents[0]
-	if c.URI != "katashiro://test/resource" {
-		t.Errorf("URI = %q, want %q", c.URI, "katashiro://test/resource")
+	if c.URI != "yorishiro://test/resource" {
+		t.Errorf("URI = %q, want %q", c.URI, "yorishiro://test/resource")
 	}
 	if c.MIMEType != "text/plain" {
 		t.Errorf("MIMEType = %q, want %q", c.MIMEType, "text/plain")
@@ -422,7 +422,7 @@ func TestMakeResourceHandler_ReturnsContent(t *testing.T) {
 
 func TestMakeResourceHandler_InvalidFilename(t *testing.T) {
 	// Verify that a handler for a nonexistent file returns an error.
-	handler := makeResourceHandler("katashiro://test/nonexistent", "text/plain", "resources/nonexistent.md")
+	handler := makeResourceHandler("yorishiro://test/nonexistent", "text/plain", "resources/nonexistent.md")
 
 	_, err := handler(context.Background(), &gomcp.ReadResourceRequest{})
 	if err == nil {

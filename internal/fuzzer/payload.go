@@ -231,7 +231,7 @@ func resolveWordlistPath(baseDir, relPath string) (string, error) {
 func DefaultWordlistBaseDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".", ".katashiro-proxy", "wordlists")
+		return filepath.Join(".", ".yorishiro-proxy", "wordlists")
 	}
-	return filepath.Join(home, ".katashiro-proxy", "wordlists")
+	return filepath.Join(home, ".yorishiro-proxy", "wordlists")
 }

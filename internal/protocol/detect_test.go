@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // mockHandler is a test double for proxy.ProtocolHandler.

@@ -84,7 +84,7 @@ const INSTALL_INSTRUCTIONS = [
     steps: [
       "1. Download the CA certificate (PEM) using the button above",
       "2. Copy to the CA certificates directory:",
-      "   sudo cp katashiro-ca.pem /usr/local/share/ca-certificates/katashiro-ca.crt",
+      "   sudo cp yorishiro-ca.pem /usr/local/share/ca-certificates/yorishiro-ca.crt",
       "3. Update the CA certificate store:",
       "   sudo update-ca-certificates",
     ],
@@ -113,12 +113,12 @@ const INSTALL_INSTRUCTIONS = [
     platform: "curl / CLI tools",
     steps: [
       "Use the --cacert flag to specify the CA certificate:",
-      "  curl --cacert katashiro-ca.pem --proxy http://127.0.0.1:8080 https://example.com",
+      "  curl --cacert yorishiro-ca.pem --proxy http://127.0.0.1:8080 https://example.com",
       "",
       "Or set the environment variable:",
-      "  export SSL_CERT_FILE=/path/to/katashiro-ca.pem",
-      "  export REQUESTS_CA_BUNDLE=/path/to/katashiro-ca.pem  # for Python requests",
-      "  export NODE_EXTRA_CA_CERTS=/path/to/katashiro-ca.pem  # for Node.js",
+      "  export SSL_CERT_FILE=/path/to/yorishiro-ca.pem",
+      "  export REQUESTS_CA_BUNDLE=/path/to/yorishiro-ca.pem  # for Python requests",
+      "  export NODE_EXTRA_CA_CERTS=/path/to/yorishiro-ca.pem  # for Node.js",
     ],
   },
 ];
@@ -146,7 +146,7 @@ export function CACertPanel({ onRefresh }: CACertPanelProps) {
 
   const handleDownload = useCallback(() => {
     if (!certData?.pem) return;
-    downloadPem(certData.pem, "katashiro-ca.pem");
+    downloadPem(certData.pem, "yorishiro-ca.pem");
     addToast({ type: "success", message: "CA certificate downloaded" });
   }, [certData, addToast]);
 

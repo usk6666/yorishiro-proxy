@@ -36,7 +36,7 @@ type CA struct {
 }
 
 // Generate creates a new self-signed root CA certificate and ECDSA P-256 private key.
-// The generated CA has Subject CN=katashiro-proxy CA, 10-year validity,
+// The generated CA has Subject CN=yorishiro-proxy CA, 10-year validity,
 // BasicConstraints IsCA=true with MaxPathLen=0, and KeyUsage CertSign|CRLSign.
 func (ca *CA) Generate() error {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -53,7 +53,7 @@ func (ca *CA) Generate() error {
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName: "katashiro-proxy CA",
+			CommonName: "yorishiro-proxy CA",
 		},
 		NotBefore:             now,
 		NotAfter:              now.Add(caValidity),

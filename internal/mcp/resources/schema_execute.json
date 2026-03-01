@@ -185,7 +185,7 @@
               },
               "path": {
                 "type": "string",
-                "description": "Relative file path under ~/.katashiro-proxy/wordlists/ (for file type)."
+                "description": "Relative file path under ~/.yorishiro-proxy/wordlists/ (for file type)."
               },
               "start": {
                 "type": "integer",

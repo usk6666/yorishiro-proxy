@@ -1,5 +1,5 @@
 /**
- * React hooks for interacting with katashiro-proxy's MCP tools.
+ * React hooks for interacting with yorishiro-proxy's MCP tools.
  *
  * These hooks provide a convenient, type-safe API for React components
  * to query data, execute actions, configure the proxy, and control

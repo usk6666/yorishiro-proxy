@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/usk6666/katashiro-proxy/internal/macro"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
 
 // hooksInput holds the hook configuration for resend/fuzz actions.

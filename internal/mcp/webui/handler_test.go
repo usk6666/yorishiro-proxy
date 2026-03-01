@@ -129,7 +129,7 @@ func TestDefaultHandler_ServesEmbeddedContent(t *testing.T) {
 	}
 
 	body, _ := io.ReadAll(rec.Result().Body)
-	if !strings.Contains(string(body), "katashiro-proxy") {
-		t.Errorf("GET / body = %q, want to contain %q", string(body), "katashiro-proxy")
+	if !strings.Contains(string(body), "yorishiro-proxy") {
+		t.Errorf("GET / body = %q, want to contain %q", string(body), "yorishiro-proxy")
 	}
 }

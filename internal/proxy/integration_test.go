@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/protocol"
-	protohttp "github.com/usk6666/katashiro-proxy/internal/protocol/http"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol"
+	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 func startProxy(t *testing.T, ctx context.Context, store session.Store) (*proxy.Listener, context.CancelFunc) {

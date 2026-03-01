@@ -8,8 +8,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/config"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // setupProxyStartTestSession creates an MCP client session with Manager, CaptureScope,

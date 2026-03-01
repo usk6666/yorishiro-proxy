@@ -1,4 +1,4 @@
-// Package grpc implements gRPC protocol handling for the katashiro-proxy.
+// Package grpc implements gRPC protocol handling for the yorishiro-proxy.
 // It parses gRPC Length-Prefixed Messages over HTTP/2 and records gRPC
 // sessions (unary and streaming RPCs) to the session store.
 //

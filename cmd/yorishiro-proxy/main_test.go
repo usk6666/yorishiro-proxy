@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/usk6666/katashiro-proxy/internal/cert"
-	"github.com/usk6666/katashiro-proxy/internal/config"
-	"github.com/usk6666/katashiro-proxy/internal/fuzzer"
-	"github.com/usk6666/katashiro-proxy/internal/mcp"
-	"github.com/usk6666/katashiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 func TestInitCA(t *testing.T) {
@@ -424,14 +424,14 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 		},
 		{
 			name:    "env var overrides default",
-			envVars: map[string]string{"KP_LOG_LEVEL": "debug"},
+			envVars: map[string]string{"YP_LOG_LEVEL": "debug"},
 			field:   "LogLevel",
 			want:    "debug",
 		},
 		{
 			name:     "flag overrides env var",
 			flagArgs: []string{"-log-level", "error"},
-			envVars:  map[string]string{"KP_LOG_LEVEL": "debug"},
+			envVars:  map[string]string{"YP_LOG_LEVEL": "debug"},
 			field:    "LogLevel",
 			want:     "error",
 		},
@@ -443,69 +443,69 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 		},
 		{
 			name:    "db env var fallback",
-			envVars: map[string]string{"KP_DB": "/tmp/test.db"},
+			envVars: map[string]string{"YP_DB": "/tmp/test.db"},
 			field:   "DBPath",
 			want:    "/tmp/test.db",
 		},
 		{
 			name:     "db flag overrides env",
 			flagArgs: []string{"-db", "/opt/db.sqlite"},
-			envVars:  map[string]string{"KP_DB": "/tmp/test.db"},
+			envVars:  map[string]string{"YP_DB": "/tmp/test.db"},
 			field:    "DBPath",
 			want:     "/opt/db.sqlite",
 		},
 		{
 			name:    "log-format env var fallback",
-			envVars: map[string]string{"KP_LOG_FORMAT": "json"},
+			envVars: map[string]string{"YP_LOG_FORMAT": "json"},
 			field:   "LogFormat",
 			want:    "json",
 		},
 		{
 			name:    "log-file env var fallback",
-			envVars: map[string]string{"KP_LOG_FILE": "/var/log/proxy.log"},
+			envVars: map[string]string{"YP_LOG_FILE": "/var/log/proxy.log"},
 			field:   "LogFile",
 			want:    "/var/log/proxy.log",
 		},
 		{
 			name:    "ca-cert env var fallback",
-			envVars: map[string]string{"KP_CA_CERT": "/certs/ca.crt"},
+			envVars: map[string]string{"YP_CA_CERT": "/certs/ca.crt"},
 			field:   "CACertPath",
 			want:    "/certs/ca.crt",
 		},
 		{
 			name:    "ca-key env var fallback",
-			envVars: map[string]string{"KP_CA_KEY": "/certs/ca.key"},
+			envVars: map[string]string{"YP_CA_KEY": "/certs/ca.key"},
 			field:   "CAKeyPath",
 			want:    "/certs/ca.key",
 		},
 		{
 			name:    "mcp-http-addr env var fallback",
-			envVars: map[string]string{"KP_MCP_HTTP_ADDR": "127.0.0.1:3000"},
+			envVars: map[string]string{"YP_MCP_HTTP_ADDR": "127.0.0.1:3000"},
 			field:   "MCPHTTPAddr",
 			want:    "127.0.0.1:3000",
 		},
 		{
 			name:    "mcp-http-token env var fallback",
-			envVars: map[string]string{"KP_MCP_HTTP_TOKEN": "secret-token"},
+			envVars: map[string]string{"YP_MCP_HTTP_TOKEN": "secret-token"},
 			field:   "MCPHTTPToken",
 			want:    "secret-token",
 		},
 		{
 			name:    "ui-dir env var fallback",
-			envVars: map[string]string{"KP_UI_DIR": "/tmp/webui"},
+			envVars: map[string]string{"YP_UI_DIR": "/tmp/webui"},
 			field:   "UIDir",
 			want:    "/tmp/webui",
 		},
 		{
 			name:     "ui-dir flag overrides env",
 			flagArgs: []string{"-ui-dir", "/opt/ui"},
-			envVars:  map[string]string{"KP_UI_DIR": "/tmp/webui"},
+			envVars:  map[string]string{"YP_UI_DIR": "/tmp/webui"},
 			field:    "UIDir",
 			want:     "/opt/ui",
 		},
 		{
 			name:    "empty env var does not override default",
-			envVars: map[string]string{"KP_LOG_LEVEL": ""},
+			envVars: map[string]string{"YP_LOG_LEVEL": ""},
 			field:   "LogLevel",
 			want:    "info",
 		},
@@ -543,19 +543,19 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 		field    string
 		want     bool
 	}{
-		{"insecure true", "KP_INSECURE", "true", "InsecureSkipVerify", true},
-		{"insecure false", "KP_INSECURE", "false", "InsecureSkipVerify", false},
-		{"insecure 1", "KP_INSECURE", "1", "InsecureSkipVerify", true},
-		{"insecure 0", "KP_INSECURE", "0", "InsecureSkipVerify", false},
-		{"ca-ephemeral true", "KP_CA_EPHEMERAL", "true", "CAEphemeral", true},
-		{"ca-ephemeral TRUE", "KP_CA_EPHEMERAL", "TRUE", "CAEphemeral", true},
-		{"ca-ephemeral false", "KP_CA_EPHEMERAL", "false", "CAEphemeral", false},
-		{"insecure invalid", "KP_INSECURE", "invalid", "InsecureSkipVerify", false},
-		{"allow-private-networks true", "KP_ALLOW_PRIVATE_NETWORKS", "true", "AllowPrivateNetworks", true},
-		{"allow-private-networks false", "KP_ALLOW_PRIVATE_NETWORKS", "false", "AllowPrivateNetworks", false},
-		{"allow-private-networks 1", "KP_ALLOW_PRIVATE_NETWORKS", "1", "AllowPrivateNetworks", true},
-		{"allow-private-networks 0", "KP_ALLOW_PRIVATE_NETWORKS", "0", "AllowPrivateNetworks", false},
-		{"allow-private-networks invalid", "KP_ALLOW_PRIVATE_NETWORKS", "invalid", "AllowPrivateNetworks", false},
+		{"insecure true", "YP_INSECURE", "true", "InsecureSkipVerify", true},
+		{"insecure false", "YP_INSECURE", "false", "InsecureSkipVerify", false},
+		{"insecure 1", "YP_INSECURE", "1", "InsecureSkipVerify", true},
+		{"insecure 0", "YP_INSECURE", "0", "InsecureSkipVerify", false},
+		{"ca-ephemeral true", "YP_CA_EPHEMERAL", "true", "CAEphemeral", true},
+		{"ca-ephemeral TRUE", "YP_CA_EPHEMERAL", "TRUE", "CAEphemeral", true},
+		{"ca-ephemeral false", "YP_CA_EPHEMERAL", "false", "CAEphemeral", false},
+		{"insecure invalid", "YP_INSECURE", "invalid", "InsecureSkipVerify", false},
+		{"allow-private-networks true", "YP_ALLOW_PRIVATE_NETWORKS", "true", "AllowPrivateNetworks", true},
+		{"allow-private-networks false", "YP_ALLOW_PRIVATE_NETWORKS", "false", "AllowPrivateNetworks", false},
+		{"allow-private-networks 1", "YP_ALLOW_PRIVATE_NETWORKS", "1", "AllowPrivateNetworks", true},
+		{"allow-private-networks 0", "YP_ALLOW_PRIVATE_NETWORKS", "0", "AllowPrivateNetworks", false},
+		{"allow-private-networks invalid", "YP_ALLOW_PRIVATE_NETWORKS", "invalid", "AllowPrivateNetworks", false},
 	}
 
 	for _, tt := range tests {
@@ -649,34 +649,34 @@ func TestUsageOutput(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
 
-	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (env: KP_DB)")
-	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level (env: KP_LOG_LEVEL)")
-	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: KP_MCP_HTTP_ADDR)")
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (env: YP_DB)")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level (env: YP_LOG_LEVEL)")
+	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: YP_MCP_HTTP_ADDR)")
 
 	var buf strings.Builder
 	fs.SetOutput(&buf)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: katashiro-proxy [flags]\n\n")
-		fmt.Fprintf(fs.Output(), "katashiro-proxy is an AI agent network proxy (MCP server).\n")
+		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n\n")
+		fmt.Fprintf(fs.Output(), "yorishiro-proxy is an AI agent network proxy (MCP server).\n")
 		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
-		fmt.Fprintf(fs.Output(), "  All flags accept a KP_ prefixed environment variable as fallback.\n")
+		fmt.Fprintf(fs.Output(), "  All flags accept a YP_ prefixed environment variable as fallback.\n")
 		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > default value.\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy                                  # MCP stdio mode (default)\n")
-		fmt.Fprintf(fs.Output(), "  katashiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
 	}
 	fs.Usage()
 
 	output := buf.String()
 	mustContain := []string{
-		"Usage: katashiro-proxy",
+		"Usage: yorishiro-proxy",
 		"MCP server",
-		"KP_DB",
-		"KP_LOG_LEVEL",
-		"KP_MCP_HTTP_ADDR",
+		"YP_DB",
+		"YP_LOG_LEVEL",
+		"YP_MCP_HTTP_ADDR",
 		"Examples:",
 		"MCP stdio mode",
 	}
@@ -745,13 +745,13 @@ func TestAllowPrivateNetworksFlag(t *testing.T) {
 		},
 		{
 			name:    "env var sets true",
-			envVars: map[string]string{"KP_ALLOW_PRIVATE_NETWORKS": "true"},
+			envVars: map[string]string{"YP_ALLOW_PRIVATE_NETWORKS": "true"},
 			want:    true,
 		},
 		{
 			name:     "CLI flag overrides env var",
 			flagArgs: []string{"-allow-private-networks=false"},
-			envVars:  map[string]string{"KP_ALLOW_PRIVATE_NETWORKS": "true"},
+			envVars:  map[string]string{"YP_ALLOW_PRIVATE_NETWORKS": "true"},
 			want:     false,
 		},
 	}
@@ -786,7 +786,7 @@ func TestConfigFlag_EnvVarFallback(t *testing.T) {
 		t.Fatalf("write config file: %v", err)
 	}
 
-	t.Setenv("KP_CONFIG", cfgPath)
+	t.Setenv("YP_CONFIG", cfgPath)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
@@ -814,7 +814,7 @@ func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
 		t.Fatalf("write flag config: %v", err)
 	}
 
-	t.Setenv("KP_CONFIG", envPath)
+	t.Setenv("YP_CONFIG", envPath)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
@@ -826,7 +826,7 @@ func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
 
 	applyEnvFallback(fs, cfg, cfgFile)
 
-	// CLI flag should take precedence over KP_CONFIG env var.
+	// CLI flag should take precedence over YP_CONFIG env var.
 	if *cfgFile != flagPath {
 		t.Errorf("configFile = %q, want %q (CLI should override env)", *cfgFile, flagPath)
 	}

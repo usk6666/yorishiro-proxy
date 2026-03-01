@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/usk6666/katashiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
 )
 
 // CAInfo holds information about the CA certificate for display.
@@ -19,7 +19,7 @@ type CAInfo struct {
 }
 
 // EnsureCA ensures a CA certificate exists at the given directory.
-// If caDir is empty, the default path (~/.katashiro-proxy/ca/) is used.
+// If caDir is empty, the default path (~/.yorishiro-proxy/ca/) is used.
 // If the CA already exists, it loads it. Otherwise, it generates a new one.
 // Returns CAInfo with the certificate path and fingerprint.
 func EnsureCA(caDir string) (*CAInfo, error) {
@@ -89,7 +89,7 @@ func caInstallInstructionsForOS(certPath, goos string) string {
 	case "linux":
 		b.WriteString("  Linux (Debian/Ubuntu):\n")
 		fmt.Fprintf(&b, "    sudo cp %s \\\n", quoted)
-		b.WriteString("      /usr/local/share/ca-certificates/katashiro-proxy.crt\n")
+		b.WriteString("      /usr/local/share/ca-certificates/yorishiro-proxy.crt\n")
 		b.WriteString("    sudo update-ca-certificates\n")
 	case "windows":
 		b.WriteString("  Windows (run as Administrator):\n")

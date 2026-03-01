@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // relayBufSize is the buffer size for bidirectional data relay.

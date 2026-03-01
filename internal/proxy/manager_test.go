@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // stubDetector is a minimal ProtocolDetector for testing.

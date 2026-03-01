@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/usk6666/katashiro-proxy/internal/protocol/ws"
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
-	"github.com/usk6666/katashiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // isWebSocketUpgrade checks if the HTTP request is a WebSocket upgrade request.

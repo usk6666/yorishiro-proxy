@@ -1,7 +1,7 @@
 package protocol
 
 import (
-	"github.com/usk6666/katashiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // Detector selects the appropriate protocol handler based on peeked bytes.
