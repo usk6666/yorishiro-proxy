@@ -1,0 +1,85 @@
+.patch-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.patch-editor-description {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  padding-bottom: var(--space-xs);
+}
+
+.patch-editor-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.patch-editor-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.patch-editor-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.patch-editor-field {
+  flex: 1;
+  height: 32px;
+  padding: 0 var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition-fast);
+}
+
+.patch-editor-field:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+}
+
+.patch-editor-field::placeholder {
+  color: var(--text-muted);
+}
+
+.patch-editor-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.patch-editor-remove:hover {
+  color: var(--accent-danger);
+  background-color: rgba(248, 81, 73, 0.1);
+}
+
+.patch-editor-spacer {
+  width: 28px;
+  flex-shrink: 0;
+}
