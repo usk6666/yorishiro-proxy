@@ -2,7 +2,7 @@
 
 **Status**: Proprietary / In Development
 
-AI agent network proxy -- a PacketProxy for AI.
+AI agent network proxy -- a MITM proxy tool for AI.
 Runs as an MCP (Model Context Protocol) server and provides traffic interception, recording, and replay capabilities for vulnerability assessment.
 
 Designed for use with Claude Code and other MCP-compatible AI agents: the agent controls the proxy entirely through five MCP tools, enabling automated security testing workflows without manual UI interaction.
