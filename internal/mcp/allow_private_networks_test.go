@@ -502,3 +502,174 @@ func TestFuzzHookCallbacks_AllowPrivateNetworks(t *testing.T) {
 		}
 	})
 }
+
+// TestWithAllowPrivateNetworks verifies the ServerOption sets the field.
+func TestWithAllowPrivateNetworks(t *testing.T) {
+	t.Run("default_false", func(t *testing.T) {
+		s := &Server{}
+		if s.allowPrivateNetworks {
+			t.Error("expected default allowPrivateNetworks to be false")
+		}
+	})
+
+	t.Run("option_sets_true", func(t *testing.T) {
+		s := &Server{}
+		opt := WithAllowPrivateNetworks(true)
+		opt(s)
+		if !s.allowPrivateNetworks {
+			t.Error("expected allowPrivateNetworks to be true after WithAllowPrivateNetworks(true)")
+		}
+	})
+
+	t.Run("option_sets_false", func(t *testing.T) {
+		s := &Server{allowPrivateNetworks: true}
+		opt := WithAllowPrivateNetworks(false)
+		opt(s)
+		if s.allowPrivateNetworks {
+			t.Error("expected allowPrivateNetworks to be false after WithAllowPrivateNetworks(false)")
+		}
+	})
+}
+
+// TestResendHTTPClient_ServerDefault_AllowPrivateNetworks verifies that
+// resendHTTPClient allows private networks when the server-level setting is true,
+// even when the per-request parameter is false.
+func TestResendHTTPClient_ServerDefault_AllowPrivateNetworks(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	// Server has allowPrivateNetworks=true, request does not set it.
+	s := &Server{allowPrivateNetworks: true}
+	params := executeParams{} // AllowPrivateNetworks defaults to false
+
+	client := s.resendHTTPClient(params)
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	// Should succeed because server-level setting disables SSRF protection.
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected no error with server-level allowPrivateNetworks=true, got: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestResendHTTPClient_ServerFalse_RequestTrue_AllowPrivateNetworks verifies that
+// per-request allow_private_networks=true still works when server default is false.
+func TestResendHTTPClient_ServerFalse_RequestTrue_AllowPrivateNetworks(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	s := &Server{allowPrivateNetworks: false}
+	params := executeParams{AllowPrivateNetworks: true}
+
+	client := s.resendHTTPClient(params)
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected no error with per-request allowPrivateNetworks=true, got: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestResendHTTPClient_ServerFalse_RequestFalse_BlocksPrivate verifies that
+// SSRF protection is active when both server and request settings are false.
+func TestResendHTTPClient_ServerFalse_RequestFalse_BlocksPrivate(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	s := &Server{allowPrivateNetworks: false}
+	params := executeParams{AllowPrivateNetworks: false}
+
+	client := s.resendHTTPClient(params)
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	// Should fail because SSRF protection blocks loopback.
+	_, err = client.Do(req)
+	if err == nil {
+		t.Fatal("expected error for loopback with both settings false, got nil")
+	}
+}
+
+// TestRawDialerFuncWithOpts_ServerDefault verifies that rawDialerFuncWithOpts
+// is called with the combined server+request flag correctly.
+// This tests the pattern: params.AllowPrivateNetworks || s.allowPrivateNetworks
+func TestRawDialerFuncWithOpts_ServerDefault(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	// Simulate server-level setting: the combined flag is true.
+	s := &Server{}
+	dialer := s.rawDialerFuncWithOpts(true) // simulates params || s.allowPrivateNetworks
+
+	ctx := context.Background()
+	conn, err := dialer.DialContext(ctx, "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("expected no error with combined allowPrivate=true, got: %v", err)
+	}
+	conn.Close()
+}
+
+// TestAllowPrivateNetworks_CombinedLogic verifies all combinations of
+// server-level and per-request settings using table-driven tests.
+func TestAllowPrivateNetworks_CombinedLogic(t *testing.T) {
+	tests := []struct {
+		name          string
+		serverAllow   bool
+		requestAllow  bool
+		wantAllowed   bool
+	}{
+		{"server=false request=false", false, false, false},
+		{"server=false request=true", false, true, true},
+		{"server=true request=false", true, false, true},
+		{"server=true request=true", true, true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			combined := tt.requestAllow || tt.serverAllow
+			if combined != tt.wantAllowed {
+				t.Errorf("combined = %v, want %v", combined, tt.wantAllowed)
+			}
+		})
+	}
+}

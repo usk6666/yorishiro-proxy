@@ -191,10 +191,11 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return nil, result, nil
 	case "run_macro":
 		mp := paramsToMacroParams(input.Params)
-		if input.Params.AllowPrivateNetworks {
+		allowPrivate := input.Params.AllowPrivateNetworks || s.allowPrivateNetworks
+		if allowPrivate {
 			slog.Warn("SSRF protection disabled: allow_private_networks is enabled for run_macro")
 		}
-		result, err := s.handleExecuteRunMacro(ctx, mp, input.Params.AllowPrivateNetworks)
+		result, err := s.handleExecuteRunMacro(ctx, mp, allowPrivate)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -302,7 +303,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	if params.Hooks != nil && params.Hooks.PreSend != nil {
 		state := &hookState{}
 		executor := newHookExecutor(s, params.Hooks, state)
-		executor.allowPrivateNetworks = params.AllowPrivateNetworks
+		executor.allowPrivateNetworks = params.AllowPrivateNetworks || s.allowPrivateNetworks
 		var err error
 		kvStore, err = executor.executePreSend(ctx)
 		if err != nil {
@@ -521,7 +522,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	if params.Hooks != nil && params.Hooks.PostReceive != nil {
 		state := &hookState{}
 		executor := newHookExecutor(s, params.Hooks, state)
-		executor.allowPrivateNetworks = params.AllowPrivateNetworks
+		executor.allowPrivateNetworks = params.AllowPrivateNetworks || s.allowPrivateNetworks
 		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody, kvStore); err != nil {
 			return nil, nil, err
 		}
@@ -648,10 +649,11 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 		}
 	}
 
+	allowPrivate := params.AllowPrivateNetworks || s.allowPrivateNetworks
 	dialer := &net.Dialer{
 		Timeout: timeout,
 	}
-	if !params.AllowPrivateNetworks {
+	if !allowPrivate {
 		dialer.Control = denyPrivateNetwork
 	} else {
 		slog.Warn("SSRF protection disabled: allow_private_networks is enabled for resend")
@@ -795,10 +797,11 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	}
 
 	// Establish the connection.
-	if params.AllowPrivateNetworks {
+	allowPrivate := params.AllowPrivateNetworks || s.allowPrivateNetworks
+	if allowPrivate {
 		slog.Warn("SSRF protection disabled: allow_private_networks is enabled for resend_raw")
 	}
-	dialer := s.rawDialerFuncWithOpts(params.AllowPrivateNetworks)
+	dialer := s.rawDialerFuncWithOpts(allowPrivate)
 	start := time.Now()
 
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
@@ -1148,16 +1151,18 @@ func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*
 		cfg.MaxRetries = *params.MaxRetries
 	}
 
+	allowPrivate := params.AllowPrivateNetworks || s.allowPrivateNetworks
+
 	// Set up hooks callbacks if configured.
 	if params.Hooks != nil {
 		hooks := newFuzzHookCallbacks(s, params.Hooks)
-		hooks.allowPrivateNetworks = params.AllowPrivateNetworks
+		hooks.allowPrivateNetworks = allowPrivate
 		cfg.Hooks = hooks
 	}
 
 	// When allow_private_networks is enabled, provide a permissive HTTP client
 	// that bypasses SSRF protection for the fuzz job.
-	if params.AllowPrivateNetworks {
+	if allowPrivate {
 		slog.Warn("SSRF protection disabled: allow_private_networks is enabled for fuzz")
 		cfg.HTTPDoer = newPermissiveHTTPClient()
 	}

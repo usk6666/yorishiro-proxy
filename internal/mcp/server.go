@@ -46,6 +46,7 @@ type Server struct {
 	upstreamProxySetters   []upstreamProxySetter // protocol handlers to update when upstream proxy changes
 	requestTimeoutSetters  []requestTimeoutSetter // protocol handlers to update when request timeout changes
 	uiDir                  string               // optional filesystem path for WebUI static files
+	allowPrivateNetworks   bool                 // global SSRF protection override
 }
 
 // tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
@@ -163,6 +164,16 @@ func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
 func WithUIDir(dir string) ServerOption {
 	return func(s *Server) {
 		s.uiDir = dir
+	}
+}
+
+// WithAllowPrivateNetworks disables SSRF protection globally when set to true.
+// When enabled, all execute actions (resend, resend_raw, tcp_replay, fuzz,
+// run_macro) allow connections to private/loopback networks without requiring
+// the per-request allow_private_networks parameter.
+func WithAllowPrivateNetworks(allow bool) ServerOption {
+	return func(s *Server) {
+		s.allowPrivateNetworks = allow
 	}
 }
 

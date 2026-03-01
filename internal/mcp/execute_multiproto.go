@@ -85,7 +85,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 
 	// Establish connection.
-	dialer := s.rawDialerFuncWithOpts(params.AllowPrivateNetworks)
+	dialer := s.rawDialerFuncWithOpts(params.AllowPrivateNetworks || s.allowPrivateNetworks)
 	start := time.Now()
 
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
@@ -293,7 +293,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 	}
 
 	// Connect.
-	dialer := s.rawDialerFuncWithOpts(params.AllowPrivateNetworks)
+	dialer := s.rawDialerFuncWithOpts(params.AllowPrivateNetworks || s.allowPrivateNetworks)
 	start := time.Now()
 
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)

@@ -61,6 +61,16 @@ type Config struct {
 	// WARNING: Enabling this option disables security checks on upstream TLS.
 	InsecureSkipVerify bool `json:"insecure_skip_verify"`
 
+	// AllowPrivateNetworks disables SSRF protection globally, allowing
+	// connections to private, loopback, and link-local networks from execute
+	// actions (resend, resend_raw, tcp_replay, fuzz, run_macro).
+	// This is useful for local development/testing where the target runs on
+	// localhost. Per-request allow_private_networks parameter still works
+	// independently; either being true disables SSRF protection.
+	// CLI flag: -allow-private-networks, env: KP_ALLOW_PRIVATE_NETWORKS.
+	// WARNING: Do not enable in production environments.
+	AllowPrivateNetworks bool `json:"allow_private_networks"`
+
 	// RetentionMaxSessions is the maximum number of sessions to retain.
 	// 0 means unlimited (default).
 	RetentionMaxSessions int `json:"retention_max_sessions"`

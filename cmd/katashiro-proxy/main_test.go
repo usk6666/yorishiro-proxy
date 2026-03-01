@@ -397,6 +397,7 @@ func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) *string {
 	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "")
 	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "")
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "")
+	fs.BoolVar(&cfg.AllowPrivateNetworks, "allow-private-networks", cfg.AllowPrivateNetworks, "")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "")
@@ -550,6 +551,11 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 		{"ca-ephemeral TRUE", "KP_CA_EPHEMERAL", "TRUE", "CAEphemeral", true},
 		{"ca-ephemeral false", "KP_CA_EPHEMERAL", "false", "CAEphemeral", false},
 		{"insecure invalid", "KP_INSECURE", "invalid", "InsecureSkipVerify", false},
+		{"allow-private-networks true", "KP_ALLOW_PRIVATE_NETWORKS", "true", "AllowPrivateNetworks", true},
+		{"allow-private-networks false", "KP_ALLOW_PRIVATE_NETWORKS", "false", "AllowPrivateNetworks", false},
+		{"allow-private-networks 1", "KP_ALLOW_PRIVATE_NETWORKS", "1", "AllowPrivateNetworks", true},
+		{"allow-private-networks 0", "KP_ALLOW_PRIVATE_NETWORKS", "0", "AllowPrivateNetworks", false},
+		{"allow-private-networks invalid", "KP_ALLOW_PRIVATE_NETWORKS", "invalid", "AllowPrivateNetworks", false},
 	}
 
 	for _, tt := range tests {
@@ -714,8 +720,62 @@ func getBoolConfigField(cfg *config.Config, field string) bool {
 		return cfg.InsecureSkipVerify
 	case "CAEphemeral":
 		return cfg.CAEphemeral
+	case "AllowPrivateNetworks":
+		return cfg.AllowPrivateNetworks
 	default:
 		return false
+	}
+}
+
+func TestAllowPrivateNetworksFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagArgs []string
+		envVars  map[string]string
+		want     bool
+	}{
+		{
+			name: "default is false",
+			want: false,
+		},
+		{
+			name:     "CLI flag sets true",
+			flagArgs: []string{"-allow-private-networks"},
+			want:     true,
+		},
+		{
+			name:    "env var sets true",
+			envVars: map[string]string{"KP_ALLOW_PRIVATE_NETWORKS": "true"},
+			want:    true,
+		},
+		{
+			name:     "CLI flag overrides env var",
+			flagArgs: []string{"-allow-private-networks=false"},
+			envVars:  map[string]string{"KP_ALLOW_PRIVATE_NETWORKS": "true"},
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			cfg := config.Default()
+			cfgFile := registerTestFlags(fs, cfg)
+
+			if err := fs.Parse(tt.flagArgs); err != nil {
+				t.Fatalf("flag.Parse: %v", err)
+			}
+
+			applyEnvFallback(fs, cfg, cfgFile)
+
+			if cfg.AllowPrivateNetworks != tt.want {
+				t.Errorf("AllowPrivateNetworks = %v, want %v", cfg.AllowPrivateNetworks, tt.want)
+			}
+		})
 	}
 }
 
