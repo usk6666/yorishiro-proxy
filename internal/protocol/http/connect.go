@@ -7,9 +7,11 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -47,6 +49,17 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Preserve the full host:port for upstream forwarding.
 	// req.Host contains the original "host:port" from the CONNECT request.
 	connectAuthority := req.Host
+
+	// Target scope enforcement: check if the CONNECT target is allowed
+	// before establishing the tunnel. Parse the port from the authority
+	// for the scope check.
+	if port := parseConnectPort(req.Host); port > 0 {
+		if blocked, reason := h.checkTargetScopeHost(hostname, port); blocked {
+			h.writeBlockedResponse(conn, hostname, reason, logger)
+			h.recordBlockedCONNECTSession(ctx, req, hostname, connectAuthority, logger)
+			return nil
+		}
+	}
 
 	// Check if the target host is in the TLS passthrough list.
 	// If so, relay encrypted bytes directly without MITM interception.
@@ -337,6 +350,35 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		}
 	}
 
+	// Target scope enforcement for HTTPS requests inside the MITM tunnel.
+	// The CONNECT target was already checked, but the Host header inside
+	// the tunnel may differ (e.g., HTTP/1.1 Host header rewrite). If the
+	// request-level Host differs from the CONNECT authority, re-check
+	// against the scope. This must happen before req.URL.Host is
+	// overwritten with connectHost below.
+	requestHost := req.Host
+	if requestHost == "" && req.URL.Host != "" {
+		requestHost = req.URL.Host
+	}
+	if requestHost != "" && requestHost != connectHost {
+		// Build a temporary URL for the scope check using the actual Host header.
+		checkURL := &url.URL{
+			Scheme: "https",
+			Host:   requestHost,
+			Path:   req.URL.Path,
+		}
+		if blocked, reason := h.checkTargetScope(checkURL); blocked {
+			// Set req.URL fields before recording so the session has the full URL.
+			if req.URL.Host == "" {
+				req.URL.Host = requestHost
+			}
+			req.URL.Scheme = "https"
+			h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
+			h.recordBlockedHTTPSSession(ctx, req, recordReqBody, rawRequest, reqTruncated, smuggling, start, connID, clientAddr, tlsMeta, logger)
+			return nil
+		}
+	}
+
 	// Reconstruct the full URL for the upstream request.
 	// Requests read from the TLS connection have relative URIs;
 	// we need to set the scheme and host from the CONNECT target.
@@ -509,4 +551,125 @@ func (h *Handler) dialUpstream(ctx context.Context, addr string, timeout time.Du
 	}
 	dialer := &net.Dialer{Timeout: timeout}
 	return dialer.DialContext(ctx, "tcp", addr)
+}
+
+// parseConnectPort extracts the port number from a CONNECT host:port string.
+// Returns the port number, or 443 as the default if no port is present.
+// Returns 0 if the port cannot be parsed.
+func parseConnectPort(hostPort string) int {
+	_, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		// No port specified; default to 443 for CONNECT.
+		return 443
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
+// recordBlockedCONNECTSession records a blocked CONNECT request as a session
+// with BlockedBy="target_scope".
+func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.Request, hostname, authority string, logger *slog.Logger) {
+	if h.store == nil {
+		return
+	}
+
+	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+	start := time.Now()
+
+	// Build a synthetic URL for CONNECT recording.
+	connectURL := &url.URL{
+		Scheme: "https",
+		Host:   authority,
+	}
+
+	if !h.shouldCapture(req.Method, connectURL) {
+		return
+	}
+
+	sess := &session.Session{
+		ConnID:      connID,
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		BlockedBy:   "target_scope",
+		ConnInfo: &session.ConnectionInfo{
+			ClientAddr: clientAddr,
+		},
+	}
+	if err := h.store.SaveSession(ctx, sess); err != nil {
+		logger.Error("blocked CONNECT session save failed", "host", authority, "error", err)
+		return
+	}
+	sendMsg := &session.Message{
+		SessionID: sess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: start,
+		Method:    "CONNECT",
+		URL:       connectURL,
+	}
+	if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("blocked CONNECT send message save failed", "error", err)
+	}
+}
+
+// recordBlockedHTTPSSession records a blocked HTTPS request (inside MITM tunnel)
+// as a session with BlockedBy="target_scope".
+func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, tlsMeta tlsMetadata, logger *slog.Logger) {
+	if h.store == nil {
+		return
+	}
+
+	reqURL := &url.URL{
+		Scheme:   "https",
+		Host:     req.URL.Host,
+		Path:     req.URL.Path,
+		RawQuery: req.URL.RawQuery,
+		Fragment: req.URL.Fragment,
+	}
+	if !h.shouldCapture(req.Method, reqURL) {
+		return
+	}
+
+	duration := time.Since(start)
+	sess := &session.Session{
+		ConnID:      connID,
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		Duration:    duration,
+		Tags:        smugglingTags(smuggling),
+		BlockedBy:   "target_scope",
+		ConnInfo: &session.ConnectionInfo{
+			ClientAddr:  clientAddr,
+			TLSVersion:  tlsMeta.Version,
+			TLSCipher:   tlsMeta.CipherSuite,
+			TLSALPN:     tlsMeta.ALPN,
+		},
+	}
+	if err := h.store.SaveSession(ctx, sess); err != nil {
+		logger.Error("blocked HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		return
+	}
+	sendMsg := &session.Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     start,
+		Method:        req.Method,
+		URL:           reqURL,
+		Headers:       req.Header,
+		Body:          reqBody,
+		RawBytes:      rawRequest,
+		BodyTruncated: reqTruncated,
+	}
+	if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("blocked HTTPS send message save failed", "error", err)
+	}
 }
