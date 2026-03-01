@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { Button } from "../../components/ui/index.js";
 
 export interface HeaderRow {
+  id: string;
   name: string;
   value: string;
 }
@@ -39,14 +40,14 @@ export function HeaderEditor({ headers, onChange }: HeaderEditorProps) {
   );
 
   const handleAdd = useCallback(() => {
-    onChange([...headers, { name: "", value: "" }]);
+    onChange([...headers, { id: crypto.randomUUID(), name: "", value: "" }]);
   }, [headers, onChange]);
 
   return (
     <div className="intercept-section">
       <div className="intercept-section-title">Headers</div>
       {headers.map((header, index) => (
-        <div key={index} className="intercept-header-row">
+        <div key={header.id} className="intercept-header-row">
           <input
             className="input intercept-header-name"
             value={header.name}

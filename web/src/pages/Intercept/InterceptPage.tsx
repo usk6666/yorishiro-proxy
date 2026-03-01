@@ -1,12 +1,12 @@
-import { useState, useCallback } from "react";
-import { useQuery, useExecute, useConfigure } from "../../lib/mcp/hooks.js";
+import { useState, useCallback, useEffect } from "react";
+import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
 import type {
   InterceptQueueEntry,
   InterceptQueueResult,
-  InterceptRule,
 } from "../../lib/mcp/types.js";
 import { Badge, Button, Spinner, Table, Tabs, useToast } from "../../components/ui/index.js";
 import { HeaderEditor } from "./HeaderEditor.js";
+import type { HeaderRow } from "./HeaderEditor.js";
 import { BodyEditor } from "./BodyEditor.js";
 import { RulesPanel } from "./RulesPanel.js";
 import "./InterceptPage.css";
@@ -25,12 +25,11 @@ export function InterceptPage() {
   // Editable fields for the selected request
   const [editMethod, setEditMethod] = useState("");
   const [editUrl, setEditUrl] = useState("");
-  const [editHeaders, setEditHeaders] = useState<Array<{ name: string; value: string }>>([]);
+  const [editHeaders, setEditHeaders] = useState<HeaderRow[]>([]);
   const [editBody, setEditBody] = useState("");
 
   const { addToast } = useToast();
   const { execute, loading: executeLoading } = useExecute();
-  const { configure, loading: configureLoading } = useConfigure();
 
   // Poll intercept queue every second
   const {
@@ -42,14 +41,20 @@ export function InterceptPage() {
     pollInterval: 1000,
   });
 
-  // Fetch config for intercept rules
+  // Fetch config for intercept rules summary
   const {
     data: configData,
     loading: configLoading,
-    refetch: refetchConfig,
   } = useQuery<"config">("config");
 
   const queue: InterceptQueueResult = queueData ?? { items: [], count: 0 };
+
+  // Clear selectedId when the selected entry is no longer in the queue
+  useEffect(() => {
+    if (selectedId && !queue.items.some((item) => item.id === selectedId)) {
+      setSelectedId(null);
+    }
+  }, [selectedId, queue.items]);
 
   const selectedEntry = selectedId
     ? queue.items.find((item) => item.id === selectedId) ?? null
@@ -63,10 +68,10 @@ export function InterceptPage() {
     setEditBody(entry.body);
 
     // Flatten headers from Record<string, string[]> to editable rows
-    const headerRows: Array<{ name: string; value: string }> = [];
+    const headerRows: HeaderRow[] = [];
     for (const [name, values] of Object.entries(entry.headers)) {
       for (const value of values) {
-        headerRows.push({ name, value });
+        headerRows.push({ id: crypto.randomUUID(), name, value });
       }
     }
     setEditHeaders(headerRows);
@@ -95,11 +100,17 @@ export function InterceptPage() {
   const handleModifyAndForward = useCallback(async () => {
     if (!selectedId) return;
 
-    // Build override headers from edit state
+    // Build override headers from edit state.
+    // Merge duplicate header names with comma concatenation (RFC 7230).
     const overrideHeaders: Record<string, string> = {};
     for (const h of editHeaders) {
-      if (h.name.trim()) {
-        overrideHeaders[h.name.trim()] = h.value;
+      const key = h.name.trim();
+      if (key) {
+        if (key in overrideHeaders) {
+          overrideHeaders[key] = overrideHeaders[key] + ", " + h.value;
+        } else {
+          overrideHeaders[key] = h.value;
+        }
       }
     }
 
@@ -144,28 +155,6 @@ export function InterceptPage() {
     }
   }, [selectedId, execute, addToast, refetchQueue]);
 
-  // Toggle intercept rule enabled/disabled
-  const handleToggleRule = useCallback(
-    async (rule: InterceptRule) => {
-      try {
-        if (rule.enabled) {
-          await configure({ intercept_rules: { disable: [rule.id] } });
-          addToast({ type: "info", message: `Rule "${rule.id}" disabled` });
-        } else {
-          await configure({ intercept_rules: { enable: [rule.id] } });
-          addToast({ type: "success", message: `Rule "${rule.id}" enabled` });
-        }
-        refetchConfig();
-      } catch (err) {
-        addToast({
-          type: "error",
-          message: `Failed to toggle rule: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    },
-    [configure, addToast, refetchConfig],
-  );
-
   return (
     <div className="page intercept-page">
       <div className="intercept-header">
@@ -192,8 +181,7 @@ export function InterceptPage() {
           {activeTab === "rules" && (
             <RulesPanel
               configData={configData ?? null}
-              loading={configLoading || configureLoading}
-              onToggleRule={handleToggleRule}
+              loading={configLoading}
             />
           )}
         </Tabs>
