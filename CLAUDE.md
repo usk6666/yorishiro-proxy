@@ -1,6 +1,6 @@
 # yorishiro-proxy
 
-AI エージェント向けネットワークプロキシツール — AI のための PacketProxy。
+AI エージェント向けネットワークプロキシツール — AI のための MITM プロキシ。
 MCP (Model Context Protocol) サーバとして動作し、脆弱性診断のためのトラフィック傍受・記録・リプレイ機能を提供する。
 
 **ステータス**: 商用非公開・開発中
