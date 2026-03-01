@@ -113,10 +113,10 @@ func (s *TargetScope) MergeRules(addAllows, removeAllows, addDenies, removeDenie
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Apply allow additions (skip duplicates).
+	// Apply allow additions (skip duplicates, deep copy each rule).
 	for _, add := range addAllows {
 		if !containsTargetRule(s.allows, add) {
-			s.allows = append(s.allows, add)
+			s.allows = append(s.allows, cloneTargetRule(add))
 		}
 	}
 	// Apply allow removals.
@@ -124,10 +124,10 @@ func (s *TargetScope) MergeRules(addAllows, removeAllows, addDenies, removeDenie
 		s.allows = filterTargetRule(s.allows, rem)
 	}
 
-	// Apply deny additions (skip duplicates).
+	// Apply deny additions (skip duplicates, deep copy each rule).
 	for _, add := range addDenies {
 		if !containsTargetRule(s.denies, add) {
-			s.denies = append(s.denies, add)
+			s.denies = append(s.denies, cloneTargetRule(add))
 		}
 	}
 	// Apply deny removals.
@@ -276,6 +276,17 @@ func filterTargetRule(rules []TargetRule, target TargetRule) []TargetRule {
 	return result
 }
 
+// cloneTargetRule returns a deep copy of a single TargetRule.
+// The Ports and Schemes slices are independently copied.
+func cloneTargetRule(r TargetRule) TargetRule {
+	return TargetRule{
+		Hostname:   r.Hostname,
+		Ports:      cloneInts(r.Ports),
+		PathPrefix: r.PathPrefix,
+		Schemes:    cloneStrings(r.Schemes),
+	}
+}
+
 // cloneTargetRules returns a deep copy of a TargetRule slice.
 // Each rule's Ports and Schemes slices are also copied.
 func cloneTargetRules(rules []TargetRule) []TargetRule {
@@ -284,12 +295,7 @@ func cloneTargetRules(rules []TargetRule) []TargetRule {
 	}
 	out := make([]TargetRule, len(rules))
 	for i, r := range rules {
-		out[i] = TargetRule{
-			Hostname:   r.Hostname,
-			Ports:      cloneInts(r.Ports),
-			PathPrefix: r.PathPrefix,
-			Schemes:    cloneStrings(r.Schemes),
-		}
+		out[i] = cloneTargetRule(r)
 	}
 	return out
 }

@@ -1104,3 +1104,60 @@ func TestTargetScope_DenyOverridesAllow_SameHostname(t *testing.T) {
 		t.Errorf("reason = %q, want %q", reason, "denied by target scope")
 	}
 }
+
+func TestTargetScope_MergeRules_DeepCopy(t *testing.T) {
+	// Verify that MergeRules deep copies the Ports and Schemes slices
+	// so that mutations to the caller's slices do not affect internal state.
+	s := NewTargetScope()
+
+	ports := []int{80, 443}
+	schemes := []string{"http", "https"}
+	allowRule := TargetRule{Hostname: "allow.com", Ports: ports, Schemes: schemes}
+
+	denyPorts := []int{8080}
+	denySchemes := []string{"http"}
+	denyRule := TargetRule{Hostname: "deny.com", Ports: denyPorts, Schemes: denySchemes}
+
+	s.MergeRules(
+		[]TargetRule{allowRule},
+		nil,
+		[]TargetRule{denyRule},
+		nil,
+	)
+
+	// Mutate the caller's slices after MergeRules.
+	ports[0] = 9999
+	schemes[0] = "ftp"
+	denyPorts[0] = 7777
+	denySchemes[0] = "wss"
+
+	allows, denies := s.Rules()
+	if len(allows) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(allows))
+	}
+	if len(denies) != 1 {
+		t.Fatalf("expected 1 deny rule, got %d", len(denies))
+	}
+
+	// Allow rule should be unaffected by caller mutation.
+	if allows[0].Ports[0] != 80 {
+		t.Errorf("allow Ports[0] = %d, want 80 (caller mutation leaked)", allows[0].Ports[0])
+	}
+	if allows[0].Ports[1] != 443 {
+		t.Errorf("allow Ports[1] = %d, want 443", allows[0].Ports[1])
+	}
+	if allows[0].Schemes[0] != "http" {
+		t.Errorf("allow Schemes[0] = %q, want %q (caller mutation leaked)", allows[0].Schemes[0], "http")
+	}
+	if allows[0].Schemes[1] != "https" {
+		t.Errorf("allow Schemes[1] = %q, want %q", allows[0].Schemes[1], "https")
+	}
+
+	// Deny rule should be unaffected by caller mutation.
+	if denies[0].Ports[0] != 8080 {
+		t.Errorf("deny Ports[0] = %d, want 8080 (caller mutation leaked)", denies[0].Ports[0])
+	}
+	if denies[0].Schemes[0] != "http" {
+		t.Errorf("deny Schemes[0] = %q, want %q (caller mutation leaked)", denies[0].Schemes[0], "http")
+	}
+}
