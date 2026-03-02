@@ -10,9 +10,16 @@ package config
 // bodies while staying well within the database engine's capabilities.
 //
 // CWE-770 note: these limits serve as a defense against resource exhaustion.
-// Each concurrent connection may allocate up to MaxBodySize of memory for body
-// buffering, so operators should consider total memory capacity when running
-// the proxy under heavy load.
+// Each concurrent connection may buffer up to MaxBodySize for both the request
+// and response body, so the worst-case memory usage is:
+//
+//	MaxBodySize × 2 (req + resp) × MaxConnections
+//	= 254 MB × 2 × 128 = ~63.5 GB
+//
+// The default MaxConnections (128, internal/proxy/listener.go) is chosen to
+// keep this theoretical maximum manageable. Operators should consider total
+// memory capacity and adjust MaxConnections via the proxy_start MCP tool or
+// configure_limits when running under heavy load.
 
 const (
 	// MaxBodySize is the unified maximum size for both reading upstream
