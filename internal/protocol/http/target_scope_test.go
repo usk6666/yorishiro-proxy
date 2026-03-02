@@ -38,7 +38,7 @@ func TestTargetScope_HTTPForwardProxy_BlockedHost(t *testing.T) {
 
 	// Configure target scope: only allow example.com
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -80,8 +80,8 @@ func TestTargetScope_HTTPForwardProxy_BlockedHost(t *testing.T) {
 	if blocked.Error != "blocked by target scope" {
 		t.Errorf("error = %q, want %q", blocked.Error, "blocked by target scope")
 	}
-	if blocked.Reason != "not in allow list" {
-		t.Errorf("reason = %q, want %q", blocked.Reason, "not in allow list")
+	if blocked.Reason != "not in agent allow list" {
+		t.Errorf("reason = %q, want %q", blocked.Reason, "not in agent allow list")
 	}
 
 	// Verify Content-Type is application/json.
@@ -104,7 +104,7 @@ func TestTargetScope_HTTPForwardProxy_AllowedHost(t *testing.T) {
 	// Configure target scope: allow the upstream host.
 	_, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "127.0.0.1"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -247,7 +247,7 @@ func TestTargetScope_HTTPForwardProxy_DenyRule(t *testing.T) {
 
 	// Configure target scope: deny 127.0.0.1 (the upstream test server).
 	ts := proxy.NewTargetScope()
-	ts.SetRules(nil, []proxy.TargetRule{
+	ts.SetAgentRules(nil, []proxy.TargetRule{
 		{Hostname: "127.0.0.1"},
 	})
 	handler.SetTargetScope(ts)
@@ -287,8 +287,8 @@ func TestTargetScope_HTTPForwardProxy_DenyRule(t *testing.T) {
 	if blocked.Error != "blocked by target scope" {
 		t.Errorf("error = %q, want %q", blocked.Error, "blocked by target scope")
 	}
-	if blocked.Reason != "denied by target scope" {
-		t.Errorf("reason = %q, want %q", blocked.Reason, "denied by target scope")
+	if blocked.Reason != "blocked by agent deny rule" {
+		t.Errorf("reason = %q, want %q", blocked.Reason, "blocked by agent deny rule")
 	}
 }
 
@@ -304,7 +304,7 @@ func TestTargetScope_HTTPForwardProxy_BlockedSessionRecording(t *testing.T) {
 	handler := NewHandler(store, nil, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -368,7 +368,7 @@ func TestTargetScope_CONNECT_BlockedHost(t *testing.T) {
 	handler := NewHandler(store, issuer, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "allowed.example.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -421,7 +421,7 @@ func TestTargetScope_CONNECT_AllowedHost(t *testing.T) {
 	handler := NewHandler(store, issuer, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -500,7 +500,7 @@ func TestTargetScope_CONNECT_BlockedSessionRecording(t *testing.T) {
 	handler := NewHandler(store, issuer, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "allowed.example.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -565,7 +565,7 @@ func TestTargetScope_CONNECT_DenyRule(t *testing.T) {
 	handler := NewHandler(store, issuer, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules(nil, []proxy.TargetRule{
+	ts.SetAgentRules(nil, []proxy.TargetRule{
 		{Hostname: "evil.com"},
 	})
 	handler.SetTargetScope(ts)
@@ -601,8 +601,8 @@ func TestTargetScope_CONNECT_DenyRule(t *testing.T) {
 	if err := json.Unmarshal(body, &blocked); err != nil {
 		t.Fatalf("failed to parse blocked response body: %v", err)
 	}
-	if blocked.Reason != "denied by target scope" {
-		t.Errorf("reason = %q, want %q", blocked.Reason, "denied by target scope")
+	if blocked.Reason != "blocked by agent deny rule" {
+		t.Errorf("reason = %q, want %q", blocked.Reason, "blocked by agent deny rule")
 	}
 }
 
@@ -613,7 +613,7 @@ func TestTargetScope_CONNECT_WildcardAllow_Blocked(t *testing.T) {
 	handler := NewHandler(store, issuer, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "*.example.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -674,7 +674,7 @@ func TestTargetScope_CONNECT_WildcardAllow_Allowed(t *testing.T) {
 	handler := NewHandler(&mockStore{}, nil, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "*.example.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -701,7 +701,7 @@ func TestTargetScope_CONNECT_PortRestriction_Blocked(t *testing.T) {
 	handler := NewHandler(store, issuer, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com", Ports: []int{443}},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -740,7 +740,7 @@ func TestTargetScope_CONNECT_PortRestriction_Unit(t *testing.T) {
 	handler := NewHandler(nil, nil, testLogger())
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com", Ports: []int{443}},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -756,8 +756,8 @@ func TestTargetScope_CONNECT_PortRestriction_Unit(t *testing.T) {
 	if !blocked {
 		t.Error("example.com:8443 should be blocked, got allowed")
 	}
-	if reason != "not in allow list" {
-		t.Errorf("reason = %q, want %q", reason, "not in allow list")
+	if reason != "not in agent allow list" {
+		t.Errorf("reason = %q, want %q", reason, "not in agent allow list")
 	}
 
 	// Port 80 should be blocked.
@@ -786,7 +786,7 @@ func TestTargetScope_HTTPS_HostHeaderRewrite(t *testing.T) {
 
 	// Allow localhost (the CONNECT target) but deny evil.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "localhost"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -839,7 +839,7 @@ func TestTargetScope_HTTPS_HostMismatchBlocked(t *testing.T) {
 
 	// Allow localhost (the CONNECT target) but not evil.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "localhost"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -958,7 +958,7 @@ func TestCheckTargetScopeHost_EmptyRules(t *testing.T) {
 func TestCheckTargetScope_BlockedByAllowList(t *testing.T) {
 	handler := NewHandler(nil, nil, testLogger())
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "allowed.com"},
 	}, nil)
 	handler.SetTargetScope(ts)
@@ -978,7 +978,7 @@ func TestCheckTargetScope_BlockedByAllowList(t *testing.T) {
 			name:       "unlisted host is blocked",
 			url:        "http://unlisted.com/path",
 			blocked:    true,
-			wantReason: "not in allow list",
+			wantReason: "not in agent allow list",
 		},
 	}
 
@@ -998,7 +998,7 @@ func TestCheckTargetScope_BlockedByAllowList(t *testing.T) {
 func TestCheckTargetScopeHost_BlockedByDenyList(t *testing.T) {
 	handler := NewHandler(nil, nil, testLogger())
 	ts := proxy.NewTargetScope()
-	ts.SetRules(nil, []proxy.TargetRule{
+	ts.SetAgentRules(nil, []proxy.TargetRule{
 		{Hostname: "evil.com"},
 	})
 	handler.SetTargetScope(ts)
@@ -1015,7 +1015,7 @@ func TestCheckTargetScopeHost_BlockedByDenyList(t *testing.T) {
 			hostname:   "evil.com",
 			port:       443,
 			blocked:    true,
-			wantReason: "denied by target scope",
+			wantReason: "blocked by agent deny rule",
 		},
 		{
 			name:     "other host is allowed",
