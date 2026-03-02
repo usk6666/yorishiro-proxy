@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -477,11 +478,22 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		return fmt.Errorf("write HTTPS response: %w", err)
 	}
 
-	// Truncate for recording.
+	// Decompress response body for recording. The raw (potentially compressed)
+	// bytes are preserved in rawResponse for wire-level analysis.
 	recordRespBody := fullRespBody
 	var respTruncated bool
-	if len(fullRespBody) > int(config.MaxBodySize) {
-		recordRespBody = fullRespBody[:int(config.MaxBodySize)]
+	decompressed := false
+	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
+		decoded, err := httputil.DecompressBody(fullRespBody, ce, config.MaxBodySize)
+		if err != nil {
+			logger.Debug("HTTPS response body decompression failed, storing as-is", "encoding", ce, "error", err)
+		} else {
+			recordRespBody = decoded
+			decompressed = true
+		}
+	}
+	if len(recordRespBody) > int(config.MaxBodySize) {
+		recordRespBody = recordRespBody[:int(config.MaxBodySize)]
 		respTruncated = true
 	}
 
@@ -537,7 +549,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 				Direction:     "receive",
 				Timestamp:     start.Add(duration),
 				StatusCode:    resp.StatusCode,
-				Headers:       resp.Header,
+				Headers:       httputil.RecordingHeaders(resp.Header, decompressed, len(recordRespBody)),
 				Body:          recordRespBody,
 				RawBytes:      rawResponse,
 				BodyTruncated: respTruncated,
