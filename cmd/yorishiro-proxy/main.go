@@ -48,8 +48,7 @@ var envVarMap = map[string]string{
 	"ca-cert":        "YP_CA_CERT",
 	"ca-key":         "YP_CA_KEY",
 	"ca-ephemeral":   "YP_CA_EPHEMERAL",
-	"insecure":                "YP_INSECURE",
-	"allow-private-networks": "YP_ALLOW_PRIVATE_NETWORKS",
+	"insecure":       "YP_INSECURE",
 	"log-level":      "YP_LOG_LEVEL",
 	"log-format":     "YP_LOG_FORMAT",
 	"log-file":       "YP_LOG_FILE",
@@ -86,7 +85,6 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "CA private key file path (env: YP_CA_KEY)")
 	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "use ephemeral in-memory CA (env: YP_CA_EPHEMERAL)")
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "skip upstream TLS verification (env: YP_INSECURE)")
-	fs.BoolVar(&cfg.AllowPrivateNetworks, "allow-private-networks", cfg.AllowPrivateNetworks, "disable SSRF protection globally, allow private/loopback networks (env: YP_ALLOW_PRIVATE_NETWORKS)")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn, error (env: YP_LOG_LEVEL)")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: text, json (env: YP_LOG_FORMAT)")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file, default stderr (env: YP_LOG_FILE)")
@@ -242,9 +240,9 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	httpHandler.SetH2Handler(http2Handler)
 
 	// Initialize fuzzer components for async fuzz job execution.
-	// Use a hardened HTTP client with SSRF protection, explicit timeout,
-	// and redirect suppression — never http.DefaultClient.
-	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewHardenedHTTPClient(), "")
+	// Use a default HTTP client with explicit timeout and redirect suppression.
+	// Access control is handled by the target scope enforcement layer.
+	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewDefaultHTTPClient(), "")
 	fuzzRegistry := fuzzer.NewJobRegistry()
 	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
 
@@ -259,7 +257,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, cfg.UIDir, cfg.AllowPrivateNetworks, logger)
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, cfg.UIDir, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -295,8 +293,6 @@ func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string) 
 			cfg.CAEphemeral = parseBool(v)
 		case "insecure":
 			cfg.InsecureSkipVerify = parseBool(v)
-		case "allow-private-networks":
-			cfg.AllowPrivateNetworks = parseBool(v)
 		case "log-level":
 			cfg.LogLevel = v
 		case "log-format":
@@ -337,7 +333,7 @@ func parseBool(s string) bool {
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, uiDir string, allowPrivateNetworks bool, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, uiDir string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	// Build MCP server options.
@@ -356,12 +352,6 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 		mcp.WithUpstreamProxySetter(http2Handler),
 		mcp.WithTargetScopeSetter(httpHandler),
 		mcp.WithTargetScopeSetter(http2Handler),
-	}
-
-	// Pass AllowPrivateNetworks setting to the MCP server.
-	if allowPrivateNetworks {
-		opts = append(opts, mcp.WithAllowPrivateNetworks(true))
-		logger.Warn("SSRF protection disabled globally: allow_private_networks is enabled via startup flag")
 	}
 
 	// Pass proxy config file defaults to the MCP server.
