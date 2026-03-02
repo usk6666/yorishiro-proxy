@@ -354,7 +354,7 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	}
 
 	// Create engine with HTTP client and session fetcher.
-	sendFunc := s.macroSendFunc()
+	sendFunc := s.macroSendFunc(macroName)
 	fetcher := &storeSessionFetcher{store: s.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
