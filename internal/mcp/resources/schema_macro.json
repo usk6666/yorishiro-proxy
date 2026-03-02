@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "macro input",
+  "description": "Input schema for the macro tool.",
+  "type": "object",
+  "required": ["action", "params"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "The action to execute.",
+      "enum": ["define_macro", "run_macro", "delete_macro"]
+    },
+    "params": {
+      "type": "object",
+      "description": "Action-specific parameters.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Macro name (required for all macro actions)."
+        },
+        "description": {
+          "type": "string",
+          "description": "Macro description (define_macro)."
+        },
+        "steps": {
+          "type": "array",
+          "description": "Macro steps (define_macro).",
+          "items": {
+            "type": "object",
+            "required": ["id", "session_id"],
+            "properties": {
+              "id": { "type": "string" },
+              "session_id": { "type": "string" },
+              "override_method": { "type": "string" },
+              "override_url": { "type": "string" },
+              "override_headers": { "type": "object", "additionalProperties": { "type": "string" } },
+              "override_body": { "type": "string" },
+              "on_error": { "type": "string", "enum": ["abort", "skip", "retry"] },
+              "retry_count": { "type": "integer", "minimum": 1 },
+              "retry_delay_ms": { "type": "integer", "minimum": 0 },
+              "timeout_ms": { "type": "integer", "minimum": 1 },
+              "extract": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "from", "source"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "from": { "type": "string", "enum": ["request", "response"] },
+                    "source": { "type": "string", "enum": ["header", "body", "body_json", "status", "url"] },
+                    "header_name": { "type": "string" },
+                    "regex": { "type": "string" },
+                    "group": { "type": "integer" },
+                    "json_path": { "type": "string" },
+                    "default": { "type": "string" },
+                    "required": { "type": "boolean" }
+                  }
+                }
+              },
+              "when": {
+                "type": "object",
+                "properties": {
+                  "step": { "type": "string" },
+                  "status_code": { "type": "integer" },
+                  "status_code_range": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+                  "header_match": { "type": "object", "additionalProperties": { "type": "string" } },
+                  "body_match": { "type": "string" },
+                  "extracted_var": { "type": "string" },
+                  "negate": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "initial_vars": {
+          "type": "object",
+          "description": "Pre-populated KV Store entries (define_macro).",
+          "additionalProperties": { "type": "string" }
+        },
+        "macro_timeout_ms": {
+          "type": "integer",
+          "description": "Overall macro timeout in milliseconds (default: 300000).",
+          "minimum": 1
+        },
+        "vars": {
+          "type": "object",
+          "description": "Runtime variable overrides for run_macro.",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -38,6 +38,19 @@ func setupTestSessionWithInterceptQueue(t *testing.T, queue *intercept.Queue) *g
 	return cs
 }
 
+// interceptCallTool is a helper that calls the intercept tool with the given arguments.
+func interceptCallTool(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
+	t.Helper()
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "intercept",
+		Arguments: args,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	return result
+}
+
 func TestExecuteRelease(t *testing.T) {
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
@@ -50,10 +63,10 @@ func TestExecuteRelease(t *testing.T) {
 	go func() {
 		defer close(done)
 		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "release",
-				Params: executeParams{
+				Params: interceptParams{
 					InterceptID: id,
 				},
 			}),
@@ -91,10 +104,10 @@ func TestExecuteDrop(t *testing.T) {
 	go func() {
 		defer close(done)
 		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "drop",
-				Params: executeParams{
+				Params: interceptParams{
 					InterceptID: id,
 				},
 			}),
@@ -131,10 +144,10 @@ func TestExecuteModifyAndForward(t *testing.T) {
 	go func() {
 		defer close(done)
 		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "modify_and_forward",
-				Params: executeParams{
+				Params: interceptParams{
 					InterceptID:     id,
 					OverrideMethod:  "POST",
 					OverrideURL:     "http://other.com/api",
@@ -180,7 +193,7 @@ func TestExecuteRelease_MissingInterceptID(t *testing.T) {
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := interceptCallTool(t, cs, map[string]any{
 		"action": "release",
 		"params": map[string]any{},
 	})
@@ -193,7 +206,7 @@ func TestExecuteRelease_NotFound(t *testing.T) {
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := interceptCallTool(t, cs, map[string]any{
 		"action": "release",
 		"params": map[string]any{
 			"intercept_id": "nonexistent",
@@ -208,7 +221,7 @@ func TestExecuteRelease_NoQueue(t *testing.T) {
 	// Server without intercept queue.
 	cs := setupTestSession(t, nil)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := interceptCallTool(t, cs, map[string]any{
 		"action": "release",
 		"params": map[string]any{
 			"intercept_id": "test-id",

@@ -348,5 +348,9 @@ func (s *Server) registerTools() {
 	s.registerConfigure()
 	s.registerQuery()
 	s.registerExecute()
+	s.registerManage()
+	s.registerFuzz()
+	s.registerMacro()
+	s.registerIntercept()
 	s.registerSecurity()
 }

@@ -31,7 +31,7 @@ The CA is automatically saved to `~/.yorishiro-proxy/ca/ca.crt` on first startup
 
 ### Regenerate the CA certificate
 ```json
-// execute
+// manage
 {
   "action": "regenerate_ca_cert",
   "params": {}
@@ -164,7 +164,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Delete old sessions
 ```json
-// execute
+// manage
 {
   "action": "delete_sessions",
   "params": {"older_than_days": 7, "confirm": true}
@@ -173,7 +173,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Delete all sessions
 ```json
-// execute
+// manage
 {
   "action": "delete_sessions",
   "params": {"confirm": true}

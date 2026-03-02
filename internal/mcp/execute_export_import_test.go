@@ -157,7 +157,7 @@ func TestExportSessionsAction_FilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "export.jsonl")
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "export_sessions",
 		"params": map[string]any{
 			"output_path": outputPath,
@@ -195,7 +195,7 @@ func TestExportSessionsAction_SymlinkRejected(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "export_sessions",
 		"params": map[string]any{
 			"output_path": symlinkPath,
@@ -217,7 +217,7 @@ func TestExportSessionsAction_InlineLimit(t *testing.T) {
 		makeExportTestSession(t, store, id)
 	}
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "export_sessions",
 		"params": map[string]any{},
 	})
@@ -257,7 +257,7 @@ func TestImportSessionsAction_SymlinkRejected(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "import_sessions",
 		"params": map[string]any{
 			"input_path": symlinkPath,
@@ -278,7 +278,7 @@ func TestExportSessionsAction_AtomicWrite(t *testing.T) {
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "atomic-export.jsonl")
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "export_sessions",
 		"params": map[string]any{
 			"output_path": outputPath,
@@ -321,7 +321,7 @@ func TestImportSessionsAction_ValidUUIDRequired(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "import_sessions",
 		"params": map[string]any{
 			"input_path": dataFile,
@@ -498,7 +498,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	exportPath := filepath.Join(dir, "export.jsonl")
 
 	// Step 1: Export
-	exportResult := executeCallTool(t, cs, map[string]any{
+	exportResult := manageCallTool(t, cs, map[string]any{
 		"action": "export_sessions",
 		"params": map[string]any{
 			"output_path": exportPath,
@@ -527,7 +527,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	t.Logf("Exported JSONL:\n%s", string(data))
 
 	// Step 2: Delete all sessions
-	deleteResult := executeCallTool(t, cs, map[string]any{
+	deleteResult := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"confirm": true,
@@ -538,7 +538,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	}
 
 	// Step 3: Import
-	importCallResult := executeCallTool(t, cs, map[string]any{
+	importCallResult := manageCallTool(t, cs, map[string]any{
 		"action": "import_sessions",
 		"params": map[string]any{
 			"input_path": exportPath,
@@ -572,7 +572,7 @@ func TestExportSessionsAction_PathTraversalCleaned(t *testing.T) {
 	// Path with .. components - should be cleaned/normalised
 	outputPath := filepath.Join(dir, "sub", "..", "export.jsonl")
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "export_sessions",
 		"params": map[string]any{
 			"output_path": outputPath,

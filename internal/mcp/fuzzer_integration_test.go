@@ -20,6 +20,19 @@ import (
 
 // --- M3 Integration: Fuzzer ---
 
+// callFuzz is a helper that calls the fuzz tool with the given arguments.
+func callFuzz(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
+	t.Helper()
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "fuzz",
+		Arguments: args,
+	})
+	if err != nil {
+		t.Fatalf("CallTool(fuzz): %v", err)
+	}
+	return result
+}
+
 // setupFuzzTestSession creates an MCP client session with a real fuzzer runner,
 // backed by a real SQLite store (which satisfies both session.Store and session.FuzzStore).
 func setupFuzzTestSession(t *testing.T, store session.Store, fuzzStore session.FuzzStore, doer *http.Client) *gomcp.ClientSession {
@@ -120,7 +133,7 @@ func TestM3_Fuzz_Sequential(t *testing.T) {
 	cs := setupFuzzTestSession(t, store, store, newPermissiveClient())
 
 	// Start a sequential fuzz job with a small wordlist.
-	result := callExecute(t, cs, map[string]any{
+	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
 			"session_id":  sessID,
@@ -241,7 +254,7 @@ func TestM3_Fuzz_PauseResume(t *testing.T) {
 		payloads[i] = "payload-" + time.Now().Format("150405") + "-" + string(rune('a'+i%26))
 	}
 
-	result := callExecute(t, cs, map[string]any{
+	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
 			"session_id":  sessID,
@@ -274,7 +287,7 @@ func TestM3_Fuzz_PauseResume(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Pause the job.
-	pauseResult := callExecute(t, cs, map[string]any{
+	pauseResult := callFuzz(t, cs, map[string]any{
 		"action": "fuzz_pause",
 		"params": map[string]any{"fuzz_id": fuzzID},
 	})
@@ -289,7 +302,7 @@ func TestM3_Fuzz_PauseResume(t *testing.T) {
 	}
 
 	// Resume the job.
-	resumeResult := callExecute(t, cs, map[string]any{
+	resumeResult := callFuzz(t, cs, map[string]any{
 		"action": "fuzz_resume",
 		"params": map[string]any{"fuzz_id": fuzzID},
 	})
@@ -304,7 +317,7 @@ func TestM3_Fuzz_PauseResume(t *testing.T) {
 	}
 
 	// Cancel the job to clean up (don't wait for all 50 payloads).
-	cancelResult := callExecute(t, cs, map[string]any{
+	cancelResult := callFuzz(t, cs, map[string]any{
 		"action": "fuzz_cancel",
 		"params": map[string]any{"fuzz_id": fuzzID},
 	})
@@ -333,7 +346,7 @@ func TestM3_Fuzz_Cancel(t *testing.T) {
 		payloads[i] = "val-" + string(rune('A'+i%26))
 	}
 
-	result := callExecute(t, cs, map[string]any{
+	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
 			"session_id":  sessID,
@@ -365,7 +378,7 @@ func TestM3_Fuzz_Cancel(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Cancel.
-	cancelResult := callExecute(t, cs, map[string]any{
+	cancelResult := callFuzz(t, cs, map[string]any{
 		"action": "fuzz_cancel",
 		"params": map[string]any{"fuzz_id": fuzzID},
 	})
@@ -433,7 +446,7 @@ func TestM3_Fuzz_StopOnStatusCode(t *testing.T) {
 	cs := setupFuzzTestSession(t, store, store, newPermissiveClient())
 
 	// "forbidden" appears at position 3, so the job should stop before processing all 5.
-	result := callExecute(t, cs, map[string]any{
+	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
 			"session_id":  sessID,
@@ -511,7 +524,7 @@ func TestM3_Fuzz_QueryFuzzResults(t *testing.T) {
 	sessID := saveFuzzTemplateSession(t, store, targetServer.URL)
 	cs := setupFuzzTestSession(t, store, store, newPermissiveClient())
 
-	result := callExecute(t, cs, map[string]any{
+	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
 			"session_id":  sessID,

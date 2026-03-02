@@ -44,7 +44,20 @@ func setupMacroTestSession(t *testing.T, store session.Store) *gomcp.ClientSessi
 	return cs
 }
 
-// callExecute invokes the execute tool and returns the raw result.
+// callMacro invokes the macro tool and returns the raw result.
+func callMacro(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
+	t.Helper()
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "macro",
+		Arguments: args,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	return result
+}
+
+// callExecute invokes the execute tool (resend, resend_raw, tcp_replay) and returns the raw result.
 func callExecute(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
 	t.Helper()
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -76,7 +89,7 @@ func TestExecute_DefineMacro_Success(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name":        "auth-flow",
@@ -126,7 +139,7 @@ func TestExecute_DefineMacro_Upsert(t *testing.T) {
 	}
 
 	// First define.
-	result1 := callExecute(t, cs, map[string]any{
+	result1 := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name":  "test-macro",
@@ -144,7 +157,7 @@ func TestExecute_DefineMacro_Upsert(t *testing.T) {
 	}
 
 	// Second define (update).
-	result2 := callExecute(t, cs, map[string]any{
+	result2 := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name":        "test-macro",
@@ -167,7 +180,7 @@ func TestExecute_DefineMacro_MissingName(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"steps": []any{
@@ -185,7 +198,7 @@ func TestExecute_DefineMacro_MissingSteps(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "no-steps",
@@ -205,7 +218,7 @@ func TestExecute_DefineMacro_InvalidStep_MissingID(t *testing.T) {
 	// it reaches our handler. Either the SDK error or our validation error
 	// is acceptable.
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "execute",
+		Name: "macro",
 		Arguments: map[string]any{
 			"action": "define_macro",
 			"params": map[string]any{
@@ -233,7 +246,7 @@ func TestExecute_DefineMacro_InvalidStep_MissingSessionID(t *testing.T) {
 	// it reaches our handler. Either the SDK error or our validation error
 	// is acceptable.
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "execute",
+		Name: "macro",
 		Arguments: map[string]any{
 			"action": "define_macro",
 			"params": map[string]any{
@@ -257,7 +270,7 @@ func TestExecute_DefineMacro_DuplicateStepID(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "dup-steps",
@@ -317,7 +330,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define a macro that references the session.
-	defineResult := callExecute(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "test-macro",
@@ -342,7 +355,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 	}
 
 	// Run the macro.
-	runResult := callExecute(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "test-macro",
@@ -416,7 +429,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define macro with initial_vars.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "vars-macro",
@@ -431,7 +444,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 	})
 
 	// Run with vars override.
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "vars-macro",
@@ -454,7 +467,7 @@ func TestExecute_RunMacro_NotFound(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "nonexistent",
@@ -470,7 +483,7 @@ func TestExecute_RunMacro_MissingName(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{},
 	})
@@ -485,7 +498,7 @@ func TestExecute_DeleteMacro_Success(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Create a macro first.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "to-delete",
@@ -496,7 +509,7 @@ func TestExecute_DeleteMacro_Success(t *testing.T) {
 	})
 
 	// Delete it.
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "delete_macro",
 		"params": map[string]any{
 			"name": "to-delete",
@@ -518,7 +531,7 @@ func TestExecute_DeleteMacro_Success(t *testing.T) {
 	}
 
 	// Verify macro is gone.
-	queryResult := callExecute(t, cs, map[string]any{
+	queryResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "to-delete",
@@ -533,7 +546,7 @@ func TestExecute_DeleteMacro_NotFound(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "delete_macro",
 		"params": map[string]any{
 			"name": "nonexistent",
@@ -549,7 +562,7 @@ func TestExecute_DeleteMacro_MissingName(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "delete_macro",
 		"params": map[string]any{},
 	})
@@ -563,7 +576,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "complex-macro",
@@ -633,7 +646,7 @@ func TestExecute_DefineMacro_NoStore(t *testing.T) {
 	}
 	t.Cleanup(func() { cs.Close() })
 
-	result := callExecute(t, cs, map[string]any{
+	result := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "test",
@@ -714,7 +727,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define a 2-step macro.
-	defineResult := callExecute(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "record-test",
@@ -742,7 +755,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	beforeCount := len(beforeSessions)
 
 	// Run the macro.
-	runResult := callExecute(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "record-test",
@@ -892,7 +905,7 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define macro with guarded step.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "skip-test",
@@ -914,7 +927,7 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	})
 
 	// Run the macro.
-	runResult := callExecute(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{"name": "skip-test"},
 	})
@@ -1000,7 +1013,7 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define the hook macro.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "hook-macro",

@@ -8,7 +8,7 @@
     "action": {
       "type": "string",
       "description": "The action to execute. 'replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'.",
-      "enum": ["resend", "resend_raw", "tcp_replay", "delete_sessions", "release", "modify_and_forward", "drop", "fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel", "define_macro", "run_macro", "delete_macro", "regenerate_ca_cert", "export_sessions", "import_sessions", "replay", "replay_raw"]
+      "enum": ["resend", "resend_raw", "tcp_replay", "replay", "replay_raw"]
     },
     "params": {
       "type": "object",
@@ -16,15 +16,11 @@
       "properties": {
         "session_id": {
           "type": "string",
-          "description": "Session ID for resend, resend_raw, tcp_replay, or single-session deletion."
+          "description": "Session ID for resend, resend_raw, or tcp_replay."
         },
         "message_sequence": {
           "type": "integer",
           "description": "Message sequence number for WebSocket/streaming resend. Required for WebSocket sessions."
-        },
-        "intercept_id": {
-          "type": "string",
-          "description": "Intercept ID for release, modify_and_forward, or drop actions."
         },
         "override_method": {
           "type": "string",
@@ -59,25 +55,14 @@
         },
         "body_patches": {
           "type": "array",
-          "description": "Partial body modification rules. Each item uses either json_path+value or regex+replace.",
+          "description": "Partial body modification rules.",
           "items": {
             "type": "object",
             "properties": {
-              "json_path": {
-                "type": "string",
-                "description": "JSON path expression (e.g., $.user.name)."
-              },
-              "value": {
-                "description": "Replacement value for json_path patch."
-              },
-              "regex": {
-                "type": "string",
-                "description": "Regular expression pattern for text-based patch."
-              },
-              "replace": {
-                "type": "string",
-                "description": "Replacement string for regex patch. Supports capture groups ($1, $2, etc.)."
-              }
+              "json_path": { "type": "string" },
+              "value": {},
+              "regex": { "type": "string" },
+              "replace": { "type": "string" }
             },
             "additionalProperties": false
           }
@@ -105,284 +90,40 @@
         },
         "target_addr": {
           "type": "string",
-          "description": "Target address (host:port) for resend_raw."
+          "description": "Target address (host:port) for resend_raw and tcp_replay."
         },
         "use_tls": {
           "type": "boolean",
-          "description": "Use TLS for resend_raw connection."
+          "description": "Use TLS for resend_raw or tcp_replay connection."
         },
-        "older_than_days": {
-          "type": "integer",
-          "description": "Delete sessions older than this many days. Must be >= 1.",
-          "minimum": 1
-        },
-        "confirm": {
-          "type": "boolean",
-          "description": "Confirm bulk deletion (required for older_than_days or delete-all)."
-        },
-        "attack_type": {
+        "override_raw_base64": {
           "type": "string",
-          "description": "Fuzz attack type: sequential (one position at a time) or parallel (all positions simultaneously).",
-          "enum": ["sequential", "parallel"]
+          "description": "Full raw bytes replacement (Base64-encoded) for resend_raw."
         },
-        "positions": {
+        "patches": {
           "type": "array",
-          "description": "Payload injection positions for fuzz action.",
+          "description": "Byte-level patches for resend_raw.",
           "items": {
             "type": "object",
-            "required": ["id", "location"],
             "properties": {
-              "id": {
-                "type": "string",
-                "description": "Unique position identifier (e.g., pos-0)."
-              },
-              "location": {
-                "type": "string",
-                "description": "Injection location in the request.",
-                "enum": ["header", "path", "query", "body_regex", "body_json", "cookie"]
-              },
-              "name": {
-                "type": "string",
-                "description": "Header name, query key, or cookie name."
-              },
-              "json_path": {
-                "type": "string",
-                "description": "JSON path for body_json location (e.g., $.password)."
-              },
-              "mode": {
-                "type": "string",
-                "description": "Operation mode (default: replace).",
-                "enum": ["replace", "add", "remove"]
-              },
-              "match": {
-                "type": "string",
-                "description": "Regex pattern for partial replacement. Capture groups replace only the group."
-              },
-              "payload_set": {
-                "type": "string",
-                "description": "Name of the payload set to use."
-              }
+              "offset": { "type": "integer" },
+              "data_base64": { "type": "string" },
+              "find": { "type": "string" },
+              "find_base64": { "type": "string" },
+              "replace": { "type": "string" },
+              "replace_base64": { "type": "string" }
             },
             "additionalProperties": false
           }
         },
-        "payload_sets": {
+        "hooks": {
           "type": "object",
-          "description": "Named payload sets for fuzz action.",
-          "additionalProperties": {
-            "type": "object",
-            "required": ["type"],
-            "properties": {
-              "type": {
-                "type": "string",
-                "description": "Payload generation type.",
-                "enum": ["wordlist", "file", "range", "sequence"]
-              },
-              "values": {
-                "type": "array",
-                "description": "Payload strings (for wordlist type).",
-                "items": { "type": "string" }
-              },
-              "path": {
-                "type": "string",
-                "description": "Relative file path under ~/.yorishiro-proxy/wordlists/ (for file type)."
-              },
-              "start": {
-                "type": "integer",
-                "description": "Range start value (for range/sequence types)."
-              },
-              "end": {
-                "type": "integer",
-                "description": "Range end value (for range/sequence types)."
-              },
-              "step": {
-                "type": "integer",
-                "description": "Range step value (for range/sequence types, default: 1)."
-              },
-              "format": {
-                "type": "string",
-                "description": "Format string for sequence type (e.g., user%04d)."
-              }
-            },
-            "additionalProperties": false
-          }
-        },
-        "concurrency": {
-          "type": "integer",
-          "description": "Number of concurrent fuzz workers (default: 1, max: 100).",
-          "minimum": 1,
-          "maximum": 100
-        },
-        "rate_limit_rps": {
-          "type": "number",
-          "description": "Requests per second limit for fuzz (0 = unlimited).",
-          "minimum": 0
-        },
-        "delay_ms": {
-          "type": "integer",
-          "description": "Fixed delay between fuzz requests in milliseconds.",
-          "minimum": 0
-        },
-        "max_retries": {
-          "type": "integer",
-          "description": "Retry count per failed fuzz request (default: 0).",
-          "minimum": 0
-        },
-        "stop_on": {
-          "type": "object",
-          "description": "Automatic stop conditions for fuzz jobs.",
+          "description": "Pre/post hooks for macro integration.",
           "properties": {
-            "status_codes": {
-              "type": "array",
-              "description": "Stop when any of these HTTP status codes is received.",
-              "items": { "type": "integer" }
-            },
-            "error_count": {
-              "type": "integer",
-              "description": "Stop when cumulative error count reaches this value.",
-              "minimum": 1
-            },
-            "latency_threshold_ms": {
-              "type": "integer",
-              "description": "Stop when sliding window median latency exceeds this (ms).",
-              "minimum": 1
-            },
-            "latency_baseline_multiplier": {
-              "type": "number",
-              "description": "Stop when current median exceeds baseline * multiplier.",
-              "exclusiveMinimum": 0
-            },
-            "latency_window": {
-              "type": "integer",
-              "description": "Sliding window size for latency detection (default: 10).",
-              "minimum": 1
-            }
+            "pre_send": { "type": "object" },
+            "post_receive": { "type": "object" }
           },
           "additionalProperties": false
-        },
-        "fuzz_id": {
-          "type": "string",
-          "description": "Fuzz job ID for fuzz_pause, fuzz_resume, fuzz_cancel actions."
-        },
-        "name": {
-          "type": "string",
-          "description": "Macro name (required for define_macro, run_macro, delete_macro)."
-        },
-        "description": {
-          "type": "string",
-          "description": "Macro description (define_macro)."
-        },
-        "steps": {
-          "type": "array",
-          "description": "Macro steps (define_macro). Each step defines a request to execute.",
-          "items": {
-            "type": "object",
-            "required": ["id", "session_id"],
-            "properties": {
-              "id": { "type": "string", "description": "Unique step identifier." },
-              "session_id": { "type": "string", "description": "Recorded session to use as template." },
-              "override_method": { "type": "string", "description": "Override HTTP method." },
-              "override_url": { "type": "string", "description": "Override request URL. Supports {{variable}} templates." },
-              "override_headers": { "type": "object", "description": "Header overrides. Supports templates.", "additionalProperties": { "type": "string" } },
-              "override_body": { "type": "string", "description": "Override request body. Supports templates." },
-              "on_error": { "type": "string", "enum": ["abort", "skip", "retry"], "description": "Error handling policy." },
-              "retry_count": { "type": "integer", "description": "Retry count for retry policy.", "minimum": 1 },
-              "retry_delay_ms": { "type": "integer", "description": "Delay between retries in ms.", "minimum": 0 },
-              "timeout_ms": { "type": "integer", "description": "Step timeout in ms.", "minimum": 1 },
-              "extract": {
-                "type": "array",
-                "description": "Value extraction rules.",
-                "items": {
-                  "type": "object",
-                  "required": ["name", "from", "source"],
-                  "properties": {
-                    "name": { "type": "string" },
-                    "from": { "type": "string", "enum": ["request", "response"] },
-                    "source": { "type": "string", "enum": ["header", "body", "body_json", "status", "url"] },
-                    "header_name": { "type": "string" },
-                    "regex": { "type": "string" },
-                    "group": { "type": "integer" },
-                    "json_path": { "type": "string" },
-                    "default": { "type": "string" },
-                    "required": { "type": "boolean" }
-                  }
-                }
-              },
-              "when": {
-                "type": "object",
-                "description": "Step guard condition.",
-                "properties": {
-                  "step": { "type": "string" },
-                  "status_code": { "type": "integer" },
-                  "status_code_range": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
-                  "header_match": { "type": "object", "additionalProperties": { "type": "string" } },
-                  "body_match": { "type": "string" },
-                  "extracted_var": { "type": "string" },
-                  "negate": { "type": "boolean" }
-                }
-              }
-            }
-          }
-        },
-        "initial_vars": {
-          "type": "object",
-          "description": "Pre-populated KV Store entries (define_macro).",
-          "additionalProperties": { "type": "string" }
-        },
-        "macro_timeout_ms": {
-          "type": "integer",
-          "description": "Overall macro timeout in milliseconds (default: 300000).",
-          "minimum": 1
-        },
-        "vars": {
-          "type": "object",
-          "description": "Runtime variable overrides for run_macro.",
-          "additionalProperties": { "type": "string" }
-        },
-        "format": {
-          "type": "string",
-          "description": "Export format (currently only 'jsonl' is supported).",
-          "enum": ["jsonl"]
-        },
-        "filter": {
-          "type": "object",
-          "description": "Session filter for export_sessions.",
-          "properties": {
-            "protocol": {
-              "type": "string",
-              "description": "Filter by protocol (e.g., HTTPS, HTTP/1.x)."
-            },
-            "url_pattern": {
-              "type": "string",
-              "description": "Filter by URL substring."
-            },
-            "time_after": {
-              "type": "string",
-              "description": "Include sessions after this time (RFC3339 format)."
-            },
-            "time_before": {
-              "type": "string",
-              "description": "Include sessions before this time (RFC3339 format)."
-            }
-          },
-          "additionalProperties": false
-        },
-        "include_bodies": {
-          "type": "boolean",
-          "description": "Include message bodies in export (default: true)."
-        },
-        "output_path": {
-          "type": "string",
-          "description": "File path to write export data."
-        },
-        "input_path": {
-          "type": "string",
-          "description": "File path to read import data."
-        },
-        "on_conflict": {
-          "type": "string",
-          "description": "Conflict policy for import: skip or replace (default: skip).",
-          "enum": ["skip", "replace"]
         }
       },
       "additionalProperties": false

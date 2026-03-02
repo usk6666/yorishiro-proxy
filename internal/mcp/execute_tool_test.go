@@ -89,6 +89,19 @@ func executeCallTool(t *testing.T, cs *gomcp.ClientSession, args map[string]any)
 	return result
 }
 
+// manageCallTool is a helper that calls the manage tool with the given arguments.
+func manageCallTool(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
+	t.Helper()
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "manage",
+		Arguments: args,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	return result
+}
+
 // --- Replay action tests ---
 
 func TestExecute_Replay_Success(t *testing.T) {
@@ -635,7 +648,7 @@ func TestExecute_DeleteSessions_ByID(t *testing.T) {
 		},
 	)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"session_id": entry.Session.ID,
@@ -693,7 +706,7 @@ func TestExecute_DeleteSessions_All(t *testing.T) {
 		)
 	}
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"confirm": true,
@@ -772,7 +785,7 @@ func TestExecute_DeleteSessions_OlderThanDays(t *testing.T) {
 		},
 	)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"older_than_days": 3,
@@ -810,7 +823,7 @@ func TestExecute_DeleteSessions_OlderThanDays_InvalidDays(t *testing.T) {
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"older_than_days": 0,
@@ -827,7 +840,7 @@ func TestExecute_DeleteSessions_OlderThanDays_RequiresConfirm(t *testing.T) {
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"older_than_days": 7,
@@ -844,7 +857,7 @@ func TestExecute_DeleteSessions_NoParamsError(t *testing.T) {
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{},
 	})
@@ -858,7 +871,7 @@ func TestExecute_DeleteSessions_NonexistentSession(t *testing.T) {
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"session_id": "nonexistent-id",
@@ -872,7 +885,7 @@ func TestExecute_DeleteSessions_NonexistentSession(t *testing.T) {
 func TestExecute_DeleteSessions_NilStore(t *testing.T) {
 	cs := setupTestSessionWithExecuteDoer(t, nil, newPermissiveClient())
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"session_id": "some-id",
@@ -998,7 +1011,7 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 		},
 	)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"protocol": "TCP",
@@ -1039,7 +1052,7 @@ func TestExecute_DeleteSessions_ByProtocol_RequiresConfirm(t *testing.T) {
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"protocol": "TCP",
@@ -1085,7 +1098,7 @@ func TestExecute_DeleteSessions_ByProtocol_NoMatches(t *testing.T) {
 		},
 	)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"protocol": "gRPC",
@@ -1141,7 +1154,7 @@ func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
 		},
 	)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"older_than_days": 30,
@@ -1234,7 +1247,7 @@ func TestExecute_RegenerateCA_AutoPersistMode(t *testing.T) {
 
 	cs := setupTestSessionForRegenerate(t, ca, issuer)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "regenerate_ca_cert",
 		"params": map[string]any{},
 	})
@@ -1291,7 +1304,7 @@ func TestExecute_RegenerateCA_ExplicitMode_Error(t *testing.T) {
 
 	cs := setupTestSessionForRegenerate(t, ca, nil)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "regenerate_ca_cert",
 		"params": map[string]any{},
 	})
@@ -1314,7 +1327,7 @@ func TestExecute_RegenerateCA_EphemeralMode(t *testing.T) {
 
 	cs := setupTestSessionForRegenerate(t, ca, issuer)
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "regenerate_ca_cert",
 		"params": map[string]any{},
 	})
@@ -1363,7 +1376,7 @@ func TestExecute_RegenerateCA_NilCA(t *testing.T) {
 	}
 	t.Cleanup(func() { cs.Close() })
 
-	result := executeCallTool(t, cs, map[string]any{
+	result := manageCallTool(t, cs, map[string]any{
 		"action": "regenerate_ca_cert",
 		"params": map[string]any{},
 	})

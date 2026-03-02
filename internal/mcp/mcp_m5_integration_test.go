@@ -196,7 +196,7 @@ func TestM5_HTTPTransport_BasicOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	expectedTools := []string{"proxy_start", "proxy_stop", "configure", "query", "execute"}
+	expectedTools := []string{"proxy_start", "proxy_stop", "configure", "query", "execute", "manage", "fuzz", "macro", "intercept"}
 	toolSet := make(map[string]bool)
 	for _, tool := range toolsResult.Tools {
 		toolSet[tool.Name] = true
@@ -651,7 +651,7 @@ func TestM5_HTTPTransport_ToolOperations(t *testing.T) {
 	}
 
 	// Delete session.
-	delResult := callTool[executeDeleteSessionsResult](t, cs, "execute", map[string]any{
+	delResult := callTool[executeDeleteSessionsResult](t, cs, "manage", map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"session_id": sessionID,

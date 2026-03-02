@@ -50,7 +50,7 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define the macro with extract rule.
-	defineResult := callExecute(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name":        "auth-flow",
@@ -87,7 +87,7 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 	}
 
 	// Run the macro.
-	runResult := callExecute(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "auth-flow",
@@ -170,7 +170,7 @@ func TestM3_Macro_StepGuard_When(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define macro with step guard: MFA only runs when login returns 302.
-	defineResult := callExecute(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "login-mfa",
@@ -203,7 +203,7 @@ func TestM3_Macro_StepGuard_When(t *testing.T) {
 	}
 
 	// Run the macro -- login returns 302, so MFA step should execute.
-	runResult := callExecute(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "login-mfa",
@@ -281,7 +281,7 @@ func TestM3_Macro_StepGuard_Skipped(t *testing.T) {
 
 	cs := setupMacroTestSession(t, store)
 
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "login-mfa-skip",
@@ -302,7 +302,7 @@ func TestM3_Macro_StepGuard_Skipped(t *testing.T) {
 		},
 	})
 
-	runResult := callExecute(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{"name": "login-mfa-skip"},
 	})
@@ -376,7 +376,7 @@ func TestM3_Hook_ResendPreSendTemplateExpansion(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define the auth macro that extracts a token.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "auth-hook-macro",
@@ -482,7 +482,7 @@ func TestM3_Hook_PostReceiveOnStatus(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define the post-receive logging macro.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "error-logger",
@@ -530,7 +530,7 @@ func TestM3_Macro_QueryMacros(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define two macros.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name":        "alpha",
@@ -540,7 +540,7 @@ func TestM3_Macro_QueryMacros(t *testing.T) {
 			},
 		},
 	})
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name":        "beta",
@@ -590,7 +590,7 @@ func TestM3_Macro_QueryMacros(t *testing.T) {
 	}
 
 	// Delete one macro and verify.
-	deleteResult := callExecute(t, cs, map[string]any{
+	deleteResult := callMacro(t, cs, map[string]any{
 		"action": "delete_macro",
 		"params": map[string]any{"name": "alpha"},
 	})
@@ -648,7 +648,7 @@ func TestM3_Macro_VarsOverrideRuntime(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define with initial_vars.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "vars-test",
@@ -660,7 +660,7 @@ func TestM3_Macro_VarsOverrideRuntime(t *testing.T) {
 	})
 
 	// Run with override vars.
-	runResult := callExecute(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "vars-test",

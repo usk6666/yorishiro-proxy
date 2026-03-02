@@ -382,8 +382,8 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		}
 	}
 
-	// 6. Delete the session via execute tool.
-	deleteResult := callTool[executeDeleteSessionsResult](t, env.cs, "execute", map[string]any{
+	// 6. Delete the session via manage tool.
+	deleteResult := callTool[executeDeleteSessionsResult](t, env.cs, "manage", map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"session_id": sessionEntry.ID,
@@ -496,7 +496,7 @@ func TestIntegration_QuerySession_NotFound(t *testing.T) {
 func TestIntegration_ExecuteDeleteSessions_NotFound(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	callToolExpectError(t, env.cs, "execute", map[string]any{
+	callToolExpectError(t, env.cs, "manage", map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"session_id": "nonexistent-session-id",
@@ -551,6 +551,10 @@ func TestIntegration_ListTools(t *testing.T) {
 		"configure":   false,
 		"query":       false,
 		"execute":     false,
+		"manage":      false,
+		"fuzz":        false,
+		"macro":       false,
+		"intercept":   false,
 	}
 
 	for _, tool := range toolsResult.Tools {
@@ -684,8 +688,8 @@ func TestIntegration_MultipleRequests(t *testing.T) {
 		t.Errorf("query sessions(url_pattern=/api/users) count = %d, want 1", urlResult.Count)
 	}
 
-	// Delete all sessions via execute tool.
-	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "execute", map[string]any{
+	// Delete all sessions via manage tool.
+	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "manage", map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"confirm": true,
