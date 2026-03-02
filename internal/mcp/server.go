@@ -48,6 +48,7 @@ type Server struct {
 	targetScopeSetters     []targetScopeSetter    // protocol handlers to update when target scope changes
 	uiDir                  string               // optional filesystem path for WebUI static files
 	targetScope            *proxy.TargetScope   // target scope rules for security tool
+	version                string               // build version reported via MCP implementation
 }
 
 // tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
@@ -182,6 +183,14 @@ func WithTargetScope(ts *proxy.TargetScope) ServerOption {
 	}
 }
 
+// WithVersion sets the version string reported in the MCP server implementation.
+// If not set, defaults to "dev".
+func WithVersion(v string) ServerOption {
+	return func(s *Server) {
+		s.version = v
+	}
+}
+
 // WithProxyDefaults sets the default proxy configuration loaded from a config file.
 // These defaults are applied to proxy_start invocations when the caller does not
 // explicitly provide a value for a given field.
@@ -228,15 +237,16 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 // The manager parameter controls the proxy lifecycle for proxy_start/proxy_stop tools.
 // If manager is nil, those tools will return an error when called.
 func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
-	server := gomcp.NewServer(&gomcp.Implementation{
-		Name:    "yorishiro-proxy",
-		Version: "0.0.1",
-	}, nil)
-
-	s := &Server{server: server, appCtx: ctx, ca: ca, store: store, manager: manager}
+	s := &Server{appCtx: ctx, ca: ca, store: store, manager: manager, version: "dev"}
 	for _, opt := range opts {
 		opt(s)
 	}
+
+	server := gomcp.NewServer(&gomcp.Implementation{
+		Name:    "yorishiro-proxy",
+		Version: s.version,
+	}, nil)
+	s.server = server
 	// Initialize default TargetScope if not provided via WithTargetScope.
 	if s.targetScope == nil {
 		s.targetScope = proxy.NewTargetScope()

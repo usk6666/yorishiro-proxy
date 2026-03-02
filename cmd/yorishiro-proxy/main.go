@@ -59,8 +59,14 @@ var envVarMap = map[string]string{
 
 func run(ctx context.Context) error {
 	// Check for subcommands before parsing flags.
-	if len(os.Args) > 1 && os.Args[1] == "setup" {
-		return runSetup(ctx, os.Args[2:])
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "setup":
+			return runSetup(ctx, os.Args[2:])
+		case "version":
+			fmt.Println(buildVersion())
+			return nil
+		}
 	}
 	return runWithFlags(ctx, flag.CommandLine, os.Args[1:])
 }
@@ -93,6 +99,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
 
 	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "yorishiro-proxy %s\n\n", buildVersion())
 		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n")
 		fmt.Fprintf(fs.Output(), "       yorishiro-proxy setup [setup-flags]\n\n")
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy is an AI agent network proxy (MCP server).\n")
@@ -338,6 +345,7 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 
 	// Build MCP server options.
 	opts := []mcp.ServerOption{
+		mcp.WithVersion(version),
 		mcp.WithDBPath(dbPath),
 		mcp.WithPassthroughList(passthrough),
 		mcp.WithCaptureScope(scope),
