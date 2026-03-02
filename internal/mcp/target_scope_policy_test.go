@@ -1332,7 +1332,7 @@ func TestPolicyIntegration_ExecuteFuzzBlockedByPolicy(t *testing.T) {
 	)
 
 	cs := setupExecuteWithTargetScope(t, store, ts)
-	result := executeCallTool(t, cs, map[string]any{
+	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
 			"session_id":  "fuzz-policy-blocked",
@@ -1421,7 +1421,7 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 	t.Cleanup(func() { cs.Close() })
 
 	// Define the macro.
-	defineResult := executeCallTool(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "test-policy-blocked-macro",
@@ -1438,7 +1438,7 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 	}
 
 	// Run the macro -- should be blocked by policy.
-	runResult := executeCallTool(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "test-policy-blocked-macro",

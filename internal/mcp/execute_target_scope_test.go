@@ -802,7 +802,7 @@ func TestExecuteFuzz_TargetScope_Blocked(t *testing.T) {
 	}, nil)
 
 	cs := setupExecuteWithTargetScope(t, store, ts)
-	result := executeCallTool(t, cs, map[string]any{
+	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
 			"session_id":  "fuzz-template-blocked",
@@ -892,7 +892,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 	t.Cleanup(func() { cs.Close() })
 
 	// First define the macro.
-	defineResult := executeCallTool(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "test-blocked-macro",
@@ -909,7 +909,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 	}
 
 	// Run the macro - should be blocked.
-	runResult := executeCallTool(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "test-blocked-macro",
@@ -981,7 +981,7 @@ func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 	t.Cleanup(func() { cs.Close() })
 
 	// Define a macro with override_url pointing to evil.com.
-	defineResult := executeCallTool(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "test-override-macro",
@@ -999,7 +999,7 @@ func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 	}
 
 	// Run the macro - should be blocked because of override_url.
-	runResult := executeCallTool(t, cs, map[string]any{
+	runResult := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
 			"name": "test-override-macro",
