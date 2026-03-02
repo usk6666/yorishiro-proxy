@@ -1075,7 +1075,7 @@ func TestM4_Execute_DeleteSessions_MixedProtocols(t *testing.T) {
 	}
 
 	// Delete all sessions.
-	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "execute", map[string]any{
+	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "manage", map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"confirm": true,
@@ -1224,7 +1224,7 @@ func TestM4_Execute_DeleteSingleSession_ByProtocol(t *testing.T) {
 	})
 
 	// Delete only the HTTP/2 session.
-	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "execute", map[string]any{
+	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "manage", map[string]any{
 		"action": "delete_sessions",
 		"params": map[string]any{
 			"session_id": h2ID,

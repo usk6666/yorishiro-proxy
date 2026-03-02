@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "manage input",
+  "description": "Input schema for the manage tool.",
+  "type": "object",
+  "required": ["action", "params"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "The action to execute.",
+      "enum": ["delete_sessions", "export_sessions", "import_sessions", "regenerate_ca_cert"]
+    },
+    "params": {
+      "type": "object",
+      "description": "Action-specific parameters.",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Session ID for single-session deletion."
+        },
+        "older_than_days": {
+          "type": "integer",
+          "description": "Delete sessions older than this many days. Must be >= 1.",
+          "minimum": 1
+        },
+        "confirm": {
+          "type": "boolean",
+          "description": "Confirm bulk deletion (required for older_than_days, protocol, or delete-all)."
+        },
+        "protocol": {
+          "type": "string",
+          "description": "Protocol filter for delete_sessions (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)."
+        },
+        "format": {
+          "type": "string",
+          "description": "Export format (currently only 'jsonl' is supported).",
+          "enum": ["jsonl"]
+        },
+        "filter": {
+          "type": "object",
+          "description": "Session filter for export_sessions.",
+          "properties": {
+            "protocol": {
+              "type": "string",
+              "description": "Filter by protocol (e.g., HTTPS, HTTP/1.x)."
+            },
+            "url_pattern": {
+              "type": "string",
+              "description": "Filter by URL substring."
+            },
+            "time_after": {
+              "type": "string",
+              "description": "Include sessions after this time (RFC3339 format)."
+            },
+            "time_before": {
+              "type": "string",
+              "description": "Include sessions before this time (RFC3339 format)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "include_bodies": {
+          "type": "boolean",
+          "description": "Include message bodies in export (default: true)."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "File path to write export data."
+        },
+        "input_path": {
+          "type": "string",
+          "description": "File path to read import data."
+        },
+        "on_conflict": {
+          "type": "string",
+          "description": "Conflict policy for import: skip or replace (default: skip).",
+          "enum": ["skip", "replace"]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

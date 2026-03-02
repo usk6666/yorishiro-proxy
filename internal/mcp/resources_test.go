@@ -58,6 +58,10 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://help/proxy_stop",
 		"yorishiro://help/query",
 		"yorishiro://help/execute",
+		"yorishiro://help/manage",
+		"yorishiro://help/fuzz",
+		"yorishiro://help/macro",
+		"yorishiro://help/intercept",
 		"yorishiro://help/configure",
 		"yorishiro://help/examples",
 		"yorishiro://help/security",
@@ -73,6 +77,10 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://schema/proxy_start",
 		"yorishiro://schema/query",
 		"yorishiro://schema/execute",
+		"yorishiro://schema/manage",
+		"yorishiro://schema/fuzz",
+		"yorishiro://schema/macro",
+		"yorishiro://schema/intercept",
 		"yorishiro://schema/configure",
 	}
 	for _, uri := range expectedSchemaURIs {
@@ -81,7 +89,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		}
 	}
 
-	// Total expected count = 6 help + 4 schema = 10.
+	// Total expected count = 11 help + 8 schema = 19.
 	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs)
 	if len(result.Resources) != expectedCount {
 		t.Errorf("resource count = %d, want %d", len(result.Resources), expectedCount)
@@ -288,7 +296,7 @@ func TestReadResource_ContentAccuracy(t *testing.T) {
 	}
 
 	text = result.Contents[0].Text
-	for _, action := range availableActions {
+	for _, action := range availableExecuteActions {
 		if !strings.Contains(text, action) {
 			t.Errorf("help/execute does not mention action %q", action)
 		}
@@ -350,7 +358,7 @@ func TestReadResource_SchemaFieldConsistency(t *testing.T) {
 	for _, a := range execSchema.Properties.Action.Enum {
 		gotActions[a] = true
 	}
-	for _, a := range availableActions {
+	for _, a := range availableExecuteActions {
 		if !gotActions[a] {
 			t.Errorf("schema/execute enum missing action %q", a)
 		}

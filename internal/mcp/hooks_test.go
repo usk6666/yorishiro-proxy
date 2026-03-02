@@ -447,7 +447,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define the auth macro.
-	defineResult := callExecute(t, cs, map[string]any{
+	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "auth-flow",
@@ -568,7 +568,7 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define post-receive macro.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "log-response",
@@ -697,7 +697,7 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define macro that extracts a token.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "token-macro",
@@ -870,7 +870,7 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define macro with initial_vars.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "auth-with-vars",
@@ -951,7 +951,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define logout macro that uses {{auth_session}} from its vars.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "logout-macro",
@@ -1012,7 +1012,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 
 	cs := setupMacroTestSession(t, store)
 
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "cleanup-macro",
@@ -1070,7 +1070,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 
 	cs := setupMacroTestSession(t, store)
 
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "cleanup-macro-2",
@@ -1179,7 +1179,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 	cs := setupMacroTestSession(t, store)
 
 	// Define pre_send macro: login and extract session cookie.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "login-macro",
@@ -1204,7 +1204,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 
 	// Define post_receive macro: logout using auth_session via override_headers.
 	// Note: template expansion only applies to step overrides, not base session headers.
-	callExecute(t, cs, map[string]any{
+	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name": "logout-macro-e2e",

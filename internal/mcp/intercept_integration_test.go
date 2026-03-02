@@ -51,10 +51,10 @@ func TestM3_Intercept_EnqueueAndRelease(t *testing.T) {
 	go func() {
 		defer close(done)
 		result, callErr := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "release",
-				Params: executeParams{
+				Params: interceptParams{
 					InterceptID: id,
 				},
 			}),
@@ -93,10 +93,10 @@ func TestM3_Intercept_ModifyAndForwardWithOverrides(t *testing.T) {
 	go func() {
 		defer close(done)
 		result, callErr := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "modify_and_forward",
-				Params: executeParams{
+				Params: interceptParams{
 					InterceptID:     id,
 					OverrideMethod:  "PUT",
 					OverrideURL:     "http://injected.example.com/api",
@@ -153,10 +153,10 @@ func TestM3_Intercept_DropAction(t *testing.T) {
 	go func() {
 		defer close(done)
 		result, callErr := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "drop",
-				Params: executeParams{
+				Params: interceptParams{
 					InterceptID: id,
 				},
 			}),
@@ -212,10 +212,10 @@ func TestM3_Intercept_MultipleItemsInQueue(t *testing.T) {
 	// Release the first request.
 	go func() {
 		cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "release",
-				Params: executeParams{InterceptID: id1},
+				Params: interceptParams{InterceptID: id1},
 			}),
 		})
 	}()
@@ -231,10 +231,10 @@ func TestM3_Intercept_MultipleItemsInQueue(t *testing.T) {
 	// Drop the second request.
 	go func() {
 		cs.CallTool(context.Background(), &gomcp.CallToolParams{
-			Name: "execute",
-			Arguments: mustMarshal(t, executeInput{
+			Name: "intercept",
+			Arguments: mustMarshal(t, interceptInput{
 				Action: "drop",
-				Params: executeParams{InterceptID: id2},
+				Params: interceptParams{InterceptID: id2},
 			}),
 		})
 	}()

@@ -1,0 +1,158 @@
+package mcp
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+)
+
+// interceptInput is the typed input for the intercept tool.
+type interceptInput struct {
+	// Action specifies the intercept action to execute.
+	// Available actions: release, modify_and_forward, drop.
+	Action string `json:"action"`
+	// Params holds action-specific parameters.
+	Params interceptParams `json:"params"`
+}
+
+// interceptParams holds the union of all intercept action-specific parameters.
+// Only the fields relevant to the specified action are used.
+type interceptParams struct {
+	// InterceptID is the intercepted request ID (required for all actions).
+	InterceptID string `json:"intercept_id,omitempty" jsonschema:"intercepted request ID for release/modify_and_forward/drop"`
+
+	// modify_and_forward mutation parameters
+	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override"`
+	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"URL override"`
+	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides"`
+	AddHeaders      map[string]string `json:"add_headers,omitempty" jsonschema:"headers to add"`
+	RemoveHeaders   []string          `json:"remove_headers,omitempty" jsonschema:"headers to remove"`
+	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override"`
+}
+
+// availableInterceptActions lists the valid action names for the intercept tool.
+var availableInterceptActions = []string{"release", "modify_and_forward", "drop"}
+
+// registerIntercept registers the intercept MCP tool.
+func (s *Server) registerIntercept() {
+	gomcp.AddTool(s.server, &gomcp.Tool{
+		Name: "intercept",
+		Description: "Act on intercepted requests in the intercept queue. " +
+			"Available actions: " +
+			"'release' forwards an intercepted request as-is (requires intercept_id); " +
+			"'modify_and_forward' forwards an intercepted request with mutations (requires intercept_id); " +
+			"'drop' discards an intercepted request returning 502 to the client (requires intercept_id).",
+	}, s.handleInterceptTool)
+}
+
+// executeInterceptResult is the structured output of intercept queue actions.
+type executeInterceptResult struct {
+	InterceptID string `json:"intercept_id"`
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+}
+
+// handleInterceptTool routes the intercept tool invocation to the appropriate action handler.
+func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolRequest, input interceptInput) (*gomcp.CallToolResult, any, error) {
+	switch input.Action {
+	case "":
+		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableInterceptActions, ", "))
+	case "release":
+		return s.handleInterceptRelease(ctx, input.Params)
+	case "modify_and_forward":
+		return s.handleInterceptModifyAndForward(ctx, input.Params)
+	case "drop":
+		return s.handleInterceptDrop(ctx, input.Params)
+	default:
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableInterceptActions)
+	}
+}
+
+// handleInterceptRelease handles the release action.
+func (s *Server) handleInterceptRelease(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
+	if s.interceptQueue == nil {
+		return nil, nil, fmt.Errorf("intercept queue is not initialized")
+	}
+	if params.InterceptID == "" {
+		return nil, nil, fmt.Errorf("intercept_id is required for release action")
+	}
+
+	action := intercept.InterceptAction{
+		Type: intercept.ActionRelease,
+	}
+	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+		return nil, nil, fmt.Errorf("release: %w", err)
+	}
+
+	return nil, &executeInterceptResult{
+		InterceptID: params.InterceptID,
+		Action:      "release",
+		Status:      "released",
+	}, nil
+}
+
+// handleInterceptModifyAndForward handles the modify_and_forward action.
+func (s *Server) handleInterceptModifyAndForward(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
+	if s.interceptQueue == nil {
+		return nil, nil, fmt.Errorf("intercept queue is not initialized")
+	}
+	if params.InterceptID == "" {
+		return nil, nil, fmt.Errorf("intercept_id is required for modify_and_forward action")
+	}
+
+	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
+		return nil, nil, fmt.Errorf("override_headers: %w", err)
+	}
+	if err := validateHeaderValues(params.AddHeaders); err != nil {
+		return nil, nil, fmt.Errorf("add_headers: %w", err)
+	}
+	if err := validateHeaderKeys(params.RemoveHeaders); err != nil {
+		return nil, nil, fmt.Errorf("remove_headers: %w", err)
+	}
+
+	action := intercept.InterceptAction{
+		Type:            intercept.ActionModifyAndForward,
+		OverrideMethod:  params.OverrideMethod,
+		OverrideURL:     params.OverrideURL,
+		OverrideHeaders: params.OverrideHeaders,
+		AddHeaders:      params.AddHeaders,
+		RemoveHeaders:   params.RemoveHeaders,
+		OverrideBody:    params.OverrideBody,
+	}
+
+	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	return nil, &executeInterceptResult{
+		InterceptID: params.InterceptID,
+		Action:      "modify_and_forward",
+		Status:      "forwarded",
+	}, nil
+}
+
+// handleInterceptDrop handles the drop action.
+func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
+	if s.interceptQueue == nil {
+		return nil, nil, fmt.Errorf("intercept queue is not initialized")
+	}
+	if params.InterceptID == "" {
+		return nil, nil, fmt.Errorf("intercept_id is required for drop action")
+	}
+
+	action := intercept.InterceptAction{
+		Type: intercept.ActionDrop,
+	}
+	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+		return nil, nil, fmt.Errorf("drop: %w", err)
+	}
+
+	return nil, &executeInterceptResult{
+		InterceptID: params.InterceptID,
+		Action:      "drop",
+		Status:      "dropped",
+	}, nil
+}
