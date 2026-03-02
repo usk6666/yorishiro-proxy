@@ -133,10 +133,6 @@ Layer 4 TCP Listener
 
 - [Getting Started Guide](docs/getting-started.md) -- Detailed setup and usage walkthrough
 
-## Acknowledgments
-
-This project was inspired by [PacketProxy](https://github.com/DeNA/PacketProxy), an open-source proxy tool developed by DeNA Co., Ltd. and licensed under Apache License 2.0.
-
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full license text.
