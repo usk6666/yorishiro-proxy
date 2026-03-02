@@ -388,9 +388,11 @@ func TestM3ComponentInitialization(t *testing.T) {
 }
 
 // registerTestFlags registers all CLI flags on fs in the same way as runWithFlags.
-// It returns a pointer to the config file path variable for use with applyEnvFallback.
-func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) *string {
+// It returns pointers to the config file and target policy file path variables
+// for use with applyEnvFallback.
+func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) (*string, *string) {
 	var configFile string
+	var targetPolicyFile string
 	fs.StringVar(&configFile, "config", "", "")
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "")
 	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "")
@@ -403,7 +405,8 @@ func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) *string {
 	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "")
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "")
-	return &configFile
+	fs.StringVar(&targetPolicyFile, "target-policy-file", "", "")
+	return &configFile, &targetPolicyFile
 }
 
 func TestApplyEnvFallback_Priority(t *testing.T) {
@@ -518,13 +521,13 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			cfgFile := registerTestFlags(fs, cfg)
+			cfgFile, policyFile := registerTestFlags(fs, cfg)
 
 			if err := fs.Parse(tt.flagArgs); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs, cfg, cfgFile)
+			applyEnvFallback(fs, cfg, cfgFile, policyFile)
 
 			got := getStringConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -558,13 +561,13 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			cfgFile := registerTestFlags(fs, cfg)
+			cfgFile, policyFile := registerTestFlags(fs, cfg)
 
 			if err := fs.Parse(nil); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs, cfg, cfgFile)
+			applyEnvFallback(fs, cfg, cfgFile, policyFile)
 
 			got := getBoolConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -588,7 +591,7 @@ func TestDeprecatedFlagsNotRegistered(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	registerTestFlags(fs, cfg)
+	_, _ = registerTestFlags(fs, cfg)
 
 	for _, name := range deprecatedFlags {
 		if f := fs.Lookup(name); f != nil {
@@ -630,7 +633,7 @@ func TestParseBool(t *testing.T) {
 func TestEnvVarMap_AllFlagsHaveMapping(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	registerTestFlags(fs, cfg)
+	_, _ = registerTestFlags(fs, cfg)
 
 	fs.VisitAll(func(f *flag.Flag) {
 		if _, ok := envVarMap[f.Name]; !ok {
@@ -730,13 +733,13 @@ func TestConfigFlag_EnvVarFallback(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile := registerTestFlags(fs, cfg)
+	cfgFile, policyFile := registerTestFlags(fs, cfg)
 
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs, cfg, cfgFile)
+	applyEnvFallback(fs, cfg, cfgFile, policyFile)
 
 	if *cfgFile != cfgPath {
 		t.Errorf("configFile = %q, want %q", *cfgFile, cfgPath)
@@ -758,13 +761,13 @@ func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile := registerTestFlags(fs, cfg)
+	cfgFile, policyFile := registerTestFlags(fs, cfg)
 
 	if err := fs.Parse([]string{"-config", flagPath}); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs, cfg, cfgFile)
+	applyEnvFallback(fs, cfg, cfgFile, policyFile)
 
 	// CLI flag should take precedence over YP_CONFIG env var.
 	if *cfgFile != flagPath {
@@ -777,5 +780,137 @@ func TestConfigFlag_FileNotFound(t *testing.T) {
 	_, err := config.LoadFile("/nonexistent/config.json")
 	if err == nil {
 		t.Fatal("expected error for nonexistent config file, got nil")
+	}
+}
+
+func TestTargetPolicyFileFlag_EnvVarFallback(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.json")
+	if err := os.WriteFile(policyPath, []byte(`{"allows": [{"hostname": "example.com"}]}`), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	t.Setenv("YP_TARGET_POLICY_FILE", policyPath)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := config.Default()
+	cfgFile, policyFile := registerTestFlags(fs, cfg)
+
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("flag.Parse: %v", err)
+	}
+
+	applyEnvFallback(fs, cfg, cfgFile, policyFile)
+
+	if *policyFile != policyPath {
+		t.Errorf("targetPolicyFile = %q, want %q", *policyFile, policyPath)
+	}
+}
+
+func TestTargetPolicyFileFlag_CLIOverridesEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env-policy.json")
+	flagPath := filepath.Join(dir, "flag-policy.json")
+	if err := os.WriteFile(envPath, []byte(`{"allows": [{"hostname": "env.com"}]}`), 0644); err != nil {
+		t.Fatalf("write env policy file: %v", err)
+	}
+	if err := os.WriteFile(flagPath, []byte(`{"allows": [{"hostname": "flag.com"}]}`), 0644); err != nil {
+		t.Fatalf("write flag policy file: %v", err)
+	}
+
+	t.Setenv("YP_TARGET_POLICY_FILE", envPath)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := config.Default()
+	cfgFile, policyFile := registerTestFlags(fs, cfg)
+
+	if err := fs.Parse([]string{"-target-policy-file", flagPath}); err != nil {
+		t.Fatalf("flag.Parse: %v", err)
+	}
+
+	applyEnvFallback(fs, cfg, cfgFile, policyFile)
+
+	// CLI flag should take precedence over YP_TARGET_POLICY_FILE env var.
+	if *policyFile != flagPath {
+		t.Errorf("targetPolicyFile = %q, want %q (CLI should override env)", *policyFile, flagPath)
+	}
+}
+
+func TestConvertTargetRules(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []config.TargetRuleConfig
+		want  int // expected number of converted rules
+	}{
+		{
+			name:  "nil input",
+			input: nil,
+			want:  0,
+		},
+		{
+			name:  "empty input",
+			input: []config.TargetRuleConfig{},
+			want:  0,
+		},
+		{
+			name: "single rule with all fields",
+			input: []config.TargetRuleConfig{
+				{
+					Hostname:   "*.target.com",
+					Ports:      []int{80, 443},
+					PathPrefix: "/api/",
+					Schemes:    []string{"https"},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "multiple rules",
+			input: []config.TargetRuleConfig{
+				{Hostname: "example.com"},
+				{Hostname: "*.target.com", Ports: []int{443}},
+				{Hostname: "api.staging.com", PathPrefix: "/v2/"},
+			},
+			want: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertTargetRules(tt.input)
+			if len(got) != tt.want {
+				t.Fatalf("convertTargetRules() returned %d rules, want %d", len(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestConvertTargetRules_FieldMapping(t *testing.T) {
+	input := []config.TargetRuleConfig{
+		{
+			Hostname:   "*.target.com",
+			Ports:      []int{80, 443},
+			PathPrefix: "/api/v1/",
+			Schemes:    []string{"http", "https"},
+		},
+	}
+
+	got := convertTargetRules(input)
+	if len(got) != 1 {
+		t.Fatalf("convertTargetRules() returned %d rules, want 1", len(got))
+	}
+
+	rule := got[0]
+	if rule.Hostname != "*.target.com" {
+		t.Errorf("Hostname = %q, want %q", rule.Hostname, "*.target.com")
+	}
+	if len(rule.Ports) != 2 || rule.Ports[0] != 80 || rule.Ports[1] != 443 {
+		t.Errorf("Ports = %v, want [80 443]", rule.Ports)
+	}
+	if rule.PathPrefix != "/api/v1/" {
+		t.Errorf("PathPrefix = %q, want %q", rule.PathPrefix, "/api/v1/")
+	}
+	if len(rule.Schemes) != 2 || rule.Schemes[0] != "http" || rule.Schemes[1] != "https" {
+		t.Errorf("Schemes = %v, want [http https]", rule.Schemes)
 	}
 }

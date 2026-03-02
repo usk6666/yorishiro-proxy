@@ -43,18 +43,19 @@ func main() {
 
 // envVarMap maps flag names to their corresponding YP_ environment variable names.
 var envVarMap = map[string]string{
-	"config":         "YP_CONFIG",
-	"db":             "YP_DB",
-	"ca-cert":        "YP_CA_CERT",
-	"ca-key":         "YP_CA_KEY",
-	"ca-ephemeral":   "YP_CA_EPHEMERAL",
-	"insecure":       "YP_INSECURE",
-	"log-level":      "YP_LOG_LEVEL",
-	"log-format":     "YP_LOG_FORMAT",
-	"log-file":       "YP_LOG_FILE",
-	"mcp-http-addr":  "YP_MCP_HTTP_ADDR",
-	"mcp-http-token": "YP_MCP_HTTP_TOKEN",
-	"ui-dir":         "YP_UI_DIR",
+	"config":             "YP_CONFIG",
+	"db":                 "YP_DB",
+	"ca-cert":            "YP_CA_CERT",
+	"ca-key":             "YP_CA_KEY",
+	"ca-ephemeral":       "YP_CA_EPHEMERAL",
+	"insecure":           "YP_INSECURE",
+	"log-level":          "YP_LOG_LEVEL",
+	"log-format":         "YP_LOG_FORMAT",
+	"log-file":           "YP_LOG_FILE",
+	"mcp-http-addr":      "YP_MCP_HTTP_ADDR",
+	"mcp-http-token":     "YP_MCP_HTTP_TOKEN",
+	"ui-dir":             "YP_UI_DIR",
+	"target-policy-file": "YP_TARGET_POLICY_FILE",
 }
 
 func run(ctx context.Context) error {
@@ -80,6 +81,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// Config file path — loaded early to provide defaults for proxy_start.
 	var configFile string
 	fs.StringVar(&configFile, "config", "", "JSON config file path for proxy defaults (env: YP_CONFIG)")
+
+	// Target scope policy file path.
+	var targetPolicyFile string
+	fs.StringVar(&targetPolicyFile, "target-policy-file", "", "target scope policy JSON file path (env: YP_TARGET_POLICY_FILE)")
 
 	// Define flags — only those requiring startup-time decisions.
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath,
@@ -133,7 +138,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	// Apply environment variable fallback for flags not explicitly set.
-	applyEnvFallback(fs, cfg, &configFile)
+	applyEnvFallback(fs, cfg, &configFile, &targetPolicyFile)
 
 	// Load proxy config file if specified.
 	var proxyCfg *config.ProxyConfig
@@ -143,6 +148,22 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		if err != nil {
 			return fmt.Errorf("load config file: %w", err)
 		}
+	}
+
+	// Load target scope policy rules.
+	// Priority: -target-policy-file > config file target_scope_policy section.
+	var targetScopePolicy *config.TargetScopePolicyConfig
+	var targetScopePolicySource string
+	if targetPolicyFile != "" {
+		var err error
+		targetScopePolicy, err = config.LoadPolicyFile(targetPolicyFile)
+		if err != nil {
+			return fmt.Errorf("load target policy file: %w", err)
+		}
+		targetScopePolicySource = "policy file"
+	} else if proxyCfg != nil && proxyCfg.TargetScopePolicy != nil {
+		targetScopePolicy = proxyCfg.TargetScopePolicy
+		targetScopePolicySource = "config file"
 	}
 
 	// Apply smart DB path resolution: project name -> ~/.yorishiro-proxy/<name>.db.
@@ -264,13 +285,22 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetPeekTimeout(cfg.PeekTimeout)
 	manager.SetMaxConnections(cfg.MaxConnections)
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, cfg.UIDir, logger)
+	// Build target scope with policy rules if configured.
+	var targetScope *proxy.TargetScope
+	if targetScopePolicy != nil {
+		targetScope = proxy.NewTargetScope()
+		allows := convertTargetRules(targetScopePolicy.Allows)
+		denies := convertTargetRules(targetScopePolicy.Denies)
+		targetScope.SetPolicyRules(allows, denies)
+	}
+
+	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, targetScope, targetScopePolicySource, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, cfg.UIDir, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
 // set on the command line, it falls back to the corresponding YP_ environment
 // variable. Priority: CLI flag > environment variable > config file > default value.
-func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string) {
+func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string, targetPolicyFile *string) {
 	// Collect flags that were explicitly set on the command line.
 	flagSet := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -312,6 +342,10 @@ func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string) 
 			cfg.MCPHTTPToken = v
 		case "ui-dir":
 			cfg.UIDir = v
+		case "target-policy-file":
+			if targetPolicyFile != nil && *targetPolicyFile == "" {
+				*targetPolicyFile = v
+			}
 		}
 	}
 }
@@ -335,12 +369,29 @@ func parseBool(s string) bool {
 	}
 }
 
+// convertTargetRules converts config TargetRuleConfig values to proxy TargetRule values.
+func convertTargetRules(cfgRules []config.TargetRuleConfig) []proxy.TargetRule {
+	if len(cfgRules) == 0 {
+		return nil
+	}
+	rules := make([]proxy.TargetRule, len(cfgRules))
+	for i, r := range cfgRules {
+		rules[i] = proxy.TargetRule{
+			Hostname:   r.Hostname,
+			Ports:      r.Ports,
+			PathPrefix: r.PathPrefix,
+			Schemes:    r.Schemes,
+		}
+	}
+	return rules
+}
+
 // runMCP starts the MCP server on stdin/stdout. When mcpHTTPAddr is non-empty,
 // a Streamable HTTP transport is also started concurrently on that address.
 // Both transports share the same MCP server instance, Manager, Store, and CA.
 // The proxy is not started automatically; use the proxy_start tool to begin
 // intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, uiDir string, logger *slog.Logger) error {
+func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, targetScope *proxy.TargetScope, targetScopePolicySource string, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, uiDir string, logger *slog.Logger) error {
 	logger.Info("starting MCP server on stdio")
 
 	// Build MCP server options.
@@ -366,6 +417,16 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 	if proxyCfg != nil {
 		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
 		logger.Info("loaded proxy config file defaults")
+	}
+
+	// Pass target scope policy to the MCP server.
+	if targetScope != nil {
+		opts = append(opts, mcp.WithTargetScope(targetScope))
+		allows, denies := targetScope.PolicyRules()
+		logger.Info("target scope policy loaded",
+			"allows", len(allows),
+			"denies", len(denies),
+			"source", targetScopePolicySource)
 	}
 
 	// Set up WebUI override directory if specified.
