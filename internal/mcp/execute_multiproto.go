@@ -72,6 +72,11 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 		}
 	}
 
+	// Target scope enforcement: check the target address.
+	if err := s.checkTargetScopeAddr("", targetAddr); err != nil {
+		return nil, nil, err
+	}
+
 	// Determine timeout.
 	timeout := defaultReplayTimeout
 	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
@@ -276,6 +281,11 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 		if targetAddr == "" {
 			return nil, nil, fmt.Errorf("cannot determine target address: no server address in session and no target_addr provided")
 		}
+	}
+
+	// Target scope enforcement: check the WebSocket target address.
+	if err := s.checkTargetScopeAddr("", targetAddr); err != nil {
+		return nil, nil, err
 	}
 
 	// Determine TLS.

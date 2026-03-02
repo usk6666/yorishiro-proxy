@@ -277,3 +277,59 @@ func fromScopeRules(rules []proxy.ScopeRule) []scopeRuleOutput {
 	}
 	return out
 }
+
+// checkTargetScopeURL checks a URL against the target scope rules.
+// Returns nil if the target is allowed or if no rules are configured (open mode).
+// Returns a descriptive error if the target is blocked.
+func (s *Server) checkTargetScopeURL(u *url.URL) error {
+	if s.targetScope == nil || !s.targetScope.HasRules() {
+		return nil
+	}
+	allowed, reason := s.targetScope.CheckURL(u)
+	if !allowed {
+		return fmt.Errorf("request blocked by target scope: host %q is %s", u.Hostname(), reason)
+	}
+	return nil
+}
+
+// checkTargetScopeAddr checks a host:port address against the target scope rules.
+// The scheme is used for default port inference (e.g., "https" -> 443).
+// Returns nil if the target is allowed or if no rules are configured (open mode).
+// Returns a descriptive error if the target is blocked.
+func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
+	if s.targetScope == nil || !s.targetScope.HasRules() {
+		return nil
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		// If no port, treat whole addr as hostname.
+		host = addr
+		portStr = ""
+	}
+	port := targetDefaultPort(scheme, portStr)
+	allowed, reason := s.targetScope.CheckTarget(scheme, host, port, "")
+	if !allowed {
+		return fmt.Errorf("request blocked by target scope: host %q is %s", host, reason)
+	}
+	return nil
+}
+
+// targetScopeCheckRedirect returns a CheckRedirect function that enforces
+// both the standard redirect safety checks and target scope rules.
+// If ts is nil or has no rules, it falls back to safeCheckRedirect.
+func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		// Apply standard redirect safety checks first.
+		if err := safeCheckRedirect(req, via); err != nil {
+			return err
+		}
+		// Apply target scope check on the redirect target.
+		if ts != nil && ts.HasRules() {
+			allowed, reason := ts.CheckURL(req.URL)
+			if !allowed {
+				return fmt.Errorf("redirect blocked by target scope: host %q is %s", req.URL.Hostname(), reason)
+			}
+		}
+		return nil
+	}
+}
