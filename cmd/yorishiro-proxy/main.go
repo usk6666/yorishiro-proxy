@@ -354,6 +354,8 @@ func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session
 		mcp.WithTCPHandler(tcpHandler),
 		mcp.WithUpstreamProxySetter(httpHandler),
 		mcp.WithUpstreamProxySetter(http2Handler),
+		mcp.WithTargetScopeSetter(httpHandler),
+		mcp.WithTargetScopeSetter(http2Handler),
 	}
 
 	// Pass AllowPrivateNetworks setting to the MCP server.

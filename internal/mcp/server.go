@@ -45,6 +45,7 @@ type Server struct {
 	proxyDefaults          *config.ProxyConfig  // default proxy config from config file
 	upstreamProxySetters   []upstreamProxySetter // protocol handlers to update when upstream proxy changes
 	requestTimeoutSetters  []requestTimeoutSetter // protocol handlers to update when request timeout changes
+	targetScopeSetters     []targetScopeSetter    // protocol handlers to update when target scope changes
 	uiDir                  string               // optional filesystem path for WebUI static files
 	allowPrivateNetworks   bool                 // global SSRF protection override
 	targetScope            *proxy.TargetScope   // target scope rules for security tool
@@ -68,6 +69,12 @@ type upstreamProxySetter interface {
 type requestTimeoutSetter interface {
 	SetRequestTimeout(d time.Duration)
 	RequestTimeout() time.Duration
+}
+
+// targetScopeSetter is implemented by protocol handlers that support
+// target scope enforcement (HTTP/1.x and HTTP/2 handlers).
+type targetScopeSetter interface {
+	SetTargetScope(scope *proxy.TargetScope)
 }
 
 // ServerOption configures a Server.
@@ -213,6 +220,15 @@ func WithRequestTimeoutSetters(setters ...requestTimeoutSetter) ServerOption {
 	}
 }
 
+// WithTargetScopeSetter registers a protocol handler that should be updated
+// when the target scope changes. Call this for each handler that implements
+// the targetScopeSetter interface (e.g., HTTP/1.x, HTTP/2).
+func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
+	return func(s *Server) {
+		s.targetScopeSetters = append(s.targetScopeSetters, setter)
+	}
+}
+
 // NewServer creates a new MCP server with proxy tools registered.
 // The ctx parameter is the application-level context that controls the proxy lifecycle;
 // when ctx is cancelled, the proxy started via proxy_start will shut down.
@@ -235,6 +251,10 @@ func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *p
 	// Initialize default TargetScope if not provided via WithTargetScope.
 	if s.targetScope == nil {
 		s.targetScope = proxy.NewTargetScope()
+	}
+	// Propagate target scope to all registered protocol handlers.
+	for _, setter := range s.targetScopeSetters {
+		setter.SetTargetScope(s.targetScope)
 	}
 	s.registerTools()
 	s.registerResources()
