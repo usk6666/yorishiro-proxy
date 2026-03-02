@@ -111,6 +111,7 @@ jobs:
           cat checksums.txt
 
       # Create GitHub Release and upload assets (tag push only).
+      # If the release already exists (e.g., created via UI), upload assets to it.
       - name: Create GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         env:
@@ -121,11 +122,16 @@ jobs:
           if echo "${VERSION}" | grep -qE '[-](alpha|beta|rc)'; then
             PRERELEASE="--prerelease"
           fi
-          gh release create "${VERSION}" \
-            --title "${VERSION}" \
-            --generate-notes \
-            ${PRERELEASE} \
-            dist/*
+          if gh release view "${VERSION}" > /dev/null 2>&1; then
+            echo "Release ${VERSION} already exists. Uploading assets..."
+            gh release upload "${VERSION}" dist/* --clobber
+          else
+            gh release create "${VERSION}" \
+              --title "${VERSION}" \
+              --generate-notes \
+              ${PRERELEASE} \
+              dist/*
+          fi
 
       # Upload artifacts for workflow_dispatch (no release created).
       - name: Upload build artifacts
