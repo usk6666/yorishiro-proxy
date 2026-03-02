@@ -85,7 +85,7 @@ func TestExecuteResend_TargetScope_Allowed(t *testing.T) {
 
 	// Configure target scope to allow the echo server host.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
@@ -131,7 +131,7 @@ func TestExecuteResend_TargetScope_BlockedByAllowList(t *testing.T) {
 
 	// Configure target scope to only allow example.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -184,7 +184,7 @@ func TestExecuteResend_TargetScope_BlockedByDenyRule(t *testing.T) {
 
 	// Configure target scope with a deny rule for admin.internal.
 	ts := proxy.NewTargetScope()
-	ts.SetRules(nil, []proxy.TargetRule{
+	ts.SetAgentRules(nil, []proxy.TargetRule{
 		{Hostname: "admin.internal"},
 	})
 
@@ -203,8 +203,8 @@ func TestExecuteResend_TargetScope_BlockedByDenyRule(t *testing.T) {
 	if !strings.Contains(text, "target scope") {
 		t.Errorf("error message should mention target scope, got: %s", text)
 	}
-	if !strings.Contains(text, "denied") {
-		t.Errorf("error message should mention denied, got: %s", text)
+	if !strings.Contains(text, "blocked") {
+		t.Errorf("error message should mention blocked, got: %s", text)
 	}
 }
 
@@ -239,7 +239,7 @@ func TestExecuteResend_TargetScope_OverrideURL_Blocked(t *testing.T) {
 
 	// Configure target scope to allow only the echo server.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
@@ -293,7 +293,7 @@ func TestExecuteResend_TargetScope_OverrideHost_Blocked(t *testing.T) {
 
 	// Configure target scope to allow the echo server.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
@@ -398,7 +398,7 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 
 	// Allow the redirect server host (127.0.0.1) but not evil.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
@@ -475,7 +475,7 @@ func TestExecuteResendRaw_TargetScope_Blocked(t *testing.T) {
 
 	// Only allow example.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -527,7 +527,7 @@ func TestExecuteResendRaw_TargetScope_TargetAddr_Blocked(t *testing.T) {
 
 	// Allow example.com but deny evil.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -587,7 +587,7 @@ func TestExecuteResendRaw_TargetScope_Allowed(t *testing.T) {
 	// Allow the test server host.
 	ts := proxy.NewTargetScope()
 	portInt := targetDefaultPort("http", port)
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: host, Ports: []int{portInt}},
 	}, nil)
 
@@ -635,7 +635,7 @@ func TestExecuteTcpReplay_TargetScope_Blocked(t *testing.T) {
 
 	// Only allow example.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -685,7 +685,7 @@ func TestExecuteTcpReplay_TargetScope_TargetAddr_Blocked(t *testing.T) {
 
 	// Only allow example.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -742,7 +742,7 @@ func TestExecuteWebSocketResend_TargetScope_Blocked(t *testing.T) {
 
 	// Only allow example.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -797,7 +797,7 @@ func TestExecuteFuzz_TargetScope_Blocked(t *testing.T) {
 
 	// Only allow example.com.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -867,7 +867,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 
 	// Define a macro that uses the blocked session.
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -956,7 +956,7 @@ func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 	)
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -1042,14 +1042,14 @@ func TestCheckTargetScopeURL(t *testing.T) {
 			allows:  []proxy.TargetRule{{Hostname: "allowed.com"}},
 			url:     "http://blocked.com/path",
 			wantErr: true,
-			errMsg:  "not in allow list",
+			errMsg:  "not in agent allow list",
 		},
 		{
 			name:    "blocked by deny rule",
 			denies:  []proxy.TargetRule{{Hostname: "blocked.com"}},
 			url:     "http://blocked.com/path",
 			wantErr: true,
-			errMsg:  "denied",
+			errMsg:  "blocked by agent deny rule",
 		},
 		{
 			name:    "deny takes precedence over allow",
@@ -1057,7 +1057,7 @@ func TestCheckTargetScopeURL(t *testing.T) {
 			denies:  []proxy.TargetRule{{Hostname: "target.com"}},
 			url:     "http://target.com/path",
 			wantErr: true,
-			errMsg:  "denied",
+			errMsg:  "blocked by agent deny rule",
 		},
 		{
 			name:    "wildcard allow",
@@ -1070,14 +1070,14 @@ func TestCheckTargetScopeURL(t *testing.T) {
 			denies:  []proxy.TargetRule{{Hostname: "*.internal"}},
 			url:     "http://admin.internal/secret",
 			wantErr: true,
-			errMsg:  "denied",
+			errMsg:  "blocked by agent deny rule",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := proxy.NewTargetScope()
-			ts.SetRules(tt.allows, tt.denies)
+			ts.SetAgentRules(tt.allows, tt.denies)
 
 			s := &Server{targetScope: ts}
 			u, err := url.Parse(tt.url)
@@ -1140,7 +1140,7 @@ func TestCheckTargetScopeAddr(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := proxy.NewTargetScope()
-			ts.SetRules(tt.allows, tt.denies)
+			ts.SetAgentRules(tt.allows, tt.denies)
 
 			s := &Server{targetScope: ts}
 			err := s.checkTargetScopeAddr(tt.scheme, tt.addr)
@@ -1198,7 +1198,7 @@ func TestTargetScopeCheckRedirect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := proxy.NewTargetScope()
 			if len(tt.allows) > 0 || len(tt.denies) > 0 {
-				ts.SetRules(tt.allows, tt.denies)
+				ts.SetAgentRules(tt.allows, tt.denies)
 			}
 
 			checkFn := targetScopeCheckRedirect(ts)
@@ -1263,7 +1263,7 @@ func TestExecuteResend_TargetScope_DryRun_StillChecked(t *testing.T) {
 	)
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 
@@ -1317,7 +1317,7 @@ func TestExecuteResendRaw_TargetScope_DryRun_StillChecked(t *testing.T) {
 	)
 
 	ts := proxy.NewTargetScope()
-	ts.SetRules([]proxy.TargetRule{
+	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
 	}, nil)
 

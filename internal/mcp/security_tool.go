@@ -90,9 +90,11 @@ type setTargetScopeResult struct {
 
 // getTargetScopeResult is the structured output for get_target_scope.
 type getTargetScopeResult struct {
-	Allows []proxy.TargetRule `json:"allows"`
-	Denies []proxy.TargetRule `json:"denies"`
-	Mode   string             `json:"mode"`
+	Allows       []proxy.TargetRule `json:"allows"`
+	Denies       []proxy.TargetRule `json:"denies"`
+	PolicyAllows []proxy.TargetRule `json:"policy_allows"`
+	PolicyDenies []proxy.TargetRule `json:"policy_denies"`
+	Mode         string             `json:"mode"`
 }
 
 // testTargetResult is the structured output for test_target.
@@ -102,7 +104,7 @@ type testTargetResult struct {
 	MatchedRule *proxy.TargetRule `json:"matched_rule"`
 }
 
-// handleSetTargetScope replaces all allow and deny rules.
+// handleSetTargetScope replaces all agent allow and deny rules.
 func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
 	if s.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
@@ -118,18 +120,20 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 
 	allows := toTargetRules(params.Allows)
 	denies := toTargetRules(params.Denies)
-	s.targetScope.SetRules(allows, denies)
+	if err := s.targetScope.SetAgentRules(allows, denies); err != nil {
+		return nil, nil, fmt.Errorf("set agent rules: %w", err)
+	}
 
-	currentAllows, currentDenies := s.targetScope.Rules()
+	currentAllows, currentDenies := s.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
 		Status: "updated",
 		Allows: ensureNonNilRules(currentAllows),
 		Denies: ensureNonNilRules(currentDenies),
-		Mode:   targetScopeMode(currentAllows),
+		Mode:   targetScopeMode(s.targetScope),
 	}, nil
 }
 
-// handleUpdateTargetScope applies delta add/remove changes to rules.
+// handleUpdateTargetScope applies delta add/remove changes to agent rules.
 func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
 	if s.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
@@ -143,19 +147,21 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 		return nil, nil, err
 	}
 
-	s.targetScope.MergeRules(
+	if err := s.targetScope.MergeAgentRules(
 		toTargetRules(params.AddAllows),
 		toTargetRules(params.RemoveAllows),
 		toTargetRules(params.AddDenies),
 		toTargetRules(params.RemoveDenies),
-	)
+	); err != nil {
+		return nil, nil, fmt.Errorf("merge agent rules: %w", err)
+	}
 
-	currentAllows, currentDenies := s.targetScope.Rules()
+	currentAllows, currentDenies := s.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
 		Status: "updated",
 		Allows: ensureNonNilRules(currentAllows),
 		Denies: ensureNonNilRules(currentDenies),
-		Mode:   targetScopeMode(currentAllows),
+		Mode:   targetScopeMode(s.targetScope),
 	}, nil
 }
 
@@ -165,11 +171,14 @@ func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
-	allows, denies := s.targetScope.Rules()
+	allows, denies := s.targetScope.AgentRules()
+	policyAllows, policyDenies := s.targetScope.PolicyRules()
 	return nil, &getTargetScopeResult{
-		Allows: ensureNonNilRules(allows),
-		Denies: ensureNonNilRules(denies),
-		Mode:   targetScopeMode(allows),
+		Allows:       ensureNonNilRules(allows),
+		Denies:       ensureNonNilRules(denies),
+		PolicyAllows: ensureNonNilRules(policyAllows),
+		PolicyDenies: ensureNonNilRules(policyDenies),
+		Mode:         targetScopeMode(s.targetScope),
 	}, nil
 }
 
@@ -201,18 +210,25 @@ func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult,
 }
 
 // findMatchedRule identifies which rule caused the allow/deny decision.
-// It re-checks the URL against each rule to find the first match.
+// It re-checks the URL against each rule in both layers to find the first match.
 func findMatchedRule(ts *proxy.TargetScope, u *url.URL, allowed bool) *proxy.TargetRule {
-	allows, denies := ts.Rules()
+	policyAllows, policyDenies := ts.PolicyRules()
+	agentAllows, agentDenies := ts.AgentRules()
 
 	scheme := strings.ToLower(u.Scheme)
 	hostname := u.Hostname()
 	port := targetDefaultPort(scheme, u.Port())
 	path := u.Path
 
-	// If denied, the matched rule is from the denies list.
+	// If denied, check policy denies first, then agent denies.
 	if !allowed {
-		for _, rule := range denies {
+		for _, rule := range policyDenies {
+			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
+				r := rule
+				return &r
+			}
+		}
+		for _, rule := range agentDenies {
 			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
 				r := rule
 				return &r
@@ -223,9 +239,19 @@ func findMatchedRule(ts *proxy.TargetScope, u *url.URL, allowed bool) *proxy.Tar
 		return nil
 	}
 
-	// If allowed and there are allow rules, find the matching allow rule.
-	if len(allows) > 0 {
-		for _, rule := range allows {
+	// If allowed and there are agent allow rules, find the matching agent allow rule.
+	if len(agentAllows) > 0 {
+		for _, rule := range agentAllows {
+			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
+				r := rule
+				return &r
+			}
+		}
+	}
+
+	// If allowed and there are policy allow rules, find the matching policy allow rule.
+	if len(policyAllows) > 0 {
+		for _, rule := range policyAllows {
 			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
 				r := rule
 				return &r
@@ -340,9 +366,12 @@ func toTargetRules(inputs []targetRuleInput) []proxy.TargetRule {
 	return rules
 }
 
-// targetScopeMode returns the enforcement mode string based on the current allows.
-func targetScopeMode(allows []proxy.TargetRule) string {
-	if len(allows) == 0 {
+// targetScopeMode returns the enforcement mode string based on the current scope.
+// If either policy or agent layer has allow rules, the mode is "enforcing".
+// If only deny rules exist (no allow rules), the mode is also "enforcing".
+// Otherwise (no rules at all), the mode is "open".
+func targetScopeMode(ts *proxy.TargetScope) string {
+	if ts == nil || !ts.HasRules() {
 		return "open"
 	}
 	return "enforcing"

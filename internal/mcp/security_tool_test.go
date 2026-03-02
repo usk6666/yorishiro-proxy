@@ -173,7 +173,7 @@ func TestSecurity_SetGetRoundtrip(t *testing.T) {
 
 func TestSecurity_SetClearsRules(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{Hostname: "existing.com"}},
 		[]proxy.TargetRule{{Hostname: "blocked.com"}},
 	)
@@ -211,7 +211,7 @@ func TestSecurity_SetClearsRules(t *testing.T) {
 
 func TestSecurity_UpdateMerge_AddRemove(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{Hostname: "existing.com"}},
 		nil,
 	)
@@ -250,7 +250,7 @@ func TestSecurity_UpdateMerge_AddRemove(t *testing.T) {
 
 func TestSecurity_UpdateMerge_SkipsDuplicates(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{Hostname: "existing.com"}},
 		nil,
 	)
@@ -310,7 +310,7 @@ func TestSecurity_TestTarget_AllowedInOpenMode(t *testing.T) {
 
 func TestSecurity_TestTarget_BlockedByDeny(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(nil, []proxy.TargetRule{{Hostname: "blocked.com"}})
+	ts.SetAgentRules(nil, []proxy.TargetRule{{Hostname: "blocked.com"}})
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
 
@@ -346,7 +346,7 @@ func TestSecurity_TestTarget_BlockedByDeny(t *testing.T) {
 
 func TestSecurity_TestTarget_AllowedByRule(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{Hostname: "*.example.com", Schemes: []string{"https"}}},
 		nil,
 	)
@@ -382,7 +382,7 @@ func TestSecurity_TestTarget_AllowedByRule(t *testing.T) {
 
 func TestSecurity_TestTarget_NotInAllowList(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{Hostname: "allowed.com"}},
 		nil,
 	)
@@ -419,7 +419,7 @@ func TestSecurity_TestTarget_NotInAllowList(t *testing.T) {
 
 func TestSecurity_TestTarget_WithPortAndPath(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{
 			Hostname:   "target.internal",
 			Ports:      []int{8080, 8443},
@@ -631,7 +631,7 @@ func TestSecurity_DefaultTargetScopeInitialized(t *testing.T) {
 
 func TestSecurity_DenyTakesPrecedence(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{Hostname: "*.example.com"}},
 		[]proxy.TargetRule{{Hostname: "blocked.example.com"}},
 	)
@@ -749,7 +749,7 @@ func TestSecurity_JSONNullArrays(t *testing.T) {
 // for http (80) and https (443) when not explicitly specified in the URL.
 func TestSecurity_TestTarget_DefaultPort(t *testing.T) {
 	ts := proxy.NewTargetScope()
-	ts.SetRules(
+	ts.SetAgentRules(
 		[]proxy.TargetRule{{Hostname: "example.com", Ports: []int{443}}},
 		nil,
 	)
@@ -924,12 +924,15 @@ func TestEnsureNonNilRules(t *testing.T) {
 
 func TestTargetScopeMode(t *testing.T) {
 	if mode := targetScopeMode(nil); mode != "open" {
-		t.Errorf("mode = %q, want %q for nil allows", mode, "open")
+		t.Errorf("mode = %q, want %q for nil scope", mode, "open")
 	}
-	if mode := targetScopeMode([]proxy.TargetRule{}); mode != "open" {
-		t.Errorf("mode = %q, want %q for empty allows", mode, "open")
+	tsEmpty := proxy.NewTargetScope()
+	if mode := targetScopeMode(tsEmpty); mode != "open" {
+		t.Errorf("mode = %q, want %q for empty scope", mode, "open")
 	}
-	if mode := targetScopeMode([]proxy.TargetRule{{Hostname: "x"}}); mode != "enforcing" {
-		t.Errorf("mode = %q, want %q for non-empty allows", mode, "enforcing")
+	tsWithRules := proxy.NewTargetScope()
+	tsWithRules.SetAgentRules([]proxy.TargetRule{{Hostname: "x"}}, nil)
+	if mode := targetScopeMode(tsWithRules); mode != "enforcing" {
+		t.Errorf("mode = %q, want %q for scope with rules", mode, "enforcing")
 	}
 }
