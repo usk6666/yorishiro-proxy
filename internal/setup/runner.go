@@ -78,9 +78,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.printf("Binary: %s\n\n", binaryPath)
 
-	// Step 1: MCP configuration.
-	if err := r.stepMCPConfig(binaryPath); err != nil {
-		return fmt.Errorf("MCP config: %w", err)
+	// Step 1: MCP configuration (optional).
+	if !r.opts.SkipMCPConfig {
+		if err := r.stepMCPConfig(binaryPath); err != nil {
+			return fmt.Errorf("MCP config: %w", err)
+		}
+	} else {
+		r.printf("--- Step 1: MCP configuration (skipped) ---\n\n")
 	}
 
 	// Step 2: CA certificate.
@@ -126,13 +130,16 @@ func (r *Runner) stepMCPConfig(binaryPath string) error {
 		if r.opts.NonInteractive {
 			scope = "project"
 		} else {
-			answer, err := r.prompter.Prompt("MCP config scope - (1) project (.mcp.json) or (2) user (~/.claude/settings.json)? [1]: ")
+			answer, err := r.prompter.Prompt("MCP config scope - (1) project (.mcp.json) (2) user (~/.claude/settings.json) (3) skip? [1]: ")
 			if err != nil {
 				return fmt.Errorf("prompt scope: %w", err)
 			}
 			switch strings.TrimSpace(answer) {
 			case "2", "user":
 				scope = "user"
+			case "3", "skip":
+				r.printf("  Skipping MCP configuration.\n\n")
+				return nil
 			default:
 				scope = "project"
 			}

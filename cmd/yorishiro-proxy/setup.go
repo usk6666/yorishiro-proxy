@@ -19,6 +19,7 @@ func runSetup(ctx context.Context, args []string) error {
 	fs.StringVar(&opts.Scope, "scope", "", "MCP config scope: project (.mcp.json) or user (~/.claude/settings.json)")
 	fs.StringVar(&opts.ListenAddr, "listen-addr", opts.ListenAddr, "proxy listen address")
 	fs.BoolVar(&opts.NonInteractive, "non-interactive", false, "run without interactive prompts, using defaults")
+	fs.BoolVar(&opts.SkipMCPConfig, "skip-mcp-config", false, "skip MCP configuration generation")
 	fs.BoolVar(&opts.SkipPlaywright, "skip-playwright", false, "skip playwright-cli integration")
 	fs.BoolVar(&opts.SkipSkills, "skip-skills", false, "skip skill installation")
 
