@@ -37,6 +37,8 @@ func deflateCompress(t *testing.T, data []byte) []byte {
 	return buf.Bytes()
 }
 
+const testMaxSize int64 = 10 << 20 // 10 MB for tests
+
 func TestDecompressBody(t *testing.T) {
 	original := []byte(`{"message":"hello world"}`)
 
@@ -119,7 +121,7 @@ func TestDecompressBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := DecompressBody(tt.body, tt.contentEncoding)
+			got, err := DecompressBody(tt.body, tt.contentEncoding, testMaxSize)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DecompressBody() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -128,6 +130,21 @@ func TestDecompressBody(t *testing.T) {
 				t.Errorf("DecompressBody() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDecompressBody_MaxSizeTruncation(t *testing.T) {
+	// Create data larger than the limit.
+	const maxSize int64 = 100
+	bigData := bytes.Repeat([]byte("A"), 200)
+	compressed := gzipCompress(t, bigData)
+
+	got, err := DecompressBody(compressed, "gzip", maxSize)
+	if err != nil {
+		t.Fatalf("DecompressBody() unexpected error: %v", err)
+	}
+	if int64(len(got)) != maxSize {
+		t.Errorf("DecompressBody() len = %d, want %d (truncated to maxSize)", len(got), maxSize)
 	}
 }
 

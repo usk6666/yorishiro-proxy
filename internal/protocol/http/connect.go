@@ -484,7 +484,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	var respTruncated bool
 	decompressed := false
 	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(fullRespBody, ce)
+		decoded, err := httputil.DecompressBody(fullRespBody, ce, config.MaxBodySize)
 		if err != nil {
 			logger.Debug("HTTPS response body decompression failed, storing as-is", "encoding", ce, "error", err)
 		} else {

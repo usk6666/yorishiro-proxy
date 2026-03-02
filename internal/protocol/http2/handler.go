@@ -396,12 +396,13 @@ func (h *Handler) handleStream(
 		}
 	}
 
-	// Decompress response body for recording.
+	// Decompress response body for recording. The raw (potentially compressed)
+	// bytes are written to the client as-is above.
 	recordRespBody := fullRespBody
 	var respTruncated bool
 	decompressed := false
 	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(fullRespBody, ce)
+		decoded, err := httputil.DecompressBody(fullRespBody, ce, config.MaxBodySize)
 		if err != nil {
 			logger.Debug("HTTP/2 response body decompression failed, storing as-is", "encoding", ce, "error", err)
 		} else {

@@ -14,13 +14,21 @@ import (
 
 // DecompressBody decompresses an HTTP response body based on the Content-Encoding
 // header value. Supported encodings: gzip, deflate, x-gzip.
+// Brotli (br) and zstd are not currently supported; the original body is returned
+// with an error for unsupported encodings.
+// Stacked/chained Content-Encoding values (e.g., "gzip, deflate") are not
+// supported and fall back to returning the original body.
+//
+// maxSize limits the decompressed output size to prevent decompression bombs
+// (CWE-409). If the decompressed data exceeds maxSize, only maxSize bytes are
+// returned (callers can detect truncation by comparing against maxSize).
 //
 // Returns the decompressed body and a nil error on success.
 // If contentEncoding is empty or "identity", the body is returned as-is.
 // If the encoding is unsupported or decompression fails, the original body is
 // returned along with an error describing the failure. This allows callers to
 // fall back to storing the compressed body.
-func DecompressBody(body []byte, contentEncoding string) ([]byte, error) {
+func DecompressBody(body []byte, contentEncoding string, maxSize int64) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
 	}
@@ -32,9 +40,9 @@ func DecompressBody(body []byte, contentEncoding string) ([]byte, error) {
 
 	switch encoding {
 	case "gzip", "x-gzip":
-		return decompressGzip(body)
+		return decompressGzip(body, maxSize)
 	case "deflate":
-		return decompressDeflate(body)
+		return decompressDeflate(body, maxSize)
 	default:
 		return body, fmt.Errorf("unsupported Content-Encoding: %s", encoding)
 	}
@@ -52,27 +60,33 @@ func RecordingHeaders(original gohttp.Header, decompressed bool, bodyLen int) go
 	return headers
 }
 
-func decompressGzip(body []byte) ([]byte, error) {
+func decompressGzip(body []byte, maxSize int64) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
 		return body, fmt.Errorf("gzip reader: %w", err)
 	}
 	defer r.Close()
 
-	decoded, err := io.ReadAll(r)
+	decoded, err := io.ReadAll(io.LimitReader(r, maxSize+1))
 	if err != nil {
 		return body, fmt.Errorf("gzip decompress: %w", err)
+	}
+	if int64(len(decoded)) > maxSize {
+		decoded = decoded[:maxSize]
 	}
 	return decoded, nil
 }
 
-func decompressDeflate(body []byte) ([]byte, error) {
+func decompressDeflate(body []byte, maxSize int64) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(body))
 	defer r.Close()
 
-	decoded, err := io.ReadAll(r)
+	decoded, err := io.ReadAll(io.LimitReader(r, maxSize+1))
 	if err != nil {
 		return body, fmt.Errorf("deflate decompress: %w", err)
+	}
+	if int64(len(decoded)) > maxSize {
+		decoded = decoded[:maxSize]
 	}
 	return decoded, nil
 }
