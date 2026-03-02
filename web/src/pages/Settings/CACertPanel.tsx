@@ -84,8 +84,10 @@ const INSTALL_INSTRUCTIONS = [
     steps: [
       "1. Download the CA certificate (PEM) using the button above",
       "2. Copy to the CA certificates directory:",
-      "   sudo cp yorishiro-ca.pem /usr/local/share/ca-certificates/yorishiro-ca.crt",
-      "3. Update the CA certificate store:",
+      "   sudo cp yorishiro-ca.pem /usr/share/ca-certificates/yorishiro-ca.crt",
+      "3. Register the certificate in the configuration:",
+      '   echo "yorishiro-ca.crt" | sudo tee -a /etc/ca-certificates.conf',
+      "4. Update the CA certificate store:",
       "   sudo update-ca-certificates",
     ],
   },

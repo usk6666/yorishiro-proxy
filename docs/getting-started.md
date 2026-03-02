@@ -115,7 +115,8 @@ sudo security add-trusted-cert -d -r trustRoot \
 
 ```bash
 sudo cp ~/.yorishiro-proxy/ca/ca.crt \
-  /usr/local/share/ca-certificates/yorishiro-proxy.crt
+  /usr/share/ca-certificates/yorishiro-proxy.crt
+echo "yorishiro-proxy.crt" | sudo tee -a /etc/ca-certificates.conf
 sudo update-ca-certificates
 ```
 

@@ -89,7 +89,8 @@ func caInstallInstructionsForOS(certPath, goos string) string {
 	case "linux":
 		b.WriteString("  Linux (Debian/Ubuntu):\n")
 		fmt.Fprintf(&b, "    sudo cp %s \\\n", quoted)
-		b.WriteString("      /usr/local/share/ca-certificates/yorishiro-proxy.crt\n")
+		b.WriteString("      /usr/share/ca-certificates/yorishiro-proxy.crt\n")
+		b.WriteString("    echo \"yorishiro-proxy.crt\" | sudo tee -a /etc/ca-certificates.conf\n")
 		b.WriteString("    sudo update-ca-certificates\n")
 	case "windows":
 		b.WriteString("  Windows (run as Administrator):\n")

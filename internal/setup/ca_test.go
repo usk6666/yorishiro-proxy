@@ -32,6 +32,8 @@ func TestCAInstallInstructions(t *testing.T) {
 			goos: "linux",
 			contains: []string{
 				"Linux",
+				"/usr/share/ca-certificates/",
+				"ca-certificates.conf",
 				"update-ca-certificates",
 				quotedPath,
 			},
