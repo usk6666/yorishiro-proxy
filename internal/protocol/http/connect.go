@@ -151,8 +151,12 @@ func (h *Handler) handlePassthrough(ctx context.Context, clientConn net.Conn, au
 // closes, an error occurs, or the context is cancelled.
 func relay(ctx context.Context, a, b net.Conn) error {
 	// Watch for context cancellation and interrupt blocking reads.
+	// Use a child context so the goroutine is reclaimed when the relay
+	// returns, not only when the parent context is cancelled.
+	relayCtx, relayCancel := context.WithCancel(ctx)
+	defer relayCancel()
 	go func() {
-		<-ctx.Done()
+		<-relayCtx.Done()
 		a.SetReadDeadline(time.Now())
 		b.SetReadDeadline(time.Now())
 	}()
@@ -264,8 +268,13 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 	// Watch for context cancellation and interrupt blocking reads.
 	// Same as Handle(): ReadRequest may block on keep-alive connections
 	// and needs an immediate deadline to unblock during shutdown.
+	//
+	// Use a child context so the goroutine is reclaimed when the loop
+	// returns, not only when the parent context is cancelled.
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
 	go func() {
-		<-ctx.Done()
+		<-connCtx.Done()
 		tlsConn.SetReadDeadline(time.Now())
 	}()
 
