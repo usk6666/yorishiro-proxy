@@ -131,7 +131,7 @@ type testedTarget struct {
 
 // handleSetTargetScope replaces all agent allow and deny rules.
 func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.targetScope == nil {
+	if s.deps.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
@@ -145,16 +145,16 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 
 	allows := toTargetRules(params.Allows)
 	denies := toTargetRules(params.Denies)
-	if err := s.targetScope.SetAgentRules(allows, denies); err != nil {
+	if err := s.deps.targetScope.SetAgentRules(allows, denies); err != nil {
 		return nil, nil, fmt.Errorf("set agent rules: %w", err)
 	}
 
-	currentAllows, currentDenies := s.targetScope.AgentRules()
+	currentAllows, currentDenies := s.deps.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
 		Status: "updated",
 		Allows: ensureNonNilRules(currentAllows),
 		Denies: ensureNonNilRules(currentDenies),
-		Mode:   targetScopeMode(s.targetScope),
+		Mode:   targetScopeMode(s.deps.targetScope),
 	}, nil
 }
 
@@ -162,7 +162,7 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 // If remove_denies contains rules that match policy deny rules, an error is returned
 // because policy denies are immutable and cannot be removed via the agent layer.
 func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.targetScope == nil {
+	if s.deps.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
@@ -175,11 +175,11 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 	}
 
 	// Reject removal of policy deny rules.
-	if err := validateNotPolicyDenies(s.targetScope, toTargetRules(params.RemoveDenies)); err != nil {
+	if err := validateNotPolicyDenies(s.deps.targetScope, toTargetRules(params.RemoveDenies)); err != nil {
 		return nil, nil, err
 	}
 
-	if err := s.targetScope.MergeAgentRules(
+	if err := s.deps.targetScope.MergeAgentRules(
 		toTargetRules(params.AddAllows),
 		toTargetRules(params.RemoveAllows),
 		toTargetRules(params.AddDenies),
@@ -188,26 +188,26 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 		return nil, nil, fmt.Errorf("merge agent rules: %w", err)
 	}
 
-	currentAllows, currentDenies := s.targetScope.AgentRules()
+	currentAllows, currentDenies := s.deps.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
 		Status: "updated",
 		Allows: ensureNonNilRules(currentAllows),
 		Denies: ensureNonNilRules(currentDenies),
-		Mode:   targetScopeMode(s.targetScope),
+		Mode:   targetScopeMode(s.deps.targetScope),
 	}, nil
 }
 
 // handleGetTargetScope returns the current Policy and Agent layer rules and mode.
 func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
-	if s.targetScope == nil {
+	if s.deps.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
-	agentAllows, agentDenies := s.targetScope.AgentRules()
-	policyAllows, policyDenies := s.targetScope.PolicyRules()
+	agentAllows, agentDenies := s.deps.targetScope.AgentRules()
+	policyAllows, policyDenies := s.deps.targetScope.PolicyRules()
 
 	source := "none"
-	if s.targetScope.HasPolicyRules() {
+	if s.deps.targetScope.HasPolicyRules() {
 		source = "config file"
 	}
 
@@ -222,13 +222,13 @@ func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
 			Allows: ensureNonNilRules(agentAllows),
 			Denies: ensureNonNilRules(agentDenies),
 		},
-		EffectiveMode: targetScopeMode(s.targetScope),
+		EffectiveMode: targetScopeMode(s.deps.targetScope),
 	}, nil
 }
 
 // handleTestTarget checks a URL against the current scope rules.
 func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.targetScope == nil {
+	if s.deps.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
@@ -241,10 +241,10 @@ func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult,
 		return nil, nil, fmt.Errorf("invalid url %q: %w", params.URL, err)
 	}
 
-	allowed, reason := s.targetScope.CheckURL(u)
+	allowed, reason := s.deps.targetScope.CheckURL(u)
 
 	// Find the matched rule and determine which layer decided.
-	matchedRule, layer := findMatchedRuleAndLayer(s.targetScope, u, allowed, reason)
+	matchedRule, layer := findMatchedRuleAndLayer(s.deps.targetScope, u, allowed, reason)
 
 	scheme := strings.ToLower(u.Scheme)
 	port := targetDefaultPort(scheme, u.Port())

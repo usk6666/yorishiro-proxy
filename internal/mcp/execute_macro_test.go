@@ -21,7 +21,7 @@ func setupMacroTestSession(t *testing.T, store session.Store) *gomcp.ClientSessi
 	ctx := context.Background()
 
 	s := NewServer(context.Background(), nil, store, nil)
-	s.replayDoer = newPermissiveClient()
+	s.deps.replayDoer = newPermissiveClient()
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

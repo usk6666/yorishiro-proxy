@@ -974,7 +974,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 		},
 	}
 	state := &hookState{}
-	executor := newHookExecutor(s, hooks, state)
+	executor := newHookExecutor(s.deps, hooks, state)
 
 
 	// Call executePostReceive with KV Store from pre_send that has the same key.
@@ -1034,7 +1034,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 		},
 	}
 	state := &hookState{}
-	executor := newHookExecutor(s, hooks, state)
+	executor := newHookExecutor(s.deps, hooks, state)
 
 
 	// Call with nil kvStore — should not panic or error.
@@ -1092,7 +1092,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 		},
 	}
 	state := &hookState{}
-	executor := newHookExecutor(s, hooks, state)
+	executor := newHookExecutor(s.deps, hooks, state)
 
 
 	// Call with empty kvStore — should not modify behavior.

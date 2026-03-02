@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -110,8 +111,8 @@ func NewDefaultHTTPClient() *http.Client {
 // it returns a client with the default replay timeout.
 // Access control is handled by the target scope enforcement layer.
 func (s *Server) httpClient() httpDoer {
-	if s.replayDoer != nil {
-		return s.replayDoer
+	if s.deps.replayDoer != nil {
+		return s.deps.replayDoer
 	}
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
@@ -133,12 +134,58 @@ func (s *Server) httpClient() httpDoer {
 // a default dialer with the replay timeout is returned.
 // Access control is handled by the target scope enforcement layer.
 func (s *Server) rawDialerFunc() rawDialer {
-	if s.rawReplayDialer != nil {
-		return s.rawReplayDialer
+	if s.deps.rawReplayDialer != nil {
+		return s.deps.rawReplayDialer
 	}
 	return &net.Dialer{
 		Timeout: defaultReplayTimeout,
 	}
+}
+
+// resendHTTPClientHelper builds an httpDoer for resend requests.
+// If a custom replayDoer is set (for testing), it is returned directly.
+// Otherwise, a new HTTP client is built with the given timeout, override host,
+// and redirect/target-scope handling.
+func resendHTTPClientHelper(replayDoer httpDoer, ts *proxy.TargetScope, params executeParams) httpDoer {
+	if replayDoer != nil {
+		return replayDoer
+	}
+	timeout := defaultReplayTimeout
+	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
+		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if params.OverrideHost != "" {
+				addr = params.OverrideHost
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	if params.FollowRedirects != nil && *params.FollowRedirects {
+		checkRedirect = targetScopeCheckRedirect(ts)
+	}
+	return &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: checkRedirect}
+}
+
+// rawDialerFuncHelper returns a rawDialer, preferring the custom dialer if set.
+// This is a standalone version of Server.rawDialerFunc for use by handler structs.
+func rawDialerFuncHelper(customDialer rawDialer) rawDialer {
+	if customDialer != nil {
+		return customDialer
+	}
+	return &net.Dialer{
+		Timeout: defaultReplayTimeout,
+	}
+}
+
+// sortStrings sorts a string slice in-place. It is a thin wrapper around sort.Strings.
+func sortStrings(s []string) {
+	sort.Strings(s)
 }
 
 // encodeBody returns the body as a string with its encoding type.
@@ -230,10 +277,16 @@ func fromScopeRules(rules []proxy.ScopeRule) []scopeRuleOutput {
 // Returns nil if the target is allowed or if no rules are configured (open mode).
 // Returns a descriptive error if the target is blocked.
 func (s *Server) checkTargetScopeURL(u *url.URL) error {
-	if s.targetScope == nil || !s.targetScope.HasRules() {
+	return checkTargetScopeURLHelper(s.deps.targetScope, u)
+}
+
+// checkTargetScopeURLHelper checks a URL against the given target scope rules.
+// This is a standalone version of Server.checkTargetScopeURL for use by handler structs.
+func checkTargetScopeURLHelper(ts *proxy.TargetScope, u *url.URL) error {
+	if ts == nil || !ts.HasRules() {
 		return nil
 	}
-	allowed, reason := s.targetScope.CheckURL(u)
+	allowed, reason := ts.CheckURL(u)
 	if !allowed {
 		return fmt.Errorf("request blocked by target scope: host %q is %s", u.Hostname(), reason)
 	}
@@ -245,7 +298,13 @@ func (s *Server) checkTargetScopeURL(u *url.URL) error {
 // Returns nil if the target is allowed or if no rules are configured (open mode).
 // Returns a descriptive error if the target is blocked.
 func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
-	if s.targetScope == nil || !s.targetScope.HasRules() {
+	return checkTargetScopeAddrHelper(s.deps.targetScope, scheme, addr)
+}
+
+// checkTargetScopeAddrHelper checks a host:port address against the given target scope rules.
+// This is a standalone version of Server.checkTargetScopeAddr for use by handler structs.
+func checkTargetScopeAddrHelper(ts *proxy.TargetScope, scheme, addr string) error {
+	if ts == nil || !ts.HasRules() {
 		return nil
 	}
 	host, portStr, err := net.SplitHostPort(addr)
@@ -255,7 +314,7 @@ func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
 		portStr = ""
 	}
 	port := targetDefaultPort(scheme, portStr)
-	allowed, reason := s.targetScope.CheckTarget(scheme, host, port, "")
+	allowed, reason := ts.CheckTarget(scheme, host, port, "")
 	if !allowed {
 		return fmt.Errorf("request blocked by target scope: host %q is %s", host, reason)
 	}

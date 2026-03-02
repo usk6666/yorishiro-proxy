@@ -117,7 +117,7 @@ type executeDeleteMacroResult struct {
 // handleExecuteDefineMacro handles the define_macro action.
 // It validates the macro definition, serializes the config to JSON, and upserts into DB.
 func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParams) (*executeDefineMacroResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, fmt.Errorf("session store is not initialized")
 	}
 	if params.Name == "" {
@@ -140,7 +140,7 @@ func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParam
 
 	// Check if macro already exists (to determine created vs updated).
 	// Distinguish "not found" (macro is new) from real DB errors.
-	_, getErr := s.store.GetMacro(ctx, params.Name)
+	_, getErr := s.deps.store.GetMacro(ctx, params.Name)
 	var isNew bool
 	if getErr != nil {
 		if strings.Contains(getErr.Error(), "not found") {
@@ -161,7 +161,7 @@ func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParam
 		return nil, fmt.Errorf("marshal macro config: %w", err)
 	}
 
-	if err := s.store.SaveMacro(ctx, params.Name, params.Description, string(configJSON)); err != nil {
+	if err := s.deps.store.SaveMacro(ctx, params.Name, params.Description, string(configJSON)); err != nil {
 		return nil, fmt.Errorf("save macro: %w", err)
 	}
 
@@ -176,7 +176,7 @@ func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParam
 // It loads the macro from DB, creates a macro.Engine, and runs it.
 // Access control is handled by the target scope enforcement layer.
 func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) (*executeRunMacroResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, fmt.Errorf("session store is not initialized")
 	}
 	if params.Name == "" {
@@ -184,7 +184,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 	}
 
 	// Load macro from DB.
-	rec, err := s.store.GetMacro(ctx, params.Name)
+	rec, err := s.deps.store.GetMacro(ctx, params.Name)
 	if err != nil {
 		return nil, fmt.Errorf("load macro: %w", err)
 	}
@@ -202,7 +202,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 	}
 
 	// Target scope enforcement: check each step's target URL before running.
-	if s.targetScope != nil && s.targetScope.HasRules() {
+	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
 		for _, step := range cfg.Steps {
 			// Check override_url if specified.
 			if step.OverrideURL != "" {
@@ -214,7 +214,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 				}
 			}
 			// Check the session's URL for this step.
-			sendMsgs, msgErr := s.store.GetMessages(ctx, step.SessionID, session.MessageListOptions{Direction: "send"})
+			sendMsgs, msgErr := s.deps.store.GetMessages(ctx, step.SessionID, session.MessageListOptions{Direction: "send"})
 			if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 				// Only check session URL if no override_url (override takes precedence).
 				if step.OverrideURL == "" {
@@ -228,7 +228,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 
 	// Create engine with HTTP client and session fetcher.
 	sendFunc := s.macroSendFunc(params.Name)
-	fetcher := &storeSessionFetcher{store: s.store}
+	fetcher := &storeSessionFetcher{store: s.deps.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
 	if err != nil {
@@ -264,14 +264,14 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 
 // handleExecuteDeleteMacro handles the delete_macro action.
 func (s *Server) handleExecuteDeleteMacro(ctx context.Context, params macroParams) (*executeDeleteMacroResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, fmt.Errorf("session store is not initialized")
 	}
 	if params.Name == "" {
 		return nil, fmt.Errorf("name is required for delete_macro action")
 	}
 
-	if err := s.store.DeleteMacro(ctx, params.Name); err != nil {
+	if err := s.deps.store.DeleteMacro(ctx, params.Name); err != nil {
 		return nil, fmt.Errorf("delete macro: %w", err)
 	}
 
@@ -418,8 +418,8 @@ func validateMacroDefinition(m *macro.Macro) error {
 func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 	return func(ctx context.Context, req *macro.SendRequest) (*macro.SendResponse, error) {
 		var client httpDoer
-		if s.replayDoer != nil {
-			client = s.replayDoer
+		if s.deps.replayDoer != nil {
+			client = s.deps.replayDoer
 		} else {
 			dialer := &net.Dialer{
 				Timeout: defaultReplayTimeout,
@@ -470,7 +470,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		duration := time.Since(start)
 
 		// Record the macro step as a session so it appears in session history.
-		if s.store != nil {
+		if s.deps.store != nil {
 			s.recordMacroStepSession(ctx, macroName, req, resp, respBody, httpReq, start, duration)
 		}
 
@@ -509,7 +509,7 @@ func (s *Server) recordMacroStepSession(
 		Duration:    duration,
 		Tags:        tags,
 	}
-	if err := s.store.SaveSession(ctx, sess); err != nil {
+	if err := s.deps.store.SaveSession(ctx, sess); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -533,7 +533,7 @@ func (s *Server) recordMacroStepSession(
 		Headers:   recordedHeaders,
 		Body:      req.Body,
 	}
-	if err := s.store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := s.deps.store.AppendMessage(ctx, sendMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step send message",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -553,7 +553,7 @@ func (s *Server) recordMacroStepSession(
 		Headers:    respHeaders,
 		Body:       respBody,
 	}
-	if err := s.store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := s.deps.store.AppendMessage(ctx, recvMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step receive message",
 			"macro", macroName, "step", req.StepID, "error", err)
 	}

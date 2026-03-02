@@ -35,13 +35,13 @@ func (s *Server) registerProxyStop() {
 
 // handleProxyStop handles the proxy_stop tool invocation.
 func (s *Server) handleProxyStop(ctx context.Context, _ *gomcp.CallToolRequest, input proxyStopInput) (*gomcp.CallToolResult, *proxyStopResult, error) {
-	if s.manager == nil {
+	if s.deps.manager == nil {
 		return nil, nil, fmt.Errorf("proxy manager is not initialized")
 	}
 
 	if input.Name != "" {
 		// Stop a specific named listener.
-		if err := s.manager.StopNamed(ctx, input.Name); err != nil {
+		if err := s.deps.manager.StopNamed(ctx, input.Name); err != nil {
 			return nil, nil, fmt.Errorf("proxy stop: %w", err)
 		}
 		result := &proxyStopResult{
@@ -53,7 +53,7 @@ func (s *Server) handleProxyStop(ctx context.Context, _ *gomcp.CallToolRequest, 
 
 	// Stop all listeners.
 	// Collect names before stopping for the response.
-	statuses := s.manager.ListenerStatuses()
+	statuses := s.deps.manager.ListenerStatuses()
 	if len(statuses) == 0 {
 		return nil, nil, fmt.Errorf("proxy stop: %w", proxy.ErrNotRunning)
 	}
@@ -63,7 +63,7 @@ func (s *Server) handleProxyStop(ctx context.Context, _ *gomcp.CallToolRequest, 
 		names = append(names, st.Name)
 	}
 
-	if err := s.manager.StopAll(ctx); err != nil {
+	if err := s.deps.manager.StopAll(ctx); err != nil {
 		return nil, nil, fmt.Errorf("proxy stop: %w", err)
 	}
 

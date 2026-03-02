@@ -96,7 +96,13 @@ func fromInterceptRules(rules []intercept.Rule) []interceptRuleOutput {
 
 // applyInterceptRules validates and sets intercept rules from the input.
 func (s *Server) applyInterceptRules(inputs []interceptRuleInput) error {
-	if s.interceptEngine == nil {
+	return applyInterceptRulesHelper(s.deps.interceptEngine, inputs)
+}
+
+// applyInterceptRulesHelper validates and sets intercept rules on the given engine.
+// This is a standalone version of Server.applyInterceptRules for use by handler structs.
+func applyInterceptRulesHelper(engine *intercept.Engine, inputs []interceptRuleInput) error {
+	if engine == nil {
 		return fmt.Errorf("intercept engine is not initialized")
 	}
 
@@ -105,7 +111,7 @@ func (s *Server) applyInterceptRules(inputs []interceptRuleInput) error {
 		rules[i] = toInterceptRule(input)
 	}
 
-	if err := s.interceptEngine.SetRules(rules); err != nil {
+	if err := engine.SetRules(rules); err != nil {
 		return err
 	}
 	return nil

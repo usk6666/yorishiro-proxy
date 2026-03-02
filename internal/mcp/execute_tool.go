@@ -130,7 +130,7 @@ type requestPreview struct {
 
 // handleExecuteResend handles the resend action within the execute tool.
 func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 	if params.SessionID == "" {
@@ -144,7 +144,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	var kvStore map[string]string
 	if params.Hooks != nil && params.Hooks.PreSend != nil {
 		state := &hookState{}
-		executor := newHookExecutor(s, params.Hooks, state)
+		executor := newHookExecutor(s.deps, params.Hooks, state)
 		var err error
 		kvStore, err = executor.executePreSend(ctx)
 		if err != nil {
@@ -158,7 +158,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		}
 	}
 
-	sess, err := s.store.GetSession(ctx, params.SessionID)
+	sess, err := s.deps.store.GetSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
@@ -167,7 +167,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		return s.handleWebSocketResend(ctx, sess, params)
 	}
 
-	sendMsgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -306,7 +306,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		Protocol: sess.Protocol, SessionType: "unary", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
-	if err := s.store.SaveSession(ctx, newSess); err != nil {
+	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
 		return nil, nil, fmt.Errorf("save resend session: %w", err)
 	}
 
@@ -315,7 +315,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		Timestamp: start, Method: method, URL: targetURL,
 		Headers: recordedHeaders, Body: reqBody,
 	}
-	if err := s.store.AppendMessage(ctx, newSendMsg); err != nil {
+	if err := s.deps.store.AppendMessage(ctx, newSendMsg); err != nil {
 		return nil, nil, fmt.Errorf("save resend send message: %w", err)
 	}
 
@@ -324,13 +324,13 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		Timestamp: start.Add(duration), StatusCode: resp.StatusCode,
 		Headers: respHeaders, Body: respBody,
 	}
-	if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
+	if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
 		return nil, nil, fmt.Errorf("save resend receive message: %w", err)
 	}
 
 	if params.Hooks != nil && params.Hooks.PostReceive != nil {
 		state := &hookState{}
-		executor := newHookExecutor(s, params.Hooks, state)
+		executor := newHookExecutor(s.deps, params.Hooks, state)
 		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody, kvStore); err != nil {
 			return nil, nil, err
 		}
@@ -417,8 +417,8 @@ func validateOverrideHost(host string) error {
 }
 
 func (s *Server) resendHTTPClient(params executeParams) httpDoer {
-	if s.replayDoer != nil {
-		return s.replayDoer
+	if s.deps.replayDoer != nil {
+		return s.deps.replayDoer
 	}
 	timeout := defaultReplayTimeout
 	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
@@ -437,7 +437,7 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 		return http.ErrUseLastResponse
 	}
 	if params.FollowRedirects != nil && *params.FollowRedirects {
-		checkRedirect = targetScopeCheckRedirect(s.targetScope)
+		checkRedirect = targetScopeCheckRedirect(s.deps.targetScope)
 	}
 	return &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: checkRedirect}
 }
@@ -464,19 +464,19 @@ type rawPreview struct {
 }
 
 func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 	if params.SessionID == "" {
 		return nil, nil, fmt.Errorf("session_id is required for resend_raw action")
 	}
 
-	sess, err := s.store.GetSession(ctx, params.SessionID)
+	sess, err := s.deps.store.GetSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
 
-	sendMsgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -591,18 +591,18 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		Protocol: sess.Protocol, SessionType: "unary", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
-	if err := s.store.SaveSession(ctx, newSess); err != nil {
+	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
 		return nil, nil, fmt.Errorf("save resend_raw session: %w", err)
 	}
 
-	if err := s.store.AppendMessage(ctx, &session.Message{
+	if err := s.deps.store.AppendMessage(ctx, &session.Message{
 		SessionID: newSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: start, RawBytes: rawBytes,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("save resend_raw send message: %w", err)
 	}
 
-	if err := s.store.AppendMessage(ctx, &session.Message{
+	if err := s.deps.store.AppendMessage(ctx, &session.Message{
 		SessionID: newSess.ID, Sequence: 1, Direction: "receive",
 		Timestamp: start.Add(duration), RawBytes: respData,
 	}); err != nil {

@@ -108,7 +108,7 @@ type executeDeleteSessionsResult struct {
 
 // handleManageDeleteSessions handles the delete_sessions action within the manage tool.
 func (s *Server) handleManageDeleteSessions(ctx context.Context, params manageParams) (*gomcp.CallToolResult, *executeDeleteSessionsResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
@@ -121,7 +121,7 @@ func (s *Server) handleManageDeleteSessions(ctx context.Context, params managePa
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with age-based deletion")
 		}
 		cutoff := time.Now().UTC().AddDate(0, 0, -days)
-		n, err := s.store.DeleteSessionsOlderThan(ctx, cutoff)
+		n, err := s.deps.store.DeleteSessionsOlderThan(ctx, cutoff)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete old sessions: %w", err)
 		}
@@ -132,10 +132,10 @@ func (s *Server) handleManageDeleteSessions(ctx context.Context, params managePa
 	}
 
 	if params.SessionID != "" {
-		if _, err := s.store.GetSession(ctx, params.SessionID); err != nil {
+		if _, err := s.deps.store.GetSession(ctx, params.SessionID); err != nil {
 			return nil, nil, fmt.Errorf("session not found: %s", params.SessionID)
 		}
-		if err := s.store.DeleteSession(ctx, params.SessionID); err != nil {
+		if err := s.deps.store.DeleteSession(ctx, params.SessionID); err != nil {
 			return nil, nil, fmt.Errorf("delete session: %w", err)
 		}
 		return nil, &executeDeleteSessionsResult{DeletedCount: 1}, nil
@@ -145,7 +145,7 @@ func (s *Server) handleManageDeleteSessions(ctx context.Context, params managePa
 		if !params.Confirm {
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with protocol-based deletion")
 		}
-		n, err := s.store.DeleteSessionsByProtocol(ctx, params.Protocol)
+		n, err := s.deps.store.DeleteSessionsByProtocol(ctx, params.Protocol)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete sessions by protocol: %w", err)
 		}
@@ -153,7 +153,7 @@ func (s *Server) handleManageDeleteSessions(ctx context.Context, params managePa
 	}
 
 	if params.Confirm {
-		n, err := s.store.DeleteAllSessions(ctx)
+		n, err := s.deps.store.DeleteAllSessions(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete all sessions: %w", err)
 		}
@@ -177,39 +177,39 @@ type executeRegenerateCACertResult struct {
 
 // handleManageRegenerateCA regenerates the CA certificate.
 func (s *Server) handleManageRegenerateCA() (*gomcp.CallToolResult, *executeRegenerateCACertResult, error) {
-	if s.ca == nil {
+	if s.deps.ca == nil {
 		return nil, nil, fmt.Errorf("CA is not initialized")
 	}
 
-	source := s.ca.Source()
+	source := s.deps.ca.Source()
 
 	if source.Explicit {
 		return nil, nil, fmt.Errorf("cannot regenerate user-provided CA (loaded from %s); provide new files via -ca-cert/-ca-key flags instead", source.CertPath)
 	}
 
-	if err := s.ca.Generate(); err != nil {
+	if err := s.deps.ca.Generate(); err != nil {
 		return nil, nil, fmt.Errorf("regenerate CA: %w", err)
 	}
 
-	if s.issuer != nil {
-		s.issuer.ClearCache()
+	if s.deps.issuer != nil {
+		s.deps.issuer.ClearCache()
 	}
 
 	if source.Persisted && source.CertPath != "" {
-		if err := s.ca.Save(source.CertPath, source.KeyPath); err != nil {
+		if err := s.deps.ca.Save(source.CertPath, source.KeyPath); err != nil {
 			slog.Warn("failed to save regenerated CA, continuing with ephemeral CA",
 				"cert_path", source.CertPath, "error", err)
-			s.ca.SetSource(cert.CASource{})
+			s.deps.ca.SetSource(cert.CASource{})
 		} else {
-			s.ca.SetSource(source)
+			s.deps.ca.SetSource(source)
 		}
 	}
 
-	newCert := s.ca.Certificate()
+	newCert := s.deps.ca.Certificate()
 	fingerprint := sha256.Sum256(newCert.Raw)
 	fingerprintHex := formatFingerprint(fingerprint[:])
 
-	newSource := s.ca.Source()
+	newSource := s.deps.ca.Source()
 	result := &executeRegenerateCACertResult{
 		Fingerprint: fingerprintHex,
 		Subject:     newCert.Subject.String(),
@@ -261,7 +261,7 @@ type executeExportSessionsResult struct {
 
 // handleManageExportSessions handles the export_sessions action within the manage tool.
 func (s *Server) handleManageExportSessions(ctx context.Context, params manageParams) (*executeExportSessionsResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, fmt.Errorf("session store is not initialized")
 	}
 
@@ -326,7 +326,7 @@ func (s *Server) handleManageExportSessions(ctx context.Context, params managePa
 			return nil, fmt.Errorf("set file permissions: %w", err)
 		}
 
-		n, err := session.ExportSessions(ctx, s.store, tmpFile, opts)
+		n, err := session.ExportSessions(ctx, s.deps.store, tmpFile, opts)
 		if err != nil {
 			return nil, fmt.Errorf("export sessions: %w", err)
 		}
@@ -355,7 +355,7 @@ func (s *Server) handleManageExportSessions(ctx context.Context, params managePa
 
 	opts.MaxSessions = maxInlineExportSessions
 	var buf bytes.Buffer
-	n, err := session.ExportSessions(ctx, s.store, &buf, opts)
+	n, err := session.ExportSessions(ctx, s.deps.store, &buf, opts)
 	if err != nil {
 		return nil, fmt.Errorf("export sessions: %w", err)
 	}
@@ -378,7 +378,7 @@ type executeImportSessionsResult struct {
 
 // handleManageImportSessions handles the import_sessions action within the manage tool.
 func (s *Server) handleManageImportSessions(ctx context.Context, params manageParams) (*executeImportSessionsResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, fmt.Errorf("session store is not initialized")
 	}
 
@@ -409,7 +409,7 @@ func (s *Server) handleManageImportSessions(ctx context.Context, params managePa
 	}
 	defer f.Close()
 
-	result, err := session.ImportSessions(ctx, s.store, f, session.ImportOptions{
+	result, err := session.ImportSessions(ctx, s.deps.store, f, session.ImportOptions{
 		OnConflict:       conflict,
 		MaxScannerBuffer: config.MaxImportScannerBuffer,
 		ValidateIDs:      true,

@@ -1402,7 +1402,7 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 
 	ctx := context.Background()
 	s := NewServer(ctx, nil, store, nil, WithTargetScope(ts))
-	s.replayDoer = newPermissiveClient()
+	s.deps.replayDoer = newPermissiveClient()
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {

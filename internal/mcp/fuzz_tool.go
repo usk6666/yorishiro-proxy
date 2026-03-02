@@ -106,15 +106,15 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 	}
 
 	// Target scope enforcement: check the template session's URL before starting fuzz.
-	if s.targetScope != nil && s.targetScope.HasRules() {
-		if s.store == nil {
+	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
+		if s.deps.store == nil {
 			return nil, nil, fmt.Errorf("session store is not initialized")
 		}
-		templateSess, err := s.store.GetSession(ctx, params.SessionID)
+		templateSess, err := s.deps.store.GetSession(ctx, params.SessionID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("get template session for target scope check: %w", err)
 		}
-		sendMsgs, err := s.store.GetMessages(ctx, templateSess.ID, session.MessageListOptions{Direction: "send"})
+		sendMsgs, err := s.deps.store.GetMessages(ctx, templateSess.ID, session.MessageListOptions{Direction: "send"})
 		if err != nil {
 			return nil, nil, fmt.Errorf("get send messages for target scope check: %w", err)
 		}
@@ -125,7 +125,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		}
 	}
 
-	if s.fuzzRunner == nil {
+	if s.deps.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 
@@ -156,11 +156,11 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 	}
 
 	if params.Hooks != nil {
-		hooks := newFuzzHookCallbacks(s, params.Hooks)
+		hooks := newFuzzHookCallbacks(s.deps, params.Hooks)
 		cfg.Hooks = hooks
 	}
 
-	result, err := s.fuzzRunner.Start(s.appCtx, cfg)
+	result, err := s.deps.fuzzRunner.Start(s.deps.appCtx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fuzz execution: %w", err)
 	}
@@ -170,14 +170,14 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 
 // handleFuzzPauseAction handles the fuzz_pause action within the fuzz tool.
 func (s *Server) handleFuzzPauseAction(params fuzzParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
-	if s.fuzzRunner == nil {
+	if s.deps.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 	if params.FuzzID == "" {
 		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_pause action")
 	}
 
-	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	ctrl := s.deps.fuzzRunner.Registry().Get(params.FuzzID)
 	if ctrl == nil {
 		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
 	}
@@ -195,14 +195,14 @@ func (s *Server) handleFuzzPauseAction(params fuzzParams) (*gomcp.CallToolResult
 
 // handleFuzzResumeAction handles the fuzz_resume action within the fuzz tool.
 func (s *Server) handleFuzzResumeAction(params fuzzParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
-	if s.fuzzRunner == nil {
+	if s.deps.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 	if params.FuzzID == "" {
 		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_resume action")
 	}
 
-	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	ctrl := s.deps.fuzzRunner.Registry().Get(params.FuzzID)
 	if ctrl == nil {
 		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
 	}
@@ -220,14 +220,14 @@ func (s *Server) handleFuzzResumeAction(params fuzzParams) (*gomcp.CallToolResul
 
 // handleFuzzCancelAction handles the fuzz_cancel action within the fuzz tool.
 func (s *Server) handleFuzzCancelAction(params fuzzParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
-	if s.fuzzRunner == nil {
+	if s.deps.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 	if params.FuzzID == "" {
 		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_cancel action")
 	}
 
-	ctrl := s.fuzzRunner.Registry().Get(params.FuzzID)
+	ctrl := s.deps.fuzzRunner.Registry().Get(params.FuzzID)
 	if ctrl == nil {
 		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
 	}

@@ -589,8 +589,8 @@ func TestQuery_Config_WithTCPForwards(t *testing.T) {
 	ctx := context.Background()
 	ca := newTestCA(t)
 	s := NewServer(ctx, ca, store, nil)
-	s.tcpForwards = map[string]string{"3306": "db.example.com:3306"}
-	s.enabledProtocols = []string{"HTTP/1.x", "HTTPS", "gRPC"}
+	s.deps.tcpForwards = map[string]string{"3306": "db.example.com:3306"}
+	s.deps.enabledProtocols = []string{"HTTP/1.x", "HTTPS", "gRPC"}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
