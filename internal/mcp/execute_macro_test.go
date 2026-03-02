@@ -647,3 +647,429 @@ func TestExecute_DefineMacro_NoStore(t *testing.T) {
 		t.Fatal("expected error when store is nil")
 	}
 }
+
+func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
+	store := newTestStore(t)
+
+	// Create an echo server that returns a predictable response.
+	echoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Step", r.Header.Get("X-Step"))
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer echoServer.Close()
+
+	ctx := context.Background()
+
+	// Save a template session for step1.
+	u1, _ := url.Parse(echoServer.URL + "/api/step1")
+	sess1 := &session.Session{
+		Protocol:    "HTTP/1.x",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   time.Now().UTC(),
+		Duration:    50 * time.Millisecond,
+	}
+	if err := store.SaveSession(ctx, sess1); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: sess1.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       u1,
+		Headers:   map[string][]string{"Content-Type": {"application/json"}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Save a template session for step2.
+	u2, _ := url.Parse(echoServer.URL + "/api/step2")
+	sess2 := &session.Session{
+		Protocol:    "HTTP/1.x",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   time.Now().UTC(),
+		Duration:    50 * time.Millisecond,
+	}
+	if err := store.SaveSession(ctx, sess2); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: sess2.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "POST",
+		URL:       u2,
+		Headers:   map[string][]string{"Content-Type": {"application/json"}},
+		Body:      []byte(`{"data":"test"}`),
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	// Define a 2-step macro.
+	defineResult := callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "record-test",
+			"steps": []any{
+				map[string]any{
+					"id":         "step1",
+					"session_id": sess1.ID,
+				},
+				map[string]any{
+					"id":         "step2",
+					"session_id": sess2.ID,
+				},
+			},
+		},
+	})
+	if defineResult.IsError {
+		t.Fatalf("define_macro failed: %v", defineResult.Content)
+	}
+
+	// Count sessions before running the macro.
+	beforeSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListSessions before: %v", err)
+	}
+	beforeCount := len(beforeSessions)
+
+	// Run the macro.
+	runResult := callExecute(t, cs, map[string]any{
+		"action": "run_macro",
+		"params": map[string]any{
+			"name": "record-test",
+		},
+	})
+	if runResult.IsError {
+		t.Fatalf("run_macro failed: %v", runResult.Content)
+	}
+
+	var out executeRunMacroResult
+	unmarshalExecuteResult(t, runResult, &out)
+
+	if out.Status != "completed" {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if out.StepsExecuted != 2 {
+		t.Fatalf("StepsExecuted = %d, want 2", out.StepsExecuted)
+	}
+
+	// After running, there should be 2 new sessions (one per step).
+	afterSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListSessions after: %v", err)
+	}
+	newCount := len(afterSessions) - beforeCount
+	if newCount != 2 {
+		t.Errorf("new sessions = %d, want 2 (one per macro step)", newCount)
+	}
+
+	// Find the macro-recorded sessions by checking tags.
+	var macroSessions []*session.Session
+	for _, s := range afterSessions {
+		if s.Tags != nil && s.Tags["macro"] == "record-test" {
+			macroSessions = append(macroSessions, s)
+		}
+	}
+	if len(macroSessions) != 2 {
+		t.Fatalf("macro-tagged sessions = %d, want 2", len(macroSessions))
+	}
+
+	// Verify each macro session has the correct tags and messages.
+	stepIDs := map[string]bool{}
+	for _, ms := range macroSessions {
+		if ms.Protocol != "HTTP/1.x" {
+			t.Errorf("session %s: Protocol = %q, want HTTP/1.x", ms.ID, ms.Protocol)
+		}
+		if ms.SessionType != "unary" {
+			t.Errorf("session %s: SessionType = %q, want unary", ms.ID, ms.SessionType)
+		}
+		if ms.State != "complete" {
+			t.Errorf("session %s: State = %q, want complete", ms.ID, ms.State)
+		}
+		if ms.Tags["macro"] != "record-test" {
+			t.Errorf("session %s: Tags[macro] = %q, want record-test", ms.ID, ms.Tags["macro"])
+		}
+		stepID := ms.Tags["macro_step"]
+		if stepID == "" {
+			t.Errorf("session %s: Tags[macro_step] is empty", ms.ID)
+		}
+		stepIDs[stepID] = true
+
+		// Check send message exists.
+		sendMsgs, err := store.GetMessages(ctx, ms.ID, session.MessageListOptions{Direction: "send"})
+		if err != nil {
+			t.Errorf("GetMessages(send) for session %s: %v", ms.ID, err)
+			continue
+		}
+		if len(sendMsgs) != 1 {
+			t.Errorf("session %s: send messages = %d, want 1", ms.ID, len(sendMsgs))
+			continue
+		}
+		if sendMsgs[0].Method == "" {
+			t.Errorf("session %s: send message has empty method", ms.ID)
+		}
+		if sendMsgs[0].URL == nil {
+			t.Errorf("session %s: send message has nil URL", ms.ID)
+		}
+
+		// Check receive message exists.
+		recvMsgs, err := store.GetMessages(ctx, ms.ID, session.MessageListOptions{Direction: "receive"})
+		if err != nil {
+			t.Errorf("GetMessages(receive) for session %s: %v", ms.ID, err)
+			continue
+		}
+		if len(recvMsgs) != 1 {
+			t.Errorf("session %s: receive messages = %d, want 1", ms.ID, len(recvMsgs))
+			continue
+		}
+		if recvMsgs[0].StatusCode != 200 {
+			t.Errorf("session %s: receive StatusCode = %d, want 200", ms.ID, recvMsgs[0].StatusCode)
+		}
+	}
+
+	// Verify both step IDs are recorded.
+	if !stepIDs["step1"] {
+		t.Error("missing macro session for step1")
+	}
+	if !stepIDs["step2"] {
+		t.Error("missing macro session for step2")
+	}
+}
+
+func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
+	store := newTestStore(t)
+
+	// Login server returns 200 (not 302), so the guarded step should be skipped.
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer loginServer.Close()
+
+	mfaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"mfa":"done"}`))
+	}))
+	defer mfaServer.Close()
+
+	ctx := context.Background()
+
+	loginURL, _ := url.Parse(loginServer.URL + "/login")
+	loginSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, loginSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: loginSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	mfaURL, _ := url.Parse(mfaServer.URL + "/mfa")
+	mfaSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, mfaSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: mfaSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: mfaURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	// Define macro with guarded step.
+	callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "skip-test",
+			"steps": []any{
+				map[string]any{
+					"id":         "login",
+					"session_id": loginSess.ID,
+				},
+				map[string]any{
+					"id":         "mfa",
+					"session_id": mfaSess.ID,
+					"when": map[string]any{
+						"step":        "login",
+						"status_code": 302, // Login returns 200, so MFA is skipped.
+					},
+				},
+			},
+		},
+	})
+
+	// Run the macro.
+	runResult := callExecute(t, cs, map[string]any{
+		"action": "run_macro",
+		"params": map[string]any{"name": "skip-test"},
+	})
+	if runResult.IsError {
+		t.Fatalf("run_macro failed: %v", runResult.Content)
+	}
+
+	var out executeRunMacroResult
+	unmarshalExecuteResult(t, runResult, &out)
+
+	if out.StepsExecuted != 1 {
+		t.Fatalf("StepsExecuted = %d, want 1", out.StepsExecuted)
+	}
+
+	// Only the executed step should create a macro session (not the skipped one).
+	allSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	var macroSessions []*session.Session
+	for _, s := range allSessions {
+		if s.Tags != nil && s.Tags["macro"] == "skip-test" {
+			macroSessions = append(macroSessions, s)
+		}
+	}
+	if len(macroSessions) != 1 {
+		t.Errorf("macro-tagged sessions = %d, want 1 (only executed step)", len(macroSessions))
+	}
+	if len(macroSessions) > 0 && macroSessions[0].Tags["macro_step"] != "login" {
+		t.Errorf("macro_step = %q, want login", macroSessions[0].Tags["macro_step"])
+	}
+}
+
+func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
+	store := newTestStore(t)
+
+	// Token server for the hook macro step.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Auth-Token", "hook-token")
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer tokenServer.Close()
+
+	// Target server for the main resend.
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(200)
+		w.Write([]byte("target-ok"))
+	}))
+	defer targetServer.Close()
+
+	ctx := context.Background()
+
+	// Save token session.
+	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
+	tokenSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, tokenSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: tokenSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Save target session.
+	targetURL, _ := url.Parse(targetServer.URL + "/api/data")
+	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveSession(ctx, targetSess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &session.Message{
+		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	// Define the hook macro.
+	callExecute(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "hook-macro",
+			"steps": []any{
+				map[string]any{
+					"id":         "get-token",
+					"session_id": tokenSess.ID,
+					"extract": []any{
+						map[string]any{
+							"name":        "auth_token",
+							"from":        "response",
+							"source":      "header",
+							"header_name": "X-Auth-Token",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	// Count sessions before resend.
+	beforeSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	beforeCount := len(beforeSessions)
+
+	// Resend with pre_send hook.
+	resendResult := callExecute(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"session_id": targetSess.ID,
+			"hooks": map[string]any{
+				"pre_send": map[string]any{
+					"macro":        "hook-macro",
+					"run_interval": "always",
+				},
+			},
+		},
+	})
+	if resendResult.IsError {
+		t.Fatalf("resend with hook failed: %v", resendResult.Content)
+	}
+
+	// Check that the hook macro step was recorded as a session.
+	afterSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+
+	var hookSessions []*session.Session
+	for _, s := range afterSessions {
+		if s.Tags != nil && s.Tags["macro"] == "hook-macro" {
+			hookSessions = append(hookSessions, s)
+		}
+	}
+
+	if len(hookSessions) != 1 {
+		t.Errorf("hook macro sessions = %d, want 1", len(hookSessions))
+	}
+	if len(hookSessions) > 0 {
+		if hookSessions[0].Tags["macro_step"] != "get-token" {
+			t.Errorf("macro_step = %q, want get-token", hookSessions[0].Tags["macro_step"])
+		}
+	}
+
+	// The total new sessions should be at least 2: 1 for the hook macro step + 1 for the resend itself.
+	newCount := len(afterSessions) - beforeCount
+	if newCount < 2 {
+		t.Errorf("new sessions = %d, want >= 2 (hook macro + resend)", newCount)
+	}
+}

@@ -240,6 +240,9 @@ func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[st
 		return nil, nil, fmt.Errorf("build request: %w", err)
 	}
 
+	// Set the step ID so the SendFunc can use it for logging/recording.
+	req.StepID = step.ID
+
 	// Send the request.
 	resp, err := e.sendFunc(stepCtx, req)
 	if err != nil {
