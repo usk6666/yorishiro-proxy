@@ -1,10 +1,7 @@
 package selfupdate
 
 import (
-	"archive/tar"
-	"archive/zip"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -65,11 +62,11 @@ func (m *mockHTTPClient) addError(url string, err error) {
 const testReleaseJSON = `{
 	"tag_name": "v1.1.0",
 	"assets": [
-		{"name": "yorishiro-proxy-v1.1.0-linux-amd64.tar.gz", "browser_download_url": "https://example.com/linux-amd64.tar.gz"},
-		{"name": "yorishiro-proxy-v1.1.0-linux-arm64.tar.gz", "browser_download_url": "https://example.com/linux-arm64.tar.gz"},
-		{"name": "yorishiro-proxy-v1.1.0-darwin-amd64.tar.gz", "browser_download_url": "https://example.com/darwin-amd64.tar.gz"},
-		{"name": "yorishiro-proxy-v1.1.0-darwin-arm64.tar.gz", "browser_download_url": "https://example.com/darwin-arm64.tar.gz"},
-		{"name": "yorishiro-proxy-v1.1.0-windows-amd64.zip", "browser_download_url": "https://example.com/windows-amd64.zip"},
+		{"name": "yorishiro-proxy-v1.1.0-linux-amd64", "browser_download_url": "https://example.com/linux-amd64"},
+		{"name": "yorishiro-proxy-v1.1.0-linux-arm64", "browser_download_url": "https://example.com/linux-arm64"},
+		{"name": "yorishiro-proxy-v1.1.0-darwin-amd64", "browser_download_url": "https://example.com/darwin-amd64"},
+		{"name": "yorishiro-proxy-v1.1.0-darwin-arm64", "browser_download_url": "https://example.com/darwin-arm64"},
+		{"name": "yorishiro-proxy-v1.1.0-windows-amd64.exe", "browser_download_url": "https://example.com/windows-amd64.exe"},
 		{"name": "checksums.txt", "browser_download_url": "https://example.com/checksums.txt"}
 	]
 }`
@@ -234,21 +231,21 @@ func TestAssetName(t *testing.T) {
 			version: "v1.0.0",
 			goos:    "linux",
 			goarch:  "amd64",
-			want:    "yorishiro-proxy-v1.0.0-linux-amd64.tar.gz",
+			want:    "yorishiro-proxy-v1.0.0-linux-amd64",
 		},
 		{
 			name:    "darwin arm64",
 			version: "v1.0.0",
 			goos:    "darwin",
 			goarch:  "arm64",
-			want:    "yorishiro-proxy-v1.0.0-darwin-arm64.tar.gz",
+			want:    "yorishiro-proxy-v1.0.0-darwin-arm64",
 		},
 		{
 			name:    "windows amd64",
 			version: "v1.0.0",
 			goos:    "windows",
 			goarch:  "amd64",
-			want:    "yorishiro-proxy-v1.0.0-windows-amd64.zip",
+			want:    "yorishiro-proxy-v1.0.0-windows-amd64.exe",
 		},
 	}
 
@@ -266,8 +263,8 @@ func TestFindAsset(t *testing.T) {
 	release := &Release{
 		TagName: "v1.0.0",
 		Assets: []ReleaseAsset{
-			{Name: "yorishiro-proxy-v1.0.0-linux-amd64.tar.gz", BrowserDownloadURL: "https://example.com/linux"},
-			{Name: "yorishiro-proxy-v1.0.0-windows-amd64.zip", BrowserDownloadURL: "https://example.com/windows"},
+			{Name: "yorishiro-proxy-v1.0.0-linux-amd64", BrowserDownloadURL: "https://example.com/linux"},
+			{Name: "yorishiro-proxy-v1.0.0-windows-amd64.exe", BrowserDownloadURL: "https://example.com/windows"},
 			{Name: "checksums.txt", BrowserDownloadURL: "https://example.com/checksums"},
 		},
 	}
@@ -328,10 +325,10 @@ func TestParseChecksums(t *testing.T) {
 	}{
 		{
 			name:  "standard sha256sum output",
-			input: "abc123  yorishiro-proxy-v1.0.0-linux-amd64.tar.gz\ndef456  yorishiro-proxy-v1.0.0-windows-amd64.zip\n",
+			input: "abc123  yorishiro-proxy-v1.0.0-linux-amd64\ndef456  yorishiro-proxy-v1.0.0-windows-amd64.exe\n",
 			want: map[string]string{
-				"yorishiro-proxy-v1.0.0-linux-amd64.tar.gz":  "abc123",
-				"yorishiro-proxy-v1.0.0-windows-amd64.zip":   "def456",
+				"yorishiro-proxy-v1.0.0-linux-amd64":     "abc123",
+				"yorishiro-proxy-v1.0.0-windows-amd64.exe": "def456",
 			},
 		},
 		{
@@ -531,48 +528,6 @@ func TestUpdater_LatestReleaseURL(t *testing.T) {
 	}
 }
 
-// createTestTarGz creates a tar.gz archive containing a fake yorishiro-proxy binary.
-func createTestTarGz(t *testing.T, binaryContent []byte) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-
-	hdr := &tar.Header{
-		Name: "yorishiro-proxy",
-		Mode: 0755,
-		Size: int64(len(binaryContent)),
-	}
-	if err := tw.WriteHeader(hdr); err != nil {
-		t.Fatalf("write tar header: %v", err)
-	}
-	if _, err := tw.Write(binaryContent); err != nil {
-		t.Fatalf("write tar content: %v", err)
-	}
-
-	tw.Close()
-	gw.Close()
-	return buf.Bytes()
-}
-
-// createTestZip creates a zip archive containing a fake yorishiro-proxy.exe binary.
-func createTestZip(t *testing.T, binaryContent []byte) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-
-	w, err := zw.Create("yorishiro-proxy.exe")
-	if err != nil {
-		t.Fatalf("create zip entry: %v", err)
-	}
-	if _, err := w.Write(binaryContent); err != nil {
-		t.Fatalf("write zip content: %v", err)
-	}
-
-	zw.Close()
-	return buf.Bytes()
-}
-
 func TestUpdater_Upgrade_NoUpdate(t *testing.T) {
 	ctx := context.Background()
 	mock := newMockHTTPClient()
@@ -695,11 +650,11 @@ func TestUpdater_Upgrade_MissingChecksumAsset(t *testing.T) {
 	releaseJSON := fmt.Sprintf(`{
 		"tag_name": "v2.0.0",
 		"assets": [
-			{"name": "yorishiro-proxy-v2.0.0-linux-amd64.tar.gz", "browser_download_url": "https://example.com/archive.tar.gz"},
-			{"name": "yorishiro-proxy-v2.0.0-linux-arm64.tar.gz", "browser_download_url": "https://example.com/archive-arm64.tar.gz"},
-			{"name": "yorishiro-proxy-v2.0.0-darwin-amd64.tar.gz", "browser_download_url": "https://example.com/archive-darwin.tar.gz"},
-			{"name": "yorishiro-proxy-v2.0.0-darwin-arm64.tar.gz", "browser_download_url": "https://example.com/archive-darwin-arm64.tar.gz"},
-			{"name": "yorishiro-proxy-v2.0.0-windows-amd64.zip", "browser_download_url": "https://example.com/archive-windows.zip"}
+			{"name": "yorishiro-proxy-v2.0.0-linux-amd64", "browser_download_url": "https://example.com/binary-linux-amd64"},
+			{"name": "yorishiro-proxy-v2.0.0-linux-arm64", "browser_download_url": "https://example.com/binary-linux-arm64"},
+			{"name": "yorishiro-proxy-v2.0.0-darwin-amd64", "browser_download_url": "https://example.com/binary-darwin-amd64"},
+			{"name": "yorishiro-proxy-v2.0.0-darwin-arm64", "browser_download_url": "https://example.com/binary-darwin-arm64"},
+			{"name": "yorishiro-proxy-v2.0.0-windows-amd64.exe", "browser_download_url": "https://example.com/binary-windows-amd64.exe"}
 		]
 	}`)
 	mock.addResponse(
@@ -724,7 +679,6 @@ func TestUpdater_Upgrade_ChecksumMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	binaryContent := []byte("new binary v2")
-	archiveData := createTestTarGz(t, binaryContent)
 
 	// Compute a wrong checksum.
 	wrongChecksum := "0000000000000000000000000000000000000000000000000000000000000000"
@@ -732,27 +686,27 @@ func TestUpdater_Upgrade_ChecksumMismatch(t *testing.T) {
 	mock := newMockHTTPClient()
 
 	// Build a release JSON that covers the current runtime OS/arch.
-	archiveAssetName := assetName("v2.0.0", "linux", "amd64")
+	binaryAssetName := assetName("v2.0.0", "linux", "amd64")
 	releaseJSON := fmt.Sprintf(`{
 		"tag_name": "v2.0.0",
 		"assets": [
-			{"name": "%s", "browser_download_url": "https://example.com/archive"},
-			{"name": "yorishiro-proxy-v2.0.0-linux-arm64.tar.gz", "browser_download_url": "https://example.com/archive-arm64"},
-			{"name": "yorishiro-proxy-v2.0.0-darwin-amd64.tar.gz", "browser_download_url": "https://example.com/archive-darwin"},
-			{"name": "yorishiro-proxy-v2.0.0-darwin-arm64.tar.gz", "browser_download_url": "https://example.com/archive-darwin-arm64"},
-			{"name": "yorishiro-proxy-v2.0.0-windows-amd64.zip", "browser_download_url": "https://example.com/archive-windows"},
+			{"name": "%s", "browser_download_url": "https://example.com/binary"},
+			{"name": "yorishiro-proxy-v2.0.0-linux-arm64", "browser_download_url": "https://example.com/binary-arm64"},
+			{"name": "yorishiro-proxy-v2.0.0-darwin-amd64", "browser_download_url": "https://example.com/binary-darwin"},
+			{"name": "yorishiro-proxy-v2.0.0-darwin-arm64", "browser_download_url": "https://example.com/binary-darwin-arm64"},
+			{"name": "yorishiro-proxy-v2.0.0-windows-amd64.exe", "browser_download_url": "https://example.com/binary-windows"},
 			{"name": "checksums.txt", "browser_download_url": "https://example.com/checksums"}
 		]
-	}`, archiveAssetName)
+	}`, binaryAssetName)
 
 	mock.addResponse(
 		"https://api.github.com/repos/usk6666/yorishiro-proxy/releases/latest",
 		http.StatusOK,
 		releaseJSON,
 	)
-	mock.addResponseBytes("https://example.com/archive", http.StatusOK, archiveData)
+	mock.addResponseBytes("https://example.com/binary", http.StatusOK, binaryContent)
 	mock.addResponse("https://example.com/checksums", http.StatusOK,
-		fmt.Sprintf("%s  %s\n", wrongChecksum, archiveAssetName))
+		fmt.Sprintf("%s  %s\n", wrongChecksum, binaryAssetName))
 
 	u := NewUpdater("v1.0.0")
 	u.Client = mock

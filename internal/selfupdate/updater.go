@@ -141,13 +141,14 @@ func (u *Updater) Check(ctx context.Context) (*CheckResult, error) {
 	}, nil
 }
 
-// assetName returns the expected archive asset name for the given version, OS, and architecture.
-// For example: "yorishiro-proxy-v1.0.0-linux-amd64.tar.gz"
+// assetName returns the expected binary asset name for the given version, OS, and architecture.
+// For example: "yorishiro-proxy-v1.0.0-linux-amd64" or "yorishiro-proxy-v1.0.0-windows-amd64.exe"
 func assetName(version, goos, goarch string) string {
+	name := fmt.Sprintf("yorishiro-proxy-%s-%s-%s", version, goos, goarch)
 	if goos == "windows" {
-		return fmt.Sprintf("yorishiro-proxy-%s-%s-%s.zip", version, goos, goarch)
+		name += ".exe"
 	}
-	return fmt.Sprintf("yorishiro-proxy-%s-%s-%s.tar.gz", version, goos, goarch)
+	return name
 }
 
 // findAsset finds the download URL for the appropriate platform asset in a release.
@@ -266,8 +267,8 @@ func (u *Updater) Upgrade(ctx context.Context) (*CheckResult, error) {
 		return result, nil
 	}
 
-	// Find the platform-specific archive asset.
-	archiveURL, err := findAsset(release, runtime.GOOS, runtime.GOARCH)
+	// Find the platform-specific binary asset.
+	binaryURL, err := findAsset(release, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return nil, err
 	}
@@ -307,27 +308,10 @@ func (u *Updater) Upgrade(ctx context.Context) (*CheckResult, error) {
 	}
 	checksums := parseChecksums(checksumData)
 
-	// Download the archive.
-	archivePath, err := u.downloadToFile(ctx, archiveURL, execDir)
+	// Download the binary directly.
+	binaryPath, err := u.downloadToFile(ctx, binaryURL, execDir)
 	if err != nil {
-		return nil, fmt.Errorf("download archive: %w", err)
-	}
-	defer os.Remove(archivePath)
-
-	// Verify checksum of the downloaded archive.
-	expectedAssetName := assetName(release.TagName, runtime.GOOS, runtime.GOARCH)
-	expectedHash, ok := checksums[expectedAssetName]
-	if !ok {
-		return nil, fmt.Errorf("no checksum found for %s in checksums.txt", expectedAssetName)
-	}
-	if err := verifyChecksum(archivePath, expectedHash); err != nil {
-		return nil, fmt.Errorf("archive checksum verification failed: %w", err)
-	}
-
-	// Extract the binary from the archive.
-	binaryPath, err := extractBinary(archivePath, execDir, runtime.GOOS)
-	if err != nil {
-		return nil, fmt.Errorf("extract binary: %w", err)
+		return nil, fmt.Errorf("download binary: %w", err)
 	}
 	defer func() {
 		// Clean up if rename fails or on other errors.
@@ -336,7 +320,17 @@ func (u *Updater) Upgrade(ctx context.Context) (*CheckResult, error) {
 		}
 	}()
 
-	// Make the extracted binary executable.
+	// Verify checksum of the downloaded binary.
+	expectedAssetName := assetName(release.TagName, runtime.GOOS, runtime.GOARCH)
+	expectedHash, ok := checksums[expectedAssetName]
+	if !ok {
+		return nil, fmt.Errorf("no checksum found for %s in checksums.txt", expectedAssetName)
+	}
+	if err := verifyChecksum(binaryPath, expectedHash); err != nil {
+		return nil, fmt.Errorf("binary checksum verification failed: %w", err)
+	}
+
+	// Make the downloaded binary executable.
 	if err := os.Chmod(binaryPath, 0755); err != nil {
 		return nil, fmt.Errorf("set binary permissions: %w", err)
 	}
