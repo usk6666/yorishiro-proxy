@@ -80,30 +80,19 @@ jobs:
           for target in "${TARGETS[@]}"; do
             os="${target%/*}"
             arch="${target#*/}"
-            output="yorishiro-proxy"
+            binary_name="yorishiro-proxy-${VERSION}-${os}-${arch}"
             if [ "${os}" = "windows" ]; then
-              output="yorishiro-proxy.exe"
+              binary_name="${binary_name}.exe"
             fi
 
             echo "Building ${os}/${arch}..."
             GOOS="${os}" GOARCH="${arch}" go build \
               -ldflags "${LDFLAGS}" \
-              -o "dist/${output}" \
+              -o "dist/${binary_name}" \
               ./cmd/yorishiro-proxy
-
-            # Archive: tar.gz for Linux/macOS, zip for Windows.
-            archive_name="yorishiro-proxy-${VERSION}-${os}-${arch}"
-            cd dist
-            if [ "${os}" = "windows" ]; then
-              zip "${archive_name}.zip" "${output}"
-            else
-              tar czf "${archive_name}.tar.gz" "${output}"
-            fi
-            rm "${output}"
-            cd ..
           done
 
-      # Generate checksums for all archives.
+      # Generate checksums for all binaries.
       - name: Generate checksums
         run: |
           cd dist
@@ -133,9 +122,24 @@ jobs:
               dist/*
           fi
 
-      # Upload artifacts for workflow_dispatch (no release created).
+      # workflow_dispatch: upload assets to existing release if tag is provided,
+      # otherwise upload as build artifacts.
+      - name: Upload assets to existing release
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if gh release view "${VERSION}" > /dev/null 2>&1; then
+            echo "Uploading assets to existing release ${VERSION}..."
+            gh release upload "${VERSION}" dist/* --clobber
+          else
+            echo "::error::Release ${VERSION} does not exist. Create the release first."
+            exit 1
+          fi
+
       - name: Upload build artifacts
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: release-binaries-${{ steps.version.outputs.version }}
