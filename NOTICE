@@ -1,0 +1,26 @@
+yorishiro-proxy
+Copyright 2025 Yusuke Usui
+
+This product includes software developed by third parties:
+
+---
+
+github.com/google/uuid
+Copyright (c) 2009,2014 Google Inc. All rights reserved.
+Licensed under the BSD 3-Clause License.
+
+github.com/modelcontextprotocol/go-sdk
+Copyright (c) 2025 Anthropic, PBC
+Licensed under the MIT License.
+
+golang.org/x/net
+Copyright (c) 2009 The Go Authors. All rights reserved.
+Licensed under the BSD 3-Clause License.
+
+golang.org/x/sync
+Copyright (c) 2009 The Go Authors. All rights reserved.
+Licensed under the BSD 3-Clause License.
+
+modernc.org/sqlite
+Copyright (c) 2017 The Sqlite Authors. All rights reserved.
+Licensed under the BSD 3-Clause License.
