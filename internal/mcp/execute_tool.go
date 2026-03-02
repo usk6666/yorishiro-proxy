@@ -758,6 +758,14 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		return nil, nil, fmt.Errorf("session %s has no raw request bytes", params.SessionID)
 	}
 
+	// Target scope enforcement: check the session's URL before any processing.
+	// This ensures dry-run mode cannot bypass scope checks.
+	if sendMsg.URL != nil {
+		if err := s.checkTargetScopeURL(sendMsg.URL); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// Build the raw bytes to send, applying patches or override.
 	rawBytes, patchCount, err := buildResendRawBytes(sendMsg.RawBytes, params)
 	if err != nil {

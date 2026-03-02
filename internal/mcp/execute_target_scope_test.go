@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1287,8 +1286,8 @@ func TestExecuteResend_TargetScope_DryRun_StillChecked(t *testing.T) {
 	}
 }
 
-// Test resend_raw dry-run still bypasses target scope check (dry-run happens before target check).
-func TestExecuteResendRaw_TargetScope_DryRun_Bypasses(t *testing.T) {
+// Test resend_raw dry-run is also blocked by target scope check.
+func TestExecuteResendRaw_TargetScope_DryRun_StillChecked(t *testing.T) {
 	store := newTestStore(t)
 
 	u, _ := url.Parse("http://evil.com/test")
@@ -1331,15 +1330,12 @@ func TestExecuteResendRaw_TargetScope_DryRun_Bypasses(t *testing.T) {
 		},
 	})
 
-	// For resend_raw, dry-run returns before target address resolution,
-	// so no target scope check occurs - this should succeed.
-	if result.IsError {
-		// In the current implementation, dry-run returns before target scope check,
-		// so this is expected to succeed.
-		var out json.RawMessage
-		text := result.Content[0].(*gomcp.TextContent).Text
-		if err := json.Unmarshal([]byte(text), &out); err != nil {
-			t.Logf("dry-run with blocked host returned error (acceptable): %s", text)
-		}
+	// Target scope check now happens before dry-run, so it should block.
+	if !result.IsError {
+		t.Fatal("expected error for blocked host even in dry-run, got success")
+	}
+	text := result.Content[0].(*gomcp.TextContent).Text
+	if !strings.Contains(text, "target scope") {
+		t.Errorf("error message should mention target scope, got: %s", text)
 	}
 }
