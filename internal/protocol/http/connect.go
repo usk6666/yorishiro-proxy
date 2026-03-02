@@ -12,6 +12,7 @@ import (
 	gohttp "net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -53,12 +54,20 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Target scope enforcement: check if the CONNECT target is allowed
 	// before establishing the tunnel. Parse the port from the authority
 	// for the scope check.
-	if port := parseConnectPort(req.Host); port > 0 {
-		if blocked, reason := h.checkTargetScopeHost(hostname, port); blocked {
-			h.writeBlockedResponse(conn, hostname, reason, logger)
-			h.recordBlockedCONNECTSession(ctx, req, hostname, connectAuthority, logger)
-			return nil
+	port := parseConnectPort(req.Host)
+	if port == 0 {
+		// Invalid (non-numeric) port in CONNECT request — reject immediately
+		// to prevent scope check bypass (S-3: CWE-20).
+		logger.Warn("CONNECT with invalid port", "host", req.Host)
+		if _, err := conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
+			logger.Debug("failed to write error response", "error", err)
 		}
+		return nil
+	}
+	if blocked, reason := h.checkTargetScopeHost(hostname, port); blocked {
+		h.writeBlockedResponse(conn, hostname, reason, logger)
+		h.recordBlockedCONNECTSession(ctx, req, hostname, connectAuthority, logger)
+		return nil
 	}
 
 	// Check if the target host is in the TLS passthrough list.
@@ -309,16 +318,46 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 // handleHTTPSRequest forwards a single decrypted HTTPS request to the upstream
 // server, records the session, and writes the response back to the client.
 func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, tlsMeta tlsMetadata, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+	start := time.Now()
+	logger := h.connLogger(ctx)
+	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+
+	// Target scope enforcement for HTTPS requests inside the MITM tunnel.
+	// The CONNECT target was already checked, but the Host header inside
+	// the tunnel may differ (e.g., HTTP/1.1 Host header rewrite). If the
+	// request-level Host differs from the CONNECT authority, re-check
+	// against the scope. This MUST happen before the WebSocket upgrade
+	// check to prevent WebSocket requests from bypassing scope
+	// enforcement (S-1: CWE-863).
+	requestHost := req.Host
+	if requestHost == "" && req.URL.Host != "" {
+		requestHost = req.URL.Host
+	}
+	if requestHost != "" && !strings.EqualFold(requestHost, connectHost) {
+		// Build a temporary URL for the scope check using the actual Host header.
+		checkURL := &url.URL{
+			Scheme: "https",
+			Host:   requestHost,
+			Path:   req.URL.Path,
+		}
+		if blocked, reason := h.checkTargetScope(checkURL); blocked {
+			// Set req.URL fields before recording so the session has the full URL.
+			if req.URL.Host == "" {
+				req.URL.Host = requestHost
+			}
+			req.URL.Scheme = "https"
+			h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
+			h.recordBlockedHTTPSSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, tlsMeta, logger)
+			return nil
+		}
+	}
+
 	// Check for WebSocket upgrade before processing as normal HTTPS.
 	// This must happen before hop-by-hop headers are removed.
 	if isWebSocketUpgrade(req) {
 		return h.handleWebSocketTLS(ctx, conn, connectHost, req, tlsMeta)
 	}
-
-	start := time.Now()
-	logger := h.connLogger(ctx)
-	connID := proxy.ConnIDFromContext(ctx)
-	clientAddr := proxy.ClientAddrFromContext(ctx)
 
 	// Read the full request body so the upstream receives uncorrupted data.
 	var recordReqBody []byte
@@ -347,35 +386,6 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		if rawEnd > captureStart && captureStart < capture.buf.Len() {
 			rawRequest = make([]byte, rawEnd-captureStart)
 			copy(rawRequest, capture.buf.Bytes()[captureStart:rawEnd])
-		}
-	}
-
-	// Target scope enforcement for HTTPS requests inside the MITM tunnel.
-	// The CONNECT target was already checked, but the Host header inside
-	// the tunnel may differ (e.g., HTTP/1.1 Host header rewrite). If the
-	// request-level Host differs from the CONNECT authority, re-check
-	// against the scope. This must happen before req.URL.Host is
-	// overwritten with connectHost below.
-	requestHost := req.Host
-	if requestHost == "" && req.URL.Host != "" {
-		requestHost = req.URL.Host
-	}
-	if requestHost != "" && requestHost != connectHost {
-		// Build a temporary URL for the scope check using the actual Host header.
-		checkURL := &url.URL{
-			Scheme: "https",
-			Host:   requestHost,
-			Path:   req.URL.Path,
-		}
-		if blocked, reason := h.checkTargetScope(checkURL); blocked {
-			// Set req.URL fields before recording so the session has the full URL.
-			if req.URL.Host == "" {
-				req.URL.Host = requestHost
-			}
-			req.URL.Scheme = "https"
-			h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
-			h.recordBlockedHTTPSSession(ctx, req, recordReqBody, rawRequest, reqTruncated, smuggling, start, connID, clientAddr, tlsMeta, logger)
-			return nil
 		}
 	}
 

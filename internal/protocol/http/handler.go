@@ -361,16 +361,35 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 }
 
 func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, smuggling *smugglingFlags, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+	start := time.Now()
+	logger := h.connLogger(ctx)
+	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+
+	// Ensure absolute URL for forward proxy. This must happen before the
+	// target scope check so that the URL has a valid Host for matching.
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	if req.URL.Scheme == "" {
+		req.URL.Scheme = "http"
+	}
+
+	// Target scope enforcement: check if the target is allowed before
+	// forwarding the request upstream. This MUST happen before the WebSocket
+	// upgrade check to prevent WebSocket requests from bypassing scope
+	// enforcement (S-1: CWE-863).
+	if blocked, reason := h.checkTargetScope(req.URL); blocked {
+		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, logger)
+		return nil
+	}
+
 	// Check for WebSocket upgrade before processing as normal HTTP.
 	// This must happen before hop-by-hop headers are removed.
 	if isWebSocketUpgrade(req) {
 		return h.handleWebSocket(ctx, conn, req)
 	}
-
-	start := time.Now()
-	logger := h.connLogger(ctx)
-	connID := proxy.ConnIDFromContext(ctx)
-	clientAddr := proxy.ClientAddrFromContext(ctx)
 
 	// Read the full request body so the upstream receives uncorrupted data.
 	var recordReqBody []byte
@@ -402,23 +421,6 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 			rawRequest = make([]byte, rawEnd-captureStart)
 			copy(rawRequest, capture.buf.Bytes()[captureStart:rawEnd])
 		}
-	}
-
-	// Ensure absolute URL for forward proxy.
-	if req.URL.Host == "" {
-		req.URL.Host = req.Host
-	}
-	if req.URL.Scheme == "" {
-		req.URL.Scheme = "http"
-	}
-
-	// Target scope enforcement: check if the target is allowed before
-	// forwarding the request upstream. This prevents access to out-of-scope
-	// hosts when the proxy is used by AI agents (e.g., Playwright browser).
-	if blocked, reason := h.checkTargetScope(req.URL); blocked {
-		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
-		h.recordBlockedSession(ctx, req, recordReqBody, rawRequest, reqTruncated, smuggling, start, connID, clientAddr, logger)
-		return nil
 	}
 
 	// Remove hop-by-hop headers.
