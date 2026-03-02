@@ -62,6 +62,40 @@ func TestRunSetup_NonInteractive(t *testing.T) {
 	}
 }
 
+func TestRunSetup_SkipMCPConfig(t *testing.T) {
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Logf("chdir back: %v", err)
+		}
+	}()
+
+	args := []string{
+		"--non-interactive",
+		"--skip-mcp-config",
+		"--skip-playwright",
+		"--skip-skills",
+	}
+
+	err = runSetup(context.Background(), args)
+	if err != nil {
+		t.Fatalf("runSetup() error: %v", err)
+	}
+
+	// Check that .mcp.json was NOT created.
+	configPath := filepath.Join(dir, ".mcp.json")
+	if _, err := os.Stat(configPath); err == nil {
+		t.Error(".mcp.json should not be created when --skip-mcp-config is used")
+	}
+}
+
 func TestRun_SubcommandRouting(t *testing.T) {
 	// Verify that runSetup works with valid args by running in a temp dir.
 	dir := t.TempDir()
