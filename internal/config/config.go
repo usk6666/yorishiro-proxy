@@ -9,6 +9,45 @@ import (
 	"time"
 )
 
+// validLogLevels lists the accepted log level strings.
+var validLogLevels = map[string]bool{
+	"debug": true,
+	"info":  true,
+	"warn":  true,
+	"error": true,
+}
+
+// Validate checks the Config fields for invalid values and returns an error
+// describing the first problem found. It should be called after flag parsing
+// and environment variable resolution, before initializing dependent components.
+func (c *Config) Validate() error {
+	if c.MaxConnections < 1 {
+		return fmt.Errorf("max_connections must be >= 1, got %d", c.MaxConnections)
+	}
+	if c.RequestTimeout <= 0 {
+		return fmt.Errorf("request_timeout must be > 0, got %s", c.RequestTimeout)
+	}
+	if c.PeekTimeout <= 0 {
+		return fmt.Errorf("peek_timeout must be > 0, got %s", c.PeekTimeout)
+	}
+	if c.LogLevel != "" && !validLogLevels[strings.ToLower(c.LogLevel)] {
+		return fmt.Errorf("invalid log level: %q (must be debug, info, warn, or error)", c.LogLevel)
+	}
+	if c.LogFormat != "" && c.LogFormat != "text" && c.LogFormat != "json" {
+		return fmt.Errorf("invalid log format: %q (must be text or json)", c.LogFormat)
+	}
+	if c.RetentionMaxSessions < 0 {
+		return fmt.Errorf("retention_max_sessions must be >= 0, got %d", c.RetentionMaxSessions)
+	}
+	if c.RetentionMaxAge < 0 {
+		return fmt.Errorf("retention_max_age must be >= 0, got %s", c.RetentionMaxAge)
+	}
+	if c.CleanupInterval < 0 {
+		return fmt.Errorf("cleanup_interval must be >= 0, got %s", c.CleanupInterval)
+	}
+	return nil
+}
+
 // Config holds the application configuration.
 type Config struct {
 	// ListenAddr is the TCP address the proxy listens on.

@@ -9,6 +9,197 @@ import (
 	"time"
 )
 
+func TestValidate_DefaultConfig(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Default().Validate() = %v, want nil", err)
+	}
+}
+
+func TestValidate_InvalidFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		modify func(c *Config)
+		errSub string
+	}{
+		{
+			name:   "max_connections zero",
+			modify: func(c *Config) { c.MaxConnections = 0 },
+			errSub: "max_connections must be >= 1",
+		},
+		{
+			name:   "max_connections negative",
+			modify: func(c *Config) { c.MaxConnections = -5 },
+			errSub: "max_connections must be >= 1",
+		},
+		{
+			name:   "request_timeout zero",
+			modify: func(c *Config) { c.RequestTimeout = 0 },
+			errSub: "request_timeout must be > 0",
+		},
+		{
+			name:   "request_timeout negative",
+			modify: func(c *Config) { c.RequestTimeout = -time.Second },
+			errSub: "request_timeout must be > 0",
+		},
+		{
+			name:   "peek_timeout zero",
+			modify: func(c *Config) { c.PeekTimeout = 0 },
+			errSub: "peek_timeout must be > 0",
+		},
+		{
+			name:   "peek_timeout negative",
+			modify: func(c *Config) { c.PeekTimeout = -time.Millisecond },
+			errSub: "peek_timeout must be > 0",
+		},
+		{
+			name:   "invalid log level",
+			modify: func(c *Config) { c.LogLevel = "verbose" },
+			errSub: "invalid log level",
+		},
+		{
+			name:   "invalid log level trace",
+			modify: func(c *Config) { c.LogLevel = "trace" },
+			errSub: "invalid log level",
+		},
+		{
+			name:   "invalid log format",
+			modify: func(c *Config) { c.LogFormat = "xml" },
+			errSub: "invalid log format",
+		},
+		{
+			name:   "invalid log format yaml",
+			modify: func(c *Config) { c.LogFormat = "yaml" },
+			errSub: "invalid log format",
+		},
+		{
+			name:   "retention_max_sessions negative",
+			modify: func(c *Config) { c.RetentionMaxSessions = -1 },
+			errSub: "retention_max_sessions must be >= 0",
+		},
+		{
+			name:   "retention_max_age negative",
+			modify: func(c *Config) { c.RetentionMaxAge = -time.Hour },
+			errSub: "retention_max_age must be >= 0",
+		},
+		{
+			name:   "cleanup_interval negative",
+			modify: func(c *Config) { c.CleanupInterval = -time.Minute },
+			errSub: "cleanup_interval must be >= 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			tt.modify(cfg)
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.errSub) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tt.errSub)
+			}
+		})
+	}
+}
+
+func TestValidate_ValidFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		modify func(c *Config)
+	}{
+		{
+			name:   "max_connections is 1",
+			modify: func(c *Config) { c.MaxConnections = 1 },
+		},
+		{
+			name:   "max_connections large value",
+			modify: func(c *Config) { c.MaxConnections = 10000 },
+		},
+		{
+			name:   "log level debug",
+			modify: func(c *Config) { c.LogLevel = "debug" },
+		},
+		{
+			name:   "log level info",
+			modify: func(c *Config) { c.LogLevel = "info" },
+		},
+		{
+			name:   "log level warn",
+			modify: func(c *Config) { c.LogLevel = "warn" },
+		},
+		{
+			name:   "log level error",
+			modify: func(c *Config) { c.LogLevel = "error" },
+		},
+		{
+			name:   "log level empty (default)",
+			modify: func(c *Config) { c.LogLevel = "" },
+		},
+		{
+			name:   "log level case insensitive DEBUG",
+			modify: func(c *Config) { c.LogLevel = "DEBUG" },
+		},
+		{
+			name:   "log level case insensitive Info",
+			modify: func(c *Config) { c.LogLevel = "Info" },
+		},
+		{
+			name:   "log format text",
+			modify: func(c *Config) { c.LogFormat = "text" },
+		},
+		{
+			name:   "log format json",
+			modify: func(c *Config) { c.LogFormat = "json" },
+		},
+		{
+			name:   "log format empty (default)",
+			modify: func(c *Config) { c.LogFormat = "" },
+		},
+		{
+			name:   "retention_max_sessions zero (unlimited)",
+			modify: func(c *Config) { c.RetentionMaxSessions = 0 },
+		},
+		{
+			name:   "retention_max_sessions positive",
+			modify: func(c *Config) { c.RetentionMaxSessions = 1000 },
+		},
+		{
+			name:   "retention_max_age zero (unlimited)",
+			modify: func(c *Config) { c.RetentionMaxAge = 0 },
+		},
+		{
+			name:   "retention_max_age positive",
+			modify: func(c *Config) { c.RetentionMaxAge = 24 * time.Hour },
+		},
+		{
+			name:   "cleanup_interval zero (disabled)",
+			modify: func(c *Config) { c.CleanupInterval = 0 },
+		},
+		{
+			name:   "cleanup_interval positive",
+			modify: func(c *Config) { c.CleanupInterval = 30 * time.Minute },
+		},
+		{
+			name:   "minimal valid non-default timeouts",
+			modify: func(c *Config) { c.PeekTimeout = time.Nanosecond; c.RequestTimeout = time.Nanosecond },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			tt.modify(cfg)
+
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestDefault_InsecureSkipVerifyIsFalse(t *testing.T) {
 	cfg := Default()
 	if cfg.InsecureSkipVerify {
