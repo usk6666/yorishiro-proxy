@@ -385,6 +385,11 @@ func TestHandle_GoroutineCleanupOnNormalClose(t *testing.T) {
 	// Verify that the context-monitoring goroutine in Handle() is reclaimed
 	// when the connection completes normally, without waiting for the parent
 	// context to be cancelled. This is a regression test for USK-176.
+	//
+	// Unlike other tests that use startTestProxy (which dispatches to
+	// handleRequest directly, bypassing Handle), this test passes accepted
+	// connections to handler.Handle() so the monitoring goroutine at the
+	// top of Handle() is actually spawned and its cleanup is verified.
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "ok")
@@ -399,8 +404,31 @@ func TestHandle_GoroutineCleanupOnNormalClose(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	// Start a TCP listener that passes connections to handler.Handle()
+	// directly (not through startTestProxy which bypasses Handle).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyCtx, proxyCancel := context.WithCancel(ctx)
 	defer proxyCancel()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				handler.Handle(proxyCtx, conn)
+			}()
+		}
+	}()
+	go func() {
+		<-proxyCtx.Done()
+		ln.Close()
+	}()
+	proxyAddr := ln.Addr().String()
 
 	// Record goroutine count before making connections.
 	before := runtime.NumGoroutine()
