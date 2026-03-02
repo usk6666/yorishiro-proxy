@@ -210,6 +210,39 @@ func isValidProjectNameRune(r rune) bool {
 		r == '-' || r == '_' || r == '.'
 }
 
+// TargetRuleConfig defines a single target scope rule in configuration files.
+// All non-empty/non-nil fields must match for the rule to apply (AND logic).
+type TargetRuleConfig struct {
+	// Hostname matches the target hostname (case-insensitive).
+	// Supports wildcard prefix "*.example.com" to match all subdomains.
+	Hostname string `json:"hostname"`
+
+	// Ports restricts the rule to specific port numbers.
+	// When nil or empty, all ports are matched.
+	Ports []int `json:"ports,omitempty"`
+
+	// PathPrefix matches the beginning of the request URL path (case-sensitive).
+	// When empty, all paths are matched.
+	PathPrefix string `json:"path_prefix,omitempty"`
+
+	// Schemes restricts the rule to specific URL schemes (e.g., "http", "https").
+	// When nil or empty, all schemes are matched.
+	Schemes []string `json:"schemes,omitempty"`
+}
+
+// TargetScopePolicyConfig defines the target scope policy rules loaded from
+// a config file or a dedicated policy file. These rules are immutable at runtime
+// and cannot be changed via MCP tools.
+type TargetScopePolicyConfig struct {
+	// Allows lists the rules that permit network access.
+	// When non-empty, only targets matching at least one allow rule are permitted.
+	Allows []TargetRuleConfig `json:"allows,omitempty"`
+
+	// Denies lists the rules that block network access.
+	// Deny rules take precedence over allow rules.
+	Denies []TargetRuleConfig `json:"denies,omitempty"`
+}
+
 // ProxyConfig holds the proxy configuration loaded from a JSON config file.
 // The JSON format is identical to the proxy_start tool's input format,
 // so users can reuse the same JSON structure for both file-based configuration
@@ -239,6 +272,12 @@ type ProxyConfig struct {
 
 	// UpstreamProxy is the upstream proxy URL for proxy chaining.
 	UpstreamProxy string `json:"upstream_proxy,omitempty"`
+
+	// TargetScopePolicy defines the immutable target scope policy rules.
+	// These rules control which network targets the proxy is allowed to access.
+	// When loaded from a config file, this section is ignored if a dedicated
+	// policy file is specified via -target-policy-file / YP_TARGET_POLICY_FILE.
+	TargetScopePolicy *TargetScopePolicyConfig `json:"target_scope_policy,omitempty"`
 }
 
 // LoadFile reads and parses a JSON config file from the given path.
@@ -260,4 +299,31 @@ func LoadFile(path string) (*ProxyConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+// LoadPolicyFile reads and parses a dedicated target scope policy JSON file.
+// The file format is the same as the target_scope_policy section in a config file:
+//
+//	{
+//	  "allows": [{"hostname": "*.target.com"}],
+//	  "denies": [{"hostname": "*.internal.corp"}]
+//	}
+//
+// It returns an error if the file does not exist or contains invalid JSON.
+func LoadPolicyFile(path string) (*TargetScopePolicyConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read policy file %s: %w", path, err)
+	}
+
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("parse policy file %s: invalid JSON", path)
+	}
+
+	var policy TargetScopePolicyConfig
+	if err := json.Unmarshal(data, &policy); err != nil {
+		return nil, fmt.Errorf("parse policy file %s: %w", path, err)
+	}
+
+	return &policy, nil
 }

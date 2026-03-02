@@ -542,3 +542,229 @@ func TestLoadFile_UnknownFieldsIgnored(t *testing.T) {
 		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, "127.0.0.1:9090")
 	}
 }
+
+func TestLoadFile_WithTargetScopePolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	content := `{
+		"listen_addr": "127.0.0.1:8080",
+		"target_scope_policy": {
+			"allows": [
+				{"hostname": "*.target.com", "ports": [80, 443]},
+				{"hostname": "api.staging.com", "path_prefix": "/v2/"}
+			],
+			"denies": [
+				{"hostname": "*.internal.corp"},
+				{"hostname": "169.254.169.254"}
+			]
+		}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+
+	if cfg.TargetScopePolicy == nil {
+		t.Fatal("TargetScopePolicy is nil, want non-nil")
+	}
+
+	if len(cfg.TargetScopePolicy.Allows) != 2 {
+		t.Fatalf("Allows = %d rules, want 2", len(cfg.TargetScopePolicy.Allows))
+	}
+	if cfg.TargetScopePolicy.Allows[0].Hostname != "*.target.com" {
+		t.Errorf("Allows[0].Hostname = %q, want %q", cfg.TargetScopePolicy.Allows[0].Hostname, "*.target.com")
+	}
+	if len(cfg.TargetScopePolicy.Allows[0].Ports) != 2 || cfg.TargetScopePolicy.Allows[0].Ports[0] != 80 {
+		t.Errorf("Allows[0].Ports = %v, want [80 443]", cfg.TargetScopePolicy.Allows[0].Ports)
+	}
+	if cfg.TargetScopePolicy.Allows[1].PathPrefix != "/v2/" {
+		t.Errorf("Allows[1].PathPrefix = %q, want %q", cfg.TargetScopePolicy.Allows[1].PathPrefix, "/v2/")
+	}
+
+	if len(cfg.TargetScopePolicy.Denies) != 2 {
+		t.Fatalf("Denies = %d rules, want 2", len(cfg.TargetScopePolicy.Denies))
+	}
+	if cfg.TargetScopePolicy.Denies[0].Hostname != "*.internal.corp" {
+		t.Errorf("Denies[0].Hostname = %q, want %q", cfg.TargetScopePolicy.Denies[0].Hostname, "*.internal.corp")
+	}
+}
+
+func TestLoadFile_WithoutTargetScopePolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	content := `{"listen_addr": "127.0.0.1:8080"}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+
+	if cfg.TargetScopePolicy != nil {
+		t.Errorf("TargetScopePolicy = %+v, want nil", cfg.TargetScopePolicy)
+	}
+}
+
+func TestLoadPolicyFile_Valid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+
+	content := `{
+		"allows": [
+			{"hostname": "*.target.com", "ports": [80, 443]},
+			{"hostname": "api.staging.com", "path_prefix": "/v2/", "schemes": ["https"]}
+		],
+		"denies": [
+			{"hostname": "*.internal.corp"},
+			{"hostname": "169.254.169.254"}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	policy, err := LoadPolicyFile(path)
+	if err != nil {
+		t.Fatalf("LoadPolicyFile: %v", err)
+	}
+
+	if len(policy.Allows) != 2 {
+		t.Fatalf("Allows = %d rules, want 2", len(policy.Allows))
+	}
+	if policy.Allows[0].Hostname != "*.target.com" {
+		t.Errorf("Allows[0].Hostname = %q, want %q", policy.Allows[0].Hostname, "*.target.com")
+	}
+	if len(policy.Allows[0].Ports) != 2 {
+		t.Errorf("Allows[0].Ports = %v, want [80 443]", policy.Allows[0].Ports)
+	}
+	if policy.Allows[1].PathPrefix != "/v2/" {
+		t.Errorf("Allows[1].PathPrefix = %q, want %q", policy.Allows[1].PathPrefix, "/v2/")
+	}
+	if len(policy.Allows[1].Schemes) != 1 || policy.Allows[1].Schemes[0] != "https" {
+		t.Errorf("Allows[1].Schemes = %v, want [https]", policy.Allows[1].Schemes)
+	}
+
+	if len(policy.Denies) != 2 {
+		t.Fatalf("Denies = %d rules, want 2", len(policy.Denies))
+	}
+	if policy.Denies[1].Hostname != "169.254.169.254" {
+		t.Errorf("Denies[1].Hostname = %q, want %q", policy.Denies[1].Hostname, "169.254.169.254")
+	}
+}
+
+func TestLoadPolicyFile_EmptyRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty-policy.json")
+
+	if err := os.WriteFile(path, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	policy, err := LoadPolicyFile(path)
+	if err != nil {
+		t.Fatalf("LoadPolicyFile: %v", err)
+	}
+
+	if len(policy.Allows) != 0 {
+		t.Errorf("Allows = %v, want empty", policy.Allows)
+	}
+	if len(policy.Denies) != 0 {
+		t.Errorf("Denies = %v, want empty", policy.Denies)
+	}
+}
+
+func TestLoadPolicyFile_AllowsOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "allows.json")
+
+	content := `{"allows": [{"hostname": "example.com"}]}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	policy, err := LoadPolicyFile(path)
+	if err != nil {
+		t.Fatalf("LoadPolicyFile: %v", err)
+	}
+
+	if len(policy.Allows) != 1 {
+		t.Fatalf("Allows = %d, want 1", len(policy.Allows))
+	}
+	if policy.Allows[0].Hostname != "example.com" {
+		t.Errorf("Allows[0].Hostname = %q, want %q", policy.Allows[0].Hostname, "example.com")
+	}
+	if len(policy.Denies) != 0 {
+		t.Errorf("Denies = %v, want empty", policy.Denies)
+	}
+}
+
+func TestLoadPolicyFile_DeniesOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "denies.json")
+
+	content := `{"denies": [{"hostname": "169.254.169.254"}]}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	policy, err := LoadPolicyFile(path)
+	if err != nil {
+		t.Fatalf("LoadPolicyFile: %v", err)
+	}
+
+	if len(policy.Allows) != 0 {
+		t.Errorf("Allows = %v, want empty", policy.Allows)
+	}
+	if len(policy.Denies) != 1 {
+		t.Fatalf("Denies = %d, want 1", len(policy.Denies))
+	}
+}
+
+func TestLoadPolicyFile_FileNotFound(t *testing.T) {
+	_, err := LoadPolicyFile("/nonexistent/policy.json")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file, got nil")
+	}
+	if !strings.Contains(err.Error(), "read policy file") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "read policy file")
+	}
+}
+
+func TestLoadPolicyFile_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invalid.json")
+
+	if err := os.WriteFile(path, []byte(`{not valid json`), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	_, err := LoadPolicyFile(path)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid JSON") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "invalid JSON")
+	}
+}
+
+func TestLoadPolicyFile_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+
+	if err := os.WriteFile(path, []byte(""), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	_, err := LoadPolicyFile(path)
+	if err == nil {
+		t.Fatal("expected error for empty file, got nil")
+	}
+}
