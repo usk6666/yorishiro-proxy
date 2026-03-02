@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -15,11 +14,13 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- M5 Integration Test Helpers ---
@@ -45,7 +46,7 @@ func setupM5HTTPEnv(t *testing.T, token string) *m5HTTPEnv {
 
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "m5-integration.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		cancel()
@@ -156,9 +157,9 @@ func newHTTPMCPClient(t *testing.T, ctx context.Context, addr, token string) *go
 	}
 
 	transport := &gomcp.StreamableClientTransport{
-		Endpoint:            fmt.Sprintf("http://%s/mcp", addr),
-		HTTPClient:          httpClient,
-		MaxRetries:          -1,   // disable retries for tests
+		Endpoint:             fmt.Sprintf("http://%s/mcp", addr),
+		HTTPClient:           httpClient,
+		MaxRetries:           -1,   // disable retries for tests
 		DisableStandaloneSSE: true, // simpler for tests
 	}
 
@@ -493,9 +494,9 @@ func TestM5_BearerTokenAuth_MCPClientConnect(t *testing.T) {
 		},
 	}
 	badTransport := &gomcp.StreamableClientTransport{
-		Endpoint:            fmt.Sprintf("http://%s/mcp", env.addr),
-		HTTPClient:          badHTTPClient,
-		MaxRetries:          -1,
+		Endpoint:             fmt.Sprintf("http://%s/mcp", env.addr),
+		HTTPClient:           badHTTPClient,
+		MaxRetries:           -1,
 		DisableStandaloneSSE: true,
 	}
 	badClient := gomcp.NewClient(&gomcp.Implementation{
@@ -759,7 +760,7 @@ func TestM5_StdioAndHTTP_SharedState(t *testing.T) {
 
 	// Create shared components.
 	dbPath := filepath.Join(t.TempDir(), "m5-dual.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)

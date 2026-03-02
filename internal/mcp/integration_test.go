@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/url"
@@ -15,11 +14,13 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // testEnv holds all the components needed for an MCP integration test.
@@ -48,7 +49,7 @@ func setupIntegrationEnvWithOpts(t *testing.T, opts ...ServerOption) *testEnv {
 
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "integration.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -112,7 +113,7 @@ func setupIntegrationEnvWithScopeAndPassthrough(t *testing.T) *testEnv {
 
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "integration.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)

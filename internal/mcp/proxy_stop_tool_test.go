@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 func TestProxyStop_Success(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -54,7 +56,7 @@ func TestProxyStop_Success(t *testing.T) {
 }
 
 func TestProxyStop_NotRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 

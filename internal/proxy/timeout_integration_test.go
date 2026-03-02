@@ -3,8 +3,6 @@ package proxy_test
 import (
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"path/filepath"
@@ -17,6 +15,7 @@ import (
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // startProxyWithTimeouts creates a proxy with configurable peek and request timeouts.
@@ -31,7 +30,7 @@ func startProxyWithTimeouts(
 ) (*proxy.Listener, context.CancelFunc) {
 	t.Helper()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	httpHandler := protohttp.NewHandler(store, issuer, logger)
 	if requestTimeout > 0 {
 		httpHandler.SetRequestTimeout(requestTimeout)
@@ -74,7 +73,7 @@ func TestIntegration_TimeoutIdleConnection(t *testing.T) {
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -134,7 +133,7 @@ func TestIntegration_TimeoutPartialHTTPHeaders(t *testing.T) {
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -236,7 +235,7 @@ func TestIntegration_TimeoutKeepAliveIdle(t *testing.T) {
 	upstreamAddr := upstreamListener.Addr().String()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -312,7 +311,7 @@ func TestIntegration_TimeoutSlowTLSHandshake(t *testing.T) {
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -393,7 +392,7 @@ func TestIntegration_TimeoutStallAfterCONNECT(t *testing.T) {
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -489,7 +488,7 @@ func TestIntegration_TimeoutProxyStillHealthy(t *testing.T) {
 	upstreamAddr := upstreamListener.Addr().String()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)

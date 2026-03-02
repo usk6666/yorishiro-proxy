@@ -13,11 +13,12 @@ import (
 	"time"
 
 	interceptPkg "github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 func TestSetInsecureSkipVerify_EnablesSkipVerify(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	handler.SetInsecureSkipVerify(true)
 
@@ -31,7 +32,7 @@ func TestSetInsecureSkipVerify_EnablesSkipVerify(t *testing.T) {
 
 func TestSetInsecureSkipVerify_FalseDoesNotModifyTransport(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	handler.SetInsecureSkipVerify(false)
 
@@ -43,7 +44,7 @@ func TestSetInsecureSkipVerify_FalseDoesNotModifyTransport(t *testing.T) {
 
 func TestSetInsecureSkipVerify_PreservesExistingTLSConfig(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Pre-set a TLSClientConfig with a custom field.
 	handler.transport.TLSClientConfig = &tls.Config{
@@ -62,7 +63,7 @@ func TestSetInsecureSkipVerify_PreservesExistingTLSConfig(t *testing.T) {
 
 func TestNewHandler_DefaultTransportHasNoInsecureSkipVerify(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Default transport should not have TLSClientConfig set.
 	if handler.transport.TLSClientConfig != nil {
@@ -80,7 +81,7 @@ func TestInsecureSkipVerify_HTTPForwardToSelfSignedServer(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Enable InsecureSkipVerify so the handler can connect to the self-signed upstream.
 	handler.SetInsecureSkipVerify(true)
@@ -135,7 +136,7 @@ func TestInsecureSkipVerify_HTTPSConnectToSelfSignedServer(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	// Use SetInsecureSkipVerify instead of manually setting transport.
 	handler.SetInsecureSkipVerify(true)
@@ -186,7 +187,7 @@ func TestWithoutInsecureSkipVerify_SelfSignedServerFails(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 	// Do NOT set InsecureSkipVerify — default transport should reject self-signed cert.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -327,9 +328,9 @@ func TestApplyInterceptModifications_CRLFValidation(t *testing.T) {
 			errContains:     "CR/LF",
 		},
 		{
-			name:       "add header value with LF",
-			addHeaders: map[string]string{"X-Add": "val\nue"},
-			wantErr:    true,
+			name:        "add header value with LF",
+			addHeaders:  map[string]string{"X-Add": "val\nue"},
+			wantErr:     true,
 			errContains: "CR/LF",
 		},
 		{

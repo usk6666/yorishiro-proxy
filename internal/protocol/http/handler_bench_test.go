@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 func BenchmarkHTTPForwardProxy(b *testing.B) {
@@ -23,7 +25,7 @@ func BenchmarkHTTPForwardProxy(b *testing.B) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -71,7 +73,7 @@ func BenchmarkHTTPForwardProxy_KeepAlive(b *testing.B) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -131,7 +133,7 @@ func BenchmarkHTTPForwardProxy_BodySizes(b *testing.B) {
 			defer upstream.Close()
 
 			store := &mockStore{}
-			handler := NewHandler(store, nil, testLogger())
+			handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

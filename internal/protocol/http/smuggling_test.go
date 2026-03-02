@@ -13,11 +13,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
 
-func smugglingTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
+)
 
 func TestCheckRequestSmuggling_CLTEConflict(t *testing.T) {
 	tests := []struct {
@@ -72,7 +70,7 @@ func TestCheckRequestSmuggling_CLTEConflict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := bufio.NewReader(strings.NewReader(tt.rawRequest))
-			logger := smugglingTestLogger()
+			logger := testutil.DiscardLogger()
 
 			flags := checkRequestSmuggling(reader, logger)
 
@@ -161,7 +159,7 @@ func TestCheckRequestSmuggling_AmbiguousTE(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := bufio.NewReader(strings.NewReader(tt.rawRequest))
-			logger := smugglingTestLogger()
+			logger := testutil.DiscardLogger()
 
 			flags := checkRequestSmuggling(reader, logger)
 
@@ -553,7 +551,7 @@ func TestReadRequestAfterSmugglingCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := bufio.NewReader(strings.NewReader(tt.rawRequest))
-			logger := smugglingTestLogger()
+			logger := testutil.DiscardLogger()
 
 			// Run smuggling check first.
 			checkRequestSmuggling(reader, logger)
@@ -588,7 +586,7 @@ func TestSmugglingDetection_EndToEnd_HTTP(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -643,7 +641,7 @@ func TestSmugglingDetection_DuplicateCL_DifferentValues(t *testing.T) {
 	raw := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\n"
 
 	reader := bufio.NewReader(strings.NewReader(raw))
-	logger := smugglingTestLogger()
+	logger := testutil.DiscardLogger()
 
 	// Smuggling check runs first.
 	checkRequestSmuggling(reader, logger)
@@ -665,7 +663,7 @@ func TestSmugglingDetection_DuplicateCL_SameValues(t *testing.T) {
 	raw := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello"
 
 	reader := bufio.NewReader(strings.NewReader(raw))
-	logger := smugglingTestLogger()
+	logger := testutil.DiscardLogger()
 
 	checkRequestSmuggling(reader, logger)
 
@@ -685,7 +683,7 @@ func TestSmugglingDetection_GoStdlib_CLTE_Handling(t *testing.T) {
 	raw := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
 
 	reader := bufio.NewReader(strings.NewReader(raw))
-	logger := smugglingTestLogger()
+	logger := testutil.DiscardLogger()
 
 	flags := checkRequestSmuggling(reader, logger)
 
