@@ -1,6 +1,6 @@
 # yorishiro-proxy
 
-**Status**: Proprietary / In Development
+**Status**: Open Source (Apache License 2.0)
 
 AI agent network proxy -- a MITM proxy tool for AI.
 Runs as an MCP (Model Context Protocol) server and provides traffic interception, recording, and replay capabilities for vulnerability assessment.
@@ -135,4 +135,4 @@ Layer 4 TCP Listener
 
 ## License
 
-Proprietary. This software is not open source and is not licensed for redistribution.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full license text.
