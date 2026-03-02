@@ -9,11 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
-
-// maxBodyRecordSize limits the body size recorded per message to 1MB.
-const maxBodyRecordSize = 1 << 20
 
 // Handler processes gRPC sessions recorded from HTTP/2 streams.
 // It is not a standalone ProtocolHandler — it is invoked by the HTTP/2 handler
@@ -229,8 +227,8 @@ func (h *Handler) recordSendMessages(
 		}
 
 		body := frame.Payload
-		if len(body) > maxBodyRecordSize {
-			msg.Body = body[:maxBodyRecordSize]
+		if len(body) > int(config.MaxBodySize) {
+			msg.Body = body[:int(config.MaxBodySize)]
 			msg.BodyTruncated = true
 		} else {
 			msg.Body = body
@@ -303,8 +301,8 @@ func (h *Handler) recordReceiveMessages(
 		}
 
 		body := frame.Payload
-		if len(body) > maxBodyRecordSize {
-			msg.Body = body[:maxBodyRecordSize]
+		if len(body) > int(config.MaxBodySize) {
+			msg.Body = body[:int(config.MaxBodySize)]
 			msg.BodyTruncated = true
 		} else {
 			msg.Body = body
