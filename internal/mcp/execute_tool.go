@@ -375,6 +375,17 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		}
 	}
 
+	// Target scope enforcement: check the final target URL.
+	if err := s.checkTargetScopeURL(targetURL); err != nil {
+		return nil, nil, err
+	}
+	// Also check override_host if specified (actual TCP connection target).
+	if params.OverrideHost != "" {
+		if err := s.checkTargetScopeAddr(targetURL.Scheme, params.OverrideHost); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// Validate header overrides for CRLF injection (CWE-113).
 	if err := validateResendHeaders(params); err != nil {
 		return nil, nil, err
@@ -672,7 +683,7 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 		return http.ErrUseLastResponse
 	}
 	if params.FollowRedirects != nil && *params.FollowRedirects {
-		checkRedirect = safeCheckRedirect
+		checkRedirect = targetScopeCheckRedirect(s.targetScope)
 	}
 
 	return &http.Client{
@@ -747,6 +758,14 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		return nil, nil, fmt.Errorf("session %s has no raw request bytes", params.SessionID)
 	}
 
+	// Target scope enforcement: check the session's URL before any processing.
+	// This ensures dry-run mode cannot bypass scope checks.
+	if sendMsg.URL != nil {
+		if err := s.checkTargetScopeURL(sendMsg.URL); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// Build the raw bytes to send, applying patches or override.
 	rawBytes, patchCount, err := buildResendRawBytes(sendMsg.RawBytes, params)
 	if err != nil {
@@ -782,6 +801,16 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 			}
 		}
 		targetAddr = net.JoinHostPort(host, port)
+	}
+
+	// Target scope enforcement: check the target address.
+	// For resend_raw we only have hostname + port (no scheme/path).
+	scheme := ""
+	if sess.Protocol == "HTTPS" {
+		scheme = "https"
+	}
+	if err := s.checkTargetScopeAddr(scheme, targetAddr); err != nil {
+		return nil, nil, err
 	}
 
 	// Determine whether to use TLS.
@@ -1106,10 +1135,6 @@ func (s *Server) handleExecuteDrop(_ context.Context, params executeParams) (*go
 // When hooks are configured, they are passed to the fuzzer as callbacks
 // that execute at each iteration.
 func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *fuzzer.AsyncResult, error) {
-	if s.fuzzRunner == nil {
-		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
-	}
-
 	if params.SessionID == "" {
 		return nil, nil, fmt.Errorf("session_id is required for fuzz action")
 	}
@@ -1123,6 +1148,32 @@ func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*
 	// Validate hooks if present.
 	if err := validateHooks(params.Hooks); err != nil {
 		return nil, nil, fmt.Errorf("invalid hooks: %w", err)
+	}
+
+	// Target scope enforcement: check the template session's URL before starting fuzz.
+	// This check runs before the fuzz runner initialization check to enforce
+	// security boundaries early (deny-first).
+	if s.targetScope != nil && s.targetScope.HasRules() {
+		if s.store == nil {
+			return nil, nil, fmt.Errorf("session store is not initialized")
+		}
+		templateSess, err := s.store.GetSession(ctx, params.SessionID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get template session for target scope check: %w", err)
+		}
+		sendMsgs, err := s.store.GetMessages(ctx, templateSess.ID, session.MessageListOptions{Direction: "send"})
+		if err != nil {
+			return nil, nil, fmt.Errorf("get send messages for target scope check: %w", err)
+		}
+		if len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
+			if err := s.checkTargetScopeURL(sendMsgs[0].URL); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	if s.fuzzRunner == nil {
+		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 
 	cfg := fuzzer.RunConfig{
