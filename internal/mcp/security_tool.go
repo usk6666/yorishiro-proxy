@@ -52,13 +52,15 @@ func (s *Server) registerSecurity() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "security",
 		Description: "Configure runtime security settings including target scope rules. " +
-			"This tool is separate from 'configure' to allow MCP clients to apply different " +
-			"approval policies (e.g., manual approval for security changes). " +
+			"Target scope uses a two-layer architecture: Policy Layer (immutable, set by config) " +
+			"and Agent Layer (mutable via this tool). This tool only modifies Agent Layer rules; " +
+			"Policy Layer rules are read-only. Agent allow rules must fall within the Policy " +
+			"allow boundary. " +
 			"Available actions: " +
-			"'set_target_scope' replaces all allow/deny rules (use empty arrays to clear rules and return to open mode); " +
-			"'update_target_scope' applies incremental add/remove changes to allow/deny rules; " +
-			"'get_target_scope' returns current rules and enforcement mode (open or enforcing); " +
-			"'test_target' checks a URL against current rules without making a request (dry run).",
+			"'set_target_scope' replaces all Agent Layer allow/deny rules (use empty arrays to clear rules); " +
+			"'update_target_scope' applies incremental add/remove changes to Agent Layer rules; " +
+			"'get_target_scope' returns Policy and Agent Layer rules with enforcement mode; " +
+			"'test_target' checks a URL against current rules and reports which layer decided.",
 	}, s.handleSecurity)
 }
 
@@ -89,19 +91,42 @@ type setTargetScopeResult struct {
 }
 
 // getTargetScopeResult is the structured output for get_target_scope.
+// It separates Policy Layer and Agent Layer rules into nested objects.
 type getTargetScopeResult struct {
-	Allows       []proxy.TargetRule `json:"allows"`
-	Denies       []proxy.TargetRule `json:"denies"`
-	PolicyAllows []proxy.TargetRule `json:"policy_allows"`
-	PolicyDenies []proxy.TargetRule `json:"policy_denies"`
-	Mode         string             `json:"mode"`
+	Policy        policyLayerResult `json:"policy"`
+	Agent         agentLayerResult  `json:"agent"`
+	EffectiveMode string            `json:"effective_mode"`
+}
+
+// policyLayerResult represents the immutable Policy Layer in get_target_scope output.
+type policyLayerResult struct {
+	Allows    []proxy.TargetRule `json:"allows"`
+	Denies    []proxy.TargetRule `json:"denies"`
+	Source    string             `json:"source"`
+	Immutable bool              `json:"immutable"`
+}
+
+// agentLayerResult represents the mutable Agent Layer in get_target_scope output.
+type agentLayerResult struct {
+	Allows []proxy.TargetRule `json:"allows"`
+	Denies []proxy.TargetRule `json:"denies"`
 }
 
 // testTargetResult is the structured output for test_target.
 type testTargetResult struct {
-	Allowed     bool              `json:"allowed"`
-	Reason      string            `json:"reason"`
-	MatchedRule *proxy.TargetRule `json:"matched_rule"`
+	Allowed      bool              `json:"allowed"`
+	Reason       string            `json:"reason"`
+	Layer        string            `json:"layer"`
+	MatchedRule  *proxy.TargetRule `json:"matched_rule"`
+	TestedTarget *testedTarget     `json:"tested_target"`
+}
+
+// testedTarget describes the parsed URL components that were evaluated.
+type testedTarget struct {
+	Hostname string `json:"hostname"`
+	Port     int    `json:"port"`
+	Scheme   string `json:"scheme"`
+	Path     string `json:"path"`
 }
 
 // handleSetTargetScope replaces all agent allow and deny rules.
@@ -134,6 +159,8 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 }
 
 // handleUpdateTargetScope applies delta add/remove changes to agent rules.
+// If remove_denies contains rules that match policy deny rules, an error is returned
+// because policy denies are immutable and cannot be removed via the agent layer.
 func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
 	if s.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
@@ -144,6 +171,11 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 		return nil, nil, err
 	}
 	if err := validateTargetRules("add_denies", params.AddDenies); err != nil {
+		return nil, nil, err
+	}
+
+	// Reject removal of policy deny rules.
+	if err := validateNotPolicyDenies(s.targetScope, toTargetRules(params.RemoveDenies)); err != nil {
 		return nil, nil, err
 	}
 
@@ -165,20 +197,32 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 	}, nil
 }
 
-// handleGetTargetScope returns the current rules and mode.
+// handleGetTargetScope returns the current Policy and Agent layer rules and mode.
 func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
 	if s.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
-	allows, denies := s.targetScope.AgentRules()
+	agentAllows, agentDenies := s.targetScope.AgentRules()
 	policyAllows, policyDenies := s.targetScope.PolicyRules()
+
+	source := "none"
+	if s.targetScope.HasPolicyRules() {
+		source = "config file"
+	}
+
 	return nil, &getTargetScopeResult{
-		Allows:       ensureNonNilRules(allows),
-		Denies:       ensureNonNilRules(denies),
-		PolicyAllows: ensureNonNilRules(policyAllows),
-		PolicyDenies: ensureNonNilRules(policyDenies),
-		Mode:         targetScopeMode(s.targetScope),
+		Policy: policyLayerResult{
+			Allows:    ensureNonNilRules(policyAllows),
+			Denies:    ensureNonNilRules(policyDenies),
+			Source:    source,
+			Immutable: true,
+		},
+		Agent: agentLayerResult{
+			Allows: ensureNonNilRules(agentAllows),
+			Denies: ensureNonNilRules(agentDenies),
+		},
+		EffectiveMode: targetScopeMode(s.targetScope),
 	}, nil
 }
 
@@ -199,19 +243,31 @@ func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult,
 
 	allowed, reason := s.targetScope.CheckURL(u)
 
-	// Find the matched rule by re-checking against each rule.
-	matchedRule := findMatchedRule(s.targetScope, u, allowed)
+	// Find the matched rule and determine which layer decided.
+	matchedRule, layer := findMatchedRuleAndLayer(s.targetScope, u, allowed, reason)
+
+	scheme := strings.ToLower(u.Scheme)
+	port := targetDefaultPort(scheme, u.Port())
 
 	return nil, &testTargetResult{
 		Allowed:     allowed,
 		Reason:      reason,
+		Layer:       layer,
 		MatchedRule: matchedRule,
+		TestedTarget: &testedTarget{
+			Hostname: u.Hostname(),
+			Port:     port,
+			Scheme:   scheme,
+			Path:     u.Path,
+		},
 	}, nil
 }
 
-// findMatchedRule identifies which rule caused the allow/deny decision.
-// It re-checks the URL against each rule in both layers to find the first match.
-func findMatchedRule(ts *proxy.TargetScope, u *url.URL, allowed bool) *proxy.TargetRule {
+// findMatchedRuleAndLayer identifies which rule caused the allow/deny decision
+// and which layer (policy or agent) made the decision.
+// The reason string from CheckTarget is used to determine the layer when no
+// specific deny rule matched (i.e., "not in X allow list" cases).
+func findMatchedRuleAndLayer(ts *proxy.TargetScope, u *url.URL, allowed bool, reason string) (*proxy.TargetRule, string) {
 	policyAllows, policyDenies := ts.PolicyRules()
 	agentAllows, agentDenies := ts.AgentRules()
 
@@ -225,18 +281,18 @@ func findMatchedRule(ts *proxy.TargetScope, u *url.URL, allowed bool) *proxy.Tar
 		for _, rule := range policyDenies {
 			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
 				r := rule
-				return &r
+				return &r, "policy"
 			}
 		}
 		for _, rule := range agentDenies {
 			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
 				r := rule
-				return &r
+				return &r, "agent"
 			}
 		}
-		// If not found in denies but blocked, it's because no allow rule matched.
-		// There's no specific matched rule to return.
-		return nil
+		// No specific deny rule matched — blocked because not in allow list.
+		// Use the reason string to determine the layer.
+		return nil, layerFromReason(reason)
 	}
 
 	// If allowed and there are agent allow rules, find the matching agent allow rule.
@@ -244,7 +300,7 @@ func findMatchedRule(ts *proxy.TargetScope, u *url.URL, allowed bool) *proxy.Tar
 		for _, rule := range agentAllows {
 			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
 				r := rule
-				return &r
+				return &r, "agent"
 			}
 		}
 	}
@@ -254,13 +310,76 @@ func findMatchedRule(ts *proxy.TargetScope, u *url.URL, allowed bool) *proxy.Tar
 		for _, rule := range policyAllows {
 			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
 				r := rule
-				return &r
+				return &r, "policy"
 			}
 		}
 	}
 
 	// Allowed because no allow rules exist (open mode) — no specific matched rule.
+	return nil, ""
+}
+
+// layerFromReason determines the layer from the reason string returned by CheckTarget.
+func layerFromReason(reason string) string {
+	switch {
+	case strings.Contains(reason, "policy"):
+		return "policy"
+	case strings.Contains(reason, "agent"):
+		return "agent"
+	default:
+		return ""
+	}
+}
+
+// validateNotPolicyDenies checks that none of the rules to remove match policy deny rules.
+// Returns an error if a remove_denies rule matches a policy deny rule, because policy
+// deny rules are immutable and cannot be removed via the agent layer.
+func validateNotPolicyDenies(ts *proxy.TargetScope, removeDenies []proxy.TargetRule) error {
+	if len(removeDenies) == 0 {
+		return nil
+	}
+
+	_, policyDenies := ts.PolicyRules()
+	if len(policyDenies) == 0 {
+		return nil
+	}
+
+	for _, rem := range removeDenies {
+		for _, pd := range policyDenies {
+			if targetRuleMatchesLocal(rem, pd) {
+				return fmt.Errorf("cannot remove policy deny rule %q: policy rules are immutable", rem.Hostname)
+			}
+		}
+	}
 	return nil
+}
+
+// targetRuleMatchesLocal checks if two target rules are equivalent.
+// Comparison is case-insensitive for hostname and schemes.
+func targetRuleMatchesLocal(a, b proxy.TargetRule) bool {
+	if !strings.EqualFold(a.Hostname, b.Hostname) {
+		return false
+	}
+	if a.PathPrefix != b.PathPrefix {
+		return false
+	}
+	if len(a.Ports) != len(b.Ports) {
+		return false
+	}
+	for i := range a.Ports {
+		if a.Ports[i] != b.Ports[i] {
+			return false
+		}
+	}
+	if len(a.Schemes) != len(b.Schemes) {
+		return false
+	}
+	for i := range a.Schemes {
+		if !strings.EqualFold(a.Schemes[i], b.Schemes[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // matchTargetRuleFields checks if a target matches a single TargetRule.

@@ -64,6 +64,13 @@ var helpResources = []resourceDef{
 		mimeType:    "text/markdown",
 		filename:    "resources/help_examples.md",
 	},
+	{
+		uri:         "yorishiro://help/security",
+		name:        "help_security",
+		description: "Two-layer target scope architecture, action syntax, and usage examples for the security tool.",
+		mimeType:    "text/markdown",
+		filename:    "resources/help_security.md",
+	},
 }
 
 // schemaResources lists all JSON Schema resources.
