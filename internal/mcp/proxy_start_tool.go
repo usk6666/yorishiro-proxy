@@ -133,7 +133,7 @@ func (s *Server) registerProxyStart() {
 
 // handleProxyStart handles the proxy_start tool invocation.
 func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest, input proxyStartInput) (*gomcp.CallToolResult, *proxyStartResult, error) {
-	if s.manager == nil {
+	if s.deps.manager == nil {
 		return nil, nil, fmt.Errorf("proxy manager is not initialized")
 	}
 
@@ -187,10 +187,10 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		if err := validateTCPForwards(input.TCPForwards); err != nil {
 			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
 		}
-		if s.tcpHandler == nil {
+		if s.deps.tcpHandler == nil {
 			return nil, nil, fmt.Errorf("tcp_forwards: TCP handler is not initialized")
 		}
-		s.tcpForwards = input.TCPForwards
+		s.deps.tcpForwards = input.TCPForwards
 	}
 
 	// Validate and store enabled protocols if provided.
@@ -198,7 +198,7 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		if err := validateProtocols(input.Protocols); err != nil {
 			return nil, nil, fmt.Errorf("protocols: %w", err)
 		}
-		s.enabledProtocols = input.Protocols
+		s.deps.enabledProtocols = input.Protocols
 	}
 
 	// Apply connection limits and timeouts if provided.
@@ -207,14 +207,14 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		if n < minMaxConnections || n > maxMaxConnections {
 			return nil, nil, fmt.Errorf("max_connections must be between %d and %d, got %d", minMaxConnections, maxMaxConnections, n)
 		}
-		s.manager.SetMaxConnections(n)
+		s.deps.manager.SetMaxConnections(n)
 	}
 	if input.PeekTimeoutMs != nil {
 		ms := *input.PeekTimeoutMs
 		if ms < minTimeoutMs || ms > maxTimeoutMs {
 			return nil, nil, fmt.Errorf("peek_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
 		}
-		s.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
+		s.deps.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
 	}
 	if input.RequestTimeoutMs != nil {
 		ms := *input.RequestTimeoutMs
@@ -230,7 +230,7 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		listenerName = proxy.DefaultListenerName
 	}
 
-	if err := s.manager.StartNamed(s.appCtx, listenerName, input.ListenAddr); err != nil {
+	if err := s.deps.manager.StartNamed(s.deps.appCtx, listenerName, input.ListenAddr); err != nil {
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
 	}
 
@@ -238,19 +238,19 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	if len(input.TCPForwards) > 0 {
 		// Update the TCP handler's forward mappings so it knows which
 		// upstream to connect to for each local port.
-		s.tcpHandler.SetForwards(input.TCPForwards)
+		s.deps.tcpHandler.SetForwards(input.TCPForwards)
 
-		if err := s.manager.StartTCPForwardsNamed(s.appCtx, listenerName, input.TCPForwards, s.tcpHandler); err != nil {
+		if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, input.TCPForwards, s.deps.tcpHandler); err != nil {
 			// Stop the listener since forward listeners failed.
-			s.manager.StopNamed(ctx, listenerName)
+			s.deps.manager.StopNamed(ctx, listenerName)
 			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
 		}
 	}
 
-	_, addr := s.manager.Status()
+	_, addr := s.deps.manager.Status()
 	// For named listeners that are not the default, get address from ListenerStatuses.
 	if listenerName != proxy.DefaultListenerName {
-		statuses := s.manager.ListenerStatuses()
+		statuses := s.deps.manager.ListenerStatuses()
 		for _, st := range statuses {
 			if st.Name == listenerName {
 				addr = st.ListenAddr
@@ -291,7 +291,7 @@ func validateLoopbackAddr(addr string) error {
 
 // applyCaptureScope validates and sets the capture scope rules from the input.
 func (s *Server) applyCaptureScope(input *captureScopeInput) error {
-	if s.scope == nil {
+	if s.deps.scope == nil {
 		return fmt.Errorf("capture scope is not initialized")
 	}
 
@@ -310,7 +310,7 @@ func (s *Server) applyCaptureScope(input *captureScopeInput) error {
 	includes := toScopeRules(input.Includes)
 	excludes := toScopeRules(input.Excludes)
 
-	s.scope.SetRules(includes, excludes)
+	s.deps.scope.SetRules(includes, excludes)
 	return nil
 }
 
@@ -366,10 +366,10 @@ func validateProtocols(protocols []string) error {
 // Fields explicitly provided by the caller (non-zero values) take precedence
 // over config file defaults.
 func (s *Server) applyProxyDefaults(input *proxyStartInput) {
-	if s.proxyDefaults == nil {
+	if s.deps.proxyDefaults == nil {
 		return
 	}
-	d := s.proxyDefaults
+	d := s.deps.proxyDefaults
 
 	if input.ListenAddr == "" && d.ListenAddr != "" {
 		input.ListenAddr = d.ListenAddr
@@ -418,12 +418,12 @@ func (s *Server) applyUpstreamProxy(rawURL string) error {
 	}
 
 	// Store in manager for status reporting.
-	if s.manager != nil {
-		s.manager.SetUpstreamProxy(rawURL)
+	if s.deps.manager != nil {
+		s.deps.manager.SetUpstreamProxy(rawURL)
 	}
 
 	// Apply to all registered protocol handlers.
-	for _, setter := range s.upstreamProxySetters {
+	for _, setter := range s.deps.upstreamProxySetters {
 		setter.SetUpstreamProxy(proxyURL)
 	}
 
@@ -432,7 +432,7 @@ func (s *Server) applyUpstreamProxy(rawURL string) error {
 
 // applyTLSPassthrough validates and adds the TLS passthrough patterns.
 func (s *Server) applyTLSPassthrough(patterns []string) error {
-	if s.passthrough == nil {
+	if s.deps.passthrough == nil {
 		return fmt.Errorf("TLS passthrough list is not initialized")
 	}
 
@@ -444,7 +444,7 @@ func (s *Server) applyTLSPassthrough(patterns []string) error {
 	}
 
 	for _, p := range patterns {
-		if !s.passthrough.Add(p) {
+		if !s.deps.passthrough.Add(p) {
 			return fmt.Errorf("invalid pattern: %q", p)
 		}
 	}
@@ -453,7 +453,7 @@ func (s *Server) applyTLSPassthrough(patterns []string) error {
 
 // applyRequestTimeout updates the request timeout on all registered protocol handlers.
 func (s *Server) applyRequestTimeout(d time.Duration) {
-	for _, setter := range s.requestTimeoutSetters {
+	for _, setter := range s.deps.requestTimeoutSetters {
 		setter.SetRequestTimeout(d)
 	}
 }
@@ -461,8 +461,8 @@ func (s *Server) applyRequestTimeout(d time.Duration) {
 // currentRequestTimeout returns the effective request timeout from the first
 // registered handler, or 0 if none is registered.
 func (s *Server) currentRequestTimeout() time.Duration {
-	if len(s.requestTimeoutSetters) > 0 {
-		return s.requestTimeoutSetters[0].RequestTimeout()
+	if len(s.deps.requestTimeoutSetters) > 0 {
+		return s.deps.requestTimeoutSetters[0].RequestTimeout()
 	}
 	return 0
 }

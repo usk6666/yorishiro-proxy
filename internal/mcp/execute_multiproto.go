@@ -36,7 +36,7 @@ type executeReplayRawResult struct {
 // It retrieves all send messages from the original session, establishes a TCP connection
 // to the target, sends the data, and reads back the response.
 func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeReplayRawResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
@@ -45,7 +45,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 
 	// Retrieve the session.
-	sess, err := s.store.GetSession(ctx, params.SessionID)
+	sess, err := s.deps.store.GetSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
@@ -55,7 +55,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 
 	// Retrieve all send messages.
-	sendMsgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -156,7 +156,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 		},
 	}
 
-	if err := s.store.SaveSession(ctx, newSess); err != nil {
+	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
 		return nil, nil, fmt.Errorf("save replay_raw session: %w", err)
 	}
 
@@ -171,7 +171,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 				Timestamp: start,
 				Body:      msg.Body,
 			}
-			if err := s.store.AppendMessage(ctx, newMsg); err != nil {
+			if err := s.deps.store.AppendMessage(ctx, newMsg); err != nil {
 				return nil, nil, fmt.Errorf("save replay_raw send message: %w", err)
 			}
 			seq++
@@ -187,7 +187,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 			Timestamp: start.Add(duration),
 			Body:      respData,
 		}
-		if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
+		if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
 			return nil, nil, fmt.Errorf("save replay_raw receive message: %w", err)
 		}
 	}
@@ -235,7 +235,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 	}
 
 	// Get the specific message.
-	allMsgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+	allMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -262,7 +262,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 			targetAddr = sess.ConnInfo.ServerAddr
 		} else {
 			// Look for URL in first send message.
-			sendMsgs, _ := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+			sendMsgs, _ := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
 			for _, m := range sendMsgs {
 				if m.URL != nil {
 					host := m.URL.Hostname()
@@ -371,7 +371,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 		Duration:    duration,
 		Tags:        tags,
 	}
-	if err := s.store.SaveSession(ctx, newSess); err != nil {
+	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
 		return nil, nil, fmt.Errorf("save WebSocket resend session: %w", err)
 	}
 
@@ -383,7 +383,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 		Body:      sendBody,
 		Metadata:  targetMsg.Metadata,
 	}
-	if err := s.store.AppendMessage(ctx, newSendMsg); err != nil {
+	if err := s.deps.store.AppendMessage(ctx, newSendMsg); err != nil {
 		return nil, nil, fmt.Errorf("save WebSocket resend send message: %w", err)
 	}
 
@@ -395,7 +395,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 			Timestamp: start.Add(duration),
 			Body:      respData,
 		}
-		if err := s.store.AppendMessage(ctx, newRecvMsg); err != nil {
+		if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
 			return nil, nil, fmt.Errorf("save WebSocket resend receive message: %w", err)
 		}
 	}

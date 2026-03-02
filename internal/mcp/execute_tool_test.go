@@ -24,7 +24,7 @@ func setupTestSessionWithExecuteDoer(t *testing.T, store session.Store, doer htt
 	ctx := context.Background()
 
 	s := NewServer(context.Background(), nil, store, nil)
-	s.replayDoer = doer
+	s.deps.replayDoer = doer
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -53,7 +53,7 @@ func setupTestSessionWithExecuteRawDialer(t *testing.T, store session.Store, dia
 	ctx := context.Background()
 
 	s := NewServer(context.Background(), nil, store, nil)
-	s.rawReplayDialer = dialer
+	s.deps.rawReplayDialer = dialer
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

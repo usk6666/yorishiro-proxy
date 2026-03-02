@@ -155,7 +155,13 @@ func validateTransformRuleInput(input transformRuleInput) error {
 
 // applyTransformRules validates and sets auto-transform rules from the input.
 func (s *Server) applyTransformRules(inputs []transformRuleInput) error {
-	if s.transformPipeline == nil {
+	return applyTransformRulesHelper(s.deps.transformPipeline, inputs)
+}
+
+// applyTransformRulesHelper validates and sets auto-transform rules on the given pipeline.
+// This is a standalone version of Server.applyTransformRules for use by handler structs.
+func applyTransformRulesHelper(pipeline *rules.Pipeline, inputs []transformRuleInput) error {
+	if pipeline == nil {
 		return fmt.Errorf("transform pipeline is not initialized")
 	}
 
@@ -167,7 +173,7 @@ func (s *Server) applyTransformRules(inputs []transformRuleInput) error {
 		rulesList[i] = toTransformRule(input)
 	}
 
-	if err := s.transformPipeline.SetRules(rulesList); err != nil {
+	if err := pipeline.SetRules(rulesList); err != nil {
 		return err
 	}
 	return nil

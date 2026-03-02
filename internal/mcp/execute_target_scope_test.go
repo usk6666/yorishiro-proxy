@@ -27,8 +27,8 @@ func setupExecuteWithTargetScope(t *testing.T, store session.Store, ts *proxy.Ta
 	}
 
 	s := NewServer(ctx, nil, store, nil, opts...)
-	s.replayDoer = newPermissiveClient()
-	s.rawReplayDialer = &testDialer{}
+	s.deps.replayDoer = newPermissiveClient()
+	s.deps.rawReplayDialer = &testDialer{}
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -873,7 +873,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 
 	ctx := context.Background()
 	s := NewServer(ctx, nil, store, nil, WithTargetScope(ts))
-	s.replayDoer = newPermissiveClient()
+	s.deps.replayDoer = newPermissiveClient()
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -962,7 +962,7 @@ func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 
 	ctx := context.Background()
 	s := NewServer(ctx, nil, store, nil, WithTargetScope(ts))
-	s.replayDoer = newPermissiveClient()
+	s.deps.replayDoer = newPermissiveClient()
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -1079,7 +1079,7 @@ func TestCheckTargetScopeURL(t *testing.T) {
 			ts := proxy.NewTargetScope()
 			ts.SetAgentRules(tt.allows, tt.denies)
 
-			s := &Server{targetScope: ts}
+			s := &Server{deps: &deps{targetScope: ts}}
 			u, err := url.Parse(tt.url)
 			if err != nil {
 				t.Fatalf("parse URL: %v", err)
@@ -1142,7 +1142,7 @@ func TestCheckTargetScopeAddr(t *testing.T) {
 			ts := proxy.NewTargetScope()
 			ts.SetAgentRules(tt.allows, tt.denies)
 
-			s := &Server{targetScope: ts}
+			s := &Server{deps: &deps{targetScope: ts}}
 			err := s.checkTargetScopeAddr(tt.scheme, tt.addr)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("checkTargetScopeAddr() error = %v, wantErr %v", err, tt.wantErr)
@@ -1220,7 +1220,7 @@ func TestTargetScopeCheckRedirect(t *testing.T) {
 
 // Test nil target scope (should never block).
 func TestCheckTargetScopeURL_NilScope(t *testing.T) {
-	s := &Server{targetScope: nil}
+	s := &Server{deps: &deps{targetScope: nil}}
 	u, _ := url.Parse("http://any-host.com/path")
 	if err := s.checkTargetScopeURL(u); err != nil {
 		t.Errorf("nil targetScope should allow all, got error: %v", err)
@@ -1228,7 +1228,7 @@ func TestCheckTargetScopeURL_NilScope(t *testing.T) {
 }
 
 func TestCheckTargetScopeAddr_NilScope(t *testing.T) {
-	s := &Server{targetScope: nil}
+	s := &Server{deps: &deps{targetScope: nil}}
 	if err := s.checkTargetScopeAddr("http", "any-host.com:80"); err != nil {
 		t.Errorf("nil targetScope should allow all, got error: %v", err)
 	}

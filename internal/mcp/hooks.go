@@ -1,13 +1,20 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -139,17 +146,17 @@ type hookState struct {
 // hookExecutor provides methods to execute pre_send and post_receive hooks
 // using the macro engine. It is created per resend call or per fuzz iteration batch.
 type hookExecutor struct {
-	server *Server
-	hooks  *hooksInput
-	state  *hookState
+	d     *deps
+	hooks *hooksInput
+	state *hookState
 }
 
 // newHookExecutor creates a new hook executor.
-func newHookExecutor(server *Server, hooks *hooksInput, state *hookState) *hookExecutor {
+func newHookExecutor(d *deps, hooks *hooksInput, state *hookState) *hookExecutor {
 	return &hookExecutor{
-		server: server,
-		hooks:  hooks,
-		state:  state,
+		d:     d,
+		hooks: hooks,
+		state: state,
 	}
 }
 
@@ -303,13 +310,13 @@ func (he *hookExecutor) shouldRunPostReceive(h *hookConfig, statusCode int, resp
 
 // runMacro loads a macro from the DB and runs it with the given vars.
 func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map[string]string) (*macro.Result, error) {
-	s := he.server
-	if s.store == nil {
+	d := he.d
+	if d.store == nil {
 		return nil, fmt.Errorf("session store is not initialized")
 	}
 
 	// Load macro from DB.
-	rec, err := s.store.GetMacro(ctx, macroName)
+	rec, err := d.store.GetMacro(ctx, macroName)
 	if err != nil {
 		return nil, fmt.Errorf("load macro %q: %w", macroName, err)
 	}
@@ -329,23 +336,23 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	// Target scope enforcement: check each step's target URL before running.
 	// This mirrors the same check in handleExecuteRunMacro to prevent hooks
 	// from bypassing target scope restrictions via macro execution.
-	if s.targetScope != nil && s.targetScope.HasRules() {
+	if d.targetScope != nil && d.targetScope.HasRules() {
 		for _, step := range cfg.Steps {
 			// Check override_url if specified.
 			if step.OverrideURL != "" {
 				u, parseErr := url.Parse(step.OverrideURL)
 				if parseErr == nil && u.Host != "" {
-					if scopeErr := s.checkTargetScopeURL(u); scopeErr != nil {
+					if scopeErr := checkTargetScopeURLHelper(d.targetScope, u); scopeErr != nil {
 						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
 					}
 				}
 			}
 			// Check the session's URL for this step.
-			sendMsgs, msgErr := s.store.GetMessages(ctx, step.SessionID, session.MessageListOptions{Direction: "send"})
+			sendMsgs, msgErr := d.store.GetMessages(ctx, step.SessionID, session.MessageListOptions{Direction: "send"})
 			if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 				// Only check session URL if no override_url (override takes precedence).
 				if step.OverrideURL == "" {
-					if scopeErr := s.checkTargetScopeURL(sendMsgs[0].URL); scopeErr != nil {
+					if scopeErr := checkTargetScopeURLHelper(d.targetScope, sendMsgs[0].URL); scopeErr != nil {
 						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
 					}
 				}
@@ -354,8 +361,8 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	}
 
 	// Create engine with HTTP client and session fetcher.
-	sendFunc := s.macroSendFunc(macroName)
-	fetcher := &storeSessionFetcher{store: s.store}
+	sendFunc := hookMacroSendFunc(d, macroName)
+	fetcher := &storeSessionFetcher{store: d.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
 	if err != nil {
@@ -368,6 +375,151 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	}
 
 	return result, nil
+}
+
+// hookMacroSendFunc creates a macro.SendFunc that uses deps directly.
+// This is used by hookExecutor.runMacro to avoid depending on *Server.
+func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
+	return func(ctx context.Context, req *macro.SendRequest) (*macro.SendResponse, error) {
+		var client httpDoer
+		if d.replayDoer != nil {
+			client = d.replayDoer
+		} else {
+			dialer := &net.Dialer{
+				Timeout: defaultReplayTimeout,
+			}
+			transport := &http.Transport{
+				DialContext: dialer.DialContext,
+			}
+			client = &http.Client{
+				Timeout:   defaultReplayTimeout,
+				Transport: transport,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+		}
+
+		var body io.Reader
+		if len(req.Body) > 0 {
+			body = bytes.NewReader(req.Body)
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, body)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+
+		for key, values := range req.Headers {
+			for i, v := range values {
+				if i == 0 {
+					httpReq.Header.Set(key, v)
+				} else {
+					httpReq.Header.Add(key, v)
+				}
+			}
+		}
+
+		start := time.Now()
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxReplayResponseSize))
+		if err != nil {
+			return nil, fmt.Errorf("read response body: %w", err)
+		}
+		duration := time.Since(start)
+
+		// Record the macro step as a session so it appears in session history.
+		if d.store != nil {
+			recordMacroStepSessionDeps(ctx, d, macroName, req, resp, respBody, httpReq, start, duration)
+		}
+
+		return &macro.SendResponse{
+			StatusCode: resp.StatusCode,
+			Headers:    resp.Header,
+			Body:       respBody,
+			URL:        resp.Request.URL.String(),
+		}, nil
+	}
+}
+
+// recordMacroStepSessionDeps saves a macro step's HTTP exchange as a session.
+// This is a deps-based version used by hookMacroSendFunc.
+func recordMacroStepSessionDeps(
+	ctx context.Context,
+	d *deps,
+	macroName string,
+	req *macro.SendRequest,
+	resp *http.Response,
+	respBody []byte,
+	httpReq *http.Request,
+	start time.Time,
+	duration time.Duration,
+) {
+	tags := map[string]string{
+		"macro":      macroName,
+		"macro_step": req.StepID,
+	}
+
+	sess := &session.Session{
+		Protocol:    "HTTP/1.x",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		Duration:    duration,
+		Tags:        tags,
+	}
+	if err := d.store.SaveSession(ctx, sess); err != nil {
+		slog.WarnContext(ctx, "failed to save macro step session",
+			"macro", macroName, "step", req.StepID, "error", err)
+		return
+	}
+
+	recordedHeaders := make(map[string][]string)
+	for key, values := range httpReq.Header {
+		recordedHeaders[key] = values
+	}
+
+	parsedURL := httpReq.URL
+
+	sendMsg := &session.Message{
+		SessionID: sess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: start,
+		Method:    req.Method,
+		URL:       parsedURL,
+		Headers:   recordedHeaders,
+		Body:      req.Body,
+	}
+	if err := d.store.AppendMessage(ctx, sendMsg); err != nil {
+		slog.WarnContext(ctx, "failed to save macro step send message",
+			"macro", macroName, "step", req.StepID, "error", err)
+		return
+	}
+
+	respHeaders := make(map[string][]string)
+	for key, values := range resp.Header {
+		respHeaders[key] = values
+	}
+
+	recvMsg := &session.Message{
+		SessionID:  sess.ID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  start.Add(duration),
+		StatusCode: resp.StatusCode,
+		Headers:    respHeaders,
+		Body:       respBody,
+	}
+	if err := d.store.AppendMessage(ctx, recvMsg); err != nil {
+		slog.WarnContext(ctx, "failed to save macro step receive message",
+			"macro", macroName, "step", req.StepID, "error", err)
+	}
 }
 
 // expandParamsWithKVStore applies template expansion to the resend/fuzz override

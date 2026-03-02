@@ -150,7 +150,7 @@ type querySessionsResult struct {
 
 // handleQuerySessions returns a paginated list of sessions with message summary data.
 func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *querySessionsResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
@@ -175,12 +175,12 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 		opts.BlockedBy = input.Filter.BlockedBy
 	}
 
-	sessionList, err := s.store.ListSessions(ctx, opts)
+	sessionList, err := s.deps.store.ListSessions(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list sessions: %w", err)
 	}
 
-	total, err := s.store.CountSessions(ctx, opts)
+	total, err := s.deps.store.CountSessions(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count sessions: %w", err)
 	}
@@ -188,7 +188,7 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 	entries := make([]querySessionsEntry, 0, len(sessionList))
 	for _, sess := range sessionList {
 		// Fetch messages for method/url/status_code/message_count via JOIN data.
-		msgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+		msgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("get messages for session %s: %w", sess.ID, err)
 		}
@@ -270,7 +270,7 @@ const streamPreviewLimit = 10
 
 // handleQuerySession returns detailed information about a single session.
 func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *querySessionResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
@@ -278,12 +278,12 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		return nil, nil, fmt.Errorf("id is required for session resource")
 	}
 
-	sess, err := s.store.GetSession(ctx, input.ID)
+	sess, err := s.deps.store.GetSession(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
 
-	msgs, err := s.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+	msgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -432,7 +432,7 @@ type queryMessagesResult struct {
 
 // handleQueryMessages returns paginated messages for a session.
 func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMessagesResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
@@ -445,12 +445,12 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	// Verify the session exists.
-	if _, err := s.store.GetSession(ctx, input.ID); err != nil {
+	if _, err := s.deps.store.GetSession(ctx, input.ID); err != nil {
 		return nil, nil, fmt.Errorf("get session: %w", err)
 	}
 
 	// Get total message count for pagination.
-	total, err := s.store.CountMessages(ctx, input.ID)
+	total, err := s.deps.store.CountMessages(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count messages: %w", err)
 	}
@@ -465,7 +465,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	// Fetch messages with optional direction filter.
-	allMsgs, err := s.store.GetMessages(ctx, input.ID, msgOpts)
+	allMsgs, err := s.deps.store.GetMessages(ctx, input.ID, msgOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -557,19 +557,19 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		DBSizeBytes: -1,
 	}
 
-	if s.manager != nil {
-		running, addr := s.manager.Status()
+	if s.deps.manager != nil {
+		running, addr := s.deps.manager.Status()
 		result.Running = running
 		result.ListenAddr = addr
-		result.UpstreamProxy = proxy.RedactProxyURL(s.manager.UpstreamProxy())
-		result.ActiveConnections = s.manager.ActiveConnections()
-		result.MaxConnections = s.manager.MaxConnections()
-		result.PeekTimeoutMs = s.manager.PeekTimeout().Milliseconds()
-		result.UptimeSeconds = int64(s.manager.Uptime().Seconds())
-		result.ListenerCount = s.manager.ListenerCount()
+		result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
+		result.ActiveConnections = s.deps.manager.ActiveConnections()
+		result.MaxConnections = s.deps.manager.MaxConnections()
+		result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
+		result.UptimeSeconds = int64(s.deps.manager.Uptime().Seconds())
+		result.ListenerCount = s.deps.manager.ListenerCount()
 
 		// Populate per-listener statuses.
-		statuses := s.manager.ListenerStatuses()
+		statuses := s.deps.manager.ListenerStatuses()
 		if len(statuses) > 0 {
 			result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
 			for _, st := range statuses {
@@ -595,22 +595,22 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.RequestTimeoutMs = 60000
 	}
 
-	if s.store != nil {
-		count, err := s.store.CountSessions(ctx, session.ListOptions{})
+	if s.deps.store != nil {
+		count, err := s.deps.store.CountSessions(ctx, session.ListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("count sessions: %w", err)
 		}
 		result.TotalSessions = count
 	}
 
-	if s.dbPath != "" {
-		info, err := os.Stat(s.dbPath)
+	if s.deps.dbPath != "" {
+		info, err := os.Stat(s.deps.dbPath)
 		if err == nil {
 			result.DBSizeBytes = info.Size()
 		}
 	}
 
-	if s.ca != nil && s.ca.Certificate() != nil {
+	if s.deps.ca != nil && s.deps.ca.Certificate() != nil {
 		result.CAInitialized = true
 	}
 
@@ -644,12 +644,12 @@ type queryPassthroughResult struct {
 func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult, error) {
 	result := &queryConfigResult{}
 
-	if s.manager != nil {
-		result.UpstreamProxy = proxy.RedactProxyURL(s.manager.UpstreamProxy())
+	if s.deps.manager != nil {
+		result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
 	}
 
-	if s.scope != nil {
-		includes, excludes := s.scope.Rules()
+	if s.deps.scope != nil {
+		includes, excludes := s.deps.scope.Rules()
 		result.CaptureScope = &queryScopeResult{
 			Includes: fromScopeRules(includes),
 			Excludes: fromScopeRules(excludes),
@@ -661,8 +661,8 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if s.passthrough != nil {
-		patterns := s.passthrough.List()
+	if s.deps.passthrough != nil {
+		patterns := s.deps.passthrough.List()
 		sort.Strings(patterns)
 		result.TLSPassthrough = &queryPassthroughResult{
 			Patterns: patterns,
@@ -675,11 +675,11 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if len(s.tcpForwards) > 0 {
-		result.TCPForwards = s.tcpForwards
+	if len(s.deps.tcpForwards) > 0 {
+		result.TCPForwards = s.deps.tcpForwards
 	}
-	if len(s.enabledProtocols) > 0 {
-		result.EnabledProtocols = s.enabledProtocols
+	if len(s.deps.enabledProtocols) > 0 {
+		result.EnabledProtocols = s.deps.enabledProtocols
 	}
 
 	return nil, result, nil
@@ -700,16 +700,16 @@ type queryCACertResult struct {
 
 // handleQueryCACert returns the CA certificate PEM and metadata.
 func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult, error) {
-	if s.ca == nil {
+	if s.deps.ca == nil {
 		return nil, nil, fmt.Errorf("CA is not initialized: no CA has been configured for this server")
 	}
 
-	cert := s.ca.Certificate()
+	cert := s.deps.ca.Certificate()
 	if cert == nil {
 		return nil, nil, fmt.Errorf("CA certificate is not available: CA has not been generated or loaded")
 	}
 
-	certPEM := s.ca.CertPEM()
+	certPEM := s.deps.ca.CertPEM()
 	if certPEM == nil {
 		return nil, nil, fmt.Errorf("CA certificate PEM is not available")
 	}
@@ -717,7 +717,7 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 	fingerprint := sha256.Sum256(cert.Raw)
 	fingerprintHex := formatFingerprint(fingerprint[:])
 
-	source := s.ca.Source()
+	source := s.deps.ca.Source()
 	result := &queryCACertResult{
 		PEM:         string(certPEM),
 		Fingerprint: fingerprintHex,
@@ -766,11 +766,11 @@ type queryInterceptQueueResult struct {
 
 // handleQueryInterceptQueue returns the list of currently intercepted (blocked) requests.
 func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolResult, *queryInterceptQueueResult, error) {
-	if s.interceptQueue == nil {
+	if s.deps.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 
-	items := s.interceptQueue.List()
+	items := s.deps.interceptQueue.List()
 
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {
@@ -839,11 +839,11 @@ type queryMacrosResult struct {
 
 // handleQueryMacros returns a list of all stored macro definitions.
 func (s *Server) handleQueryMacros(ctx context.Context) (*gomcp.CallToolResult, *queryMacrosResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 
-	records, err := s.store.ListMacros(ctx)
+	records, err := s.deps.store.ListMacros(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list macros: %w", err)
 	}
@@ -886,14 +886,14 @@ type queryMacroResult struct {
 
 // handleQueryMacro returns detailed information about a single macro definition.
 func (s *Server) handleQueryMacro(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMacroResult, error) {
-	if s.store == nil {
+	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("session store is not initialized")
 	}
 	if input.ID == "" {
 		return nil, nil, fmt.Errorf("id is required for macro resource (macro name)")
 	}
 
-	rec, err := s.store.GetMacro(ctx, input.ID)
+	rec, err := s.deps.store.GetMacro(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get macro: %w", err)
 	}
