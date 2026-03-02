@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
@@ -131,7 +132,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 
 	// Read response.
-	respData, err := io.ReadAll(io.LimitReader(conn, maxReplayResponseSize))
+	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
 	if err != nil && len(respData) == 0 {
 		return nil, nil, fmt.Errorf("read response: %w", err)
 	}
@@ -350,7 +351,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 	}
 
 	// Read response (limited).
-	respData, err := io.ReadAll(io.LimitReader(conn, maxReplayResponseSize))
+	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
 	if err != nil && len(respData) == 0 {
 		return nil, nil, fmt.Errorf("read response: %w", err)
 	}

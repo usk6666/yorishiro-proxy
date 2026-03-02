@@ -698,40 +698,31 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 			timeout:             15 * time.Second,
 		},
 		{
-			name:                "body exactly 1MB",
-			bodySize:            maxBodyRecordSize,
+			name:                "body 1MB (well below limit)",
+			bodySize:            1 << 20,
 			wantReqTruncated:    false,
 			wantRespTruncated:   false,
-			wantRecordedReqLen:  maxBodyRecordSize,
-			wantRecordedRespLen: maxBodyRecordSize,
+			wantRecordedReqLen:  1 << 20,
+			wantRecordedRespLen: 1 << 20,
 			timeout:             30 * time.Second,
 		},
 		{
-			name:                "body 1MB plus 1 byte",
-			bodySize:            maxBodyRecordSize + 1,
-			wantReqTruncated:    true,
-			wantRespTruncated:   true,
-			wantRecordedReqLen:  maxBodyRecordSize,
-			wantRecordedRespLen: maxBodyRecordSize,
+			name:                "body 2MB (below limit)",
+			bodySize:            2 << 20,
+			wantReqTruncated:    false,
+			wantRespTruncated:   false,
+			wantRecordedReqLen:  2 << 20,
+			wantRecordedRespLen: 2 << 20,
 			timeout:             30 * time.Second,
 		},
 		{
-			name:                "very large body 2MB",
-			bodySize:            2 * maxBodyRecordSize,
-			wantReqTruncated:    true,
-			wantRespTruncated:   true,
-			wantRecordedReqLen:  maxBodyRecordSize,
-			wantRecordedRespLen: maxBodyRecordSize,
+			name:                "body 10MB (below limit)",
+			bodySize:            10 << 20,
+			wantReqTruncated:    false,
+			wantRespTruncated:   false,
+			wantRecordedReqLen:  10 << 20,
+			wantRecordedRespLen: 10 << 20,
 			timeout:             60 * time.Second,
-		},
-		{
-			name:                "very large body 10MB",
-			bodySize:            10 * maxBodyRecordSize,
-			wantReqTruncated:    true,
-			wantRespTruncated:   true,
-			wantRecordedReqLen:  maxBodyRecordSize,
-			wantRecordedRespLen: maxBodyRecordSize,
-			timeout:             120 * time.Second,
 		},
 	}
 
@@ -857,12 +848,12 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 
 			// When truncated, verify the recorded body is the prefix of the original.
 			if tt.wantReqTruncated && tt.bodySize > 0 {
-				if !bytes.Equal(send.Body, reqBody[:maxBodyRecordSize]) {
+				if !bytes.Equal(send.Body, reqBody[:maxBodySize]) {
 					t.Error("truncated request body is not a prefix of the original body")
 				}
 			}
 			if tt.wantRespTruncated && tt.bodySize > 0 {
-				if !bytes.Equal(recv.Body, reqBody[:maxBodyRecordSize]) {
+				if !bytes.Equal(recv.Body, reqBody[:maxBodySize]) {
 					t.Error("truncated response body is not a prefix of the original body")
 				}
 			}
