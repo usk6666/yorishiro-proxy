@@ -402,11 +402,11 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
-	// Create a Server with target scope and allow_private_networks to bypass SSRF
-	// so the initial request to localhost succeeds, then the redirect to evil.com
-	// gets blocked by the target scope check.
+	// Create a Server with target scope. The initial request to localhost succeeds
+	// (since it is in scope), then the redirect to evil.com gets blocked by the
+	// target scope check.
 	ctx := context.Background()
-	s := NewServer(ctx, nil, store, nil, WithTargetScope(ts), WithAllowPrivateNetworks(true))
+	s := NewServer(ctx, nil, store, nil, WithTargetScope(ts))
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {

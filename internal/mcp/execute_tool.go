@@ -111,9 +111,6 @@ type executeParams struct {
 	// import_sessions parameters
 	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data"`
 	OnConflict string `json:"on_conflict,omitempty" jsonschema:"conflict policy: skip or replace (default: skip)"`
-
-	// SSRF protection override
-	AllowPrivateNetworks bool `json:"allow_private_networks,omitempty" jsonschema:"disable SSRF protection to allow connections to private/loopback networks (default: false)"`
 }
 
 // exportFilter holds filter parameters for the export_sessions action.
@@ -191,11 +188,7 @@ func (s *Server) handleExecute(ctx context.Context, req *gomcp.CallToolRequest, 
 		return nil, result, nil
 	case "run_macro":
 		mp := paramsToMacroParams(input.Params)
-		allowPrivate := input.Params.AllowPrivateNetworks || s.allowPrivateNetworks
-		if allowPrivate {
-			slog.Warn("SSRF protection disabled: allow_private_networks is enabled for run_macro")
-		}
-		result, err := s.handleExecuteRunMacro(ctx, mp, allowPrivate)
+		result, err := s.handleExecuteRunMacro(ctx, mp)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -303,7 +296,6 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	if params.Hooks != nil && params.Hooks.PreSend != nil {
 		state := &hookState{}
 		executor := newHookExecutor(s, params.Hooks, state)
-		executor.allowPrivateNetworks = params.AllowPrivateNetworks || s.allowPrivateNetworks
 		var err error
 		kvStore, err = executor.executePreSend(ctx)
 		if err != nil {
@@ -533,7 +525,6 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	if params.Hooks != nil && params.Hooks.PostReceive != nil {
 		state := &hookState{}
 		executor := newHookExecutor(s, params.Hooks, state)
-		executor.allowPrivateNetworks = params.AllowPrivateNetworks || s.allowPrivateNetworks
 		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody, kvStore); err != nil {
 			return nil, nil, err
 		}
@@ -647,7 +638,9 @@ func validateOverrideHost(host string) error {
 }
 
 // resendHTTPClient returns an HTTP client configured for the resend action.
-// It respects follow_redirects, timeout_ms, override_host, and allow_private_networks parameters.
+// It respects follow_redirects, timeout_ms, and override_host parameters.
+// SSRF protection via denyPrivateNetwork has been removed; access control is
+// now handled by target scope enforcement (TargetScope.CheckURL / CheckTarget).
 func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 	if s.replayDoer != nil {
 		return s.replayDoer
@@ -660,14 +653,8 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 		}
 	}
 
-	allowPrivate := params.AllowPrivateNetworks || s.allowPrivateNetworks
 	dialer := &net.Dialer{
 		Timeout: timeout,
-	}
-	if !allowPrivate {
-		dialer.Control = denyPrivateNetwork
-	} else {
-		slog.Warn("SSRF protection disabled: allow_private_networks is enabled for resend")
 	}
 
 	transport := &http.Transport{
@@ -826,11 +813,7 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	}
 
 	// Establish the connection.
-	allowPrivate := params.AllowPrivateNetworks || s.allowPrivateNetworks
-	if allowPrivate {
-		slog.Warn("SSRF protection disabled: allow_private_networks is enabled for resend_raw")
-	}
-	dialer := s.rawDialerFuncWithOpts(allowPrivate)
+	dialer := s.rawDialerFunc()
 	start := time.Now()
 
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
@@ -1202,20 +1185,10 @@ func (s *Server) handleExecuteFuzz(ctx context.Context, params executeParams) (*
 		cfg.MaxRetries = *params.MaxRetries
 	}
 
-	allowPrivate := params.AllowPrivateNetworks || s.allowPrivateNetworks
-
 	// Set up hooks callbacks if configured.
 	if params.Hooks != nil {
 		hooks := newFuzzHookCallbacks(s, params.Hooks)
-		hooks.allowPrivateNetworks = allowPrivate
 		cfg.Hooks = hooks
-	}
-
-	// When allow_private_networks is enabled, provide a permissive HTTP client
-	// that bypasses SSRF protection for the fuzz job.
-	if allowPrivate {
-		slog.Warn("SSRF protection disabled: allow_private_networks is enabled for fuzz")
-		cfg.HTTPDoer = newPermissiveHTTPClient()
 	}
 
 	// Use the application-level context so the job survives beyond the MCP request.

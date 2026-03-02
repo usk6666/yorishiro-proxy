@@ -689,9 +689,6 @@ export interface ExecuteParams {
     output_path?: string;
     input_path?: string;
     on_conflict?: string;
-
-    // SSRF protection
-    allow_private_networks?: boolean;
   };
 }
 

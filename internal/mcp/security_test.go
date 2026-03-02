@@ -151,64 +151,6 @@ func TestValidateResendHeaders_CRLFInRemoveKey(t *testing.T) {
 	}
 }
 
-// --- SSRF protection tests ---
-
-func TestDenyPrivateNetwork_Loopback(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "127.0.0.1:80", nil)
-	if err == nil {
-		t.Fatal("expected error for loopback address, got nil")
-	}
-}
-
-func TestDenyPrivateNetwork_Private10(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "10.0.0.1:80", nil)
-	if err == nil {
-		t.Fatal("expected error for 10.x.x.x address, got nil")
-	}
-}
-
-func TestDenyPrivateNetwork_Private172(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "172.16.0.1:80", nil)
-	if err == nil {
-		t.Fatal("expected error for 172.16.x.x address, got nil")
-	}
-}
-
-func TestDenyPrivateNetwork_Private192(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "192.168.1.1:80", nil)
-	if err == nil {
-		t.Fatal("expected error for 192.168.x.x address, got nil")
-	}
-}
-
-func TestDenyPrivateNetwork_LinkLocal(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "169.254.0.1:80", nil)
-	if err == nil {
-		t.Fatal("expected error for link-local address, got nil")
-	}
-}
-
-func TestDenyPrivateNetwork_Unspecified(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "0.0.0.0:80", nil)
-	if err == nil {
-		t.Fatal("expected error for unspecified address, got nil")
-	}
-}
-
-func TestDenyPrivateNetwork_IPv6Loopback(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "[::1]:80", nil)
-	if err == nil {
-		t.Fatal("expected error for IPv6 loopback address, got nil")
-	}
-}
-
-func TestDenyPrivateNetwork_PublicIP(t *testing.T) {
-	err := denyPrivateNetwork("tcp", "8.8.8.8:80", nil)
-	if err != nil {
-		t.Fatalf("expected no error for public IP, got: %v", err)
-	}
-}
-
 // --- URL scheme validation tests ---
 
 func TestValidateURLScheme_Valid(t *testing.T) {

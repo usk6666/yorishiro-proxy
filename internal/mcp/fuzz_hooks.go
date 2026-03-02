@@ -10,9 +10,8 @@ import (
 // MCP layer's hookExecutor. It bridges the fuzzer package's hook interface
 // with the macro execution infrastructure.
 type fuzzHookCallbacks struct {
-	server               *Server
-	hooks                *hooksInput
-	allowPrivateNetworks bool
+	server *Server
+	hooks  *hooksInput
 }
 
 // newFuzzHookCallbacks creates a new fuzzHookCallbacks instance.
@@ -33,7 +32,6 @@ func (f *fuzzHookCallbacks) PreSend(ctx context.Context, state *fuzzer.HookState
 	// Convert fuzzer.HookState to internal hookState.
 	hs := fuzzStateToHookState(state)
 	executor := newHookExecutor(f.server, f.hooks, hs)
-	executor.allowPrivateNetworks = f.allowPrivateNetworks
 
 	kvStore, err := executor.executePreSend(ctx)
 	if err != nil {
@@ -57,7 +55,6 @@ func (f *fuzzHookCallbacks) PostSend(ctx context.Context, state *fuzzer.HookStat
 
 	hs := fuzzStateToHookState(state)
 	executor := newHookExecutor(f.server, f.hooks, hs)
-	executor.allowPrivateNetworks = f.allowPrivateNetworks
 
 	return executor.executePostReceive(ctx, statusCode, responseBody, kvStore)
 }

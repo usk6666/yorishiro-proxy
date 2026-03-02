@@ -975,7 +975,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	}
 	state := &hookState{}
 	executor := newHookExecutor(s, hooks, state)
-	executor.allowPrivateNetworks = true
+
 
 	// Call executePostReceive with KV Store from pre_send that has the same key.
 	// pre_send KV Store should take precedence over hook config vars.
@@ -1035,7 +1035,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 	}
 	state := &hookState{}
 	executor := newHookExecutor(s, hooks, state)
-	executor.allowPrivateNetworks = true
+
 
 	// Call with nil kvStore — should not panic or error.
 	err := executor.executePostReceive(ctx, 200, []byte("ok"), nil)
@@ -1093,7 +1093,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 	}
 	state := &hookState{}
 	executor := newHookExecutor(s, hooks, state)
-	executor.allowPrivateNetworks = true
+
 
 	// Call with empty kvStore — should not modify behavior.
 	err := executor.executePostReceive(ctx, 200, []byte("ok"), map[string]string{})

@@ -39,7 +39,6 @@ type RunConfig struct {
 
 	// HTTPDoer overrides the engine's default HTTP client for this job.
 	// When set, this client is used instead of the engine's httpDoer.
-	// This allows per-job SSRF protection control (e.g., allow_private_networks).
 	// Not serialized to JSON (set at runtime only).
 	HTTPDoer HTTPDoer `json:"-"`
 }
