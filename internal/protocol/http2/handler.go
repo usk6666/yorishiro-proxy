@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/net/http2"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -30,13 +31,6 @@ import (
 // http2Preface is the HTTP/2 connection preface sent by clients.
 // Only the first 16 bytes are needed for detection since the listener peeks 16 bytes.
 var http2Preface = []byte("PRI * HTTP/2.0\r\n")
-
-const maxBodyRecordSize = 1 << 20 // 1MB
-
-// maxResponseBodySize limits the size of upstream response bodies read into memory.
-// Responses larger than this are truncated. This prevents OOM from oversized
-// upstream responses (CWE-770).
-const maxResponseBodySize = 64 << 20 // 64MB
 
 // Handler processes HTTP/2 connections (h2c cleartext).
 // For h2 (TLS), the HTTP handler's CONNECT flow calls HandleH2 after ALPN negotiation.
@@ -280,8 +274,8 @@ func (h *Handler) handleStream(
 	}
 
 	recordReqBody := reqBody
-	if len(reqBody) > maxBodyRecordSize {
-		recordReqBody = reqBody[:maxBodyRecordSize]
+	if len(reqBody) > int(config.MaxBodySize) {
+		recordReqBody = reqBody[:int(config.MaxBodySize)]
 		reqTruncated = true
 	}
 
@@ -381,7 +375,7 @@ func (h *Handler) handleStream(
 	defer resp.Body.Close()
 
 	// Read the response body with a size limit to prevent OOM (CWE-770).
-	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
+	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
 	if err != nil {
 		logger.Warn("HTTP/2 failed to read response body", "error", err)
 	}
@@ -404,8 +398,8 @@ func (h *Handler) handleStream(
 	// Truncate for recording.
 	recordRespBody := fullRespBody
 	var respTruncated bool
-	if len(fullRespBody) > maxBodyRecordSize {
-		recordRespBody = fullRespBody[:maxBodyRecordSize]
+	if len(fullRespBody) > int(config.MaxBodySize) {
+		recordRespBody = fullRespBody[:int(config.MaxBodySize)]
 		respTruncated = true
 	}
 

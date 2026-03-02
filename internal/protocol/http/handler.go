@@ -18,22 +18,16 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
-const maxBodyRecordSize = 1 << 20 // 1MB
-
 // maxRawCaptureSize limits the size of raw request/response bytes captured.
 // This prevents excessive memory use for very large requests.
 const maxRawCaptureSize = 2 << 20 // 2MB
-
-// maxResponseBodySize limits the size of upstream response bodies read into memory.
-// Responses larger than this are truncated. This prevents OOM from oversized
-// upstream responses (CWE-770).
-const maxResponseBodySize = 64 << 20 // 64MB
 
 const defaultRequestTimeout = 60 * time.Second
 
@@ -403,8 +397,8 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		req.Body = io.NopCloser(bytes.NewReader(fullBody))
 
 		recordReqBody = fullBody
-		if len(fullBody) > maxBodyRecordSize {
-			recordReqBody = fullBody[:maxBodyRecordSize]
+		if len(fullBody) > int(config.MaxBodySize) {
+			recordReqBody = fullBody[:int(config.MaxBodySize)]
 			reqTruncated = true
 		}
 	}
@@ -484,7 +478,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	defer resp.Body.Close()
 
 	// Read the response body with a size limit to prevent OOM (CWE-770).
-	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
+	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
 	}
@@ -505,8 +499,8 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Truncate for recording.
 	recordRespBody := fullRespBody
 	var respTruncated bool
-	if len(fullRespBody) > maxBodyRecordSize {
-		recordRespBody = fullRespBody[:maxBodyRecordSize]
+	if len(fullRespBody) > int(config.MaxBodySize) {
+		recordRespBody = fullRespBody[:int(config.MaxBodySize)]
 		respTruncated = true
 	}
 

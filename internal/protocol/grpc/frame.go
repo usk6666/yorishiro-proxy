@@ -15,14 +15,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 )
 
 // frameHeaderSize is the size of the gRPC Length-Prefixed Message header.
 const frameHeaderSize = 5
-
-// maxMessageSize limits the maximum gRPC message payload to prevent memory
-// exhaustion from malicious or malformed messages.
-const maxMessageSize = 16 << 20 // 16MB
 
 // Frame represents a parsed gRPC Length-Prefixed Message.
 type Frame struct {
@@ -51,8 +49,8 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 	}
 
 	length := binary.BigEndian.Uint32(header[1:5])
-	if length > maxMessageSize {
-		return nil, fmt.Errorf("grpc message too large: %d > %d", length, maxMessageSize)
+	if length > config.MaxGRPCMessageSize {
+		return nil, fmt.Errorf("grpc message too large: %d > %d", length, config.MaxGRPCMessageSize)
 	}
 
 	payload := make([]byte, length)
@@ -91,8 +89,8 @@ func ReadAllFrames(data []byte) ([]*Frame, error) {
 		}
 
 		length := binary.BigEndian.Uint32(data[offset+1 : offset+5])
-		if length > maxMessageSize {
-			return frames, fmt.Errorf("grpc message too large: %d > %d", length, maxMessageSize)
+		if length > config.MaxGRPCMessageSize {
+			return frames, fmt.Errorf("grpc message too large: %d > %d", length, config.MaxGRPCMessageSize)
 		}
 
 		offset += frameHeaderSize

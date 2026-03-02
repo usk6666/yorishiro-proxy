@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -371,8 +372,8 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		req.Body = io.NopCloser(bytes.NewReader(fullBody))
 
 		recordReqBody = fullBody
-		if len(fullBody) > maxBodyRecordSize {
-			recordReqBody = fullBody[:maxBodyRecordSize]
+		if len(fullBody) > int(config.MaxBodySize) {
+			recordReqBody = fullBody[:int(config.MaxBodySize)]
 			reqTruncated = true
 		}
 	}
@@ -452,7 +453,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	defer resp.Body.Close()
 
 	// Read the response body with a size limit to prevent OOM (CWE-770).
-	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
+	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
 	}
@@ -479,8 +480,8 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Truncate for recording.
 	recordRespBody := fullRespBody
 	var respTruncated bool
-	if len(fullRespBody) > maxBodyRecordSize {
-		recordRespBody = fullRespBody[:maxBodyRecordSize]
+	if len(fullRespBody) > int(config.MaxBodySize) {
+		recordRespBody = fullRespBody[:int(config.MaxBodySize)]
 		respTruncated = true
 	}
 

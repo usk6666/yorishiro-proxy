@@ -83,8 +83,8 @@ type proxyStartInput struct {
 	Protocols []string `json:"protocols,omitempty" jsonschema:"enabled protocol list (default: all protocols enabled)"`
 
 	// MaxConnections is the maximum number of concurrent proxy connections.
-	// Defaults to 1024 if omitted or zero.
-	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (default: 1024)"`
+	// Defaults to 128 if omitted or zero.
+	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (default: 128)"`
 
 	// PeekTimeoutMs is the timeout in milliseconds for protocol detection on new connections.
 	// Defaults to 30000 (30s) if omitted or zero.
@@ -124,10 +124,10 @@ func (s *Server) registerProxyStart() {
 			"auto_transform to configure automatic request/response modification rules, " +
 			"tcp_forwards to map local ports to upstream TCP addresses for Raw TCP forwarding, " +
 			"protocols to specify which protocols are enabled for detection, " +
-			"max_connections to set the concurrent connection limit (default: 1024), " +
+			"max_connections to set the concurrent connection limit (default: 128), " +
 			"peek_timeout_ms for protocol detection timeout (default: 30000ms), " +
 			"and request_timeout_ms for HTTP request header read timeout (default: 60000ms). " +
-			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, max_connections=1024, peek_timeout_ms=30000, request_timeout_ms=60000.",
+			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
 	}, s.handleProxyStart)
 }
 

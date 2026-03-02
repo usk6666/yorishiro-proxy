@@ -19,6 +19,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -453,7 +454,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	defer resp.Body.Close()
 
 	// Limit response body read to prevent OOM from unbounded responses.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxReplayResponseSize))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxReplayResponseSize))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read resend response body: %w", err)
 	}
@@ -846,8 +847,8 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		return nil, nil, fmt.Errorf("send raw request: %w", err)
 	}
 
-	// Read the raw response (limited to maxReplayResponseSize).
-	respData, err := io.ReadAll(io.LimitReader(conn, maxReplayResponseSize))
+	// Read the raw response (limited to config.MaxReplayResponseSize).
+	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
 	if err != nil {
 		// Connection may be closed by the server after sending the response.
 		// If we already have some data, that's fine.
@@ -1362,10 +1363,6 @@ func (s *Server) handleExecuteRegenerateCA() (*gomcp.CallToolResult, *executeReg
 // (without output_path) to prevent unbounded memory usage (S-4: CWE-400).
 const maxInlineExportSessions = 100
 
-// maxImportScannerBuffer is the maximum per-line buffer size for the import
-// scanner. 4 MB is generous for JSONL session records while preventing
-// excessive memory allocation (S-6: CWE-400).
-const maxImportScannerBuffer = 4 * 1024 * 1024
 
 // validateFilePath sanitises and validates a user-supplied file path.
 // It rejects empty paths, normalises via filepath.Abs + filepath.Clean,
@@ -1564,7 +1561,7 @@ func (s *Server) handleExecuteImportSessions(ctx context.Context, params execute
 
 	result, err := session.ImportSessions(ctx, s.store, f, session.ImportOptions{
 		OnConflict:       conflict,
-		MaxScannerBuffer: maxImportScannerBuffer,
+		MaxScannerBuffer: config.MaxImportScannerBuffer,
 		ValidateIDs:      true,
 	})
 	if err != nil {

@@ -104,7 +104,7 @@ func Default() *Config {
 		LogFormat:       "text",
 		PeekTimeout:     30 * time.Second,
 		RequestTimeout:  60 * time.Second,
-		MaxConnections:  1024,
+		MaxConnections:  128,
 		CleanupInterval: time.Hour,
 	}
 }

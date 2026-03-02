@@ -512,8 +512,8 @@ func TestQuery_Status_DefaultLimitsAndTimeouts(t *testing.T) {
 	unmarshalQueryResult(t, result, &out)
 
 	// Default values.
-	if out.MaxConnections != 1024 {
-		t.Errorf("max_connections = %d, want 1024 (default)", out.MaxConnections)
+	if out.MaxConnections != 128 {
+		t.Errorf("max_connections = %d, want 128 (default)", out.MaxConnections)
 	}
 	if out.PeekTimeoutMs != 30000 {
 		t.Errorf("peek_timeout_ms = %d, want 30000 (default)", out.PeekTimeoutMs)

@@ -13,16 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
-
-// maxRecordPayloadSize limits the payload size recorded per message.
-// Payloads exceeding this size are truncated in the session store.
-const maxRecordPayloadSize = 1 << 20 // 1MB
-
-// maxMessageSize limits the total assembled size of a fragmented WebSocket message.
-// This prevents unbounded memory growth from continuation frame accumulation (CWE-400).
-const maxMessageSize = 64 << 20 // 64MB
 
 // Handler manages a WebSocket connection relay between client and upstream.
 // It is not a ProtocolHandler — it is invoked from the HTTP handler when
@@ -167,7 +160,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 
 // relayDirection reads frames from src, records them, and writes them to dst.
 // It handles fragmentation by assembling continuation frames into complete messages.
-// Fragment accumulation is capped at maxMessageSize to prevent OOM (CWE-400).
+// Fragment accumulation is capped at config.MaxWebSocketMessageSize to prevent OOM (CWE-400).
 func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, sessionID, direction string, seq *atomic.Int64, start time.Time) error {
 	// Fragment assembly state.
 	var fragmentBuf []byte
@@ -249,11 +242,11 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 					"session_id", sessionID, "direction", direction)
 				continue
 			}
-			if int64(len(fragmentBuf))+int64(len(frame.Payload)) > maxMessageSize {
+			if int64(len(fragmentBuf))+int64(len(frame.Payload)) > config.MaxWebSocketMessageSize {
 				h.logger.Warn("websocket message size limit exceeded, closing connection",
 					"session_id", sessionID, "direction", direction,
 					"accumulated", len(fragmentBuf), "incoming", len(frame.Payload),
-					"limit", maxMessageSize)
+					"limit", config.MaxWebSocketMessageSize)
 				// Discard fragment buffer and send Close frame (1009 = message too big).
 				fragmentBuf = nil
 				inFragment = false
@@ -262,7 +255,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 				closePayload[1] = 0xF1 // 1009
 				closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Payload: closePayload}
 				_ = WriteFrame(dst, closeFrame)
-				return fmt.Errorf("fragmented message exceeded maxMessageSize (%d bytes)", maxMessageSize)
+				return fmt.Errorf("fragmented message exceeded config.MaxWebSocketMessageSize (%d bytes)", config.MaxWebSocketMessageSize)
 			}
 			fragmentBuf = append(fragmentBuf, frame.Payload...)
 			if frame.Fin {
@@ -297,8 +290,8 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 	}
 
 	recordPayload := payload
-	if len(payload) > maxRecordPayloadSize {
-		recordPayload = payload[:maxRecordPayloadSize]
+	if len(payload) > config.MaxWebSocketRecordPayloadSize {
+		recordPayload = payload[:config.MaxWebSocketRecordPayloadSize]
 		msg.BodyTruncated = true
 	}
 

@@ -14,7 +14,11 @@ const peekSize = 16
 
 const defaultPeekTimeout = 30 * time.Second
 
-const defaultMaxConnections = 1024
+// defaultMaxConnections limits concurrent connections to bound worst-case memory.
+// With MaxBodySize=254MB, each connection may buffer up to 2×254MB (request + response).
+// 128 connections × 508MB = ~63.5GB theoretical maximum.
+// Operators can adjust via SetMaxConnections or the proxy_start MCP tool.
+const defaultMaxConnections = 128
 
 // ProtocolDetector selects a handler based on peeked bytes.
 type ProtocolDetector interface {
@@ -27,7 +31,7 @@ type ListenerConfig struct {
 	Detector       ProtocolDetector
 	Logger         *slog.Logger
 	PeekTimeout    time.Duration // 0 = defaultPeekTimeout (30s)
-	MaxConnections int           // 0 = defaultMaxConnections (1024)
+	MaxConnections int           // 0 = defaultMaxConnections (128)
 }
 
 // Listener accepts TCP connections and dispatches them to protocol handlers.

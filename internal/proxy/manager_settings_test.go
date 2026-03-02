@@ -15,9 +15,9 @@ func TestManager_MaxConnections_DefaultWhenNotSet(t *testing.T) {
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
-	// When no explicit value is set, should return default (1024).
-	if got := manager.MaxConnections(); got != 1024 {
-		t.Errorf("MaxConnections = %d, want 1024 (default)", got)
+	// When no explicit value is set, should return default (128).
+	if got := manager.MaxConnections(); got != 128 {
+		t.Errorf("MaxConnections = %d, want 128 (default)", got)
 	}
 }
 

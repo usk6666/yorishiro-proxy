@@ -84,15 +84,15 @@ func TestListener_SetMaxConnections_IgnoresNonPositive(t *testing.T) {
 func TestListener_SetMaxConnections_DefaultMaxConnections(t *testing.T) {
 	handler := &slowHandler{delay: time.Millisecond, name: "fast"}
 	detector := &slowDetector{handler: handler}
-	// MaxConnections=0 should default to 1024.
+	// MaxConnections=0 should default to 128.
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:     "127.0.0.1:0",
 		Detector: detector,
 		Logger:   newTestLogger(),
 	})
 
-	if got := listener.MaxConnections(); got != 1024 {
-		t.Errorf("default MaxConnections = %d, want 1024", got)
+	if got := listener.MaxConnections(); got != 128 {
+		t.Errorf("default MaxConnections = %d, want 128", got)
 	}
 }
 
