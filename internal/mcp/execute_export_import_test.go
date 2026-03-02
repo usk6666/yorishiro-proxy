@@ -349,6 +349,216 @@ func TestImportSessionsAction_ValidUUIDRequired(t *testing.T) {
 	if importResult.Errors != 1 {
 		t.Errorf("expected 1 error for invalid UUID, got %d", importResult.Errors)
 	}
+	// Verify error details are returned via MCP.
+	if len(importResult.ErrorDetails) != 1 {
+		t.Fatalf("expected 1 error detail, got %d", len(importResult.ErrorDetails))
+	}
+	if importResult.ErrorDetails[0].Reason == "" {
+		t.Errorf("expected non-empty error reason")
+	}
+}
+
+// makeExportTestSessionUUID creates a test session with valid UUID IDs for MCP handler tests.
+func makeExportTestSessionUUID(t *testing.T, store session.Store, sessID, msgID string) {
+	t.Helper()
+	ctx := context.Background()
+	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+
+	sess := &session.Session{
+		ID:          sessID,
+		ConnID:      "conn-" + sessID,
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   ts,
+		Duration:    100 * time.Millisecond,
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	msg := &session.Message{
+		ID:        msgID,
+		SessionID: sessID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: ts,
+		Method:    "GET",
+	}
+	if err := store.AppendMessage(ctx, msg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+}
+
+// makeRealisticTestSession creates a test session that mimics real proxy data
+// with all fields populated, including ConnInfo and message bodies.
+func makeRealisticTestSession(t *testing.T, store session.Store, sessID, sendMsgID, recvMsgID, protocol string, withConnInfo bool) {
+	t.Helper()
+	ctx := context.Background()
+	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+
+	sess := &session.Session{
+		ID:          sessID,
+		Protocol:    protocol,
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   ts,
+		Duration:    250 * time.Millisecond,
+		Tags:        map[string]string{"env": "test"},
+	}
+	// Resend-generated sessions have empty ConnID
+	if withConnInfo {
+		sess.ConnID = "conn-" + sessID
+		sess.ConnInfo = &session.ConnectionInfo{
+			ClientAddr:           "127.0.0.1:54321",
+			ServerAddr:           "93.184.216.34:443",
+			TLSVersion:           "TLS 1.3",
+			TLSCipher:            "TLS_AES_128_GCM_SHA256",
+			TLSALPN:              "h2",
+			TLSServerCertSubject: "CN=example.com",
+		}
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	sendMsg := &session.Message{
+		ID:        sendMsgID,
+		SessionID: sessID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: ts,
+		Method:    "POST",
+		Headers:   map[string][]string{"Content-Type": {"application/json"}, "Accept": {"*/*"}},
+		Body:      []byte(`{"user":"admin","action":"login"}`),
+		RawBytes:  []byte("POST /api/login HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+		Metadata:  map[string]string{"source": "resend"},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	recvMsg := &session.Message{
+		ID:         recvMsgID,
+		SessionID:  sessID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  ts.Add(250 * time.Millisecond),
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"application/json"}, "Set-Cookie": {"sid=abc; Path=/"}},
+		Body:       []byte(`{"ok":true,"token":"secret123"}`),
+		RawBytes:   []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"),
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage(recv): %v", err)
+	}
+}
+
+// parseMCPImportResult extracts the import result from an MCP CallToolResult.
+func parseMCPImportResult(t *testing.T, result *gomcp.CallToolResult) executeImportSessionsResult {
+	t.Helper()
+	var textContent gomcp.TextContent
+	raw, _ := json.Marshal(result.Content[0])
+	if err := json.Unmarshal(raw, &textContent); err != nil {
+		t.Fatalf("unmarshal text content: %v", err)
+	}
+	var importRes executeImportSessionsResult
+	if err := json.Unmarshal([]byte(textContent.Text), &importRes); err != nil {
+		t.Fatalf("unmarshal import result: %v", err)
+	}
+	return importRes
+}
+
+func TestExportImportRoundTrip_MCP(t *testing.T) {
+	store := newTestStore(t)
+	ca := newTestCA(t)
+	cs := setupTestSession(t, ca, store)
+
+	// Mix of session types:
+	// - HTTPS with ConnInfo (normal proxy session)
+	// - HTTPS without ConnInfo (resend-generated, empty ConnID)
+	// - HTTP/1.x with ConnInfo
+	makeRealisticTestSession(t, store,
+		"550e8400-e29b-41d4-a716-446655440001",
+		"550e8400-e29b-41d4-a716-446655440002",
+		"550e8400-e29b-41d4-a716-446655440003",
+		"HTTPS", true)
+	makeRealisticTestSession(t, store,
+		"550e8400-e29b-41d4-a716-446655440004",
+		"550e8400-e29b-41d4-a716-446655440005",
+		"550e8400-e29b-41d4-a716-446655440006",
+		"HTTPS", false) // resend-like: no ConnID, no ConnInfo
+	makeRealisticTestSession(t, store,
+		"550e8400-e29b-41d4-a716-446655440007",
+		"550e8400-e29b-41d4-a716-446655440008",
+		"550e8400-e29b-41d4-a716-446655440009",
+		"HTTP/1.x", true)
+
+	dir := t.TempDir()
+	exportPath := filepath.Join(dir, "export.jsonl")
+
+	// Step 1: Export
+	exportResult := executeCallTool(t, cs, map[string]any{
+		"action": "export_sessions",
+		"params": map[string]any{
+			"output_path": exportPath,
+		},
+	})
+	if exportResult.IsError {
+		t.Fatalf("export returned error: %v", exportResult.Content)
+	}
+
+	// Verify export count
+	var exportTextContent gomcp.TextContent
+	exportRaw, _ := json.Marshal(exportResult.Content[0])
+	if err := json.Unmarshal(exportRaw, &exportTextContent); err != nil {
+		t.Fatalf("unmarshal export text content: %v", err)
+	}
+	var exportRes executeExportSessionsResult
+	if err := json.Unmarshal([]byte(exportTextContent.Text), &exportRes); err != nil {
+		t.Fatalf("unmarshal export result: %v", err)
+	}
+	if exportRes.ExportedCount != 3 {
+		t.Fatalf("expected 3 exported, got %d", exportRes.ExportedCount)
+	}
+
+	// Log JSONL for debugging
+	data, _ := os.ReadFile(exportPath)
+	t.Logf("Exported JSONL:\n%s", string(data))
+
+	// Step 2: Delete all sessions
+	deleteResult := executeCallTool(t, cs, map[string]any{
+		"action": "delete_sessions",
+		"params": map[string]any{
+			"confirm": true,
+		},
+	})
+	if deleteResult.IsError {
+		t.Fatalf("delete returned error: %v", deleteResult.Content)
+	}
+
+	// Step 3: Import
+	importCallResult := executeCallTool(t, cs, map[string]any{
+		"action": "import_sessions",
+		"params": map[string]any{
+			"input_path": exportPath,
+		},
+	})
+	if importCallResult.IsError {
+		t.Fatalf("import returned error: %v", importCallResult.Content)
+	}
+
+	importRes := parseMCPImportResult(t, importCallResult)
+
+	if importRes.Errors != 0 {
+		t.Errorf("expected 0 errors, got %d", importRes.Errors)
+		for _, e := range importRes.ErrorDetails {
+			t.Errorf("  line %d (session %s): %s", e.Line, e.SessionID, e.Reason)
+		}
+	}
+	if importRes.Imported != 3 {
+		t.Errorf("expected 3 imported, got %d", importRes.Imported)
+	}
 }
 
 func TestExportSessionsAction_PathTraversalCleaned(t *testing.T) {

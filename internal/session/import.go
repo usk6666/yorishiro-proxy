@@ -28,10 +28,20 @@ type ImportOptions struct {
 	// OnConflict determines behavior for duplicate session IDs.
 	OnConflict ConflictPolicy
 	// MaxScannerBuffer is the maximum per-line buffer size in bytes for the
-	// JSONL scanner. 0 uses the default (64 MB).
+	// JSONL scanner. 0 uses the default (4 MB).
 	MaxScannerBuffer int
 	// ValidateIDs when true requires session and message IDs to be valid UUIDs.
 	ValidateIDs bool
+}
+
+// ImportError describes a single line-level error during import.
+type ImportError struct {
+	// Line is the 1-based line number in the JSONL input.
+	Line int `json:"line"`
+	// SessionID is the session ID from the record, if available.
+	SessionID string `json:"session_id,omitempty"`
+	// Reason describes why the import failed.
+	Reason string `json:"reason"`
 }
 
 // ImportResult summarizes the outcome of an import operation.
@@ -42,6 +52,26 @@ type ImportResult struct {
 	Skipped int `json:"skipped"`
 	// Errors is the number of sessions that failed to import.
 	Errors int `json:"errors"`
+	// ErrorDetails contains per-line error descriptions. Only populated when
+	// errors occur. Capped at maxErrorDetails entries to prevent unbounded
+	// memory usage.
+	ErrorDetails []ImportError `json:"error_details,omitempty"`
+}
+
+// maxErrorDetails limits the number of per-line error details stored in
+// ImportResult to prevent unbounded memory growth on large files.
+const maxErrorDetails = 50
+
+// addError records an import error with an optional session ID and reason.
+func (r *ImportResult) addError(line int, sessionID, reason string) {
+	r.Errors++
+	if len(r.ErrorDetails) < maxErrorDetails {
+		r.ErrorDetails = append(r.ErrorDetails, ImportError{
+			Line:      line,
+			SessionID: sessionID,
+			Reason:    reason,
+		})
+	}
 }
 
 // isValidUUID checks whether s is a valid UUID (RFC 4122) string.
@@ -85,43 +115,50 @@ func ImportSessions(ctx context.Context, store Store, r io.Reader, opts ImportOp
 
 		var record ExportRecord
 		if err := json.Unmarshal(line, &record); err != nil {
-			result.Errors++
+			result.addError(lineNum, "", fmt.Sprintf("invalid JSON: %v", err))
 			continue
 		}
 
 		if record.Session == nil {
-			result.Errors++
+			result.addError(lineNum, "", "missing session field")
 			continue
 		}
 
+		sessionID := record.Session.ID
+
 		if record.Version != ExportFormatVersion {
-			result.Errors++
+			result.addError(lineNum, sessionID,
+				fmt.Sprintf("unsupported version %q (expected %q)", record.Version, ExportFormatVersion))
 			continue
 		}
 
 		// S-5: validate session ID is a valid UUID.
-		if opts.ValidateIDs && !isValidUUID(record.Session.ID) {
-			result.Errors++
+		if opts.ValidateIDs && !isValidUUID(sessionID) {
+			result.addError(lineNum, sessionID,
+				fmt.Sprintf("invalid session UUID: %q", sessionID))
 			continue
 		}
 
 		sess, err := exportToSession(record.Session)
 		if err != nil {
-			result.Errors++
+			result.addError(lineNum, sessionID, fmt.Sprintf("convert session: %v", err))
 			continue
 		}
 
 		// S-5: validate message IDs are valid UUIDs.
 		if opts.ValidateIDs {
 			invalidMsg := false
+			var invalidMsgID string
 			for _, em := range record.Messages {
 				if !isValidUUID(em.ID) {
 					invalidMsg = true
+					invalidMsgID = em.ID
 					break
 				}
 			}
 			if invalidMsg {
-				result.Errors++
+				result.addError(lineNum, sessionID,
+					fmt.Sprintf("invalid message UUID: %q", invalidMsgID))
 				continue
 			}
 		}
@@ -135,7 +172,8 @@ func ImportSessions(ctx context.Context, store Store, r io.Reader, opts ImportOp
 				continue
 			case ConflictReplace:
 				if err := store.DeleteSession(ctx, sess.ID); err != nil {
-					result.Errors++
+					result.addError(lineNum, sessionID,
+						fmt.Sprintf("delete existing session for replace: %v", err))
 					continue
 				}
 			default:
@@ -145,27 +183,27 @@ func ImportSessions(ctx context.Context, store Store, r io.Reader, opts ImportOp
 		}
 
 		if err := store.SaveSession(ctx, sess); err != nil {
-			result.Errors++
+			result.addError(lineNum, sessionID, fmt.Sprintf("save session: %v", err))
 			continue
 		}
 
-		msgErr := false
+		var msgErr error
 		for _, em := range record.Messages {
 			msg, err := exportToMessage(em)
 			if err != nil {
-				msgErr = true
+				msgErr = fmt.Errorf("convert message %q: %w", em.ID, err)
 				break
 			}
 			if err := store.AppendMessage(ctx, msg); err != nil {
-				msgErr = true
+				msgErr = fmt.Errorf("save message %q: %w", em.ID, err)
 				break
 			}
 		}
 
-		if msgErr {
+		if msgErr != nil {
 			// Clean up the session we just saved on message import failure.
 			_ = store.DeleteSession(ctx, sess.ID)
-			result.Errors++
+			result.addError(lineNum, sessionID, msgErr.Error())
 			continue
 		}
 
