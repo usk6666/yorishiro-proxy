@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -224,7 +226,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 	}
 
 	// Create engine with HTTP client and session fetcher.
-	sendFunc := s.macroSendFunc()
+	sendFunc := s.macroSendFunc(params.Name)
 	fetcher := &storeSessionFetcher{store: s.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
@@ -409,8 +411,10 @@ func validateMacroDefinition(m *macro.Macro) error {
 }
 
 // macroSendFunc returns a macro.SendFunc for macro step execution.
+// The macroName parameter is embedded in the closure so that each step's
+// HTTP exchange can be recorded as a session with macro metadata tags.
 // Access control is handled by the target scope enforcement layer.
-func (s *Server) macroSendFunc() macro.SendFunc {
+func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 	return func(ctx context.Context, req *macro.SendRequest) (*macro.SendResponse, error) {
 		var client httpDoer
 		if s.replayDoer != nil {
@@ -451,6 +455,7 @@ func (s *Server) macroSendFunc() macro.SendFunc {
 			}
 		}
 
+		start := time.Now()
 		resp, err := client.Do(httpReq)
 		if err != nil {
 			return nil, fmt.Errorf("send request: %w", err)
@@ -461,6 +466,12 @@ func (s *Server) macroSendFunc() macro.SendFunc {
 		if err != nil {
 			return nil, fmt.Errorf("read response body: %w", err)
 		}
+		duration := time.Since(start)
+
+		// Record the macro step as a session so it appears in session history.
+		if s.store != nil {
+			s.recordMacroStepSession(ctx, macroName, req, resp, respBody, httpReq, start, duration)
+		}
 
 		return &macro.SendResponse{
 			StatusCode: resp.StatusCode,
@@ -468,6 +479,82 @@ func (s *Server) macroSendFunc() macro.SendFunc {
 			Body:       respBody,
 			URL:        resp.Request.URL.String(),
 		}, nil
+	}
+}
+
+// recordMacroStepSession saves a macro step's HTTP exchange as a session with
+// send and receive messages. Errors are logged but not propagated to avoid
+// disrupting macro execution when session recording fails.
+func (s *Server) recordMacroStepSession(
+	ctx context.Context,
+	macroName string,
+	req *macro.SendRequest,
+	resp *http.Response,
+	respBody []byte,
+	httpReq *http.Request,
+	start time.Time,
+	duration time.Duration,
+) {
+	tags := map[string]string{
+		"macro":      macroName,
+		"macro_step": req.StepID,
+	}
+
+	sess := &session.Session{
+		Protocol:    "HTTP/1.x",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		Duration:    duration,
+		Tags:        tags,
+	}
+	if err := s.store.SaveSession(ctx, sess); err != nil {
+		slog.WarnContext(ctx, "failed to save macro step session",
+			"macro", macroName, "step", req.StepID, "error", err)
+		return
+	}
+
+	// Build recorded request headers from the actual http.Request.
+	recordedHeaders := make(map[string][]string)
+	for key, values := range httpReq.Header {
+		recordedHeaders[key] = values
+	}
+
+	parsedURL := httpReq.URL
+
+	sendMsg := &session.Message{
+		SessionID: sess.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: start,
+		Method:    req.Method,
+		URL:       parsedURL,
+		Headers:   recordedHeaders,
+		Body:      req.Body,
+	}
+	if err := s.store.AppendMessage(ctx, sendMsg); err != nil {
+		slog.WarnContext(ctx, "failed to save macro step send message",
+			"macro", macroName, "step", req.StepID, "error", err)
+		return
+	}
+
+	respHeaders := make(map[string][]string)
+	for key, values := range resp.Header {
+		respHeaders[key] = values
+	}
+
+	recvMsg := &session.Message{
+		SessionID:  sess.ID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  start.Add(duration),
+		StatusCode: resp.StatusCode,
+		Headers:    respHeaders,
+		Body:       respBody,
+	}
+	if err := s.store.AppendMessage(ctx, recvMsg); err != nil {
+		slog.WarnContext(ctx, "failed to save macro step receive message",
+			"macro", macroName, "step", req.StepID, "error", err)
 	}
 }
 

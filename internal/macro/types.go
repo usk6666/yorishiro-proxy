@@ -205,6 +205,9 @@ type SendRequest struct {
 	Headers map[string][]string
 	// Body is the request body.
 	Body []byte
+	// StepID is the macro step identifier. Set by the engine before calling
+	// SendFunc so that callers can use it for logging or session recording.
+	StepID string
 }
 
 // SendResponse represents the response from sending a macro step request.
