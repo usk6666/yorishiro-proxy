@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -90,50 +89,14 @@ func safeCheckRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-// denyPrivateNetwork returns an error if the resolved IP is a private, loopback,
-// link-local, or otherwise internal address. This prevents SSRF attacks.
-func denyPrivateNetwork(_, address string, _ syscall.RawConn) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("split host port: %w", err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("invalid IP address: %s", host)
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return fmt.Errorf("connections to private/internal networks are not allowed: %s", ip)
-	}
-	return nil
-}
-
-// newPermissiveHTTPClient returns an *http.Client without SSRF protection,
-// suitable for use when allow_private_networks is enabled.
-// It uses the same timeout and redirect settings as NewHardenedHTTPClient.
-func newPermissiveHTTPClient() *http.Client {
+// NewDefaultHTTPClient returns an *http.Client with an explicit timeout and
+// redirect suppression. It should be used for outbound HTTP requests initiated
+// by user input (fuzz, resend, macro, etc.). Access control is handled at a
+// higher level by the target scope enforcement layer (TargetScope).
+func NewDefaultHTTPClient() *http.Client {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: defaultReplayTimeout,
-		}).DialContext,
-	}
-	return &http.Client{
-		Timeout:   defaultReplayTimeout,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
-// NewHardenedHTTPClient returns an *http.Client with SSRF protection
-// (denyPrivateNetwork), an explicit timeout, and redirect suppression.
-// This should be used for all outbound HTTP requests initiated by user input
-// (fuzz, resend, macro, etc.) to prevent SSRF pivoting and connection-hold DoS.
-func NewHardenedHTTPClient() *http.Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: defaultReplayTimeout,
-			Control: denyPrivateNetwork,
 		}).DialContext,
 	}
 	return &http.Client{
@@ -147,17 +110,15 @@ func NewHardenedHTTPClient() *http.Client {
 
 // httpClient returns the HTTP client to use for replay requests.
 // If a custom doer is set (for testing), it wraps it; otherwise,
-// it returns a client with the default replay timeout and SSRF protection.
+// it returns a client with the default replay timeout.
+// Access control is handled by the target scope enforcement layer.
 func (s *Server) httpClient() httpDoer {
 	if s.replayDoer != nil {
 		return s.replayDoer
 	}
-	// S-2: Use a custom Dialer with a Control function to block connections
-	// to private/internal networks, preventing SSRF and DNS rebinding attacks.
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: defaultReplayTimeout,
-			Control: denyPrivateNetwork,
 		}).DialContext,
 	}
 	return &http.Client{
@@ -172,25 +133,15 @@ func (s *Server) httpClient() httpDoer {
 
 // rawDialerFunc returns the raw dialer to use for replay_raw connections.
 // If a custom dialer is set (for testing), it is returned; otherwise,
-// a dialer with SSRF protection is returned.
+// a default dialer with the replay timeout is returned.
+// Access control is handled by the target scope enforcement layer.
 func (s *Server) rawDialerFunc() rawDialer {
-	return s.rawDialerFuncWithOpts(false)
-}
-
-// rawDialerFuncWithOpts returns the raw dialer to use for replay_raw connections.
-// When allowPrivateNetworks is true, SSRF protection is skipped to allow
-// connections to localhost and private networks.
-func (s *Server) rawDialerFuncWithOpts(allowPrivateNetworks bool) rawDialer {
 	if s.rawReplayDialer != nil {
 		return s.rawReplayDialer
 	}
-	dialer := &net.Dialer{
+	return &net.Dialer{
 		Timeout: defaultReplayTimeout,
 	}
-	if !allowPrivateNetworks {
-		dialer.Control = denyPrivateNetwork
-	}
-	return dialer
 }
 
 // encodeBody returns the body as a string with its encoding type.
