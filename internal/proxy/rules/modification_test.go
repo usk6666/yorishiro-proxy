@@ -178,19 +178,52 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action: Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method: "GET",
-			url:    "/api/test",
+			url:    "http://example.com/api/test",
 			want:   true,
 		},
 		{
-			name: "match URL pattern",
+			name: "match URL pattern on path",
 			rule: Rule{
 				ID: "r1", Direction: DirectionRequest,
 				Conditions: Conditions{URLPattern: "/api/.*"},
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method: "GET",
-			url:    "/api/test",
+			url:    "http://example.com/api/test",
 			want:   true,
+		},
+		{
+			name: "match URL pattern on hostname",
+			rule: Rule{
+				ID: "r1", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: `example\.com`},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			method: "GET",
+			url:    "http://example.com/api/test",
+			want:   true,
+		},
+		{
+			name: "match URL pattern on full URL",
+			rule: Rule{
+				ID: "r1", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: `http://example\.com/api/test`},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			method: "GET",
+			url:    "http://example.com/api/test",
+			want:   true,
+		},
+		{
+			name: "no match URL pattern on hostname",
+			rule: Rule{
+				ID: "r1", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: `other\.com`},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			method: "GET",
+			url:    "http://example.com/api/test",
+			want:   false,
 		},
 		{
 			name: "no match URL pattern",
@@ -200,7 +233,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method: "GET",
-			url:    "/public/test",
+			url:    "http://example.com/public/test",
 			want:   false,
 		},
 		{
@@ -211,7 +244,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method: "POST",
-			url:    "/test",
+			url:    "http://example.com/test",
 			want:   true,
 		},
 		{
@@ -222,7 +255,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method: "GET",
-			url:    "/test",
+			url:    "http://example.com/test",
 			want:   false,
 		},
 		{
@@ -233,7 +266,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method: "POST",
-			url:    "/test",
+			url:    "http://example.com/test",
 			want:   true,
 		},
 		{
@@ -244,7 +277,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method:  "GET",
-			url:     "/test",
+			url:     "http://example.com/test",
 			headers: http.Header{"Content-Type": {"application/json"}},
 			want:    true,
 		},
@@ -256,7 +289,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method:  "GET",
-			url:     "/test",
+			url:     "http://example.com/test",
 			headers: http.Header{"Content-Type": {"application/json"}},
 			want:    false,
 		},
@@ -268,7 +301,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method:  "GET",
-			url:     "/test",
+			url:     "http://example.com/test",
 			headers: nil,
 			want:    false,
 		},
@@ -288,14 +321,14 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 			rule: Rule{
 				ID: "r1", Direction: DirectionRequest,
 				Conditions: Conditions{
-					URLPattern:  "/api/.*",
+					URLPattern:  `example\.com/api/.*`,
 					Methods:     []string{"POST"},
 					HeaderMatch: map[string]string{"Content-Type": "json"},
 				},
 				Action: Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method:  "POST",
-			url:     "/api/test",
+			url:     "http://example.com/api/test",
 			headers: http.Header{"Content-Type": {"application/json"}},
 			want:    true,
 		},
@@ -310,8 +343,41 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				Action: Action{Type: ActionRemoveHeader, Header: "X"},
 			},
 			method: "GET",
-			url:    "/api/test",
+			url:    "http://example.com/api/test",
 			want:   false,
+		},
+		{
+			name: "match URL pattern with scheme",
+			rule: Rule{
+				ID: "r1", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: `^https://`},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			method: "GET",
+			url:    "https://example.com/test",
+			want:   true,
+		},
+		{
+			name: "no match URL pattern with wrong scheme",
+			rule: Rule{
+				ID: "r1", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: `^https://`},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			method: "GET",
+			url:    "http://example.com/test",
+			want:   false,
+		},
+		{
+			name: "match URL pattern with query string",
+			rule: Rule{
+				ID: "r1", Direction: DirectionRequest,
+				Conditions: Conditions{URLPattern: `key=value`},
+				Action:     Action{Type: ActionRemoveHeader, Header: "X"},
+			},
+			method: "GET",
+			url:    "http://example.com/test?key=value",
+			want:   true,
 		},
 	}
 
@@ -324,7 +390,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 
 			var u *url.URL
 			if tt.url != "" {
-				u, _ = url.Parse("http://example.com" + tt.url)
+				u, _ = url.Parse(tt.url)
 			}
 
 			got := cr.matchesRequest(tt.method, u, tt.headers)
