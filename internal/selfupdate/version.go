@@ -104,8 +104,8 @@ func compareSemver(a, b semver) int {
 
 // IsNewerThan returns true if the latest version string is newer than the current one.
 // Both are expected in "vX.Y.Z" or "vX.Y.Z-pre" format.
-// Returns false and nil error if current is "dev" (development builds always allow upgrade check
-// but the caller should handle "dev" specially).
+// Returns true and nil error if current is "dev" (development builds treat any valid
+// release as newer).
 func IsNewerThan(latest, current string) (bool, error) {
 	if current == "dev" {
 		// Development builds: treat any release as newer.
