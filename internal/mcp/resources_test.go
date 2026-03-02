@@ -60,6 +60,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://help/execute",
 		"yorishiro://help/configure",
 		"yorishiro://help/examples",
+		"yorishiro://help/security",
 	}
 	for _, uri := range expectedHelpURIs {
 		if !gotURIs[uri] {
@@ -132,6 +133,12 @@ func TestReadResource_HelpResources(t *testing.T) {
 			uri:          "yorishiro://help/examples",
 			wantMIMEType: "text/markdown",
 			wantContains: "Workflow",
+		},
+		{
+			name:         "help/security",
+			uri:          "yorishiro://help/security",
+			wantMIMEType: "text/markdown",
+			wantContains: "Two-Layer",
 		},
 	}
 
