@@ -2,10 +2,15 @@ BINARY := yorishiro-proxy
 BINDIR := bin
 MODULE := github.com/usk6666/yorishiro-proxy
 
+VERSION ?= dev
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+DATE    ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+
 .PHONY: build build-ui dev-ui test test-cover vet clean bench bench-compare
 
 build: build-ui vet
-	go build -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
+	go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
 
 build-ui:
 	cd web && pnpm install --frozen-lockfile && pnpm run build
