@@ -225,20 +225,20 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
 		}
 		current := ""
-		if s.manager != nil {
-			current = proxy.RedactProxyURL(s.manager.UpstreamProxy())
+		if s.deps.manager != nil {
+			current = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
 		}
 		result.UpstreamProxy = &current
 	}
 
 	if input.CaptureScope != nil {
-		if s.scope == nil {
+		if s.deps.scope == nil {
 			return nil, nil, fmt.Errorf("capture scope is not initialized: proxy may not be running")
 		}
 		if err := s.mergeScope(input.CaptureScope); err != nil {
 			return nil, nil, fmt.Errorf("capture_scope merge: %w", err)
 		}
-		includes, excludes := s.scope.Rules()
+		includes, excludes := s.deps.scope.Rules()
 		result.CaptureScope = &configureScopeResult{
 			IncludeCount: len(includes),
 			ExcludeCount: len(excludes),
@@ -246,17 +246,17 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	}
 
 	if input.TLSPassthrough != nil {
-		if s.passthrough == nil {
+		if s.deps.passthrough == nil {
 			return nil, nil, fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
 		}
 		s.mergePassthrough(input.TLSPassthrough)
 		result.TLSPassthrough = &configurePassthroughResult{
-			TotalPatterns: s.passthrough.Len(),
+			TotalPatterns: s.deps.passthrough.Len(),
 		}
 	}
 
 	if input.InterceptRules != nil {
-		if s.interceptEngine == nil {
+		if s.deps.interceptEngine == nil {
 			return nil, nil, fmt.Errorf("intercept engine is not initialized: proxy may not be running")
 		}
 		if err := s.mergeInterceptRules(input.InterceptRules); err != nil {
@@ -266,7 +266,7 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	}
 
 	if input.InterceptQueue != nil {
-		if s.interceptQueue == nil {
+		if s.deps.interceptQueue == nil {
 			return nil, nil, fmt.Errorf("intercept queue is not initialized: proxy may not be running")
 		}
 		if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
@@ -276,7 +276,7 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	}
 
 	if input.AutoTransform != nil {
-		if s.transformPipeline == nil {
+		if s.deps.transformPipeline == nil {
 			return nil, nil, fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
 		}
 		if err := s.mergeAutoTransform(input.AutoTransform); err != nil {
@@ -301,14 +301,14 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
 		}
 		current := ""
-		if s.manager != nil {
-			current = proxy.RedactProxyURL(s.manager.UpstreamProxy())
+		if s.deps.manager != nil {
+			current = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
 		}
 		result.UpstreamProxy = &current
 	}
 
 	if input.CaptureScope != nil {
-		if s.scope == nil {
+		if s.deps.scope == nil {
 			return nil, nil, fmt.Errorf("capture scope is not initialized: proxy may not be running")
 		}
 		// Validate rules before applying.
@@ -320,7 +320,7 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		}
 		includes := toScopeRules(input.CaptureScope.Includes)
 		excludes := toScopeRules(input.CaptureScope.Excludes)
-		s.scope.SetRules(includes, excludes)
+		s.deps.scope.SetRules(includes, excludes)
 		result.CaptureScope = &configureScopeResult{
 			IncludeCount: len(includes),
 			ExcludeCount: len(excludes),
@@ -328,17 +328,17 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	}
 
 	if input.TLSPassthrough != nil {
-		if s.passthrough == nil {
+		if s.deps.passthrough == nil {
 			return nil, nil, fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
 		}
 		s.replacePassthrough(input.TLSPassthrough)
 		result.TLSPassthrough = &configurePassthroughResult{
-			TotalPatterns: s.passthrough.Len(),
+			TotalPatterns: s.deps.passthrough.Len(),
 		}
 	}
 
 	if input.InterceptRules != nil {
-		if s.interceptEngine == nil {
+		if s.deps.interceptEngine == nil {
 			return nil, nil, fmt.Errorf("intercept engine is not initialized: proxy may not be running")
 		}
 		if err := s.replaceInterceptRules(input.InterceptRules); err != nil {
@@ -348,7 +348,7 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	}
 
 	if input.InterceptQueue != nil {
-		if s.interceptQueue == nil {
+		if s.deps.interceptQueue == nil {
 			return nil, nil, fmt.Errorf("intercept queue is not initialized: proxy may not be running")
 		}
 		if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
@@ -358,7 +358,7 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	}
 
 	if input.AutoTransform != nil {
-		if s.transformPipeline == nil {
+		if s.deps.transformPipeline == nil {
 			return nil, nil, fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
 		}
 		if err := s.replaceAutoTransform(input.AutoTransform); err != nil {
@@ -380,25 +380,25 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 // since these fields are scalar values, not collections.
 func (s *Server) applyConnectionLimits(input configureInput, result *configureResult) error {
 	if input.MaxConnections != nil {
-		if s.manager == nil {
+		if s.deps.manager == nil {
 			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
 		}
 		n := *input.MaxConnections
 		if n < minMaxConnections || n > maxMaxConnections {
 			return fmt.Errorf("max_connections must be between %d and %d, got %d", minMaxConnections, maxMaxConnections, n)
 		}
-		s.manager.SetMaxConnections(n)
+		s.deps.manager.SetMaxConnections(n)
 		result.MaxConnections = &n
 	}
 	if input.PeekTimeoutMs != nil {
-		if s.manager == nil {
+		if s.deps.manager == nil {
 			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
 		}
 		ms := *input.PeekTimeoutMs
 		if ms < minTimeoutMs || ms > maxTimeoutMs {
 			return fmt.Errorf("peek_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
 		}
-		s.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
+		s.deps.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
 		msVal := int64(ms)
 		result.PeekTimeoutMs = &msVal
 	}
@@ -425,7 +425,7 @@ func (s *Server) mergeScope(cfg *configureCaptureScope) error {
 		return err
 	}
 
-	s.scope.MergeRules(
+	s.deps.scope.MergeRules(
 		toScopeRules(cfg.AddIncludes),
 		toScopeRules(cfg.RemoveIncludes),
 		toScopeRules(cfg.AddExcludes),
@@ -437,22 +437,22 @@ func (s *Server) mergeScope(cfg *configureCaptureScope) error {
 // mergePassthrough applies delta add/remove operations to the passthrough list.
 func (s *Server) mergePassthrough(cfg *configureTLSPassthrough) {
 	for _, p := range cfg.Add {
-		s.passthrough.Add(p)
+		s.deps.passthrough.Add(p)
 	}
 	for _, p := range cfg.Remove {
-		s.passthrough.Remove(p)
+		s.deps.passthrough.Remove(p)
 	}
 }
 
 // replacePassthrough replaces the entire passthrough list with new patterns.
 func (s *Server) replacePassthrough(cfg *configureTLSPassthrough) {
 	// Remove all existing patterns.
-	for _, p := range s.passthrough.List() {
-		s.passthrough.Remove(p)
+	for _, p := range s.deps.passthrough.List() {
+		s.deps.passthrough.Remove(p)
 	}
 	// Add new patterns.
 	for _, p := range cfg.Patterns {
-		s.passthrough.Add(p)
+		s.deps.passthrough.Add(p)
 	}
 }
 
@@ -472,28 +472,28 @@ func (s *Server) mergeInterceptRules(cfg *configureInterceptRules) error {
 	// Process additions first.
 	for _, input := range cfg.Add {
 		r := toInterceptRule(input)
-		if err := s.interceptEngine.AddRule(r); err != nil {
+		if err := s.deps.interceptEngine.AddRule(r); err != nil {
 			return err
 		}
 	}
 
 	// Process removals.
 	for _, id := range cfg.Remove {
-		if err := s.interceptEngine.RemoveRule(id); err != nil {
+		if err := s.deps.interceptEngine.RemoveRule(id); err != nil {
 			return err
 		}
 	}
 
 	// Process enable.
 	for _, id := range cfg.Enable {
-		if err := s.interceptEngine.EnableRule(id, true); err != nil {
+		if err := s.deps.interceptEngine.EnableRule(id, true); err != nil {
 			return err
 		}
 	}
 
 	// Process disable.
 	for _, id := range cfg.Disable {
-		if err := s.interceptEngine.EnableRule(id, false); err != nil {
+		if err := s.deps.interceptEngine.EnableRule(id, false); err != nil {
 			return err
 		}
 	}
@@ -511,7 +511,7 @@ func (s *Server) replaceInterceptRules(cfg *configureInterceptRules) error {
 
 // interceptRulesResult returns the current intercept rules state.
 func (s *Server) interceptRulesResult() *configureInterceptResult {
-	rules := s.interceptEngine.Rules()
+	rules := s.deps.interceptEngine.Rules()
 	enabled := 0
 	for _, r := range rules {
 		if r.Enabled {
@@ -531,12 +531,12 @@ func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
 		if ms < 1000 {
 			return fmt.Errorf("timeout_ms must be >= 1000, got %d", ms)
 		}
-		s.interceptQueue.SetTimeout(time.Duration(ms) * time.Millisecond)
+		s.deps.interceptQueue.SetTimeout(time.Duration(ms) * time.Millisecond)
 	}
 	if cfg.TimeoutBehavior != "" {
 		switch intercept.TimeoutBehavior(cfg.TimeoutBehavior) {
 		case intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop:
-			s.interceptQueue.SetTimeoutBehavior(intercept.TimeoutBehavior(cfg.TimeoutBehavior))
+			s.deps.interceptQueue.SetTimeoutBehavior(intercept.TimeoutBehavior(cfg.TimeoutBehavior))
 		default:
 			return fmt.Errorf("invalid timeout_behavior %q: must be %q or %q",
 				cfg.TimeoutBehavior, intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop)
@@ -548,9 +548,9 @@ func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
 // interceptQueueResult returns the current intercept queue configuration state.
 func (s *Server) interceptQueueResult() *configureInterceptQueueResult {
 	return &configureInterceptQueueResult{
-		TimeoutMs:       s.interceptQueue.Timeout().Milliseconds(),
-		TimeoutBehavior: string(s.interceptQueue.TimeoutBehaviorValue()),
-		QueuedItems:     s.interceptQueue.Len(),
+		TimeoutMs:       s.deps.interceptQueue.Timeout().Milliseconds(),
+		TimeoutBehavior: string(s.deps.interceptQueue.TimeoutBehaviorValue()),
+		QueuedItems:     s.deps.interceptQueue.Len(),
 	}
 }
 
@@ -559,28 +559,28 @@ func (s *Server) mergeAutoTransform(cfg *configureAutoTransform) error {
 	// Process additions first.
 	for _, input := range cfg.Add {
 		r := toTransformRule(input)
-		if err := s.transformPipeline.AddRule(r); err != nil {
+		if err := s.deps.transformPipeline.AddRule(r); err != nil {
 			return err
 		}
 	}
 
 	// Process removals.
 	for _, id := range cfg.Remove {
-		if err := s.transformPipeline.RemoveRule(id); err != nil {
+		if err := s.deps.transformPipeline.RemoveRule(id); err != nil {
 			return err
 		}
 	}
 
 	// Process enable.
 	for _, id := range cfg.Enable {
-		if err := s.transformPipeline.EnableRule(id, true); err != nil {
+		if err := s.deps.transformPipeline.EnableRule(id, true); err != nil {
 			return err
 		}
 	}
 
 	// Process disable.
 	for _, id := range cfg.Disable {
-		if err := s.transformPipeline.EnableRule(id, false); err != nil {
+		if err := s.deps.transformPipeline.EnableRule(id, false); err != nil {
 			return err
 		}
 	}
@@ -595,7 +595,7 @@ func (s *Server) replaceAutoTransform(cfg *configureAutoTransform) error {
 
 // autoTransformResult returns the current auto-transform rules state.
 func (s *Server) autoTransformResult() *configureAutoTransformResult {
-	rulesList := s.transformPipeline.Rules()
+	rulesList := s.deps.transformPipeline.Rules()
 	enabled := 0
 	for _, r := range rulesList {
 		if r.Enabled {

@@ -73,7 +73,7 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 
 // handleInterceptRelease handles the release action.
 func (s *Server) handleInterceptRelease(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
-	if s.interceptQueue == nil {
+	if s.deps.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 	if params.InterceptID == "" {
@@ -83,7 +83,7 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 	action := intercept.InterceptAction{
 		Type: intercept.ActionRelease,
 	}
-	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("release: %w", err)
 	}
 
@@ -96,7 +96,7 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 
 // handleInterceptModifyAndForward handles the modify_and_forward action.
 func (s *Server) handleInterceptModifyAndForward(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
-	if s.interceptQueue == nil {
+	if s.deps.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 	if params.InterceptID == "" {
@@ -123,7 +123,7 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 		OverrideBody:    params.OverrideBody,
 	}
 
-	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
 
@@ -136,7 +136,7 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 
 // handleInterceptDrop handles the drop action.
 func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
-	if s.interceptQueue == nil {
+	if s.deps.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 	if params.InterceptID == "" {
@@ -146,7 +146,7 @@ func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) 
 	action := intercept.InterceptAction{
 		Type: intercept.ActionDrop,
 	}
-	if err := s.interceptQueue.Respond(params.InterceptID, action); err != nil {
+	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("drop: %w", err)
 	}
 

@@ -963,7 +963,7 @@ func TestApplyCaptureScope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Server{scope: tt.scope}
+			s := &Server{deps: &deps{scope: tt.scope}}
 			err := s.applyCaptureScope(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("applyCaptureScope() error = %v, wantErr %v", err, tt.wantErr)
@@ -1330,7 +1330,7 @@ func TestApplyTLSPassthrough(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Server{passthrough: tt.pl}
+			s := &Server{deps: &deps{passthrough: tt.pl}}
 			err := s.applyTLSPassthrough(tt.patterns)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("applyTLSPassthrough() error = %v, wantErr %v", err, tt.wantErr)
@@ -1348,7 +1348,7 @@ func TestApplyTLSPassthrough(t *testing.T) {
 // Tests for proxy config file default merging via applyProxyDefaults.
 
 func TestApplyProxyDefaults_NilDefaults(t *testing.T) {
-	s := &Server{proxyDefaults: nil}
+	s := &Server{deps: &deps{proxyDefaults: nil}}
 	input := proxyStartInput{ListenAddr: "127.0.0.1:0"}
 
 	s.applyProxyDefaults(&input)
@@ -1360,11 +1360,11 @@ func TestApplyProxyDefaults_NilDefaults(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_ListenAddr(t *testing.T) {
-	s := &Server{
+	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
 			ListenAddr: "127.0.0.1:9090",
 		},
-	}
+	}}
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1384,11 +1384,11 @@ func TestApplyProxyDefaults_ListenAddr(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
-	s := &Server{
+	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
 			TLSPassthrough: []string{"pinned.com", "*.googleapis.com"},
 		},
-	}
+	}}
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1411,11 +1411,11 @@ func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_TCPForwards(t *testing.T) {
-	s := &Server{
+	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
 			TCPForwards: map[string]string{"3306": "db.example.com:3306"},
 		},
-	}
+	}}
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1444,11 +1444,11 @@ func TestApplyProxyDefaults_CaptureScope(t *testing.T) {
 		"includes": [{"hostname": "*.target.com"}],
 		"excludes": [{"hostname": "cdn.example.com"}]
 	}`)
-	s := &Server{
+	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
 			CaptureScope: scopeJSON,
 		},
-	}
+	}}
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1483,11 +1483,11 @@ func TestApplyProxyDefaults_InterceptRules(t *testing.T) {
 		"direction": "request",
 		"conditions": {"host_pattern": ".*"}
 	}]`)
-	s := &Server{
+	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
 			InterceptRules: rulesJSON,
 		},
-	}
+	}}
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1520,11 +1520,11 @@ func TestApplyProxyDefaults_AutoTransform(t *testing.T) {
 		"conditions": {},
 		"action": {"type": "set_header", "header": "X-Default", "value": "true"}
 	}]`)
-	s := &Server{
+	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
 			AutoTransform: transformJSON,
 		},
-	}
+	}}
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1550,13 +1550,13 @@ func TestApplyProxyDefaults_AutoTransform(t *testing.T) {
 
 func TestApplyProxyDefaults_InvalidJSON(t *testing.T) {
 	// Invalid JSON in defaults should be silently ignored (not crash).
-	s := &Server{
+	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
 			CaptureScope:  json.RawMessage(`{invalid`),
 			InterceptRules: json.RawMessage(`[{invalid`),
 			AutoTransform: json.RawMessage(`[{invalid`),
 		},
-	}
+	}}
 
 	input := proxyStartInput{}
 	s.applyProxyDefaults(&input)

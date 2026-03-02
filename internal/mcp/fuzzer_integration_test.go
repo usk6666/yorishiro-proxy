@@ -47,7 +47,7 @@ func setupFuzzTestSession(t *testing.T, store session.Store, fuzzStore session.F
 		WithFuzzRunner(runner),
 		WithFuzzStore(fuzzStore),
 	)
-	s.replayDoer = doer
+	s.deps.replayDoer = doer
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
