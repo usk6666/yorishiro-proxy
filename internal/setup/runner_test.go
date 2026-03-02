@@ -146,6 +146,134 @@ func TestRunner_UserScope(t *testing.T) {
 	}
 }
 
+func TestRunner_SkipMCPConfig_Flag(t *testing.T) {
+	dir := t.TempDir()
+	origDir := chdir(t, dir)
+	defer chdir(t, origDir)
+
+	var out bytes.Buffer
+	opts := Options{
+		ListenAddr:     "127.0.0.1:8080",
+		NonInteractive: true,
+		SkipMCPConfig:  true,
+		SkipPlaywright: true,
+		SkipSkills:     true,
+		BinaryPath:     "/usr/bin/yorishiro-proxy",
+	}
+
+	runner := NewRunner(opts, &mockPrompter{}, &out)
+	runner.SetNowFunc(func() time.Time {
+		return time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
+	})
+
+	ctx := context.Background()
+	err := runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	output := out.String()
+
+	// Should show skipped message.
+	if !strings.Contains(output, "Step 1: MCP configuration (skipped)") {
+		t.Errorf("output missing skip message\nfull output:\n%s", output)
+	}
+
+	// .mcp.json should NOT be created.
+	configPath := dir + "/.mcp.json"
+	if _, err := os.Stat(configPath); err == nil {
+		t.Error(".mcp.json should not be created when SkipMCPConfig is true")
+	}
+}
+
+func TestRunner_SkipMCPConfig_InteractiveChoice3(t *testing.T) {
+	dir := t.TempDir()
+	origDir := chdir(t, dir)
+	defer chdir(t, origDir)
+
+	var out bytes.Buffer
+	prompter := &mockPrompter{
+		responses: []string{
+			"3", // scope: skip
+			"n", // skip skills
+		},
+	}
+
+	opts := Options{
+		ListenAddr:     "127.0.0.1:8080",
+		SkipPlaywright: true,
+		BinaryPath:     "/usr/bin/yorishiro-proxy",
+	}
+
+	runner := NewRunner(opts, prompter, &out)
+	runner.SetNowFunc(func() time.Time {
+		return time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
+	})
+
+	ctx := context.Background()
+	err := runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	output := out.String()
+
+	// Should show the skip message within step 1.
+	if !strings.Contains(output, "Skipping MCP configuration") {
+		t.Errorf("output missing skip message\nfull output:\n%s", output)
+	}
+
+	// .mcp.json should NOT be created.
+	configPath := dir + "/.mcp.json"
+	if _, err := os.Stat(configPath); err == nil {
+		t.Error(".mcp.json should not be created when user chooses skip")
+	}
+}
+
+func TestRunner_SkipMCPConfig_InteractiveChoiceSkipText(t *testing.T) {
+	dir := t.TempDir()
+	origDir := chdir(t, dir)
+	defer chdir(t, origDir)
+
+	var out bytes.Buffer
+	prompter := &mockPrompter{
+		responses: []string{
+			"skip", // scope: skip (text variant)
+			"n",    // skip skills
+		},
+	}
+
+	opts := Options{
+		ListenAddr:     "127.0.0.1:8080",
+		SkipPlaywright: true,
+		BinaryPath:     "/usr/bin/yorishiro-proxy",
+	}
+
+	runner := NewRunner(opts, prompter, &out)
+	runner.SetNowFunc(func() time.Time {
+		return time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
+	})
+
+	ctx := context.Background()
+	err := runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	output := out.String()
+
+	// Should show the skip message within step 1.
+	if !strings.Contains(output, "Skipping MCP configuration") {
+		t.Errorf("output missing skip message\nfull output:\n%s", output)
+	}
+
+	// .mcp.json should NOT be created.
+	configPath := dir + "/.mcp.json"
+	if _, err := os.Stat(configPath); err == nil {
+		t.Error(".mcp.json should not be created when user types 'skip'")
+	}
+}
+
 // chdir changes directory and returns the original directory.
 func chdir(t *testing.T, dir string) string {
 	t.Helper()

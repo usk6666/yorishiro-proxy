@@ -17,6 +17,9 @@ type Options struct {
 	// SkipPlaywright skips playwright-cli integration.
 	SkipPlaywright bool
 
+	// SkipMCPConfig skips MCP configuration generation.
+	SkipMCPConfig bool
+
 	// SkipSkills skips yorishiro skill installation.
 	SkipSkills bool
 
