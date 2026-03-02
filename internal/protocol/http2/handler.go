@@ -23,6 +23,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -395,11 +396,22 @@ func (h *Handler) handleStream(
 		}
 	}
 
-	// Truncate for recording.
+	// Decompress response body for recording. The raw (potentially compressed)
+	// bytes are written to the client as-is above.
 	recordRespBody := fullRespBody
 	var respTruncated bool
-	if len(fullRespBody) > int(config.MaxBodySize) {
-		recordRespBody = fullRespBody[:int(config.MaxBodySize)]
+	decompressed := false
+	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
+		decoded, err := httputil.DecompressBody(fullRespBody, ce, config.MaxBodySize)
+		if err != nil {
+			logger.Debug("HTTP/2 response body decompression failed, storing as-is", "encoding", ce, "error", err)
+		} else {
+			recordRespBody = decoded
+			decompressed = true
+		}
+	}
+	if len(recordRespBody) > int(config.MaxBodySize) {
+		recordRespBody = recordRespBody[:int(config.MaxBodySize)]
 		respTruncated = true
 	}
 
@@ -499,7 +511,7 @@ func (h *Handler) handleStream(
 					Direction:     "receive",
 					Timestamp:     start.Add(duration),
 					StatusCode:    resp.StatusCode,
-					Headers:       resp.Header,
+					Headers:       httputil.RecordingHeaders(resp.Header, decompressed, len(recordRespBody)),
 					Body:          recordRespBody,
 					BodyTruncated: respTruncated,
 				}
