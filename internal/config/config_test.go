@@ -159,6 +159,14 @@ func TestValidate_ValidFields(t *testing.T) {
 			modify: func(c *Config) { c.LogFormat = "" },
 		},
 		{
+			name:   "log format case insensitive JSON",
+			modify: func(c *Config) { c.LogFormat = "JSON" },
+		},
+		{
+			name:   "log format case insensitive Text",
+			modify: func(c *Config) { c.LogFormat = "Text" },
+		},
+		{
 			name:   "retention_max_sessions zero (unlimited)",
 			modify: func(c *Config) { c.RetentionMaxSessions = 0 },
 		},

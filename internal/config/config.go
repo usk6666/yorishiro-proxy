@@ -33,7 +33,7 @@ func (c *Config) Validate() error {
 	if c.LogLevel != "" && !validLogLevels[strings.ToLower(c.LogLevel)] {
 		return fmt.Errorf("invalid log level: %q (must be debug, info, warn, or error)", c.LogLevel)
 	}
-	if c.LogFormat != "" && c.LogFormat != "text" && c.LogFormat != "json" {
+	if lf := strings.ToLower(c.LogFormat); lf != "" && lf != "text" && lf != "json" {
 		return fmt.Errorf("invalid log format: %q (must be text or json)", c.LogFormat)
 	}
 	if c.RetentionMaxSessions < 0 {
