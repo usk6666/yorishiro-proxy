@@ -40,6 +40,12 @@ const maxResponseBodySize = 64 << 20 // 64MB
 
 // Handler processes HTTP/2 connections (h2c cleartext).
 // For h2 (TLS), the HTTP handler's CONNECT flow calls HandleH2 after ALPN negotiation.
+//
+// NOTE (S-2): For h2 connections via CONNECT, the HTTP/1.x handler's
+// handleCONNECT already performs target scope enforcement before the tunnel
+// is established. For h2c (cleartext HTTP/2) connections, target scope
+// enforcement is applied per-stream in handleStream. This ensures all
+// HTTP/2 traffic paths are covered by scope checks.
 type Handler struct {
 	store  session.Store
 	logger *slog.Logger
@@ -52,6 +58,10 @@ type Handler struct {
 
 	// scope controls which requests are recorded.
 	scope *proxy.CaptureScope
+
+	// targetScope enforces which network targets are allowed or blocked.
+	// When set, requests to targets outside the scope receive a 403 Forbidden response.
+	targetScope *proxy.TargetScope
 
 	// interceptEngine evaluates intercept rules against HTTP/2 requests.
 	interceptEngine *intercept.Engine
@@ -99,6 +109,13 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 // are recorded to the session store.
 func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
 	h.scope = scope
+}
+
+// SetTargetScope sets the target scope used to enforce which network targets
+// are allowed or blocked for h2c (cleartext HTTP/2) connections. For h2 (TLS)
+// connections via CONNECT, the HTTP/1.x handler enforces scope at the tunnel level.
+func (h *Handler) SetTargetScope(scope *proxy.TargetScope) {
+	h.targetScope = scope
 }
 
 // SetGRPCHandler sets the gRPC handler used for gRPC-specific session recording.
@@ -282,6 +299,24 @@ func (h *Handler) handleStream(
 	}
 	if req.URL.Scheme == "" {
 		req.URL.Scheme = scheme
+	}
+
+	// Target scope enforcement: check if the target is allowed before
+	// forwarding the request upstream. For h2c connections this is the
+	// only scope check; for h2 via CONNECT the tunnel-level check in
+	// the HTTP/1.x handler provides the first line of defense (S-2).
+	if h.targetScope != nil && h.targetScope.HasRules() {
+		if allowed, reason := h.targetScope.CheckURL(req.URL); !allowed {
+			body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`,
+				req.URL.Hostname(), reason)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			w.WriteHeader(gohttp.StatusForbidden)
+			w.Write([]byte(body))
+			logger.Info("HTTP/2 request blocked by target scope",
+				"host", req.URL.Host, "reason", reason)
+			return
+		}
 	}
 
 	// Build the outbound request for the upstream server.

@@ -116,6 +116,7 @@ type Handler struct {
 	requestTimeoutNs  atomic.Int64 // nanoseconds; read/written atomically
 	passthrough       *proxy.PassthroughList
 	scope             *proxy.CaptureScope
+	targetScope       *proxy.TargetScope
 	interceptEngine   *intercept.Engine
 	interceptQueue    *intercept.Queue
 	transformPipeline *rules.Pipeline
@@ -196,6 +197,18 @@ func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
 // CaptureScope returns the handler's capture scope, or nil if not set.
 func (h *Handler) CaptureScope() *proxy.CaptureScope {
 	return h.scope
+}
+
+// SetTargetScope sets the target scope used to enforce which network targets
+// are allowed or blocked. When set, requests to targets outside the scope
+// receive a 403 Forbidden response.
+func (h *Handler) SetTargetScope(scope *proxy.TargetScope) {
+	h.targetScope = scope
+}
+
+// TargetScope returns the handler's target scope, or nil if not set.
+func (h *Handler) TargetScope() *proxy.TargetScope {
+	return h.targetScope
 }
 
 // SetInterceptEngine sets the intercept rule engine used to determine which
@@ -348,16 +361,35 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 }
 
 func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, smuggling *smugglingFlags, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+	start := time.Now()
+	logger := h.connLogger(ctx)
+	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+
+	// Ensure absolute URL for forward proxy. This must happen before the
+	// target scope check so that the URL has a valid Host for matching.
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	if req.URL.Scheme == "" {
+		req.URL.Scheme = "http"
+	}
+
+	// Target scope enforcement: check if the target is allowed before
+	// forwarding the request upstream. This MUST happen before the WebSocket
+	// upgrade check to prevent WebSocket requests from bypassing scope
+	// enforcement (S-1: CWE-863).
+	if blocked, reason := h.checkTargetScope(req.URL); blocked {
+		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, logger)
+		return nil
+	}
+
 	// Check for WebSocket upgrade before processing as normal HTTP.
 	// This must happen before hop-by-hop headers are removed.
 	if isWebSocketUpgrade(req) {
 		return h.handleWebSocket(ctx, conn, req)
 	}
-
-	start := time.Now()
-	logger := h.connLogger(ctx)
-	connID := proxy.ConnIDFromContext(ctx)
-	clientAddr := proxy.ClientAddrFromContext(ctx)
 
 	// Read the full request body so the upstream receives uncorrupted data.
 	var recordReqBody []byte
@@ -389,14 +421,6 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 			rawRequest = make([]byte, rawEnd-captureStart)
 			copy(rawRequest, capture.buf.Bytes()[captureStart:rawEnd])
 		}
-	}
-
-	// Ensure absolute URL for forward proxy.
-	if req.URL.Host == "" {
-		req.URL.Host = req.Host
-	}
-	if req.URL.Scheme == "" {
-		req.URL.Scheme = "http"
 	}
 
 	// Remove hop-by-hop headers.
@@ -731,4 +755,89 @@ func applyInterceptModifications(req *gohttp.Request, action intercept.Intercept
 	}
 
 	return req, nil
+}
+
+// checkTargetScope checks if the request URL is allowed by the target scope.
+// Returns (true, reason) if the target is blocked, (false, "") if allowed.
+// If no target scope is configured or it has no rules, the target is always allowed.
+func (h *Handler) checkTargetScope(u *url.URL) (blocked bool, reason string) {
+	if h.targetScope == nil || !h.targetScope.HasRules() {
+		return false, ""
+	}
+	allowed, reason := h.targetScope.CheckURL(u)
+	if !allowed {
+		return true, reason
+	}
+	return false, ""
+}
+
+// checkTargetScopeHost checks if a hostname:port is allowed by the target scope.
+// This is used for CONNECT requests where only host and port are available.
+// Returns (true, reason) if the target is blocked, (false, "") if allowed.
+func (h *Handler) checkTargetScopeHost(hostname string, port int) (blocked bool, reason string) {
+	if h.targetScope == nil || !h.targetScope.HasRules() {
+		return false, ""
+	}
+	// CONNECT targets don't have scheme or path information.
+	allowed, reason := h.targetScope.CheckTarget("", hostname, port, "")
+	if !allowed {
+		return true, reason
+	}
+	return false, ""
+}
+
+// writeBlockedResponse writes a 403 Forbidden response with a JSON body
+// indicating that the target was blocked by the target scope.
+func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, logger *slog.Logger) {
+	body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`, target, reason)
+	resp := fmt.Sprintf("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		len(body), body)
+	if _, err := conn.Write([]byte(resp)); err != nil {
+		logger.Debug("failed to write target scope blocked response", "error", err)
+	}
+	logger.Info("request blocked by target scope", "target", target, "reason", reason)
+}
+
+// recordBlockedSession records a blocked request as a session with BlockedBy="target_scope".
+func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, logger *slog.Logger) {
+	if h.store == nil {
+		return
+	}
+	if !h.shouldCapture(req.Method, req.URL) {
+		return
+	}
+
+	duration := time.Since(start)
+	sess := &session.Session{
+		ConnID:      connID,
+		Protocol:    "HTTP/1.x",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   start,
+		Duration:    duration,
+		Tags:        smugglingTags(smuggling),
+		BlockedBy:   "target_scope",
+		ConnInfo: &session.ConnectionInfo{
+			ClientAddr: clientAddr,
+		},
+	}
+	if err := h.store.SaveSession(ctx, sess); err != nil {
+		logger.Error("blocked session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		return
+	}
+	sendMsg := &session.Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     start,
+		Method:        req.Method,
+		URL:           req.URL,
+		Headers:       req.Header,
+		Body:          reqBody,
+		RawBytes:      rawRequest,
+		BodyTruncated: reqTruncated,
+	}
+	if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("blocked send message save failed", "error", err)
+	}
 }
