@@ -90,9 +90,8 @@
 すべての修正を適用した後、以下を順に実行し、全てパスすることを確認する:
 
 ```bash
-go vet ./...
-go test -race -v ./...
-go build ./...
+make build
+make test
 ```
 
 失敗した場合は原因を特定して修正し、再度全てパスするまで繰り返す。
@@ -129,9 +128,8 @@ FIX_SUMMARY:
   ...
 
 VERIFICATION:
-  go_vet: PASS | FAIL
-  go_test: PASS | FAIL (<テスト数> passed, <失敗数> failed)
-  go_build: PASS | FAIL
+  make_build: PASS | FAIL
+  make_test: PASS | FAIL (<テスト数> passed, <失敗数> failed)
 
 COMMIT: <コミットハッシュ>
 PUSHED: true | false
@@ -144,6 +142,6 @@ UNRESOLVED_ISSUES:
 
 - **スコープ限定**: レビュー所見の修正のみ行う。新機能追加やリファクタリングは禁止
 - **LOW/NIT 無視**: LOW と NIT の所見は修正対象外（再レビューでもチェックされない）
-- **テスト必須**: 修正後に `go vet` / `go test -race` / `go build` が全てパスすること
+- **テスト必須**: 修正後に `make build` / `make test` が全てパスすること
 - **1 コミット**: 修正は原則 1 コミットにまとめる
 ```

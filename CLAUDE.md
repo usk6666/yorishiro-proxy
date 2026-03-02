@@ -45,12 +45,19 @@ internal/
 ## ビルド・テスト
 
 ```bash
-make build          # bin/yorishiro-proxy にビルド
-make test           # go test -race -v ./...
-make test-cover     # カバレッジレポート付きテスト
-make vet            # go vet ./...
+make build          # build-ui → vet → go build（常に UI を再ビルド）
+make build-ui       # web/ の React/Vite アプリをビルドし dist/ を生成
+make ensure-ui      # dist/ が存在しない場合のみ build-ui を実行（軽量）
+make test           # ensure-ui → go test -race -v ./...
+make test-cover     # ensure-ui → カバレッジレポート付きテスト
+make vet            # ensure-ui → go vet ./...
+make bench          # ensure-ui → ベンチマーク実行
 make clean          # 成果物削除
 ```
+
+> **重要**: `go test` / `go vet` / `go build` を直接実行しないこと。
+> `internal/mcp/webui/embed.go` が `//go:embed dist/*` で Web UI を埋め込むため、
+> `dist/` が存在しないとコンパイルエラーになる。必ず `make` ターゲット経由で実行する。
 
 ## コーディング規約
 

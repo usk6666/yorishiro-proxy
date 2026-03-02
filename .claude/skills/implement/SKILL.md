@@ -23,9 +23,8 @@ Linear Issue に基づいて実装から PR 作成までを行う一気通貫ワ
 5. **実装**: 計画に基づいてコードを実装
 6. **テスト作成**: 実装に対するテストを書く
 7. **検証**:
-   - `go vet ./...`
-   - `go test -race ./...`
-   - `go build ./...`
+   - `make build`
+   - `make test`
 8. **コミット**: Conventional Commits 形式でコミット
    - コミットメッセージのフッターに `Refs: <Issue ID>` を含める
 9. **プッシュ**: `git push -u origin <branch-name>` でリモートにプッシュ

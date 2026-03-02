@@ -151,9 +151,8 @@ func TestFunctionName_Scenario(t *testing.T) {
 すべてのコードを書いた後、以下を順に実行し、全てパスすることを確認する:
 
 ```bash
-go vet ./...
-go test -race -v ./...
-go build ./...
+make build
+make test
 ```
 
 失敗した場合は原因を特定して修正し、再度全てパスするまで繰り返す。
@@ -206,9 +205,8 @@ Linear: https://linear.app/usk6666/issue/{{ISSUE_ID}}
 
 - [ ] Issue の要件を全て満たしている
 - [ ] 新しいコードに対するテストが書かれている
-- [ ] `go vet` がクリーンに通過する
-- [ ] `go test -race` が全てパスする
-- [ ] `go build` が成功する
+- [ ] `make build` が成功する
+- [ ] `make test` が全てパスする
 - [ ] コミットメッセージが Conventional Commits 形式
 - [ ] PR が作成され、適切な説明がある
 - [ ] 不要なファイル（デバッグ出力、一時ファイル）が含まれていない
@@ -226,5 +224,5 @@ Linear: https://linear.app/usk6666/issue/{{ISSUE_ID}}
 
 **注意**: PR 作成後、オーケストレーターが自動で Code Review Agent と Security Review Agent による
 レビューを実行する。そのため、自己レビューや品質チェックの追加実施は不要。
-`go vet` / `go test -race` / `go build` の検証が通過していれば十分である。
+`make build` / `make test` の検証が通過していれば十分である。
 ```
