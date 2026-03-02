@@ -37,9 +37,11 @@ analyze network traffic. Reports about the tool's intended functionality
 
 ### Response Timeline
 
-- **Acknowledgment**: Within 3 business days
-- **Initial assessment**: Within 7 business days
-- **Fix release**: Depends on severity; critical issues will be prioritized
+This project is currently maintained by a single developer. Response times
+may vary depending on availability.
+
+- **Acknowledgment**: Best effort, typically within a few weeks
+- **Fix release**: Depends on severity and complexity
 
 ### Disclosure
 
