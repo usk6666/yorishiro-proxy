@@ -394,6 +394,26 @@ func TestImportInvalidJSONL(t *testing.T) {
 	if result.Errors != 3 {
 		t.Errorf("expected 3 errors, got %d", result.Errors)
 	}
+	// Verify error details are populated.
+	if len(result.ErrorDetails) != 3 {
+		t.Errorf("expected 3 error details, got %d", len(result.ErrorDetails))
+	}
+	if len(result.ErrorDetails) >= 1 {
+		if result.ErrorDetails[0].Line != 1 {
+			t.Errorf("expected error on line 1, got %d", result.ErrorDetails[0].Line)
+		}
+		if !strings.Contains(result.ErrorDetails[0].Reason, "invalid JSON") {
+			t.Errorf("expected 'invalid JSON' reason, got %q", result.ErrorDetails[0].Reason)
+		}
+	}
+	if len(result.ErrorDetails) >= 2 {
+		if result.ErrorDetails[1].Line != 2 {
+			t.Errorf("expected error on line 2, got %d", result.ErrorDetails[1].Line)
+		}
+		if !strings.Contains(result.ErrorDetails[1].Reason, "missing session") {
+			t.Errorf("expected 'missing session' reason, got %q", result.ErrorDetails[1].Reason)
+		}
+	}
 }
 
 func TestImportInvalidVersion(t *testing.T) {
@@ -411,6 +431,16 @@ func TestImportInvalidVersion(t *testing.T) {
 	}
 	if result.Errors != 1 {
 		t.Errorf("expected 1 error for version mismatch, got %d", result.Errors)
+	}
+	// Verify error detail includes version info.
+	if len(result.ErrorDetails) != 1 {
+		t.Fatalf("expected 1 error detail, got %d", len(result.ErrorDetails))
+	}
+	if !strings.Contains(result.ErrorDetails[0].Reason, "unsupported version") {
+		t.Errorf("expected 'unsupported version' reason, got %q", result.ErrorDetails[0].Reason)
+	}
+	if result.ErrorDetails[0].SessionID != "ver2" {
+		t.Errorf("expected session_id 'ver2', got %q", result.ErrorDetails[0].SessionID)
 	}
 }
 
@@ -788,6 +818,13 @@ func TestImportValidateIDs_InvalidSessionID(t *testing.T) {
 	if result.Errors != 1 {
 		t.Errorf("expected 1 error for invalid session UUID, got %d", result.Errors)
 	}
+	// Verify error detail contains UUID info.
+	if len(result.ErrorDetails) != 1 {
+		t.Fatalf("expected 1 error detail, got %d", len(result.ErrorDetails))
+	}
+	if !strings.Contains(result.ErrorDetails[0].Reason, "invalid session UUID") {
+		t.Errorf("expected 'invalid session UUID' reason, got %q", result.ErrorDetails[0].Reason)
+	}
 }
 
 func TestImportValidateIDs_InvalidMessageID(t *testing.T) {
@@ -805,6 +842,13 @@ func TestImportValidateIDs_InvalidMessageID(t *testing.T) {
 	}
 	if result.Errors != 1 {
 		t.Errorf("expected 1 error for invalid message UUID, got %d", result.Errors)
+	}
+	// Verify error detail contains message UUID info.
+	if len(result.ErrorDetails) != 1 {
+		t.Fatalf("expected 1 error detail, got %d", len(result.ErrorDetails))
+	}
+	if !strings.Contains(result.ErrorDetails[0].Reason, "invalid message UUID") {
+		t.Errorf("expected 'invalid message UUID' reason, got %q", result.ErrorDetails[0].Reason)
 	}
 }
 
@@ -857,6 +901,161 @@ func TestImportDefaultScannerBuffer(t *testing.T) {
 	result, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{})
 	if err != nil {
 		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Errorf("expected 1 imported, got %d", result.Imported)
+	}
+}
+
+func TestImportErrorDetails_SaveSessionFailure(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a session that will cause a duplicate key error when imported twice.
+	sessID := "550e8400-e29b-41d4-a716-446655440099"
+	data := fmt.Sprintf(`{"session":{"id":"%s","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`, sessID)
+
+	// First import: should succeed.
+	r1, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{})
+	if err != nil {
+		t.Fatalf("first ImportSessions: %v", err)
+	}
+	if r1.Imported != 1 {
+		t.Fatalf("first import: expected 1 imported, got %d", r1.Imported)
+	}
+
+	// Second import with skip: should skip.
+	r2, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{OnConflict: ConflictSkip})
+	if err != nil {
+		t.Fatalf("second ImportSessions: %v", err)
+	}
+	if r2.Skipped != 1 {
+		t.Errorf("expected 1 skipped, got %d", r2.Skipped)
+	}
+
+	// Second import with replace: should succeed.
+	r3, err := ImportSessions(ctx, store, strings.NewReader(data), ImportOptions{OnConflict: ConflictReplace})
+	if err != nil {
+		t.Fatalf("third ImportSessions: %v", err)
+	}
+	if r3.Imported != 1 {
+		t.Errorf("expected 1 imported with replace, got %d", r3.Imported)
+	}
+	if r3.Errors != 0 {
+		t.Errorf("expected 0 errors with replace, got %d", r3.Errors)
+		for _, e := range r3.ErrorDetails {
+			t.Errorf("  line %d: %s", e.Line, e.Reason)
+		}
+	}
+}
+
+func TestImportErrorDetailsCap(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create more invalid lines than maxErrorDetails to test capping.
+	var lines strings.Builder
+	for i := 0; i < maxErrorDetails+10; i++ {
+		lines.WriteString("not valid json\n")
+	}
+	result, err := ImportSessions(ctx, store, strings.NewReader(lines.String()), ImportOptions{})
+	if err != nil {
+		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Errors != maxErrorDetails+10 {
+		t.Errorf("expected %d errors, got %d", maxErrorDetails+10, result.Errors)
+	}
+	if len(result.ErrorDetails) != maxErrorDetails {
+		t.Errorf("expected error_details capped at %d, got %d", maxErrorDetails, len(result.ErrorDetails))
+	}
+}
+
+func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+
+	// Use real UUID IDs like the production system
+	sessID := "550e8400-e29b-41d4-a716-446655440001"
+	msgSendID := "550e8400-e29b-41d4-a716-446655440002"
+	msgRecvID := "550e8400-e29b-41d4-a716-446655440003"
+
+	sess := &Session{
+		ID:          sessID,
+		ConnID:      "conn-" + sessID,
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   ts,
+		Duration:    150 * time.Millisecond,
+		Tags:        map[string]string{"env": "test"},
+		ConnInfo: &ConnectionInfo{
+			ClientAddr:           "127.0.0.1:12345",
+			ServerAddr:           "93.184.216.34:443",
+			TLSVersion:           "TLS 1.3",
+			TLSCipher:            "TLS_AES_128_GCM_SHA256",
+			TLSALPN:              "h2",
+			TLSServerCertSubject: "CN=example.com",
+		},
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	sendMsg := &Message{
+		ID:        msgSendID,
+		SessionID: sessID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: ts,
+		Method:    "GET",
+		URL:       mustParseURL("https://example.com/api/users"),
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      []byte(`{"user":"admin"}`),
+		RawBytes:  []byte("GET /api/users HTTP/1.1\r\n"),
+		Metadata:  map[string]string{"key": "value"},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	recvMsg := &Message{
+		ID:        msgRecvID,
+		SessionID: sessID,
+		Sequence:  1,
+		Direction: "receive",
+		Timestamp: ts.Add(100 * time.Millisecond),
+		StatusCode: 200,
+		Headers:   map[string][]string{"Content-Type": {"text/html"}},
+		Body:      []byte("<html>OK</html>"),
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage(receive): %v", err)
+	}
+
+	// Export
+	var buf bytes.Buffer
+	n, err := ExportSessions(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	if err != nil {
+		t.Fatalf("ExportSessions: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 exported, got %d", n)
+	}
+
+	t.Logf("Exported JSONL:\n%s", buf.String())
+
+	// Import into a fresh store with ValidateIDs: true (like MCP handler does)
+	store2 := newTestStore(t)
+	result, err := ImportSessions(ctx, store2, &buf, ImportOptions{
+		OnConflict:  ConflictSkip,
+		ValidateIDs: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportSessions: %v", err)
+	}
+	if result.Errors != 0 {
+		t.Errorf("expected 0 errors, got %d", result.Errors)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
