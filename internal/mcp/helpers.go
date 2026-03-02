@@ -23,9 +23,6 @@ const maxListLimit = 1000
 // defaultReplayTimeout is the default timeout for replay HTTP requests.
 const defaultReplayTimeout = 30 * time.Second
 
-// maxReplayResponseSize is the maximum response body size (1 MB) to prevent OOM.
-const maxReplayResponseSize = 1 << 20
-
 // maxRedirects is the maximum number of HTTP redirects to follow.
 const maxRedirects = 10
 

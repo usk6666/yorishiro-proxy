@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"io"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 )
 
 func TestReadFrame_ValidUncompressed(t *testing.T) {
@@ -80,7 +82,7 @@ func TestReadFrame_Errors(t *testing.T) {
 			data: func() []byte {
 				b := make([]byte, 5)
 				b[0] = 0x00
-				binary.BigEndian.PutUint32(b[1:5], maxMessageSize+1)
+				binary.BigEndian.PutUint32(b[1:5], config.MaxGRPCMessageSize+1)
 				return b
 			}(),
 			wantErr: "grpc message too large",

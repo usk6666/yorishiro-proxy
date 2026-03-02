@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -462,7 +463,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		}
 		defer resp.Body.Close()
 
-		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxReplayResponseSize))
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxReplayResponseSize))
 		if err != nil {
 			return nil, fmt.Errorf("read response body: %w", err)
 		}
