@@ -67,8 +67,8 @@ var validActionTypes = map[ActionType]bool{
 // All non-empty fields must match for the conditions to be satisfied (AND logic).
 // These are compatible with the intercept package's Conditions structure.
 type Conditions struct {
-	// URLPattern is a regular expression matched against the request URL path.
-	// An empty string matches all URLs.
+	// URLPattern is a regular expression matched against the full request URL
+	// (e.g. "http://example.com/path"). An empty string matches all URLs.
 	URLPattern string `json:"url_pattern,omitempty"`
 
 	// Methods is a whitelist of HTTP methods (case-insensitive).
@@ -235,13 +235,13 @@ func validateAction(a Action) error {
 // matchesRequest evaluates whether the compiled rule matches the given
 // HTTP method, URL, and headers.
 func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.Header) bool {
-	// Check URL pattern.
+	// Check URL pattern against the full URL (scheme + host + path + query).
 	if cr.urlPatternRe != nil {
-		path := ""
+		fullURL := ""
 		if u != nil {
-			path = u.Path
+			fullURL = u.String()
 		}
-		if !cr.urlPatternRe.MatchString(path) {
+		if !cr.urlPatternRe.MatchString(fullURL) {
 			return false
 		}
 	}

@@ -30,8 +30,8 @@ type transformRuleInput struct {
 
 // transformConditionsInput is the JSON representation of auto-transform rule conditions.
 type transformConditionsInput struct {
-	// URLPattern is a regular expression matched against the request URL path.
-	URLPattern string `json:"url_pattern,omitempty" jsonschema:"regex pattern for URL path matching"`
+	// URLPattern is a regular expression matched against the full request URL.
+	URLPattern string `json:"url_pattern,omitempty" jsonschema:"regex pattern for URL matching"`
 
 	// Methods is a whitelist of HTTP methods (case-insensitive).
 	Methods []string `json:"methods,omitempty" jsonschema:"HTTP method whitelist (e.g. POST, PUT, DELETE)"`
