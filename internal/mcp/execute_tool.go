@@ -1548,10 +1548,11 @@ func (s *Server) handleExecuteExportSessions(ctx context.Context, params execute
 
 // executeImportSessionsResult is the structured output of the import_sessions action.
 type executeImportSessionsResult struct {
-	Imported int    `json:"imported"`
-	Skipped  int    `json:"skipped"`
-	Errors   int    `json:"errors"`
-	Source   string `json:"source"`
+	Imported     int                    `json:"imported"`
+	Skipped      int                    `json:"skipped"`
+	Errors       int                    `json:"errors"`
+	Source       string                 `json:"source"`
+	ErrorDetails []session.ImportError  `json:"error_details,omitempty"`
 }
 
 // handleExecuteImportSessions handles the import_sessions action within the execute tool.
@@ -1598,9 +1599,10 @@ func (s *Server) handleExecuteImportSessions(ctx context.Context, params execute
 	}
 
 	return &executeImportSessionsResult{
-		Imported: result.Imported,
-		Skipped:  result.Skipped,
-		Errors:   result.Errors,
-		Source:   cleanPath,
+		Imported:     result.Imported,
+		Skipped:      result.Skipped,
+		Errors:       result.Errors,
+		Source:       cleanPath,
+		ErrorDetails: result.ErrorDetails,
 	}, nil
 }
