@@ -63,6 +63,8 @@ func run(ctx context.Context) error {
 		switch os.Args[1] {
 		case "setup":
 			return runSetup(ctx, os.Args[2:])
+		case "upgrade":
+			return runUpgrade(ctx, os.Args[2:])
 		case "version":
 			fmt.Println(buildVersion())
 			return nil
@@ -101,11 +103,13 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy %s\n\n", buildVersion())
 		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n")
-		fmt.Fprintf(fs.Output(), "       yorishiro-proxy setup [setup-flags]\n\n")
+		fmt.Fprintf(fs.Output(), "       yorishiro-proxy setup [setup-flags]\n")
+		fmt.Fprintf(fs.Output(), "       yorishiro-proxy upgrade [--check]\n\n")
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy is an AI agent network proxy (MCP server).\n")
 		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
 		fmt.Fprintf(fs.Output(), "Subcommands:\n")
-		fmt.Fprintf(fs.Output(), "  setup    Interactive setup wizard for Claude Code integration\n\n")
+		fmt.Fprintf(fs.Output(), "  setup    Interactive setup wizard for Claude Code integration\n")
+		fmt.Fprintf(fs.Output(), "  upgrade  Check for and install updates from GitHub Releases\n\n")
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
