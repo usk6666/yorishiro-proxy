@@ -348,39 +348,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Remove hop-by-hop headers.
 	removeHopByHopHeaders(req.Header)
 
-	// Step 4: Intercept check + modifications.
-	var dropped bool
-	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
-	if dropped {
-		return nil
-	}
-
-	// Step 5: Apply auto-transform rules.
-	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
-
-	// Step 6: Forward upstream.
-	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
-	if err != nil {
-		return err
-	}
-	defer fwd.resp.Body.Close()
-
-	// Step 7: Read response, write to client, and record session.
-	fullRespBody, rawResponse := h.readResponseBody(fwd.resp, logger)
-
-	// Extract the upstream server's TLS certificate subject if available.
-	var tlsCertSubject string
-	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
-		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
-	}
-
-	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
-		return err
-	}
-
-	duration := time.Since(start)
-
-	// Record session with HTTPS protocol and the full reconstructed URL.
+	// Build the reconstructed HTTPS URL for recording.
 	reqURL := &url.URL{
 		Scheme:   "https",
 		Host:     req.URL.Host,
@@ -389,30 +357,73 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		Fragment: req.URL.Fragment,
 	}
 
-	h.recordHTTPSession(ctx, sessionRecordParams{
+	// Build send record params for progressive recording.
+	sp := sendRecordParams{
 		connID:     connID,
 		clientAddr: clientAddr,
-		serverAddr: fwd.serverAddr,
 		protocol:   "HTTPS",
 		start:      start,
-		duration:   duration,
 		tags:       smugglingTags(smuggling),
 		connInfo: &session.ConnectionInfo{
-			ClientAddr:           clientAddr,
-			ServerAddr:           fwd.serverAddr,
-			TLSVersion:           tlsMeta.Version,
-			TLSCipher:            tlsMeta.CipherSuite,
-			TLSALPN:              tlsMeta.ALPN,
-			TLSServerCertSubject: tlsCertSubject,
+			ClientAddr: clientAddr,
+			TLSVersion: tlsMeta.Version,
+			TLSCipher:  tlsMeta.CipherSuite,
+			TLSALPN:    tlsMeta.ALPN,
 		},
 		req:          req,
 		reqURL:       reqURL,
 		reqBody:      bodyResult.recordBody,
 		rawRequest:   rawRequest,
 		reqTruncated: bodyResult.truncated,
-		resp:         fwd.resp,
-		rawResponse:  rawResponse,
-		respBody:     fullRespBody,
+	}
+
+	// Step 4: Intercept check + modifications.
+	var dropped bool
+	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
+	if dropped {
+		sp.reqBody = bodyResult.recordBody
+		h.recordInterceptDrop(ctx, sp, logger)
+		return nil
+	}
+
+	// Step 5: Apply auto-transform rules.
+	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+	sp.reqBody = bodyResult.recordBody
+
+	// Progressive recording: record send (session + request) before forwarding.
+	sendResult := h.recordSend(ctx, sp, logger)
+
+	// Step 6: Forward upstream.
+	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
+	if err != nil {
+		// Upstream failed — record session as error. Send is already recorded.
+		h.recordSendError(ctx, sendResult, start, err, logger)
+		return err
+	}
+	defer fwd.resp.Body.Close()
+
+	// Step 7: Read response, write to client, and record session.
+	fullRespBody, rawResponse := h.readResponseBody(fwd.resp, logger)
+
+	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
+		return err
+	}
+
+	// Progressive recording: record receive (response + session completion).
+	// Update ConnInfo with server-side TLS certificate info now that we have it.
+	duration := time.Since(start)
+	var tlsCertSubject string
+	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
+		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
+	}
+	h.recordReceive(ctx, sendResult, receiveRecordParams{
+		start:                start,
+		duration:             duration,
+		serverAddr:           fwd.serverAddr,
+		tlsServerCertSubject: tlsCertSubject,
+		resp:                 fwd.resp,
+		rawResponse:          rawResponse,
+		respBody:             fullRespBody,
 	}, logger)
 
 	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
