@@ -783,7 +783,7 @@ func TestTargetScope_HTTPS_HostHeaderRewrite(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	// Allow localhost (the CONNECT target) but deny evil.com.
 	ts := proxy.NewTargetScope()
@@ -836,7 +836,7 @@ func TestTargetScope_HTTPS_HostMismatchBlocked(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	// Allow localhost (the CONNECT target) but not evil.com.
 	ts := proxy.NewTargetScope()
@@ -901,7 +901,7 @@ func TestTargetScope_SetterAndGetter(t *testing.T) {
 	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 
 	// Initially nil.
-	if handler.TargetScope() != nil {
+	if handler.TargetScope != nil {
 		t.Error("expected nil target scope initially")
 	}
 
@@ -909,7 +909,7 @@ func TestTargetScope_SetterAndGetter(t *testing.T) {
 	ts := proxy.NewTargetScope()
 	handler.SetTargetScope(ts)
 
-	if handler.TargetScope() != ts {
+	if handler.TargetScope != ts {
 		t.Error("SetTargetScope/TargetScope round-trip failed")
 	}
 }

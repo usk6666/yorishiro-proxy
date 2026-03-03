@@ -48,13 +48,13 @@ func TestSetUpstreamProxy(t *testing.T) {
 		proxyURL, _ := url.Parse("http://proxy:3128")
 		handler.SetUpstreamProxy(proxyURL)
 
-		if handler.transport.Proxy == nil {
+		if handler.Transport.Proxy == nil {
 			t.Fatal("transport.Proxy should be set")
 		}
 
 		// Verify the proxy function returns the expected URL.
 		req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
-		got, err := handler.transport.Proxy(req)
+		got, err := handler.Transport.Proxy(req)
 		if err != nil {
 			t.Fatalf("transport.Proxy error: %v", err)
 		}
@@ -66,7 +66,7 @@ func TestSetUpstreamProxy(t *testing.T) {
 	t.Run("clearing proxy clears transport proxy function", func(t *testing.T) {
 		handler.SetUpstreamProxy(nil)
 
-		if handler.transport.Proxy != nil {
+		if handler.Transport.Proxy != nil {
 			t.Error("transport.Proxy should be nil after clearing")
 		}
 	})
