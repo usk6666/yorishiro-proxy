@@ -2,7 +2,6 @@ package http
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -15,10 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
@@ -326,75 +323,23 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 
-	// Target scope enforcement for HTTPS requests inside the MITM tunnel.
+	// Step 1: Target scope enforcement for HTTPS requests inside the MITM tunnel.
 	// The CONNECT target was already checked, but the Host header inside
-	// the tunnel may differ (e.g., HTTP/1.1 Host header rewrite). If the
-	// request-level Host differs from the CONNECT authority, re-check
-	// against the scope. This MUST happen before the WebSocket upgrade
-	// check to prevent WebSocket requests from bypassing scope
-	// enforcement (S-1: CWE-863).
-	requestHost := req.Host
-	if requestHost == "" && req.URL.Host != "" {
-		requestHost = req.URL.Host
-	}
-	if requestHost != "" && !strings.EqualFold(requestHost, connectHost) {
-		// Build a temporary URL for the scope check using the actual Host header.
-		checkURL := &url.URL{
-			Scheme: "https",
-			Host:   requestHost,
-			Path:   req.URL.Path,
-		}
-		if blocked, reason := h.checkTargetScope(checkURL); blocked {
-			// Set req.URL fields before recording so the session has the full URL.
-			if req.URL.Host == "" {
-				req.URL.Host = requestHost
-			}
-			req.URL.Scheme = "https"
-			h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
-			h.recordBlockedHTTPSSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, tlsMeta, logger)
-			return nil
-		}
+	// the tunnel may differ (e.g., HTTP/1.1 Host header rewrite).
+	if blocked := h.checkHTTPSScopeRewrite(ctx, conn, connectHost, req, smuggling, start, connID, clientAddr, tlsMeta, logger); blocked {
+		return nil
 	}
 
-	// Check for WebSocket upgrade before processing as normal HTTPS.
-	// This must happen before hop-by-hop headers are removed.
+	// Step 2: WebSocket upgrade (before hop-by-hop header removal).
 	if isWebSocketUpgrade(req) {
 		return h.handleWebSocketTLS(ctx, conn, connectHost, req, tlsMeta)
 	}
 
-	// Read the full request body so the upstream receives uncorrupted data.
-	var recordReqBody []byte
-	var reqTruncated bool
-	if req.Body != nil {
-		fullBody, err := io.ReadAll(req.Body)
-		if err != nil {
-			logger.Warn("failed to read request body", "error", err)
-		}
-		req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(fullBody))
-
-		recordReqBody = fullBody
-		if len(fullBody) > int(config.MaxBodySize) {
-			recordReqBody = fullBody[:int(config.MaxBodySize)]
-			reqTruncated = true
-		}
-	}
-
-	// Extract raw request bytes captured by the captureReader.
-	var rawRequest []byte
-	if capture != nil {
-		captureEnd := capture.buf.Len()
-		buffered := reader.Buffered()
-		rawEnd := captureEnd - buffered
-		if rawEnd > captureStart && captureStart < capture.buf.Len() {
-			rawRequest = make([]byte, rawEnd-captureStart)
-			copy(rawRequest, capture.buf.Bytes()[captureStart:rawEnd])
-		}
-	}
+	// Step 3: Read request body + capture raw bytes.
+	bodyResult := readAndCaptureRequestBody(req, logger)
+	rawRequest := extractRawRequest(capture, captureStart, reader)
 
 	// Reconstruct the full URL for the upstream request.
-	// Requests read from the TLS connection have relative URIs;
-	// we need to set the scheme and host from the CONNECT target.
 	if req.URL.Host == "" {
 		req.URL.Host = connectHost
 	}
@@ -403,90 +348,34 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Remove hop-by-hop headers.
 	removeHopByHopHeaders(req.Header)
 
-	// Intercept check: same as handleRequest but for HTTPS.
-	if action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, logger); intercepted {
-		switch action.Type {
-		case intercept.ActionDrop:
-			httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-			logger.Info("intercepted HTTPS request dropped", "method", req.Method, "url", req.URL.String())
-			return nil
-		case intercept.ActionModifyAndForward:
-			var modErr error
-			req, modErr = applyInterceptModifications(req, action, recordReqBody)
-			if modErr != nil {
-				logger.Error("intercept modification failed", "error", modErr)
-				httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
-				return nil
-			}
-			if action.OverrideBody != nil {
-				recordReqBody = []byte(*action.OverrideBody)
-			}
-		case intercept.ActionRelease:
-			// Continue with the original request.
-		}
+	// Step 4: Intercept check + modifications.
+	var dropped bool
+	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
+	if dropped {
+		return nil
 	}
 
-	// Apply auto-transform rules to the HTTPS request before forwarding upstream.
-	if h.transformPipeline != nil {
-		req.Header, recordReqBody = h.transformPipeline.TransformRequest(req.Method, req.URL, req.Header, recordReqBody)
-		req.Body = io.NopCloser(bytes.NewReader(recordReqBody))
-		req.ContentLength = int64(len(recordReqBody))
-	}
+	// Step 5: Apply auto-transform rules.
+	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
 
-	// Forward request to upstream over HTTPS.
-	outReq := req.WithContext(ctx)
-	outReq.RequestURI = ""
-
-	resp, serverAddr, err := roundTripWithTrace(h.Transport, outReq)
+	// Step 6: Forward upstream.
+	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
 	if err != nil {
-		logger.Error("HTTPS upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		return fmt.Errorf("HTTPS upstream request: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
+	defer fwd.resp.Body.Close()
 
-	// Read the response body with a size limit to prevent OOM (CWE-770).
-	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
-	if err != nil {
-		logger.Warn("failed to read response body", "error", err)
-	}
-
-	// Apply auto-transform rules to the HTTPS response before sending to client.
-	if h.transformPipeline != nil {
-		resp.Header, fullRespBody = h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, fullRespBody)
-	}
-
-	// Capture raw response bytes by serializing the response as received.
-	rawResponse := serializeRawResponse(resp, fullRespBody)
+	// Step 7: Read response, write to client, and record session.
+	fullRespBody, rawResponse := h.readResponseBody(fwd.resp, logger)
 
 	// Extract the upstream server's TLS certificate subject if available.
 	var tlsCertSubject string
-	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-		tlsCertSubject = resp.TLS.PeerCertificates[0].Subject.String()
+	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
+		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
 	}
 
-	// Write response back to the client over the TLS connection (full body).
-	if err := writeResponse(conn, resp, fullRespBody); err != nil {
-		return fmt.Errorf("write HTTPS response: %w", err)
-	}
-
-	// Decompress response body for recording. The raw (potentially compressed)
-	// bytes are preserved in rawResponse for wire-level analysis.
-	recordRespBody := fullRespBody
-	var respTruncated bool
-	decompressed := false
-	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(fullRespBody, ce, config.MaxBodySize)
-		if err != nil {
-			logger.Debug("HTTPS response body decompression failed, storing as-is", "encoding", ce, "error", err)
-		} else {
-			recordRespBody = decoded
-			decompressed = true
-		}
-	}
-	if len(recordRespBody) > int(config.MaxBodySize) {
-		recordRespBody = recordRespBody[:int(config.MaxBodySize)]
-		respTruncated = true
+	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
+		return err
 	}
 
 	duration := time.Since(start)
@@ -499,62 +388,68 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		RawQuery: req.URL.RawQuery,
 		Fragment: req.URL.Fragment,
 	}
-	if h.Store != nil && h.shouldCapture(req.Method, reqURL) {
-		sess := &session.Session{
-			ConnID:      connID,
-			Protocol:    "HTTPS",
-			SessionType: "unary",
-			State:       "complete",
-			Timestamp:   start,
-			Duration:    duration,
-			Tags:        smugglingTags(smuggling),
-			ConnInfo: &session.ConnectionInfo{
-				ClientAddr:           clientAddr,
-				ServerAddr:           serverAddr,
-				TLSVersion:           tlsMeta.Version,
-				TLSCipher:            tlsMeta.CipherSuite,
-				TLSALPN:              tlsMeta.ALPN,
-				TLSServerCertSubject: tlsCertSubject,
-			},
-		}
-		if err := h.Store.SaveSession(ctx, sess); err != nil {
-			logger.Error("HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
-		} else {
-			sendMsg := &session.Message{
-				SessionID:     sess.ID,
-				Sequence:      0,
-				Direction:     "send",
-				Timestamp:     start,
-				Method:        req.Method,
-				URL:           reqURL,
-				Headers:       req.Header,
-				Body:          recordReqBody,
-				RawBytes:      rawRequest,
-				BodyTruncated: reqTruncated,
-			}
-			if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
-				logger.Error("HTTPS send message save failed", "error", err)
-			}
-			recvMsg := &session.Message{
-				SessionID:     sess.ID,
-				Sequence:      1,
-				Direction:     "receive",
-				Timestamp:     start.Add(duration),
-				StatusCode:    resp.StatusCode,
-				Headers:       httputil.RecordingHeaders(resp.Header, decompressed, len(recordRespBody)),
-				Body:          recordRespBody,
-				RawBytes:      rawResponse,
-				BodyTruncated: respTruncated,
-			}
-			if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
-				logger.Error("HTTPS receive message save failed", "error", err)
-			}
-		}
-	}
 
-	logger.Info("https request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+	h.recordHTTPSession(ctx, sessionRecordParams{
+		connID:     connID,
+		clientAddr: clientAddr,
+		serverAddr: fwd.serverAddr,
+		protocol:   "HTTPS",
+		start:      start,
+		duration:   duration,
+		tags:       smugglingTags(smuggling),
+		connInfo: &session.ConnectionInfo{
+			ClientAddr:           clientAddr,
+			ServerAddr:           fwd.serverAddr,
+			TLSVersion:           tlsMeta.Version,
+			TLSCipher:            tlsMeta.CipherSuite,
+			TLSALPN:              tlsMeta.ALPN,
+			TLSServerCertSubject: tlsCertSubject,
+		},
+		req:          req,
+		reqURL:       reqURL,
+		reqBody:      bodyResult.recordBody,
+		rawRequest:   rawRequest,
+		reqTruncated: bodyResult.truncated,
+		resp:         fwd.resp,
+		rawResponse:  rawResponse,
+		respBody:     fullRespBody,
+	}, logger)
+
+	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
 
 	return nil
+}
+
+// checkHTTPSScopeRewrite re-checks the target scope when the Host header inside
+// an HTTPS MITM tunnel differs from the CONNECT authority. Returns true if the
+// request was blocked.
+func (h *Handler) checkHTTPSScopeRewrite(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, tlsMeta tlsMetadata, logger *slog.Logger) bool {
+	requestHost := req.Host
+	if requestHost == "" && req.URL.Host != "" {
+		requestHost = req.URL.Host
+	}
+	if requestHost == "" || strings.EqualFold(requestHost, connectHost) {
+		return false
+	}
+
+	checkURL := &url.URL{
+		Scheme: "https",
+		Host:   requestHost,
+		Path:   req.URL.Path,
+	}
+	blocked, reason := h.checkTargetScope(checkURL)
+	if !blocked {
+		return false
+	}
+
+	// Set req.URL fields before recording so the session has the full URL.
+	if req.URL.Host == "" {
+		req.URL.Host = requestHost
+	}
+	req.URL.Scheme = "https"
+	h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
+	h.recordBlockedHTTPSSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, tlsMeta, logger)
+	return true
 }
 
 // dialUpstream dials the target address, optionally routing through the
