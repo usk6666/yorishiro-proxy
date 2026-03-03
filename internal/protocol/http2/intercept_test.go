@@ -23,7 +23,7 @@ func TestSetInterceptEngine(t *testing.T) {
 	engine := intercept.NewEngine()
 	handler.SetInterceptEngine(engine)
 
-	if handler.interceptEngine != engine {
+	if handler.InterceptEngine != engine {
 		t.Error("interceptEngine was not set correctly")
 	}
 }
@@ -33,7 +33,7 @@ func TestSetInterceptQueue(t *testing.T) {
 	queue := intercept.NewQueue()
 	handler.SetInterceptQueue(queue)
 
-	if handler.interceptQueue != queue {
+	if handler.InterceptQueue != queue {
 		t.Error("interceptQueue was not set correctly")
 	}
 }

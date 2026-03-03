@@ -430,7 +430,7 @@ func TestHandleCONNECT_HTTPSForwarding(t *testing.T) {
 	// Use a transport that skips TLS verification for the upstream test server.
 	// This avoids hostname mismatch since the httptest cert is for 127.0.0.1/example.com,
 	// not localhost. What we're testing is the proxy's MITM behavior, not upstream TLS.
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -478,7 +478,7 @@ func TestHandleCONNECT_SessionRecording(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -565,7 +565,7 @@ func TestHandleCONNECT_KeepAlive(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -787,7 +787,7 @@ func TestHandleCONNECT_SessionURLHasHTTPSScheme(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -847,7 +847,7 @@ func TestHandleCONNECT_NilStore(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	handler := NewHandler(nil, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1069,7 +1069,7 @@ func TestHandleCONNECT_MalformedHTTPSRequests(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -1165,7 +1165,7 @@ func TestHandleCONNECT_PartialHTTPSRequests(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
