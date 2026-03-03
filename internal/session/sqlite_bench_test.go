@@ -3,19 +3,19 @@ package session
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"io"
 	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // newBenchStore creates a SQLiteStore in a temporary directory for benchmarking.
 func newBenchStore(b *testing.B) *SQLiteStore {
 	b.Helper()
 	dbPath := filepath.Join(b.TempDir(), "bench.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		b.Fatalf("NewSQLiteStore: %v", err)

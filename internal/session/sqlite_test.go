@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,12 +13,14 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -85,7 +85,7 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 
 func TestNewSQLiteStore_BusyTimeout(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "busy_timeout_test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -652,7 +652,7 @@ func TestSQLiteStore_LIKEWildcardEscape(t *testing.T) {
 func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "persist.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	ctx := context.Background()
 
 	// Create store and save a session.
@@ -685,7 +685,7 @@ func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 func TestSQLiteStore_Migration(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "migrate.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	ctx := context.Background()
 
 	store, err := NewSQLiteStore(ctx, dbPath, logger)
@@ -713,7 +713,7 @@ func TestSQLiteStore_Migration(t *testing.T) {
 func TestSQLiteStore_FutureSchemaVersion(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "future.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	ctx := context.Background()
 
 	// Create a database with a future schema version.
@@ -743,7 +743,7 @@ func TestSQLiteStore_GetNotFound(t *testing.T) {
 }
 
 func TestSQLiteStore_InvalidDBPath(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	_, err := NewSQLiteStore(context.Background(), "/nonexistent/path/to/db", logger)
 	if err == nil {
 		t.Fatal("expected error for invalid path, got nil")
@@ -798,7 +798,7 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 func TestSQLiteStore_DBFileCreated(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "created.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
@@ -1009,7 +1009,7 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "v2_migrate.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	ctx := context.Background()
 
 	// Create a V2 database manually (simulate a pre-existing database).

@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/http/httptest"
@@ -17,8 +16,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // newTestCA generates a test CA for use in tests.
@@ -38,11 +39,6 @@ func newTestIssuer(t *testing.T) (*cert.Issuer, *x509.CertPool) {
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.Certificate())
 	return cert.NewIssuer(ca), pool
-}
-
-// testLogger creates a silent logger for tests.
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // mockStore is a thread-safe minimal in-memory session store for testing.
@@ -174,7 +170,7 @@ func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, err
 	return count, nil
 }
 
-func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error   { return nil }
+func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error { return nil }
 func (m *mockStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
 	return nil, fmt.Errorf("not found")
 }
@@ -327,7 +323,7 @@ func doConnectAndTLS(t *testing.T, proxyAddr, connectHost string, rootCAs *x509.
 func TestHandleCONNECT_200ConnectionEstablished(t *testing.T) {
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -367,7 +363,7 @@ func TestHandleCONNECT_200ConnectionEstablished(t *testing.T) {
 func TestHandleCONNECT_TLSHandshakeSuccess(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -430,7 +426,7 @@ func TestHandleCONNECT_HTTPSForwarding(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	// Use a transport that skips TLS verification for the upstream test server.
 	// This avoids hostname mismatch since the httptest cert is for 127.0.0.1/example.com,
 	// not localhost. What we're testing is the proxy's MITM behavior, not upstream TLS.
@@ -481,7 +477,7 @@ func TestHandleCONNECT_SessionRecording(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -568,7 +564,7 @@ func TestHandleCONNECT_KeepAlive(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -627,7 +623,7 @@ func TestHandleCONNECT_KeepAlive(t *testing.T) {
 func TestHandleCONNECT_BadHostname(t *testing.T) {
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -659,7 +655,7 @@ func TestHandleCONNECT_BadHostname(t *testing.T) {
 
 func TestHandleCONNECT_NilIssuer(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -697,7 +693,7 @@ func TestHandleCONNECT_RegularHTTPStillWorks(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -790,7 +786,7 @@ func TestHandleCONNECT_SessionURLHasHTTPSScheme(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -850,7 +846,7 @@ func TestHandleCONNECT_NilStore(t *testing.T) {
 	connectHost := "localhost:" + port
 
 	issuer, rootCAs := newTestIssuer(t)
-	handler := NewHandler(nil, issuer, testLogger())
+	handler := NewHandler(nil, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -897,7 +893,7 @@ func (bc *bufferedConn) Read(b []byte) (int, error) {
 func TestHandleCONNECT_MalformedRequests(t *testing.T) {
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -993,7 +989,7 @@ func TestHandleCONNECT_MalformedRequests(t *testing.T) {
 func TestHandleCONNECT_PartialRequests(t *testing.T) {
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1072,7 +1068,7 @@ func TestHandleCONNECT_MalformedHTTPSRequests(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1168,7 +1164,7 @@ func TestHandleCONNECT_PartialHTTPSRequests(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

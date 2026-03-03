@@ -8,8 +8,10 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // setupConfigureTestSessionWithManager creates a connected MCP client session
@@ -51,7 +53,7 @@ func setupConfigureTestSessionWithManager(t *testing.T, manager *proxy.Manager, 
 }
 
 func TestConfigure_MergeMaxConnections(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	ctx := context.Background()
@@ -93,7 +95,7 @@ func TestConfigure_MergeMaxConnections(t *testing.T) {
 }
 
 func TestConfigure_MergePeekTimeoutMs(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	ctx := context.Background()
@@ -132,7 +134,7 @@ func TestConfigure_MergePeekTimeoutMs(t *testing.T) {
 }
 
 func TestConfigure_MergeRequestTimeoutMs(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	ctx := context.Background()
@@ -186,7 +188,7 @@ func TestConfigure_MaxConnections_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := newTestLogger()
+			logger := testutil.DiscardLogger()
 			detector := &stubDetector{}
 			manager := proxy.NewManager(detector, logger)
 			ctx := context.Background()
@@ -233,7 +235,7 @@ func TestConfigure_PeekTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := newTestLogger()
+			logger := testutil.DiscardLogger()
 			detector := &stubDetector{}
 			manager := proxy.NewManager(detector, logger)
 			ctx := context.Background()
@@ -280,7 +282,7 @@ func TestConfigure_RequestTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := newTestLogger()
+			logger := testutil.DiscardLogger()
 			detector := &stubDetector{}
 			manager := proxy.NewManager(detector, logger)
 			ctx := context.Background()
@@ -352,7 +354,7 @@ func TestConfigure_NilManager_PeekTimeoutMs(t *testing.T) {
 
 func TestConfigure_ReplaceLimits(t *testing.T) {
 	// Verify that replace operation also applies limits/timeouts.
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	ctx := context.Background()
@@ -406,7 +408,7 @@ func TestConfigure_ReplaceLimits(t *testing.T) {
 
 func TestConfigure_OmittedLimits_NoChange(t *testing.T) {
 	// When limits are omitted, they should not appear in the result.
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	ctx := context.Background()
@@ -448,7 +450,7 @@ func TestConfigure_OmittedLimits_NoChange(t *testing.T) {
 
 func TestQuery_Status_ShowsLimitsAndTimeouts(t *testing.T) {
 	store := newTestStore(t)
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -491,7 +493,7 @@ func TestQuery_Status_ShowsLimitsAndTimeouts(t *testing.T) {
 
 func TestQuery_Status_DefaultLimitsAndTimeouts(t *testing.T) {
 	store := newTestStore(t)
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 

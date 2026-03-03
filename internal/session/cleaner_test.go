@@ -2,17 +2,17 @@ package session
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 func newTestCleaner(t *testing.T, cfg CleanerConfig) (*Cleaner, *SQLiteStore) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "cleaner.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)

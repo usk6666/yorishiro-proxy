@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- Mock store ---
@@ -148,11 +148,6 @@ func (m *mockStore) getMessages() []*session.Message {
 
 // --- Test helpers ---
 
-func testLogger(t *testing.T) *slog.Logger {
-	t.Helper()
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
 // setupEchoServer starts a TCP server that echoes all received data.
 // Returns the listener address and a cleanup function.
 func setupEchoServer(t *testing.T) string {
@@ -192,14 +187,14 @@ func (c *connWithLocalAddr) LocalAddr() net.Addr {
 // --- Tests ---
 
 func TestHandler_Name(t *testing.T) {
-	h := NewHandler(nil, nil, testLogger(t))
+	h := NewHandler(nil, nil, testutil.DiscardLogger())
 	if got := h.Name(); got != "TCP" {
 		t.Errorf("Name() = %q, want %q", got, "TCP")
 	}
 }
 
 func TestHandler_Detect(t *testing.T) {
-	h := NewHandler(nil, nil, testLogger(t))
+	h := NewHandler(nil, nil, testutil.DiscardLogger())
 
 	tests := []struct {
 		name string
@@ -227,7 +222,7 @@ func TestHandler_Handle_BidirectionalRelay(t *testing.T) {
 
 	store := &mockStore{}
 	forwards := map[string]string{echoPort: echoAddr}
-	h := NewHandler(store, forwards, testLogger(t))
+	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	// Create a pipe simulating client <-> proxy.
 	clientConn, proxyConn := net.Pipe()
@@ -349,7 +344,7 @@ func TestHandler_Handle_BidirectionalRelay(t *testing.T) {
 func TestHandler_Handle_NoForwardConfigured(t *testing.T) {
 	store := &mockStore{}
 	// No forwarding rules.
-	h := NewHandler(store, nil, testLogger(t))
+	h := NewHandler(store, nil, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
 	defer clientConn.Close()
@@ -379,7 +374,7 @@ func TestHandler_Handle_UpstreamDialFailure(t *testing.T) {
 	store := &mockStore{}
 	// Point to a non-routable address that should fail fast.
 	forwards := map[string]string{"9999": "127.0.0.1:1"}
-	h := NewHandler(store, forwards, testLogger(t))
+	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
 	defer clientConn.Close()
@@ -405,7 +400,7 @@ func TestHandler_Handle_ContextCancellation(t *testing.T) {
 
 	store := &mockStore{}
 	forwards := map[string]string{echoPort: echoAddr}
-	h := NewHandler(store, forwards, testLogger(t))
+	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
 	defer clientConn.Close()
@@ -458,7 +453,7 @@ func TestHandler_Handle_NilStore(t *testing.T) {
 
 	// Nil store: relay should still work, just no recording.
 	forwards := map[string]string{echoPort: echoAddr}
-	h := NewHandler(nil, forwards, testLogger(t))
+	h := NewHandler(nil, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
 	defer clientConn.Close()
@@ -503,7 +498,7 @@ func TestHandler_Handle_MultipleChunks(t *testing.T) {
 
 	store := &mockStore{}
 	forwards := map[string]string{echoPort: echoAddr}
-	h := NewHandler(store, forwards, testLogger(t))
+	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
 	defer clientConn.Close()
@@ -573,7 +568,7 @@ func TestHandler_Handle_StoreErrors(t *testing.T) {
 		appendMessageErr: errors.New("storage write error"),
 	}
 	forwards := map[string]string{echoPort: echoAddr}
-	h := NewHandler(store, forwards, testLogger(t))
+	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
 	defer clientConn.Close()
@@ -614,7 +609,7 @@ func TestHandler_Handle_StoreErrors(t *testing.T) {
 }
 
 func TestNewHandler_NilForwards(t *testing.T) {
-	h := NewHandler(nil, nil, testLogger(t))
+	h := NewHandler(nil, nil, testutil.DiscardLogger())
 	if h.forwards == nil {
 		t.Error("forwards should be initialized to empty map, not nil")
 	}
@@ -626,7 +621,7 @@ func TestRelay_Record_NilStore(t *testing.T) {
 	r := &relay{
 		store:     nil,
 		sessionID: "test-session",
-		logger:    testLogger(t),
+		logger:    testutil.DiscardLogger(),
 	}
 
 	// Should not panic.
@@ -638,7 +633,7 @@ func TestRelay_SequenceNumbers(t *testing.T) {
 	r := &relay{
 		store:     store,
 		sessionID: "test-session",
-		logger:    testLogger(t),
+		logger:    testutil.DiscardLogger(),
 	}
 
 	for i := 0; i < 5; i++ {
@@ -663,7 +658,7 @@ func TestRelay_DataIsolation(t *testing.T) {
 	r := &relay{
 		store:     store,
 		sessionID: "test-session",
-		logger:    testLogger(t),
+		logger:    testutil.DiscardLogger(),
 	}
 
 	buf := []byte("original data")
@@ -685,7 +680,7 @@ func TestRelay_DataIsolation(t *testing.T) {
 // --- SetForwards tests ---
 
 func TestHandler_SetForwards(t *testing.T) {
-	h := NewHandler(nil, nil, testLogger(t))
+	h := NewHandler(nil, nil, testutil.DiscardLogger())
 
 	// Initially empty.
 	if len(h.Forwards()) != 0 {
@@ -715,7 +710,7 @@ func TestHandler_SetForwards_Merge(t *testing.T) {
 	initial := map[string]string{
 		"3306": "db.example.com:3306",
 	}
-	h := NewHandler(nil, initial, testLogger(t))
+	h := NewHandler(nil, initial, testutil.DiscardLogger())
 
 	// Add a new entry.
 	h.SetForwards(map[string]string{
@@ -739,7 +734,7 @@ func TestHandler_SetForwards_Override(t *testing.T) {
 	initial := map[string]string{
 		"3306": "old-db.example.com:3306",
 	}
-	h := NewHandler(nil, initial, testLogger(t))
+	h := NewHandler(nil, initial, testutil.DiscardLogger())
 
 	h.SetForwards(map[string]string{
 		"3306": "new-db.example.com:3306",

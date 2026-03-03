@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/url"
@@ -22,12 +21,13 @@ import (
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 func startProxy(t *testing.T, ctx context.Context, store session.Store) (*proxy.Listener, context.CancelFunc) {
 	t.Helper()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	httpHandler := protohttp.NewHandler(store, nil, logger)
 	detector := protocol.NewDetector(httpHandler)
 	listener := proxy.NewListener(proxy.ListenerConfig{
@@ -86,7 +86,7 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -184,7 +184,7 @@ func TestIntegration_MalformedHTTPRequests(t *testing.T) {
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -325,7 +325,7 @@ func TestIntegration_PartialHTTPRequest(t *testing.T) {
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -418,7 +418,7 @@ func TestIntegration_TransferEncodingChunked(t *testing.T) {
 	upstreamAddr := upstreamListener.Addr().String()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -477,7 +477,7 @@ func TestIntegration_MalformedChunkedEncoding(t *testing.T) {
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -569,7 +569,7 @@ func TestIntegration_HTTPForwardProxy_POST(t *testing.T) {
 	defer upstreamServer.Close()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -692,7 +692,7 @@ func TestIntegration_LargeBodyBoundary_HTTP(t *testing.T) {
 			upstreamAddr := upstreamListener.Addr().String()
 
 			dbPath := filepath.Join(t.TempDir(), "test.db")
-			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			logger := testutil.DiscardLogger()
 			store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 			if err != nil {
 				t.Fatalf("NewSQLiteStore: %v", err)
@@ -841,7 +841,7 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -1239,7 +1239,7 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_WithRealDB(t *testing.T)
 	// The real-world scenario (DB failure after successful start) is adequately
 	// covered by the failingStore tests above.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	realStore, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -1305,7 +1305,7 @@ func TestIntegration_ProxyContextCancellation(t *testing.T) {
 	upstreamAddr := upstreamListener.Addr().String()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)

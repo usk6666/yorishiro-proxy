@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/http/httptest"
@@ -23,6 +22,7 @@ import (
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // startHTTPSProxy creates and starts a proxy with TLS MITM support.
@@ -32,7 +32,7 @@ func startHTTPSProxy(t *testing.T, ctx context.Context, store session.Store, ca 
 	t.Helper()
 
 	issuer := cert.NewIssuer(ca)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	httpHandler := protohttp.NewHandler(store, issuer, logger)
 	detector := protocol.NewDetector(httpHandler)
 	listener := proxy.NewListener(proxy.ListenerConfig{
@@ -107,7 +107,7 @@ func TestIntegration_HTTPSGET(t *testing.T) {
 
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -233,7 +233,7 @@ func TestIntegration_HTTPSPOST(t *testing.T) {
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -348,7 +348,7 @@ func TestIntegration_HTTPSSessionRecording(t *testing.T) {
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -478,7 +478,7 @@ func TestIntegration_HTTPSKeepAlive(t *testing.T) {
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -579,7 +579,7 @@ func TestIntegration_HTTPSMultipleHosts(t *testing.T) {
 	_, port2, _ := net.SplitHostPort(upstream2.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -742,7 +742,7 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 			_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 			dbPath := filepath.Join(t.TempDir(), "test.db")
-			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			logger := testutil.DiscardLogger()
 			store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 			if err != nil {
 				t.Fatalf("NewSQLiteStore: %v", err)
@@ -898,7 +898,7 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)

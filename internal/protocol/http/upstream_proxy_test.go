@@ -15,11 +15,12 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 func TestSetUpstreamProxy(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	t.Run("set upstream proxy", func(t *testing.T) {
 		proxyURL, _ := url.Parse("http://proxy:3128")
@@ -73,7 +74,7 @@ func TestSetUpstreamProxy(t *testing.T) {
 
 func TestDialUpstream_Direct(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Start an echo server.
 	echoAddr := startTCPEchoServer(t)
@@ -101,7 +102,7 @@ func TestDialUpstream_Direct(t *testing.T) {
 
 func TestDialUpstream_ViaHTTPProxy(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Start an echo server.
 	echoAddr := startTCPEchoServer(t)
@@ -147,7 +148,7 @@ func TestHTTPForwardViaUpstreamProxy(t *testing.T) {
 	proxyAddr := startMockHTTPForwardProxy(t)
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Configure the upstream proxy on the Transport.
 	proxyURL, _ := url.Parse("http://" + proxyAddr)
@@ -200,7 +201,7 @@ func TestHTTPSConnectViaUpstreamProxy(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(true)
 
 	// Start a mock HTTP CONNECT proxy.
@@ -241,7 +242,7 @@ func TestHTTPSConnectViaUpstreamProxy(t *testing.T) {
 
 func TestUpstreamProxyUnreachable(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Configure an unreachable upstream proxy.
 	proxyURL, _ := url.Parse("http://127.0.0.1:1")
@@ -283,7 +284,7 @@ func TestUpstreamProxyUnreachable(t *testing.T) {
 
 func TestUpstreamProxyDynamicChange(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Start without upstream proxy.
 	if handler.UpstreamProxy() != nil {
@@ -339,7 +340,7 @@ func TestHTTPSPassthroughViaUpstreamProxy(t *testing.T) {
 
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	// Configure passthrough for the echo server host.
 	passthrough := proxy.NewPassthroughList()
@@ -564,7 +565,7 @@ func TestHTTPConnectViaUpstreamProxyWithAuth(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(true)
 
 	// Start mock proxy with authentication.
