@@ -23,7 +23,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -222,6 +221,37 @@ func (h *Handler) handleStream(
 		req.URL.Scheme = scheme
 	}
 
+	// Build the request URL for recording. This is computed early so that
+	// all recording paths (success, error, intercept drop) use the same URL.
+	reqURL := &url.URL{
+		Scheme:   scheme,
+		Host:     req.URL.Host,
+		Path:     req.URL.Path,
+		RawQuery: req.URL.RawQuery,
+		Fragment: req.URL.Fragment,
+	}
+
+	// Build the connection info for session recording (without ServerAddr and
+	// TLSServerCertSubject which are only known after upstream connection).
+	connInfo := &session.ConnectionInfo{
+		ClientAddr:  clientAddr,
+		TLSVersion:  tlsMeta.Version,
+		TLSCipher:   tlsMeta.CipherSuite,
+		TLSALPN:     tlsMeta.ALPN,
+	}
+
+	// Prepare send record params used across all recording paths.
+	srp := sendRecordParams{
+		connID:       connID,
+		clientAddr:   clientAddr,
+		start:        start,
+		connInfo:     connInfo,
+		req:          req,
+		reqURL:       reqURL,
+		reqBody:      recordReqBody,
+		reqTruncated: reqTruncated,
+	}
+
 	// Target scope enforcement: check if the target is allowed before
 	// forwarding the request upstream. For h2c connections this is the
 	// only scope check; for h2 via CONNECT the tunnel-level check in
@@ -252,6 +282,7 @@ func (h *Handler) handleStream(
 	outReq, err := gohttp.NewRequestWithContext(ctx, req.Method, outURL.String(), io.NopCloser(bytes.NewReader(reqBody)))
 	if err != nil {
 		logger.Error("HTTP/2 failed to build upstream request", "error", err)
+		h.recordOutReqError(ctx, srp, err, logger)
 		w.WriteHeader(gohttp.StatusBadGateway)
 		return
 	}
@@ -269,7 +300,8 @@ func (h *Handler) handleStream(
 	if action, intercepted := h.interceptRequest(ctx, req, recordReqBody, logger); intercepted {
 		switch action.Type {
 		case intercept.ActionDrop:
-			// Drop: return 502 to client.
+			// Drop: record intercept drop and return 502 to client.
+			h.recordInterceptDrop(ctx, srp, logger)
 			w.WriteHeader(gohttp.StatusBadGateway)
 			logger.Info("intercepted HTTP/2 request dropped", "method", req.Method, "url", outURL.String())
 			return
@@ -285,10 +317,23 @@ func (h *Handler) handleStream(
 			// Update recordReqBody for session recording if body changed.
 			if action.OverrideBody != nil {
 				recordReqBody = []byte(*action.OverrideBody)
+				srp.reqBody = recordReqBody
 			}
 		case intercept.ActionRelease:
 			// Continue with the original request.
 		}
+	}
+
+	// Determine if this is a gRPC request. gRPC sessions are recorded by the
+	// gRPC handler using its own recording logic (not progressive recording).
+	isGRPC := h.grpcHandler != nil && isGRPCContentType(req.Header.Get("Content-Type"))
+
+	// Progressive recording: record the send (request) phase before forwarding
+	// to upstream, so even if the upstream fails, the request is persisted.
+	// gRPC sessions use their own recording path (grpcHandler.RecordSession).
+	var sendResult *sendRecordResult
+	if !isGRPC {
+		sendResult = h.recordSend(ctx, srp, logger)
 	}
 
 	// Forward to upstream.
@@ -296,6 +341,7 @@ func (h *Handler) handleStream(
 	if err != nil {
 		logger.Error("HTTP/2 upstream request failed",
 			"method", req.Method, "url", outURL.String(), "error", err)
+		h.recordSendError(ctx, sendResult, start, err, logger)
 		w.WriteHeader(gohttp.StatusBadGateway)
 		return
 	}
@@ -322,25 +368,6 @@ func (h *Handler) handleStream(
 		}
 	}
 
-	// Decompress response body for recording. The raw (potentially compressed)
-	// bytes are written to the client as-is above.
-	recordRespBody := fullRespBody
-	var respTruncated bool
-	decompressed := false
-	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(fullRespBody, ce, config.MaxBodySize)
-		if err != nil {
-			logger.Debug("HTTP/2 response body decompression failed, storing as-is", "encoding", ce, "error", err)
-		} else {
-			recordRespBody = decoded
-			decompressed = true
-		}
-	}
-	if len(recordRespBody) > int(config.MaxBodySize) {
-		recordRespBody = recordRespBody[:int(config.MaxBodySize)]
-		respTruncated = true
-	}
-
 	duration := time.Since(start)
 
 	// Extract the upstream server's TLS certificate subject if available.
@@ -349,21 +376,10 @@ func (h *Handler) handleStream(
 		tlsCertSubject = resp.TLS.PeerCertificates[0].Subject.String()
 	}
 
-	// Record session.
-	reqURL := &url.URL{
-		Scheme:   scheme,
-		Host:     req.URL.Host,
-		Path:     req.URL.Path,
-		RawQuery: req.URL.RawQuery,
-		Fragment: req.URL.Fragment,
-	}
-
-	if h.shouldCapture(req.Method, reqURL) {
-		// Check if this is a gRPC request and delegate to the gRPC handler.
-		isGRPC := h.grpcHandler != nil && isGRPCContentType(req.Header.Get("Content-Type"))
-
-		if isGRPC {
-			// Collect trailers from the response.
+	// Record the receive (response) phase.
+	if isGRPC {
+		// gRPC session recording is handled by the gRPC handler.
+		if h.shouldCapture(req.Method, reqURL) {
 			var trailers map[string][]string
 			if resp.Trailer != nil {
 				trailers = make(map[string][]string, len(resp.Trailer))
@@ -394,62 +410,20 @@ func (h *Handler) handleStream(
 			if err := h.grpcHandler.RecordSession(ctx, info); err != nil {
 				logger.Error("gRPC session recording failed", "error", err)
 			}
-		} else if h.Store != nil {
-			// Standard HTTP/2 session recording.
-			protocol := "HTTP/2"
-			sess := &session.Session{
-				ConnID:      connID,
-				Protocol:    protocol,
-				SessionType: "unary",
-				State:       "complete",
-				Timestamp:   start,
-				Duration:    duration,
-				ConnInfo: &session.ConnectionInfo{
-					ClientAddr:           clientAddr,
-					ServerAddr:           serverAddr,
-					TLSVersion:           tlsMeta.Version,
-					TLSCipher:            tlsMeta.CipherSuite,
-					TLSALPN:              tlsMeta.ALPN,
-					TLSServerCertSubject: tlsCertSubject,
-				},
-			}
-			if err := h.Store.SaveSession(ctx, sess); err != nil {
-				logger.Error("HTTP/2 session save failed", "error", err)
-			} else {
-				sendMsg := &session.Message{
-					SessionID:     sess.ID,
-					Sequence:      0,
-					Direction:     "send",
-					Timestamp:     start,
-					Method:        req.Method,
-					URL:           reqURL,
-					Headers:       req.Header,
-					Body:          recordReqBody,
-					BodyTruncated: reqTruncated,
-				}
-				if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
-					logger.Error("HTTP/2 send message save failed", "error", err)
-				}
-
-				recvMsg := &session.Message{
-					SessionID:     sess.ID,
-					Sequence:      1,
-					Direction:     "receive",
-					Timestamp:     start.Add(duration),
-					StatusCode:    resp.StatusCode,
-					Headers:       httputil.RecordingHeaders(resp.Header, decompressed, len(recordRespBody)),
-					Body:          recordRespBody,
-					BodyTruncated: respTruncated,
-				}
-				if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
-					logger.Error("HTTP/2 receive message save failed", "error", err)
-				}
-			}
 		}
+	} else {
+		h.recordReceive(ctx, sendResult, receiveRecordParams{
+			start:                start,
+			duration:             duration,
+			serverAddr:           serverAddr,
+			tlsServerCertSubject: tlsCertSubject,
+			resp:                 resp,
+			respBody:             fullRespBody,
+		}, logger)
 	}
 
 	logProtocol := "http/2"
-	if h.grpcHandler != nil && isGRPCContentType(req.Header.Get("Content-Type")) {
+	if isGRPC {
 		logProtocol = "grpc"
 	}
 	logger.Info(logProtocol+" request",

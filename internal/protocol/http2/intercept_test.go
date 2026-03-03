@@ -663,11 +663,25 @@ func TestHandleStream_InterceptDrop(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusBadGateway)
 	}
 
-	// Verify no session was recorded (request was dropped before forwarding).
+	// Verify session was recorded as intercept_drop (progressive recording).
 	time.Sleep(200 * time.Millisecond)
 	entries := store.Entries()
-	if len(entries) != 0 {
-		t.Errorf("expected 0 session entries when dropped, got %d", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 session entry for intercept drop, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Session.State != "complete" {
+		t.Errorf("state = %q, want %q", entry.Session.State, "complete")
+	}
+	if entry.Session.BlockedBy != "intercept_drop" {
+		t.Errorf("blocked_by = %q, want %q", entry.Session.BlockedBy, "intercept_drop")
+	}
+	if entry.Send == nil {
+		t.Fatal("send message is nil for intercept drop")
+	}
+	if entry.Receive != nil {
+		t.Error("receive message should be nil for intercept drop")
 	}
 }
 

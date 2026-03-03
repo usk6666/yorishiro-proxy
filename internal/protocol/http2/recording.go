@@ -1,0 +1,275 @@
+package http2
+
+import (
+	"context"
+	"log/slog"
+	gohttp "net/http"
+	"net/url"
+	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
+)
+
+// sendRecordParams holds the parameters needed to record the send phase
+// (Session + request message) of an HTTP/2 session.
+type sendRecordParams struct {
+	connID     string
+	clientAddr string
+	start      time.Time
+	connInfo   *session.ConnectionInfo
+
+	req          *gohttp.Request
+	reqURL       *url.URL
+	reqBody      []byte
+	reqTruncated bool
+}
+
+// sendRecordResult holds the session created by recordSend so that
+// subsequent recordReceive or recordSendError calls can reference it.
+type sendRecordResult struct {
+	sessionID string
+}
+
+// recordSend records the send phase of an HTTP/2 session: creates the session
+// with State="active" and appends the send (request) message. This is called
+// after intercept/transform processing but before upstream forwarding, so even
+// if the upstream fails, the request is already recorded.
+//
+// Returns a sendRecordResult containing the session ID for follow-up calls,
+// or nil if recording was skipped (nil store, capture scope miss, etc.).
+func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *slog.Logger) *sendRecordResult {
+	if h.Store == nil {
+		return nil
+	}
+
+	if !h.shouldCapture(p.req.Method, p.reqURL) {
+		return nil
+	}
+
+	sess := &session.Session{
+		ConnID:      p.connID,
+		Protocol:    "HTTP/2",
+		SessionType: "unary",
+		State:       "active",
+		Timestamp:   p.start,
+		ConnInfo:    p.connInfo,
+	}
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
+		logger.Error("HTTP/2 session save failed",
+			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+		return nil
+	}
+
+	sendMsg := &session.Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     p.start,
+		Method:        p.req.Method,
+		URL:           p.reqURL,
+		Headers:       p.req.Header,
+		Body:          p.reqBody,
+		BodyTruncated: p.reqTruncated,
+	}
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("HTTP/2 send message save failed", "error", err)
+	}
+
+	return &sendRecordResult{sessionID: sess.ID}
+}
+
+// receiveRecordParams holds the parameters needed to record the receive phase
+// (response message + session completion) of an HTTP/2 session.
+type receiveRecordParams struct {
+	start      time.Time
+	duration   time.Duration
+	serverAddr string
+
+	// tlsServerCertSubject is the subject DN of the upstream server's TLS
+	// certificate. Only set for HTTPS (h2) connections.
+	tlsServerCertSubject string
+
+	resp     *gohttp.Response
+	respBody []byte
+}
+
+// recordReceive records the receive phase of an HTTP/2 session: appends the
+// receive (response) message and updates the session to State="complete". This
+// is called after the response has been written to the client.
+//
+// If sendResult is nil (recording was skipped in recordSend), this is a no-op.
+func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResult, p receiveRecordParams, logger *slog.Logger) {
+	if sendResult == nil || h.Store == nil {
+		return
+	}
+
+	if p.resp == nil {
+		return
+	}
+
+	// Decompress response body for recording. The raw (potentially compressed)
+	// bytes are preserved for wire-level analysis.
+	recordRespBody := p.respBody
+	var respTruncated bool
+	decompressed := false
+	if ce := p.resp.Header.Get("Content-Encoding"); ce != "" {
+		decoded, err := httputil.DecompressBody(p.respBody, ce, config.MaxBodySize)
+		if err != nil {
+			logger.Debug("HTTP/2 response body decompression failed, storing as-is",
+				"encoding", ce, "error", err)
+		} else {
+			recordRespBody = decoded
+			decompressed = true
+		}
+	}
+	if len(recordRespBody) > int(config.MaxBodySize) {
+		recordRespBody = recordRespBody[:int(config.MaxBodySize)]
+		respTruncated = true
+	}
+
+	recvMsg := &session.Message{
+		SessionID:     sendResult.sessionID,
+		Sequence:      1,
+		Direction:     "receive",
+		Timestamp:     p.start.Add(p.duration),
+		StatusCode:    p.resp.StatusCode,
+		Headers:       httputil.RecordingHeaders(p.resp.Header, decompressed, len(recordRespBody)),
+		Body:          recordRespBody,
+		BodyTruncated: respTruncated,
+	}
+	if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
+		logger.Error("HTTP/2 receive message save failed", "error", err)
+	}
+
+	// Update the session to complete with the final duration and server address.
+	update := session.SessionUpdate{
+		State:      "complete",
+		Duration:   p.duration,
+		ServerAddr: p.serverAddr,
+	}
+	if p.tlsServerCertSubject != "" {
+		update.TLSServerCertSubject = p.tlsServerCertSubject
+	}
+	if err := h.Store.UpdateSession(ctx, sendResult.sessionID, update); err != nil {
+		logger.Error("HTTP/2 session update failed", "error", err)
+	}
+}
+
+// recordSendError updates an HTTP/2 session to State="error" after an upstream
+// failure. The send message is already recorded by recordSend; this only updates
+// the session metadata.
+//
+// If sendResult is nil (recording was skipped in recordSend), this is a no-op.
+func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordResult, start time.Time, upstreamErr error, logger *slog.Logger) {
+	if sendResult == nil || h.Store == nil {
+		return
+	}
+
+	duration := time.Since(start)
+	tags := map[string]string{
+		"error": upstreamErr.Error(),
+	}
+	update := session.SessionUpdate{
+		State:    "error",
+		Duration: duration,
+		Tags:     tags,
+	}
+	if err := h.Store.UpdateSession(ctx, sendResult.sessionID, update); err != nil {
+		logger.Error("HTTP/2 session error update failed", "error", err)
+	}
+}
+
+// recordInterceptDrop records an HTTP/2 session where the request was dropped by
+// an intercept rule. The session is recorded as State="complete" with
+// BlockedBy="intercept_drop" and only a send message (no receive).
+func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, logger *slog.Logger) {
+	if h.Store == nil {
+		return
+	}
+
+	if !h.shouldCapture(p.req.Method, p.reqURL) {
+		return
+	}
+
+	duration := time.Since(p.start)
+	sess := &session.Session{
+		ConnID:      p.connID,
+		Protocol:    "HTTP/2",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   p.start,
+		Duration:    duration,
+		BlockedBy:   "intercept_drop",
+		ConnInfo:    p.connInfo,
+	}
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
+		logger.Error("HTTP/2 intercept drop session save failed",
+			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+		return
+	}
+
+	sendMsg := &session.Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     p.start,
+		Method:        p.req.Method,
+		URL:           p.reqURL,
+		Headers:       p.req.Header,
+		Body:          p.reqBody,
+		BodyTruncated: p.reqTruncated,
+	}
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("HTTP/2 intercept drop send message save failed", "error", err)
+	}
+}
+
+// recordOutReqError records an HTTP/2 session where the outbound request
+// construction failed. The session is recorded as State="error" with the
+// request message and an error tag.
+func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, buildErr error, logger *slog.Logger) {
+	if h.Store == nil {
+		return
+	}
+
+	if !h.shouldCapture(p.req.Method, p.reqURL) {
+		return
+	}
+
+	duration := time.Since(p.start)
+	tags := map[string]string{
+		"error": buildErr.Error(),
+	}
+	sess := &session.Session{
+		ConnID:      p.connID,
+		Protocol:    "HTTP/2",
+		SessionType: "unary",
+		State:       "error",
+		Timestamp:   p.start,
+		Duration:    duration,
+		Tags:        tags,
+		ConnInfo:    p.connInfo,
+	}
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
+		logger.Error("HTTP/2 outReq error session save failed",
+			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+		return
+	}
+
+	sendMsg := &session.Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     p.start,
+		Method:        p.req.Method,
+		URL:           p.reqURL,
+		Headers:       p.req.Header,
+		Body:          p.reqBody,
+		BodyTruncated: p.reqTruncated,
+	}
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("HTTP/2 outReq error send message save failed", "error", err)
+	}
+}
