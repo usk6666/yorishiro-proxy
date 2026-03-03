@@ -104,7 +104,7 @@ type H2Handler interface {
 
 // Handler processes HTTP/1.x connections.
 type Handler struct {
-	store             session.Store
+	store             session.SessionWriter
 	issuer            *cert.Issuer
 	transport         *gohttp.Transport
 	logger            *slog.Logger
@@ -125,7 +125,7 @@ type Handler struct {
 // NewHandler creates a new HTTP handler with session recording.
 // If issuer is non-nil, CONNECT requests are handled for HTTPS MITM;
 // otherwise CONNECT requests receive a 501 Not Implemented response.
-func NewHandler(store session.Store, issuer *cert.Issuer, logger *slog.Logger) *Handler {
+func NewHandler(store session.SessionWriter, issuer *cert.Issuer, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:     store,
 		issuer:    issuer,
