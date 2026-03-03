@@ -303,7 +303,94 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		targetScope.SetPolicyRules(allows, denies)
 	}
 
-	return runMCP(ctx, ca, issuer, store, store, manager, passthrough, scope, interceptEngine, interceptQueue, pipeline, fuzzRunner, tcpHandler, httpHandler, http2Handler, proxyCfg, targetScope, targetScopePolicySource, cfg.DBPath, cfg.MCPHTTPAddr, cfg.MCPHTTPToken, cfg.UIDir, logger)
+	// Build MCP server options.
+	opts := []mcp.ServerOption{
+		mcp.WithVersion(version),
+		mcp.WithDBPath(cfg.DBPath),
+		mcp.WithPassthroughList(passthrough),
+		mcp.WithCaptureScope(scope),
+		mcp.WithInterceptEngine(interceptEngine),
+		mcp.WithInterceptQueue(interceptQueue),
+		mcp.WithTransformPipeline(pipeline),
+		mcp.WithFuzzRunner(fuzzRunner),
+		mcp.WithFuzzStore(store),
+		mcp.WithIssuer(issuer),
+		mcp.WithTCPHandler(tcpHandler),
+		mcp.WithUpstreamProxySetter(httpHandler),
+		mcp.WithUpstreamProxySetter(http2Handler),
+		mcp.WithTargetScopeSetter(httpHandler),
+		mcp.WithTargetScopeSetter(http2Handler),
+	}
+
+	// Pass proxy config file defaults to the MCP server.
+	if proxyCfg != nil {
+		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
+		logger.Info("loaded proxy config file defaults")
+	}
+
+	// Pass target scope policy to the MCP server.
+	if targetScope != nil {
+		opts = append(opts, mcp.WithTargetScope(targetScope))
+		allows, denies := targetScope.PolicyRules()
+		logger.Info("target scope policy loaded",
+			"allows", len(allows),
+			"denies", len(denies),
+			"source", targetScopePolicySource)
+	}
+
+	// Set up WebUI override directory if specified.
+	if cfg.UIDir != "" {
+		opts = append(opts, mcp.WithUIDir(cfg.UIDir))
+	}
+
+	// Set up Bearer token authentication middleware for HTTP transport.
+	if cfg.MCPHTTPAddr != "" {
+		token, err := resolveHTTPToken(cfg.MCPHTTPToken, logger)
+		if err != nil {
+			return fmt.Errorf("MCP HTTP token: %w", err)
+		}
+		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
+			return mcp.BearerAuthMiddleware(next, token)
+		}))
+		logger.Info("WebUI available",
+			"url", fmt.Sprintf("http://%s/?token=%s", cfg.MCPHTTPAddr, token))
+	}
+
+	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
+	logger.Info("starting MCP server on stdio")
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	// Always start stdio transport (single session via Server.Run).
+	g.Go(func() error {
+		transport := &gomcp.StdioTransport{}
+		if err := mcpServer.Run(gctx, transport); err != nil {
+			// Context cancellation is expected during graceful shutdown.
+			if gctx.Err() != nil {
+				logger.Info("MCP stdio server stopped")
+				return nil
+			}
+			return fmt.Errorf("MCP stdio server: %w", err)
+		}
+		return nil
+	})
+
+	// Optionally start Streamable HTTP transport (multi-session via Server.Connect).
+	if cfg.MCPHTTPAddr != "" {
+		g.Go(func() error {
+			if err := mcpServer.RunHTTP(gctx, cfg.MCPHTTPAddr); err != nil {
+				// Context cancellation is expected during graceful shutdown.
+				if gctx.Err() != nil {
+					logger.Info("MCP HTTP server stopped")
+					return nil
+				}
+				return err
+			}
+			return nil
+		})
+	}
+
+	return g.Wait()
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -393,103 +480,6 @@ func convertTargetRules(cfgRules []config.TargetRuleConfig) []proxy.TargetRule {
 		}
 	}
 	return rules
-}
-
-// runMCP starts the MCP server on stdin/stdout. When mcpHTTPAddr is non-empty,
-// a Streamable HTTP transport is also started concurrently on that address.
-// Both transports share the same MCP server instance, Manager, Store, and CA.
-// The proxy is not started automatically; use the proxy_start tool to begin
-// intercepting traffic.
-func runMCP(ctx context.Context, ca *cert.CA, issuer *cert.Issuer, store session.Store, fuzzStore session.FuzzStore, manager *proxy.Manager, passthrough *proxy.PassthroughList, scope *proxy.CaptureScope, interceptEngine *intercept.Engine, interceptQueue *intercept.Queue, pipeline *rules.Pipeline, fuzzRunner *fuzzer.Runner, tcpHandler *prototcp.Handler, httpHandler *protohttp.Handler, http2Handler *protohttp2.Handler, proxyCfg *config.ProxyConfig, targetScope *proxy.TargetScope, targetScopePolicySource string, dbPath string, mcpHTTPAddr string, mcpHTTPToken string, uiDir string, logger *slog.Logger) error {
-	logger.Info("starting MCP server on stdio")
-
-	// Build MCP server options.
-	opts := []mcp.ServerOption{
-		mcp.WithVersion(version),
-		mcp.WithDBPath(dbPath),
-		mcp.WithPassthroughList(passthrough),
-		mcp.WithCaptureScope(scope),
-		mcp.WithInterceptEngine(interceptEngine),
-		mcp.WithInterceptQueue(interceptQueue),
-		mcp.WithTransformPipeline(pipeline),
-		mcp.WithFuzzRunner(fuzzRunner),
-		mcp.WithFuzzStore(fuzzStore),
-		mcp.WithIssuer(issuer),
-		mcp.WithTCPHandler(tcpHandler),
-		mcp.WithUpstreamProxySetter(httpHandler),
-		mcp.WithUpstreamProxySetter(http2Handler),
-		mcp.WithTargetScopeSetter(httpHandler),
-		mcp.WithTargetScopeSetter(http2Handler),
-	}
-
-	// Pass proxy config file defaults to the MCP server.
-	if proxyCfg != nil {
-		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
-		logger.Info("loaded proxy config file defaults")
-	}
-
-	// Pass target scope policy to the MCP server.
-	if targetScope != nil {
-		opts = append(opts, mcp.WithTargetScope(targetScope))
-		allows, denies := targetScope.PolicyRules()
-		logger.Info("target scope policy loaded",
-			"allows", len(allows),
-			"denies", len(denies),
-			"source", targetScopePolicySource)
-	}
-
-	// Set up WebUI override directory if specified.
-	if uiDir != "" {
-		opts = append(opts, mcp.WithUIDir(uiDir))
-	}
-
-	// Set up Bearer token authentication middleware for HTTP transport.
-	if mcpHTTPAddr != "" {
-		token, err := resolveHTTPToken(mcpHTTPToken, logger)
-		if err != nil {
-			return fmt.Errorf("MCP HTTP token: %w", err)
-		}
-		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
-			return mcp.BearerAuthMiddleware(next, token)
-		}))
-		logger.Info("WebUI available",
-			"url", fmt.Sprintf("http://%s/?token=%s", mcpHTTPAddr, token))
-	}
-
-	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
-
-	g, gctx := errgroup.WithContext(ctx)
-
-	// Always start stdio transport (single session via Server.Run).
-	g.Go(func() error {
-		transport := &gomcp.StdioTransport{}
-		if err := mcpServer.Run(gctx, transport); err != nil {
-			// Context cancellation is expected during graceful shutdown.
-			if gctx.Err() != nil {
-				logger.Info("MCP stdio server stopped")
-				return nil
-			}
-			return fmt.Errorf("MCP stdio server: %w", err)
-		}
-		return nil
-	})
-
-	// Optionally start Streamable HTTP transport (multi-session via Server.Connect).
-	if mcpHTTPAddr != "" {
-		g.Go(func() error {
-			if err := mcpServer.RunHTTP(gctx, mcpHTTPAddr); err != nil {
-				// Context cancellation is expected during graceful shutdown.
-				if gctx.Err() != nil {
-					logger.Info("MCP HTTP server stopped")
-					return nil
-				}
-				return err
-			}
-			return nil
-		})
-	}
-
-	return g.Wait()
 }
 
 // resolveHTTPToken returns the Bearer token to use for MCP HTTP authentication.
