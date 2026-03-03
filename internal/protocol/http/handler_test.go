@@ -23,10 +23,10 @@ func TestSetInsecureSkipVerify_EnablesSkipVerify(t *testing.T) {
 
 	handler.SetInsecureSkipVerify(true)
 
-	if handler.transport.TLSClientConfig == nil {
+	if handler.Transport.TLSClientConfig == nil {
 		t.Fatal("TLSClientConfig is nil after SetInsecureSkipVerify(true)")
 	}
-	if !handler.transport.TLSClientConfig.InsecureSkipVerify {
+	if !handler.Transport.TLSClientConfig.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify = false, want true")
 	}
 }
@@ -38,8 +38,8 @@ func TestSetInsecureSkipVerify_FalseDoesNotModifyTransport(t *testing.T) {
 	handler.SetInsecureSkipVerify(false)
 
 	// When skip is false, TLSClientConfig should remain nil (not modified).
-	if handler.transport.TLSClientConfig != nil {
-		t.Errorf("TLSClientConfig = %v, want nil when skip is false", handler.transport.TLSClientConfig)
+	if handler.Transport.TLSClientConfig != nil {
+		t.Errorf("TLSClientConfig = %v, want nil when skip is false", handler.Transport.TLSClientConfig)
 	}
 }
 
@@ -48,16 +48,16 @@ func TestSetInsecureSkipVerify_PreservesExistingTLSConfig(t *testing.T) {
 	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Pre-set a TLSClientConfig with a custom field.
-	handler.transport.TLSClientConfig = &tls.Config{
+	handler.Transport.TLSClientConfig = &tls.Config{
 		ServerName: "custom-server",
 	}
 
 	handler.SetInsecureSkipVerify(true)
 
-	if handler.transport.TLSClientConfig.ServerName != "custom-server" {
-		t.Errorf("ServerName = %q, want %q", handler.transport.TLSClientConfig.ServerName, "custom-server")
+	if handler.Transport.TLSClientConfig.ServerName != "custom-server" {
+		t.Errorf("ServerName = %q, want %q", handler.Transport.TLSClientConfig.ServerName, "custom-server")
 	}
-	if !handler.transport.TLSClientConfig.InsecureSkipVerify {
+	if !handler.Transport.TLSClientConfig.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify = false, want true")
 	}
 }
@@ -67,8 +67,8 @@ func TestNewHandler_DefaultTransportHasNoInsecureSkipVerify(t *testing.T) {
 	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Default transport should not have TLSClientConfig set.
-	if handler.transport.TLSClientConfig != nil {
-		t.Errorf("default transport TLSClientConfig = %v, want nil", handler.transport.TLSClientConfig)
+	if handler.Transport.TLSClientConfig != nil {
+		t.Errorf("default transport TLSClientConfig = %v, want nil", handler.Transport.TLSClientConfig)
 	}
 }
 
@@ -484,7 +484,7 @@ func TestHTTPSLoop_GoroutineCleanupOnNormalClose(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
 	handler := NewHandler(store, issuer, testutil.DiscardLogger())
-	handler.transport = upstreamTransport(upstream)
+	handler.Transport = upstreamTransport(upstream)
 
 	// Use a parent context that is NOT cancelled during this test.
 	ctx, cancel := context.WithCancel(context.Background())

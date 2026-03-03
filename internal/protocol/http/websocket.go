@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -69,8 +70,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	upstreamConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
 		logger.Error("websocket upstream dial failed", "host", host, "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("dial websocket upstream %s: %w", host, err)
 	}
 	defer upstreamConn.Close()
@@ -80,8 +80,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	// Forward the original upgrade request to the upstream server.
 	if err := req.Write(upstreamConn); err != nil {
 		logger.Error("websocket upstream write failed", "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("write websocket upgrade request: %w", err)
 	}
 
@@ -90,8 +89,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	resp, err := gohttp.ReadResponse(upstreamReader, req)
 	if err != nil {
 		logger.Error("websocket upstream response read failed", "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("read websocket upgrade response: %w", err)
 	}
 
@@ -118,7 +116,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 
 	// Delegate to the WebSocket handler for frame relay.
 	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
-	wsHandler := ws.NewHandler(h.store, logger)
+	wsHandler := ws.NewHandler(h.Store, logger)
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
@@ -149,8 +147,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	rawConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
 		logger.Error("wss upstream dial failed", "host", host, "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("dial wss upstream %s: %w", host, err)
 	}
 	defer rawConn.Close()
@@ -164,14 +161,13 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 		ServerName: hostname,
 		MinVersion: tls.VersionTLS12,
 	}
-	if h.transport != nil && h.transport.TLSClientConfig != nil {
-		tlsConfig.InsecureSkipVerify = h.transport.TLSClientConfig.InsecureSkipVerify
+	if h.Transport != nil && h.Transport.TLSClientConfig != nil {
+		tlsConfig.InsecureSkipVerify = h.Transport.TLSClientConfig.InsecureSkipVerify
 	}
 	upstreamTLS := tls.Client(rawConn, tlsConfig)
 	if err := upstreamTLS.HandshakeContext(ctx); err != nil {
 		logger.Error("wss upstream TLS handshake failed", "host", host, "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("wss upstream TLS handshake: %w", err)
 	}
 	defer upstreamTLS.Close()
@@ -191,8 +187,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	outReq.RequestURI = req.URL.RequestURI()
 	if err := outReq.Write(upstreamTLS); err != nil {
 		logger.Error("wss upstream write failed", "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("write wss upgrade request: %w", err)
 	}
 
@@ -201,8 +196,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	resp, err := gohttp.ReadResponse(upstreamReader, req)
 	if err != nil {
 		logger.Error("wss upstream response read failed", "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		conn.Write([]byte(errResp))
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("read wss upgrade response: %w", err)
 	}
 
@@ -232,6 +226,6 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 
 	// Delegate to the WebSocket handler for frame relay.
 	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
-	wsHandler := ws.NewHandler(h.store, logger)
+	wsHandler := ws.NewHandler(h.Store, logger)
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }

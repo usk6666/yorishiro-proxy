@@ -43,9 +43,7 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	hostname, err := parseConnectHost(req.Host)
 	if err != nil {
 		logger.Warn("invalid CONNECT host", "host", req.Host, "error", err)
-		if _, err := conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
-			logger.Debug("failed to write error response", "error", err)
-		}
+		httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
 		return nil
 	}
 
@@ -61,9 +59,7 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 		// Invalid (non-numeric) port in CONNECT request — reject immediately
 		// to prevent scope check bypass (S-3: CWE-20).
 		logger.Warn("CONNECT with invalid port", "host", req.Host)
-		if _, err := conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
-			logger.Debug("failed to write error response", "error", err)
-		}
+		httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
 		return nil
 	}
 	if blocked, reason := h.checkTargetScopeHost(hostname, port); blocked {
@@ -81,9 +77,7 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Validate that the issuer is configured for TLS interception.
 	if h.issuer == nil {
 		logger.Warn("CONNECT received but TLS issuer not configured", "host", req.Host)
-		if _, err := conn.Write([]byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
-			logger.Debug("failed to write error response", "error", err)
-		}
+		httputil.WriteHTTPError(conn, gohttp.StatusNotImplemented, logger)
 		return nil
 	}
 
@@ -130,9 +124,7 @@ func (h *Handler) handlePassthrough(ctx context.Context, clientConn net.Conn, au
 	upstream, err := h.dialUpstream(ctx, authority, 30*time.Second)
 	if err != nil {
 		logger.Error("passthrough upstream dial failed", "host", authority, "error", err)
-		if _, err := clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
-			logger.Debug("failed to write error response", "error", err)
-		}
+		httputil.WriteHTTPError(clientConn, gohttp.StatusBadGateway, logger)
 		return nil
 	}
 	defer upstream.Close()
@@ -295,7 +287,7 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 
 		// Check for HTTP request smuggling patterns in raw headers before
 		// ReadRequest normalizes them. Same check as Handle() for HTTP.
-		smuggling := checkRequestSmuggling(reader, h.logger)
+		smuggling := checkRequestSmuggling(reader, h.Logger)
 
 		req, err := gohttp.ReadRequest(reader)
 		if err != nil {
@@ -311,7 +303,7 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 		}
 
 		// Log any detected smuggling patterns.
-		logSmugglingWarnings(h.logger, smuggling, req)
+		logSmugglingWarnings(h.Logger, smuggling, req)
 
 		// Reset deadline after successful read.
 		tlsConn.SetReadDeadline(time.Time{})
@@ -415,10 +407,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	if action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, logger); intercepted {
 		switch action.Type {
 		case intercept.ActionDrop:
-			errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-			if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
-				logger.Debug("failed to write drop response", "error", writeErr)
-			}
+			httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 			logger.Info("intercepted HTTPS request dropped", "method", req.Method, "url", req.URL.String())
 			return nil
 		case intercept.ActionModifyAndForward:
@@ -426,10 +415,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 			req, modErr = applyInterceptModifications(req, action, recordReqBody)
 			if modErr != nil {
 				logger.Error("intercept modification failed", "error", modErr)
-				errResp := "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-				if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
-					logger.Debug("failed to write error response", "error", writeErr)
-				}
+				httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
 				return nil
 			}
 			if action.OverrideBody != nil {
@@ -451,13 +437,10 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	outReq := req.WithContext(ctx)
 	outReq.RequestURI = ""
 
-	resp, serverAddr, err := roundTripWithTrace(h.transport, outReq)
+	resp, serverAddr, err := roundTripWithTrace(h.Transport, outReq)
 	if err != nil {
 		logger.Error("HTTPS upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
-		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-		if _, err := conn.Write([]byte(errResp)); err != nil {
-			logger.Debug("failed to write error response", "error", err)
-		}
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("HTTPS upstream request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -516,7 +499,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		RawQuery: req.URL.RawQuery,
 		Fragment: req.URL.Fragment,
 	}
-	if h.store != nil && h.shouldCapture(req.Method, reqURL) {
+	if h.Store != nil && h.shouldCapture(req.Method, reqURL) {
 		sess := &session.Session{
 			ConnID:      connID,
 			Protocol:    "HTTPS",
@@ -534,7 +517,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 				TLSServerCertSubject: tlsCertSubject,
 			},
 		}
-		if err := h.store.SaveSession(ctx, sess); err != nil {
+		if err := h.Store.SaveSession(ctx, sess); err != nil {
 			logger.Error("HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		} else {
 			sendMsg := &session.Message{
@@ -549,7 +532,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 				RawBytes:      rawRequest,
 				BodyTruncated: reqTruncated,
 			}
-			if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+			if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 				logger.Error("HTTPS send message save failed", "error", err)
 			}
 			recvMsg := &session.Message{
@@ -563,7 +546,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 				RawBytes:      rawResponse,
 				BodyTruncated: respTruncated,
 			}
-			if err := h.store.AppendMessage(ctx, recvMsg); err != nil {
+			if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
 				logger.Error("HTTPS receive message save failed", "error", err)
 			}
 		}
@@ -604,7 +587,7 @@ func parseConnectPort(hostPort string) int {
 // recordBlockedCONNECTSession records a blocked CONNECT request as a session
 // with BlockedBy="target_scope".
 func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.Request, hostname, authority string, logger *slog.Logger) {
-	if h.store == nil {
+	if h.Store == nil {
 		return
 	}
 
@@ -633,7 +616,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 			ClientAddr: clientAddr,
 		},
 	}
-	if err := h.store.SaveSession(ctx, sess); err != nil {
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
 		logger.Error("blocked CONNECT session save failed", "host", authority, "error", err)
 		return
 	}
@@ -645,7 +628,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 		Method:    "CONNECT",
 		URL:       connectURL,
 	}
-	if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("blocked CONNECT send message save failed", "error", err)
 	}
 }
@@ -653,7 +636,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 // recordBlockedHTTPSSession records a blocked HTTPS request (inside MITM tunnel)
 // as a session with BlockedBy="target_scope".
 func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, tlsMeta tlsMetadata, logger *slog.Logger) {
-	if h.store == nil {
+	if h.Store == nil {
 		return
 	}
 
@@ -685,7 +668,7 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 			TLSALPN:     tlsMeta.ALPN,
 		},
 	}
-	if err := h.store.SaveSession(ctx, sess); err != nil {
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
 		logger.Error("blocked HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		return
 	}
@@ -701,7 +684,7 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 		RawBytes:      rawRequest,
 		BodyTruncated: reqTruncated,
 	}
-	if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("blocked HTTPS send message save failed", "error", err)
 	}
 }

@@ -42,27 +42,7 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 // enforcement is applied per-stream in handleStream. This ensures all
 // HTTP/2 traffic paths are covered by scope checks.
 type Handler struct {
-	store  session.SessionWriter
-	logger *slog.Logger
-
-	// transport is used for upstream HTTP/2 requests.
-	transport *gohttp.Transport
-
-	// upstreamMu protects upstreamProxy for concurrent access.
-	upstreamMu sync.RWMutex
-
-	// scope controls which requests are recorded.
-	scope *proxy.CaptureScope
-
-	// targetScope enforces which network targets are allowed or blocked.
-	// When set, requests to targets outside the scope receive a 403 Forbidden response.
-	targetScope *proxy.TargetScope
-
-	// interceptEngine evaluates intercept rules against HTTP/2 requests.
-	interceptEngine *intercept.Engine
-
-	// interceptQueue holds intercepted requests waiting for AI agent actions.
-	interceptQueue *intercept.Queue
+	proxy.HandlerBase
 
 	// grpcHandler processes gRPC session recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
@@ -72,45 +52,14 @@ type Handler struct {
 // NewHandler creates a new HTTP/2 handler with session recording.
 func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
 	return &Handler{
-		store:  store,
-		logger: logger,
-		transport: &gohttp.Transport{
-			ForceAttemptHTTP2: true,
+		HandlerBase: proxy.HandlerBase{
+			Store:  store,
+			Logger: logger,
+			Transport: &gohttp.Transport{
+				ForceAttemptHTTP2: true,
+			},
 		},
 	}
-}
-
-// SetTransport replaces the handler's HTTP transport. This is primarily
-// useful for testing, where the upstream server uses a self-signed certificate.
-func (h *Handler) SetTransport(t *gohttp.Transport) {
-	h.transport = t
-}
-
-// SetInsecureSkipVerify configures whether the handler skips TLS certificate
-// verification when connecting to upstream servers.
-func (h *Handler) SetInsecureSkipVerify(skip bool) {
-	if skip {
-		h.logger.Warn("HTTP/2 upstream TLS certificate verification is disabled")
-		if h.transport.TLSClientConfig == nil {
-			h.transport.TLSClientConfig = &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			}
-		}
-		h.transport.TLSClientConfig.InsecureSkipVerify = true
-	}
-}
-
-// SetCaptureScope sets the capture scope used to filter which requests
-// are recorded to the session store.
-func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
-	h.scope = scope
-}
-
-// SetTargetScope sets the target scope used to enforce which network targets
-// are allowed or blocked for h2c (cleartext HTTP/2) connections. For h2 (TLS)
-// connections via CONNECT, the HTTP/1.x handler enforces scope at the tunnel level.
-func (h *Handler) SetTargetScope(scope *proxy.TargetScope) {
-	h.targetScope = scope
 }
 
 // SetGRPCHandler sets the gRPC handler used for gRPC-specific session recording.
@@ -118,29 +67,6 @@ func (h *Handler) SetTargetScope(scope *proxy.TargetScope) {
 // sessions with parsed service/method metadata instead of plain HTTP/2.
 func (h *Handler) SetGRPCHandler(gh *protogrpc.Handler) {
 	h.grpcHandler = gh
-}
-
-// SetInterceptEngine sets the intercept rule engine used to determine which
-// HTTP/2 requests should be intercepted. When set together with an intercept
-// queue, matching requests are held for AI agent review.
-func (h *Handler) SetInterceptEngine(engine *intercept.Engine) {
-	h.interceptEngine = engine
-}
-
-// SetInterceptQueue sets the intercept queue used to hold HTTP/2 requests
-// that match intercept rules. The queue must be set together with an intercept
-// engine.
-func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
-	h.interceptQueue = queue
-}
-
-// SetUpstreamProxy configures the upstream proxy for outgoing HTTP/2 connections.
-// Pass nil to disable the upstream proxy (direct connections).
-// This method is safe to call concurrently.
-func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
-	h.upstreamMu.Lock()
-	defer h.upstreamMu.Unlock()
-	h.transport.Proxy = proxy.TransportProxyFunc(proxyURL)
 }
 
 // Name returns the protocol name for h2c (cleartext HTTP/2).
@@ -300,8 +226,8 @@ func (h *Handler) handleStream(
 	// forwarding the request upstream. For h2c connections this is the
 	// only scope check; for h2 via CONNECT the tunnel-level check in
 	// the HTTP/1.x handler provides the first line of defense (S-2).
-	if h.targetScope != nil && h.targetScope.HasRules() {
-		if allowed, reason := h.targetScope.CheckURL(req.URL); !allowed {
+	if h.TargetScope != nil && h.TargetScope.HasRules() {
+		if allowed, reason := h.TargetScope.CheckURL(req.URL); !allowed {
 			body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`,
 				req.URL.Hostname(), reason)
 			w.Header().Set("Content-Type", "application/json")
@@ -468,7 +394,7 @@ func (h *Handler) handleStream(
 			if err := h.grpcHandler.RecordSession(ctx, info); err != nil {
 				logger.Error("gRPC session recording failed", "error", err)
 			}
-		} else if h.store != nil {
+		} else if h.Store != nil {
 			// Standard HTTP/2 session recording.
 			protocol := "HTTP/2"
 			sess := &session.Session{
@@ -487,7 +413,7 @@ func (h *Handler) handleStream(
 					TLSServerCertSubject: tlsCertSubject,
 				},
 			}
-			if err := h.store.SaveSession(ctx, sess); err != nil {
+			if err := h.Store.SaveSession(ctx, sess); err != nil {
 				logger.Error("HTTP/2 session save failed", "error", err)
 			} else {
 				sendMsg := &session.Message{
@@ -501,7 +427,7 @@ func (h *Handler) handleStream(
 					Body:          recordReqBody,
 					BodyTruncated: reqTruncated,
 				}
-				if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+				if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 					logger.Error("HTTP/2 send message save failed", "error", err)
 				}
 
@@ -515,7 +441,7 @@ func (h *Handler) handleStream(
 					Body:          recordRespBody,
 					BodyTruncated: respTruncated,
 				}
-				if err := h.store.AppendMessage(ctx, recvMsg); err != nil {
+				if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
 					logger.Error("HTTP/2 receive message save failed", "error", err)
 				}
 			}
@@ -548,9 +474,9 @@ func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, str
 
 	// Hold a read lock while accessing transport.Proxy via RoundTrip to
 	// prevent a data race with concurrent SetUpstreamProxy writes.
-	h.upstreamMu.RLock()
-	resp, err := h.transport.RoundTrip(req)
-	h.upstreamMu.RUnlock()
+	h.UpstreamMu.RLock()
+	resp, err := h.Transport.RoundTrip(req)
+	h.UpstreamMu.RUnlock()
 
 	return resp, serverAddr, err
 }
@@ -558,16 +484,13 @@ func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, str
 // shouldCapture checks the capture scope to determine whether a request
 // should be recorded. Returns true if no scope is configured.
 func (h *Handler) shouldCapture(method string, u *url.URL) bool {
-	if h.scope == nil {
-		return true
-	}
-	return h.scope.ShouldCapture(method, u)
+	return h.ShouldCapture(method, u)
 }
 
 // connLogger returns the connection-scoped logger from context,
 // falling back to the handler's logger.
 func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
-	return proxy.LoggerFromContext(ctx, h.logger)
+	return h.ConnLogger(ctx)
 }
 
 // interceptRequest checks if the request matches any intercept rules and,
@@ -575,21 +498,21 @@ func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 // or the timeout expires. Returns the action and true if intercepted, or a
 // zero-value action and false if not intercepted.
 func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
-	if h.interceptEngine == nil || h.interceptQueue == nil {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.interceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
 
 	logger.Info("HTTP/2 request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
 
-	id, actionCh := h.interceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
-	defer h.interceptQueue.Remove(id) // ensure cleanup on timeout/cancel
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
+	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
 
-	timeout := h.interceptQueue.Timeout()
+	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
 	defer timeoutCancel()
 
@@ -598,7 +521,7 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 		return action, true
 	case <-timeoutCtx.Done():
 		// Timeout or context cancellation.
-		behavior := h.interceptQueue.TimeoutBehaviorValue()
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
 		if ctx.Err() != nil {
 			// Proxy shutting down — drop.
 			logger.Info("intercepted HTTP/2 request cancelled (proxy shutdown)", "id", id)

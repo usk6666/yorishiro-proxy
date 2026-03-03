@@ -220,7 +220,7 @@ func startH2CProxyListener(t *testing.T, handler *Handler, connID, clientAddr, c
 	h2Server := &http2.Server{}
 	proxyHTTPHandler := gohttp.HandlerFunc(func(w gohttp.ResponseWriter, req *gohttp.Request) {
 		hctx := proxy.ContextWithConnID(proxy.ContextWithClientAddr(ctx, clientAddr), connID)
-		handler.handleStream(hctx, w, req, connID, clientAddr, connectAuthority, tlsMeta, handler.logger)
+		handler.handleStream(hctx, w, req, connID, clientAddr, connectAuthority, tlsMeta, handler.Logger)
 	})
 	h2cH := h2c.NewHandler(proxyHTTPHandler, h2Server)
 
@@ -670,10 +670,10 @@ func TestSetInsecureSkipVerify(t *testing.T) {
 	handler := NewHandler(nil, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(true)
 
-	if handler.transport.TLSClientConfig == nil {
+	if handler.Transport.TLSClientConfig == nil {
 		t.Fatal("TLSClientConfig is nil after SetInsecureSkipVerify(true)")
 	}
-	if !handler.transport.TLSClientConfig.InsecureSkipVerify {
+	if !handler.Transport.TLSClientConfig.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify = false, want true")
 	}
 }
@@ -682,9 +682,9 @@ func TestSetInsecureSkipVerify_FalseDoesNotModify(t *testing.T) {
 	handler := NewHandler(nil, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(false)
 
-	if handler.transport.TLSClientConfig != nil {
+	if handler.Transport.TLSClientConfig != nil {
 		t.Errorf("TLSClientConfig = %v, want nil when skip is false",
-			handler.transport.TLSClientConfig)
+			handler.Transport.TLSClientConfig)
 	}
 }
 
@@ -693,7 +693,7 @@ func TestSetCaptureScope(t *testing.T) {
 	scope := proxy.NewCaptureScope()
 	handler.SetCaptureScope(scope)
 
-	if handler.scope != scope {
+	if handler.Scope != scope {
 		t.Error("scope was not set correctly")
 	}
 }
@@ -703,7 +703,7 @@ func TestSetTransport(t *testing.T) {
 	newTransport := &gohttp.Transport{MaxIdleConns: 42}
 	handler.SetTransport(newTransport)
 
-	if handler.transport != newTransport {
+	if handler.Transport != newTransport {
 		t.Error("transport was not set correctly")
 	}
 }

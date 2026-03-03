@@ -13,7 +13,6 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -104,22 +103,13 @@ type H2Handler interface {
 
 // Handler processes HTTP/1.x connections.
 type Handler struct {
-	store             session.SessionWriter
+	proxy.HandlerBase
+
 	issuer            *cert.Issuer
-	transport         *gohttp.Transport
-	logger            *slog.Logger
 	requestTimeoutNs  atomic.Int64 // nanoseconds; read/written atomically
 	passthrough       *proxy.PassthroughList
-	scope             *proxy.CaptureScope
-	targetScope       *proxy.TargetScope
-	interceptEngine   *intercept.Engine
-	interceptQueue    *intercept.Queue
 	transformPipeline *rules.Pipeline
 	h2Handler         H2Handler
-
-	// upstreamMu protects upstreamProxy for concurrent access.
-	upstreamMu    sync.RWMutex
-	upstreamProxy *url.URL
 }
 
 // NewHandler creates a new HTTP handler with session recording.
@@ -127,33 +117,12 @@ type Handler struct {
 // otherwise CONNECT requests receive a 501 Not Implemented response.
 func NewHandler(store session.SessionWriter, issuer *cert.Issuer, logger *slog.Logger) *Handler {
 	return &Handler{
-		store:     store,
-		issuer:    issuer,
-		transport: &gohttp.Transport{},
-		logger:    logger,
-	}
-}
-
-// SetTransport replaces the handler's HTTP transport. This is primarily
-// useful for testing, where the upstream server uses a self-signed certificate.
-func (h *Handler) SetTransport(t *gohttp.Transport) {
-	h.transport = t
-}
-
-// SetInsecureSkipVerify configures whether the handler skips TLS certificate
-// verification when connecting to upstream servers. When enabled, a warning
-// is logged because this disables important security checks.
-// This is intended for vulnerability assessments against targets using
-// self-signed or expired certificates.
-func (h *Handler) SetInsecureSkipVerify(skip bool) {
-	if skip {
-		h.logger.Warn("upstream TLS certificate verification is disabled — connections to upstream servers will not verify certificates")
-		if h.transport.TLSClientConfig == nil {
-			h.transport.TLSClientConfig = &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			}
-		}
-		h.transport.TLSClientConfig.InsecureSkipVerify = true
+		HandlerBase: proxy.HandlerBase{
+			Store:     store,
+			Transport: &gohttp.Transport{},
+			Logger:    logger,
+		},
+		issuer: issuer,
 	}
 }
 
@@ -183,42 +152,6 @@ func (h *Handler) PassthroughList() *proxy.PassthroughList {
 	return h.passthrough
 }
 
-// SetCaptureScope sets the capture scope used to filter which requests
-// are recorded to the session store. If scope is nil, all requests are recorded.
-func (h *Handler) SetCaptureScope(scope *proxy.CaptureScope) {
-	h.scope = scope
-}
-
-// CaptureScope returns the handler's capture scope, or nil if not set.
-func (h *Handler) CaptureScope() *proxy.CaptureScope {
-	return h.scope
-}
-
-// SetTargetScope sets the target scope used to enforce which network targets
-// are allowed or blocked. When set, requests to targets outside the scope
-// receive a 403 Forbidden response.
-func (h *Handler) SetTargetScope(scope *proxy.TargetScope) {
-	h.targetScope = scope
-}
-
-// TargetScope returns the handler's target scope, or nil if not set.
-func (h *Handler) TargetScope() *proxy.TargetScope {
-	return h.targetScope
-}
-
-// SetInterceptEngine sets the intercept rule engine used to determine which
-// requests should be intercepted. When set together with an intercept queue,
-// matching requests are held for AI agent review.
-func (h *Handler) SetInterceptEngine(engine *intercept.Engine) {
-	h.interceptEngine = engine
-}
-
-// SetInterceptQueue sets the intercept queue used to hold requests that match
-// intercept rules. The queue must be set together with an intercept engine.
-func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
-	h.interceptQueue = queue
-}
-
 // SetTransformPipeline sets the auto-transform rule pipeline used to
 // automatically modify requests and responses passing through the proxy.
 // When set, matching rules are applied to request headers/body before upstream
@@ -238,22 +171,10 @@ func (h *Handler) SetH2Handler(handler H2Handler) {
 	h.h2Handler = handler
 }
 
-// SetUpstreamProxy configures the upstream proxy for outgoing connections.
-// Pass nil to disable the upstream proxy (direct connections).
-// This method is safe to call concurrently and updates both the transport's
-// Proxy function (for HTTP/HTTPS requests) and the stored URL (for CONNECT tunnels).
-func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
-	h.upstreamMu.Lock()
-	defer h.upstreamMu.Unlock()
-	h.upstreamProxy = proxyURL
-	h.transport.Proxy = proxy.TransportProxyFunc(proxyURL)
-}
-
 // UpstreamProxy returns the current upstream proxy URL, or nil if not set.
+// This is a convenience alias for GetUpstreamProxy from HandlerBase.
 func (h *Handler) UpstreamProxy() *url.URL {
-	h.upstreamMu.RLock()
-	defer h.upstreamMu.RUnlock()
-	return h.upstreamProxy
+	return h.GetUpstreamProxy()
 }
 
 func (h *Handler) effectiveRequestTimeout() time.Duration {
@@ -281,7 +202,7 @@ func (h *Handler) Detect(peek []byte) bool {
 // connLogger returns the connection-scoped logger from context,
 // falling back to the handler's logger.
 func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
-	return proxy.LoggerFromContext(ctx, h.logger)
+	return h.ConnLogger(ctx)
 }
 
 // Handle processes HTTP connections in a loop (keep-alive support).
@@ -324,7 +245,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		// ReadRequest normalizes them. This is important because Go's
 		// ReadRequest strips Content-Length when Transfer-Encoding is
 		// present, making post-parse detection impossible.
-		smuggling := checkRequestSmuggling(reader, h.logger)
+		smuggling := checkRequestSmuggling(reader, h.Logger)
 
 		req, err := gohttp.ReadRequest(reader)
 		if err != nil {
@@ -340,7 +261,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		}
 
 		// Log any detected smuggling patterns.
-		logSmugglingWarnings(h.logger, smuggling, req)
+		logSmugglingWarnings(h.Logger, smuggling, req)
 
 		// Reset deadline after successful read.
 		conn.SetReadDeadline(time.Time{})
@@ -433,10 +354,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		switch action.Type {
 		case intercept.ActionDrop:
 			// Drop: return 502 to client.
-			errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-			if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
-				logger.Debug("failed to write drop response", "error", writeErr)
-			}
+			httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 			logger.Info("intercepted request dropped", "method", req.Method, "url", req.URL.String())
 			return nil
 		case intercept.ActionModifyAndForward:
@@ -445,10 +363,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 			req, modErr = applyInterceptModifications(req, action, recordReqBody)
 			if modErr != nil {
 				logger.Error("intercept modification failed", "error", modErr)
-				errResp := "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-				if _, writeErr := conn.Write([]byte(errResp)); writeErr != nil {
-					logger.Debug("failed to write error response", "error", writeErr)
-				}
+				httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
 				return nil
 			}
 			// Update recordReqBody for session recording if body changed.
@@ -471,14 +386,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	outReq := req.WithContext(ctx)
 	outReq.RequestURI = ""
 
-	resp, serverAddr, err := roundTripWithTrace(h.transport, outReq)
+	resp, serverAddr, err := roundTripWithTrace(h.Transport, outReq)
 	if err != nil {
 		logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		// Send 502 Bad Gateway to client.
-		errResp := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-		if _, err := conn.Write([]byte(errResp)); err != nil {
-			logger.Debug("failed to write error response", "error", err)
-		}
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return fmt.Errorf("upstream request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -524,7 +436,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	duration := time.Since(start)
 
 	// Record session + messages.
-	if h.store != nil && h.shouldCapture(req.Method, req.URL) {
+	if h.Store != nil && h.shouldCapture(req.Method, req.URL) {
 		sess := &session.Session{
 			ConnID:      connID,
 			Protocol:    "HTTP/1.x",
@@ -538,7 +450,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 				ServerAddr: serverAddr,
 			},
 		}
-		if err := h.store.SaveSession(ctx, sess); err != nil {
+		if err := h.Store.SaveSession(ctx, sess); err != nil {
 			logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		} else {
 			sendMsg := &session.Message{
@@ -553,7 +465,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 				RawBytes:      rawRequest,
 				BodyTruncated: reqTruncated,
 			}
-			if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+			if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 				logger.Error("send message save failed", "error", err)
 			}
 			recvMsg := &session.Message{
@@ -567,7 +479,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 				RawBytes:      rawResponse,
 				BodyTruncated: respTruncated,
 			}
-			if err := h.store.AppendMessage(ctx, recvMsg); err != nil {
+			if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
 				logger.Error("receive message save failed", "error", err)
 			}
 		}
@@ -606,10 +518,7 @@ func serializeRawResponse(resp *gohttp.Response, body []byte) []byte {
 // shouldCapture checks the capture scope to determine whether a request
 // should be recorded. Returns true if no scope is configured.
 func (h *Handler) shouldCapture(method string, u *url.URL) bool {
-	if h.scope == nil {
-		return true
-	}
-	return h.scope.ShouldCapture(method, u)
+	return h.ShouldCapture(method, u)
 }
 
 func removeHopByHopHeaders(header gohttp.Header) {
@@ -662,21 +571,21 @@ func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
 // or the timeout expires. Returns the action and true if intercepted, or a
 // zero-value action and false if not intercepted.
 func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
-	if h.interceptEngine == nil || h.interceptQueue == nil {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.interceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
 
 	logger.Info("request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
 
-	id, actionCh := h.interceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
-	defer h.interceptQueue.Remove(id) // ensure cleanup on timeout/cancel
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
+	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
 
-	timeout := h.interceptQueue.Timeout()
+	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
 	defer timeoutCancel()
 
@@ -685,7 +594,7 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 		return action, true
 	case <-timeoutCtx.Done():
 		// Timeout or context cancellation.
-		behavior := h.interceptQueue.TimeoutBehaviorValue()
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
 		if ctx.Err() != nil {
 			// Proxy shutting down — drop.
 			logger.Info("intercepted request cancelled (proxy shutdown)", "id", id)
@@ -772,10 +681,10 @@ func applyInterceptModifications(req *gohttp.Request, action intercept.Intercept
 // Returns (true, reason) if the target is blocked, (false, "") if allowed.
 // If no target scope is configured or it has no rules, the target is always allowed.
 func (h *Handler) checkTargetScope(u *url.URL) (blocked bool, reason string) {
-	if h.targetScope == nil || !h.targetScope.HasRules() {
+	if h.TargetScope == nil || !h.TargetScope.HasRules() {
 		return false, ""
 	}
-	allowed, reason := h.targetScope.CheckURL(u)
+	allowed, reason := h.TargetScope.CheckURL(u)
 	if !allowed {
 		return true, reason
 	}
@@ -786,11 +695,11 @@ func (h *Handler) checkTargetScope(u *url.URL) (blocked bool, reason string) {
 // This is used for CONNECT requests where only host and port are available.
 // Returns (true, reason) if the target is blocked, (false, "") if allowed.
 func (h *Handler) checkTargetScopeHost(hostname string, port int) (blocked bool, reason string) {
-	if h.targetScope == nil || !h.targetScope.HasRules() {
+	if h.TargetScope == nil || !h.TargetScope.HasRules() {
 		return false, ""
 	}
 	// CONNECT targets don't have scheme or path information.
-	allowed, reason := h.targetScope.CheckTarget("", hostname, port, "")
+	allowed, reason := h.TargetScope.CheckTarget("", hostname, port, "")
 	if !allowed {
 		return true, reason
 	}
@@ -811,7 +720,7 @@ func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, log
 
 // recordBlockedSession records a blocked request as a session with BlockedBy="target_scope".
 func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, logger *slog.Logger) {
-	if h.store == nil {
+	if h.Store == nil {
 		return
 	}
 	if !h.shouldCapture(req.Method, req.URL) {
@@ -832,7 +741,7 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 			ClientAddr: clientAddr,
 		},
 	}
-	if err := h.store.SaveSession(ctx, sess); err != nil {
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
 		logger.Error("blocked session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		return
 	}
@@ -848,7 +757,7 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 		RawBytes:      rawRequest,
 		BodyTruncated: reqTruncated,
 	}
-	if err := h.store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("blocked send message save failed", "error", err)
 	}
 }
