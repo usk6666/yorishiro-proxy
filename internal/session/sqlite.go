@@ -213,6 +213,14 @@ func (s *SQLiteStore) UpdateSession(ctx context.Context, id string, update Sessi
 			sets = append(sets, "tags = ?")
 			args = append(args, string(tagsJSON))
 		}
+		if update.ServerAddr != "" {
+			sets = append(sets, "server_addr = ?")
+			args = append(args, update.ServerAddr)
+		}
+		if update.TLSServerCertSubject != "" {
+			sets = append(sets, "tls_server_cert_subject = ?")
+			args = append(args, update.TLSServerCertSubject)
+		}
 
 		if len(sets) == 0 {
 			return nil

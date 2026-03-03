@@ -300,15 +300,37 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	rawRequest := extractRawRequest(capture, captureStart, reader)
 	removeHopByHopHeaders(req.Header)
 
+	// Build send record params for progressive recording.
+	sp := sendRecordParams{
+		connID:       connID,
+		clientAddr:   clientAddr,
+		protocol:     "HTTP/1.x",
+		start:        start,
+		tags:         smugglingTags(smuggling),
+		connInfo:     &session.ConnectionInfo{ClientAddr: clientAddr},
+		req:          req,
+		reqBody:      bodyResult.recordBody,
+		rawRequest:   rawRequest,
+		reqTruncated: bodyResult.truncated,
+	}
+
 	var dropped bool
 	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
 	if dropped {
+		sp.reqBody = bodyResult.recordBody
+		h.recordInterceptDrop(ctx, sp, logger)
 		return nil
 	}
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+	sp.reqBody = bodyResult.recordBody
+
+	// Progressive recording: record send (session + request) before forwarding.
+	sendResult := h.recordSend(ctx, sp, logger)
 
 	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
 	if err != nil {
+		// Upstream failed — record session as error. Send is already recorded.
+		h.recordSendError(ctx, sendResult, start, err, logger)
 		return err
 	}
 	defer fwd.resp.Body.Close()
@@ -318,15 +340,17 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		return err
 	}
 
+	// Progressive recording: record receive (response + session completion).
 	duration := time.Since(start)
-	h.recordHTTPSession(ctx, sessionRecordParams{
-		connID: connID, clientAddr: clientAddr, serverAddr: fwd.serverAddr,
-		protocol: "HTTP/1.x", start: start, duration: duration,
-		tags:     smugglingTags(smuggling),
-		connInfo: &session.ConnectionInfo{ClientAddr: clientAddr, ServerAddr: fwd.serverAddr},
-		req: req, reqBody: bodyResult.recordBody, rawRequest: rawRequest, reqTruncated: bodyResult.truncated,
-		resp: fwd.resp, rawResponse: rawResponse, respBody: fullRespBody,
+	h.recordReceive(ctx, sendResult, receiveRecordParams{
+		start:       start,
+		duration:    duration,
+		serverAddr:  fwd.serverAddr,
+		resp:        fwd.resp,
+		rawResponse: rawResponse,
+		respBody:    fullRespBody,
 	}, logger)
+
 	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
 	return nil
 }
