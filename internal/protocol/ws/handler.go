@@ -254,7 +254,9 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 				closePayload[0] = 0x03
 				closePayload[1] = 0xF1 // 1009
 				closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Payload: closePayload}
-				_ = WriteFrame(dst, closeFrame)
+				if err := WriteFrame(dst, closeFrame); err != nil {
+					h.logger.Debug("failed to send close frame for oversized message", "session_id", sessionID, "error", err)
+				}
 				return fmt.Errorf("fragmented message exceeded config.MaxWebSocketMessageSize (%d bytes)", config.MaxWebSocketMessageSize)
 			}
 			fragmentBuf = append(fragmentBuf, frame.Payload...)

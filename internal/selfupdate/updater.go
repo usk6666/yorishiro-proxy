@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -373,7 +374,9 @@ func atomicReplace(oldPath, newPath, goos string) error {
 		}
 		if err := os.Rename(newPath, oldPath); err != nil {
 			// Try to restore the backup on failure.
-			_ = os.Rename(backupPath, oldPath)
+			if restoreErr := os.Rename(backupPath, oldPath); restoreErr != nil {
+				slog.Warn("failed to restore backup after install failure", "backup", backupPath, "target", oldPath, "error", restoreErr)
+			}
 			return fmt.Errorf("install new binary: %w", err)
 		}
 		// Best-effort cleanup of the backup. On Windows the old binary may

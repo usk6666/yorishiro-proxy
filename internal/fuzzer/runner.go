@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -411,7 +412,9 @@ func (r *Runner) execute(
 	}
 
 	// Use a background context since the job context may be cancelled.
-	_ = r.engine.fuzzStore.UpdateFuzzJob(context.Background(), finalJob)
+	if err := r.engine.fuzzStore.UpdateFuzzJob(context.Background(), finalJob); err != nil {
+		slog.Warn("failed to finalize fuzz job in DB", "job_id", job.ID, "error", err)
+	}
 }
 
 // updateJobProgress updates the job's completed and error counts in the DB.
@@ -429,5 +432,7 @@ func (r *Runner) updateJobProgress(ctx context.Context, job *session.FuzzJob, co
 		ErrorCount:     errors,
 	}
 	// Best-effort update; don't fail the job if DB write fails here.
-	_ = r.engine.fuzzStore.UpdateFuzzJob(ctx, update)
+	if err := r.engine.fuzzStore.UpdateFuzzJob(ctx, update); err != nil {
+		slog.Warn("failed to update fuzz job progress", "job_id", job.ID, "error", err)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"time"
 
@@ -202,7 +203,9 @@ func ImportSessions(ctx context.Context, store Store, r io.Reader, opts ImportOp
 
 		if msgErr != nil {
 			// Clean up the session we just saved on message import failure.
-			_ = store.DeleteSession(ctx, sess.ID)
+			if delErr := store.DeleteSession(ctx, sess.ID); delErr != nil {
+				slog.Warn("failed to clean up session after import error", "session_id", sess.ID, "error", delErr)
+			}
 			result.addError(lineNum, sessionID, msgErr.Error())
 			continue
 		}
