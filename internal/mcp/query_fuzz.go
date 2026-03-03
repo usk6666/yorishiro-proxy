@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -176,7 +177,9 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		payloads := make(map[string]string)
 		if r.Payloads != "" {
 			// Best-effort parse; if it fails, return empty map.
-			_ = json.Unmarshal([]byte(r.Payloads), &payloads)
+			if err := json.Unmarshal([]byte(r.Payloads), &payloads); err != nil {
+				slog.Warn("failed to parse fuzz result payloads", "result_id", r.ID, "error", err)
+			}
 		}
 
 		entries = append(entries, queryFuzzResultEntry{
