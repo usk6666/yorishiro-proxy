@@ -3,21 +3,17 @@ package grpc
 import (
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- test helpers ---
-
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 // mockStore is a thread-safe minimal in-memory session store for testing.
 type mockStore struct {
@@ -305,7 +301,7 @@ func TestClassifySessionType(t *testing.T) {
 
 func TestRecordSession_UnaryRPC(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	reqPayload := []byte{0x0A, 0x05, 0x68, 0x65, 0x6C, 0x6C, 0x6F} // protobuf bytes
@@ -428,7 +424,7 @@ func TestRecordSession_UnaryRPC(t *testing.T) {
 
 func TestRecordSession_ServerStreaming(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	reqPayload := []byte{0x01, 0x02}
@@ -518,7 +514,7 @@ func TestRecordSession_ServerStreaming(t *testing.T) {
 
 func TestRecordSession_BidirectionalStreaming(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	// Multiple request frames.
@@ -588,7 +584,7 @@ func TestRecordSession_BidirectionalStreaming(t *testing.T) {
 }
 
 func TestRecordSession_NilStore(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	info := &StreamInfo{
@@ -607,7 +603,7 @@ func TestRecordSession_NilStore(t *testing.T) {
 
 func TestRecordSession_ErrorResponse(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	// gRPC error with no response body (Trailers-Only).
@@ -662,7 +658,7 @@ func TestRecordSession_ErrorResponse(t *testing.T) {
 
 func TestRecordSession_InvalidPath(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	info := &StreamInfo{
@@ -709,7 +705,7 @@ func TestRecordSession_InvalidPath(t *testing.T) {
 
 func TestRecordSession_CompressedFrames(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	reqBody := EncodeFrame(true, []byte{0x1F, 0x8B, 0x08}) // compressed
@@ -764,7 +760,7 @@ func TestRecordSession_CompressedFrames(t *testing.T) {
 
 func TestRecordSession_EmptyBodies(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	ctx := context.Background()
 
 	info := &StreamInfo{

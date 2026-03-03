@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/http/httptest"
@@ -20,6 +19,7 @@ import (
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // startHTTPSProxyWithPassthrough creates and starts a proxy with TLS MITM
@@ -34,7 +34,7 @@ func startHTTPSProxyWithPassthrough(t *testing.T, ctx context.Context, store ses
 	}
 
 	issuer := cert.NewIssuer(ca)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	httpHandler := protohttp.NewHandler(store, issuer, logger)
 	httpHandler.SetPassthroughList(pl)
 	detector := protocol.NewDetector(httpHandler)
@@ -105,7 +105,7 @@ func TestIntegration_TLSPassthrough_RelayWithoutMITM(t *testing.T) {
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -203,7 +203,7 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -280,7 +280,7 @@ func TestIntegration_TLSPassthrough_WildcardPattern(t *testing.T) {
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -360,7 +360,7 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -462,7 +462,7 @@ func TestIntegration_TLSPassthrough_VerifyCertIsUpstream(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)

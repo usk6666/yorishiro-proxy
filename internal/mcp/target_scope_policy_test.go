@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	gohttp "net/http"
 	"net/url"
 	"path/filepath"
@@ -14,11 +13,13 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // policyTestEnv holds all the components needed for a Target Scope Policy
@@ -40,7 +41,7 @@ func setupPolicyTestEnv(t *testing.T, ts *proxy.TargetScope) *policyTestEnv {
 
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "policy-integration.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -1004,11 +1005,11 @@ func TestPolicyIntegration_FullLayeredEvaluation(t *testing.T) {
 	env := setupPolicyTestEnv(t, ts)
 
 	tests := []struct {
-		name          string
-		url           string
-		wantAllowed   bool
-		wantLayer     string
-		wantReason    string
+		name        string
+		url         string
+		wantAllowed bool
+		wantLayer   string
+		wantReason  string
 	}{
 		{
 			name:        "policy deny blocks",

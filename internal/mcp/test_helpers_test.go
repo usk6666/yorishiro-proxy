@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,9 +15,11 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // newTestCA creates a CA with a generated certificate for testing.
@@ -35,7 +36,7 @@ func newTestCA(t *testing.T) *cert.CA {
 func newTestStore(t *testing.T) session.Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -117,11 +118,6 @@ func saveTestEntry(t *testing.T, store session.Store, sess *session.Session, sen
 type stubDetector struct{}
 
 func (d *stubDetector) Detect(_ []byte) proxy.ProtocolHandler { return nil }
-
-// newTestLogger creates a logger that discards all output, for testing.
-func newTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 // setupTestSessionWithManager creates an MCP client session with a ProxyManager for testing.
 func setupTestSessionWithManager(t *testing.T, manager *proxy.Manager) *gomcp.ClientSession {

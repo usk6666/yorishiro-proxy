@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- SetMaxConnections tests ---
@@ -18,7 +19,7 @@ func TestListener_SetMaxConnections_ResizesCapacity(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:           "127.0.0.1:0",
 		Detector:       detector,
-		Logger:         newTestLogger(),
+		Logger:         testutil.DiscardLogger(),
 		MaxConnections: 2,
 	})
 
@@ -65,7 +66,7 @@ func TestListener_SetMaxConnections_IgnoresNonPositive(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:           "127.0.0.1:0",
 		Detector:       detector,
-		Logger:         newTestLogger(),
+		Logger:         testutil.DiscardLogger(),
 		MaxConnections: 10,
 	})
 
@@ -88,7 +89,7 @@ func TestListener_SetMaxConnections_DefaultMaxConnections(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:     "127.0.0.1:0",
 		Detector: detector,
-		Logger:   newTestLogger(),
+		Logger:   testutil.DiscardLogger(),
 	})
 
 	if got := listener.MaxConnections(); got != 128 {
@@ -104,7 +105,7 @@ func TestListener_SetPeekTimeout_UpdatesTimeout(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:        "127.0.0.1:0",
 		Detector:    detector,
-		Logger:      newTestLogger(),
+		Logger:      testutil.DiscardLogger(),
 		PeekTimeout: 500 * time.Millisecond,
 	})
 
@@ -126,7 +127,7 @@ func TestListener_SetPeekTimeout_IgnoresNonPositive(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:        "127.0.0.1:0",
 		Detector:    detector,
-		Logger:      newTestLogger(),
+		Logger:      testutil.DiscardLogger(),
 		PeekTimeout: 500 * time.Millisecond,
 	})
 
@@ -148,7 +149,7 @@ func TestListener_PeekTimeout_DefaultValue(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:     "127.0.0.1:0",
 		Detector: detector,
-		Logger:   newTestLogger(),
+		Logger:   testutil.DiscardLogger(),
 	})
 
 	if got := listener.PeekTimeout(); got != 30*time.Second {
@@ -162,7 +163,7 @@ func TestListener_SetPeekTimeout_TakesEffectOnNewConnections(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:        "127.0.0.1:0",
 		Detector:    detector,
-		Logger:      newTestLogger(),
+		Logger:      testutil.DiscardLogger(),
 		PeekTimeout: 30 * time.Second, // Long initial timeout.
 	})
 

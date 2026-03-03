@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // setupMultiListenerTestSession creates an MCP client session with a Manager for
@@ -17,7 +19,7 @@ func setupMultiListenerTestSession(t *testing.T, manager *proxy.Manager) *gomcp.
 }
 
 func TestProxyStart_WithName(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -59,7 +61,7 @@ func TestProxyStart_WithName(t *testing.T) {
 }
 
 func TestProxyStart_DefaultNameWhenOmitted(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -91,7 +93,7 @@ func TestProxyStart_DefaultNameWhenOmitted(t *testing.T) {
 }
 
 func TestProxyStart_MultipleNamedListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -135,7 +137,7 @@ func TestProxyStart_MultipleNamedListeners(t *testing.T) {
 }
 
 func TestProxyStart_DuplicateName_Error(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -174,7 +176,7 @@ func TestProxyStart_DuplicateName_Error(t *testing.T) {
 }
 
 func TestProxyStop_WithName(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -235,7 +237,7 @@ func TestProxyStop_WithName(t *testing.T) {
 }
 
 func TestProxyStop_WithoutName_StopsAll(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -291,7 +293,7 @@ func TestProxyStop_WithoutName_StopsAll(t *testing.T) {
 }
 
 func TestProxyStop_NamedNotFound_Error(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -312,7 +314,7 @@ func TestProxyStop_NamedNotFound_Error(t *testing.T) {
 }
 
 func TestQueryStatus_MultipleListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -382,7 +384,7 @@ func TestQueryStatus_MultipleListeners(t *testing.T) {
 }
 
 func TestQueryStatus_NoListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -416,7 +418,7 @@ func TestQueryStatus_NoListeners(t *testing.T) {
 }
 
 func TestQueryStatus_OnlyNamedListeners_RunningTrue(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 

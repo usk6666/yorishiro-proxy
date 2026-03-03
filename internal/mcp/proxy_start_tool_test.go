@@ -8,8 +8,10 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // setupProxyStartTestSession creates an MCP client session with Manager, CaptureScope,
@@ -76,7 +78,7 @@ func unmarshalProxyStartResult(t *testing.T, result *gomcp.CallToolResult) proxy
 }
 
 func TestProxyStart_WithListenAddr(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -103,7 +105,7 @@ func TestProxyStart_WithListenAddr(t *testing.T) {
 }
 
 func TestProxyStart_DefaultAddr(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -128,7 +130,7 @@ func TestProxyStart_DefaultAddr(t *testing.T) {
 }
 
 func TestProxyStart_AlreadyRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -173,7 +175,7 @@ func TestProxyStart_NilManager(t *testing.T) {
 }
 
 func TestProxyStart_NonLoopbackAddr(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -204,7 +206,7 @@ func TestProxyStart_NonLoopbackAddr(t *testing.T) {
 }
 
 func TestProxyStart_InvalidAddr(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -222,7 +224,7 @@ func TestProxyStart_InvalidAddr(t *testing.T) {
 }
 
 func TestProxyStart_WithCaptureScope(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -276,7 +278,7 @@ func TestProxyStart_WithCaptureScope(t *testing.T) {
 }
 
 func TestProxyStart_WithCaptureScope_IncludesOnly(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -309,7 +311,7 @@ func TestProxyStart_WithCaptureScope_IncludesOnly(t *testing.T) {
 }
 
 func TestProxyStart_WithCaptureScope_ExcludesOnly(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -342,7 +344,7 @@ func TestProxyStart_WithCaptureScope_ExcludesOnly(t *testing.T) {
 }
 
 func TestProxyStart_WithCaptureScope_EmptyRuleError(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -367,7 +369,7 @@ func TestProxyStart_WithCaptureScope_EmptyRuleError(t *testing.T) {
 }
 
 func TestProxyStart_WithCaptureScope_EmptyExcludeRuleError(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -392,7 +394,7 @@ func TestProxyStart_WithCaptureScope_EmptyExcludeRuleError(t *testing.T) {
 }
 
 func TestProxyStart_WithCaptureScope_NilScope(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -416,7 +418,7 @@ func TestProxyStart_WithCaptureScope_NilScope(t *testing.T) {
 }
 
 func TestProxyStart_WithTLSPassthrough(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -453,7 +455,7 @@ func TestProxyStart_WithTLSPassthrough(t *testing.T) {
 }
 
 func TestProxyStart_WithTLSPassthrough_EmptyPattern(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -473,7 +475,7 @@ func TestProxyStart_WithTLSPassthrough_EmptyPattern(t *testing.T) {
 }
 
 func TestProxyStart_WithTLSPassthrough_NilPassthrough(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -493,7 +495,7 @@ func TestProxyStart_WithTLSPassthrough_NilPassthrough(t *testing.T) {
 }
 
 func TestProxyStart_WithAllConfig(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -545,7 +547,7 @@ func TestProxyStart_WithAllConfig(t *testing.T) {
 }
 
 func TestProxyStart_WithEmptyCaptureScope(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -583,7 +585,7 @@ func TestProxyStart_WithEmptyCaptureScope(t *testing.T) {
 }
 
 func TestProxyStart_WithoutCaptureScope(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -634,7 +636,7 @@ func TestProxyStart_LoopbackAddresses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := newTestLogger()
+			logger := testutil.DiscardLogger()
 			detector := &stubDetector{}
 			manager := proxy.NewManager(detector, logger)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -661,7 +663,7 @@ func TestProxyStart_LoopbackAddresses(t *testing.T) {
 func TestProxyStart_ScopeAppliedBeforeStart(t *testing.T) {
 	// Verify that scope and passthrough are configured before the proxy starts.
 	// If scope validation fails, proxy should NOT start.
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -694,7 +696,7 @@ func TestProxyStart_ScopeAppliedBeforeStart(t *testing.T) {
 
 func TestProxyStart_PassthroughAppliedBeforeStart(t *testing.T) {
 	// If passthrough validation fails, proxy should NOT start.
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -726,8 +728,8 @@ type mockTCPHandler struct {
 	forwards map[string]string
 }
 
-func (h *mockTCPHandler) Name() string                                { return "TCP" }
-func (h *mockTCPHandler) Detect(_ []byte) bool                        { return true }
+func (h *mockTCPHandler) Name() string         { return "TCP" }
+func (h *mockTCPHandler) Detect(_ []byte) bool { return true }
 func (h *mockTCPHandler) Handle(_ context.Context, conn net.Conn) error {
 	// Simple echo for testing.
 	buf := make([]byte, 1024)
@@ -747,7 +749,7 @@ func (h *mockTCPHandler) SetForwards(forwards map[string]string) {
 }
 
 func TestProxyStart_WithTCPForwards(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -800,7 +802,7 @@ func TestProxyStart_WithTCPForwards(t *testing.T) {
 }
 
 func TestProxyStart_WithTCPForwards_NilHandler(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -822,7 +824,7 @@ func TestProxyStart_WithTCPForwards_NilHandler(t *testing.T) {
 }
 
 func TestProxyStart_WithTCPForwards_InvalidTarget(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -985,7 +987,7 @@ func TestApplyCaptureScope(t *testing.T) {
 // --- Tests for max_connections, peek_timeout_ms, request_timeout_ms ---
 
 func TestProxyStart_WithMaxConnections(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -993,7 +995,7 @@ func TestProxyStart_WithMaxConnections(t *testing.T) {
 	cs := setupProxyStartTestSession(t, manager, nil, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr":    "127.0.0.1:0",
+		"listen_addr":     "127.0.0.1:0",
 		"max_connections": 500,
 	})
 	if err != nil {
@@ -1015,7 +1017,7 @@ func TestProxyStart_WithMaxConnections(t *testing.T) {
 }
 
 func TestProxyStart_WithPeekTimeoutMs(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -1039,7 +1041,7 @@ func TestProxyStart_WithPeekTimeoutMs(t *testing.T) {
 }
 
 func TestProxyStart_WithRequestTimeoutMs(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -1051,7 +1053,7 @@ func TestProxyStart_WithRequestTimeoutMs(t *testing.T) {
 	)
 
 	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr":       "127.0.0.1:0",
+		"listen_addr":        "127.0.0.1:0",
 		"request_timeout_ms": 10000,
 	})
 	if err != nil {
@@ -1083,7 +1085,7 @@ func TestProxyStart_MaxConnections_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := newTestLogger()
+			logger := testutil.DiscardLogger()
 			detector := &stubDetector{}
 			manager := proxy.NewManager(detector, logger)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -1091,7 +1093,7 @@ func TestProxyStart_MaxConnections_Validation(t *testing.T) {
 			cs := setupProxyStartTestSession(t, manager, nil, nil)
 
 			result, err := callProxyStart(t, cs, map[string]any{
-				"listen_addr":    "127.0.0.1:0",
+				"listen_addr":     "127.0.0.1:0",
 				"max_connections": tt.value,
 			})
 			if err != nil {
@@ -1125,7 +1127,7 @@ func TestProxyStart_PeekTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := newTestLogger()
+			logger := testutil.DiscardLogger()
 			detector := &stubDetector{}
 			manager := proxy.NewManager(detector, logger)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -1167,7 +1169,7 @@ func TestProxyStart_RequestTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := newTestLogger()
+			logger := testutil.DiscardLogger()
 			detector := &stubDetector{}
 			manager := proxy.NewManager(detector, logger)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -1178,7 +1180,7 @@ func TestProxyStart_RequestTimeoutMs_Validation(t *testing.T) {
 			)
 
 			result, err := callProxyStart(t, cs, map[string]any{
-				"listen_addr":       "127.0.0.1:0",
+				"listen_addr":        "127.0.0.1:0",
 				"request_timeout_ms": tt.value,
 			})
 			if err != nil {
@@ -1196,7 +1198,7 @@ func TestProxyStart_RequestTimeoutMs_Validation(t *testing.T) {
 }
 
 func TestProxyStart_AllLimitsAndTimeouts(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -1207,9 +1209,9 @@ func TestProxyStart_AllLimitsAndTimeouts(t *testing.T) {
 	)
 
 	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr":       "127.0.0.1:0",
+		"listen_addr":        "127.0.0.1:0",
 		"max_connections":    2048,
-		"peek_timeout_ms":   15000,
+		"peek_timeout_ms":    15000,
 		"request_timeout_ms": 90000,
 	})
 	if err != nil {
@@ -1236,7 +1238,7 @@ func TestProxyStart_AllLimitsAndTimeouts(t *testing.T) {
 }
 
 func TestProxyStart_InvalidMaxConnections_DoesNotStartProxy(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -1244,7 +1246,7 @@ func TestProxyStart_InvalidMaxConnections_DoesNotStartProxy(t *testing.T) {
 
 	// Invalid max_connections should prevent proxy from starting.
 	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr":    "127.0.0.1:0",
+		"listen_addr":     "127.0.0.1:0",
 		"max_connections": 0,
 	})
 	if err != nil {
@@ -1552,9 +1554,9 @@ func TestApplyProxyDefaults_InvalidJSON(t *testing.T) {
 	// Invalid JSON in defaults should be silently ignored (not crash).
 	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
-			CaptureScope:  json.RawMessage(`{invalid`),
+			CaptureScope:   json.RawMessage(`{invalid`),
 			InterceptRules: json.RawMessage(`[{invalid`),
-			AutoTransform: json.RawMessage(`[{invalid`),
+			AutoTransform:  json.RawMessage(`[{invalid`),
 		},
 	}}
 
@@ -1576,7 +1578,7 @@ func TestApplyProxyDefaults_InvalidJSON(t *testing.T) {
 func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 	// Integration test: verify that config defaults are applied when proxy_start
 	// is called without arguments via the MCP protocol.
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
@@ -1638,7 +1640,7 @@ func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 
 func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 	// Integration test: verify that caller arguments override config file defaults.
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })

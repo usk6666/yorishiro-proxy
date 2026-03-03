@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // stubDetector is a minimal ProtocolDetector for testing.
@@ -18,12 +18,8 @@ type stubDetector struct{}
 
 func (d *stubDetector) Detect(_ []byte) proxy.ProtocolHandler { return nil }
 
-func newTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
 func TestManager_StartStop_Lifecycle(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -74,7 +70,7 @@ func TestManager_StartStop_Lifecycle(t *testing.T) {
 }
 
 func TestManager_DoubleStart_Error(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -97,7 +93,7 @@ func TestManager_DoubleStart_Error(t *testing.T) {
 }
 
 func TestManager_StopWhenNotRunning_Error(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -111,7 +107,7 @@ func TestManager_StopWhenNotRunning_Error(t *testing.T) {
 }
 
 func TestManager_StopAfterStop_Error(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -135,7 +131,7 @@ func TestManager_StopAfterStop_Error(t *testing.T) {
 }
 
 func TestManager_StartWithRandomPort(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -157,7 +153,7 @@ func TestManager_StartWithRandomPort(t *testing.T) {
 }
 
 func TestManager_RestartAfterStop(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -193,7 +189,7 @@ func TestManager_RestartAfterStop(t *testing.T) {
 }
 
 func TestManager_StartWithInvalidAddr(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -212,7 +208,7 @@ func TestManager_StartWithInvalidAddr(t *testing.T) {
 }
 
 func TestManager_StopWithCancelledContext(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -240,7 +236,7 @@ func TestManager_StopWithCancelledContext(t *testing.T) {
 }
 
 func TestManager_ActiveConnections_NotRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -250,7 +246,7 @@ func TestManager_ActiveConnections_NotRunning(t *testing.T) {
 }
 
 func TestManager_ActiveConnections_Running(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -267,7 +263,7 @@ func TestManager_ActiveConnections_Running(t *testing.T) {
 }
 
 func TestManager_Uptime_NotRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -277,7 +273,7 @@ func TestManager_Uptime_NotRunning(t *testing.T) {
 }
 
 func TestManager_Uptime_Running(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -299,7 +295,7 @@ func TestManager_Uptime_Running(t *testing.T) {
 }
 
 func TestManager_Uptime_AfterStop(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -318,7 +314,7 @@ func TestManager_Uptime_AfterStop(t *testing.T) {
 }
 
 func TestManager_ConcurrentStatus(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -344,7 +340,7 @@ func TestManager_ConcurrentStatus(t *testing.T) {
 }
 
 func TestManager_StartTCPForwards(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -374,7 +370,7 @@ func TestManager_StartTCPForwards(t *testing.T) {
 }
 
 func TestManager_StartTCPForwards_NotRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -393,7 +389,7 @@ func TestManager_StartTCPForwards_NotRunning(t *testing.T) {
 }
 
 func TestManager_StartTCPForwards_Connectable(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -427,7 +423,7 @@ func TestManager_StartTCPForwards_Connectable(t *testing.T) {
 }
 
 func TestManager_StopCleansUpTCPForwards(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -468,7 +464,7 @@ func TestManager_StopCleansUpTCPForwards(t *testing.T) {
 }
 
 func TestManager_TCPForwardAddrs_NotRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -480,7 +476,7 @@ func TestManager_TCPForwardAddrs_NotRunning(t *testing.T) {
 // --- Multi-listener (Named) tests ---
 
 func TestManager_StartNamed_MultipleListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -532,7 +528,7 @@ func TestManager_StartNamed_MultipleListeners(t *testing.T) {
 }
 
 func TestManager_StartNamed_DuplicateName_Error(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -554,7 +550,7 @@ func TestManager_StartNamed_DuplicateName_Error(t *testing.T) {
 }
 
 func TestManager_StartNamed_DefaultName_BackwardCompat(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -589,7 +585,7 @@ func TestManager_StartNamed_DefaultName_BackwardCompat(t *testing.T) {
 }
 
 func TestManager_StopNamed_Individual(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -624,7 +620,7 @@ func TestManager_StopNamed_Individual(t *testing.T) {
 }
 
 func TestManager_StopNamed_NotFound(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -639,7 +635,7 @@ func TestManager_StopNamed_NotFound(t *testing.T) {
 }
 
 func TestManager_StopNamed_DefaultBackwardCompat(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -657,7 +653,7 @@ func TestManager_StopNamed_DefaultBackwardCompat(t *testing.T) {
 }
 
 func TestManager_StopAll(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -701,7 +697,7 @@ func TestManager_StopAll(t *testing.T) {
 }
 
 func TestManager_StopAll_NoListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -712,7 +708,7 @@ func TestManager_StopAll_NoListeners(t *testing.T) {
 }
 
 func TestManager_ListenerStatuses_Empty(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -722,7 +718,7 @@ func TestManager_ListenerStatuses_Empty(t *testing.T) {
 }
 
 func TestManager_ListenerStatuses_Uptime(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -744,7 +740,7 @@ func TestManager_ListenerStatuses_Uptime(t *testing.T) {
 }
 
 func TestManager_ListenerCount(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -776,7 +772,7 @@ func TestManager_ListenerCount(t *testing.T) {
 }
 
 func TestManager_ActiveConnections_MultipleListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -792,7 +788,7 @@ func TestManager_ActiveConnections_MultipleListeners(t *testing.T) {
 }
 
 func TestManager_SetPeekTimeout_AppliesAllListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -812,7 +808,7 @@ func TestManager_SetPeekTimeout_AppliesAllListeners(t *testing.T) {
 }
 
 func TestManager_SetMaxConnections_AppliesAllListeners(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -831,7 +827,7 @@ func TestManager_SetMaxConnections_AppliesAllListeners(t *testing.T) {
 }
 
 func TestManager_MixedNamedAndDefault(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -879,7 +875,7 @@ func TestManager_MixedNamedAndDefault(t *testing.T) {
 }
 
 func TestManager_StartNamed_EmptyName_DefaultsToDefault(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -900,7 +896,7 @@ func TestManager_StartNamed_EmptyName_DefaultsToDefault(t *testing.T) {
 }
 
 func TestManager_ConcurrentStartNamed(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -940,8 +936,8 @@ func containsError(err, target error) bool {
 // echoHandler is a simple protocol handler that echoes data for testing.
 type echoHandler struct{}
 
-func (h *echoHandler) Name() string          { return "echo" }
-func (h *echoHandler) Detect(_ []byte) bool   { return true }
+func (h *echoHandler) Name() string         { return "echo" }
+func (h *echoHandler) Detect(_ []byte) bool { return true }
 func (h *echoHandler) Handle(_ context.Context, conn net.Conn) error {
 	_, err := io.Copy(conn, conn)
 	return err

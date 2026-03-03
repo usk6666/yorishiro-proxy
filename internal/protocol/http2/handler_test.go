@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"net/http/httptest"
@@ -19,15 +18,13 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/google/uuid"
+
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- test helpers ---
-
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 // mockStore is a thread-safe minimal in-memory session store for testing.
 type mockStore struct {
@@ -302,7 +299,7 @@ func TestDetect_HTTP2Preface(t *testing.T) {
 		},
 	}
 
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := handler.Detect(tt.peek)
@@ -314,7 +311,7 @@ func TestDetect_HTTP2Preface(t *testing.T) {
 }
 
 func TestName(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	if got := handler.Name(); got != "HTTP/2 (h2c)" {
 		t.Errorf("Name() = %q, want %q", got, "HTTP/2 (h2c)")
 	}
@@ -340,7 +337,7 @@ func TestHandleStream_SessionRecording(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	addr, cancel := startH2CProxyListener(t, handler, "test-conn-rec", "127.0.0.1:12345", "", tlsMetadata{})
 	defer cancel()
@@ -441,7 +438,7 @@ func TestHandleStream_MultipleStreams(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	addr, cancel := startH2CProxyListener(t, handler, "test-conn-multi", "127.0.0.1:12345", "", tlsMetadata{})
 	defer cancel()
@@ -496,7 +493,7 @@ func TestHandleStream_NilStore(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 
 	addr, cancel := startH2CProxyListener(t, handler, "test-no-store", "127.0.0.1:12345", "", tlsMetadata{})
 	defer cancel()
@@ -521,7 +518,7 @@ func TestHandleStream_NilStore(t *testing.T) {
 
 func TestHandleStream_UpstreamError(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	addr, cancel := startH2CProxyListener(t, handler, "test-upstream-err", "127.0.0.1:12345", "", tlsMetadata{})
 	defer cancel()
@@ -556,7 +553,7 @@ func TestHandleH2_TLSMetadataRecording(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(true)
 
 	tlsMeta := tlsMetadata{
@@ -627,7 +624,7 @@ func TestHandleH2_HTTPSScheme(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(true)
 
 	// connectAuthority set to the TLS upstream address triggers https scheme.
@@ -670,7 +667,7 @@ func TestHandleH2_HTTPSScheme(t *testing.T) {
 // --- Configuration tests ---
 
 func TestSetInsecureSkipVerify(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(true)
 
 	if handler.transport.TLSClientConfig == nil {
@@ -682,7 +679,7 @@ func TestSetInsecureSkipVerify(t *testing.T) {
 }
 
 func TestSetInsecureSkipVerify_FalseDoesNotModify(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(false)
 
 	if handler.transport.TLSClientConfig != nil {
@@ -692,7 +689,7 @@ func TestSetInsecureSkipVerify_FalseDoesNotModify(t *testing.T) {
 }
 
 func TestSetCaptureScope(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	scope := proxy.NewCaptureScope()
 	handler.SetCaptureScope(scope)
 
@@ -702,7 +699,7 @@ func TestSetCaptureScope(t *testing.T) {
 }
 
 func TestSetTransport(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	newTransport := &gohttp.Transport{MaxIdleConns: 42}
 	handler.SetTransport(newTransport)
 
@@ -714,7 +711,7 @@ func TestSetTransport(t *testing.T) {
 // --- shouldCapture tests ---
 
 func TestShouldCapture_NoScope(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	u, _ := url.Parse("http://example.com/api/test")
 	if !handler.shouldCapture("GET", u) {
 		t.Error("shouldCapture with nil scope should return true")
@@ -779,7 +776,7 @@ func TestHandleStream_BodyTruncation(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	addr, cancel := startH2CProxyListener(t, handler, "test-trunc", "127.0.0.1:12345", "", tlsMetadata{})
 	defer cancel()
@@ -830,7 +827,7 @@ func TestHandle_H2C_RealConnection(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	gohttp "net/http"
 	"sync"
@@ -14,13 +12,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
-)
 
-// testLogger creates a silent logger for tests.
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
+)
 
 // mockStore is a thread-safe minimal in-memory session store for testing.
 type mockStore struct {
@@ -132,7 +127,7 @@ func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, err
 	return count, nil
 }
 
-func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error   { return nil }
+func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error { return nil }
 func (m *mockStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
 	return nil, fmt.Errorf("not found")
 }
@@ -157,7 +152,7 @@ func (m *mockStore) Messages() []*session.Message {
 
 func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -302,7 +297,7 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 
 func TestHandleUpgrade_BinaryFrame(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -381,7 +376,7 @@ func TestHandleUpgrade_BinaryFrame(t *testing.T) {
 
 func TestHandleUpgrade_PingPongRelay(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -480,7 +475,7 @@ func TestHandleUpgrade_PingPongRelay(t *testing.T) {
 
 func TestHandleUpgrade_FragmentedMessage(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -571,7 +566,7 @@ func TestHandleUpgrade_FragmentedMessage(t *testing.T) {
 
 func TestHandleUpgrade_CloseFrameEndsRelay(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -632,7 +627,7 @@ func TestHandleUpgrade_CloseFrameEndsRelay(t *testing.T) {
 
 func TestHandleUpgrade_ContextCancellation(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -669,7 +664,7 @@ func TestHandleUpgrade_ContextCancellation(t *testing.T) {
 
 func TestHandleUpgrade_NilStore(t *testing.T) {
 	// Handler should work without a store (no recording).
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -713,7 +708,7 @@ func TestHandleUpgrade_NilStore(t *testing.T) {
 
 func TestHandleUpgrade_ConnInfoRecorded(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -774,7 +769,7 @@ func TestHandleUpgrade_ConnInfoRecorded(t *testing.T) {
 
 func TestHandleUpgrade_MultipleMessages(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
@@ -882,7 +877,7 @@ func TestHandleUpgrade_MultipleMessages(t *testing.T) {
 
 func TestHandleUpgrade_ConnectionDrop(t *testing.T) {
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()

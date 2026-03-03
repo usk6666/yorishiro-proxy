@@ -13,12 +13,13 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- SetInterceptEngine / SetInterceptQueue tests ---
 
 func TestSetInterceptEngine(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	handler.SetInterceptEngine(engine)
 
@@ -28,7 +29,7 @@ func TestSetInterceptEngine(t *testing.T) {
 }
 
 func TestSetInterceptQueue(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	queue := intercept.NewQueue()
 	handler.SetInterceptQueue(queue)
 
@@ -40,9 +41,9 @@ func TestSetInterceptQueue(t *testing.T) {
 // --- interceptRequest unit tests ---
 
 func TestInterceptRequest_NoEngineOrQueue(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
 	if intercepted {
@@ -54,13 +55,13 @@ func TestInterceptRequest_NoEngineOrQueue(t *testing.T) {
 }
 
 func TestInterceptRequest_OnlyEngineNoQueue(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	handler.SetInterceptEngine(engine)
 	// queue is nil
 
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	_, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
 	if intercepted {
@@ -69,13 +70,13 @@ func TestInterceptRequest_OnlyEngineNoQueue(t *testing.T) {
 }
 
 func TestInterceptRequest_OnlyQueueNoEngine(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	queue := intercept.NewQueue()
 	handler.SetInterceptQueue(queue)
 	// engine is nil
 
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	_, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
 	if intercepted {
@@ -84,7 +85,7 @@ func TestInterceptRequest_OnlyQueueNoEngine(t *testing.T) {
 }
 
 func TestInterceptRequest_NoMatchingRules(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
 	handler.SetInterceptEngine(engine)
@@ -104,7 +105,7 @@ func TestInterceptRequest_NoMatchingRules(t *testing.T) {
 	}
 
 	req, _ := gohttp.NewRequest("GET", "http://different.example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	_, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
 	if intercepted {
@@ -113,7 +114,7 @@ func TestInterceptRequest_NoMatchingRules(t *testing.T) {
 }
 
 func TestInterceptRequest_Release(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
 	handler.SetInterceptEngine(engine)
@@ -132,7 +133,7 @@ func TestInterceptRequest_Release(t *testing.T) {
 	}
 
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	// Respond with release in a goroutine.
 	var wg sync.WaitGroup
@@ -166,7 +167,7 @@ func TestInterceptRequest_Release(t *testing.T) {
 }
 
 func TestInterceptRequest_Drop(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
 	handler.SetInterceptEngine(engine)
@@ -185,7 +186,7 @@ func TestInterceptRequest_Drop(t *testing.T) {
 	}
 
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	// Respond with drop in a goroutine.
 	go func() {
@@ -210,7 +211,7 @@ func TestInterceptRequest_Drop(t *testing.T) {
 }
 
 func TestInterceptRequest_TimeoutAutoRelease(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
 	queue.SetTimeout(100 * time.Millisecond)
@@ -231,7 +232,7 @@ func TestInterceptRequest_TimeoutAutoRelease(t *testing.T) {
 	}
 
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	// Do not respond — let it timeout.
 	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
@@ -245,7 +246,7 @@ func TestInterceptRequest_TimeoutAutoRelease(t *testing.T) {
 }
 
 func TestInterceptRequest_TimeoutAutoDrop(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
 	queue.SetTimeout(100 * time.Millisecond)
@@ -266,7 +267,7 @@ func TestInterceptRequest_TimeoutAutoDrop(t *testing.T) {
 	}
 
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
 
@@ -279,7 +280,7 @@ func TestInterceptRequest_TimeoutAutoDrop(t *testing.T) {
 }
 
 func TestInterceptRequest_ContextCancellation(t *testing.T) {
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
 	queue.SetTimeout(5 * time.Second) // long timeout, context will cancel first
@@ -299,7 +300,7 @@ func TestInterceptRequest_ContextCancellation(t *testing.T) {
 	}
 
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -460,9 +461,9 @@ func TestApplyInterceptModifications_CRLFValidation(t *testing.T) {
 			errContains:     "CR/LF",
 		},
 		{
-			name:       "add header value with LF",
-			addHeaders: map[string]string{"X-Add": "val\nue"},
-			wantErr:    true,
+			name:        "add header value with LF",
+			addHeaders:  map[string]string{"X-Add": "val\nue"},
+			wantErr:     true,
 			errContains: "CR/LF",
 		},
 		{
@@ -533,7 +534,7 @@ func TestHandleStream_InterceptRelease(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
@@ -608,7 +609,7 @@ func TestHandleStream_InterceptDrop(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
@@ -680,7 +681,7 @@ func TestHandleStream_InterceptModifyAndForward(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
@@ -751,7 +752,7 @@ func TestHandleStream_InterceptTimeoutAutoRelease(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
@@ -809,7 +810,7 @@ func TestHandleStream_NoInterceptWithoutRules(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
@@ -855,7 +856,7 @@ func TestHandleStream_InterceptMethodFilter(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, testLogger())
+	handler := NewHandler(store, testutil.DiscardLogger())
 
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
@@ -915,7 +916,7 @@ func TestHandleStream_InterceptedRequestMetadata(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := NewHandler(nil, testLogger())
+	handler := NewHandler(nil, testutil.DiscardLogger())
 
 	engine := intercept.NewEngine()
 	queue := intercept.NewQueue()
@@ -991,4 +992,3 @@ func TestHandleStream_InterceptedRequestMetadata(t *testing.T) {
 		t.Errorf("matched rules = %v, want [meta-rule]", interceptedReq.MatchedRules)
 	}
 }
-

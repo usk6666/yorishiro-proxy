@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // slowHandler is a ProtocolHandler that blocks for a configured duration.
@@ -18,7 +19,7 @@ type slowHandler struct {
 	name    string
 }
 
-func (h *slowHandler) Name() string        { return h.name }
+func (h *slowHandler) Name() string         { return h.name }
 func (h *slowHandler) Detect(_ []byte) bool { return true }
 
 func (h *slowHandler) Handle(_ context.Context, conn net.Conn) error {
@@ -66,7 +67,7 @@ func TestListener_GracefulShutdown_WaitsForHandlers(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:     "127.0.0.1:0",
 		Detector: detector,
-		Logger:   newTestLogger(),
+		Logger:   testutil.DiscardLogger(),
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,7 +112,7 @@ func TestListener_GracefulShutdown_EmptyDrain(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:     "127.0.0.1:0",
 		Detector: detector,
-		Logger:   newTestLogger(),
+		Logger:   testutil.DiscardLogger(),
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -145,7 +146,7 @@ func TestListener_MultipleConnections_AllDrain(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:     "127.0.0.1:0",
 		Detector: detector,
-		Logger:   newTestLogger(),
+		Logger:   testutil.DiscardLogger(),
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -194,7 +195,7 @@ func TestListener_Semaphore_RejectsAtCapacity(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:           "127.0.0.1:0",
 		Detector:       detector,
-		Logger:         newTestLogger(),
+		Logger:         testutil.DiscardLogger(),
 		MaxConnections: 2,
 	})
 
@@ -252,7 +253,7 @@ func TestListener_Semaphore_ReleasesSlot(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:           "127.0.0.1:0",
 		Detector:       detector,
-		Logger:         newTestLogger(),
+		Logger:         testutil.DiscardLogger(),
 		MaxConnections: 1,
 	})
 
@@ -304,7 +305,7 @@ func TestListener_ActiveConnections_NoSemaphore(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:           "127.0.0.1:0",
 		Detector:       detector,
-		Logger:         newTestLogger(),
+		Logger:         testutil.DiscardLogger(),
 		MaxConnections: 10,
 	})
 
@@ -354,7 +355,7 @@ func TestListener_PeekTimeout_DisconnectsSlowClient(t *testing.T) {
 	listener := proxy.NewListener(proxy.ListenerConfig{
 		Addr:        "127.0.0.1:0",
 		Detector:    detector,
-		Logger:      newTestLogger(),
+		Logger:      testutil.DiscardLogger(),
 		PeekTimeout: 200 * time.Millisecond,
 	})
 

@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- MaxConnections getter tests ---
 
 func TestManager_MaxConnections_DefaultWhenNotSet(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -22,7 +23,7 @@ func TestManager_MaxConnections_DefaultWhenNotSet(t *testing.T) {
 }
 
 func TestManager_MaxConnections_ConfiguredBeforeStart(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -35,7 +36,7 @@ func TestManager_MaxConnections_ConfiguredBeforeStart(t *testing.T) {
 }
 
 func TestManager_MaxConnections_ReflectsRunningListener(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -62,7 +63,7 @@ func TestManager_MaxConnections_ReflectsRunningListener(t *testing.T) {
 // --- PeekTimeout getter tests ---
 
 func TestManager_PeekTimeout_DefaultWhenNotSet(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -73,7 +74,7 @@ func TestManager_PeekTimeout_DefaultWhenNotSet(t *testing.T) {
 }
 
 func TestManager_PeekTimeout_ConfiguredBeforeStart(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -85,7 +86,7 @@ func TestManager_PeekTimeout_ConfiguredBeforeStart(t *testing.T) {
 }
 
 func TestManager_PeekTimeout_ReflectsRunningListener(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -112,7 +113,7 @@ func TestManager_PeekTimeout_ReflectsRunningListener(t *testing.T) {
 // --- SetPeekTimeout / SetMaxConnections propagation tests ---
 
 func TestManager_SetPeekTimeout_PropagatesWhenNotRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
@@ -124,7 +125,7 @@ func TestManager_SetPeekTimeout_PropagatesWhenNotRunning(t *testing.T) {
 }
 
 func TestManager_SetMaxConnections_PropagatesWhenNotRunning(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // blockedResponseBody is the JSON structure returned when a request is blocked
@@ -34,7 +35,7 @@ func TestTargetScope_HTTPForwardProxy_BlockedHost(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Configure target scope: only allow example.com
 	ts := proxy.NewTargetScope()
@@ -99,7 +100,7 @@ func TestTargetScope_HTTPForwardProxy_AllowedHost(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Configure target scope: allow the upstream host.
 	_, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
@@ -151,7 +152,7 @@ func TestTargetScope_HTTPForwardProxy_NoRules_AllAllowed(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Set target scope with no rules (open mode).
 	ts := proxy.NewTargetScope()
@@ -198,7 +199,7 @@ func TestTargetScope_HTTPForwardProxy_NilScope_AllAllowed(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 	// Do not set any target scope — handler.targetScope remains nil.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -243,7 +244,7 @@ func TestTargetScope_HTTPForwardProxy_DenyRule(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Configure target scope: deny 127.0.0.1 (the upstream test server).
 	ts := proxy.NewTargetScope()
@@ -301,7 +302,7 @@ func TestTargetScope_HTTPForwardProxy_BlockedSessionRecording(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -365,7 +366,7 @@ func TestTargetScope_CONNECT_BlockedHost(t *testing.T) {
 	// a 403 Forbidden response.
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -418,7 +419,7 @@ func TestTargetScope_CONNECT_AllowedHost(t *testing.T) {
 	// a 200 Connection Established response.
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -459,7 +460,7 @@ func TestTargetScope_CONNECT_NoRules_AllAllowed(t *testing.T) {
 	// pass through (backward compatibility).
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	// Set target scope with no rules.
 	ts := proxy.NewTargetScope()
@@ -497,7 +498,7 @@ func TestTargetScope_CONNECT_BlockedSessionRecording(t *testing.T) {
 	// recorded with BlockedBy="target_scope".
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -562,7 +563,7 @@ func TestTargetScope_CONNECT_DenyRule(t *testing.T) {
 	// when no allow rules are configured (open mode with denies).
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules(nil, []proxy.TargetRule{
@@ -610,7 +611,7 @@ func TestTargetScope_CONNECT_WildcardAllow_Blocked(t *testing.T) {
 	// Wildcard allow rules should block non-matching hosts for CONNECT.
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -671,7 +672,7 @@ func TestTargetScope_CONNECT_WildcardAllow_Allowed(t *testing.T) {
 	// so we just verify the scope check logic unit-tests pass. We test
 	// that allowed hosts reach the "200 Connection Established" step
 	// using the checkTargetScopeHost function.
-	handler := NewHandler(&mockStore{}, nil, testLogger())
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -698,7 +699,7 @@ func TestTargetScope_CONNECT_PortRestriction_Blocked(t *testing.T) {
 	// Port-restricted allow rules should block CONNECT to different ports.
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -737,7 +738,7 @@ func TestTargetScope_CONNECT_PortRestriction_Blocked(t *testing.T) {
 
 func TestTargetScope_CONNECT_PortRestriction_Unit(t *testing.T) {
 	// Verify port restriction logic via the unit-level checkTargetScopeHost.
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
@@ -781,7 +782,7 @@ func TestTargetScope_HTTPS_HostHeaderRewrite(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	// Allow localhost (the CONNECT target) but deny evil.com.
@@ -834,7 +835,7 @@ func TestTargetScope_HTTPS_HostMismatchBlocked(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	// Allow localhost (the CONNECT target) but not evil.com.
@@ -897,7 +898,7 @@ func TestTargetScope_HTTPS_HostMismatchBlocked(t *testing.T) {
 }
 
 func TestTargetScope_SetterAndGetter(t *testing.T) {
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 
 	// Initially nil.
 	if handler.TargetScope() != nil {
@@ -914,7 +915,7 @@ func TestTargetScope_SetterAndGetter(t *testing.T) {
 }
 
 func TestCheckTargetScope_NilScope(t *testing.T) {
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 
 	// With nil target scope, nothing should be blocked.
 	blocked, reason := handler.checkTargetScope(mustParseURL("http://example.com"))
@@ -924,7 +925,7 @@ func TestCheckTargetScope_NilScope(t *testing.T) {
 }
 
 func TestCheckTargetScope_EmptyRules(t *testing.T) {
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 	ts := proxy.NewTargetScope()
 	handler.SetTargetScope(ts)
 
@@ -936,7 +937,7 @@ func TestCheckTargetScope_EmptyRules(t *testing.T) {
 }
 
 func TestCheckTargetScopeHost_NilScope(t *testing.T) {
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 
 	blocked, reason := handler.checkTargetScopeHost("example.com", 443)
 	if blocked {
@@ -945,7 +946,7 @@ func TestCheckTargetScopeHost_NilScope(t *testing.T) {
 }
 
 func TestCheckTargetScopeHost_EmptyRules(t *testing.T) {
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 	ts := proxy.NewTargetScope()
 	handler.SetTargetScope(ts)
 
@@ -956,7 +957,7 @@ func TestCheckTargetScopeHost_EmptyRules(t *testing.T) {
 }
 
 func TestCheckTargetScope_BlockedByAllowList(t *testing.T) {
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "allowed.com"},
@@ -964,9 +965,9 @@ func TestCheckTargetScope_BlockedByAllowList(t *testing.T) {
 	handler.SetTargetScope(ts)
 
 	tests := []struct {
-		name      string
-		url       string
-		blocked   bool
+		name       string
+		url        string
+		blocked    bool
 		wantReason string
 	}{
 		{
@@ -996,7 +997,7 @@ func TestCheckTargetScope_BlockedByAllowList(t *testing.T) {
 }
 
 func TestCheckTargetScopeHost_BlockedByDenyList(t *testing.T) {
-	handler := NewHandler(nil, nil, testLogger())
+	handler := NewHandler(nil, nil, testutil.DiscardLogger())
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules(nil, []proxy.TargetRule{
 		{Hostname: "evil.com"},
@@ -1004,10 +1005,10 @@ func TestCheckTargetScopeHost_BlockedByDenyList(t *testing.T) {
 	handler.SetTargetScope(ts)
 
 	tests := []struct {
-		name      string
-		hostname  string
-		port      int
-		blocked   bool
+		name       string
+		hostname   string
+		port       int
+		blocked    bool
 		wantReason string
 	}{
 		{

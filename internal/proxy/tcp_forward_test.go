@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // echoHandler is defined in manager_test.go
 
 func TestTCPForwardListener_StartStop(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	handler := &echoHandler{}
 
 	fl := proxy.NewTCPForwardListener("127.0.0.1:0", handler, logger)
@@ -75,7 +76,7 @@ func TestTCPForwardListener_StartStop(t *testing.T) {
 }
 
 func TestTCPForwardListener_InvalidAddr(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	handler := &echoHandler{}
 
 	// Use an invalid address that will fail to bind.
@@ -91,7 +92,7 @@ func TestTCPForwardListener_InvalidAddr(t *testing.T) {
 }
 
 func TestTCPForwardListener_AddrBeforeStart(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	handler := &echoHandler{}
 
 	fl := proxy.NewTCPForwardListener("127.0.0.1:0", handler, logger)
@@ -103,7 +104,7 @@ func TestTCPForwardListener_AddrBeforeStart(t *testing.T) {
 }
 
 func TestTCPForwardListener_MultipleConnections(t *testing.T) {
-	logger := newTestLogger()
+	logger := testutil.DiscardLogger()
 	handler := &echoHandler{}
 
 	fl := proxy.NewTCPForwardListener("127.0.0.1:0", handler, logger)

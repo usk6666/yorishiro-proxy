@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,8 +13,10 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- M3 Integration: Fuzzer ---
@@ -74,7 +75,7 @@ func setupFuzzTestSession(t *testing.T, store session.Store, fuzzStore session.F
 func newFuzzTestStore(t *testing.T) *session.SQLiteStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "fuzz_test.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := testutil.DiscardLogger()
 	store, err := session.NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
