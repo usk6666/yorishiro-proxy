@@ -561,7 +561,7 @@ func (s *Server) recordMacroStepSession(
 
 // storeSessionFetcher implements macro.SessionFetcher using the session store.
 type storeSessionFetcher struct {
-	store session.Store
+	store session.SessionReader
 }
 
 // GetSessionRequest retrieves the send message from a recorded session

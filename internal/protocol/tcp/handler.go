@@ -20,7 +20,7 @@ import (
 // It acts as a fallback handler: Detect always returns true, so it must be
 // registered last in the protocol detector.
 type Handler struct {
-	store    session.Store
+	store    session.SessionWriter
 	forwards map[string]string // listen port -> forward address
 	logger   *slog.Logger
 	mu       sync.Mutex
@@ -31,7 +31,7 @@ type Handler struct {
 // forwards maps local listen ports to upstream addresses
 // (e.g. {"3306": "db.example.com:3306"}). Connections arriving on a port
 // without a mapping are closed immediately.
-func NewHandler(store session.Store, forwards map[string]string, logger *slog.Logger) *Handler {
+func NewHandler(store session.SessionWriter, forwards map[string]string, logger *slog.Logger) *Handler {
 	if forwards == nil {
 		forwards = make(map[string]string)
 	}

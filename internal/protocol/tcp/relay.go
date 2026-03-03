@@ -19,7 +19,7 @@ const relayBufSize = 32 * 1024
 // relay copies data bidirectionally between a client and an upstream
 // connection, recording each chunk as a message in the session store.
 type relay struct {
-	store     session.Store
+	store     session.SessionWriter
 	sessionID string
 	logger    *slog.Logger
 	seq       atomic.Int64 // next message sequence number

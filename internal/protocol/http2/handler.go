@@ -42,7 +42,7 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 // enforcement is applied per-stream in handleStream. This ensures all
 // HTTP/2 traffic paths are covered by scope checks.
 type Handler struct {
-	store  session.Store
+	store  session.SessionWriter
 	logger *slog.Logger
 
 	// transport is used for upstream HTTP/2 requests.
@@ -70,7 +70,7 @@ type Handler struct {
 }
 
 // NewHandler creates a new HTTP/2 handler with session recording.
-func NewHandler(store session.Store, logger *slog.Logger) *Handler {
+func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,

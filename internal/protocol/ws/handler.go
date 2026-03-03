@@ -21,12 +21,12 @@ import (
 // It is not a ProtocolHandler — it is invoked from the HTTP handler when
 // an Upgrade: websocket request is detected.
 type Handler struct {
-	store  session.Store
+	store  session.SessionWriter
 	logger *slog.Logger
 }
 
 // NewHandler creates a new WebSocket relay handler.
-func NewHandler(store session.Store, logger *slog.Logger) *Handler {
+func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,

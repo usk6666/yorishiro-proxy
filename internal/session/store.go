@@ -19,14 +19,8 @@ type MacroRecord struct {
 	UpdatedAt time.Time
 }
 
-// Store defines the interface for session and message persistence.
-type Store interface {
-	// SaveSession persists a new session.
-	SaveSession(ctx context.Context, s *Session) error
-
-	// UpdateSession applies partial updates to an existing session.
-	UpdateSession(ctx context.Context, id string, update SessionUpdate) error
-
+// SessionReader provides read-only access to sessions and messages.
+type SessionReader interface {
 	// GetSession retrieves a session by ID.
 	GetSession(ctx context.Context, id string) (*Session, error)
 
@@ -37,6 +31,27 @@ type Store interface {
 	// filter options. Unlike ListSessions, it ignores Limit and Offset.
 	CountSessions(ctx context.Context, opts ListOptions) (int, error)
 
+	// GetMessages retrieves messages for a session, optionally filtered.
+	GetMessages(ctx context.Context, sessionID string, opts MessageListOptions) ([]*Message, error)
+
+	// CountMessages returns the number of messages for a session.
+	CountMessages(ctx context.Context, sessionID string) (int, error)
+}
+
+// SessionWriter provides write access for creating and updating sessions and messages.
+type SessionWriter interface {
+	// SaveSession persists a new session.
+	SaveSession(ctx context.Context, s *Session) error
+
+	// UpdateSession applies partial updates to an existing session.
+	UpdateSession(ctx context.Context, id string, update SessionUpdate) error
+
+	// AppendMessage persists a new message associated with a session.
+	AppendMessage(ctx context.Context, msg *Message) error
+}
+
+// SessionDeleter provides deletion operations for sessions.
+type SessionDeleter interface {
 	// DeleteSession removes a session and its associated messages by ID.
 	DeleteSession(ctx context.Context, id string) error
 
@@ -57,16 +72,10 @@ type Store interface {
 	// DeleteExcessSessions removes the oldest sessions exceeding maxCount,
 	// keeping only the most recent maxCount sessions.
 	DeleteExcessSessions(ctx context.Context, maxCount int) (int64, error)
+}
 
-	// AppendMessage persists a new message associated with a session.
-	AppendMessage(ctx context.Context, msg *Message) error
-
-	// GetMessages retrieves messages for a session, optionally filtered.
-	GetMessages(ctx context.Context, sessionID string, opts MessageListOptions) ([]*Message, error)
-
-	// CountMessages returns the number of messages for a session.
-	CountMessages(ctx context.Context, sessionID string) (int, error)
-
+// MacroStore provides CRUD operations for macro definitions.
+type MacroStore interface {
 	// SaveMacro persists a macro definition (upsert by name).
 	SaveMacro(ctx context.Context, name, description, configJSON string) error
 
@@ -78,6 +87,16 @@ type Store interface {
 
 	// DeleteMacro removes a macro definition by name.
 	DeleteMacro(ctx context.Context, name string) error
+}
+
+// Store defines the composite interface for session, message, and macro persistence.
+// It combines all sub-interfaces for backward compatibility. Callers that only
+// need a subset of operations should accept the narrower interface instead.
+type Store interface {
+	SessionReader
+	SessionWriter
+	SessionDeleter
+	MacroStore
 }
 
 // ListOptions configures session listing behavior.

@@ -17,12 +17,12 @@ import (
 // It is not a standalone ProtocolHandler — it is invoked by the HTTP/2 handler
 // when Content-Type: application/grpc is detected on a stream.
 type Handler struct {
-	store  session.Store
+	store  session.SessionWriter
 	logger *slog.Logger
 }
 
 // NewHandler creates a new gRPC handler with session recording.
-func NewHandler(store session.Store, logger *slog.Logger) *Handler {
+func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,

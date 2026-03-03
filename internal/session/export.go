@@ -87,7 +87,7 @@ type ExportMessage struct {
 // ExportSessions exports sessions matching the filter to a JSONL writer.
 // Each line is a complete JSON object containing a session and its messages.
 // Returns the number of sessions exported.
-func ExportSessions(ctx context.Context, store Store, w io.Writer, opts ExportOptions) (int, error) {
+func ExportSessions(ctx context.Context, store SessionReader, w io.Writer, opts ExportOptions) (int, error) {
 	// Build list options from filter, fetching all matching sessions (no limit).
 	listOpts := ListOptions{
 		Protocol:   opts.Filter.Protocol,
