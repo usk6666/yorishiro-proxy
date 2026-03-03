@@ -398,7 +398,7 @@ func TestHandle_GoroutineCleanupOnNormalClose(t *testing.T) {
 	defer upstream.Close()
 
 	store := &mockStore{}
-	handler := NewHandler(store, nil, testLogger())
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
 	// Use a parent context that is NOT cancelled during this test.
 	// If the goroutine leaks, it will remain blocked on ctx.Done() forever.
@@ -483,7 +483,7 @@ func TestHTTPSLoop_GoroutineCleanupOnNormalClose(t *testing.T) {
 
 	issuer, rootCAs := newTestIssuer(t)
 	store := &mockStore{}
-	handler := NewHandler(store, issuer, testLogger())
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
 	handler.transport = upstreamTransport(upstream)
 
 	// Use a parent context that is NOT cancelled during this test.
