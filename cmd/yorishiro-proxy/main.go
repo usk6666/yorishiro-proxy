@@ -144,6 +144,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// Apply environment variable fallback for flags not explicitly set.
 	applyEnvFallback(fs, cfg, &configFile, &targetPolicyFile)
 
+	// Validate configuration values before proceeding with initialization.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	// Load proxy config file if specified.
 	var proxyCfg *config.ProxyConfig
 	if configFile != "" {
