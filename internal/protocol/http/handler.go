@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
-	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
@@ -286,207 +284,50 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
+	normalizeRequestURL(req)
 
-	// Ensure absolute URL for forward proxy. This must happen before the
-	// target scope check so that the URL has a valid Host for matching.
-	if req.URL.Host == "" {
-		req.URL.Host = req.Host
-	}
-	if req.URL.Scheme == "" {
-		req.URL.Scheme = "http"
-	}
-
-	// Target scope enforcement: check if the target is allowed before
-	// forwarding the request upstream. This MUST happen before the WebSocket
-	// upgrade check to prevent WebSocket requests from bypassing scope
-	// enforcement (S-1: CWE-863).
+	// Target scope enforcement (before WebSocket — S-1: CWE-863).
 	if blocked, reason := h.checkTargetScope(req.URL); blocked {
 		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
 		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, logger)
 		return nil
 	}
-
-	// Check for WebSocket upgrade before processing as normal HTTP.
-	// This must happen before hop-by-hop headers are removed.
 	if isWebSocketUpgrade(req) {
 		return h.handleWebSocket(ctx, conn, req)
 	}
 
-	// Read the full request body so the upstream receives uncorrupted data.
-	var recordReqBody []byte
-	var reqTruncated bool
-	if req.Body != nil {
-		fullBody, err := io.ReadAll(req.Body)
-		if err != nil {
-			logger.Warn("failed to read request body", "error", err)
-		}
-		req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(fullBody))
-
-		recordReqBody = fullBody
-		if len(fullBody) > int(config.MaxBodySize) {
-			recordReqBody = fullBody[:int(config.MaxBodySize)]
-			reqTruncated = true
-		}
-	}
-
-	// Extract raw request bytes captured by the captureReader.
-	// The raw bytes span from captureStart to the current capture position,
-	// minus any bytes buffered by the bufio.Reader (which belong to the next request).
-	var rawRequest []byte
-	if capture != nil {
-		captureEnd := capture.buf.Len()
-		buffered := reader.Buffered()
-		rawEnd := captureEnd - buffered
-		if rawEnd > captureStart && captureStart < capture.buf.Len() {
-			rawRequest = make([]byte, rawEnd-captureStart)
-			copy(rawRequest, capture.buf.Bytes()[captureStart:rawEnd])
-		}
-	}
-
-	// Remove hop-by-hop headers.
+	bodyResult := readAndCaptureRequestBody(req, logger)
+	rawRequest := extractRawRequest(capture, captureStart, reader)
 	removeHopByHopHeaders(req.Header)
 
-	// Intercept check: if an intercept engine and queue are configured,
-	// check if the request matches any intercept rules. If so, enqueue
-	// the request and block until the AI agent responds with an action.
-	if action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, logger); intercepted {
-		switch action.Type {
-		case intercept.ActionDrop:
-			// Drop: return 502 to client.
-			httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-			logger.Info("intercepted request dropped", "method", req.Method, "url", req.URL.String())
-			return nil
-		case intercept.ActionModifyAndForward:
-			// Apply modifications to the request.
-			var modErr error
-			req, modErr = applyInterceptModifications(req, action, recordReqBody)
-			if modErr != nil {
-				logger.Error("intercept modification failed", "error", modErr)
-				httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
-				return nil
-			}
-			// Update recordReqBody for session recording if body changed.
-			if action.OverrideBody != nil {
-				recordReqBody = []byte(*action.OverrideBody)
-			}
-		case intercept.ActionRelease:
-			// Continue with the original request.
-		}
+	var dropped bool
+	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
+	if dropped {
+		return nil
 	}
+	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
 
-	// Apply auto-transform rules to the request before forwarding upstream.
-	if h.transformPipeline != nil {
-		req.Header, recordReqBody = h.transformPipeline.TransformRequest(req.Method, req.URL, req.Header, recordReqBody)
-		req.Body = io.NopCloser(bytes.NewReader(recordReqBody))
-		req.ContentLength = int64(len(recordReqBody))
-	}
-
-	// Forward request upstream.
-	outReq := req.WithContext(ctx)
-	outReq.RequestURI = ""
-
-	resp, serverAddr, err := roundTripWithTrace(h.Transport, outReq)
+	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
 	if err != nil {
-		logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
-		// Send 502 Bad Gateway to client.
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		return fmt.Errorf("upstream request: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
+	defer fwd.resp.Body.Close()
 
-	// Read the response body with a size limit to prevent OOM (CWE-770).
-	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
-	if err != nil {
-		logger.Warn("failed to read response body", "error", err)
-	}
-
-	// Apply auto-transform rules to the response before sending to client.
-	if h.transformPipeline != nil {
-		resp.Header, fullRespBody = h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, fullRespBody)
-	}
-
-	// Capture raw response bytes by serializing the response as received.
-	rawResponse := serializeRawResponse(resp, fullRespBody)
-
-	// Write response back to client (full body).
-	if err := writeResponse(conn, resp, fullRespBody); err != nil {
-		return fmt.Errorf("write response: %w", err)
-	}
-
-	// Decompress response body for recording. The raw (potentially compressed)
-	// bytes are preserved in rawResponse for wire-level analysis.
-	recordRespBody := fullRespBody
-	var respTruncated bool
-	decompressed := false
-	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(fullRespBody, ce, config.MaxBodySize)
-		if err != nil {
-			logger.Debug("response body decompression failed, storing as-is", "encoding", ce, "error", err)
-		} else {
-			recordRespBody = decoded
-			decompressed = true
-		}
-	}
-	if len(recordRespBody) > int(config.MaxBodySize) {
-		recordRespBody = recordRespBody[:int(config.MaxBodySize)]
-		respTruncated = true
+	fullRespBody, rawResponse := h.readResponseBody(fwd.resp, logger)
+	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
+		return err
 	}
 
 	duration := time.Since(start)
-
-	// Record session + messages.
-	if h.Store != nil && h.shouldCapture(req.Method, req.URL) {
-		sess := &session.Session{
-			ConnID:      connID,
-			Protocol:    "HTTP/1.x",
-			SessionType: "unary",
-			State:       "complete",
-			Timestamp:   start,
-			Duration:    duration,
-			Tags:        smugglingTags(smuggling),
-			ConnInfo: &session.ConnectionInfo{
-				ClientAddr: clientAddr,
-				ServerAddr: serverAddr,
-			},
-		}
-		if err := h.Store.SaveSession(ctx, sess); err != nil {
-			logger.Error("session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
-		} else {
-			sendMsg := &session.Message{
-				SessionID:     sess.ID,
-				Sequence:      0,
-				Direction:     "send",
-				Timestamp:     start,
-				Method:        req.Method,
-				URL:           req.URL,
-				Headers:       req.Header,
-				Body:          recordReqBody,
-				RawBytes:      rawRequest,
-				BodyTruncated: reqTruncated,
-			}
-			if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
-				logger.Error("send message save failed", "error", err)
-			}
-			recvMsg := &session.Message{
-				SessionID:     sess.ID,
-				Sequence:      1,
-				Direction:     "receive",
-				Timestamp:     start.Add(duration),
-				StatusCode:    resp.StatusCode,
-				Headers:       httputil.RecordingHeaders(resp.Header, decompressed, len(recordRespBody)),
-				Body:          recordRespBody,
-				RawBytes:      rawResponse,
-				BodyTruncated: respTruncated,
-			}
-			if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
-				logger.Error("receive message save failed", "error", err)
-			}
-		}
-	}
-
-	logger.Info("http request", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
-
+	h.recordHTTPSession(ctx, sessionRecordParams{
+		connID: connID, clientAddr: clientAddr, serverAddr: fwd.serverAddr,
+		protocol: "HTTP/1.x", start: start, duration: duration,
+		tags:     smugglingTags(smuggling),
+		connInfo: &session.ConnectionInfo{ClientAddr: clientAddr, ServerAddr: fwd.serverAddr},
+		req: req, reqBody: bodyResult.recordBody, rawRequest: rawRequest, reqTruncated: bodyResult.truncated,
+		resp: fwd.resp, rawResponse: rawResponse, respBody: fullRespBody,
+	}, logger)
+	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
 	return nil
 }
 
