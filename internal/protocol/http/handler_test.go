@@ -9,6 +9,7 @@ import (
 	"net"
 	gohttp "net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 
@@ -377,6 +378,179 @@ func TestApplyInterceptModifications_CRLFValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandle_GoroutineCleanupOnNormalClose(t *testing.T) {
+	// Verify that the context-monitoring goroutine in Handle() is reclaimed
+	// when the connection completes normally, without waiting for the parent
+	// context to be cancelled. This is a regression test for USK-176.
+	//
+	// Unlike other tests that use startTestProxy (which dispatches to
+	// handleRequest directly, bypassing Handle), this test passes accepted
+	// connections to handler.Handle() so the monitoring goroutine at the
+	// top of Handle() is actually spawned and its cleanup is verified.
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "ok")
+	}))
+	defer upstream.Close()
+
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testLogger())
+
+	// Use a parent context that is NOT cancelled during this test.
+	// If the goroutine leaks, it will remain blocked on ctx.Done() forever.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start a TCP listener that passes connections to handler.Handle()
+	// directly (not through startTestProxy which bypasses Handle).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyCtx, proxyCancel := context.WithCancel(ctx)
+	defer proxyCancel()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				handler.Handle(proxyCtx, conn)
+			}()
+		}
+	}()
+	go func() {
+		<-proxyCtx.Done()
+		ln.Close()
+	}()
+	proxyAddr := ln.Addr().String()
+
+	// Record goroutine count before making connections.
+	before := runtime.NumGoroutine()
+
+	// Make several connections that complete normally.
+	for i := 0; i < 10; i++ {
+		conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial proxy: %v", err)
+		}
+		httpReq := fmt.Sprintf("GET %s/test HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+			upstream.URL, upstream.Listener.Addr().String())
+		conn.Write([]byte(httpReq))
+
+		reader := bufio.NewReader(conn)
+		resp, err := gohttp.ReadResponse(reader, nil)
+		if err != nil {
+			conn.Close()
+			t.Fatalf("read response: %v", err)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+		conn.Close()
+	}
+
+	// Allow goroutines to settle.
+	time.Sleep(200 * time.Millisecond)
+
+	after := runtime.NumGoroutine()
+	// The goroutine count should not have grown significantly.
+	// Allow a small margin for runtime jitter (e.g., GC, runtime goroutines).
+	leaked := after - before
+	if leaked > 5 {
+		t.Errorf("possible goroutine leak: before=%d, after=%d (delta=%d); "+
+			"expected monitoring goroutines to be reclaimed on connection close",
+			before, after, leaked)
+	}
+}
+
+func TestHTTPSLoop_GoroutineCleanupOnNormalClose(t *testing.T) {
+	// Verify that the context-monitoring goroutine in httpsLoop() is reclaimed
+	// when the HTTPS connection completes normally. Regression test for USK-176.
+	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "ok")
+	}))
+	defer upstream.Close()
+
+	port := upstreamPort(t, upstream)
+	connectHost := "localhost:" + port
+
+	issuer, rootCAs := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testLogger())
+	handler.transport = upstreamTransport(upstream)
+
+	// Use a parent context that is NOT cancelled during this test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 10; i++ {
+		tlsConn, tlsReader := doConnectAndTLS(t, proxyAddr, connectHost, rootCAs)
+		httpReq := fmt.Sprintf("GET /test-%d HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", i, connectHost)
+		tlsConn.Write([]byte(httpReq))
+
+		httpsResp, err := gohttp.ReadResponse(tlsReader, nil)
+		if err != nil {
+			tlsConn.Close()
+			t.Fatalf("read HTTPS response: %v", err)
+		}
+		io.ReadAll(httpsResp.Body)
+		httpsResp.Body.Close()
+		tlsConn.Close()
+	}
+
+	// Allow goroutines to settle.
+	time.Sleep(200 * time.Millisecond)
+
+	after := runtime.NumGoroutine()
+	leaked := after - before
+	if leaked > 5 {
+		t.Errorf("possible goroutine leak in httpsLoop: before=%d, after=%d (delta=%d); "+
+			"expected monitoring goroutines to be reclaimed on connection close",
+			before, after, leaked)
+	}
+}
+
+func TestRelay_GoroutineCleanupOnNormalClose(t *testing.T) {
+	// Verify that the context-monitoring goroutine in relay() is reclaimed
+	// when the relay completes normally. Regression test for USK-176.
+
+	// Use a parent context that is NOT cancelled during this test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 10; i++ {
+		a, b := net.Pipe()
+		// Write some data and close one side to trigger relay completion.
+		go func() {
+			a.Write([]byte("hello"))
+			a.Close()
+		}()
+		relay(ctx, b, a)
+		b.Close()
+	}
+
+	// Allow goroutines to settle.
+	time.Sleep(200 * time.Millisecond)
+
+	after := runtime.NumGoroutine()
+	leaked := after - before
+	if leaked > 5 {
+		t.Errorf("possible goroutine leak in relay: before=%d, after=%d (delta=%d); "+
+			"expected monitoring goroutines to be reclaimed on relay completion",
+			before, after, leaked)
 	}
 }
 

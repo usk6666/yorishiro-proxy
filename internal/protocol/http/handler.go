@@ -293,8 +293,13 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	// When the proxy is shutting down, ReadRequest may be blocked waiting
 	// for the next request on a keep-alive connection. Setting an immediate
 	// read deadline causes it to return with a timeout error.
+	//
+	// Use a child context so the goroutine is reclaimed when the connection
+	// handler returns, not only when the parent context is cancelled.
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
 	go func() {
-		<-ctx.Done()
+		<-connCtx.Done()
 		conn.SetReadDeadline(time.Now())
 	}()
 
