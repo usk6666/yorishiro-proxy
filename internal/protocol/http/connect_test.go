@@ -72,6 +72,18 @@ func (m *mockStore) UpdateSession(_ context.Context, id string, update session.S
 			if update.Tags != nil {
 				s.Tags = update.Tags
 			}
+			if update.ServerAddr != "" {
+				if s.ConnInfo == nil {
+					s.ConnInfo = &session.ConnectionInfo{}
+				}
+				s.ConnInfo.ServerAddr = update.ServerAddr
+			}
+			if update.TLSServerCertSubject != "" {
+				if s.ConnInfo == nil {
+					s.ConnInfo = &session.ConnectionInfo{}
+				}
+				s.ConnInfo.TLSServerCertSubject = update.TLSServerCertSubject
+			}
 			return nil
 		}
 	}

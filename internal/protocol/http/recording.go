@@ -33,6 +33,9 @@ type sendRecordParams struct {
 // subsequent recordReceive or recordSendError calls can reference it.
 type sendRecordResult struct {
 	sessionID string
+	// tags holds the original session tags set during recordSend, so that
+	// recordSendError can merge error tags with them instead of replacing.
+	tags map[string]string
 }
 
 // recordSend records the send phase of a session: creates the session with
@@ -86,7 +89,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		logger.Error("send message save failed", "error", err)
 	}
 
-	return &sendRecordResult{sessionID: sess.ID}
+	return &sendRecordResult{sessionID: sess.ID, tags: p.tags}
 }
 
 // receiveRecordParams holds the parameters needed to record the receive phase
@@ -95,6 +98,10 @@ type receiveRecordParams struct {
 	start      time.Time
 	duration   time.Duration
 	serverAddr string
+
+	// tlsServerCertSubject is the subject DN of the upstream server's TLS
+	// certificate. Only set for HTTPS connections.
+	tlsServerCertSubject string
 
 	resp        *gohttp.Response
 	rawResponse []byte
@@ -151,8 +158,12 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 
 	// Update the session to complete with the final duration and server address.
 	update := session.SessionUpdate{
-		State:    "complete",
-		Duration: p.duration,
+		State:      "complete",
+		Duration:   p.duration,
+		ServerAddr: p.serverAddr,
+	}
+	if p.tlsServerCertSubject != "" {
+		update.TLSServerCertSubject = p.tlsServerCertSubject
 	}
 	if err := h.Store.UpdateSession(ctx, sendResult.sessionID, update); err != nil {
 		logger.Error("session update failed", "error", err)
@@ -170,7 +181,13 @@ func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordRes
 	}
 
 	duration := time.Since(start)
-	tags := map[string]string{"error": upstreamErr.Error()}
+	// Merge the error tag with any existing tags (e.g., smuggling detection)
+	// from the send phase to avoid silently discarding them.
+	tags := make(map[string]string)
+	for k, v := range sendResult.tags {
+		tags[k] = v
+	}
+	tags["error"] = upstreamErr.Error()
 	update := session.SessionUpdate{
 		State:    "error",
 		Duration: duration,
@@ -286,13 +303,18 @@ func (h *Handler) recordHTTPSession(ctx context.Context, p sessionRecordParams, 
 	sendResult := h.recordSend(ctx, sp, logger)
 
 	if p.resp != nil {
+		var tlsCertSubject string
+		if p.connInfo != nil {
+			tlsCertSubject = p.connInfo.TLSServerCertSubject
+		}
 		h.recordReceive(ctx, sendResult, receiveRecordParams{
-			start:       p.start,
-			duration:    p.duration,
-			serverAddr:  p.serverAddr,
-			resp:        p.resp,
-			rawResponse: p.rawResponse,
-			respBody:    p.respBody,
+			start:                p.start,
+			duration:             p.duration,
+			serverAddr:           p.serverAddr,
+			tlsServerCertSubject: tlsCertSubject,
+			resp:                 p.resp,
+			rawResponse:          p.rawResponse,
+			respBody:             p.respBody,
 		}, logger)
 	}
 }

@@ -106,4 +106,10 @@ type SessionUpdate struct {
 	Duration time.Duration
 	// Tags replaces the session tags.
 	Tags map[string]string
+	// ServerAddr sets the upstream server address in ConnInfo.
+	// Only applied when non-empty.
+	ServerAddr string
+	// TLSServerCertSubject sets the upstream server TLS certificate subject in ConnInfo.
+	// Only applied when non-empty.
+	TLSServerCertSubject string
 }
