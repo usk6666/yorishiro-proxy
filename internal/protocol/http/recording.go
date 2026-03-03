@@ -36,6 +36,10 @@ type sendRecordResult struct {
 	// tags holds the original session tags set during recordSend, so that
 	// recordSendError can merge error tags with them instead of replacing.
 	tags map[string]string
+	// recvSequence is the sequence number to use for the receive message.
+	// Defaults to 1 (send=0, receive=1). When variant recording produces
+	// two send messages (original=0, modified=1), this is set to 2.
+	recvSequence int
 }
 
 // recordSend records the send phase of a session: creates the session with
@@ -89,7 +93,110 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		logger.Error("send message save failed", "error", err)
 	}
 
-	return &sendRecordResult{sessionID: sess.ID, tags: p.tags}
+	return &sendRecordResult{sessionID: sess.ID, tags: p.tags, recvSequence: 1}
+}
+
+// recordSendWithVariant records the send phase with variant support. If the
+// request was modified by intercept or transform (detected by comparing
+// snap against the current request), it records two send messages:
+//   - Sequence 0: original (variant="original") with the snapshot's headers/body
+//   - Sequence 1: modified (variant="modified") with the current headers/body
+//
+// If no modification occurred (snap is nil or headers/body unchanged), this
+// behaves identically to recordSend (single send at sequence 0, no variant
+// metadata).
+//
+// The returned sendRecordResult.recvSequence is set accordingly: 2 when
+// variant recording produced two messages, 1 otherwise.
+func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams, snap *requestSnapshot, logger *slog.Logger) *sendRecordResult {
+	if h.Store == nil {
+		return nil
+	}
+
+	reqURL := p.reqURL
+	if reqURL == nil {
+		reqURL = p.req.URL
+	}
+
+	if !h.shouldCapture(p.req.Method, reqURL) {
+		return nil
+	}
+
+	// Detect whether modification occurred.
+	modified := snap != nil && requestModified(*snap, p.req.Header, p.reqBody)
+
+	sess := &session.Session{
+		ConnID:      p.connID,
+		Protocol:    p.protocol,
+		SessionType: "unary",
+		State:       "active",
+		Timestamp:   p.start,
+		Tags:        p.tags,
+		ConnInfo:    p.connInfo,
+	}
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
+		logger.Error("session save failed", "method", p.req.Method, "url", reqURL.String(), "error", err)
+		return nil
+	}
+
+	if modified {
+		// Record the original (unmodified) request as sequence 0.
+		originalMsg := &session.Message{
+			SessionID:     sess.ID,
+			Sequence:      0,
+			Direction:     "send",
+			Timestamp:     p.start,
+			Method:        p.req.Method,
+			URL:           reqURL,
+			Headers:       snap.headers,
+			Body:          snap.body,
+			RawBytes:      p.rawRequest,
+			BodyTruncated: p.reqTruncated,
+			Metadata:      map[string]string{"variant": "original"},
+		}
+		if err := h.Store.AppendMessage(ctx, originalMsg); err != nil {
+			logger.Error("original send message save failed", "error", err)
+		}
+
+		// Record the modified request as sequence 1.
+		modifiedMsg := &session.Message{
+			SessionID:     sess.ID,
+			Sequence:      1,
+			Direction:     "send",
+			Timestamp:     p.start,
+			Method:        p.req.Method,
+			URL:           reqURL,
+			Headers:       p.req.Header,
+			Body:          p.reqBody,
+			RawBytes:      nil, // modified is not wire-observed
+			BodyTruncated: p.reqTruncated,
+			Metadata:      map[string]string{"variant": "modified"},
+		}
+		if err := h.Store.AppendMessage(ctx, modifiedMsg); err != nil {
+			logger.Error("modified send message save failed", "error", err)
+		}
+
+		return &sendRecordResult{sessionID: sess.ID, tags: p.tags, recvSequence: 2}
+	}
+
+	// No modification: single send message without variant metadata.
+	sendMsg := &session.Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     p.start,
+		Method:        p.req.Method,
+		URL:           reqURL,
+		Headers:       p.req.Header,
+		Body:          p.reqBody,
+		RawBytes:      p.rawRequest,
+		BodyTruncated: p.reqTruncated,
+	}
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("send message save failed", "error", err)
+	}
+
+	return &sendRecordResult{sessionID: sess.ID, tags: p.tags, recvSequence: 1}
 }
 
 // receiveRecordParams holds the parameters needed to record the receive phase
@@ -143,7 +250,7 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 
 	recvMsg := &session.Message{
 		SessionID:     sendResult.sessionID,
-		Sequence:      1,
+		Sequence:      sendResult.recvSequence,
 		Direction:     "receive",
 		Timestamp:     p.start.Add(p.duration),
 		StatusCode:    p.resp.StatusCode,
