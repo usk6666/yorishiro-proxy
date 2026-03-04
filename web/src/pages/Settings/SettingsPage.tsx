@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import { Spinner, Tabs } from "../../components/ui/index.js";
 import { ProxyControl } from "./ProxyControl.js";
+import { ProtocolFilter } from "./ProtocolFilter.js";
 import { CaptureScope } from "./CaptureScope.js";
 import { TlsPassthrough } from "./TlsPassthrough.js";
 import { InterceptRules } from "./InterceptRules.js";
@@ -53,7 +54,12 @@ export function SettingsPage() {
   const renderContent = () => {
     switch (activeTab) {
       case "proxy":
-        return <ProxyControl />;
+        return (
+          <div className="settings-section">
+            <ProxyControl />
+            {configData && <ProtocolFilter config={configData} />}
+          </div>
+        );
 
       case "capture":
         if (configLoading && !configData) {
