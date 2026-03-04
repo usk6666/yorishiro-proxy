@@ -273,6 +273,10 @@ func buildSessionWhereClause(opts ListOptions) (string, []interface{}) {
 		conditions = append(conditions, "s.blocked_by = ?")
 		args = append(args, opts.BlockedBy)
 	}
+	if opts.State != "" {
+		conditions = append(conditions, "s.state = ?")
+		args = append(args, opts.State)
+	}
 
 	clause := ""
 	if len(conditions) > 0 {

@@ -114,6 +114,9 @@ type ListOptions struct {
 	// BlockedBy filters sessions by their blocked_by value.
 	// When set, only sessions with a matching blocked_by value are returned.
 	BlockedBy string
+	// State filters sessions by their lifecycle state
+	// ("active", "complete", or "error").
+	State string
 	// Limit is the maximum number of sessions to return.
 	Limit int
 	// Offset is the number of sessions to skip for pagination.

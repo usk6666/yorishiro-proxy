@@ -227,6 +227,8 @@ export interface QueryFilter {
   method?: string;
   url_pattern?: string;
   status_code?: number;
+  blocked_by?: string;
+  state?: string;
   direction?: "send" | "receive";
   body_contains?: string;
   status?: string;
@@ -257,6 +259,7 @@ export interface SessionEntry {
   url: string;
   status_code: number;
   message_count: number;
+  blocked_by?: string;
   protocol_summary?: Record<string, string>;
   timestamp: string;
   duration_ms: number;
@@ -284,6 +287,15 @@ export interface MessageEntry {
   timestamp: string;
 }
 
+/** Original request data before intercept/transform modification. */
+export interface VariantRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string[]>;
+  body: string;
+  body_encoding: string;
+}
+
 /** Response for query resource="session". */
 export interface SessionDetailResult {
   id: string;
@@ -305,12 +317,14 @@ export interface SessionDetailResult {
   timestamp: string;
   duration_ms: number;
   tags?: Record<string, string>;
+  blocked_by?: string;
   raw_request?: string;
   raw_response?: string;
   conn_info?: ConnInfo;
   message_count: number;
   protocol_summary?: Record<string, string>;
   message_preview?: MessageEntry[];
+  original_request?: VariantRequest;
 }
 
 /** Response for query resource="messages". */
