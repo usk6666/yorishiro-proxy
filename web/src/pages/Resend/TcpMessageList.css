@@ -1,0 +1,89 @@
+.tcp-messages {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.tcp-messages-description {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  padding-bottom: var(--space-xs);
+}
+
+.tcp-messages-description code {
+  padding: 2px var(--space-xs);
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  color: var(--accent-info);
+}
+
+.tcp-messages-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.tcp-messages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.tcp-message-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-sm);
+  border-radius: var(--radius-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.tcp-message-entry--send {
+  background-color: rgba(88, 166, 255, 0.04);
+  border-left: 2px solid var(--accent-info);
+}
+
+.tcp-message-entry--receive {
+  background-color: rgba(63, 185, 80, 0.04);
+  border-left: 2px solid var(--accent-success);
+}
+
+.tcp-message-entry:hover {
+  background-color: var(--bg-tertiary);
+}
+
+.tcp-message-seq {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  min-width: 28px;
+}
+
+.tcp-message-size {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  min-width: 100px;
+}
+
+.tcp-message-preview {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcp-message-time {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  min-width: 80px;
+  text-align: right;
+}
