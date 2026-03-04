@@ -11,9 +11,10 @@ interface TcpForwardsProps {
 /**
  * TcpForwards — manage TCP forward mappings (local port -> upstream host:port).
  *
- * TCP forwards are configured at proxy_start time. This component displays
- * the currently active mappings and provides a form to start new TCP forward
- * listeners via proxy_start.
+ * TCP forwards are start-time configuration: they are applied when starting a
+ * new listener via proxy_start. Adding a forward triggers a proxy restart.
+ * Individual removal is not supported at runtime — the proxy must be restarted
+ * with the updated mapping set.
  */
 export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
   const { addToast } = useToast();
@@ -124,7 +125,11 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
           <p className="settings-section-desc">
             Map local ports to upstream TCP addresses. Incoming connections on a mapped port
             are forwarded to the specified upstream host:port via the Raw TCP handler.
-            Changes require a proxy restart to take effect.
+          </p>
+          <p className="settings-section-desc">
+            TCP forwards are configured when starting a new listener. Adding a forward
+            restarts the proxy with the updated mappings. To remove a forward, restart
+            the proxy with the desired configuration.
           </p>
 
           {/* Add mapping form */}

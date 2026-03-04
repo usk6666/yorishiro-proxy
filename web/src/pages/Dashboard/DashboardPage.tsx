@@ -38,6 +38,13 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+/** Parse "host:port" into display parts for consistent upstream rendering. */
+function parseUpstream(value: string): { host: string; port: string } {
+  const lastColon = value.lastIndexOf(":");
+  if (lastColon === -1) return { host: value, port: "" };
+  return { host: value.slice(0, lastColon), port: value.slice(lastColon + 1) };
+}
+
 /** Get badge variant for protocol. */
 function protocolVariant(protocol: string): "default" | "success" | "warning" | "danger" | "info" {
   switch (protocol) {
@@ -301,15 +308,20 @@ export function DashboardPage() {
         <div className="dashboard-section">
           <h2 className="dashboard-section-title">TCP Forwards</h2>
           <div className="dashboard-tcp-forwards">
-            {Object.entries(configData.tcp_forwards).map(([port, upstream]) => (
-              <div key={port} className="dashboard-tcp-forward">
-                <div className="dashboard-tcp-forward-info">
-                  <Badge variant="info">:{port}</Badge>
-                  <span className="dashboard-tcp-forward-arrow">{"->"}</span>
-                  <span className="dashboard-tcp-forward-upstream">{upstream}</span>
+            {Object.entries(configData.tcp_forwards).map(([port, upstream]) => {
+              const parsed = parseUpstream(upstream);
+              return (
+                <div key={port} className="dashboard-tcp-forward">
+                  <div className="dashboard-tcp-forward-info">
+                    <Badge variant="info">:{port}</Badge>
+                    <span className="dashboard-tcp-forward-arrow">{"->"}</span>
+                    <span className="dashboard-tcp-forward-upstream">
+                      {parsed.host}:{parsed.port}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
