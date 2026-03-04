@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
+import { useDialog } from "../../components/ui/Dialog.js";
 import type {
   FlowDetailResult,
   MessageEntry,
@@ -13,6 +14,8 @@ import { Tabs } from "../../components/ui/Tabs.js";
 import { HeadersTable } from "./HeadersTable.js";
 import { BodyViewer } from "./BodyViewer.js";
 import { MessageList } from "./MessageList.js";
+import { generateCurl } from "../../lib/export/curl.js";
+import { buildHar, downloadHar } from "../../lib/export/har.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -131,6 +134,7 @@ export function FlowDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { addToast } = useToast();
+  const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
 
   // Tabs state
@@ -178,9 +182,13 @@ export function FlowDetailPage() {
   const handleDelete = useCallback(async () => {
     if (!id) return;
 
-    const confirmed = window.confirm(
-      "Are you sure you want to delete this flow? This action cannot be undone.",
-    );
+    const confirmed = await showDialog({
+      title: "Delete Flow",
+      message: "Are you sure you want to delete this flow? This action cannot be undone.",
+      variant: "confirm",
+      confirmLabel: "Delete",
+      confirmVariant: "danger",
+    });
     if (!confirmed) return;
 
     try {
@@ -196,7 +204,7 @@ export function FlowDetailPage() {
         message: `Failed to delete flow: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [id, manage, addToast, navigate]);
+  }, [id, showDialog, manage, addToast, navigate]);
 
   // Navigate to resend view
   const handleResend = useCallback(() => {
@@ -208,6 +216,37 @@ export function FlowDetailPage() {
   const handleBack = useCallback(() => {
     navigate("/");
   }, [navigate]);
+
+  // Copy request as cURL command
+  const handleCopyCurl = useCallback(async () => {
+    if (!flowData) return;
+    try {
+      const curl = generateCurl(flowData);
+      await navigator.clipboard.writeText(curl);
+      addToast({ type: "success", message: "cURL command copied to clipboard" });
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to copy: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [flowData, addToast]);
+
+  // Export flow as HAR file
+  const handleExportHar = useCallback(() => {
+    if (!flowData) return;
+    try {
+      const har = buildHar(flowData);
+      const shortFlowId = flowData.id.length > 8 ? flowData.id.slice(0, 8) : flowData.id;
+      downloadHar(har, `flow-${shortFlowId}.har`);
+      addToast({ type: "success", message: "HAR file downloaded" });
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to export HAR: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [flowData, addToast]);
 
   // Message page navigation
   const handleMessagesPageChange = useCallback((newOffset: number) => {
@@ -282,6 +321,12 @@ export function FlowDetailPage() {
           <div className="sd-header-actions">
             <Button variant="primary" size="sm" onClick={handleResend}>
               Resend
+            </Button>
+            <Button variant="secondary" size="sm" onClick={handleCopyCurl}>
+              Copy as cURL
+            </Button>
+            <Button variant="secondary" size="sm" onClick={handleExportHar}>
+              Export HAR
             </Button>
             <Button
               variant="danger"

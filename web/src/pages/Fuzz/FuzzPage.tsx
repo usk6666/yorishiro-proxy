@@ -8,6 +8,7 @@ import type {
   FuzzPosition,
   FuzzPayloadSet,
   FuzzStopCondition,
+  MacrosEntry,
 } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
@@ -548,6 +549,10 @@ function createEmptyPayloadSet(): PayloadSetFormEntry {
 function CampaignCreator({ onCreated }: CampaignCreatorProps) {
   const { addToast } = useToast();
   const { fuzz: fuzzAction, loading: executing } = useFuzz();
+
+  // Fetch available macros for hook selection
+  const { data: macrosData } = useQuery("macros");
+  const availableMacros: MacrosEntry[] = macrosData?.macros ?? [];
 
   // Base flow
   const [flowId, setFlowId] = useState("");
@@ -1092,19 +1097,33 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
         <div className="fuzz-position-fields">
           <div className="fuzz-creator-field">
             <label className="fuzz-creator-label">Pre-send Macro</label>
-            <Input
+            <select
+              className="fuzz-filter-select"
               value={preSendMacro}
               onChange={(e) => setPreSendMacro(e.target.value)}
-              placeholder="Macro name"
-            />
+            >
+              <option value="">None</option>
+              {availableMacros.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="fuzz-creator-field">
             <label className="fuzz-creator-label">Post-receive Macro</label>
-            <Input
+            <select
+              className="fuzz-filter-select"
               value={postReceiveMacro}
               onChange={(e) => setPostReceiveMacro(e.target.value)}
-              placeholder="Macro name"
-            />
+            >
+              <option value="">None</option>
+              {availableMacros.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
       </div>

@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
+import { useDialog } from "../../components/ui/Dialog.js";
 import type { QueryFilter, FlowEntry, ManageImportFlowsResult } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
@@ -9,6 +10,19 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import "./FlowsPage.css";
+
+// ---------------------------------------------------------------------------
+// useDebounce — returns a debounced copy of `value` that only updates after
+// `delay` milliseconds of inactivity.
+// ---------------------------------------------------------------------------
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -113,6 +127,7 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
 export function FlowsPage() {
   const navigate = useNavigate();
   const { addToast } = useToast();
+  const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
 
   // --- Filter state ---
@@ -122,6 +137,13 @@ export function FlowsPage() {
   const [statusCodeRange, setStatusCodeRange] = useState<string>("");
   const [urlPattern, setUrlPattern] = useState<string>("");
   const [selectedState, setSelectedState] = useState<string>("");
+  const [bodyContains, setBodyContains] = useState<string>("");
+  const [tagFilter, setTagFilter] = useState<string>("");
+
+  // Debounce text inputs to avoid firing expensive queries on every keystroke
+  const debouncedUrlPattern = useDebounce(urlPattern, 300);
+  const debouncedBodyContains = useDebounce(bodyContains, 300);
+  const debouncedTagFilter = useDebounce(tagFilter, 300);
 
   // --- Pagination state ---
   const [pageSize, setPageSize] = useState<number>(50);
@@ -149,8 +171,8 @@ export function FlowsPage() {
     if (selectedMethod) {
       f.method = selectedMethod;
     }
-    if (urlPattern.trim()) {
-      f.url_pattern = urlPattern.trim();
+    if (debouncedUrlPattern.trim()) {
+      f.url_pattern = debouncedUrlPattern.trim();
     }
     if (statusCodeRange) {
       const code = parseInt(statusCodeRange, 10);
@@ -161,8 +183,14 @@ export function FlowsPage() {
     if (selectedState) {
       f.state = selectedState;
     }
+    if (debouncedBodyContains.trim()) {
+      f.body_contains = debouncedBodyContains.trim();
+    }
+    if (debouncedTagFilter.trim()) {
+      f.tag = debouncedTagFilter.trim();
+    }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange, selectedState]);
+  }, [selectedProtocol, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedState, debouncedBodyContains, debouncedTagFilter]);
 
   // --- Query flows ---
   const { data, loading, error, refetch } = useQuery("flows", {
@@ -187,7 +215,18 @@ export function FlowsPage() {
     prevFilterKey.current = key;
   }, [filter, pageSize, offset, refetch]);
 
-  // Reset offset when filter changes
+  // Reset offset and selection when debounced text filters change
+  const prevTextFilterKey = useRef("");
+  useEffect(() => {
+    const key = JSON.stringify({ debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter });
+    if (prevTextFilterKey.current && prevTextFilterKey.current !== key) {
+      setOffset(0);
+      setSelectedIds(new Set());
+    }
+    prevTextFilterKey.current = key;
+  }, [debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter]);
+
+  // Reset offset when filter changes (used by non-debounced filter controls)
   const handleFilterChange = useCallback(() => {
     setOffset(0);
     setSelectedIds(new Set());
@@ -229,13 +268,28 @@ export function FlowsPage() {
     [handleFilterChange],
   );
 
-  // --- URL pattern ---
+  // --- URL pattern (debounced — offset/selection reset via effect) ---
   const handleUrlChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setUrlPattern(e.target.value);
-      handleFilterChange();
     },
-    [handleFilterChange],
+    [],
+  );
+
+  // --- Body contains (debounced — offset/selection reset via effect) ---
+  const handleBodyContainsChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setBodyContains(e.target.value);
+    },
+    [],
+  );
+
+  // --- Tag filter (debounced — offset/selection reset via effect) ---
+  const handleTagFilterChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setTagFilter(e.target.value);
+    },
+    [],
   );
 
   // --- Row click → navigate to detail ---
@@ -274,9 +328,13 @@ export function FlowsPage() {
     if (selectedIds.size === 0) return;
 
     const count = selectedIds.size;
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${count} flow(s)? This action cannot be undone.`,
-    );
+    const confirmed = await showDialog({
+      title: "Delete Flows",
+      message: `Are you sure you want to delete ${count} flow(s)? This action cannot be undone.`,
+      variant: "confirm",
+      confirmLabel: "Delete",
+      confirmVariant: "danger",
+    });
     if (!confirmed) return;
 
     try {
@@ -295,7 +353,7 @@ export function FlowsPage() {
         message: `Failed to delete flows: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedIds, manage, addToast, refetch]);
+  }, [selectedIds, showDialog, manage, addToast, refetch]);
 
   // --- Export flows ---
   const handleExport = useCallback(async () => {
@@ -522,6 +580,24 @@ export function FlowsPage() {
               placeholder="Filter by URL..."
               value={urlPattern}
               onChange={handleUrlChange}
+            />
+          </div>
+
+          <div className="flows-filter-group flows-text-filter">
+            <span className="flows-filter-label">Body Contains</span>
+            <Input
+              placeholder="Search response body..."
+              value={bodyContains}
+              onChange={handleBodyContainsChange}
+            />
+          </div>
+
+          <div className="flows-filter-group flows-text-filter">
+            <span className="flows-filter-label">Tag</span>
+            <Input
+              placeholder="Filter by tag..."
+              value={tagFilter}
+              onChange={handleTagFilterChange}
             />
           </div>
         </div>

@@ -4,6 +4,19 @@ import type { StatusResult } from "../../lib/mcp/types.js";
 import { Badge, Button, Input, Spinner, useToast } from "../../components/ui/index.js";
 
 /**
+ * All supported protocol names, matching the validProtocols set in the Go backend
+ * (internal/mcp/proxy_start_tool.go).
+ */
+const ALL_PROTOCOLS = [
+  "HTTP/1.x",
+  "HTTPS",
+  "WebSocket",
+  "HTTP/2",
+  "gRPC",
+  "TCP",
+] as const;
+
+/**
  * ProxyControl — manage proxy listeners (start/stop).
  */
 export function ProxyControl() {
@@ -23,15 +36,46 @@ export function ProxyControl() {
   const [listenAddr, setListenAddr] = useState("127.0.0.1:8080");
   const [upstreamProxy, setUpstreamProxy] = useState("");
 
+  // Protocol selection for new listener (all enabled by default)
+  const [selectedProtocols, setSelectedProtocols] = useState<Set<string>>(
+    () => new Set(ALL_PROTOCOLS),
+  );
+
   // Stop confirmation
   const [confirmStop, setConfirmStop] = useState<string | null>(null);
 
+  const handleToggleProtocol = useCallback((protocol: string) => {
+    setSelectedProtocols((prev) => {
+      const next = new Set(prev);
+      if (next.has(protocol)) {
+        next.delete(protocol);
+      } else {
+        next.add(protocol);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleAll = useCallback((selectAll: boolean) => {
+    setSelectedProtocols(selectAll ? new Set(ALL_PROTOCOLS) : new Set());
+  }, []);
+
   const handleStart = useCallback(async () => {
+    if (selectedProtocols.size === 0) {
+      addToast({ type: "warning", message: "At least one protocol must be enabled" });
+      return;
+    }
+
     try {
       const params: Record<string, unknown> = {};
       if (name.trim()) params.name = name.trim();
       if (listenAddr.trim()) params.listen_addr = listenAddr.trim();
       if (upstreamProxy.trim()) params.upstream_proxy = upstreamProxy.trim();
+
+      // Only include protocols if not all are selected (default is all enabled)
+      if (selectedProtocols.size < ALL_PROTOCOLS.length) {
+        params.protocols = Array.from(selectedProtocols);
+      }
 
       await start(params);
       addToast({ type: "success", message: `Listener started on ${listenAddr}` });
@@ -39,6 +83,7 @@ export function ProxyControl() {
       setName("");
       setListenAddr("127.0.0.1:8080");
       setUpstreamProxy("");
+      setSelectedProtocols(new Set(ALL_PROTOCOLS));
       refetchStatus();
     } catch (err) {
       addToast({
@@ -46,7 +91,7 @@ export function ProxyControl() {
         message: `Start failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [name, listenAddr, upstreamProxy, start, addToast, refetchStatus]);
+  }, [name, listenAddr, upstreamProxy, selectedProtocols, start, addToast, refetchStatus]);
 
   const handleStop = useCallback(async (listenerName?: string) => {
     try {
@@ -185,6 +230,46 @@ export function ProxyControl() {
               placeholder="http://host:port or socks5://host:port"
             />
           </div>
+
+          {/* Protocol selection */}
+          <div className="settings-protocol-section">
+            <div className="settings-protocol-header">
+              <span className="settings-protocol-label">Protocols</span>
+              <div className="settings-protocol-bulk">
+                <button
+                  type="button"
+                  className="settings-protocol-link"
+                  onClick={() => handleToggleAll(true)}
+                >
+                  Select All
+                </button>
+                <span className="settings-protocol-sep">|</span>
+                <button
+                  type="button"
+                  className="settings-protocol-link"
+                  onClick={() => handleToggleAll(false)}
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
+            <div className="settings-protocol-grid">
+              {ALL_PROTOCOLS.map((proto) => (
+                <label key={proto} className="settings-protocol-toggle-label">
+                  <span className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={selectedProtocols.has(proto)}
+                      onChange={() => handleToggleProtocol(proto)}
+                    />
+                    <span className="settings-toggle-slider" />
+                  </span>
+                  <span className="settings-protocol-toggle-name">{proto}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
           <div className="settings-add-form-actions">
             <Button variant="secondary" size="sm" onClick={() => setShowForm(false)}>
               Cancel
