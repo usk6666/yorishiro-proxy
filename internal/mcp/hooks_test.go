@@ -262,12 +262,12 @@ func TestExpandParamsWithKVStore_URL(t *testing.T) {
 
 func TestExpandParamsWithKVStore_Headers(t *testing.T) {
 	params := executeParams{
-		OverrideHeaders: map[string]string{
-			"Cookie":       "sid={{session_cookie}}",
-			"X-CSRF-Token": "{{csrf_token}}",
+		OverrideHeaders: HeaderEntries{
+			{Key: "Cookie", Value: "sid={{session_cookie}}"},
+			{Key: "X-CSRF-Token", Value: "{{csrf_token}}"},
 		},
-		AddHeaders: map[string]string{
-			"Authorization": "Bearer {{token}}",
+		AddHeaders: HeaderEntries{
+			{Key: "Authorization", Value: "Bearer {{token}}"},
 		},
 	}
 	kvStore := map[string]string{
@@ -278,14 +278,23 @@ func TestExpandParamsWithKVStore_Headers(t *testing.T) {
 	if err := expandParamsWithKVStore(&params, kvStore); err != nil {
 		t.Fatalf("expandParamsWithKVStore: %v", err)
 	}
-	if params.OverrideHeaders["Cookie"] != "sid=abc123" {
-		t.Errorf("Cookie = %q, want %q", params.OverrideHeaders["Cookie"], "sid=abc123")
+	// Find entries by key.
+	findEntry := func(entries HeaderEntries, key string) string {
+		for _, e := range entries {
+			if e.Key == key {
+				return e.Value
+			}
+		}
+		return ""
 	}
-	if params.OverrideHeaders["X-CSRF-Token"] != "x9f2k" {
-		t.Errorf("X-CSRF-Token = %q, want %q", params.OverrideHeaders["X-CSRF-Token"], "x9f2k")
+	if v := findEntry(params.OverrideHeaders, "Cookie"); v != "sid=abc123" {
+		t.Errorf("Cookie = %q, want %q", v, "sid=abc123")
 	}
-	if params.AddHeaders["Authorization"] != "Bearer jwt-token" {
-		t.Errorf("Authorization = %q, want %q", params.AddHeaders["Authorization"], "Bearer jwt-token")
+	if v := findEntry(params.OverrideHeaders, "X-CSRF-Token"); v != "x9f2k" {
+		t.Errorf("X-CSRF-Token = %q, want %q", v, "x9f2k")
+	}
+	if v := findEntry(params.AddHeaders, "Authorization"); v != "Bearer jwt-token" {
+		t.Errorf("Authorization = %q, want %q", v, "Bearer jwt-token")
 	}
 }
 

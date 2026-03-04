@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +29,40 @@ type executeInput struct {
 	Params executeParams `json:"params"`
 }
 
+// HeaderEntry represents a single header key-value pair, allowing duplicate keys.
+type HeaderEntry struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// HeaderEntries is a slice of HeaderEntry that supports unmarshaling from both
+// the new array format ([]HeaderEntry) and the legacy map format (map[string]string)
+// for backward compatibility.
+type HeaderEntries []HeaderEntry
+
+// UnmarshalJSON implements json.Unmarshaler.
+// It accepts both the new array format and the legacy map[string]string format.
+func (h *HeaderEntries) UnmarshalJSON(data []byte) error {
+	// Try array format first: [{"key":"k","value":"v"}, ...]
+	var entries []HeaderEntry
+	if err := json.Unmarshal(data, &entries); err == nil {
+		*h = entries
+		return nil
+	}
+
+	// Fall back to legacy map format: {"key": "value", ...}
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("header entries must be an array of {key,value} objects or a map of key-value pairs")
+	}
+	result := make([]HeaderEntry, 0, len(m))
+	for k, v := range m {
+		result = append(result, HeaderEntry{Key: k, Value: v})
+	}
+	*h = result
+	return nil
+}
+
 // executeParams holds parameters for the execute tool actions (resend, resend_raw, tcp_replay).
 type executeParams struct {
 	// FlowID identifies the flow to resend/replay.
@@ -37,21 +72,23 @@ type executeParams struct {
 	MessageSequence *int `json:"message_sequence,omitempty"`
 
 	// resend overrides
-	OverrideMethod  string            `json:"override_method,omitempty"`
-	OverrideURL     string            `json:"override_url,omitempty"`
-	OverrideHeaders map[string]string `json:"override_headers,omitempty"`
-	OverrideBody    *string           `json:"override_body,omitempty"`
+	OverrideMethod     string        `json:"override_method,omitempty"`
+	OverrideURL        string        `json:"override_url,omitempty"`
+	OverrideHeadersRaw any           `json:"override_headers,omitempty"`
+	OverrideHeaders    HeaderEntries `json:"-"` // parsed from OverrideHeadersRaw
+	OverrideBody       *string       `json:"override_body,omitempty"`
 
 	// resend extended mutation options
-	AddHeaders         map[string]string `json:"add_headers,omitempty"`
-	RemoveHeaders      []string          `json:"remove_headers,omitempty"`
-	OverrideBodyBase64 *string           `json:"override_body_base64,omitempty"`
-	BodyPatches        []BodyPatch       `json:"body_patches,omitempty"`
-	OverrideHost       string            `json:"override_host,omitempty"`
-	FollowRedirects    *bool             `json:"follow_redirects,omitempty"`
-	TimeoutMs          *int              `json:"timeout_ms,omitempty"`
-	DryRun             bool              `json:"dry_run,omitempty"`
-	Tag                string            `json:"tag,omitempty"`
+	AddHeadersRaw  any           `json:"add_headers,omitempty"`
+	AddHeaders     HeaderEntries `json:"-"` // parsed from AddHeadersRaw
+	RemoveHeaders  []string      `json:"remove_headers,omitempty"`
+	OverrideBodyBase64 *string       `json:"override_body_base64,omitempty"`
+	BodyPatches        []BodyPatch   `json:"body_patches,omitempty"`
+	OverrideHost       string        `json:"override_host,omitempty"`
+	FollowRedirects    *bool         `json:"follow_redirects,omitempty"`
+	TimeoutMs          *int          `json:"timeout_ms,omitempty"`
+	DryRun             bool          `json:"dry_run,omitempty"`
+	Tag                string        `json:"tag,omitempty"`
 
 	// resend_raw parameters
 	TargetAddr        string     `json:"target_addr,omitempty"`
@@ -61,6 +98,63 @@ type executeParams struct {
 
 	// hooks parameters (resend)
 	Hooks *hooksInput `json:"hooks,omitempty"`
+}
+
+// parseRawHeaders parses the raw JSON header fields (OverrideHeadersRaw, AddHeadersRaw)
+// into their typed HeaderEntries fields. This must be called before accessing
+// OverrideHeaders or AddHeaders.
+func (p *executeParams) parseRawHeaders() error {
+	if p.OverrideHeadersRaw != nil {
+		entries, err := parseHeaderEntriesFromAny(p.OverrideHeadersRaw)
+		if err != nil {
+			return fmt.Errorf("override_headers: %w", err)
+		}
+		p.OverrideHeaders = entries
+	}
+	if p.AddHeadersRaw != nil {
+		entries, err := parseHeaderEntriesFromAny(p.AddHeadersRaw)
+		if err != nil {
+			return fmt.Errorf("add_headers: %w", err)
+		}
+		p.AddHeaders = entries
+	}
+	return nil
+}
+
+// parseHeaderEntriesFromAny converts an any value (from JSON deserialization)
+// into HeaderEntries. It accepts:
+//   - []any where each element is map[string]any with "key" and "value" fields (array format)
+//   - map[string]any where each key-value pair is a header (legacy map format)
+func parseHeaderEntriesFromAny(v any) (HeaderEntries, error) {
+	switch val := v.(type) {
+	case []any:
+		entries := make(HeaderEntries, 0, len(val))
+		for i, item := range val {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("entry %d: expected object with key and value fields", i)
+			}
+			key, _ := m["key"].(string)
+			value, _ := m["value"].(string)
+			if key == "" {
+				return nil, fmt.Errorf("entry %d: key is required", i)
+			}
+			entries = append(entries, HeaderEntry{Key: key, Value: value})
+		}
+		return entries, nil
+	case map[string]any:
+		entries := make(HeaderEntries, 0, len(val))
+		for k, v := range val {
+			value, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("header %q: value must be a string", k)
+			}
+			entries = append(entries, HeaderEntry{Key: k, Value: value})
+		}
+		return entries, nil
+	default:
+		return nil, fmt.Errorf("must be an array of {key,value} objects or a map of key-value pairs")
+	}
 }
 
 // availableExecuteActions lists the valid action names for the execute tool.
@@ -86,6 +180,11 @@ func (s *Server) registerExecute() {
 
 // handleExecute routes the execute tool invocation to the appropriate action handler.
 func (s *Server) handleExecute(ctx context.Context, _ *gomcp.CallToolRequest, input executeInput) (*gomcp.CallToolResult, any, error) {
+	// Parse raw header JSON fields into typed HeaderEntries.
+	if err := input.Params.parseRawHeaders(); err != nil {
+		return nil, nil, err
+	}
+
 	switch input.Action {
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableExecuteActions, ", "))
@@ -370,10 +469,10 @@ func buildResendBody(originalBody []byte, params executeParams) ([]byte, error) 
 }
 
 func validateResendHeaders(params executeParams) error {
-	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
+	if err := validateHeaderEntries(params.OverrideHeaders); err != nil {
 		return fmt.Errorf("override_headers: %w", err)
 	}
-	if err := validateHeaderValues(params.AddHeaders); err != nil {
+	if err := validateHeaderEntries(params.AddHeaders); err != nil {
 		return fmt.Errorf("add_headers: %w", err)
 	}
 	if err := validateHeaderKeys(params.RemoveHeaders); err != nil {
@@ -392,14 +491,30 @@ func buildResendHeaders(originalHeaders map[string][]string, params executeParam
 	for _, key := range params.RemoveHeaders {
 		headers[http.CanonicalHeaderKey(key)] = []string{}
 	}
-	for key, value := range params.OverrideHeaders {
-		headers[http.CanonicalHeaderKey(key)] = []string{value}
+	// OverrideHeaders: collect all values per canonical key, replacing any original values.
+	overrideGroups := groupHeaderEntries(params.OverrideHeaders)
+	for canonical, values := range overrideGroups {
+		headers[canonical] = values
 	}
-	for key, value := range params.AddHeaders {
-		canonical := http.CanonicalHeaderKey(key)
-		headers[canonical] = append(headers[canonical], value)
+	for _, entry := range params.AddHeaders {
+		canonical := http.CanonicalHeaderKey(entry.Key)
+		headers[canonical] = append(headers[canonical], entry.Value)
 	}
 	return headers
+}
+
+// groupHeaderEntries groups HeaderEntries by canonical header key,
+// preserving the order of values for each key.
+func groupHeaderEntries(entries HeaderEntries) map[string][]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	result := make(map[string][]string)
+	for _, entry := range entries {
+		canonical := http.CanonicalHeaderKey(entry.Key)
+		result[canonical] = append(result[canonical], entry.Value)
+	}
+	return result
 }
 
 func validateOverrideHost(host string) error {
