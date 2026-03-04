@@ -40,6 +40,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: <FuzzIcon />,
   },
   {
+    to: "/macros",
+    label: "Macros",
+    icon: <MacroIcon />,
+  },
+  {
     to: "/settings",
     label: "Settings",
     icon: <SettingsIcon />,
@@ -120,6 +125,15 @@ function FuzzIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M2 13L5 4L8 10L11 6L14 13" />
+    </svg>
+  );
+}
+
+function MacroIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="2 4 6 8 2 12" />
+      <line x1="8" y1="12" x2="14" y2="12" />
     </svg>
   );
 }
