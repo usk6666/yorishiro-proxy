@@ -510,3 +510,118 @@
   line-height: 1.5;
   white-space: pre-wrap;
 }
+
+/* Protocol filter — enabled protocols display */
+.settings-protocol-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.settings-protocol-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-primary);
+}
+
+.settings-protocol-item--disabled {
+  opacity: 0.5;
+}
+
+.settings-protocol-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.settings-protocol-dot--on {
+  background-color: var(--accent-success);
+}
+
+.settings-protocol-dot--off {
+  background-color: var(--text-muted);
+}
+
+.settings-protocol-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  flex: 1;
+}
+
+/* Protocol selection in new listener form */
+.settings-protocol-section {
+  margin-top: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.settings-protocol-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-sm);
+}
+
+.settings-protocol-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.settings-protocol-bulk {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.settings-protocol-link {
+  background: none;
+  border: none;
+  color: var(--accent-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  padding: 0;
+}
+
+.settings-protocol-link:hover {
+  text-decoration: underline;
+}
+
+.settings-protocol-sep {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.settings-protocol-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-sm);
+}
+
+.settings-protocol-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  cursor: pointer;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-primary);
+}
+
+.settings-protocol-toggle-label:hover {
+  border-color: var(--border-default);
+}
+
+.settings-protocol-toggle-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
