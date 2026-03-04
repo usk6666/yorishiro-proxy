@@ -36,8 +36,8 @@ func (c *Config) Validate() error {
 	if lf := strings.ToLower(c.LogFormat); lf != "" && lf != "text" && lf != "json" {
 		return fmt.Errorf("invalid log format: %q (must be text or json)", c.LogFormat)
 	}
-	if c.RetentionMaxSessions < 0 {
-		return fmt.Errorf("retention_max_sessions must be >= 0, got %d", c.RetentionMaxSessions)
+	if c.RetentionMaxFlows < 0 {
+		return fmt.Errorf("retention_max_flows must be >= 0, got %d", c.RetentionMaxFlows)
 	}
 	if c.RetentionMaxAge < 0 {
 		return fmt.Errorf("retention_max_age must be >= 0, got %s", c.RetentionMaxAge)
@@ -100,11 +100,11 @@ type Config struct {
 	// WARNING: Enabling this option disables security checks on upstream TLS.
 	InsecureSkipVerify bool `json:"insecure_skip_verify"`
 
-	// RetentionMaxSessions is the maximum number of sessions to retain.
+	// RetentionMaxFlows is the maximum number of flows to retain.
 	// 0 means unlimited (default).
-	RetentionMaxSessions int `json:"retention_max_sessions"`
+	RetentionMaxFlows int `json:"retention_max_flows"`
 
-	// RetentionMaxAge is the maximum age of sessions to retain.
+	// RetentionMaxAge is the maximum age of flows to retain.
 	// 0 means unlimited (default).
 	RetentionMaxAge time.Duration `json:"retention_max_age"`
 
@@ -294,7 +294,7 @@ type ProxyConfig struct {
 	// ListenAddr is the TCP address the proxy listens on (e.g. "127.0.0.1:8080").
 	ListenAddr string `json:"listen_addr,omitempty"`
 
-	// CaptureScope configures which requests are recorded to the session store.
+	// CaptureScope configures which requests are recorded to the flow store.
 	CaptureScope json.RawMessage `json:"capture_scope,omitempty"`
 
 	// TLSPassthrough is a list of domain patterns that bypass TLS interception.

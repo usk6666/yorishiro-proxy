@@ -53,7 +53,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/manage",
 		name:        "help_manage",
-		description: "Action list, parameter syntax, and usage examples for the manage tool (delete_sessions, export_sessions, import_sessions, regenerate_ca_cert).",
+		description: "Action list, parameter syntax, and usage examples for the manage tool (delete_flows, export_flows, import_flows, regenerate_ca_cert).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_manage.md",
 	},

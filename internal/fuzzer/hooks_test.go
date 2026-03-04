@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // mockHookCallbacks implements HookCallbacks for testing.
@@ -420,32 +420,32 @@ func TestHookState_Initial(t *testing.T) {
 // --- memStore implements the interfaces needed for fuzzer engine tests ---
 
 type memStore struct {
-	sessions map[string]*session.Session
-	messages map[string][]*session.Message
-	fuzzJobs map[string]*session.FuzzJob
-	results  []*session.FuzzResult
+	flows map[string]*flow.Flow
+	messages map[string][]*flow.Message
+	fuzzJobs map[string]*flow.FuzzJob
+	results  []*flow.FuzzResult
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		sessions: make(map[string]*session.Session),
-		messages: make(map[string][]*session.Message),
-		fuzzJobs: make(map[string]*session.FuzzJob),
+		flows: make(map[string]*flow.Flow),
+		messages: make(map[string][]*flow.Message),
+		fuzzJobs: make(map[string]*flow.FuzzJob),
 	}
 }
 
-func (m *memStore) GetSession(_ context.Context, id string) (*session.Session, error) {
-	s, ok := m.sessions[id]
+func (m *memStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
+	s, ok := m.flows[id]
 	if !ok {
-		return nil, fmt.Errorf("session %s not found", id)
+		return nil, fmt.Errorf("flow %s not found", id)
 	}
 	return s, nil
 }
 
-func (m *memStore) GetMessages(_ context.Context, sessionID string, opts session.MessageListOptions) ([]*session.Message, error) {
-	msgs := m.messages[sessionID]
+func (m *memStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
+	msgs := m.messages[flowID]
 	if opts.Direction != "" {
-		var filtered []*session.Message
+		var filtered []*flow.Message
 		for _, msg := range msgs {
 			if msg.Direction == opts.Direction {
 				filtered = append(filtered, msg)
@@ -456,30 +456,30 @@ func (m *memStore) GetMessages(_ context.Context, sessionID string, opts session
 	return msgs, nil
 }
 
-func (m *memStore) SaveSession(_ context.Context, s *session.Session) error {
+func (m *memStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	if s.ID == "" {
-		s.ID = fmt.Sprintf("sess-%d", len(m.sessions)+1)
+		s.ID = fmt.Sprintf("sess-%d", len(m.flows)+1)
 	}
-	m.sessions[s.ID] = s
+	m.flows[s.ID] = s
 	return nil
 }
 
-func (m *memStore) AppendMessage(_ context.Context, msg *session.Message) error {
-	m.messages[msg.SessionID] = append(m.messages[msg.SessionID], msg)
+func (m *memStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+	m.messages[msg.FlowID] = append(m.messages[msg.FlowID], msg)
 	return nil
 }
 
-func (m *memStore) SaveFuzzJob(_ context.Context, job *session.FuzzJob) error {
+func (m *memStore) SaveFuzzJob(_ context.Context, job *flow.FuzzJob) error {
 	m.fuzzJobs[job.ID] = job
 	return nil
 }
 
-func (m *memStore) UpdateFuzzJob(_ context.Context, job *session.FuzzJob) error {
+func (m *memStore) UpdateFuzzJob(_ context.Context, job *flow.FuzzJob) error {
 	m.fuzzJobs[job.ID] = job
 	return nil
 }
 
-func (m *memStore) SaveFuzzResult(_ context.Context, result *session.FuzzResult) error {
+func (m *memStore) SaveFuzzResult(_ context.Context, result *flow.FuzzResult) error {
 	m.results = append(m.results, result)
 	return nil
 }

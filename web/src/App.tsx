@@ -14,7 +14,7 @@ function App() {
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<SessionsPage />} />
-        <Route path="sessions/:id" element={<SessionDetailPage />} />
+        <Route path="flows/:id" element={<SessionDetailPage />} />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="intercept" element={<InterceptPage />} />
         <Route path="resend" element={<ResendPage />} />

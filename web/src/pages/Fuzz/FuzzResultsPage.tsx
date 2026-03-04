@@ -6,7 +6,7 @@ import type {
   QueryFilter,
   FuzzJobEntry,
   FuzzResultEntry,
-  SessionDetailResult,
+  FlowDetailResult,
 } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
@@ -106,7 +106,7 @@ export function FuzzResultsPage() {
   const [selectedResult, setSelectedResult] = useState<FuzzResultEntry | null>(
     null,
   );
-  const [detailSession, setDetailSession] = useState<SessionDetailResult | null>(
+  const [detailSession, setDetailSession] = useState<FlowDetailResult | null>(
     null,
   );
   const [detailLoading, setDetailLoading] = useState(false);
@@ -233,7 +233,7 @@ export function FuzzResultsPage() {
   const handleSelectResult = useCallback(
     async (result: FuzzResultEntry) => {
       setSelectedResult(result);
-      if (!result.session_id) {
+      if (!result.flow_id) {
         setDetailSession(null);
         return;
       }
@@ -245,10 +245,10 @@ export function FuzzResultsPage() {
           return;
         }
         const session = await client.query({
-          resource: "session",
-          id: result.session_id,
+          resource: "flow",
+          id: result.flow_id,
         });
-        setDetailSession(session as SessionDetailResult);
+        setDetailSession(session as FlowDetailResult);
       } catch {
         setDetailSession(null);
       } finally {

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { SessionDetailResult } from "../../lib/mcp/types.js";
+import type { FlowDetailResult } from "../../lib/mcp/types.js";
 import type { ResendResult } from "./ResendPage.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import "./ResponseViewer.css";
@@ -13,7 +13,7 @@ const RESPONSE_TABS = [
 
 export interface ResponseViewerProps {
   response: ResendResult;
-  originalSession: SessionDetailResult;
+  originalSession: FlowDetailResult;
 }
 
 /**

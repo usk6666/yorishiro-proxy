@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -31,7 +31,7 @@ func TestRecordSend_Basic(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        req,
 		reqBody:    []byte("request body"),
 	}, logger)
@@ -39,19 +39,19 @@ func TestRecordSend_Basic(t *testing.T) {
 	if result == nil {
 		t.Fatal("recordSend returned nil, expected non-nil result")
 	}
-	if result.sessionID == "" {
-		t.Fatal("sessionID is empty")
+	if result.flowID == "" {
+		t.Fatal("flowID is empty")
 	}
 
-	// Verify session was created with State="active".
+	// Verify flow was created with State="active".
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "active" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "active")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "active")
 	}
 	if entry.Session.Protocol != "HTTP/1.x" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/1.x")
@@ -117,7 +117,7 @@ func TestRecordSend_WithReqURL(t *testing.T) {
 	result := handler.recordSend(ctx, sendRecordParams{
 		protocol: "HTTPS",
 		start:    time.Now(),
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqURL:   reqURL,
 		reqBody:  []byte("body"),
@@ -151,7 +151,7 @@ func TestRecordReceive_Basic(t *testing.T) {
 		connID:   "conn-1",
 		protocol: "HTTP/1.x",
 		start:    start,
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqBody:  []byte("req"),
 	}, logger)
@@ -180,15 +180,15 @@ func TestRecordReceive_Basic(t *testing.T) {
 	// Verify session is now complete.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "complete" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "complete")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "complete")
 	}
 	if entry.Session.Duration != duration {
-		t.Errorf("session duration = %v, want %v", entry.Session.Duration, duration)
+		t.Errorf("flow duration = %v, want %v", entry.Session.Duration, duration)
 	}
 
 	// Verify receive message.
@@ -242,7 +242,7 @@ func TestRecordReceive_NilResponse(t *testing.T) {
 	sendResult := handler.recordSend(ctx, sendRecordParams{
 		protocol: "HTTP/1.x",
 		start:    time.Now(),
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 	}, logger)
 
@@ -258,9 +258,9 @@ func TestRecordReceive_NilResponse(t *testing.T) {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
 
-	// Session should still be "active" since recordReceive didn't execute.
+	// Flow should still be "active" since recordReceive didn't execute.
 	if entries[0].Session.State != "active" {
-		t.Errorf("session state = %q, want %q", entries[0].Session.State, "active")
+		t.Errorf("flow state = %q, want %q", entries[0].Session.State, "active")
 	}
 	if entries[0].Receive != nil {
 		t.Error("receive message should be nil when resp is nil")
@@ -281,7 +281,7 @@ func TestRecordSendError_Basic(t *testing.T) {
 		connID:   "conn-1",
 		protocol: "HTTP/1.x",
 		start:    start,
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqBody:  []byte("req"),
 	}, logger)
@@ -297,21 +297,21 @@ func TestRecordSendError_Basic(t *testing.T) {
 	// Verify session is in error state.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "error" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "error")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
 	}
 	if entry.Session.Duration <= 0 {
-		t.Errorf("session duration = %v, want positive", entry.Session.Duration)
+		t.Errorf("flow duration = %v, want positive", entry.Session.Duration)
 	}
 	if entry.Session.Tags == nil {
-		t.Fatal("session tags is nil")
+		t.Fatal("flow tags is nil")
 	}
 	if _, ok := entry.Session.Tags["error"]; !ok {
-		t.Error("session tags should contain 'error' key")
+		t.Error("flow tags should contain 'error' key")
 	}
 
 	// Verify send message is present but no receive.
@@ -354,25 +354,25 @@ func TestRecordInterceptDrop_Basic(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        req,
 		reqBody:    []byte("intercepted body"),
 	}, logger)
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "complete" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "complete")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "complete")
 	}
 	if entry.Session.BlockedBy != "intercept_drop" {
-		t.Errorf("session BlockedBy = %q, want %q", entry.Session.BlockedBy, "intercept_drop")
+		t.Errorf("flow BlockedBy = %q, want %q", entry.Session.BlockedBy, "intercept_drop")
 	}
 	if entry.Session.Duration <= 0 {
-		t.Errorf("session duration = %v, want positive", entry.Session.Duration)
+		t.Errorf("flow duration = %v, want positive", entry.Session.Duration)
 	}
 
 	// Verify send message is present but no receive.
@@ -425,7 +425,7 @@ func TestRecordInterceptDrop_HTTPS(t *testing.T) {
 		connID:   "conn-1",
 		protocol: "HTTPS",
 		start:    start,
-		connInfo: &session.ConnectionInfo{
+		connInfo: &flow.ConnectionInfo{
 			ClientAddr: "127.0.0.1:1234",
 			TLSVersion: "TLS 1.3",
 			TLSCipher:  "TLS_AES_128_GCM_SHA256",
@@ -470,7 +470,7 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		tags:       map[string]string{"test": "lifecycle"},
-		connInfo:   &session.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
 		req:        req,
 		reqBody:    []byte(`{"key":"value"}`),
 		rawRequest: []byte("POST /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
@@ -481,15 +481,15 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 	}
 
 	// Verify intermediate state: session is active, only send message exists.
-	sess, err := store.GetSession(ctx, sendResult.sessionID)
+	fl, err := store.GetFlow(ctx, sendResult.flowID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
-	if sess.State != "active" {
-		t.Errorf("after send: state = %q, want %q", sess.State, "active")
+	if fl.State != "active" {
+		t.Errorf("after send: state = %q, want %q", fl.State, "active")
 	}
 
-	msgs, _ := store.GetMessages(ctx, sendResult.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("after send: expected 1 message, got %d", len(msgs))
 	}
@@ -516,24 +516,24 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 	}, logger)
 
 	// Verify final state: session is complete, both messages exist.
-	sess, err = store.GetSession(ctx, sendResult.sessionID)
+	fl, err = store.GetFlow(ctx, sendResult.flowID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
-	if sess.State != "complete" {
-		t.Errorf("after receive: state = %q, want %q", sess.State, "complete")
+	if fl.State != "complete" {
+		t.Errorf("after receive: state = %q, want %q", fl.State, "complete")
 	}
-	if sess.Duration != duration {
-		t.Errorf("after receive: duration = %v, want %v", sess.Duration, duration)
+	if fl.Duration != duration {
+		t.Errorf("after receive: duration = %v, want %v", fl.Duration, duration)
 	}
 
-	msgs, _ = store.GetMessages(ctx, sendResult.sessionID, session.MessageListOptions{})
+	msgs, _ = store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("after receive: expected 2 messages, got %d", len(msgs))
 	}
 
 	// Verify message ordering.
-	var sendMsg, recvMsg *session.Message
+	var sendMsg, recvMsg *flow.Message
 	for _, m := range msgs {
 		if m.Direction == "send" {
 			sendMsg = m
@@ -569,7 +569,7 @@ func TestProgressiveRecording_ErrorLifecycle(t *testing.T) {
 		clientAddr: "10.0.0.1:5000",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
 		req:        req,
 		reqBody:    nil,
 	}, logger)
@@ -583,22 +583,22 @@ func TestProgressiveRecording_ErrorLifecycle(t *testing.T) {
 	handler.recordSendError(ctx, sendResult, start, upstreamErr, logger)
 
 	// Verify: session is in error state with error tag.
-	sess, err := store.GetSession(ctx, sendResult.sessionID)
+	fl, err := store.GetFlow(ctx, sendResult.flowID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
-	if sess.State != "error" {
-		t.Errorf("state = %q, want %q", sess.State, "error")
+	if fl.State != "error" {
+		t.Errorf("state = %q, want %q", fl.State, "error")
 	}
-	if sess.Tags == nil || sess.Tags["error"] == "" {
-		t.Error("session should have 'error' tag")
+	if fl.Tags == nil || fl.Tags["error"] == "" {
+		t.Error("flow should have 'error' tag")
 	}
-	if sess.Duration <= 0 {
-		t.Errorf("duration = %v, want positive", sess.Duration)
+	if fl.Duration <= 0 {
+		t.Errorf("duration = %v, want positive", fl.Duration)
 	}
 
 	// Verify: only send message, no receive.
-	msgs, _ := store.GetMessages(ctx, sendResult.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message (send only), got %d", len(msgs))
 	}
@@ -621,7 +621,7 @@ func TestProgressiveRecording_Tags(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    time.Now(),
 		tags:     tags,
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 	}, logger)
 
@@ -651,7 +651,7 @@ func TestProgressiveRecording_TLSConnInfo(t *testing.T) {
 	sendResult := handler.recordSend(ctx, sendRecordParams{
 		protocol: "HTTPS",
 		start:    time.Now(),
-		connInfo: &session.ConnectionInfo{
+		connInfo: &flow.ConnectionInfo{
 			ClientAddr: "127.0.0.1:1234",
 			ServerAddr: "93.184.216.34:443",
 			TLSVersion: "TLS 1.3",
@@ -683,7 +683,7 @@ func TestProgressiveRecording_TLSConnInfo(t *testing.T) {
 }
 
 // TestHTTP_UpstreamFailure_RecordsSession verifies that when an upstream server
-// is unreachable, the proxy records the session with State="error" and the send
+// is unreachable, the proxy records the flow with State="error" and the send
 // message, rather than silently discarding it. This is the key behavior change
 // introduced by progressive recording.
 func TestHTTP_UpstreamFailure_RecordsSession(t *testing.T) {
@@ -723,18 +723,18 @@ func TestHTTP_UpstreamFailure_RecordsSession(t *testing.T) {
 	// Wait for async recording to complete.
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify session was recorded with error state.
+	// Verify flow was recorded with error state.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry (error), got %d", len(entries))
+		t.Fatalf("expected 1 flow entry (error), got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "error" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "error")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
 	}
 	if entry.Session.Tags == nil || entry.Session.Tags["error"] == "" {
-		t.Error("session should have 'error' tag with error message")
+		t.Error("flow should have 'error' tag with error message")
 	}
 
 	// Verify send message is present.
@@ -793,15 +793,15 @@ func TestHTTPS_UpstreamFailure_RecordsSession(t *testing.T) {
 	// Wait for recording.
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify error session was recorded.
+	// Verify error flow was recorded.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry (error), got %d", len(entries))
+		t.Fatalf("expected 1 flow entry (error), got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "error" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "error")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
 	}
 	if entry.Session.Protocol != "HTTPS" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTPS")
@@ -863,12 +863,12 @@ func TestHTTP_NormalRequest_ProgressiveRecording(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "complete" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "complete")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "complete")
 	}
 	if entry.Session.Protocol != "HTTP/1.x" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/1.x")

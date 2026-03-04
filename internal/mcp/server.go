@@ -17,7 +17,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // deps holds all shared dependencies for handler structs.
@@ -28,7 +28,7 @@ type deps struct {
 	appCtx                context.Context
 	ca                    *cert.CA
 	issuer                *cert.Issuer
-	store                 session.Store
+	store                 flow.Store
 	manager               *proxy.Manager
 	passthrough           *proxy.PassthroughList
 	scope                 *proxy.CaptureScope
@@ -36,7 +36,7 @@ type deps struct {
 	interceptQueue        *intercept.Queue
 	transformPipeline     *rules.Pipeline
 	fuzzRunner            *fuzzer.Runner
-	fuzzStore             session.FuzzStore
+	fuzzStore             flow.FuzzStore
 	dbPath                string
 	replayDoer            httpDoer
 	rawReplayDialer       rawDialer
@@ -146,7 +146,7 @@ func WithFuzzRunner(runner *fuzzer.Runner) ServerOption {
 
 // WithFuzzStore sets the fuzz store for the MCP server,
 // enabling fuzz_jobs and fuzz_results query resources.
-func WithFuzzStore(fs session.FuzzStore) ServerOption {
+func WithFuzzStore(fs flow.FuzzStore) ServerOption {
 	return func(s *Server) {
 		s.deps.fuzzStore = fs
 	}
@@ -246,7 +246,7 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 // If store is nil, session-related operations will return an error.
 // The manager parameter controls the proxy lifecycle for proxy_start/proxy_stop tools.
 // If manager is nil, those tools will return an error when called.
-func NewServer(ctx context.Context, ca *cert.CA, store session.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
+func NewServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
 	d := &deps{
 		appCtx:  ctx,
 		ca:      ca,

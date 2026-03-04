@@ -14,19 +14,19 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // Handler manages a WebSocket connection relay between client and upstream.
 // It is not a ProtocolHandler — it is invoked from the HTTP handler when
 // an Upgrade: websocket request is detected.
 type Handler struct {
-	store  session.SessionWriter
+	store  flow.FlowWriter
 	logger *slog.Logger
 }
 
 // NewHandler creates a new WebSocket relay handler.
-func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
+func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,
@@ -35,7 +35,7 @@ func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
 
 // HandleUpgrade processes a WebSocket upgrade request. It forwards the upgrade
 // to the upstream server, validates the 101 response, then starts a bidirectional
-// frame relay with session recording.
+// frame relay with flow recording.
 //
 // Parameters:
 //   - ctx: context for cancellation
@@ -48,52 +48,52 @@ func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
 //   - connID: connection identifier for log correlation
 //   - clientAddr: client's remote address
 //   - connInfo: optional connection metadata (TLS info etc.)
-func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, upgradeReq *gohttp.Request, upgradeResp *gohttp.Response, connID, clientAddr string, connInfo *session.ConnectionInfo) error {
+func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, upgradeReq *gohttp.Request, upgradeResp *gohttp.Response, connID, clientAddr string, connInfo *flow.ConnectionInfo) error {
 	start := time.Now()
 
-	// Create the WebSocket session record.
-	sess := &session.Session{
+	// Create the WebSocket flow record.
+	fl := &flow.Flow{
 		ConnID:      connID,
 		Protocol:    "WebSocket",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "active",
 		Timestamp:   start,
 		ConnInfo:    connInfo,
 	}
 
 	if h.store != nil {
-		if err := h.store.SaveSession(ctx, sess); err != nil {
-			h.logger.Error("websocket session save failed", "error", err)
-			return fmt.Errorf("save websocket session: %w", err)
+		if err := h.store.SaveFlow(ctx, fl); err != nil {
+			h.logger.Error("websocket flow save failed", "error", err)
+			return fmt.Errorf("save websocket flow: %w", err)
 		}
 	}
 
-	h.logger.Info("websocket session started",
-		"session_id", sess.ID,
+	h.logger.Info("websocket flow started",
+		"flow_id", fl.ID,
 		"conn_id", connID,
 		"url", upgradeReq.URL.String(),
 	)
 
 	// Run bidirectional frame relay.
-	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, sess.ID, start)
+	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start)
 
-	// Update session state to complete.
+	// Update flow state to complete.
 	duration := time.Since(start)
 	if h.store != nil {
 		state := "complete"
 		if err != nil && ctx.Err() == nil {
 			state = "error"
 		}
-		if updateErr := h.store.UpdateSession(ctx, sess.ID, session.SessionUpdate{
+		if updateErr := h.store.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{
 			State:    state,
 			Duration: duration,
 		}); updateErr != nil {
-			h.logger.Error("websocket session update failed", "session_id", sess.ID, "error", updateErr)
+			h.logger.Error("websocket flow update failed", "flow_id", fl.ID, "error", updateErr)
 		}
 	}
 
-	h.logger.Info("websocket session ended",
-		"session_id", sess.ID,
+	h.logger.Info("websocket flow ended",
+		"flow_id", fl.ID,
 		"duration_ms", duration.Milliseconds(),
 	)
 
@@ -102,9 +102,9 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 
 // relayFrames runs two goroutines to relay WebSocket frames bidirectionally
 // between the client and upstream server. Each frame is recorded to the
-// session store. The relay stops when a Close frame is received, a connection
+// flow store. The relay stops when a Close frame is received, a connection
 // error occurs, or the context is cancelled.
-func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, sessionID string, start time.Time) error {
+func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -131,7 +131,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, clientReader, upstreamConn, sessionID, "send", &seq, start)
+		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start)
 		errCh <- err
 		cancel()
 	}()
@@ -140,7 +140,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, upstreamReader, clientConn, sessionID, "receive", &seq, start)
+		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start)
 		errCh <- err
 		cancel()
 	}()
@@ -161,7 +161,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 // relayDirection reads frames from src, records them, and writes them to dst.
 // It handles fragmentation by assembling continuation frames into complete messages.
 // Fragment accumulation is capped at config.MaxWebSocketMessageSize to prevent OOM (CWE-400).
-func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, sessionID, direction string, seq *atomic.Int64, start time.Time) error {
+func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time) error {
 	// Fragment assembly state.
 	var fragmentBuf []byte
 	var fragmentOpcode byte
@@ -205,7 +205,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 
 		// Handle control frames (these can appear between data frame fragments).
 		if frame.IsControl() {
-			h.recordControlFrame(ctx, frame, sessionID, direction, seq, start)
+			h.recordControlFrame(ctx, frame, flowID, direction, seq, start)
 
 			// Close frame: signal end of relay.
 			if frame.Opcode == OpcodeClose {
@@ -221,13 +221,13 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 				// Protocol violation: new data frame while a fragmented message is pending.
 				// Record what we have and start fresh.
 				h.logger.Warn("websocket protocol violation: new data frame while fragment pending",
-					"session_id", sessionID, "direction", direction)
+					"flow_id", flowID, "direction", direction)
 				fragmentBuf = nil
 				inFragment = false
 			}
 			if frame.Fin {
 				// Single unfragmented message.
-				h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, sessionID, direction, seq, start)
+				h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, flowID, direction, seq, start)
 			} else {
 				// First fragment: start accumulating (cap checked on continuation).
 				fragmentOpcode = frame.Opcode
@@ -239,12 +239,12 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			// Continuation frame.
 			if !inFragment {
 				h.logger.Warn("websocket protocol violation: continuation frame without initial fragment",
-					"session_id", sessionID, "direction", direction)
+					"flow_id", flowID, "direction", direction)
 				continue
 			}
 			if int64(len(fragmentBuf))+int64(len(frame.Payload)) > config.MaxWebSocketMessageSize {
 				h.logger.Warn("websocket message size limit exceeded, closing connection",
-					"session_id", sessionID, "direction", direction,
+					"flow_id", flowID, "direction", direction,
 					"accumulated", len(fragmentBuf), "incoming", len(frame.Payload),
 					"limit", config.MaxWebSocketMessageSize)
 				// Discard fragment buffer and send Close frame (1009 = message too big).
@@ -255,14 +255,14 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 				closePayload[1] = 0xF1 // 1009
 				closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Payload: closePayload}
 				if err := WriteFrame(dst, closeFrame); err != nil {
-					h.logger.Debug("failed to send close frame for oversized message", "session_id", sessionID, "error", err)
+					h.logger.Debug("failed to send close frame for oversized message", "flow_id", flowID, "error", err)
 				}
 				return fmt.Errorf("fragmented message exceeded config.MaxWebSocketMessageSize (%d bytes)", config.MaxWebSocketMessageSize)
 			}
 			fragmentBuf = append(fragmentBuf, frame.Payload...)
 			if frame.Fin {
 				// Final fragment: record the assembled message.
-				h.recordDataMessage(ctx, fragmentOpcode, fragmentBuf, frame.Masked, sessionID, direction, seq, start)
+				h.recordDataMessage(ctx, fragmentOpcode, fragmentBuf, frame.Masked, flowID, direction, seq, start)
 				fragmentBuf = nil
 				inFragment = false
 			}
@@ -271,16 +271,16 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 }
 
 // recordDataMessage records a complete WebSocket data message (text or binary)
-// to the session store.
-func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, sessionID, direction string, seq *atomic.Int64, start time.Time) {
+// to the flow store.
+func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, flowID, direction string, seq *atomic.Int64, start time.Time) {
 	if h.store == nil {
 		return
 	}
 
 	msgSeq := int(seq.Add(1) - 1)
 
-	msg := &session.Message{
-		SessionID: sessionID,
+	msg := &flow.Message{
+		FlowID: flowID,
 		Sequence:  msgSeq,
 		Direction: direction,
 		Timestamp: time.Now(),
@@ -305,7 +305,7 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 
 	if err := h.store.AppendMessage(ctx, msg); err != nil {
 		h.logger.Error("websocket message save failed",
-			"session_id", sessionID,
+			"flow_id", flowID,
 			"direction", direction,
 			"sequence", msgSeq,
 			"error", err,
@@ -314,16 +314,16 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 }
 
 // recordControlFrame records a WebSocket control frame (Close, Ping, Pong)
-// to the session store.
-func (h *Handler) recordControlFrame(ctx context.Context, frame *Frame, sessionID, direction string, seq *atomic.Int64, start time.Time) {
+// to the flow store.
+func (h *Handler) recordControlFrame(ctx context.Context, frame *Frame, flowID, direction string, seq *atomic.Int64, start time.Time) {
 	if h.store == nil {
 		return
 	}
 
 	msgSeq := int(seq.Add(1) - 1)
 
-	msg := &session.Message{
-		SessionID: sessionID,
+	msg := &flow.Message{
+		FlowID: flowID,
 		Sequence:  msgSeq,
 		Direction: direction,
 		Timestamp: time.Now(),
@@ -342,7 +342,7 @@ func (h *Handler) recordControlFrame(ctx context.Context, frame *Frame, sessionI
 
 	if err := h.store.AppendMessage(ctx, msg); err != nil {
 		h.logger.Error("websocket control frame save failed",
-			"session_id", sessionID,
+			"flow_id", flowID,
 			"direction", direction,
 			"sequence", msgSeq,
 			"opcode", OpcodeString(frame.Opcode),

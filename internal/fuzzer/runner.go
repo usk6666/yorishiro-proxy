@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // maxConcurrency is the upper bound on concurrent workers per fuzz job.
@@ -109,18 +109,18 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 		return nil, fmt.Errorf("invalid fuzz config: %w", err)
 	}
 
-	// Fetch the template session and validate it exists.
-	sess, err := r.engine.sessionFetcher.GetSession(ctx, cfg.SessionID)
+	// Fetch the template flow and validate it exists.
+	fl, err := r.engine.flowFetcher.GetFlow(ctx, cfg.FlowID)
 	if err != nil {
-		return nil, fmt.Errorf("get template session: %w", err)
+		return nil, fmt.Errorf("get template flow: %w", err)
 	}
 
-	sendMsgs, err := r.engine.sessionFetcher.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := r.engine.flowFetcher.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, fmt.Errorf("template session %s has no send messages", cfg.SessionID)
+		return nil, fmt.Errorf("template flow %s has no send messages", cfg.FlowID)
 	}
 	sendMsg := sendMsgs[0]
 
@@ -146,9 +146,9 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 
 	// Create fuzz job in DB.
 	now := time.Now()
-	job := &session.FuzzJob{
+	job := &flow.FuzzJob{
 		ID:        uuid.New().String(),
-		SessionID: cfg.SessionID,
+		FlowID: cfg.FlowID,
 		Config:    string(configJSON),
 		Status:    string(StatusRunning),
 		Tag:       cfg.Tag,
@@ -195,7 +195,7 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 	}
 
 	// Launch the background execution.
-	go r.execute(jobCtx, job, ctrl, iter, baseData, cfg, sess.Protocol, timeout, concurrency, monitor)
+	go r.execute(jobCtx, job, ctrl, iter, baseData, cfg, fl.Protocol, timeout, concurrency, monitor)
 
 	return &AsyncResult{
 		FuzzID:        job.ID,
@@ -210,7 +210,7 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 // and stop conditions. It updates the job status in the DB upon completion.
 func (r *Runner) execute(
 	ctx context.Context,
-	job *session.FuzzJob,
+	job *flow.FuzzJob,
 	ctrl *JobController,
 	iter Iterator,
 	baseData *RequestData,
@@ -295,7 +295,7 @@ func (r *Runner) execute(
 				}
 
 				// Execute with retries.
-				var result *session.FuzzResult
+				var result *flow.FuzzResult
 				attempts := 1 + cfg.MaxRetries
 				for attempt := 0; attempt < attempts; attempt++ {
 					result = r.engine.executeFuzzCaseWithHooks(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID, cfg.Hooks, hookState, cfg.HTTPDoer)
@@ -398,9 +398,9 @@ func (r *Runner) execute(
 	// Update the job in the DB with final status.
 	// Create a new struct to avoid data races with concurrent readers.
 	completedAt := time.Now()
-	finalJob := &session.FuzzJob{
+	finalJob := &flow.FuzzJob{
 		ID:             job.ID,
-		SessionID:      job.SessionID,
+		FlowID:      job.FlowID,
 		Config:         job.Config,
 		Status:         string(finalStatus),
 		Tag:            job.Tag,
@@ -418,11 +418,11 @@ func (r *Runner) execute(
 }
 
 // updateJobProgress updates the job's completed and error counts in the DB.
-func (r *Runner) updateJobProgress(ctx context.Context, job *session.FuzzJob, completed, errors int) {
+func (r *Runner) updateJobProgress(ctx context.Context, job *flow.FuzzJob, completed, errors int) {
 	// Create a shallow copy to avoid data races.
-	update := &session.FuzzJob{
+	update := &flow.FuzzJob{
 		ID:             job.ID,
-		SessionID:      job.SessionID,
+		FlowID:      job.FlowID,
 		Config:         job.Config,
 		Status:         string(StatusRunning),
 		Tag:            job.Tag,

@@ -213,7 +213,7 @@ export class McpClient {
     return this.callTool<ConfigureResult>("configure", params as unknown as Record<string, unknown>);
   }
 
-  /** Query proxy data (sessions, status, config, etc.). */
+  /** Query proxy data (flows, status, config, etc.). */
   async query<R extends QueryResource>(
     params: QueryParams & { resource: R },
   ): Promise<QueryResultMap[R]> {

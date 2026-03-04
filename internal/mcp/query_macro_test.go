@@ -6,11 +6,11 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // setupMacroQueryTestSession creates an MCP client session for macro query tests.
-func setupMacroQueryTestSession(t *testing.T, store session.Store) *gomcp.ClientSession {
+func setupMacroQueryTestSession(t *testing.T, store flow.Store) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -93,10 +93,10 @@ func TestQuery_Macros_WithEntries(t *testing.T) {
 	ctx := context.Background()
 
 	// Define macros directly in the store.
-	if err := store.SaveMacro(ctx, "alpha", "Alpha macro", `{"steps":[{"id":"s1","session_id":"sess-1"}]}`); err != nil {
+	if err := store.SaveMacro(ctx, "alpha", "Alpha macro", `{"steps":[{"id":"s1","flow_id":"sess-1"}]}`); err != nil {
 		t.Fatalf("SaveMacro: %v", err)
 	}
-	if err := store.SaveMacro(ctx, "beta", "Beta macro", `{"steps":[{"id":"s1","session_id":"sess-1"},{"id":"s2","session_id":"sess-2"}]}`); err != nil {
+	if err := store.SaveMacro(ctx, "beta", "Beta macro", `{"steps":[{"id":"s1","flow_id":"sess-1"},{"id":"s2","flow_id":"sess-2"}]}`); err != nil {
 		t.Fatalf("SaveMacro: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestQuery_Macro_Success(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	configJSON := `{"steps":[{"id":"login","session_id":"sess-1","override_headers":{"Cookie":"test"},"extract":[{"name":"token","from":"response","source":"header","header_name":"X-Token"}]},{"id":"get-csrf","session_id":"sess-2","when":{"step":"login","status_code":200}}],"initial_vars":{"password":"admin123"},"timeout_ms":60000}`
+	configJSON := `{"steps":[{"id":"login","flow_id":"sess-1","override_headers":{"Cookie":"test"},"extract":[{"name":"token","from":"response","source":"header","header_name":"X-Token"}]},{"id":"get-csrf","flow_id":"sess-2","when":{"step":"login","status_code":200}}],"initial_vars":{"password":"admin123"},"timeout_ms":60000}`
 	if err := store.SaveMacro(ctx, "auth-flow", "Full auth flow", configJSON); err != nil {
 		t.Fatalf("SaveMacro: %v", err)
 	}
@@ -179,8 +179,8 @@ func TestQuery_Macro_Success(t *testing.T) {
 	if out.Steps[0].ID != "login" {
 		t.Errorf("Steps[0].ID = %q, want %q", out.Steps[0].ID, "login")
 	}
-	if out.Steps[0].SessionID != "sess-1" {
-		t.Errorf("Steps[0].SessionID = %q, want %q", out.Steps[0].SessionID, "sess-1")
+	if out.Steps[0].FlowID != "sess-1" {
+		t.Errorf("Steps[0].FlowID = %q, want %q", out.Steps[0].FlowID, "sess-1")
 	}
 	if len(out.Steps[0].Extract) != 1 {
 		t.Errorf("Steps[0].Extract count = %d, want 1", len(out.Steps[0].Extract))

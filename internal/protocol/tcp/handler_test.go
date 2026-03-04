@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -19,9 +19,9 @@ import (
 
 type mockStore struct {
 	mu       sync.Mutex
-	sessions []*session.Session
+	flows []*flow.Flow
 	updates  []sessionUpdateCall
-	messages []*session.Message
+	messages []*flow.Message
 
 	saveSessionErr   error
 	updateSessionErr error
@@ -30,23 +30,23 @@ type mockStore struct {
 
 type sessionUpdateCall struct {
 	ID     string
-	Update session.SessionUpdate
+	Update flow.FlowUpdate
 }
 
-func (m *mockStore) SaveSession(_ context.Context, s *session.Session) error {
+func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.saveSessionErr != nil {
 		return m.saveSessionErr
 	}
 	if s.ID == "" {
-		s.ID = fmt.Sprintf("sess-%d", len(m.sessions)+1)
+		s.ID = fmt.Sprintf("sess-%d", len(m.flows)+1)
 	}
-	m.sessions = append(m.sessions, s)
+	m.flows = append(m.flows, s)
 	return nil
 }
 
-func (m *mockStore) UpdateSession(_ context.Context, id string, update session.SessionUpdate) error {
+func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.updateSessionErr != nil {
@@ -56,31 +56,31 @@ func (m *mockStore) UpdateSession(_ context.Context, id string, update session.S
 	return nil
 }
 
-func (m *mockStore) GetSession(_ context.Context, _ string) (*session.Session, error) {
+func (m *mockStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) {
 	return nil, nil
 }
 
-func (m *mockStore) ListSessions(_ context.Context, _ session.ListOptions) ([]*session.Session, error) {
+func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
 	return nil, nil
 }
 
-func (m *mockStore) CountSessions(_ context.Context, _ session.ListOptions) (int, error) {
+func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
 	return 0, nil
 }
 
-func (m *mockStore) DeleteSession(_ context.Context, _ string) error {
+func (m *mockStore) DeleteFlow(_ context.Context, _ string) error {
 	return nil
 }
 
-func (m *mockStore) DeleteAllSessions(_ context.Context) (int64, error) {
+func (m *mockStore) DeleteAllFlows(_ context.Context) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) DeleteSessionsByProtocol(_ context.Context, _ string) (int64, error) {
+func (m *mockStore) DeleteFlowsByProtocol(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (m *mockStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
 
@@ -88,7 +88,7 @@ func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error
 	return 0, nil
 }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *session.Message) error {
+func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.appendMessageErr != nil {
@@ -98,7 +98,7 @@ func (m *mockStore) AppendMessage(_ context.Context, msg *session.Message) error
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, _ string, _ session.MessageListOptions) ([]*session.Message, error) {
+func (m *mockStore) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
 	return nil, nil
 }
 
@@ -110,11 +110,11 @@ func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error {
 	return nil
 }
 
-func (m *mockStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
+func (m *mockStore) GetMacro(_ context.Context, _ string) (*flow.MacroRecord, error) {
 	return nil, nil
 }
 
-func (m *mockStore) ListMacros(_ context.Context) ([]*session.MacroRecord, error) {
+func (m *mockStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) {
 	return nil, nil
 }
 
@@ -122,11 +122,11 @@ func (m *mockStore) DeleteMacro(_ context.Context, _ string) error {
 	return nil
 }
 
-func (m *mockStore) getSessions() []*session.Session {
+func (m *mockStore) getFlows() []*flow.Flow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*session.Session, len(m.sessions))
-	copy(out, m.sessions)
+	out := make([]*flow.Flow, len(m.flows))
+	copy(out, m.flows)
 	return out
 }
 
@@ -138,10 +138,10 @@ func (m *mockStore) getUpdates() []sessionUpdateCall {
 	return out
 }
 
-func (m *mockStore) getMessages() []*session.Message {
+func (m *mockStore) getMessages() []*flow.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*session.Message, len(m.messages))
+	out := make([]*flow.Message, len(m.messages))
 	copy(out, m.messages)
 	return out
 }
@@ -267,33 +267,33 @@ func TestHandler_Handle_BidirectionalRelay(t *testing.T) {
 		t.Errorf("Handle() returned error: %v", err)
 	}
 
-	// Verify session was recorded.
-	sessions := store.getSessions()
+	// Verify flow was recorded.
+	sessions := store.getFlows()
 	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
+		t.Fatalf("expected 1 flow, got %d", len(sessions))
 	}
 
-	sess := sessions[0]
-	if sess.Protocol != "TCP" {
-		t.Errorf("session protocol = %q, want %q", sess.Protocol, "TCP")
+	fl := sessions[0]
+	if fl.Protocol != "TCP" {
+		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "TCP")
 	}
-	if sess.SessionType != "bidirectional" {
-		t.Errorf("session type = %q, want %q", sess.SessionType, "bidirectional")
+	if fl.FlowType != "bidirectional" {
+		t.Errorf("flow type = %q, want %q", fl.FlowType, "bidirectional")
 	}
-	if sess.ConnID != "test-conn-01" {
-		t.Errorf("session connID = %q, want %q", sess.ConnID, "test-conn-01")
+	if fl.ConnID != "test-conn-01" {
+		t.Errorf("flow connID = %q, want %q", fl.ConnID, "test-conn-01")
 	}
-	if sess.ConnInfo == nil {
-		t.Fatal("session ConnInfo is nil")
+	if fl.ConnInfo == nil {
+		t.Fatal("flow ConnInfo is nil")
 	}
-	if sess.ConnInfo.ClientAddr != "192.168.1.100:54321" {
-		t.Errorf("ConnInfo.ClientAddr = %q, want %q", sess.ConnInfo.ClientAddr, "192.168.1.100:54321")
+	if fl.ConnInfo.ClientAddr != "192.168.1.100:54321" {
+		t.Errorf("ConnInfo.ClientAddr = %q, want %q", fl.ConnInfo.ClientAddr, "192.168.1.100:54321")
 	}
-	if sess.ConnInfo.ServerAddr != echoAddr {
-		t.Errorf("ConnInfo.ServerAddr = %q, want %q", sess.ConnInfo.ServerAddr, echoAddr)
+	if fl.ConnInfo.ServerAddr != echoAddr {
+		t.Errorf("ConnInfo.ServerAddr = %q, want %q", fl.ConnInfo.ServerAddr, echoAddr)
 	}
 
-	// Verify session was updated to complete.
+	// Verify flow was updated to complete.
 	updates := store.getUpdates()
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 update, got %d", len(updates))
@@ -329,8 +329,8 @@ func TestHandler_Handle_BidirectionalRelay(t *testing.T) {
 				t.Errorf("receive message raw_bytes = %q, want %q", msg.RawBytes, testData)
 			}
 		}
-		if msg.SessionID != sess.ID {
-			t.Errorf("message session_id = %q, want %q", msg.SessionID, sess.ID)
+		if msg.FlowID != fl.ID {
+			t.Errorf("message session_id = %q, want %q", msg.FlowID, fl.ID)
 		}
 	}
 	if !hasSend {
@@ -363,8 +363,8 @@ func TestHandler_Handle_NoForwardConfigured(t *testing.T) {
 		t.Errorf("Handle() returned error: %v, want nil (graceful close)", err)
 	}
 
-	// No session should be saved since there's no forward target.
-	sessions := store.getSessions()
+	// No flow should be saved since there's no forward target.
+	sessions := store.getFlows()
 	if len(sessions) != 0 {
 		t.Errorf("expected 0 sessions, got %d", len(sessions))
 	}
@@ -436,7 +436,7 @@ func TestHandler_Handle_ContextCancellation(t *testing.T) {
 		t.Errorf("Handle() returned %v, want nil or context.Canceled", err)
 	}
 
-	// Session should be updated even on cancellation.
+	// Flow should be updated even on cancellation.
 	updates := store.getUpdates()
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 update, got %d", len(updates))
@@ -620,7 +620,7 @@ func TestNewHandler_NilForwards(t *testing.T) {
 func TestRelay_Record_NilStore(t *testing.T) {
 	r := &relay{
 		store:     nil,
-		sessionID: "test-session",
+		flowID: "test-session",
 		logger:    testutil.DiscardLogger(),
 	}
 
@@ -632,7 +632,7 @@ func TestRelay_SequenceNumbers(t *testing.T) {
 	store := &mockStore{}
 	r := &relay{
 		store:     store,
-		sessionID: "test-session",
+		flowID: "test-session",
 		logger:    testutil.DiscardLogger(),
 	}
 
@@ -657,7 +657,7 @@ func TestRelay_DataIsolation(t *testing.T) {
 	store := &mockStore{}
 	r := &relay{
 		store:     store,
-		sessionID: "test-session",
+		flowID: "test-session",
 		logger:    testutil.DiscardLogger(),
 	}
 

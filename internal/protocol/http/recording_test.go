@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -36,7 +36,7 @@ func TestRecordHTTPSession_Basic(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		duration:   duration,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234", ServerAddr: "93.184.216.34:80"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234", ServerAddr: "93.184.216.34:80"},
 		req:        req,
 		reqBody:    []byte("request body"),
 		resp:       resp,
@@ -45,7 +45,7 @@ func TestRecordHTTPSession_Basic(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
@@ -129,7 +129,7 @@ func TestRecordHTTPSession_WithReqURL(t *testing.T) {
 		protocol: "HTTPS",
 		start:    time.Now(),
 		duration: time.Millisecond,
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqURL:   reqURL,
 		reqBody:  []byte("body"),
@@ -168,7 +168,7 @@ func TestRecordHTTPSession_Tags(t *testing.T) {
 		start:    time.Now(),
 		duration: time.Millisecond,
 		tags:     tags,
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		resp:     resp,
 		respBody: []byte("ok"),
@@ -202,7 +202,7 @@ func TestRecordHTTPSession_TLSConnInfo(t *testing.T) {
 		protocol: "HTTPS",
 		start:    time.Now(),
 		duration: time.Millisecond,
-		connInfo: &session.ConnectionInfo{
+		connInfo: &flow.ConnectionInfo{
 			ClientAddr:           "127.0.0.1:1234",
 			ServerAddr:           "93.184.216.34:443",
 			TLSVersion:           "TLS 1.3",

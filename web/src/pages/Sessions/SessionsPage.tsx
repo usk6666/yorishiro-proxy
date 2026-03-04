@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
-import type { QueryFilter, SessionEntry } from "../../lib/mcp/types.js";
+import type { QueryFilter, FlowEntry } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Input } from "../../components/ui/Input.js";
@@ -30,7 +30,7 @@ const POLL_INTERVALS = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Return a shortened session ID for display (first 8 characters). */
+/** Return a shortened flow ID for display (first 8 characters). */
 function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
@@ -158,15 +158,15 @@ export function SessionsPage() {
     return Object.keys(f).length > 0 ? f : undefined;
   }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange, selectedState]);
 
-  // --- Query sessions ---
-  const { data, loading, error, refetch } = useQuery("sessions", {
+  // --- Query flows ---
+  const { data, loading, error, refetch } = useQuery("flows", {
     pollInterval,
     filter,
     limit: pageSize,
     offset,
   });
 
-  const sessions = data?.sessions ?? [];
+  const sessions = data?.flows ?? [];
   const total = data?.total ?? 0;
 
   // Trigger refetch when filter/pagination options change.
@@ -234,8 +234,8 @@ export function SessionsPage() {
 
   // --- Row click → navigate to detail ---
   const handleRowClick = useCallback(
-    (session: SessionEntry) => {
-      navigate(`/sessions/${session.id}`);
+    (session: FlowEntry) => {
+      navigate(`/flows/${session.id}`);
     },
     [navigate],
   );
@@ -263,42 +263,42 @@ export function SessionsPage() {
     });
   }, [sessions]);
 
-  // --- Delete sessions ---
+  // --- Delete flows ---
   const handleDeleteSelected = useCallback(async () => {
     if (selectedIds.size === 0) return;
 
     const count = selectedIds.size;
     const confirmed = window.confirm(
-      `Are you sure you want to delete ${count} session(s)? This action cannot be undone.`,
+      `Are you sure you want to delete ${count} flow(s)? This action cannot be undone.`,
     );
     if (!confirmed) return;
 
     try {
       for (const id of selectedIds) {
         await execute({
-          action: "delete_sessions",
-          params: { session_id: id, confirm: true },
+          action: "delete_flows",
+          params: { flow_id: id, confirm: true },
         });
       }
-      addToast({ type: "success", message: `Deleted ${count} session(s)` });
+      addToast({ type: "success", message: `Deleted ${count} flow(s)` });
       setSelectedIds(new Set());
       await refetch();
     } catch (err) {
       addToast({
         type: "error",
-        message: `Failed to delete sessions: ${err instanceof Error ? err.message : String(err)}`,
+        message: `Failed to delete flows: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }, [selectedIds, execute, addToast, refetch]);
 
-  // --- Export sessions ---
+  // --- Export flows ---
   const handleExport = useCallback(async () => {
     try {
       await execute({
-        action: "export_sessions",
+        action: "export_flows",
         params: { format: "jsonl" },
       });
-      addToast({ type: "success", message: "Sessions exported (JSONL)" });
+      addToast({ type: "success", message: "Flows exported (JSONL)" });
     } catch (err) {
       addToast({
         type: "error",
@@ -340,12 +340,12 @@ export function SessionsPage() {
     <div className="page sessions-page">
       <div className="sessions-header">
         <div className="sessions-header-info">
-          <h1 className="page-title">Sessions</h1>
+          <h1 className="page-title">Flows</h1>
           <p className="page-description">
-            Captured HTTP/HTTPS, WebSocket, gRPC, and TCP sessions.
+            Captured HTTP/HTTPS, WebSocket, gRPC, and TCP flows.
           </p>
           {total > 0 && (
-            <span className="sessions-total">{total} total sessions</span>
+            <span className="sessions-total">{total} total flows</span>
           )}
         </div>
       </div>
@@ -499,7 +499,7 @@ export function SessionsPage() {
       {/* Error state */}
       {error && (
         <div className="sessions-error">
-          Error loading sessions: {error.message}
+          Error loading flows: {error.message}
         </div>
       )}
 
@@ -513,12 +513,12 @@ export function SessionsPage() {
       {/* Empty state */}
       {!loading && !error && data && sessions.length === 0 && (
         <div className="sessions-empty">
-          <span>No sessions captured yet.</span>
-          <span>Start the proxy and send some traffic to see sessions here.</span>
+          <span>No flows captured yet.</span>
+          <span>Start the proxy and send some traffic to see flows here.</span>
         </div>
       )}
 
-      {/* Session table */}
+      {/* Flow table */}
       {sessions.length > 0 && (
         <>
           <div className="sessions-table-wrapper">

@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -22,21 +22,21 @@ func newTestCleaner(t *testing.T, cfg CleanerConfig) (*Cleaner, *SQLiteStore) {
 	return cleaner, store
 }
 
-// saveCleanerSession is a helper that saves a minimal session for cleaner tests.
+// saveCleanerSession is a helper that saves a minimal flow for cleaner tests.
 func saveCleanerSession(t *testing.T, store *SQLiteStore, ts time.Time, reqURL string) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &Session{
+	fl := &Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: ts,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	msg := &Message{
-		SessionID: sess.ID,
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -66,18 +66,18 @@ func TestCleaner_RunOnce_MaxAge(t *testing.T) {
 		t.Errorf("RunOnce deleted %d, want 1", n)
 	}
 
-	remaining, err := store.ListSessions(ctx, ListOptions{})
+	remaining, err := store.ListFlows(ctx, ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 1 {
-		t.Fatalf("expected 1 remaining session, got %d", len(remaining))
+		t.Fatalf("expected 1 remaining flow, got %d", len(remaining))
 	}
 }
 
 func TestCleaner_RunOnce_MaxSessions(t *testing.T) {
 	cleaner, store := newTestCleaner(t, CleanerConfig{
-		MaxSessions: 2,
+		MaxFlows: 2,
 	})
 	ctx := context.Background()
 
@@ -94,9 +94,9 @@ func TestCleaner_RunOnce_MaxSessions(t *testing.T) {
 		t.Errorf("RunOnce deleted %d, want 3", n)
 	}
 
-	remaining, err := store.ListSessions(ctx, ListOptions{})
+	remaining, err := store.ListFlows(ctx, ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 2 {
 		t.Errorf("expected 2 remaining sessions, got %d", len(remaining))
@@ -120,7 +120,7 @@ func TestCleaner_RunOnce_Disabled(t *testing.T) {
 
 func TestCleaner_Start_RunsAtStartup(t *testing.T) {
 	cleaner, store := newTestCleaner(t, CleanerConfig{
-		MaxSessions: 1,
+		MaxFlows: 1,
 		Interval:    time.Hour,
 	})
 	ctx := context.Background()
@@ -134,9 +134,9 @@ func TestCleaner_Start_RunsAtStartup(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cleaner.Stop()
 
-	remaining, err := store.ListSessions(ctx, ListOptions{})
+	remaining, err := store.ListFlows(ctx, ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 1 {
 		t.Errorf("expected 1 remaining session after startup cleanup, got %d", len(remaining))
@@ -156,9 +156,9 @@ func TestCleaner_Start_Periodic(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	cleaner.Stop()
 
-	remaining, err := store.ListSessions(ctx, ListOptions{})
+	remaining, err := store.ListFlows(ctx, ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 0 {
 		t.Errorf("expected 0 remaining sessions after periodic cleanup, got %d", len(remaining))
@@ -172,9 +172,9 @@ func TestCleanerConfig_Enabled(t *testing.T) {
 		want   bool
 	}{
 		{"both zero", CleanerConfig{}, false},
-		{"max sessions only", CleanerConfig{MaxSessions: 100}, true},
+		{"max sessions only", CleanerConfig{MaxFlows: 100}, true},
 		{"max age only", CleanerConfig{MaxAge: time.Hour}, true},
-		{"both set", CleanerConfig{MaxSessions: 100, MaxAge: time.Hour}, true},
+		{"both set", CleanerConfig{MaxFlows: 100, MaxAge: time.Hour}, true},
 	}
 
 	for _, tt := range tests {

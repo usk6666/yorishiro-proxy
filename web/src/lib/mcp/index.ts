@@ -5,7 +5,7 @@
  * - proxy_start: Start proxy listeners
  * - proxy_stop: Stop proxy listeners
  * - configure: Configure runtime proxy settings
- * - query: Query sessions, status, config, and other resources
+ * - query: Query flows, status, config, and other resources
  * - execute: Execute actions (resend, fuzz, delete, etc.)
  */
 
@@ -67,10 +67,10 @@ export type {
   QueryResource,
   QueryFilter,
   QueryParams,
-  SessionEntry,
-  SessionsResult,
+  FlowEntry,
+  FlowsResult,
   MessageEntry,
-  SessionDetailResult,
+  FlowDetailResult,
   MessagesResult,
   ListenerStatusEntry,
   StatusResult,

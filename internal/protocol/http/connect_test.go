@@ -18,7 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -41,27 +41,27 @@ func newTestIssuer(t *testing.T) (*cert.Issuer, *x509.CertPool) {
 	return cert.NewIssuer(ca), pool
 }
 
-// mockStore is a thread-safe minimal in-memory session store for testing.
+// mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
 	mu       sync.Mutex
-	sessions []*session.Session
-	messages []*session.Message
+	flows []*flow.Flow
+	messages []*flow.Message
 }
 
-func (m *mockStore) SaveSession(_ context.Context, s *session.Session) error {
+func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s.ID == "" {
 		s.ID = uuid.New().String()
 	}
-	m.sessions = append(m.sessions, s)
+	m.flows = append(m.flows, s)
 	return nil
 }
 
-func (m *mockStore) UpdateSession(_ context.Context, id string, update session.SessionUpdate) error {
+func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, s := range m.sessions {
+	for _, s := range m.flows {
 		if s.ID == id {
 			if update.State != "" {
 				s.State = update.State
@@ -74,13 +74,13 @@ func (m *mockStore) UpdateSession(_ context.Context, id string, update session.S
 			}
 			if update.ServerAddr != "" {
 				if s.ConnInfo == nil {
-					s.ConnInfo = &session.ConnectionInfo{}
+					s.ConnInfo = &flow.ConnectionInfo{}
 				}
 				s.ConnInfo.ServerAddr = update.ServerAddr
 			}
 			if update.TLSServerCertSubject != "" {
 				if s.ConnInfo == nil {
-					s.ConnInfo = &session.ConnectionInfo{}
+					s.ConnInfo = &flow.ConnectionInfo{}
 				}
 				s.ConnInfo.TLSServerCertSubject = update.TLSServerCertSubject
 			}
@@ -90,10 +90,10 @@ func (m *mockStore) UpdateSession(_ context.Context, id string, update session.S
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) GetSession(_ context.Context, id string) (*session.Session, error) {
+func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, s := range m.sessions {
+	for _, s := range m.flows {
 		if s.ID == id {
 			return s, nil
 		}
@@ -101,46 +101,46 @@ func (m *mockStore) GetSession(_ context.Context, id string) (*session.Session, 
 	return nil, fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) ListSessions(_ context.Context, _ session.ListOptions) ([]*session.Session, error) {
+func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*session.Session, len(m.sessions))
-	copy(result, m.sessions)
+	result := make([]*flow.Flow, len(m.flows))
+	copy(result, m.flows)
 	return result, nil
 }
 
-func (m *mockStore) CountSessions(_ context.Context, _ session.ListOptions) (int, error) {
+func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.sessions), nil
+	return len(m.flows), nil
 }
 
-func (m *mockStore) DeleteSession(_ context.Context, id string) error {
+func (m *mockStore) DeleteFlow(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i, s := range m.sessions {
+	for i, s := range m.flows {
 		if s.ID == id {
-			m.sessions = append(m.sessions[:i], m.sessions[i+1:]...)
+			m.flows = append(m.flows[:i], m.flows[i+1:]...)
 			return nil
 		}
 	}
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) DeleteAllSessions(_ context.Context) (int64, error) {
+func (m *mockStore) DeleteAllFlows(_ context.Context) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := int64(len(m.sessions))
-	m.sessions = nil
+	n := int64(len(m.flows))
+	m.flows = nil
 	m.messages = nil
 	return n, nil
 }
 
-func (m *mockStore) DeleteSessionsByProtocol(_ context.Context, _ string) (int64, error) {
+func (m *mockStore) DeleteFlowsByProtocol(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (m *mockStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
 
@@ -148,19 +148,19 @@ func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error
 	return 0, nil
 }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *session.Message) error {
+func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, sessionID string, opts session.MessageListOptions) ([]*session.Message, error) {
+func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var result []*session.Message
+	var result []*flow.Message
 	for _, msg := range m.messages {
-		if msg.SessionID == sessionID {
+		if msg.FlowID == flowID {
 			if opts.Direction != "" && msg.Direction != opts.Direction {
 				continue
 			}
@@ -170,12 +170,12 @@ func (m *mockStore) GetMessages(_ context.Context, sessionID string, opts sessio
 	return result, nil
 }
 
-func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, error) {
+func (m *mockStore) CountMessages(_ context.Context, flowID string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
 	for _, msg := range m.messages {
-		if msg.SessionID == sessionID {
+		if msg.FlowID == flowID {
 			count++
 		}
 	}
@@ -183,28 +183,28 @@ func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, err
 }
 
 func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error { return nil }
-func (m *mockStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
+func (m *mockStore) GetMacro(_ context.Context, _ string) (*flow.MacroRecord, error) {
 	return nil, fmt.Errorf("not found")
 }
-func (m *mockStore) ListMacros(_ context.Context) ([]*session.MacroRecord, error) { return nil, nil }
+func (m *mockStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) { return nil, nil }
 func (m *mockStore) DeleteMacro(_ context.Context, _ string) error                { return nil }
 
-// mockEntry is a convenience view of a recorded session with its send/receive messages.
+// mockEntry is a convenience view of a recorded flow with its send/receive messages.
 type mockEntry struct {
-	Session *session.Session
-	Send    *session.Message
-	Receive *session.Message
+	Session *flow.Flow
+	Send    *flow.Message
+	Receive *flow.Message
 }
 
-// Entries returns a list of mockEntry views for all recorded sessions.
+// Entries returns a list of mockEntry views for all recorded flows.
 func (m *mockStore) Entries() []mockEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var entries []mockEntry
-	for _, s := range m.sessions {
+	for _, s := range m.flows {
 		e := mockEntry{Session: s}
 		for _, msg := range m.messages {
-			if msg.SessionID == s.ID {
+			if msg.FlowID == s.ID {
 				if msg.Direction == "send" && e.Send == nil {
 					e.Send = msg
 				}
@@ -512,13 +512,13 @@ func TestHandleCONNECT_SessionRecording(t *testing.T) {
 	io.ReadAll(httpsResp.Body)
 	httpsResp.Body.Close()
 
-	// Wait for session recording.
+	// Wait for flow recording.
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify session was recorded.
+	// Verify flow was recorded.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
@@ -739,13 +739,13 @@ func TestHandleCONNECT_RegularHTTPStillWorks(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "http-ok")
 	}
 
-	// Wait for session recording to complete in the handler goroutine.
+	// Wait for flow recording to complete in the handler goroutine.
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify session was recorded as HTTP/1.x, not HTTPS.
+	// Verify flow was recorded as HTTP/1.x, not HTTPS.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 	if entries[0].Session.Protocol != "HTTP/1.x" {
 		t.Errorf("protocol = %q, want %q", entries[0].Session.Protocol, "HTTP/1.x")
@@ -817,7 +817,7 @@ func TestHandleCONNECT_SessionURLHasHTTPSScheme(t *testing.T) {
 	io.ReadAll(httpsResp.Body)
 	httpsResp.Body.Close()
 
-	// Wait for session recording.
+	// Wait for flow recording.
 	time.Sleep(100 * time.Millisecond)
 
 	entries := store.Entries()

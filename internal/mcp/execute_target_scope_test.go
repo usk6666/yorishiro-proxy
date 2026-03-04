@@ -12,12 +12,12 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // setupExecuteWithTargetScope creates a Server with a configured TargetScope and
 // a permissive HTTP client for testing target scope enforcement in execute actions.
-func setupExecuteWithTargetScope(t *testing.T, store session.Store, ts *proxy.TargetScope) *gomcp.ClientSession {
+func setupExecuteWithTargetScope(t *testing.T, store flow.Store, ts *proxy.TargetScope) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -61,12 +61,12 @@ func TestExecuteResend_TargetScope_Allowed(t *testing.T) {
 	serverURL, _ := url.Parse(echoServer.URL + "/api/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -74,7 +74,7 @@ func TestExecuteResend_TargetScope_Allowed(t *testing.T) {
 			URL:       serverURL,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -93,7 +93,7 @@ func TestExecuteResend_TargetScope_Allowed(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -107,12 +107,12 @@ func TestExecuteResend_TargetScope_BlockedByAllowList(t *testing.T) {
 
 	u, _ := url.Parse("http://evil.com/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -120,7 +120,7 @@ func TestExecuteResend_TargetScope_BlockedByAllowList(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -139,7 +139,7 @@ func TestExecuteResend_TargetScope_BlockedByAllowList(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -160,12 +160,12 @@ func TestExecuteResend_TargetScope_BlockedByDenyRule(t *testing.T) {
 
 	u, _ := url.Parse("http://admin.internal/secret")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -173,7 +173,7 @@ func TestExecuteResend_TargetScope_BlockedByDenyRule(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -192,7 +192,7 @@ func TestExecuteResend_TargetScope_BlockedByDenyRule(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -215,12 +215,12 @@ func TestExecuteResend_TargetScope_OverrideURL_Blocked(t *testing.T) {
 	// Original URL is allowed.
 	serverURL, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -228,7 +228,7 @@ func TestExecuteResend_TargetScope_OverrideURL_Blocked(t *testing.T) {
 			URL:       serverURL,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -249,7 +249,7 @@ func TestExecuteResend_TargetScope_OverrideURL_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":   entry.Session.ID,
+			"flow_id":   entry.Session.ID,
 			"override_url": "http://evil.com/api/test",
 		},
 	})
@@ -269,12 +269,12 @@ func TestExecuteResend_TargetScope_OverrideHost_Blocked(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -282,7 +282,7 @@ func TestExecuteResend_TargetScope_OverrideHost_Blocked(t *testing.T) {
 			URL:       serverURL,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -303,7 +303,7 @@ func TestExecuteResend_TargetScope_OverrideHost_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":    entry.Session.ID,
+			"flow_id":    entry.Session.ID,
 			"override_host": "evil.com:8080",
 		},
 	})
@@ -323,12 +323,12 @@ func TestExecuteResend_TargetScope_NoRules_AllAllowed(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -336,7 +336,7 @@ func TestExecuteResend_TargetScope_NoRules_AllAllowed(t *testing.T) {
 			URL:       serverURL,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -352,7 +352,7 @@ func TestExecuteResend_TargetScope_NoRules_AllAllowed(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -374,12 +374,12 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 
 	serverURL, _ := url.Parse(redirectServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -387,7 +387,7 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 			URL:       serverURL,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -428,7 +428,7 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":       entry.Session.ID,
+			"flow_id":       entry.Session.ID,
 			"follow_redirects": followRedirects,
 		},
 	})
@@ -450,12 +450,12 @@ func TestExecuteResendRaw_TargetScope_Blocked(t *testing.T) {
 	u, _ := url.Parse("http://evil.com/test")
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: evil.com\r\n\r\n")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -464,7 +464,7 @@ func TestExecuteResendRaw_TargetScope_Blocked(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -483,7 +483,7 @@ func TestExecuteResendRaw_TargetScope_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -502,12 +502,12 @@ func TestExecuteResendRaw_TargetScope_TargetAddr_Blocked(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -516,7 +516,7 @@ func TestExecuteResendRaw_TargetScope_TargetAddr_Blocked(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -537,7 +537,7 @@ func TestExecuteResendRaw_TargetScope_TargetAddr_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": "evil.com:80",
 		},
 	})
@@ -561,12 +561,12 @@ func TestExecuteResendRaw_TargetScope_Allowed(t *testing.T) {
 	u, _ := url.Parse("http://" + addr + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -575,7 +575,7 @@ func TestExecuteResendRaw_TargetScope_Allowed(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -595,7 +595,7 @@ func TestExecuteResendRaw_TargetScope_Allowed(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -610,22 +610,22 @@ func TestExecuteTcpReplay_TargetScope_Blocked(t *testing.T) {
 	store := newTestStore(t)
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:    "TCP",
-			SessionType: "bidirectional",
+			FlowType: "bidirectional",
 			Timestamp:   time.Now(),
 			Duration:    100 * time.Millisecond,
-			ConnInfo: &session.ConnectionInfo{
+			ConnInfo: &flow.ConnectionInfo{
 				ServerAddr: "evil.com:1234",
 			},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
 			Body:      []byte("hello"),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  1,
 			Direction: "receive",
 			Timestamp: time.Now(),
@@ -643,7 +643,7 @@ func TestExecuteTcpReplay_TargetScope_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -660,22 +660,22 @@ func TestExecuteTcpReplay_TargetScope_TargetAddr_Blocked(t *testing.T) {
 	store := newTestStore(t)
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:    "TCP",
-			SessionType: "bidirectional",
+			FlowType: "bidirectional",
 			Timestamp:   time.Now(),
 			Duration:    100 * time.Millisecond,
-			ConnInfo: &session.ConnectionInfo{
+			ConnInfo: &flow.ConnectionInfo{
 				ServerAddr: "example.com:1234",
 			},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
 			Body:      []byte("hello"),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  1,
 			Direction: "receive",
 			Timestamp: time.Now(),
@@ -695,7 +695,7 @@ func TestExecuteTcpReplay_TargetScope_TargetAddr_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": "evil.com:1234",
 		},
 	})
@@ -715,24 +715,24 @@ func TestExecuteWebSocketResend_TargetScope_Blocked(t *testing.T) {
 	store := newTestStore(t)
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:    "WebSocket",
-			SessionType: "bidirectional",
+			FlowType: "bidirectional",
 			Timestamp:   time.Now(),
 			Duration:    100 * time.Millisecond,
-			ConnInfo: &session.ConnectionInfo{
+			ConnInfo: &flow.ConnectionInfo{
 				ServerAddr: "evil.com:443",
 				TLSVersion: "TLS 1.3",
 			},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
 			Body:      []byte("ws message"),
 			Metadata:  map[string]string{"opcode": "1"},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  1,
 			Direction: "receive",
 			Timestamp: time.Now(),
@@ -751,7 +751,7 @@ func TestExecuteWebSocketResend_TargetScope_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":       entry.Session.ID,
+			"flow_id":       entry.Session.ID,
 			"message_sequence": msgSeq,
 		},
 	})
@@ -772,13 +772,13 @@ func TestExecuteFuzz_TargetScope_Blocked(t *testing.T) {
 
 	u, _ := url.Parse("http://evil.com/api/test")
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			ID:        "fuzz-template-blocked",
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -786,7 +786,7 @@ func TestExecuteFuzz_TargetScope_Blocked(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Content-Type": {"text/plain"}},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -805,7 +805,7 @@ func TestExecuteFuzz_TargetScope_Blocked(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"session_id":  "fuzz-template-blocked",
+			"flow_id":  "fuzz-template-blocked",
 			"attack_type": "sequential",
 			"positions": []map[string]any{
 				{
@@ -838,16 +838,16 @@ func TestExecuteFuzz_TargetScope_Blocked(t *testing.T) {
 func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 	store := newTestStore(t)
 
-	// Create a session with a blocked URL.
+	// Create a flow with a blocked URL.
 	u, _ := url.Parse("http://evil.com/api/login")
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			ID:        "macro-blocked-session",
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -856,7 +856,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":"admin"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -865,7 +865,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 		},
 	)
 
-	// Define a macro that uses the blocked session.
+	// Define a macro that uses the blocked flow.
 	ts := proxy.NewTargetScope()
 	ts.SetAgentRules([]proxy.TargetRule{
 		{Hostname: "example.com"},
@@ -899,7 +899,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 			"steps": []map[string]any{
 				{
 					"id":         "step-1",
-					"session_id": "macro-blocked-session",
+					"flow_id": "macro-blocked-session",
 				},
 			},
 		},
@@ -928,16 +928,16 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 	store := newTestStore(t)
 
-	// Create a session with an allowed URL.
+	// Create a flow with an allowed URL.
 	u, _ := url.Parse("http://example.com/api/login")
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			ID:        "macro-override-session",
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -946,7 +946,7 @@ func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":"admin"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -988,7 +988,7 @@ func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 			"steps": []map[string]any{
 				{
 					"id":           "step-1",
-					"session_id":   "macro-override-session",
+					"flow_id":   "macro-override-session",
 					"override_url": "http://evil.com/api/login",
 				},
 			},
@@ -1240,12 +1240,12 @@ func TestExecuteResend_TargetScope_DryRun_StillChecked(t *testing.T) {
 
 	u, _ := url.Parse("http://evil.com/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1253,7 +1253,7 @@ func TestExecuteResend_TargetScope_DryRun_StillChecked(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1271,7 +1271,7 @@ func TestExecuteResend_TargetScope_DryRun_StillChecked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"dry_run":    true,
 		},
 	})
@@ -1293,12 +1293,12 @@ func TestExecuteResendRaw_TargetScope_DryRun_StillChecked(t *testing.T) {
 	u, _ := url.Parse("http://evil.com/test")
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: evil.com\r\n\r\n")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1307,7 +1307,7 @@ func TestExecuteResendRaw_TargetScope_DryRun_StillChecked(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1325,7 +1325,7 @@ func TestExecuteResendRaw_TargetScope_DryRun_StillChecked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"dry_run":    true,
 		},
 	})

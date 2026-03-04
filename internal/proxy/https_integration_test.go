@@ -21,14 +21,14 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // startHTTPSProxy creates and starts a proxy with TLS MITM support.
 // It returns the listener, the HTTP handler (for transport configuration),
 // and a cancel function for cleanup.
-func startHTTPSProxy(t *testing.T, ctx context.Context, store session.Store, ca *cert.CA) (*proxy.Listener, *protohttp.Handler, context.CancelFunc) {
+func startHTTPSProxy(t *testing.T, ctx context.Context, store flow.Store, ca *cert.CA) (*proxy.Listener, *protohttp.Handler, context.CancelFunc) {
 	t.Helper()
 
 	issuer := cert.NewIssuer(ca)
@@ -108,7 +108,7 @@ func TestIntegration_HTTPSGET(t *testing.T) {
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -151,18 +151,18 @@ func TestIntegration_HTTPSGET(t *testing.T) {
 	}
 
 	// Poll for session and messages to be persisted.
-	var sessions []*session.Session
-	var send, recv *session.Message
+	var flows []*flow.Flow
+	var send, recv *flow.Message
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		sessions, err = store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+		flows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
 		if err != nil {
-			t.Fatalf("ListSessions: %v", err)
+			t.Fatalf("ListFlows: %v", err)
 		}
-		if len(sessions) != 1 {
+		if len(flows) != 1 {
 			continue
 		}
-		msgs, mErr := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+		msgs, mErr := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -178,13 +178,13 @@ func TestIntegration_HTTPSGET(t *testing.T) {
 			break
 		}
 	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 HTTPS session, got %d", len(sessions))
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 HTTPS flow, got %d", len(flows))
 	}
 
-	sess := sessions[0]
-	if sess.Protocol != "HTTPS" {
-		t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
+	fl := flows[0]
+	if fl.Protocol != "HTTPS" {
+		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
 	if send == nil {
 		t.Fatal("send message not found")
@@ -193,27 +193,27 @@ func TestIntegration_HTTPSGET(t *testing.T) {
 		t.Fatal("receive message not found")
 	}
 	if send.Method != "GET" {
-		t.Errorf("session method = %q, want %q", send.Method, "GET")
+		t.Errorf("flow method = %q, want %q", send.Method, "GET")
 	}
 	if send.URL == nil || send.URL.Scheme != "https" {
 		scheme := ""
 		if send.URL != nil {
 			scheme = send.URL.Scheme
 		}
-		t.Errorf("session URL scheme = %q, want %q", scheme, "https")
+		t.Errorf("flow URL scheme = %q, want %q", scheme, "https")
 	}
 	if send.URL == nil || send.URL.Path != "/test-path" {
 		path := ""
 		if send.URL != nil {
 			path = send.URL.Path
 		}
-		t.Errorf("session URL path = %q, want %q", path, "/test-path")
+		t.Errorf("flow URL path = %q, want %q", path, "/test-path")
 	}
 	if recv.StatusCode != 200 {
-		t.Errorf("session status = %d, want %d", recv.StatusCode, 200)
+		t.Errorf("flow status = %d, want %d", recv.StatusCode, 200)
 	}
 	if string(recv.Body) != "hello from https upstream" {
-		t.Errorf("session response body = %q, want %q", recv.Body, "hello from https upstream")
+		t.Errorf("flow response body = %q, want %q", recv.Body, "hello from https upstream")
 	}
 }
 
@@ -234,7 +234,7 @@ func TestIntegration_HTTPSPOST(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -271,18 +271,18 @@ func TestIntegration_HTTPSPOST(t *testing.T) {
 	}
 
 	// Poll for session and messages to be persisted.
-	var sessions []*session.Session
-	var send, recv *session.Message
+	var flows []*flow.Flow
+	var send, recv *flow.Message
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		sessions, err = store.ListSessions(ctx, session.ListOptions{Method: "POST", Limit: 10})
+		flows, err = store.ListFlows(ctx, flow.ListOptions{Method: "POST", Limit: 10})
 		if err != nil {
-			t.Fatalf("ListSessions: %v", err)
+			t.Fatalf("ListFlows: %v", err)
 		}
-		if len(sessions) != 1 {
+		if len(flows) != 1 {
 			continue
 		}
-		msgs, mErr := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+		msgs, mErr := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -298,13 +298,13 @@ func TestIntegration_HTTPSPOST(t *testing.T) {
 			break
 		}
 	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 POST session, got %d", len(sessions))
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 POST flow, got %d", len(flows))
 	}
 
-	sess := sessions[0]
-	if sess.Protocol != "HTTPS" {
-		t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
+	fl := flows[0]
+	if fl.Protocol != "HTTPS" {
+		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
 	if send == nil {
 		t.Fatal("send message not found")
@@ -313,22 +313,22 @@ func TestIntegration_HTTPSPOST(t *testing.T) {
 		t.Fatal("receive message not found")
 	}
 	if send.Method != "POST" {
-		t.Errorf("session method = %q, want %q", send.Method, "POST")
+		t.Errorf("flow method = %q, want %q", send.Method, "POST")
 	}
 	if send.URL == nil || send.URL.Scheme != "https" {
-		t.Errorf("session URL scheme = %q, want %q", send.URL.Scheme, "https")
+		t.Errorf("flow URL scheme = %q, want %q", send.URL.Scheme, "https")
 	}
 	if send.URL == nil || send.URL.Path != "/api/data" {
-		t.Errorf("session URL path = %q, want %q", send.URL.Path, "/api/data")
+		t.Errorf("flow URL path = %q, want %q", send.URL.Path, "/api/data")
 	}
 	if string(send.Body) != reqBody {
-		t.Errorf("session request body = %q, want %q", send.Body, reqBody)
+		t.Errorf("flow request body = %q, want %q", send.Body, reqBody)
 	}
 	if recv.StatusCode != 201 {
-		t.Errorf("session response status = %d, want %d", recv.StatusCode, 201)
+		t.Errorf("flow response status = %d, want %d", recv.StatusCode, 201)
 	}
 	if string(recv.Body) != expectedBody {
-		t.Errorf("session response body = %q, want %q", recv.Body, expectedBody)
+		t.Errorf("flow response body = %q, want %q", recv.Body, expectedBody)
 	}
 }
 
@@ -349,7 +349,7 @@ func TestIntegration_HTTPSSessionRecording(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -375,30 +375,30 @@ func TestIntegration_HTTPSSessionRecording(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// Wait for session to be persisted.
+	// Wait for flow to be persisted.
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify detailed session recording.
-	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	// Verify detailed flow recording.
+	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(flows))
 	}
 
-	sess := sessions[0]
+	fl := flows[0]
 
 	// Protocol must be HTTPS.
-	if sess.Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
+	if fl.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
 
-	msgs, err := store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+	msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
-	var send, recv *session.Message
+	var send, recv *flow.Message
 	for _, m := range msgs {
 		switch m.Direction {
 		case "send":
@@ -449,13 +449,13 @@ func TestIntegration_HTTPSSessionRecording(t *testing.T) {
 	}
 
 	// Duration must be positive.
-	if sess.Duration <= 0 {
-		t.Errorf("duration = %v, want positive", sess.Duration)
+	if fl.Duration <= 0 {
+		t.Errorf("duration = %v, want positive", fl.Duration)
 	}
 
 	// ID must be assigned.
-	if sess.ID == "" {
-		t.Error("session ID is empty")
+	if fl.ID == "" {
+		t.Error("flow ID is empty")
 	}
 }
 
@@ -479,7 +479,7 @@ func TestIntegration_HTTPSKeepAlive(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -513,25 +513,25 @@ func TestIntegration_HTTPSKeepAlive(t *testing.T) {
 		}
 	}
 
-	// Wait for sessions to be persisted.
+	// Wait for flows to be persisted.
 	time.Sleep(300 * time.Millisecond)
 
-	// Verify all 3 sessions were recorded.
-	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	// Verify all 3 flows were recorded.
+	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
-	if len(sessions) != 3 {
-		t.Fatalf("expected 3 HTTPS sessions, got %d", len(sessions))
+	if len(flows) != 3 {
+		t.Fatalf("expected 3 HTTPS flows, got %d", len(flows))
 	}
 
 	// Verify each session has correct protocol and unique paths.
 	paths := make(map[string]bool)
-	for _, sess := range sessions {
-		if sess.Protocol != "HTTPS" {
-			t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
+	for _, fl := range flows {
+		if fl.Protocol != "HTTPS" {
+			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 		}
-		sendMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+		sendMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -553,7 +553,7 @@ func TestIntegration_HTTPSKeepAlive(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		expectedPath := fmt.Sprintf("/path-%d", i)
 		if !paths[expectedPath] {
-			t.Errorf("missing session for path %q", expectedPath)
+			t.Errorf("missing flow for path %q", expectedPath)
 		}
 	}
 }
@@ -580,7 +580,7 @@ func TestIntegration_HTTPSMultipleHosts(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -630,25 +630,25 @@ func TestIntegration_HTTPSMultipleHosts(t *testing.T) {
 		t.Errorf("host2 body = %q, want %q", body2, "host2-response")
 	}
 
-	// Wait for sessions to be persisted.
+	// Wait for flows to be persisted.
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify both sessions were recorded with different hosts.
-	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	// Verify both flows were recorded with different hosts.
+	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
-	if len(sessions) != 2 {
-		t.Fatalf("expected 2 HTTPS sessions, got %d", len(sessions))
+	if len(flows) != 2 {
+		t.Fatalf("expected 2 HTTPS flows, got %d", len(flows))
 	}
 
-	// Verify sessions have different host:port values.
+	// Verify flows have different host:port values.
 	hosts := make(map[string]bool)
-	for _, sess := range sessions {
-		if sess.Protocol != "HTTPS" {
-			t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
+	for _, fl := range flows {
+		if fl.Protocol != "HTTPS" {
+			t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTPS")
 		}
-		sendMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+		sendMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -665,10 +665,10 @@ func TestIntegration_HTTPSMultipleHosts(t *testing.T) {
 	expectedHost1 := "localhost:" + port1
 	expectedHost2 := "localhost:" + port2
 	if !hosts[expectedHost1] {
-		t.Errorf("missing session for host %q, got hosts %v", expectedHost1, hosts)
+		t.Errorf("missing flow for host %q, got hosts %v", expectedHost1, hosts)
 	}
 	if !hosts[expectedHost2] {
-		t.Errorf("missing session for host %q, got hosts %v", expectedHost2, hosts)
+		t.Errorf("missing flow for host %q, got hosts %v", expectedHost2, hosts)
 	}
 }
 
@@ -743,7 +743,7 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			logger := testutil.DiscardLogger()
-			store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+			store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 			if err != nil {
 				t.Fatalf("NewSQLiteStore: %v", err)
 			}
@@ -792,18 +792,18 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 			}
 
 			// Poll for session and messages to be persisted (large bodies may take longer to save).
-			var httpsSessionList []*session.Session
-			var send, recv *session.Message
+			var httpsFlows []*flow.Flow
+			var send, recv *flow.Message
 			for i := 0; i < 50; i++ {
 				time.Sleep(100 * time.Millisecond)
-				httpsSessionList, err = store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+				httpsFlows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
 				if err != nil {
-					t.Fatalf("ListSessions: %v", err)
+					t.Fatalf("ListFlows: %v", err)
 				}
-				if len(httpsSessionList) != 1 {
+				if len(httpsFlows) != 1 {
 					continue
 				}
-				allMsgs, mErr := store.GetMessages(ctx, httpsSessionList[0].ID, session.MessageListOptions{})
+				allMsgs, mErr := store.GetMessages(ctx, httpsFlows[0].ID, flow.MessageListOptions{})
 				if mErr != nil {
 					t.Fatalf("GetMessages: %v", mErr)
 				}
@@ -819,10 +819,10 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 					break
 				}
 			}
-			if len(httpsSessionList) != 1 {
-				t.Fatalf("expected 1 HTTPS session, got %d", len(httpsSessionList))
+			if len(httpsFlows) != 1 {
+				t.Fatalf("expected 1 HTTPS flow, got %d", len(httpsFlows))
 			}
-			sess := httpsSessionList[0]
+			fl := httpsFlows[0]
 			if send == nil {
 				t.Fatal("send message not found")
 			}
@@ -859,8 +859,8 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 			}
 
 			// Verify metadata.
-			if sess.Protocol != "HTTPS" {
-				t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
+			if fl.Protocol != "HTTPS" {
+				t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTPS")
 			}
 			if send.Method != "POST" {
 				t.Errorf("method = %q, want %q", send.Method, "POST")
@@ -899,7 +899,7 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -955,30 +955,30 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 
 	wg.Wait()
 
-	// Wait for all sessions to be persisted.
+	// Wait for all flows to be persisted.
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify all sessions were recorded.
-	sessions, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: numClients + 10})
+	// Verify all flows were recorded.
+	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: numClients + 10})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
-	if len(sessions) != numClients {
-		t.Fatalf("expected %d HTTPS sessions, got %d", numClients, len(sessions))
+	if len(flows) != numClients {
+		t.Fatalf("expected %d HTTPS flows, got %d", numClients, len(flows))
 	}
 
 	// Verify each client's session is distinct and data is not mixed.
 	seenPaths := make(map[string]bool)
-	for _, sess := range sessions {
-		if sess.Protocol != "HTTPS" {
-			t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTPS")
+	for _, fl := range flows {
+		if fl.Protocol != "HTTPS" {
+			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 		}
 
-		allMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+		allMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
-		var send, recv *session.Message
+		var send, recv *flow.Message
 		for _, m := range allMsgs {
 			switch m.Direction {
 			case "send":
@@ -997,14 +997,14 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 		}
 
 		if send.Method != "POST" {
-			t.Errorf("session method = %q, want %q", send.Method, "POST")
+			t.Errorf("flow method = %q, want %q", send.Method, "POST")
 		}
 		if send.URL == nil {
 			t.Error("request URL is nil")
 			continue
 		}
 		if send.URL.Scheme != "https" {
-			t.Errorf("session URL scheme = %q, want %q", send.URL.Scheme, "https")
+			t.Errorf("flow URL scheme = %q, want %q", send.URL.Scheme, "https")
 		}
 
 		path := send.URL.Path
@@ -1018,25 +1018,25 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 		}
 		expectedReqBody := fmt.Sprintf(`{"client":%d}`, pathID)
 		if string(send.Body) != expectedReqBody {
-			t.Errorf("session path %s: request body = %q, want %q (data mixed between sessions)",
+			t.Errorf("flow path %s: request body = %q, want %q (data mixed between flows)",
 				path, send.Body, expectedReqBody)
 		}
 
 		// Verify response body matches.
 		expectedRespBody := fmt.Sprintf("echo:%s:%s", path, expectedReqBody)
 		if string(recv.Body) != expectedRespBody {
-			t.Errorf("session path %s: response body = %q, want %q (data mixed between sessions)",
+			t.Errorf("flow path %s: response body = %q, want %q (data mixed between flows)",
 				path, recv.Body, expectedRespBody)
 		}
 
 		if recv.StatusCode != 200 {
-			t.Errorf("session path %s: status = %d, want %d", path, recv.StatusCode, 200)
+			t.Errorf("flow path %s: status = %d, want %d", path, recv.StatusCode, 200)
 		}
-		if sess.ID == "" {
-			t.Errorf("session path %s: ID is empty", path)
+		if fl.ID == "" {
+			t.Errorf("flow path %s: ID is empty", path)
 		}
-		if sess.Duration < 0 {
-			t.Errorf("session path %s: duration = %v, want non-negative", path, sess.Duration)
+		if fl.Duration < 0 {
+			t.Errorf("flow path %s: duration = %v, want non-negative", path, fl.Duration)
 		}
 	}
 
@@ -1047,7 +1047,7 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 	for i := 0; i < numClients; i++ {
 		expectedPath := fmt.Sprintf("/concurrent/%d", i)
 		if !seenPaths[expectedPath] {
-			t.Errorf("missing session for path %q", expectedPath)
+			t.Errorf("missing flow for path %q", expectedPath)
 		}
 	}
 }

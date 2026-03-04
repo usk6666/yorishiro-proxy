@@ -620,12 +620,12 @@ func TestSmugglingDetection_EndToEnd_HTTP(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "ok")
 	}
 
-	// Wait for session recording.
+	// Wait for flow recording.
 	time.Sleep(200 * time.Millisecond)
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	// Normal request should have no tags.

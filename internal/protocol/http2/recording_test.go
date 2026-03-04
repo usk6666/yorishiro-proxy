@@ -13,14 +13,14 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- Progressive recording tests ---
 
 func TestHandleStream_ProgressiveRecording_NormalFlow(t *testing.T) {
-	// Verify that the normal flow creates a session with State="active" first,
+	// Verify that the normal flow creates a flow with State="active" first,
 	// then updates it to State="complete" with Send + Receive messages.
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.Header().Set("X-Resp", "ok")
@@ -62,11 +62,11 @@ func TestHandleStream_ProgressiveRecording_NormalFlow(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
-	// Session should be complete after the full flow.
+	// Flow should be complete after the full flow.
 	if entry.Session.State != "complete" {
 		t.Errorf("state = %q, want %q", entry.Session.State, "complete")
 	}
@@ -82,7 +82,7 @@ func TestHandleStream_ProgressiveRecording_NormalFlow(t *testing.T) {
 	if entry.Session.ConnInfo.ClientAddr != "127.0.0.1:12345" {
 		t.Errorf("client_addr = %q, want %q", entry.Session.ConnInfo.ClientAddr, "127.0.0.1:12345")
 	}
-	// ServerAddr should be set via UpdateSession.
+	// ServerAddr should be set via UpdateFlow.
 	if entry.Session.ConnInfo.ServerAddr == "" {
 		t.Error("server_addr should be set after successful upstream request")
 	}
@@ -121,7 +121,7 @@ func TestHandleStream_ProgressiveRecording_NormalFlow(t *testing.T) {
 
 func TestHandleStream_ProgressiveRecording_UpstreamError(t *testing.T) {
 	// When the upstream request fails (e.g., connection refused),
-	// the session should be recorded with State="error" and a send message,
+	// the flow should be recorded with State="error" and a send message,
 	// but no receive message.
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
@@ -150,7 +150,7 @@ func TestHandleStream_ProgressiveRecording_UpstreamError(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry for upstream error, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry for upstream error, got %d", len(entries))
 	}
 
 	entry := entries[0]
@@ -182,7 +182,7 @@ func TestHandleStream_ProgressiveRecording_UpstreamError(t *testing.T) {
 }
 
 func TestHandleStream_ProgressiveRecording_InterceptDrop(t *testing.T) {
-	// When the request is dropped by intercept, the session should be recorded
+	// When the request is dropped by intercept, the flow should be recorded
 	// with State="complete", BlockedBy="intercept_drop", and only a send message.
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		t.Error("upstream should not be reached when request is dropped")
@@ -248,7 +248,7 @@ func TestHandleStream_ProgressiveRecording_InterceptDrop(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry for intercept drop, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry for intercept drop, got %d", len(entries))
 	}
 
 	entry := entries[0]
@@ -333,7 +333,7 @@ func TestRecordSend_CreatesActiveSession(t *testing.T) {
 		connID:     "conn-1",
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
 		reqURL:     reqURL,
 		reqBody:    []byte("request-body"),
@@ -343,8 +343,8 @@ func TestRecordSend_CreatesActiveSession(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if result.sessionID == "" {
-		t.Error("session ID should not be empty")
+	if result.flowID == "" {
+		t.Error("flow ID should not be empty")
 	}
 
 	entries := store.Entries()
@@ -352,7 +352,7 @@ func TestRecordSend_CreatesActiveSession(t *testing.T) {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
 
-	// Session should be in "active" state before recordReceive is called.
+	// Flow should be in "active" state before recordReceive is called.
 	if entries[0].Session.State != "active" {
 		t.Errorf("state = %q, want %q", entries[0].Session.State, "active")
 	}
@@ -392,7 +392,7 @@ func TestRecordReceive_CompletesSession(t *testing.T) {
 		connID:     "conn-1",
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
 		reqURL:     reqURL,
 	}, testutil.DiscardLogger())
@@ -459,7 +459,7 @@ func TestRecordSendError_SetsErrorState(t *testing.T) {
 		connID:     "conn-1",
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
 		reqURL:     reqURL,
 	}, testutil.DiscardLogger())
@@ -500,7 +500,7 @@ func TestRecordInterceptDrop_RecordsSession(t *testing.T) {
 		connID:     "conn-1",
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        &gohttp.Request{Method: "POST", Header: gohttp.Header{}},
 		reqURL:     reqURL,
 		reqBody:    []byte("drop-body"),
@@ -546,7 +546,7 @@ func TestRecordOutReqError_RecordsSession(t *testing.T) {
 		connID:     "conn-1",
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
 		reqURL:     reqURL,
 	}
@@ -611,7 +611,7 @@ func TestRecordReceive_WithTLSCertSubject(t *testing.T) {
 		connID:     "conn-tls",
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234", TLSVersion: "TLS 1.3"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234", TLSVersion: "TLS 1.3"},
 		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
 		reqURL:     reqURL,
 	}, testutil.DiscardLogger())

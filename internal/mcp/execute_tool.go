@@ -15,7 +15,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // executeInput is the typed input for the execute tool.
@@ -30,10 +30,10 @@ type executeInput struct {
 
 // executeParams holds parameters for the execute tool actions (resend, resend_raw, tcp_replay).
 type executeParams struct {
-	// SessionID identifies the session to resend/replay.
-	SessionID string `json:"session_id,omitempty"`
+	// FlowID identifies the flow to resend/replay.
+	FlowID string `json:"flow_id,omitempty"`
 
-	// MessageSequence specifies a specific message within a session for WebSocket/streaming resend.
+	// MessageSequence specifies a specific message within a flow for WebSocket/streaming resend.
 	MessageSequence *int `json:"message_sequence,omitempty"`
 
 	// resend overrides
@@ -73,11 +73,11 @@ func (s *Server) registerExecute() {
 		Description: "Resend and replay recorded proxy requests with optional mutations. " +
 			"Available actions: " +
 			"'resend' resends a recorded HTTP/HTTP2/WebSocket request with optional mutation (method/URL/header/body overrides, body patches, dry-run). " +
-			"For WebSocket sessions, use message_sequence to specify which message to resend as a raw TCP frame; " +
-			"'resend_raw' resends raw bytes from a recorded session over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
-			"'tcp_replay' replays a Raw TCP session by sending all 'send' messages sequentially to the target. " +
+			"For WebSocket flows, use message_sequence to specify which message to resend as a raw TCP frame; " +
+			"'resend_raw' resends raw bytes from a recorded flow over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
+			"'tcp_replay' replays a Raw TCP flow by sending all 'send' messages sequentially to the target. " +
 			"('replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'). " +
-			"For session management (delete/export/import), use the 'manage' tool. " +
+			"For flow management (delete/export/import), use the 'manage' tool. " +
 			"For fuzzing, use the 'fuzz' tool. " +
 			"For macro operations, use the 'macro' tool. " +
 			"For intercept queue actions, use the 'intercept' tool.",
@@ -104,7 +104,7 @@ func (s *Server) handleExecute(ctx context.Context, _ *gomcp.CallToolRequest, in
 
 // executeResendResult is the structured output of the resend action.
 type executeResendResult struct {
-	NewSessionID         string              `json:"new_session_id"`
+	NewFlowID         string              `json:"new_flow_id"`
 	StatusCode           int                 `json:"status_code"`
 	ResponseHeaders      map[string][]string `json:"response_headers"`
 	ResponseBody         string              `json:"response_body"`
@@ -131,10 +131,10 @@ type requestPreview struct {
 // handleExecuteResend handles the resend action within the execute tool.
 func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
-	if params.SessionID == "" {
-		return nil, nil, fmt.Errorf("session_id is required for resend action")
+	if params.FlowID == "" {
+		return nil, nil, fmt.Errorf("flow_id is required for resend action")
 	}
 
 	if err := validateHooks(params.Hooks); err != nil {
@@ -158,21 +158,21 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		}
 	}
 
-	sess, err := s.deps.store.GetSession(ctx, params.SessionID)
+	fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get session: %w", err)
+		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	if sess.Protocol == "WebSocket" {
-		return s.handleWebSocketResend(ctx, sess, params)
+	if fl.Protocol == "WebSocket" {
+		return s.handleWebSocketResend(ctx, fl, params)
 	}
 
-	sendMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, nil, fmt.Errorf("session %s has no send messages", params.SessionID)
+		return nil, nil, fmt.Errorf("flow %s has no send messages", params.FlowID)
 	}
 	sendMsg := sendMsgs[0]
 
@@ -197,7 +197,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	}
 
 	if targetURL == nil {
-		return nil, nil, fmt.Errorf("original session has no URL and no override_url was provided")
+		return nil, nil, fmt.Errorf("original flow has no URL and no override_url was provided")
 	}
 	if err := validateURLScheme(targetURL); err != nil {
 		return nil, nil, err
@@ -302,16 +302,16 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		tags = map[string]string{"tag": params.Tag}
 	}
 
-	newSess := &session.Session{
-		Protocol: sess.Protocol, SessionType: "unary", State: "complete",
+	newFl := &flow.Flow{
+		Protocol: fl.Protocol, FlowType: "unary", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
-	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
-		return nil, nil, fmt.Errorf("save resend session: %w", err)
+	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
+		return nil, nil, fmt.Errorf("save resend flow: %w", err)
 	}
 
-	newSendMsg := &session.Message{
-		SessionID: newSess.ID, Sequence: 0, Direction: "send",
+	newSendMsg := &flow.Message{
+		FlowID: newFl.ID, Sequence: 0, Direction: "send",
 		Timestamp: start, Method: method, URL: targetURL,
 		Headers: recordedHeaders, Body: reqBody,
 	}
@@ -319,8 +319,8 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 		return nil, nil, fmt.Errorf("save resend send message: %w", err)
 	}
 
-	newRecvMsg := &session.Message{
-		SessionID: newSess.ID, Sequence: 1, Direction: "receive",
+	newRecvMsg := &flow.Message{
+		FlowID: newFl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: start.Add(duration), StatusCode: resp.StatusCode,
 		Headers: respHeaders, Body: respBody,
 	}
@@ -338,7 +338,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 
 	respBodyStr, respBodyEncoding := encodeBody(respBody)
 	return nil, &executeResendResult{
-		NewSessionID: newSess.ID, StatusCode: resp.StatusCode,
+		NewFlowID: newFl.ID, StatusCode: resp.StatusCode,
 		ResponseHeaders: respHeaders, ResponseBody: respBodyStr,
 		ResponseBodyEncoding: respBodyEncoding, DurationMs: duration.Milliseconds(),
 		Tag: params.Tag,
@@ -445,7 +445,7 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 // --- Resend raw ---
 
 type executeResendRawResult struct {
-	NewSessionID string `json:"new_session_id,omitempty"`
+	NewFlowID string `json:"new_flow_id,omitempty"`
 	ResponseData string `json:"response_data"`
 	ResponseSize int    `json:"response_size"`
 	DurationMs   int64  `json:"duration_ms"`
@@ -465,28 +465,28 @@ type rawPreview struct {
 
 func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
-	if params.SessionID == "" {
-		return nil, nil, fmt.Errorf("session_id is required for resend_raw action")
+	if params.FlowID == "" {
+		return nil, nil, fmt.Errorf("flow_id is required for resend_raw action")
 	}
 
-	sess, err := s.deps.store.GetSession(ctx, params.SessionID)
+	fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get session: %w", err)
+		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	sendMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, nil, fmt.Errorf("session %s has no send messages", params.SessionID)
+		return nil, nil, fmt.Errorf("flow %s has no send messages", params.FlowID)
 	}
 	sendMsg := sendMsgs[0]
 
 	if len(sendMsg.RawBytes) == 0 {
-		return nil, nil, fmt.Errorf("session %s has no raw request bytes", params.SessionID)
+		return nil, nil, fmt.Errorf("flow %s has no raw request bytes", params.FlowID)
 	}
 
 	if sendMsg.URL != nil {
@@ -513,7 +513,7 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	targetAddr := params.TargetAddr
 	if targetAddr == "" {
 		if sendMsg.URL == nil {
-			return nil, nil, fmt.Errorf("session has no URL and no target_addr was provided")
+			return nil, nil, fmt.Errorf("flow has no URL and no target_addr was provided")
 		}
 		host := sendMsg.URL.Hostname()
 		port := sendMsg.URL.Port()
@@ -528,14 +528,14 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	}
 
 	scheme := ""
-	if sess.Protocol == "HTTPS" {
+	if fl.Protocol == "HTTPS" {
 		scheme = "https"
 	}
 	if err := s.checkTargetScopeAddr(scheme, targetAddr); err != nil {
 		return nil, nil, err
 	}
 
-	useTLS := sess.Protocol == "HTTPS"
+	useTLS := fl.Protocol == "HTTPS"
 	if params.UseTLS != nil {
 		useTLS = *params.UseTLS
 	}
@@ -587,30 +587,30 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		tags = map[string]string{"tag": params.Tag}
 	}
 
-	newSess := &session.Session{
-		Protocol: sess.Protocol, SessionType: "unary", State: "complete",
+	newFl := &flow.Flow{
+		Protocol: fl.Protocol, FlowType: "unary", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
-	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
-		return nil, nil, fmt.Errorf("save resend_raw session: %w", err)
+	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
+		return nil, nil, fmt.Errorf("save resend_raw flow: %w", err)
 	}
 
-	if err := s.deps.store.AppendMessage(ctx, &session.Message{
-		SessionID: newSess.ID, Sequence: 0, Direction: "send",
+	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+		FlowID: newFl.ID, Sequence: 0, Direction: "send",
 		Timestamp: start, RawBytes: rawBytes,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("save resend_raw send message: %w", err)
 	}
 
-	if err := s.deps.store.AppendMessage(ctx, &session.Message{
-		SessionID: newSess.ID, Sequence: 1, Direction: "receive",
+	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+		FlowID: newFl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: start.Add(duration), RawBytes: respData,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("save resend_raw receive message: %w", err)
 	}
 
 	return nil, &executeResendRawResult{
-		NewSessionID: newSess.ID,
+		NewFlowID: newFl.ID,
 		ResponseData: base64.StdEncoding.EncodeToString(respData),
 		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
 		Tag: params.Tag,

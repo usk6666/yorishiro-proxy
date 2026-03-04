@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -12,43 +12,43 @@ import (
 // ExportFormatVersion is the current JSONL export format version.
 const ExportFormatVersion = "1"
 
-// ExportFilter specifies criteria for filtering sessions during export.
+// ExportFilter specifies criteria for filtering flows during export.
 type ExportFilter struct {
 	// Protocol filters by protocol name (e.g. "HTTPS", "HTTP/1.x").
 	Protocol string
 	// URLPattern filters by URL substring match.
 	URLPattern string
-	// TimeAfter includes only sessions with timestamps at or after this time.
+	// TimeAfter includes only flows with timestamps at or after this time.
 	TimeAfter *time.Time
-	// TimeBefore includes only sessions with timestamps at or before this time.
+	// TimeBefore includes only flows with timestamps at or before this time.
 	TimeBefore *time.Time
 }
 
-// ExportOptions configures session export behavior.
+// ExportOptions configures flow export behavior.
 type ExportOptions struct {
-	// Filter specifies session filter criteria.
+	// Filter specifies flow filter criteria.
 	Filter ExportFilter
 	// IncludeBodies controls whether message body and raw_bytes are included.
 	// If false, only metadata fields are exported.
 	IncludeBodies bool
-	// MaxSessions limits the number of sessions exported.
+	// MaxFlows limits the number of flows exported.
 	// 0 means no limit.
-	MaxSessions int
+	MaxFlows int
 }
 
 // ExportRecord represents a single JSONL line in the export format.
 type ExportRecord struct {
-	Session  *ExportSession  `json:"session"`
+	Flow  *ExportFlow  `json:"flow"`
 	Messages []*ExportMessage `json:"messages"`
 	Version  string           `json:"version"`
 }
 
-// ExportSession is the JSON-serializable representation of a Session.
-type ExportSession struct {
+// ExportFlow is the JSON-serializable representation of a Flow.
+type ExportFlow struct {
 	ID          string            `json:"id"`
 	ConnID      string            `json:"conn_id"`
 	Protocol    string            `json:"protocol"`
-	SessionType string            `json:"session_type"`
+	FlowType string            `json:"flow_type"`
 	State       string            `json:"state"`
 	Timestamp   string            `json:"timestamp"`
 	DurationMs  int64             `json:"duration_ms"`
@@ -70,7 +70,7 @@ type ExportConnInfo struct {
 // ExportMessage is the JSON-serializable representation of a Message.
 type ExportMessage struct {
 	ID            string              `json:"id"`
-	SessionID     string              `json:"session_id"`
+	FlowID     string              `json:"flow_id"`
 	Sequence      int                 `json:"sequence"`
 	Direction     string              `json:"direction"`
 	Timestamp     string              `json:"timestamp"`
@@ -84,50 +84,50 @@ type ExportMessage struct {
 	Metadata      map[string]string   `json:"metadata,omitempty"`
 }
 
-// ExportSessions exports sessions matching the filter to a JSONL writer.
-// Each line is a complete JSON object containing a session and its messages.
-// Returns the number of sessions exported.
-func ExportSessions(ctx context.Context, store SessionReader, w io.Writer, opts ExportOptions) (int, error) {
-	// Build list options from filter, fetching all matching sessions (no limit).
+// ExportFlows exports flows matching the filter to a JSONL writer.
+// Each line is a complete JSON object containing a flow and its messages.
+// Returns the number of flows exported.
+func ExportFlows(ctx context.Context, store FlowReader, w io.Writer, opts ExportOptions) (int, error) {
+	// Build list options from filter, fetching all matching flows (no limit).
 	listOpts := ListOptions{
 		Protocol:   opts.Filter.Protocol,
 		URLPattern: opts.Filter.URLPattern,
 	}
 
-	sessions, err := store.ListSessions(ctx, listOpts)
+	flows, err := store.ListFlows(ctx, listOpts)
 	if err != nil {
-		return 0, fmt.Errorf("list sessions for export: %w", err)
+		return 0, fmt.Errorf("list flows for export: %w", err)
 	}
 
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	exported := 0
 
-	for _, sess := range sessions {
+	for _, fl := range flows {
 		if err := ctx.Err(); err != nil {
 			return exported, err
 		}
 
-		// S-4: enforce session count limit when set.
-		if opts.MaxSessions > 0 && exported >= opts.MaxSessions {
+		// S-4: enforce flow count limit when set.
+		if opts.MaxFlows > 0 && exported >= opts.MaxFlows {
 			break
 		}
 
 		// Apply time-based filters (not supported by ListOptions).
-		if opts.Filter.TimeAfter != nil && sess.Timestamp.Before(*opts.Filter.TimeAfter) {
+		if opts.Filter.TimeAfter != nil && fl.Timestamp.Before(*opts.Filter.TimeAfter) {
 			continue
 		}
-		if opts.Filter.TimeBefore != nil && sess.Timestamp.After(*opts.Filter.TimeBefore) {
+		if opts.Filter.TimeBefore != nil && fl.Timestamp.After(*opts.Filter.TimeBefore) {
 			continue
 		}
 
-		messages, err := store.GetMessages(ctx, sess.ID, MessageListOptions{})
+		messages, err := store.GetMessages(ctx, fl.ID, MessageListOptions{})
 		if err != nil {
-			return exported, fmt.Errorf("get messages for session %s: %w", sess.ID, err)
+			return exported, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
 
 		record := ExportRecord{
-			Session:  sessionToExport(sess),
+			Flow:  flowToExport(fl),
 			Messages: messagesToExport(messages, opts.IncludeBodies),
 			Version:  ExportFormatVersion,
 		}
@@ -141,13 +141,13 @@ func ExportSessions(ctx context.Context, store SessionReader, w io.Writer, opts 
 	return exported, nil
 }
 
-// sessionToExport converts a Session to its export representation.
-func sessionToExport(s *Session) *ExportSession {
-	es := &ExportSession{
+// flowToExport converts a Flow to its export representation.
+func flowToExport(s *Flow) *ExportFlow {
+	es := &ExportFlow{
 		ID:          s.ID,
 		ConnID:      s.ConnID,
 		Protocol:    s.Protocol,
-		SessionType: s.SessionType,
+		FlowType: s.FlowType,
 		State:       s.State,
 		Timestamp:   s.Timestamp.UTC().Format(time.RFC3339Nano),
 		DurationMs:  s.Duration.Milliseconds(),
@@ -173,7 +173,7 @@ func messagesToExport(msgs []*Message, includeBodies bool) []*ExportMessage {
 	for i, m := range msgs {
 		em := &ExportMessage{
 			ID:            m.ID,
-			SessionID:     m.SessionID,
+			FlowID:     m.FlowID,
 			Sequence:      m.Sequence,
 			Direction:     m.Direction,
 			Timestamp:     m.Timestamp.UTC().Format(time.RFC3339Nano),

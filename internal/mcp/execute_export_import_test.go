@@ -11,7 +11,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // --- validateFilePath unit tests ---
@@ -115,28 +115,28 @@ func TestValidateFilePath_RegularFileIsOK(t *testing.T) {
 
 // --- MCP handler integration tests ---
 
-// makeExportTestSession creates a test session with a single message for MCP handler tests.
-func makeExportTestSession(t *testing.T, store session.Store, id string) {
+// makeExportTestSession creates a test flow with a single message for MCP handler tests.
+func makeExportTestSession(t *testing.T, store flow.Store, id string) {
 	t.Helper()
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          id,
 		ConnID:      "conn-" + id,
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   ts,
 		Duration:    100 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	msg := &session.Message{
+	msg := &flow.Message{
 		ID:        "msg-" + id,
-		SessionID: id,
+		FlowID: id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -147,7 +147,7 @@ func makeExportTestSession(t *testing.T, store session.Store, id string) {
 	}
 }
 
-func TestExportSessionsAction_FilePermissions(t *testing.T) {
+func TestExportFlowsAction_FilePermissions(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -158,7 +158,7 @@ func TestExportSessionsAction_FilePermissions(t *testing.T) {
 	outputPath := filepath.Join(dir, "export.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "export_sessions",
+		"action": "export_flows",
 		"params": map[string]any{
 			"output_path": outputPath,
 		},
@@ -178,7 +178,7 @@ func TestExportSessionsAction_FilePermissions(t *testing.T) {
 	}
 }
 
-func TestExportSessionsAction_SymlinkRejected(t *testing.T) {
+func TestExportFlowsAction_SymlinkRejected(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -196,7 +196,7 @@ func TestExportSessionsAction_SymlinkRejected(t *testing.T) {
 	}
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "export_sessions",
+		"action": "export_flows",
 		"params": map[string]any{
 			"output_path": symlinkPath,
 		},
@@ -206,19 +206,19 @@ func TestExportSessionsAction_SymlinkRejected(t *testing.T) {
 	}
 }
 
-func TestExportSessionsAction_InlineLimit(t *testing.T) {
+func TestExportFlowsAction_InlineLimit(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	// Create more sessions than the inline limit
-	for i := 0; i < maxInlineExportSessions+10; i++ {
+	for i := 0; i < maxInlineExportFlows+10; i++ {
 		id := fmt.Sprintf("sess-inline-%04d", i)
 		makeExportTestSession(t, store, id)
 	}
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "export_sessions",
+		"action": "export_flows",
 		"params": map[string]any{},
 	})
 	if result.IsError {
@@ -232,24 +232,24 @@ func TestExportSessionsAction_InlineLimit(t *testing.T) {
 		t.Fatalf("unmarshal text content: %v", err)
 	}
 
-	var exportResult executeExportSessionsResult
+	var exportResult executeExportFlowsResult
 	if err := json.Unmarshal([]byte(textContent.Text), &exportResult); err != nil {
 		t.Fatalf("unmarshal export result: %v", err)
 	}
 
-	if exportResult.ExportedCount > maxInlineExportSessions {
-		t.Errorf("inline export should be capped at %d, got %d", maxInlineExportSessions, exportResult.ExportedCount)
+	if exportResult.ExportedCount > maxInlineExportFlows {
+		t.Errorf("inline export should be capped at %d, got %d", maxInlineExportFlows, exportResult.ExportedCount)
 	}
 }
 
-func TestImportSessionsAction_SymlinkRejected(t *testing.T) {
+func TestImportFlowsAction_SymlinkRejected(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	dir := t.TempDir()
 	realFile := filepath.Join(dir, "data.jsonl")
-	if err := os.WriteFile(realFile, []byte(`{"session":{"id":"s","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`), 0600); err != nil {
+	if err := os.WriteFile(realFile, []byte(`{"flow":{"id":"s","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	symlinkPath := filepath.Join(dir, "link.jsonl")
@@ -258,7 +258,7 @@ func TestImportSessionsAction_SymlinkRejected(t *testing.T) {
 	}
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "import_sessions",
+		"action": "import_flows",
 		"params": map[string]any{
 			"input_path": symlinkPath,
 		},
@@ -268,7 +268,7 @@ func TestImportSessionsAction_SymlinkRejected(t *testing.T) {
 	}
 }
 
-func TestExportSessionsAction_AtomicWrite(t *testing.T) {
+func TestExportFlowsAction_AtomicWrite(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -279,7 +279,7 @@ func TestExportSessionsAction_AtomicWrite(t *testing.T) {
 	outputPath := filepath.Join(dir, "atomic-export.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "export_sessions",
+		"action": "export_flows",
 		"params": map[string]any{
 			"output_path": outputPath,
 		},
@@ -309,20 +309,20 @@ func TestExportSessionsAction_AtomicWrite(t *testing.T) {
 	}
 }
 
-func TestImportSessionsAction_ValidUUIDRequired(t *testing.T) {
+func TestImportFlowsAction_ValidUUIDRequired(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	dir := t.TempDir()
 	dataFile := filepath.Join(dir, "invalid-ids.jsonl")
-	// Non-UUID session IDs should be rejected when MCP handler enables validation
-	if err := os.WriteFile(dataFile, []byte(`{"session":{"id":"not-uuid","conn_id":"c","protocol":"HTTPS","session_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`), 0600); err != nil {
+	// Non-UUID flow IDs should be rejected when MCP handler enables validation
+	if err := os.WriteFile(dataFile, []byte(`{"flow":{"id":"not-uuid","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "import_sessions",
+		"action": "import_flows",
 		"params": map[string]any{
 			"input_path": dataFile,
 		},
@@ -338,7 +338,7 @@ func TestImportSessionsAction_ValidUUIDRequired(t *testing.T) {
 		t.Fatalf("unmarshal text content: %v", err)
 	}
 
-	var importResult executeImportSessionsResult
+	var importResult executeImportFlowsResult
 	if err := json.Unmarshal([]byte(textContent.Text), &importResult); err != nil {
 		t.Fatalf("unmarshal import result: %v", err)
 	}
@@ -358,28 +358,28 @@ func TestImportSessionsAction_ValidUUIDRequired(t *testing.T) {
 	}
 }
 
-// makeExportTestSessionUUID creates a test session with valid UUID IDs for MCP handler tests.
-func makeExportTestSessionUUID(t *testing.T, store session.Store, sessID, msgID string) {
+// makeExportTestSessionUUID creates a test flow with valid UUID IDs for MCP handler tests.
+func makeExportTestSessionUUID(t *testing.T, store flow.Store, sessID, msgID string) {
 	t.Helper()
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          sessID,
 		ConnID:      "conn-" + sessID,
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   ts,
 		Duration:    100 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	msg := &session.Message{
+	msg := &flow.Message{
 		ID:        msgID,
-		SessionID: sessID,
+		FlowID: sessID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -392,15 +392,15 @@ func makeExportTestSessionUUID(t *testing.T, store session.Store, sessID, msgID 
 
 // makeRealisticTestSession creates a test session that mimics real proxy data
 // with all fields populated, including ConnInfo and message bodies.
-func makeRealisticTestSession(t *testing.T, store session.Store, sessID, sendMsgID, recvMsgID, protocol string, withConnInfo bool) {
+func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID, recvMsgID, protocol string, withConnInfo bool) {
 	t.Helper()
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          sessID,
 		Protocol:    protocol,
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   ts,
 		Duration:    250 * time.Millisecond,
@@ -408,8 +408,8 @@ func makeRealisticTestSession(t *testing.T, store session.Store, sessID, sendMsg
 	}
 	// Resend-generated sessions have empty ConnID
 	if withConnInfo {
-		sess.ConnID = "conn-" + sessID
-		sess.ConnInfo = &session.ConnectionInfo{
+		fl.ConnID = "conn-" + sessID
+		fl.ConnInfo = &flow.ConnectionInfo{
 			ClientAddr:           "127.0.0.1:54321",
 			ServerAddr:           "93.184.216.34:443",
 			TLSVersion:           "TLS 1.3",
@@ -418,13 +418,13 @@ func makeRealisticTestSession(t *testing.T, store session.Store, sessID, sendMsg
 			TLSServerCertSubject: "CN=example.com",
 		}
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        sendMsgID,
-		SessionID: sessID,
+		FlowID: sessID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -438,9 +438,9 @@ func makeRealisticTestSession(t *testing.T, store session.Store, sessID, sendMsg
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &session.Message{
+	recvMsg := &flow.Message{
 		ID:         recvMsgID,
-		SessionID:  sessID,
+		FlowID:  sessID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  ts.Add(250 * time.Millisecond),
@@ -455,14 +455,14 @@ func makeRealisticTestSession(t *testing.T, store session.Store, sessID, sendMsg
 }
 
 // parseMCPImportResult extracts the import result from an MCP CallToolResult.
-func parseMCPImportResult(t *testing.T, result *gomcp.CallToolResult) executeImportSessionsResult {
+func parseMCPImportResult(t *testing.T, result *gomcp.CallToolResult) executeImportFlowsResult {
 	t.Helper()
 	var textContent gomcp.TextContent
 	raw, _ := json.Marshal(result.Content[0])
 	if err := json.Unmarshal(raw, &textContent); err != nil {
 		t.Fatalf("unmarshal text content: %v", err)
 	}
-	var importRes executeImportSessionsResult
+	var importRes executeImportFlowsResult
 	if err := json.Unmarshal([]byte(textContent.Text), &importRes); err != nil {
 		t.Fatalf("unmarshal import result: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 
 	// Step 1: Export
 	exportResult := manageCallTool(t, cs, map[string]any{
-		"action": "export_sessions",
+		"action": "export_flows",
 		"params": map[string]any{
 			"output_path": exportPath,
 		},
@@ -514,7 +514,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	if err := json.Unmarshal(exportRaw, &exportTextContent); err != nil {
 		t.Fatalf("unmarshal export text content: %v", err)
 	}
-	var exportRes executeExportSessionsResult
+	var exportRes executeExportFlowsResult
 	if err := json.Unmarshal([]byte(exportTextContent.Text), &exportRes); err != nil {
 		t.Fatalf("unmarshal export result: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 
 	// Step 2: Delete all sessions
 	deleteResult := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"confirm": true,
 		},
@@ -539,7 +539,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 
 	// Step 3: Import
 	importCallResult := manageCallTool(t, cs, map[string]any{
-		"action": "import_sessions",
+		"action": "import_flows",
 		"params": map[string]any{
 			"input_path": exportPath,
 		},
@@ -553,7 +553,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	if importRes.Errors != 0 {
 		t.Errorf("expected 0 errors, got %d", importRes.Errors)
 		for _, e := range importRes.ErrorDetails {
-			t.Errorf("  line %d (session %s): %s", e.Line, e.SessionID, e.Reason)
+			t.Errorf("  line %d (flow %s): %s", e.Line, e.FlowID, e.Reason)
 		}
 	}
 	if importRes.Imported != 3 {
@@ -561,7 +561,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	}
 }
 
-func TestExportSessionsAction_PathTraversalCleaned(t *testing.T) {
+func TestExportFlowsAction_PathTraversalCleaned(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -573,7 +573,7 @@ func TestExportSessionsAction_PathTraversalCleaned(t *testing.T) {
 	outputPath := filepath.Join(dir, "sub", "..", "export.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "export_sessions",
+		"action": "export_flows",
 		"params": map[string]any{
 			"output_path": outputPath,
 		},

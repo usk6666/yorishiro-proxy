@@ -8,11 +8,11 @@
     "resource": {
       "type": "string",
       "description": "The resource to query.",
-      "enum": ["sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"]
+      "enum": ["flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"]
     },
     "id": {
       "type": "string",
-      "description": "Session ID or macro name. Required for session, messages, and macro resources."
+      "description": "Flow ID or macro name. Required for flow, messages, and macro resources."
     },
     "fuzz_id": {
       "type": "string",
@@ -20,7 +20,7 @@
     },
     "filter": {
       "type": "object",
-      "description": "Filter options for sessions, fuzz_jobs, and fuzz_results resources.",
+      "description": "Filter options for flows, fuzz_jobs, and fuzz_results resources.",
       "properties": {
         "protocol": {
           "type": "string",

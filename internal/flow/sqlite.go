@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -74,7 +74,7 @@ func NewSQLiteStore(ctx context.Context, path string, logger *slog.Logger) (*SQL
 	}
 	s.wg.Add(1)
 	go s.writeLoop()
-	logger.Info("session store initialized", "db_path", path)
+	logger.Info("flow store initialized", "db_path", path)
 	return s, nil
 }
 
@@ -88,7 +88,7 @@ func (s *SQLiteStore) writeLoop() {
 			}
 			err := op.fn(op.ctx)
 			if err != nil {
-				s.logger.Warn("session write failed", "error", err)
+				s.logger.Warn("flow write failed", "error", err)
 			}
 			op.result <- err
 		case <-s.done:
@@ -100,7 +100,7 @@ func (s *SQLiteStore) writeLoop() {
 				case op := <-s.writeCh:
 					err := op.fn(drainCtx)
 					if err != nil {
-						s.logger.Warn("session write failed during drain", "error", err)
+						s.logger.Warn("flow write failed during drain", "error", err)
 					}
 					op.result <- err
 				default:
@@ -127,20 +127,20 @@ func (s *SQLiteStore) enqueueWrite(ctx context.Context, fn func(ctx context.Cont
 	}
 }
 
-// SaveSession persists a new session.
-func (s *SQLiteStore) SaveSession(ctx context.Context, sess *Session) error {
-	if sess.ID == "" {
-		sess.ID = uuid.New().String()
+// SaveFlow persists a new flow.
+func (s *SQLiteStore) SaveFlow(ctx context.Context, fl *Flow) error {
+	if fl.ID == "" {
+		fl.ID = uuid.New().String()
 	}
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
-		return s.saveSessionSync(ctx, sess)
+		return s.saveFlowSync(ctx, fl)
 	})
 }
 
-func (s *SQLiteStore) saveSessionSync(ctx context.Context, sess *Session) error {
+func (s *SQLiteStore) saveFlowSync(ctx context.Context, fl *Flow) error {
 	tags := "{}"
-	if sess.Tags != nil {
-		tagsJSON, err := json.Marshal(sess.Tags)
+	if fl.Tags != nil {
+		tagsJSON, err := json.Marshal(fl.Tags)
 		if err != nil {
 			return fmt.Errorf("marshal tags: %w", err)
 		}
@@ -148,34 +148,34 @@ func (s *SQLiteStore) saveSessionSync(ctx context.Context, sess *Session) error 
 	}
 
 	var clientAddr, serverAddr, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject string
-	if sess.ConnInfo != nil {
-		clientAddr = sess.ConnInfo.ClientAddr
-		serverAddr = sess.ConnInfo.ServerAddr
-		tlsVersion = sess.ConnInfo.TLSVersion
-		tlsCipher = sess.ConnInfo.TLSCipher
-		tlsALPN = sess.ConnInfo.TLSALPN
-		tlsCertSubject = sess.ConnInfo.TLSServerCertSubject
+	if fl.ConnInfo != nil {
+		clientAddr = fl.ConnInfo.ClientAddr
+		serverAddr = fl.ConnInfo.ServerAddr
+		tlsVersion = fl.ConnInfo.TLSVersion
+		tlsCipher = fl.ConnInfo.TLSCipher
+		tlsALPN = fl.ConnInfo.TLSALPN
+		tlsCertSubject = fl.ConnInfo.TLSServerCertSubject
 	}
 
-	sessionType := sess.SessionType
-	if sessionType == "" {
-		sessionType = "unary"
+	flowType := fl.FlowType
+	if flowType == "" {
+		flowType = "unary"
 	}
-	state := sess.State
+	state := fl.State
 	if state == "" {
 		state = "complete"
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by)
+		`INSERT INTO flows (id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sess.ID,
-		sess.ConnID,
-		sess.Protocol,
-		sessionType,
+		fl.ID,
+		fl.ConnID,
+		fl.Protocol,
+		flowType,
 		state,
-		sess.Timestamp.UTC().Format(time.RFC3339Nano),
-		sess.Duration.Milliseconds(),
+		fl.Timestamp.UTC().Format(time.RFC3339Nano),
+		fl.Duration.Milliseconds(),
 		tags,
 		clientAddr,
 		serverAddr,
@@ -183,16 +183,16 @@ func (s *SQLiteStore) saveSessionSync(ctx context.Context, sess *Session) error 
 		tlsCipher,
 		tlsALPN,
 		tlsCertSubject,
-		sess.BlockedBy,
+		fl.BlockedBy,
 	)
 	if err != nil {
-		return fmt.Errorf("insert session: %w", err)
+		return fmt.Errorf("insert flow: %w", err)
 	}
 	return nil
 }
 
-// UpdateSession applies partial updates to an existing session.
-func (s *SQLiteStore) UpdateSession(ctx context.Context, id string, update SessionUpdate) error {
+// UpdateFlow applies partial updates to an existing flow.
+func (s *SQLiteStore) UpdateFlow(ctx context.Context, id string, update FlowUpdate) error {
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
 		var sets []string
 		var args []interface{}
@@ -227,28 +227,28 @@ func (s *SQLiteStore) UpdateSession(ctx context.Context, id string, update Sessi
 		}
 
 		args = append(args, id)
-		query := fmt.Sprintf("UPDATE sessions SET %s WHERE id = ?", strings.Join(sets, ", "))
+		query := fmt.Sprintf("UPDATE flows SET %s WHERE id = ?", strings.Join(sets, ", "))
 		_, err := s.db.ExecContext(ctx, query, args...)
 		if err != nil {
-			return fmt.Errorf("update session %s: %w", id, err)
+			return fmt.Errorf("update flow %s: %w", id, err)
 		}
 		return nil
 	})
 }
 
-// GetSession retrieves a session by ID.
-func (s *SQLiteStore) GetSession(ctx context.Context, id string) (*Session, error) {
+// GetFlow retrieves a flow by ID.
+func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, id)
-	return scanSession(row)
+		`SELECT `+flowColumns+` FROM flows WHERE id = ?`, id)
+	return scanFlow(row)
 }
 
-// sessionColumns is the list of columns selected in session queries.
-const sessionColumns = `id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by`
+// flowColumns is the list of columns selected in flow queries.
+const flowColumns = `id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by`
 
-// buildSessionWhereClause constructs a SQL WHERE clause from ListOptions.
+// buildFlowWhereClause constructs a SQL WHERE clause from ListOptions.
 // Method, URLPattern, and StatusCode are matched via EXISTS subqueries on messages.
-func buildSessionWhereClause(opts ListOptions) (string, []interface{}) {
+func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 	var conditions []string
 	var args []interface{}
 
@@ -257,16 +257,16 @@ func buildSessionWhereClause(opts ListOptions) (string, []interface{}) {
 		args = append(args, opts.Protocol)
 	}
 	if opts.Method != "" {
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.direction = 'send' AND m.method = ?)")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND m.method = ?)")
 		args = append(args, opts.Method)
 	}
 	if opts.URLPattern != "" {
 		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.URLPattern)
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
 		args = append(args, "%"+escaped+"%")
 	}
 	if opts.StatusCode != 0 {
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
 		args = append(args, opts.StatusCode)
 	}
 	if opts.BlockedBy != "" {
@@ -285,11 +285,11 @@ func buildSessionWhereClause(opts ListOptions) (string, []interface{}) {
 	return clause, args
 }
 
-// ListSessions returns sessions matching the given options.
-func (s *SQLiteStore) ListSessions(ctx context.Context, opts ListOptions) ([]*Session, error) {
-	whereClause, args := buildSessionWhereClause(opts)
+// ListFlows returns flows matching the given options.
+func (s *SQLiteStore) ListFlows(ctx context.Context, opts ListOptions) ([]*Flow, error) {
+	whereClause, args := buildFlowWhereClause(opts)
 
-	query := "SELECT " + sessionColumns + " FROM sessions s" + whereClause
+	query := "SELECT " + flowColumns + " FROM flows s" + whereClause
 	query += " ORDER BY s.timestamp DESC"
 
 	if opts.Limit > 0 {
@@ -301,48 +301,48 @@ func (s *SQLiteStore) ListSessions(ctx context.Context, opts ListOptions) ([]*Se
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
+		return nil, fmt.Errorf("list flows: %w", err)
 	}
 	defer rows.Close()
 
-	var sessions []*Session
+	var flows []*Flow
 	for rows.Next() {
-		sess, err := scanSession(rows)
+		fl, err := scanFlow(rows)
 		if err != nil {
 			return nil, err
 		}
-		sessions = append(sessions, sess)
+		flows = append(flows, fl)
 	}
-	return sessions, rows.Err()
+	return flows, rows.Err()
 }
 
-// CountSessions returns the total number of sessions matching the given filter options.
-func (s *SQLiteStore) CountSessions(ctx context.Context, opts ListOptions) (int, error) {
-	whereClause, args := buildSessionWhereClause(opts)
+// CountFlows returns the total number of flows matching the given filter options.
+func (s *SQLiteStore) CountFlows(ctx context.Context, opts ListOptions) (int, error) {
+	whereClause, args := buildFlowWhereClause(opts)
 
-	query := "SELECT COUNT(*) FROM sessions s" + whereClause
+	query := "SELECT COUNT(*) FROM flows s" + whereClause
 
 	var count int
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count sessions: %w", err)
+		return 0, fmt.Errorf("count flows: %w", err)
 	}
 	return count, nil
 }
 
-// DeleteSession removes a session by ID (messages are cascade-deleted).
-func (s *SQLiteStore) DeleteSession(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
+// DeleteFlow removes a flow by ID (messages are cascade-deleted).
+func (s *SQLiteStore) DeleteFlow(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM flows WHERE id = ?", id)
 	if err != nil {
-		return fmt.Errorf("delete session %s: %w", id, err)
+		return fmt.Errorf("delete flow %s: %w", id, err)
 	}
 	return nil
 }
 
-// DeleteAllSessions removes all sessions and returns the number of deleted rows.
-func (s *SQLiteStore) DeleteAllSessions(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions")
+// DeleteAllFlows removes all flows and returns the number of deleted rows.
+func (s *SQLiteStore) DeleteAllFlows(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM flows")
 	if err != nil {
-		return 0, fmt.Errorf("delete all sessions: %w", err)
+		return 0, fmt.Errorf("delete all flows: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -351,12 +351,12 @@ func (s *SQLiteStore) DeleteAllSessions(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// DeleteSessionsByProtocol removes sessions matching the given protocol.
-func (s *SQLiteStore) DeleteSessionsByProtocol(ctx context.Context, protocol string) (int64, error) {
+// DeleteFlowsByProtocol removes flows matching the given protocol.
+func (s *SQLiteStore) DeleteFlowsByProtocol(ctx context.Context, protocol string) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM sessions WHERE protocol = ?", protocol)
+		"DELETE FROM flows WHERE protocol = ?", protocol)
 	if err != nil {
-		return 0, fmt.Errorf("delete sessions by protocol %q: %w", protocol, err)
+		return 0, fmt.Errorf("delete flows by protocol %q: %w", protocol, err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -365,13 +365,13 @@ func (s *SQLiteStore) DeleteSessionsByProtocol(ctx context.Context, protocol str
 	return n, nil
 }
 
-// DeleteSessionsOlderThan removes sessions with timestamps before the given cutoff.
-func (s *SQLiteStore) DeleteSessionsOlderThan(ctx context.Context, before time.Time) (int64, error) {
+// DeleteFlowsOlderThan removes flows with timestamps before the given cutoff.
+func (s *SQLiteStore) DeleteFlowsOlderThan(ctx context.Context, before time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM sessions WHERE timestamp < ?",
+		"DELETE FROM flows WHERE timestamp < ?",
 		before.UTC().Format(time.RFC3339Nano))
 	if err != nil {
-		return 0, fmt.Errorf("delete sessions older than %s: %w", before.Format(time.RFC3339), err)
+		return 0, fmt.Errorf("delete flows older than %s: %w", before.Format(time.RFC3339), err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -380,16 +380,16 @@ func (s *SQLiteStore) DeleteSessionsOlderThan(ctx context.Context, before time.T
 	return n, nil
 }
 
-// DeleteExcessSessions removes the oldest sessions exceeding maxCount.
-func (s *SQLiteStore) DeleteExcessSessions(ctx context.Context, maxCount int) (int64, error) {
+// DeleteExcessFlows removes the oldest flows exceeding maxCount.
+func (s *SQLiteStore) DeleteExcessFlows(ctx context.Context, maxCount int) (int64, error) {
 	if maxCount <= 0 {
 		return 0, fmt.Errorf("maxCount must be > 0, got %d", maxCount)
 	}
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY timestamp DESC LIMIT ?)",
+		"DELETE FROM flows WHERE id NOT IN (SELECT id FROM flows ORDER BY timestamp DESC LIMIT ?)",
 		maxCount)
 	if err != nil {
-		return 0, fmt.Errorf("delete excess sessions: %w", err)
+		return 0, fmt.Errorf("delete excess flows: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -398,7 +398,7 @@ func (s *SQLiteStore) DeleteExcessSessions(ctx context.Context, maxCount int) (i
 	return n, nil
 }
 
-// AppendMessage persists a new message associated with a session.
+// AppendMessage persists a new message associated with a flow.
 func (s *SQLiteStore) AppendMessage(ctx context.Context, msg *Message) error {
 	if msg.ID == "" {
 		msg.ID = uuid.New().String()
@@ -433,10 +433,10 @@ func (s *SQLiteStore) appendMessageSync(ctx context.Context, msg *Message) error
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (id, session_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
+		`INSERT INTO messages (id, flow_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID,
-		msg.SessionID,
+		msg.FlowID,
 		msg.Sequence,
 		msg.Direction,
 		msg.Timestamp.UTC().Format(time.RFC3339Nano),
@@ -456,12 +456,12 @@ func (s *SQLiteStore) appendMessageSync(ctx context.Context, msg *Message) error
 }
 
 // messageColumns is the list of columns selected in message queries.
-const messageColumns = `id, session_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata`
+const messageColumns = `id, flow_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata`
 
-// GetMessages retrieves messages for a session, optionally filtered by direction.
-func (s *SQLiteStore) GetMessages(ctx context.Context, sessionID string, opts MessageListOptions) ([]*Message, error) {
-	query := "SELECT " + messageColumns + " FROM messages WHERE session_id = ?"
-	args := []interface{}{sessionID}
+// GetMessages retrieves messages for a flow, optionally filtered by direction.
+func (s *SQLiteStore) GetMessages(ctx context.Context, flowID string, opts MessageListOptions) ([]*Message, error) {
+	query := "SELECT " + messageColumns + " FROM messages WHERE flow_id = ?"
+	args := []interface{}{flowID}
 
 	if opts.Direction != "" {
 		query += " AND direction = ?"
@@ -487,10 +487,10 @@ func (s *SQLiteStore) GetMessages(ctx context.Context, sessionID string, opts Me
 	return messages, rows.Err()
 }
 
-// CountMessages returns the number of messages for a session.
-func (s *SQLiteStore) CountMessages(ctx context.Context, sessionID string) (int, error) {
+// CountMessages returns the number of messages for a flow.
+func (s *SQLiteStore) CountMessages(ctx context.Context, flowID string) (int, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE session_id = ?", sessionID).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE flow_id = ?", flowID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count messages: %w", err)
 	}
 	return count, nil
@@ -600,9 +600,9 @@ type scannable interface {
 	Scan(dest ...interface{}) error
 }
 
-func scanSession(row scannable) (*Session, error) {
+func scanFlow(row scannable) (*Flow, error) {
 	var (
-		sess           Session
+		fl           Flow
 		tsStr          string
 		durationMs     int64
 		tagsStr        string
@@ -616,11 +616,11 @@ func scanSession(row scannable) (*Session, error) {
 	)
 
 	err := row.Scan(
-		&sess.ID,
-		&sess.ConnID,
-		&sess.Protocol,
-		&sess.SessionType,
-		&sess.State,
+		&fl.ID,
+		&fl.ConnID,
+		&fl.Protocol,
+		&fl.FlowType,
+		&fl.State,
 		&tsStr,
 		&durationMs,
 		&tagsStr,
@@ -634,27 +634,27 @@ func scanSession(row scannable) (*Session, error) {
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("session not found")
+			return nil, fmt.Errorf("flow not found")
 		}
-		return nil, fmt.Errorf("scan session: %w", err)
+		return nil, fmt.Errorf("scan flow: %w", err)
 	}
 
 	if tagsStr != "" && tagsStr != "{}" {
-		if err := json.Unmarshal([]byte(tagsStr), &sess.Tags); err != nil {
-			slog.Warn("failed to parse session tags", "session_id", sess.ID, "value", tagsStr, "error", err)
-			sess.Tags = nil
+		if err := json.Unmarshal([]byte(tagsStr), &fl.Tags); err != nil {
+			slog.Warn("failed to parse flow tags", "flow_id", fl.ID, "value", tagsStr, "error", err)
+			fl.Tags = nil
 		}
 	}
 
 	ts, err := time.Parse(time.RFC3339Nano, tsStr)
 	if err != nil {
-		slog.Warn("failed to parse session timestamp (possible bug)", "value", tsStr, "error", err)
+		slog.Warn("failed to parse flow timestamp (possible bug)", "value", tsStr, "error", err)
 	}
-	sess.Timestamp = ts
-	sess.Duration = time.Duration(durationMs) * time.Millisecond
+	fl.Timestamp = ts
+	fl.Duration = time.Duration(durationMs) * time.Millisecond
 
 	if clientAddr != "" || serverAddr != "" || tlsVersion != "" || tlsCipher != "" || tlsALPN != "" || tlsCertSubject != "" {
-		sess.ConnInfo = &ConnectionInfo{
+		fl.ConnInfo = &ConnectionInfo{
 			ClientAddr:           clientAddr,
 			ServerAddr:           serverAddr,
 			TLSVersion:           tlsVersion,
@@ -664,9 +664,9 @@ func scanSession(row scannable) (*Session, error) {
 		}
 	}
 
-	sess.BlockedBy = blockedBy
+	fl.BlockedBy = blockedBy
 
-	return &sess, nil
+	return &fl, nil
 }
 
 func scanMessage(row scannable) (*Message, error) {
@@ -681,7 +681,7 @@ func scanMessage(row scannable) (*Message, error) {
 
 	err := row.Scan(
 		&msg.ID,
-		&msg.SessionID,
+		&msg.FlowID,
 		&msg.Sequence,
 		&msg.Direction,
 		&tsStr,

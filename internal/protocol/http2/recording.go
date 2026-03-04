@@ -10,16 +10,16 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // sendRecordParams holds the parameters needed to record the send phase
-// (Session + request message) of an HTTP/2 session.
+// (Session + request message) of an HTTP/2 flow.
 type sendRecordParams struct {
 	connID     string
 	clientAddr string
 	start      time.Time
-	connInfo   *session.ConnectionInfo
+	connInfo   *flow.ConnectionInfo
 
 	req          *gohttp.Request
 	reqURL       *url.URL
@@ -27,22 +27,22 @@ type sendRecordParams struct {
 	reqTruncated bool
 }
 
-// sendRecordResult holds the session created by recordSend so that
+// sendRecordResult holds the flow created by recordSend so that
 // subsequent recordReceive or recordSendError calls can reference it.
 type sendRecordResult struct {
-	sessionID string
+	flowID string
 	// recvSequence is the sequence number to use for the receive message.
 	// Defaults to 1 (send=0, receive=1). When variant recording produces
 	// two send messages (original=0, modified=1), this is set to 2.
 	recvSequence int
 }
 
-// recordSend records the send phase of an HTTP/2 session: creates the session
+// recordSend records the send phase of an HTTP/2 session: creates the flow
 // with State="active" and appends the send (request) message. This is called
 // after intercept/transform processing but before upstream forwarding, so even
 // if the upstream fails, the request is already recorded.
 //
-// Returns a sendRecordResult containing the session ID for follow-up calls,
+// Returns a sendRecordResult containing the flow ID for follow-up calls,
 // or nil if recording was skipped (nil store, capture scope miss, etc.).
 func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *slog.Logger) *sendRecordResult {
 	if h.Store == nil {
@@ -53,22 +53,22 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		return nil
 	}
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      p.connID,
 		Protocol:    "HTTP/2",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "active",
 		Timestamp:   p.start,
 		ConnInfo:    p.connInfo,
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("HTTP/2 session save failed",
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("HTTP/2 flow save failed",
 			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
 		return nil
 	}
 
-	sendMsg := &session.Message{
-		SessionID:     sess.ID,
+	sendMsg := &flow.Message{
+		FlowID:     fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -82,7 +82,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		logger.Error("HTTP/2 send message save failed", "error", err)
 	}
 
-	return &sendRecordResult{sessionID: sess.ID, recvSequence: 1}
+	return &sendRecordResult{flowID: fl.ID, recvSequence: 1}
 }
 
 // requestSnapshot holds a copy of the request headers and body taken before
@@ -157,24 +157,24 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	// Detect whether modification occurred.
 	modified := snap != nil && requestModified(*snap, p.req.Header, p.reqBody)
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      p.connID,
 		Protocol:    "HTTP/2",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "active",
 		Timestamp:   p.start,
 		ConnInfo:    p.connInfo,
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("HTTP/2 session save failed",
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("HTTP/2 flow save failed",
 			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
 		return nil
 	}
 
 	if modified {
 		// Record the original (unmodified) request as sequence 0.
-		originalMsg := &session.Message{
-			SessionID:     sess.ID,
+		originalMsg := &flow.Message{
+			FlowID:     fl.ID,
 			Sequence:      0,
 			Direction:     "send",
 			Timestamp:     p.start,
@@ -190,8 +190,8 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		}
 
 		// Record the modified request as sequence 1.
-		modifiedMsg := &session.Message{
-			SessionID:     sess.ID,
+		modifiedMsg := &flow.Message{
+			FlowID:     fl.ID,
 			Sequence:      1,
 			Direction:     "send",
 			Timestamp:     p.start,
@@ -206,12 +206,12 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			logger.Error("HTTP/2 modified send message save failed", "error", err)
 		}
 
-		return &sendRecordResult{sessionID: sess.ID, recvSequence: 2}
+		return &sendRecordResult{flowID: fl.ID, recvSequence: 2}
 	}
 
 	// No modification: single send message without variant metadata.
-	sendMsg := &session.Message{
-		SessionID:     sess.ID,
+	sendMsg := &flow.Message{
+		FlowID:     fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -225,11 +225,11 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		logger.Error("HTTP/2 send message save failed", "error", err)
 	}
 
-	return &sendRecordResult{sessionID: sess.ID, recvSequence: 1}
+	return &sendRecordResult{flowID: fl.ID, recvSequence: 1}
 }
 
 // receiveRecordParams holds the parameters needed to record the receive phase
-// (response message + session completion) of an HTTP/2 session.
+// (response message + session completion) of an HTTP/2 flow.
 type receiveRecordParams struct {
 	start      time.Time
 	duration   time.Duration
@@ -244,7 +244,7 @@ type receiveRecordParams struct {
 }
 
 // recordReceive records the receive phase of an HTTP/2 session: appends the
-// receive (response) message and updates the session to State="complete". This
+// receive (response) message and updates the flow to State="complete". This
 // is called after the response has been written to the client.
 //
 // If sendResult is nil (recording was skipped in recordSend), this is a no-op.
@@ -277,8 +277,8 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 		respTruncated = true
 	}
 
-	recvMsg := &session.Message{
-		SessionID:     sendResult.sessionID,
+	recvMsg := &flow.Message{
+		FlowID:     sendResult.flowID,
 		Sequence:      sendResult.recvSequence,
 		Direction:     "receive",
 		Timestamp:     p.start.Add(p.duration),
@@ -291,8 +291,8 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 		logger.Error("HTTP/2 receive message save failed", "error", err)
 	}
 
-	// Update the session to complete with the final duration and server address.
-	update := session.SessionUpdate{
+	// Update the flow to complete with the final duration and server address.
+	update := flow.FlowUpdate{
 		State:      "complete",
 		Duration:   p.duration,
 		ServerAddr: p.serverAddr,
@@ -300,14 +300,14 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 	if p.tlsServerCertSubject != "" {
 		update.TLSServerCertSubject = p.tlsServerCertSubject
 	}
-	if err := h.Store.UpdateSession(ctx, sendResult.sessionID, update); err != nil {
+	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("HTTP/2 session update failed", "error", err)
 	}
 }
 
 // recordSendError updates an HTTP/2 session to State="error" after an upstream
 // failure. The send message is already recorded by recordSend; this only updates
-// the session metadata.
+// the flow metadata.
 //
 // If sendResult is nil (recording was skipped in recordSend), this is a no-op.
 func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordResult, start time.Time, upstreamErr error, logger *slog.Logger) {
@@ -319,12 +319,12 @@ func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordRes
 	tags := map[string]string{
 		"error": upstreamErr.Error(),
 	}
-	update := session.SessionUpdate{
+	update := flow.FlowUpdate{
 		State:    "error",
 		Duration: duration,
 		Tags:     tags,
 	}
-	if err := h.Store.UpdateSession(ctx, sendResult.sessionID, update); err != nil {
+	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("HTTP/2 session error update failed", "error", err)
 	}
 }
@@ -342,24 +342,24 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	}
 
 	duration := time.Since(p.start)
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      p.connID,
 		Protocol:    "HTTP/2",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   p.start,
 		Duration:    duration,
 		BlockedBy:   "intercept_drop",
 		ConnInfo:    p.connInfo,
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("HTTP/2 intercept drop session save failed",
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("HTTP/2 intercept drop flow save failed",
 			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
 		return
 	}
 
-	sendMsg := &session.Message{
-		SessionID:     sess.ID,
+	sendMsg := &flow.Message{
+		FlowID:     fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -390,24 +390,24 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 	tags := map[string]string{
 		"error": buildErr.Error(),
 	}
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      p.connID,
 		Protocol:    "HTTP/2",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "error",
 		Timestamp:   p.start,
 		Duration:    duration,
 		Tags:        tags,
 		ConnInfo:    p.connInfo,
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("HTTP/2 outReq error session save failed",
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("HTTP/2 outReq error flow save failed",
 			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
 		return
 	}
 
-	sendMsg := &session.Message{
-		SessionID:     sess.ID,
+	sendMsg := &flow.Message{
+		FlowID:     fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,

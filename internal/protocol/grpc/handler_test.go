@@ -9,28 +9,28 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // --- test helpers ---
 
-// mockStore is a thread-safe minimal in-memory session store for testing.
+// mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
-	sessions []*session.Session
-	messages []*session.Message
+	flows []*flow.Flow
+	messages []*flow.Message
 }
 
-func (m *mockStore) SaveSession(_ context.Context, s *session.Session) error {
+func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	if s.ID == "" {
 		s.ID = uuid.New().String()
 	}
-	m.sessions = append(m.sessions, s)
+	m.flows = append(m.flows, s)
 	return nil
 }
 
-func (m *mockStore) UpdateSession(_ context.Context, id string, update session.SessionUpdate) error {
-	for _, s := range m.sessions {
+func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+	for _, s := range m.flows {
 		if s.ID == id {
 			if update.State != "" {
 				s.State = update.State
@@ -47,8 +47,8 @@ func (m *mockStore) UpdateSession(_ context.Context, id string, update session.S
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) GetSession(_ context.Context, id string) (*session.Session, error) {
-	for _, s := range m.sessions {
+func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
+	for _, s := range m.flows {
 		if s.ID == id {
 			return s, nil
 		}
@@ -56,37 +56,37 @@ func (m *mockStore) GetSession(_ context.Context, id string) (*session.Session, 
 	return nil, fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) ListSessions(_ context.Context, _ session.ListOptions) ([]*session.Session, error) {
-	return m.sessions, nil
+func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
+	return m.flows, nil
 }
 
-func (m *mockStore) CountSessions(_ context.Context, _ session.ListOptions) (int, error) {
-	return len(m.sessions), nil
+func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
+	return len(m.flows), nil
 }
 
-func (m *mockStore) DeleteSession(_ context.Context, _ string) error { return nil }
-func (m *mockStore) DeleteAllSessions(_ context.Context) (int64, error) {
+func (m *mockStore) DeleteFlow(_ context.Context, _ string) error { return nil }
+func (m *mockStore) DeleteAllFlows(_ context.Context) (int64, error) {
 	return 0, nil
 }
-func (m *mockStore) DeleteSessionsByProtocol(_ context.Context, _ string) (int64, error) {
+func (m *mockStore) DeleteFlowsByProtocol(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
-func (m *mockStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (m *mockStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
 func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *session.Message) error {
+func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, sessionID string, opts session.MessageListOptions) ([]*session.Message, error) {
-	var result []*session.Message
+func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
+	var result []*flow.Message
 	for _, msg := range m.messages {
-		if msg.SessionID == sessionID {
+		if msg.FlowID == flowID {
 			if opts.Direction != "" && msg.Direction != opts.Direction {
 				continue
 			}
@@ -96,10 +96,10 @@ func (m *mockStore) GetMessages(_ context.Context, sessionID string, opts sessio
 	return result, nil
 }
 
-func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, error) {
+func (m *mockStore) CountMessages(_ context.Context, flowID string) (int, error) {
 	count := 0
 	for _, msg := range m.messages {
-		if msg.SessionID == sessionID {
+		if msg.FlowID == flowID {
 			count++
 		}
 	}
@@ -107,17 +107,17 @@ func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, err
 }
 
 func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error { return nil }
-func (m *mockStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
+func (m *mockStore) GetMacro(_ context.Context, _ string) (*flow.MacroRecord, error) {
 	return nil, fmt.Errorf("not found")
 }
-func (m *mockStore) ListMacros(_ context.Context) ([]*session.MacroRecord, error) { return nil, nil }
+func (m *mockStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) { return nil, nil }
 func (m *mockStore) DeleteMacro(_ context.Context, _ string) error                { return nil }
 
-// messagesForSession returns messages for a given session ID.
-func (m *mockStore) messagesForSession(sessionID string) []*session.Message {
-	var result []*session.Message
+// messagesForSession returns messages for a given flow ID.
+func (m *mockStore) messagesForSession(flowID string) []*flow.Message {
+	var result []*flow.Message
 	for _, msg := range m.messages {
-		if msg.SessionID == sessionID {
+		if msg.FlowID == flowID {
 			result = append(result, msg)
 		}
 	}
@@ -268,9 +268,9 @@ func TestParseServiceMethod(t *testing.T) {
 	}
 }
 
-// --- classifySessionType tests ---
+// --- classifyFlowType tests ---
 
-func TestClassifySessionType(t *testing.T) {
+func TestClassifyFlowType(t *testing.T) {
 	tests := []struct {
 		name       string
 		reqFrames  int
@@ -289,9 +289,9 @@ func TestClassifySessionType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifySessionType(tt.reqFrames, tt.respFrames)
+			got := classifyFlowType(tt.reqFrames, tt.respFrames)
 			if got != tt.want {
-				t.Errorf("classifySessionType(%d, %d) = %q, want %q", tt.reqFrames, tt.respFrames, got, tt.want)
+				t.Errorf("classifyFlowType(%d, %d) = %q, want %q", tt.reqFrames, tt.respFrames, got, tt.want)
 			}
 		})
 	}
@@ -346,35 +346,35 @@ func TestRecordSession_UnaryRPC(t *testing.T) {
 		t.Fatalf("RecordSession() error = %v", err)
 	}
 
-	// Verify session.
-	if len(store.sessions) != 1 {
-		t.Fatalf("sessions count = %d, want 1", len(store.sessions))
+	// Verify flow.
+	if len(store.flows) != 1 {
+		t.Fatalf("sessions count = %d, want 1", len(store.flows))
 	}
-	sess := store.sessions[0]
-	if sess.Protocol != "gRPC" {
-		t.Errorf("protocol = %q, want %q", sess.Protocol, "gRPC")
+	fl := store.flows[0]
+	if fl.Protocol != "gRPC" {
+		t.Errorf("protocol = %q, want %q", fl.Protocol, "gRPC")
 	}
-	if sess.SessionType != "unary" {
-		t.Errorf("session_type = %q, want %q", sess.SessionType, "unary")
+	if fl.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
 	}
-	if sess.State != "complete" {
-		t.Errorf("state = %q, want %q", sess.State, "complete")
+	if fl.State != "complete" {
+		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
-	if sess.ConnID != "test-conn-1" {
-		t.Errorf("conn_id = %q, want %q", sess.ConnID, "test-conn-1")
+	if fl.ConnID != "test-conn-1" {
+		t.Errorf("conn_id = %q, want %q", fl.ConnID, "test-conn-1")
 	}
-	if sess.ConnInfo == nil {
+	if fl.ConnInfo == nil {
 		t.Fatal("conn_info is nil")
 	}
-	if sess.ConnInfo.ClientAddr != "127.0.0.1:12345" {
-		t.Errorf("client_addr = %q, want %q", sess.ConnInfo.ClientAddr, "127.0.0.1:12345")
+	if fl.ConnInfo.ClientAddr != "127.0.0.1:12345" {
+		t.Errorf("client_addr = %q, want %q", fl.ConnInfo.ClientAddr, "127.0.0.1:12345")
 	}
-	if sess.ConnInfo.TLSVersion != "TLS 1.3" {
-		t.Errorf("tls_version = %q, want %q", sess.ConnInfo.TLSVersion, "TLS 1.3")
+	if fl.ConnInfo.TLSVersion != "TLS 1.3" {
+		t.Errorf("tls_version = %q, want %q", fl.ConnInfo.TLSVersion, "TLS 1.3")
 	}
 
 	// Verify messages.
-	msgs := store.messagesForSession(sess.ID)
+	msgs := store.messagesForSession(fl.ID)
 	if len(msgs) != 2 {
 		t.Fatalf("messages count = %d, want 2", len(msgs))
 	}
@@ -469,16 +469,16 @@ func TestRecordSession_ServerStreaming(t *testing.T) {
 		t.Fatalf("RecordSession() error = %v", err)
 	}
 
-	if len(store.sessions) != 1 {
-		t.Fatalf("sessions count = %d, want 1", len(store.sessions))
+	if len(store.flows) != 1 {
+		t.Fatalf("sessions count = %d, want 1", len(store.flows))
 	}
-	sess := store.sessions[0]
-	if sess.SessionType != "stream" {
-		t.Errorf("session_type = %q, want %q", sess.SessionType, "stream")
+	fl := store.flows[0]
+	if fl.FlowType != "stream" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
 	}
 
 	// 1 send + 3 receive = 4 messages.
-	msgs := store.messagesForSession(sess.ID)
+	msgs := store.messagesForSession(fl.ID)
 	if len(msgs) != 4 {
 		t.Fatalf("messages count = %d, want 4", len(msgs))
 	}
@@ -559,13 +559,13 @@ func TestRecordSession_BidirectionalStreaming(t *testing.T) {
 		t.Fatalf("RecordSession() error = %v", err)
 	}
 
-	sess := store.sessions[0]
-	if sess.SessionType != "bidirectional" {
-		t.Errorf("session_type = %q, want %q", sess.SessionType, "bidirectional")
+	fl := store.flows[0]
+	if fl.FlowType != "bidirectional" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
 	}
 
 	// 3 send + 2 receive = 5 messages.
-	msgs := store.messagesForSession(sess.ID)
+	msgs := store.messagesForSession(fl.ID)
 	if len(msgs) != 5 {
 		t.Fatalf("messages count = %d, want 5", len(msgs))
 	}
@@ -637,12 +637,12 @@ func TestRecordSession_ErrorResponse(t *testing.T) {
 		t.Fatalf("RecordSession() error = %v", err)
 	}
 
-	sess := store.sessions[0]
-	if sess.SessionType != "unary" {
-		t.Errorf("session_type = %q, want %q", sess.SessionType, "unary")
+	fl := store.flows[0]
+	if fl.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
 	}
 
-	msgs := store.messagesForSession(sess.ID)
+	msgs := store.messagesForSession(fl.ID)
 	if len(msgs) != 2 {
 		t.Fatalf("messages count = %d, want 2", len(msgs))
 	}
@@ -691,7 +691,7 @@ func TestRecordSession_InvalidPath(t *testing.T) {
 	}
 
 	// Should still record with "unknown" service/method.
-	msgs := store.messagesForSession(store.sessions[0].ID)
+	msgs := store.messagesForSession(store.flows[0].ID)
 	if len(msgs) != 2 {
 		t.Fatalf("messages count = %d, want 2", len(msgs))
 	}
@@ -741,7 +741,7 @@ func TestRecordSession_CompressedFrames(t *testing.T) {
 		t.Fatalf("RecordSession() error = %v", err)
 	}
 
-	msgs := store.messagesForSession(store.sessions[0].ID)
+	msgs := store.messagesForSession(store.flows[0].ID)
 	if len(msgs) != 2 {
 		t.Fatalf("messages count = %d, want 2", len(msgs))
 	}
@@ -792,7 +792,7 @@ func TestRecordSession_EmptyBodies(t *testing.T) {
 		t.Fatalf("RecordSession() error = %v", err)
 	}
 
-	msgs := store.messagesForSession(store.sessions[0].ID)
+	msgs := store.messagesForSession(store.flows[0].ID)
 	if len(msgs) != 2 {
 		t.Fatalf("messages count = %d, want 2", len(msgs))
 	}

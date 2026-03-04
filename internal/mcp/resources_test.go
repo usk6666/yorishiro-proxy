@@ -122,7 +122,7 @@ func TestReadResource_HelpResources(t *testing.T) {
 			name:         "help/query",
 			uri:          "yorishiro://help/query",
 			wantMIMEType: "text/markdown",
-			wantContains: "sessions",
+			wantContains: "flows",
 		},
 		{
 			name:         "help/execute",

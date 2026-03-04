@@ -321,7 +321,7 @@ export function FuzzPage() {
                       <thead>
                         <tr>
                           <th>ID</th>
-                          <th>Session</th>
+                          <th>Flow</th>
                           <th>Status</th>
                           <th>Progress</th>
                           <th>Errors</th>
@@ -339,7 +339,7 @@ export function FuzzPage() {
                           >
                             <td className="fuzz-cell-id">{shortId(job.id)}</td>
                             <td className="fuzz-cell-id">
-                              {shortId(job.session_id)}
+                              {shortId(job.flow_id)}
                             </td>
                             <td>
                               <Badge variant={statusVariant(job.status)}>
@@ -549,8 +549,8 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
   const { addToast } = useToast();
   const { execute, loading: executing } = useExecute();
 
-  // Base session
-  const [sessionId, setSessionId] = useState("");
+  // Base flow
+  const [flowId, setFlowId] = useState("");
 
   // Attack type
   const [attackType, setAttackType] = useState("sequential");
@@ -621,8 +621,8 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
 
   // --- Submit ---
   const handleSubmit = useCallback(async () => {
-    if (!sessionId.trim()) {
-      addToast({ type: "warning", message: "Session ID is required" });
+    if (!flowId.trim()) {
+      addToast({ type: "warning", message: "Flow ID is required" });
       return;
     }
 
@@ -717,7 +717,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
       await execute({
         action: "fuzz",
         params: {
-          session_id: sessionId.trim(),
+          flow_id: flowId.trim(),
           positions: builtPositions,
           payload_sets: builtPayloadSets,
           attack_type: attackType,
@@ -740,7 +740,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
       });
     }
   }, [
-    sessionId,
+    flowId,
     positions,
     payloadSets,
     attackType,
@@ -761,15 +761,15 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
 
   return (
     <div className="fuzz-creator">
-      {/* Base session */}
+      {/* Base flow */}
       <div className="fuzz-creator-section">
-        <h3 className="fuzz-creator-section-title">Base Session</h3>
+        <h3 className="fuzz-creator-section-title">Base Flow</h3>
         <div className="fuzz-creator-row">
-          <label className="fuzz-creator-label">Session ID</label>
+          <label className="fuzz-creator-label">Flow ID</label>
           <Input
-            placeholder="Enter session ID..."
-            value={sessionId}
-            onChange={(e) => setSessionId(e.target.value)}
+            placeholder="Enter flow ID..."
+            value={flowId}
+            onChange={(e) => setFlowId(e.target.value)}
           />
         </div>
       </div>
