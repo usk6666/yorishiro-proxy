@@ -1,0 +1,102 @@
+.tcp-response-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Dry-run preview */
+.tcp-response-dry-run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.tcp-response-dry-run-header {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--accent-warning);
+}
+
+.tcp-response-dry-run-info {
+  display: flex;
+  gap: var(--space-lg);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+/* Decoded view */
+.tcp-response-decoded-view {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.tcp-response-decoded-content {
+  margin: 0;
+  padding: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 400px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* Hex dump view */
+.tcp-response-hex-view {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.tcp-response-hex-content {
+  margin: 0;
+  padding: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 400px;
+  white-space: pre;
+  line-height: 1.6;
+}
+
+/* Raw base64 view */
+.tcp-response-raw-view {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.tcp-response-raw-content {
+  margin: 0;
+  padding: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 400px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* Empty state */
+.tcp-response-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
