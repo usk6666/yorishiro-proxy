@@ -504,6 +504,8 @@ export function FlowDetailPage() {
       {/* gRPC structured details panel */}
       {isGrpcFlow(flowData) && (
         <GrpcPanel flow={flowData} />
+      )}
+
       {/* HTTP/2 Stream Grouping (for multi-stream message previews) */}
       {flowData.protocol === "HTTP/2" && messages.length > 0 && (
         <div className="sd-section">
