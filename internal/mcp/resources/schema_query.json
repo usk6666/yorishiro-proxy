@@ -43,6 +43,15 @@
           "type": "integer",
           "description": "HTTP response status code filter."
         },
+        "blocked_by": {
+          "type": "string",
+          "description": "Filter sessions by blocked_by value (e.g. target_scope, intercept_drop)."
+        },
+        "state": {
+          "type": "string",
+          "description": "Session lifecycle state filter (active, complete, error).",
+          "enum": ["active", "complete", "error"]
+        },
         "body_contains": {
           "type": "string",
           "description": "Response body substring filter (fuzz_results)."

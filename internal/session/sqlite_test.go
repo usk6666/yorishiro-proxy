@@ -323,6 +323,8 @@ func TestSQLiteStore_ListSessions_Filters(t *testing.T) {
 		{"by URL pattern", ListOptions{URLPattern: "api.example"}, 1},
 		{"by status 404", ListOptions{StatusCode: 404}, 1},
 		{"by status 200", ListOptions{StatusCode: 200}, 1},
+		{"by state complete", ListOptions{State: "complete"}, 3},
+		{"by state error", ListOptions{State: "error"}, 0},
 		{"limit", ListOptions{Limit: 1}, 1},
 	}
 
@@ -334,6 +336,74 @@ func TestSQLiteStore_ListSessions_Filters(t *testing.T) {
 			}
 			if len(sessions) != tt.want {
 				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
+			}
+		})
+	}
+}
+
+func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Create sessions with different states.
+	activeSession := &Session{
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "active",
+		Timestamp:   now,
+	}
+	if err := store.SaveSession(ctx, activeSession); err != nil {
+		t.Fatalf("SaveSession(active): %v", err)
+	}
+
+	completeSession := &Session{
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   now,
+	}
+	if err := store.SaveSession(ctx, completeSession); err != nil {
+		t.Fatalf("SaveSession(complete): %v", err)
+	}
+
+	errorSession := &Session{
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "error",
+		Timestamp:   now,
+	}
+	if err := store.SaveSession(ctx, errorSession); err != nil {
+		t.Fatalf("SaveSession(error): %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		state string
+		want  int
+	}{
+		{"active sessions", "active", 1},
+		{"complete sessions", "complete", 1},
+		{"error sessions", "error", 1},
+		{"all sessions", "", 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions, err := store.ListSessions(ctx, ListOptions{State: tt.state})
+			if err != nil {
+				t.Fatalf("ListSessions: %v", err)
+			}
+			if len(sessions) != tt.want {
+				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
+			}
+
+			count, err := store.CountSessions(ctx, ListOptions{State: tt.state})
+			if err != nil {
+				t.Fatalf("CountSessions: %v", err)
+			}
+			if count != tt.want {
+				t.Errorf("count = %d, want %d", count, tt.want)
 			}
 		})
 	}

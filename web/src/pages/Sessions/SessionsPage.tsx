@@ -16,6 +16,7 @@ import "./SessionsPage.css";
 
 const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP"] as const;
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] as const;
+const SESSION_STATES = ["active", "complete", "error"] as const;
 const PAGE_SIZES = [25, 50, 100] as const;
 const POLL_INTERVALS = [
   { label: "Off", value: 0 },
@@ -91,6 +92,20 @@ function formatMessageCount(count: number): string {
   return String(count);
 }
 
+/** Get the Badge variant for a session state. */
+function stateVariant(state: string): "default" | "success" | "warning" | "danger" | "info" {
+  switch (state) {
+    case "complete":
+      return "success";
+    case "active":
+      return "info";
+    case "error":
+      return "danger";
+    default:
+      return "default";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -106,6 +121,7 @@ export function SessionsPage() {
   const [selectedMethod, setSelectedMethod] = useState<string>("");
   const [statusCodeRange, setStatusCodeRange] = useState<string>("");
   const [urlPattern, setUrlPattern] = useState<string>("");
+  const [selectedState, setSelectedState] = useState<string>("");
 
   // --- Pagination state ---
   const [pageSize, setPageSize] = useState<number>(50);
@@ -136,8 +152,11 @@ export function SessionsPage() {
         f.status_code = code;
       }
     }
+    if (selectedState) {
+      f.state = selectedState;
+    }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange]);
+  }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange, selectedState]);
 
   // --- Query sessions ---
   const { data, loading, error, refetch } = useQuery("sessions", {
@@ -190,6 +209,15 @@ export function SessionsPage() {
   const handleStatusCodeChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       setStatusCodeRange(e.target.value);
+      handleFilterChange();
+    },
+    [handleFilterChange],
+  );
+
+  // --- Session state ---
+  const handleStateChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      setSelectedState(e.target.value);
       handleFilterChange();
     },
     [handleFilterChange],
@@ -418,6 +446,22 @@ export function SessionsPage() {
             </select>
           </div>
 
+          <div className="sessions-filter-group">
+            <span className="sessions-filter-label">Session State</span>
+            <select
+              className="sessions-filter-select"
+              value={selectedState}
+              onChange={handleStateChange}
+            >
+              <option value="">All</option>
+              {SESSION_STATES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="sessions-filter-group sessions-url-filter">
             <span className="sessions-filter-label">URL Pattern</span>
             <Input
@@ -493,6 +537,7 @@ export function SessionsPage() {
                   </th>
                   <th>ID</th>
                   <th>Protocol</th>
+                  <th>State</th>
                   <th>Method</th>
                   <th>URL</th>
                   <th>Status</th>
@@ -524,6 +569,11 @@ export function SessionsPage() {
                     <td>
                       <Badge variant={protocolVariant(session.protocol)}>
                         {session.protocol}
+                      </Badge>
+                    </td>
+                    <td>
+                      <Badge variant={stateVariant(session.state)}>
+                        {session.state}
                       </Badge>
                     </td>
                     <td className="sessions-cell-method">{session.method}</td>

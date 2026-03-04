@@ -504,6 +504,22 @@
   margin-bottom: var(--space-sm);
 }
 
+/* --- No response state --- */
+
+.sd-no-response {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-style: italic;
+}
+
+/* --- Full-width panel (when variant diff takes up request column) --- */
+
+.sd-panel--full-width {
+  grid-column: 1 / -1;
+}
+
 /* --- Messages pagination --- */
 
 .sd-messages-pagination {

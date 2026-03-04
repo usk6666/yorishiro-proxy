@@ -19,6 +19,8 @@ Filter options for the `sessions`, `messages`, `fuzz_jobs`, and `fuzz_results` r
 - **method** (string): HTTP method filter for sessions (e.g. `"GET"`, `"POST"`).
 - **url_pattern** (string): URL substring match for sessions (e.g. `"/api/"`).
 - **status_code** (integer): HTTP status code filter for sessions and fuzz_results (e.g. `200`, `404`).
+- **blocked_by** (string): Filter for blocked sessions (e.g. `"target_scope"`, `"intercept_drop"`).
+- **state** (string): Session lifecycle state filter (`"active"`, `"complete"`, `"error"`).
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
 - **status** (string): Job status filter for fuzz_jobs (e.g. `"running"`, `"completed"`).
@@ -54,6 +56,13 @@ Returns: `sessions[]` (id, protocol, session_type, state, method, url, status_co
 ### session
 Get full details of a single session including request/response headers, bodies, and connection info.
 
+Session state indicates the lifecycle stage:
+- `"active"`: In progress (send recorded, awaiting receive)
+- `"complete"`: Finished successfully
+- `"error"`: Failed (e.g. 502 error, upstream connection failure)
+
+When intercept/transform modifies a request, the session contains variant messages. The `original_request` field is populated with the pre-modification request data for diff comparison. The main request fields show the modified (actually sent) version.
+
 For streaming sessions (`session_type` != `"unary"`), the response includes:
 - `message_preview`: The first 10 messages with full details (body, metadata, etc.)
 - `message_count`: Total number of messages in the session
@@ -63,7 +72,7 @@ Use the `messages` resource with `limit`/`offset` to page through all messages.
 
 Requires: `id` (session ID).
 
-Returns: id, conn_id, protocol, session_type, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), timestamps.
+Returns: id, conn_id, protocol, session_type, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant sessions), timestamps.
 
 ### messages
 Get paginated messages within a session. Supports direction filtering for streaming protocols.
@@ -130,6 +139,22 @@ Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, ma
   "resource": "sessions",
   "filter": {"method": "POST", "url_pattern": "/api/login"},
   "limit": 10
+}
+```
+
+### Filter sessions by state (e.g. active or error)
+```json
+{
+  "resource": "sessions",
+  "filter": {"state": "error"}
+}
+```
+
+### Filter blocked sessions
+```json
+{
+  "resource": "sessions",
+  "filter": {"blocked_by": "intercept_drop"}
 }
 ```
 

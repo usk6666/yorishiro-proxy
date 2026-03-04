@@ -95,9 +95,32 @@ function formatTimestamp(ts: string): string {
   }
 }
 
+/** Get the Badge variant for a session state. */
+function stateVariant(state: string): "default" | "success" | "warning" | "danger" | "info" {
+  switch (state) {
+    case "complete":
+      return "success";
+    case "active":
+      return "info";
+    case "error":
+      return "danger";
+    default:
+      return "default";
+  }
+}
+
 /** Whether a session is a streaming type (WebSocket, gRPC server/client streaming). */
 function isStreamingSession(session: SessionDetailResult): boolean {
   return session.session_type !== "unary";
+}
+
+/** Whether a session has a response (error/drop sessions may not have one). */
+function hasResponse(session: SessionDetailResult): boolean {
+  return (
+    session.response_status_code > 0 ||
+    (session.response_headers != null &&
+      Object.keys(session.response_headers).length > 0)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -308,8 +331,14 @@ export function SessionDetailPage() {
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">State</span>
-            <Badge variant="default">{session.state}</Badge>
+            <Badge variant={stateVariant(session.state)}>{session.state}</Badge>
           </div>
+          {session.blocked_by && (
+            <div className="sd-meta-item">
+              <span className="sd-meta-label">Blocked By</span>
+              <Badge variant="warning">{session.blocked_by}</Badge>
+            </div>
+          )}
           {session.message_count > 0 && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Messages</span>
@@ -389,34 +418,94 @@ export function SessionDetailPage() {
         </div>
       )}
 
+      {/* Variant diff: original vs modified request */}
+      {session.original_request && (
+        <div className="sd-section">
+          <h2 className="sd-section-title">Request Modification (Original vs Modified)</h2>
+          <div className="sd-panels">
+            {/* Original request */}
+            <div className="sd-panel">
+              <div className="sd-panel-header">
+                <span className="sd-panel-title">Original Request</span>
+                <Badge variant="default">original</Badge>
+              </div>
+              <Tabs
+                tabs={REQUEST_TABS}
+                activeTab={requestTab}
+                onTabChange={setRequestTab}
+              >
+                {requestTab === "headers" && (
+                  <HeadersTable headers={session.original_request.headers} />
+                )}
+                {requestTab === "body" && (
+                  <BodyViewer
+                    body={session.original_request.body}
+                    encoding={session.original_request.body_encoding}
+                    truncated={false}
+                    headers={session.original_request.headers}
+                  />
+                )}
+              </Tabs>
+            </div>
+
+            {/* Modified request */}
+            <div className="sd-panel">
+              <div className="sd-panel-header">
+                <span className="sd-panel-title">Modified Request</span>
+                <Badge variant="warning">modified</Badge>
+              </div>
+              <Tabs
+                tabs={REQUEST_TABS}
+                activeTab={requestTab}
+                onTabChange={setRequestTab}
+              >
+                {requestTab === "headers" && (
+                  <HeadersTable headers={session.request_headers} />
+                )}
+                {requestTab === "body" && (
+                  <BodyViewer
+                    body={session.request_body}
+                    encoding={session.request_body_encoding}
+                    truncated={session.request_body_truncated}
+                    headers={session.request_headers}
+                  />
+                )}
+              </Tabs>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Request / Response panels */}
       <div className="sd-panels">
-        {/* Request panel */}
-        <div className="sd-panel">
-          <div className="sd-panel-header">
-            <span className="sd-panel-title">Request</span>
+        {/* Request panel (shown when no variant diff) */}
+        {!session.original_request && (
+          <div className="sd-panel">
+            <div className="sd-panel-header">
+              <span className="sd-panel-title">Request</span>
+            </div>
+            <Tabs
+              tabs={REQUEST_TABS}
+              activeTab={requestTab}
+              onTabChange={setRequestTab}
+            >
+              {requestTab === "headers" && (
+                <HeadersTable headers={session.request_headers} />
+              )}
+              {requestTab === "body" && (
+                <BodyViewer
+                  body={session.request_body}
+                  encoding={session.request_body_encoding}
+                  truncated={session.request_body_truncated}
+                  headers={session.request_headers}
+                />
+              )}
+            </Tabs>
           </div>
-          <Tabs
-            tabs={REQUEST_TABS}
-            activeTab={requestTab}
-            onTabChange={setRequestTab}
-          >
-            {requestTab === "headers" && (
-              <HeadersTable headers={session.request_headers} />
-            )}
-            {requestTab === "body" && (
-              <BodyViewer
-                body={session.request_body}
-                encoding={session.request_body_encoding}
-                truncated={session.request_body_truncated}
-                headers={session.request_headers}
-              />
-            )}
-          </Tabs>
-        </div>
+        )}
 
         {/* Response panel */}
-        <div className="sd-panel">
+        <div className={session.original_request ? "sd-panel sd-panel--full-width" : "sd-panel"}>
           <div className="sd-panel-header">
             <span className="sd-panel-title">Response</span>
             {session.response_status_code > 0 && (
@@ -434,24 +523,39 @@ export function SessionDetailPage() {
                 {session.response_status_code}
               </Badge>
             )}
+            {!hasResponse(session) && (
+              <Badge variant="danger">No Response</Badge>
+            )}
           </div>
-          <Tabs
-            tabs={RESPONSE_TABS}
-            activeTab={responseTab}
-            onTabChange={setResponseTab}
-          >
-            {responseTab === "headers" && (
-              <HeadersTable headers={session.response_headers} />
-            )}
-            {responseTab === "body" && (
-              <BodyViewer
-                body={session.response_body}
-                encoding={session.response_body_encoding}
-                truncated={session.response_body_truncated}
-                headers={session.response_headers}
-              />
-            )}
-          </Tabs>
+          {hasResponse(session) ? (
+            <Tabs
+              tabs={RESPONSE_TABS}
+              activeTab={responseTab}
+              onTabChange={setResponseTab}
+            >
+              {responseTab === "headers" && (
+                <HeadersTable headers={session.response_headers} />
+              )}
+              {responseTab === "body" && (
+                <BodyViewer
+                  body={session.response_body}
+                  encoding={session.response_body_encoding}
+                  truncated={session.response_body_truncated}
+                  headers={session.response_headers}
+                />
+              )}
+            </Tabs>
+          ) : (
+            <div className="sd-no-response">
+              {session.state === "error"
+                ? "This session ended with an error. No response was received from the upstream server."
+                : session.state === "active"
+                  ? "This session is still active. The response has not been received yet."
+                  : session.blocked_by === "intercept_drop"
+                    ? "This request was dropped by an intercept rule. No response was generated."
+                    : "No response data available for this session."}
+            </div>
+          )}
         </div>
       </div>
     </div>
