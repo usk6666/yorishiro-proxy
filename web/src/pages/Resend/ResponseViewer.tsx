@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import type { FlowDetailResult } from "../../lib/mcp/types.js";
 import type { ResendResult } from "./ResendPage.js";
+import { CodeViewer } from "../../components/ui/CodeViewer.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import "./ResponseViewer.css";
 
@@ -23,16 +24,31 @@ export interface ResponseViewerProps {
 export function ResponseViewer({ response, originalFlow }: ResponseViewerProps) {
   const [activeTab, setActiveTab] = useState("body");
 
+  /** Extract Content-Type from response headers (case-insensitive). */
+  const responseContentType = useMemo(() => {
+    if (!response.response_headers) return "";
+    for (const [key, values] of Object.entries(response.response_headers)) {
+      if (key.toLowerCase() === "content-type" && values.length > 0) {
+        return values[0];
+      }
+    }
+    return "";
+  }, [response.response_headers]);
+
+  const bodyText = response.response_body_encoding === "base64"
+    ? "(Binary content, base64 encoded)"
+    : response.response_body || "";
+
   return (
     <div className="response-viewer">
       <Tabs tabs={RESPONSE_TABS} activeTab={activeTab} onTabChange={setActiveTab}>
         {activeTab === "body" && (
           <div className="response-body-view">
-            <pre className="response-body-content">
-              {response.response_body_encoding === "base64"
-                ? "(Binary content, base64 encoded)"
-                : response.response_body || "(empty body)"}
-            </pre>
+            {bodyText ? (
+              <CodeViewer code={bodyText} contentType={responseContentType} />
+            ) : (
+              <div className="response-empty">(empty body)</div>
+            )}
           </div>
         )}
         {activeTab === "headers" && (
