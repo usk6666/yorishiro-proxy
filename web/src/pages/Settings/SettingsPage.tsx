@@ -5,6 +5,7 @@ import { ProxyControl } from "./ProxyControl.js";
 import { ProtocolFilter } from "./ProtocolFilter.js";
 import { CaptureScope } from "./CaptureScope.js";
 import { TlsPassthrough } from "./TlsPassthrough.js";
+import { TcpForwards } from "./TcpForwards.js";
 import { InterceptRules } from "./InterceptRules.js";
 import { AutoTransformRules } from "./AutoTransformRules.js";
 import { ConnectionSettings } from "./ConnectionSettings.js";
@@ -15,6 +16,7 @@ const TABS = [
   { id: "proxy", label: "Proxy" },
   { id: "capture", label: "Capture Scope" },
   { id: "tls", label: "TLS Passthrough" },
+  { id: "tcp-forwards", label: "TCP Forwards" },
   { id: "intercept", label: "Intercept Rules" },
   { id: "transform", label: "Auto-Transform" },
   { id: "connection", label: "Connection" },
@@ -80,6 +82,16 @@ export function SettingsPage() {
         }
         if (!configData) return null;
         return <TlsPassthrough config={configData} onRefresh={handleRefresh} />;
+
+      case "tcp-forwards":
+        if (configLoading && !configData) {
+          return <div className="settings-loading"><Spinner size="md" /></div>;
+        }
+        if (configError) {
+          return <div className="settings-error">Error loading config: {configError.message}</div>;
+        }
+        if (!configData) return null;
+        return <TcpForwards config={configData} onRefresh={handleRefresh} />;
 
       case "intercept":
         if (configLoading && !configData) {
