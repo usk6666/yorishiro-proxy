@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
+import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
 import type { QueryFilter, FlowEntry } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
@@ -113,7 +113,7 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
 export function SessionsPage() {
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const { execute, loading: executeLoading } = useExecute();
+  const { manage, loading: executeLoading } = useManage();
 
   // --- Filter state ---
   const [showFilters, setShowFilters] = useState(false);
@@ -275,7 +275,7 @@ export function SessionsPage() {
 
     try {
       for (const id of selectedIds) {
-        await execute({
+        await manage({
           action: "delete_flows",
           params: { flow_id: id, confirm: true },
         });
@@ -289,12 +289,12 @@ export function SessionsPage() {
         message: `Failed to delete flows: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedIds, execute, addToast, refetch]);
+  }, [selectedIds, manage, addToast, refetch]);
 
   // --- Export flows ---
   const handleExport = useCallback(async () => {
     try {
-      await execute({
+      await manage({
         action: "export_flows",
         params: { format: "jsonl" },
       });
@@ -305,7 +305,7 @@ export function SessionsPage() {
         message: `Export failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [execute, addToast]);
+  }, [manage, addToast]);
 
   // --- Pagination ---
   const totalPages = Math.max(1, Math.ceil(total / pageSize));

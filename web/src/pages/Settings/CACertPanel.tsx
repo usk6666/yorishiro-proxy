@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
+import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
@@ -133,7 +133,7 @@ interface CACertPanelProps {
 
 export function CACertPanel({ onRefresh }: CACertPanelProps) {
   const { addToast } = useToast();
-  const { execute, loading: executing } = useExecute();
+  const { manage, loading: executing } = useManage();
   const [showConfirm, setShowConfirm] = useState(false);
   const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
 
@@ -153,7 +153,7 @@ export function CACertPanel({ onRefresh }: CACertPanelProps) {
   const handleRegenerate = useCallback(async () => {
     setShowConfirm(false);
     try {
-      await execute({
+      await manage({
         action: "regenerate_ca_cert",
         params: {},
       });
@@ -169,7 +169,7 @@ export function CACertPanel({ onRefresh }: CACertPanelProps) {
         message: `Failed to regenerate CA: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [execute, addToast, refetch, onRefresh]);
+  }, [manage, addToast, refetch, onRefresh]);
 
   const togglePlatform = useCallback((platform: string) => {
     setExpandedPlatform((prev) => (prev === platform ? null : platform));
