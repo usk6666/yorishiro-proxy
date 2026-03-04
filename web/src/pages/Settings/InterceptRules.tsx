@@ -9,13 +9,13 @@ interface InterceptRulesProps {
 }
 
 const DIRECTION_OPTIONS = ["request", "response", "both"] as const;
+const TIMEOUT_BEHAVIOR_OPTIONS = ["auto_release", "auto_drop"] as const;
 
 /**
  * InterceptRules — manage intercept rules for request/response interception.
  *
  * Note: The config query does not return individual rule details.
- * We query the status to get intercept_queue info and manage rules
- * via the configure tool's intercept_rules section.
+ * We manage rules via the configure tool's intercept_rules section.
  */
 export function InterceptRules({ config: _config, onRefresh }: InterceptRulesProps) {
   const { addToast } = useToast();
@@ -33,6 +33,10 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
 
   // Remove/enable/disable by ID
   const [actionId, setActionId] = useState("");
+
+  // Intercept queue settings
+  const [queueTimeoutMs, setQueueTimeoutMs] = useState("");
+  const [queueTimeoutBehavior, setQueueTimeoutBehavior] = useState<"auto_release" | "auto_drop">("auto_release");
 
   const resetForm = () => {
     setRuleId("");
@@ -146,6 +150,35 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
       });
     }
   }, [actionId, configure, addToast, onRefresh]);
+
+  const handleSaveQueueSettings = useCallback(async () => {
+    let timeoutMs: number | null = null;
+    const trimmed = queueTimeoutMs.trim();
+    if (trimmed) {
+      const parsed = parseInt(trimmed, 10);
+      if (isNaN(parsed) || parsed < 0) {
+        addToast({ type: "warning", message: "Timeout must be a non-negative number" });
+        return;
+      }
+      timeoutMs = parsed;
+    }
+
+    try {
+      await configure({
+        intercept_queue: {
+          timeout_ms: timeoutMs,
+          timeout_behavior: queueTimeoutBehavior,
+        },
+      });
+      addToast({ type: "success", message: "Intercept queue settings updated" });
+      onRefresh();
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to update queue settings: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [queueTimeoutMs, queueTimeoutBehavior, configure, addToast, onRefresh]);
 
   return (
     <div className="settings-section">
@@ -261,6 +294,51 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
           </div>
         </div>
       )}
+
+      {/* Intercept Queue Settings */}
+      <div className="settings-card">
+        <div className="settings-card-header">
+          <span className="settings-card-title">Intercept Queue</span>
+        </div>
+        <div className="settings-card-body">
+          <p className="settings-section-desc">
+            Configure timeout behavior for intercepted requests waiting in the queue.
+            When the timeout expires, the request is automatically released or dropped.
+          </p>
+          <div className="settings-form-row">
+            <Input
+              label="Timeout (ms)"
+              type="number"
+              value={queueTimeoutMs}
+              onChange={(e) => setQueueTimeoutMs(e.target.value)}
+              placeholder="e.g. 30000 (leave empty for default)"
+            />
+            <div className="input-wrapper">
+              <label className="input-label" htmlFor="queue-timeout-behavior">Timeout Behavior</label>
+              <select
+                id="queue-timeout-behavior"
+                className="settings-select"
+                value={queueTimeoutBehavior}
+                onChange={(e) => setQueueTimeoutBehavior(e.target.value as "auto_release" | "auto_drop")}
+              >
+                {TIMEOUT_BEHAVIOR_OPTIONS.map((b) => (
+                  <option key={b} value={b}>{b === "auto_release" ? "Auto Release" : "Auto Drop"}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="settings-add-form-actions">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSaveQueueSettings}
+              disabled={configureLoading}
+            >
+              Save Queue Settings
+            </Button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
