@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -30,10 +30,10 @@ func BenchmarkSaveSession(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sess := &Session{
+		fl := &Flow{
 			ConnID:      fmt.Sprintf("conn-%d", i),
 			Protocol:    "HTTP/1.x",
-			SessionType: "unary",
+			FlowType: "unary",
 			State:       "complete",
 			Timestamp:   time.Now(),
 			Duration:    100 * time.Millisecond,
@@ -42,8 +42,8 @@ func BenchmarkSaveSession(b *testing.B) {
 				ServerAddr: "93.184.216.34:443",
 			},
 		}
-		if err := store.SaveSession(ctx, sess); err != nil {
-			b.Fatalf("SaveSession: %v", err)
+		if err := store.SaveFlow(ctx, fl); err != nil {
+			b.Fatalf("SaveFlow: %v", err)
 		}
 	}
 }
@@ -52,17 +52,17 @@ func BenchmarkAppendMessage(b *testing.B) {
 	store := newBenchStore(b)
 	ctx := context.Background()
 
-	// Create a parent session.
-	sess := &Session{
+	// Create a parent flow.
+	fl := &Flow{
 		ConnID:      "bench-conn",
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now(),
 		Duration:    50 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		b.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		b.Fatalf("SaveFlow: %v", err)
 	}
 
 	u, _ := url.Parse("https://example.com/api/test")
@@ -71,7 +71,7 @@ func BenchmarkAppendMessage(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msg := &Message{
-			SessionID: sess.ID,
+			FlowID: fl.ID,
 			Sequence:  i,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -95,16 +95,16 @@ func BenchmarkListSessions(b *testing.B) {
 
 			// Pre-populate sessions.
 			for i := 0; i < n; i++ {
-				sess := &Session{
+				fl := &Flow{
 					ConnID:      fmt.Sprintf("conn-%d", i),
 					Protocol:    "HTTP/1.x",
-					SessionType: "unary",
+					FlowType: "unary",
 					State:       "complete",
 					Timestamp:   time.Now(),
 					Duration:    time.Duration(i) * time.Millisecond,
 				}
-				if err := store.SaveSession(ctx, sess); err != nil {
-					b.Fatalf("SaveSession: %v", err)
+				if err := store.SaveFlow(ctx, fl); err != nil {
+					b.Fatalf("SaveFlow: %v", err)
 				}
 			}
 
@@ -112,8 +112,8 @@ func BenchmarkListSessions(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := store.ListSessions(ctx, opts); err != nil {
-					b.Fatalf("ListSessions: %v", err)
+				if _, err := store.ListFlows(ctx, opts); err != nil {
+					b.Fatalf("ListFlows: %v", err)
 				}
 			}
 		})
@@ -124,23 +124,23 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 	store := newBenchStore(b)
 	ctx := context.Background()
 
-	// Pre-populate 100 sessions with messages.
+	// Pre-populate 100 flows with messages.
 	for i := 0; i < 100; i++ {
-		sess := &Session{
+		fl := &Flow{
 			ConnID:      fmt.Sprintf("conn-%d", i),
 			Protocol:    "HTTP/1.x",
-			SessionType: "unary",
+			FlowType: "unary",
 			State:       "complete",
 			Timestamp:   time.Now(),
 			Duration:    time.Duration(i) * time.Millisecond,
 		}
-		if err := store.SaveSession(ctx, sess); err != nil {
-			b.Fatalf("SaveSession: %v", err)
+		if err := store.SaveFlow(ctx, fl); err != nil {
+			b.Fatalf("SaveFlow: %v", err)
 		}
 
 		u, _ := url.Parse(fmt.Sprintf("https://example.com/api/v1/resource/%d", i))
 		sendMsg := &Message{
-			SessionID: sess.ID,
+			FlowID: fl.ID,
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -153,7 +153,7 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 		}
 
 		recvMsg := &Message{
-			SessionID:  sess.ID,
+			FlowID:  fl.ID,
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -181,8 +181,8 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				if _, err := store.ListSessions(ctx, tc.opts); err != nil {
-					b.Fatalf("ListSessions: %v", err)
+				if _, err := store.ListFlows(ctx, tc.opts); err != nil {
+					b.Fatalf("ListFlows: %v", err)
 				}
 			}
 		})
@@ -193,11 +193,11 @@ func BenchmarkGetSession(b *testing.B) {
 	store := newBenchStore(b)
 	ctx := context.Background()
 
-	// Create a session to look up.
-	sess := &Session{
+	// Create a flow to look up.
+	fl := &Flow{
 		ConnID:      "bench-get",
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now(),
 		Duration:    50 * time.Millisecond,
@@ -208,14 +208,14 @@ func BenchmarkGetSession(b *testing.B) {
 			TLSCipher:  "TLS_AES_128_GCM_SHA256",
 		},
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		b.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		b.Fatalf("SaveFlow: %v", err)
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := store.GetSession(ctx, sess.ID); err != nil {
-			b.Fatalf("GetSession: %v", err)
+		if _, err := store.GetFlow(ctx, fl.ID); err != nil {
+			b.Fatalf("GetFlow: %v", err)
 		}
 	}
 }

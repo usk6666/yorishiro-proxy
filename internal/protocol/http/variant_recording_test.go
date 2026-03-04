@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -126,7 +126,7 @@ func TestRecordSendWithVariant_NoModification(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        req,
 		reqBody:    body,
 	}, &snap, logger)
@@ -139,7 +139,7 @@ func TestRecordSendWithVariant_NoModification(t *testing.T) {
 	}
 
 	// Verify: only 1 send message, no variant metadata.
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -180,7 +180,7 @@ func TestRecordSendWithVariant_BodyModified(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        req,
 		reqBody:    modifiedBody,
 	}, &snap, logger)
@@ -193,7 +193,7 @@ func TestRecordSendWithVariant_BodyModified(t *testing.T) {
 	}
 
 	// Verify: 2 send messages with variant metadata.
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -256,7 +256,7 @@ func TestRecordSendWithVariant_HeaderModified(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        req,
 		reqBody:    body,
 	}, &snap, logger)
@@ -268,7 +268,7 @@ func TestRecordSendWithVariant_HeaderModified(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 2 (variant recording)", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -306,7 +306,7 @@ func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:        req,
 		reqBody:    modifiedBody,
 		rawRequest: rawBytes,
@@ -316,7 +316,7 @@ func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
 		t.Fatal("recordSendWithVariant returned nil")
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -346,7 +346,7 @@ func TestRecordSendWithVariant_NilSnap(t *testing.T) {
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		protocol: "HTTP/1.x",
 		start:    start,
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 	}, nil, logger)
 
@@ -357,7 +357,7 @@ func TestRecordSendWithVariant_NilSnap(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 1", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -410,7 +410,7 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 		clientAddr: "10.0.0.1:5000",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
 		req:        req,
 		reqBody:    modifiedBody,
 		rawRequest: []byte("POST /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
@@ -423,16 +423,16 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 2", sendResult.recvSequence)
 	}
 
-	// Verify intermediate state: session is active, 2 send messages.
-	sess, err := store.GetSession(ctx, sendResult.sessionID)
+	// Verify intermediate state: flow is active, 2 send messages.
+	sess, err := store.GetFlow(ctx, sendResult.flowID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
 	if sess.State != "active" {
 		t.Errorf("state = %q, want %q", sess.State, "active")
 	}
 
-	msgs, _ := store.GetMessages(ctx, sendResult.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("after send: expected 2 messages, got %d", len(msgs))
 	}
@@ -455,7 +455,7 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 	}, logger)
 
 	// Verify final state: 3 messages total.
-	msgs, _ = store.GetMessages(ctx, sendResult.sessionID, session.MessageListOptions{})
+	msgs, _ = store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
 	if len(msgs) != 3 {
 		t.Fatalf("after receive: expected 3 messages, got %d", len(msgs))
 	}
@@ -483,8 +483,8 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 		}
 	}
 
-	// Session should be complete.
-	sess, _ = store.GetSession(ctx, sendResult.sessionID)
+	// Flow should be complete.
+	sess, _ = store.GetFlow(ctx, sendResult.flowID)
 	if sess.State != "complete" {
 		t.Errorf("final state = %q, want %q", sess.State, "complete")
 	}
@@ -510,7 +510,7 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 		clientAddr: "10.0.0.1:5000",
 		protocol:   "HTTP/1.x",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
 		req:        req,
 		reqBody:    body,
 	}, &snap, logger)
@@ -536,7 +536,7 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 		respBody:   []byte("ok"),
 	}, logger)
 
-	msgs, _ := store.GetMessages(ctx, sendResult.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -584,7 +584,7 @@ func TestRecordSendWithVariant_SelfContainedMessages(t *testing.T) {
 		connID:   "conn-5",
 		protocol: "HTTP/1.x",
 		start:    start,
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqBody:  modifiedBody,
 		reqURL: &url.URL{
@@ -598,7 +598,7 @@ func TestRecordSendWithVariant_SelfContainedMessages(t *testing.T) {
 		t.Fatal("recordSendWithVariant returned nil")
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}

@@ -16,7 +16,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // tlsMetadata holds TLS connection information extracted from the handshake.
@@ -316,7 +316,7 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 }
 
 // handleHTTPSRequest forwards a single decrypted HTTPS request to the upstream
-// server, records the session, and writes the response back to the client.
+// server, records the flow, and writes the response back to the client.
 func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, tlsMeta tlsMetadata, capture *captureReader, captureStart int, reader *bufio.Reader) error {
 	start := time.Now()
 	logger := h.connLogger(ctx)
@@ -364,7 +364,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		protocol:   "HTTPS",
 		start:      start,
 		tags:       smugglingTags(smuggling),
-		connInfo: &session.ConnectionInfo{
+		connInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 			TLSVersion: tlsMeta.Version,
 			TLSCipher:  tlsMeta.CipherSuite,
@@ -407,7 +407,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	}
 	defer fwd.resp.Body.Close()
 
-	// Step 7: Read response, write to client, and record session.
+	// Step 7: Read response, write to client, and record flow.
 	fullRespBody, rawResponse := h.readResponseBody(fwd.resp, logger)
 
 	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
@@ -458,7 +458,7 @@ func (h *Handler) checkHTTPSScopeRewrite(ctx context.Context, conn net.Conn, con
 		return false
 	}
 
-	// Set req.URL fields before recording so the session has the full URL.
+	// Set req.URL fields before recording so the flow has the full URL.
 	if req.URL.Host == "" {
 		req.URL.Host = requestHost
 	}
@@ -495,7 +495,7 @@ func parseConnectPort(hostPort string) int {
 	return port
 }
 
-// recordBlockedCONNECTSession records a blocked CONNECT request as a session
+// recordBlockedCONNECTSession records a blocked CONNECT request as a flow
 // with BlockedBy="target_scope".
 func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.Request, hostname, authority string, logger *slog.Logger) {
 	if h.Store == nil {
@@ -516,23 +516,23 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 		return
 	}
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      connID,
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   start,
 		BlockedBy:   "target_scope",
-		ConnInfo: &session.ConnectionInfo{
+		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 		},
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("blocked CONNECT session save failed", "host", authority, "error", err)
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("blocked CONNECT flow save failed", "host", authority, "error", err)
 		return
 	}
-	sendMsg := &session.Message{
-		SessionID: sess.ID,
+	sendMsg := &flow.Message{
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -545,7 +545,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 }
 
 // recordBlockedHTTPSSession records a blocked HTTPS request (inside MITM tunnel)
-// as a session with BlockedBy="target_scope".
+// as a flow with BlockedBy="target_scope".
 func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, tlsMeta tlsMetadata, logger *slog.Logger) {
 	if h.Store == nil {
 		return
@@ -563,28 +563,28 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 	}
 
 	duration := time.Since(start)
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      connID,
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
 		Tags:        smugglingTags(smuggling),
 		BlockedBy:   "target_scope",
-		ConnInfo: &session.ConnectionInfo{
+		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr:  clientAddr,
 			TLSVersion:  tlsMeta.Version,
 			TLSCipher:   tlsMeta.CipherSuite,
 			TLSALPN:     tlsMeta.ALPN,
 		},
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("blocked HTTPS session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("blocked HTTPS flow save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		return
 	}
-	sendMsg := &session.Message{
-		SessionID:     sess.ID,
+	sendMsg := &flow.Message{
+		FlowID:     fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     start,

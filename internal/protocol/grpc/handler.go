@@ -10,19 +10,19 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // Handler processes gRPC sessions recorded from HTTP/2 streams.
 // It is not a standalone ProtocolHandler — it is invoked by the HTTP/2 handler
 // when Content-Type: application/grpc is detected on a stream.
 type Handler struct {
-	store  session.SessionWriter
+	store  flow.FlowWriter
 	logger *slog.Logger
 }
 
-// NewHandler creates a new gRPC handler with session recording.
-func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
+// NewHandler creates a new gRPC handler with flow recording.
+func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,
@@ -100,7 +100,7 @@ type StreamInfo struct {
 
 // RecordSession records a gRPC session from the given stream info.
 // It parses gRPC frames from the request/response bodies, determines the
-// session type (unary or streaming), and stores the session and messages.
+// session type (unary or streaming), and stores the flow and messages.
 func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	if h.store == nil {
 		return nil
@@ -125,22 +125,22 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	}
 
 	// Determine session type based on frame counts.
-	sessionType := classifySessionType(len(reqFrames), len(respFrames))
+	sessionType := classifyFlowType(len(reqFrames), len(respFrames))
 
 	// Extract grpc-status from trailers or response headers.
 	grpcStatus := extractGRPCStatus(info.Trailers, info.ResponseHeaders)
 	grpcMessage := extractGRPCMessage(info.Trailers, info.ResponseHeaders)
 	grpcEncoding := extractHeader(info.RequestHeaders, "grpc-encoding")
 
-	// Save session.
-	sess := &session.Session{
+	// Save flow.
+	fl := &flow.Flow{
 		ConnID:      info.ConnID,
 		Protocol:    "gRPC",
-		SessionType: sessionType,
+		FlowType: sessionType,
 		State:       "complete",
 		Timestamp:   info.Start,
 		Duration:    info.Duration,
-		ConnInfo: &session.ConnectionInfo{
+		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr:           info.ClientAddr,
 			ServerAddr:           info.ServerAddr,
 			TLSVersion:           info.TLSVersion,
@@ -150,27 +150,27 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 		},
 	}
 
-	if err := h.store.SaveSession(ctx, sess); err != nil {
+	if err := h.store.SaveFlow(ctx, fl); err != nil {
 		return fmt.Errorf("save grpc session: %w", err)
 	}
 
-	logger := h.logger.With("session_id", sess.ID, "service", service, "method", method)
+	logger := h.logger.With("flow_id", fl.ID, "service", service, "method", method)
 
 	// Record messages based on session type.
 	seq := 0
 
 	if sessionType == "unary" {
 		// Unary: one send message (seq=0), one receive message (seq=1).
-		seq = h.recordSendMessages(ctx, logger, sess.ID, info, service, method, grpcEncoding, reqFrames, seq)
-		h.recordReceiveMessages(ctx, logger, sess.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq)
+		seq = h.recordSendMessages(ctx, logger, fl.ID, info, service, method, grpcEncoding, reqFrames, seq)
+		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq)
 	} else {
 		// Streaming: record all request frames as send, all response frames as receive.
-		seq = h.recordSendMessages(ctx, logger, sess.ID, info, service, method, grpcEncoding, reqFrames, seq)
-		h.recordReceiveMessages(ctx, logger, sess.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq)
+		seq = h.recordSendMessages(ctx, logger, fl.ID, info, service, method, grpcEncoding, reqFrames, seq)
+		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq)
 	}
 
-	logger.Info("gRPC session recorded",
-		"session_type", sessionType,
+	logger.Info("gRPC flow recorded",
+		"flow_type", sessionType,
 		"grpc_status", grpcStatus,
 		"req_frames", len(reqFrames),
 		"resp_frames", len(respFrames),
@@ -184,7 +184,7 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 func (h *Handler) recordSendMessages(
 	ctx context.Context,
 	logger *slog.Logger,
-	sessionID string,
+	flowID string,
 	info *StreamInfo,
 	service, method, grpcEncoding string,
 	frames []*Frame,
@@ -194,8 +194,8 @@ func (h *Handler) recordSendMessages(
 
 	if len(frames) == 0 {
 		// Even with no frames, record the request metadata.
-		msg := &session.Message{
-			SessionID: sessionID,
+		msg := &flow.Message{
+			FlowID: flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -211,8 +211,8 @@ func (h *Handler) recordSendMessages(
 	}
 
 	for i, frame := range frames {
-		msg := &session.Message{
-			SessionID: sessionID,
+		msg := &flow.Message{
+			FlowID: flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -247,7 +247,7 @@ func (h *Handler) recordSendMessages(
 func (h *Handler) recordReceiveMessages(
 	ctx context.Context,
 	logger *slog.Logger,
-	sessionID string,
+	flowID string,
 	info *StreamInfo,
 	service, method, grpcStatus, grpcMessage, grpcEncoding string,
 	frames []*Frame,
@@ -257,8 +257,8 @@ func (h *Handler) recordReceiveMessages(
 
 	if len(frames) == 0 {
 		// Record the response metadata even without frames (e.g., error responses).
-		msg := &session.Message{
-			SessionID:  sessionID,
+		msg := &flow.Message{
+			FlowID:  flowID,
 			Sequence:   seq,
 			Direction:  "receive",
 			Timestamp:  info.Start.Add(info.Duration),
@@ -274,8 +274,8 @@ func (h *Handler) recordReceiveMessages(
 
 	for i, frame := range frames {
 		isLast := i == len(frames)-1
-		msg := &session.Message{
-			SessionID: sessionID,
+		msg := &flow.Message{
+			FlowID: flowID,
 			Sequence:  seq,
 			Direction: "receive",
 			Timestamp: info.Start.Add(info.Duration),
@@ -315,8 +315,8 @@ func (h *Handler) recordReceiveMessages(
 	}
 }
 
-// classifySessionType determines the gRPC session type based on frame counts.
-func classifySessionType(reqFrames, respFrames int) string {
+// classifyFlowType determines the gRPC session type based on frame counts.
+func classifyFlowType(reqFrames, respFrames int) string {
 	if reqFrames <= 1 && respFrames <= 1 {
 		return "unary"
 	}

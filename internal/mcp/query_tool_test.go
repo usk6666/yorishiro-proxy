@@ -13,12 +13,12 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // setupQueryTestSession creates an MCP client session for query tool tests.
 // It accepts optional ServerOption values for configuring scope, passthrough, etc.
-func setupQueryTestSession(t *testing.T, store session.Store, opts ...ServerOption) *gomcp.ClientSession {
+func setupQueryTestSession(t *testing.T, store flow.Store, opts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -83,29 +83,29 @@ func unmarshalQueryResult(t *testing.T, result *gomcp.CallToolResult, dest any) 
 	}
 }
 
-// seedSession creates a session and its messages in the store for testing.
-func seedSession(t *testing.T, store session.Store, id, protocol, method, urlStr string, statusCode int) {
+// seedSession creates a flow and its messages in the store for testing.
+func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr string, statusCode int) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          id,
 		ConnID:      "conn-" + id,
 		Protocol:    protocol,
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    150 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession(%s): %v", id, err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
 
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        id + "-send",
-		SessionID: id,
+		FlowID: id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -118,9 +118,9 @@ func seedSession(t *testing.T, store session.Store, id, protocol, method, urlStr
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &session.Message{
+	recvMsg := &flow.Message{
 		ID:         id + "-recv",
-		SessionID:  id,
+		FlowID:  id,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -158,7 +158,7 @@ func TestQuery_UnknownResource(t *testing.T) {
 	if !ok {
 		t.Fatalf("content[0] type = %T, want *TextContent", result.Content[0])
 	}
-	if !strings.Contains(text.Text, "sessions") || !strings.Contains(text.Text, "ca_cert") {
+	if !strings.Contains(text.Text, "flows") || !strings.Contains(text.Text, "ca_cert") {
 		t.Errorf("error message should list available resources, got: %s", text.Text)
 	}
 }
@@ -169,12 +169,12 @@ func TestQuery_Sessions_Empty(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 0 {
@@ -183,8 +183,8 @@ func TestQuery_Sessions_Empty(t *testing.T) {
 	if out.Total != 0 {
 		t.Errorf("total = %d, want 0", out.Total)
 	}
-	if len(out.Sessions) != 0 {
-		t.Errorf("sessions len = %d, want 0", len(out.Sessions))
+	if len(out.Flows) != 0 {
+		t.Errorf("sessions len = %d, want 0", len(out.Flows))
 	}
 }
 
@@ -195,12 +195,12 @@ func TestQuery_Sessions_WithData(t *testing.T) {
 
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 2 {
@@ -212,7 +212,7 @@ func TestQuery_Sessions_WithData(t *testing.T) {
 
 	// Verify fields are populated (sessions returned newest first).
 	found := false
-	for _, s := range out.Sessions {
+	for _, s := range out.Flows {
 		if s.ID == "sess-1" {
 			found = true
 			if s.Protocol != "HTTPS" {
@@ -227,8 +227,8 @@ func TestQuery_Sessions_WithData(t *testing.T) {
 			if s.MessageCount != 2 {
 				t.Errorf("message_count = %d, want 2", s.MessageCount)
 			}
-			if s.SessionType != "unary" {
-				t.Errorf("session_type = %q, want unary", s.SessionType)
+			if s.FlowType != "unary" {
+				t.Errorf("flow_type = %q, want unary", s.FlowType)
 			}
 			if s.State != "complete" {
 				t.Errorf("state = %q, want complete", s.State)
@@ -248,14 +248,14 @@ func TestQuery_Sessions_WithFilter(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{Method: "POST"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
@@ -264,8 +264,8 @@ func TestQuery_Sessions_WithFilter(t *testing.T) {
 	if out.Total != 1 {
 		t.Errorf("total = %d, want 1", out.Total)
 	}
-	if out.Sessions[0].ID != "sess-post" {
-		t.Errorf("id = %q, want sess-post", out.Sessions[0].ID)
+	if out.Flows[0].ID != "sess-post" {
+		t.Errorf("id = %q, want sess-post", out.Flows[0].ID)
 	}
 }
 
@@ -280,14 +280,14 @@ func TestQuery_Sessions_Pagination(t *testing.T) {
 
 	// First page: limit 2, offset 0.
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Limit:    2,
 		Offset:   0,
 	})
 	if result.IsError {
 		t.Fatalf("page 1: expected success, got error: %v", result.Content)
 	}
-	var page1 querySessionsResult
+	var page1 queryFlowsResult
 	unmarshalQueryResult(t, result, &page1)
 	if page1.Count != 2 {
 		t.Errorf("page 1 count = %d, want 2", page1.Count)
@@ -298,14 +298,14 @@ func TestQuery_Sessions_Pagination(t *testing.T) {
 
 	// Second page: limit 2, offset 2.
 	result = callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Limit:    2,
 		Offset:   2,
 	})
 	if result.IsError {
 		t.Fatalf("page 2: expected success, got error: %v", result.Content)
 	}
-	var page2 querySessionsResult
+	var page2 queryFlowsResult
 	unmarshalQueryResult(t, result, &page2)
 	if page2.Count != 2 {
 		t.Errorf("page 2 count = %d, want 2", page2.Count)
@@ -320,7 +320,7 @@ func TestQuery_Sessions_NegativeOffset(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Offset:   -1,
 	})
 	if !result.IsError {
@@ -331,13 +331,13 @@ func TestQuery_Sessions_NegativeOffset(t *testing.T) {
 func TestQuery_Sessions_NilStore(t *testing.T) {
 	cs := setupQueryTestSession(t, nil)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if !result.IsError {
 		t.Fatal("expected IsError=true for nil store")
 	}
 }
 
-// --- Test: session resource ---
+// --- Test: flow resource ---
 
 func TestQuery_Session_Success(t *testing.T) {
 	store := newTestStore(t)
@@ -346,14 +346,14 @@ func TestQuery_Session_Success(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "sess-detail",
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.ID != "sess-detail" {
@@ -380,8 +380,8 @@ func TestQuery_Session_Success(t *testing.T) {
 	if out.MessageCount != 2 {
 		t.Errorf("message_count = %d, want 2", out.MessageCount)
 	}
-	if out.SessionType != "unary" {
-		t.Errorf("session_type = %q, want unary", out.SessionType)
+	if out.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want unary", out.FlowType)
 	}
 }
 
@@ -389,7 +389,7 @@ func TestQuery_Session_MissingID(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "session"})
+	result := callQuery(t, cs, queryInput{Resource: "flow"})
 	if !result.IsError {
 		t.Fatal("expected IsError=true for missing id")
 	}
@@ -400,7 +400,7 @@ func TestQuery_Session_NotFound(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "nonexistent",
 	})
 	if !result.IsError {
@@ -412,7 +412,7 @@ func TestQuery_Session_NilStore(t *testing.T) {
 	cs := setupQueryTestSession(t, nil)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "some-id",
 	})
 	if !result.IsError {
@@ -471,22 +471,22 @@ func TestQuery_Messages_Pagination(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "sess-many",
 		Protocol:    "HTTPS",
-		SessionType: "stream",
+		FlowType: "stream",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Create 5 messages.
 	for i := 0; i < 5; i++ {
-		msg := &session.Message{
+		msg := &flow.Message{
 			ID:        fmt.Sprintf("msg-%d", i),
-			SessionID: "sess-many",
+			FlowID: "sess-many",
 			Sequence:  i,
 			Direction: "send",
 			Timestamp: time.Now().UTC(),
@@ -622,8 +622,8 @@ func TestQuery_Status_Basic(t *testing.T) {
 	if out.Running {
 		t.Error("running = true, want false")
 	}
-	if out.TotalSessions != 0 {
-		t.Errorf("total_sessions = %d, want 0", out.TotalSessions)
+	if out.TotalFlows != 0 {
+		t.Errorf("total_flows = %d, want 0", out.TotalFlows)
 	}
 	// CA is initialized in setupQueryTestSession.
 	if !out.CAInitialized {
@@ -646,8 +646,8 @@ func TestQuery_Status_WithSessions(t *testing.T) {
 	var out queryStatusResult
 	unmarshalQueryResult(t, result, &out)
 
-	if out.TotalSessions != 2 {
-		t.Errorf("total_sessions = %d, want 2", out.TotalSessions)
+	if out.TotalFlows != 2 {
+		t.Errorf("total_flows = %d, want 2", out.TotalFlows)
 	}
 }
 
@@ -819,21 +819,21 @@ func TestQuery_Sessions_FilterByProtocol(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{Protocol: "HTTPS"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want HTTPS", out.Sessions[0].Protocol)
+	if out.Flows[0].Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want HTTPS", out.Flows[0].Protocol)
 	}
 }
 
@@ -845,21 +845,21 @@ func TestQuery_Sessions_FilterByURLPattern(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{URLPattern: "/api/"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].ID != "api-1" {
-		t.Errorf("id = %q, want api-1", out.Sessions[0].ID)
+	if out.Flows[0].ID != "api-1" {
+		t.Errorf("id = %q, want api-1", out.Flows[0].ID)
 	}
 }
 
@@ -871,21 +871,21 @@ func TestQuery_Sessions_FilterByStatusCode(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{StatusCode: 500},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].ID != "err-1" {
-		t.Errorf("id = %q, want err-1", out.Sessions[0].ID)
+	if out.Flows[0].ID != "err-1" {
+		t.Errorf("id = %q, want err-1", out.Flows[0].ID)
 	}
 }
 
@@ -984,31 +984,31 @@ func TestQuery_CACert_EphemeralFields(t *testing.T) {
 	}
 }
 
-// --- Test: blocked_by in sessions and session resources ---
+// --- Test: blocked_by in sessions and flow resources ---
 
-// seedBlockedSession creates a blocked session with only a send message (no response).
-func seedBlockedSession(t *testing.T, store session.Store, id, protocol, method, urlStr, blockedBy string) {
+// seedBlockedSession creates a blocked flow with only a send message (no response).
+func seedBlockedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr, blockedBy string) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          id,
 		ConnID:      "conn-" + id,
 		Protocol:    protocol,
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    0,
 		BlockedBy:   blockedBy,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession(%s): %v", id, err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        id + "-send",
-		SessionID: id,
+		FlowID: id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1031,14 +1031,14 @@ func TestQuery_Sessions_FilterByBlockedBy(t *testing.T) {
 
 	// Filter for blocked sessions only.
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{BlockedBy: "target_scope"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 2 {
@@ -1047,9 +1047,9 @@ func TestQuery_Sessions_FilterByBlockedBy(t *testing.T) {
 	if out.Total != 2 {
 		t.Errorf("total = %d, want 2", out.Total)
 	}
-	for _, s := range out.Sessions {
+	for _, s := range out.Flows {
 		if s.BlockedBy != "target_scope" {
-			t.Errorf("session %s blocked_by = %q, want %q", s.ID, s.BlockedBy, "target_scope")
+			t.Errorf("flow %s blocked_by = %q, want %q", s.ID, s.BlockedBy, "target_scope")
 		}
 	}
 }
@@ -1060,19 +1060,19 @@ func TestQuery_Sessions_BlockedByFieldInResponse(t *testing.T) {
 
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Fatalf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].BlockedBy != "target_scope" {
-		t.Errorf("blocked_by = %q, want %q", out.Sessions[0].BlockedBy, "target_scope")
+	if out.Flows[0].BlockedBy != "target_scope" {
+		t.Errorf("blocked_by = %q, want %q", out.Flows[0].BlockedBy, "target_scope")
 	}
 }
 
@@ -1082,19 +1082,19 @@ func TestQuery_Sessions_NormalSessionHasEmptyBlockedBy(t *testing.T) {
 
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Fatalf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].BlockedBy != "" {
-		t.Errorf("blocked_by = %q, want empty string", out.Sessions[0].BlockedBy)
+	if out.Flows[0].BlockedBy != "" {
+		t.Errorf("blocked_by = %q, want empty string", out.Flows[0].BlockedBy)
 	}
 }
 
@@ -1105,14 +1105,14 @@ func TestQuery_Session_BlockedByInDetail(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "blocked-detail",
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.ID != "blocked-detail" {
@@ -1143,14 +1143,14 @@ func TestQuery_Session_NormalHasNoBlockedBy(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "normal-detail",
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.BlockedBy != "" {
@@ -1161,27 +1161,27 @@ func TestQuery_Session_NormalHasNoBlockedBy(t *testing.T) {
 // --- Test: state filter ---
 
 // seedSessionWithState creates a session with a specific state and messages.
-func seedSessionWithState(t *testing.T, store session.Store, id, protocol, method, urlStr, state string, statusCode int) {
+func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, urlStr, state string, statusCode int) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &session.Session{
+	sess := &flow.Flow{
 		ID:          id,
 		ConnID:      "conn-" + id,
 		Protocol:    protocol,
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       state,
 		Timestamp:   time.Now().UTC(),
 		Duration:    100 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
+	if err := store.SaveFlow(ctx, sess); err != nil {
 		t.Fatalf("SaveSession(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        id + "-send",
-		SessionID: id,
+		FlowID: id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1195,9 +1195,9 @@ func seedSessionWithState(t *testing.T, store session.Store, id, protocol, metho
 	}
 
 	if statusCode > 0 {
-		recvMsg := &session.Message{
+		recvMsg := &flow.Message{
 			ID:         id + "-recv",
-			SessionID:  id,
+			FlowID:  id,
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now().UTC(),
@@ -1233,14 +1233,14 @@ func TestQuery_Sessions_FilterByState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := callQuery(t, cs, queryInput{
-				Resource: "sessions",
+				Resource: "flows",
 				Filter:   &queryFilter{State: tt.state},
 			})
 			if result.IsError {
 				t.Fatalf("expected success, got error: %v", result.Content)
 			}
 
-			var out querySessionsResult
+			var out queryFlowsResult
 			unmarshalQueryResult(t, result, &out)
 
 			if out.Count != tt.wantCount {
@@ -1249,7 +1249,7 @@ func TestQuery_Sessions_FilterByState(t *testing.T) {
 			if out.Total != tt.wantCount {
 				t.Errorf("total = %d, want %d", out.Total, tt.wantCount)
 			}
-			for _, s := range out.Sessions {
+			for _, s := range out.Flows {
 				if s.State != tt.state {
 					t.Errorf("session %s state = %q, want %q", s.ID, s.State, tt.state)
 				}
@@ -1266,14 +1266,14 @@ func TestQuery_Session_ErrorStateNoResponse(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "err-sess",
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.State != "error" {
@@ -1290,27 +1290,27 @@ func TestQuery_Session_ErrorStateNoResponse(t *testing.T) {
 // --- Test: variant messages ---
 
 // seedVariantSession creates a session with original and modified variant send messages.
-func seedVariantSession(t *testing.T, store session.Store, id string) {
+func seedVariantSession(t *testing.T, store flow.Store, id string) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &session.Session{
+	sess := &flow.Flow{
 		ID:          id,
 		ConnID:      "conn-" + id,
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    200 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
+	if err := store.SaveFlow(ctx, sess); err != nil {
 		t.Fatalf("SaveSession(%s): %v", id, err)
 	}
 
 	origURL, _ := url.Parse("https://example.com/original")
-	originalSend := &session.Message{
+	originalSend := &flow.Message{
 		ID:        id + "-send-orig",
-		SessionID: id,
+		FlowID: id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1325,9 +1325,9 @@ func seedVariantSession(t *testing.T, store session.Store, id string) {
 	}
 
 	modURL, _ := url.Parse("https://example.com/modified")
-	modifiedSend := &session.Message{
+	modifiedSend := &flow.Message{
 		ID:        id + "-send-mod",
-		SessionID: id,
+		FlowID: id,
 		Sequence:  1,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1341,9 +1341,9 @@ func seedVariantSession(t *testing.T, store session.Store, id string) {
 		t.Fatalf("AppendMessage(modified send): %v", err)
 	}
 
-	recvMsg := &session.Message{
+	recvMsg := &flow.Message{
 		ID:         id + "-recv",
-		SessionID:  id,
+		FlowID:  id,
 		Sequence:   2,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -1363,14 +1363,14 @@ func TestQuery_Session_VariantMessages(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "variant-sess",
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	// The effective request should be the modified version.
@@ -1414,14 +1414,14 @@ func TestQuery_Session_NoVariantMessages(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "normal-sess",
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	// No variant, so original_request should be nil.
@@ -1437,13 +1437,13 @@ func TestQuery_Sessions_VariantUsesModifiedMethod(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
@@ -1451,11 +1451,11 @@ func TestQuery_Sessions_VariantUsesModifiedMethod(t *testing.T) {
 	}
 
 	// The sessions list should use the modified method/URL.
-	if out.Sessions[0].Method != "POST" {
-		t.Errorf("method = %q, want POST (modified)", out.Sessions[0].Method)
+	if out.Flows[0].Method != "POST" {
+		t.Errorf("method = %q, want POST (modified)", out.Flows[0].Method)
 	}
-	if out.Sessions[0].URL != "https://example.com/modified" {
-		t.Errorf("url = %q, want https://example.com/modified", out.Sessions[0].URL)
+	if out.Flows[0].URL != "https://example.com/modified" {
+		t.Errorf("url = %q, want https://example.com/modified", out.Flows[0].URL)
 	}
 }
 
@@ -1470,14 +1470,14 @@ func TestQuery_Sessions_FilterByInterceptDrop(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{BlockedBy: "intercept_drop"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
@@ -1486,11 +1486,11 @@ func TestQuery_Sessions_FilterByInterceptDrop(t *testing.T) {
 	if out.Total != 1 {
 		t.Errorf("total = %d, want 1", out.Total)
 	}
-	if out.Sessions[0].ID != "dropped" {
-		t.Errorf("id = %q, want dropped", out.Sessions[0].ID)
+	if out.Flows[0].ID != "dropped" {
+		t.Errorf("id = %q, want dropped", out.Flows[0].ID)
 	}
-	if out.Sessions[0].BlockedBy != "intercept_drop" {
-		t.Errorf("blocked_by = %q, want intercept_drop", out.Sessions[0].BlockedBy)
+	if out.Flows[0].BlockedBy != "intercept_drop" {
+		t.Errorf("blocked_by = %q, want intercept_drop", out.Flows[0].BlockedBy)
 	}
 }
 

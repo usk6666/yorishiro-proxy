@@ -122,7 +122,7 @@ export function ProxyControl() {
                 {" | "}
                 {status.active_connections} connection{status.active_connections !== 1 ? "s" : ""}
                 {" | "}
-                {status.total_sessions} session{status.total_sessions !== 1 ? "s" : ""}
+                {status.total_flows} flow{status.total_flows !== 1 ? "s" : ""}
               </span>
             )}
           </div>

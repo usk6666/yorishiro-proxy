@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
-  SessionsResult,
+  FlowsResult,
   ListenerStatusEntry,
 } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
@@ -64,40 +64,40 @@ export function DashboardPage() {
     refetch: refetchStatus,
   } = useQuery("status", { pollInterval: POLL_INTERVAL });
 
-  // Fetch sessions for statistics (limit: 0 just to get totals)
+  // Fetch flows for statistics (limit: 0 just to get totals)
   const {
-    data: sessionsData,
-    loading: sessionsLoading,
-    refetch: refetchSessions,
-  } = useQuery("sessions", { pollInterval: POLL_INTERVAL, limit: 0 });
+    data: flowsData,
+    loading: flowsLoading,
+    refetch: refetchFlows,
+  } = useQuery("flows", { pollInterval: POLL_INTERVAL, limit: 0 });
 
-  // Fetch per-protocol session counts
-  const { data: httpSessions } = useQuery("sessions", {
+  // Fetch per-protocol flow counts
+  const { data: httpFlows } = useQuery("flows", {
     pollInterval: POLL_INTERVAL,
     limit: 0,
     filter: { protocol: "HTTP/1.x" },
   });
-  const { data: httpsSessions } = useQuery("sessions", {
+  const { data: httpsFlows } = useQuery("flows", {
     pollInterval: POLL_INTERVAL,
     limit: 0,
     filter: { protocol: "HTTPS" },
   });
-  const { data: wsSessions } = useQuery("sessions", {
+  const { data: wsFlows } = useQuery("flows", {
     pollInterval: POLL_INTERVAL,
     limit: 0,
     filter: { protocol: "WebSocket" },
   });
-  const { data: h2Sessions } = useQuery("sessions", {
+  const { data: h2Flows } = useQuery("flows", {
     pollInterval: POLL_INTERVAL,
     limit: 0,
     filter: { protocol: "HTTP/2" },
   });
-  const { data: grpcSessions } = useQuery("sessions", {
+  const { data: grpcFlows } = useQuery("flows", {
     pollInterval: POLL_INTERVAL,
     limit: 0,
     filter: { protocol: "gRPC" },
   });
-  const { data: tcpSessions } = useQuery("sessions", {
+  const { data: tcpFlows } = useQuery("flows", {
     pollInterval: POLL_INTERVAL,
     limit: 0,
     filter: { protocol: "TCP" },
@@ -122,20 +122,20 @@ export function DashboardPage() {
 
   const handleRefreshAll = useCallback(() => {
     refetchStatus();
-    refetchSessions();
+    refetchFlows();
     refetchIntercept();
     refetchFuzz();
-  }, [refetchStatus, refetchSessions, refetchIntercept, refetchFuzz]);
+  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz]);
 
   // Build protocol breakdown
   const protocolCounts: Record<string, number> = {};
-  const protocolResults: Record<string, SessionsResult | null> = {
-    "HTTP/1.x": httpSessions,
-    "HTTPS": httpsSessions,
-    "WebSocket": wsSessions,
-    "HTTP/2": h2Sessions,
-    "gRPC": grpcSessions,
-    "TCP": tcpSessions,
+  const protocolResults: Record<string, FlowsResult | null> = {
+    "HTTP/1.x": httpFlows,
+    "HTTPS": httpsFlows,
+    "WebSocket": wsFlows,
+    "HTTP/2": h2Flows,
+    "gRPC": grpcFlows,
+    "TCP": tcpFlows,
   };
   for (const proto of PROTOCOLS) {
     const result = protocolResults[proto];
@@ -144,7 +144,7 @@ export function DashboardPage() {
     }
   }
 
-  const totalSessions = sessionsData?.total ?? statusData?.total_sessions ?? 0;
+  const totalFlows = flowsData?.total ?? statusData?.total_flows ?? 0;
   const maxProtocolCount = Math.max(1, ...Object.values(protocolCounts));
 
   return (
@@ -153,7 +153,7 @@ export function DashboardPage() {
         <div className="dashboard-header-info">
           <h1 className="page-title">Dashboard</h1>
           <p className="page-description">
-            Proxy status overview and session statistics.
+            Proxy status overview and flow statistics.
           </p>
         </div>
         <Button variant="secondary" size="sm" onClick={handleRefreshAll}>
@@ -210,12 +210,12 @@ export function DashboardPage() {
         </SummaryCard>
 
         <SummaryCard
-          title="Total Sessions"
-          loading={sessionsLoading && !sessionsData}
+          title="Total Flows"
+          loading={flowsLoading && !flowsData}
         >
-          {sessionsData && (
+          {flowsData && (
             <div className="dashboard-metric">
-              <span className="dashboard-metric-value">{totalSessions}</span>
+              <span className="dashboard-metric-value">{totalFlows}</span>
             </div>
           )}
         </SummaryCard>
@@ -291,9 +291,9 @@ export function DashboardPage() {
 
       {/* Protocol breakdown */}
       <div className="dashboard-section">
-        <h2 className="dashboard-section-title">Sessions by Protocol</h2>
-        {totalSessions === 0 ? (
-          <div className="dashboard-empty">No sessions captured yet.</div>
+        <h2 className="dashboard-section-title">Flows by Protocol</h2>
+        {totalFlows === 0 ? (
+          <div className="dashboard-empty">No flows captured yet.</div>
         ) : (
           <div className="dashboard-protocol-chart">
             {PROTOCOLS.map((proto) => {

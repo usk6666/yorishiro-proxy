@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // HandlerBase provides shared fields and setter methods for protocol handlers.
@@ -17,7 +17,7 @@ import (
 // setter boilerplate for capture scope, target scope, intercept engine/queue,
 // upstream proxy, and TLS configuration.
 type HandlerBase struct {
-	Store           session.SessionWriter
+	Store           flow.FlowWriter
 	Transport       *gohttp.Transport
 	Logger          *slog.Logger
 	Scope           *CaptureScope
@@ -54,7 +54,7 @@ func (b *HandlerBase) SetInsecureSkipVerify(skip bool) {
 }
 
 // SetCaptureScope sets the capture scope used to filter which requests
-// are recorded to the session store. If scope is nil, all requests are recorded.
+// are recorded to the flow store. If scope is nil, all requests are recorded.
 func (b *HandlerBase) SetCaptureScope(scope *CaptureScope) {
 	b.Scope = scope
 }

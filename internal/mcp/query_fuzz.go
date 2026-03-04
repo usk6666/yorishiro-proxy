@@ -7,7 +7,7 @@ import (
 	"log/slog"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // --- fuzz_jobs resource ---
@@ -15,7 +15,7 @@ import (
 // queryFuzzJobEntry is a single fuzz job entry in the fuzz_jobs query response.
 type queryFuzzJobEntry struct {
 	ID             string  `json:"id"`
-	SessionID      string  `json:"session_id"`
+	FlowID      string  `json:"flow_id"`
 	Status         string  `json:"status"`
 	Tag            string  `json:"tag"`
 	Total          int     `json:"total"`
@@ -47,7 +47,7 @@ func (s *Server) handleQueryFuzzJobs(ctx context.Context, input queryInput) (*go
 		limit = defaultListLimit
 	}
 
-	opts := session.FuzzJobListOptions{
+	opts := flow.FuzzJobListOptions{
 		Limit:  limit,
 		Offset: input.Offset,
 	}
@@ -70,7 +70,7 @@ func (s *Server) handleQueryFuzzJobs(ctx context.Context, input queryInput) (*go
 	for _, job := range jobs {
 		entry := queryFuzzJobEntry{
 			ID:             job.ID,
-			SessionID:      job.SessionID,
+			FlowID:      job.FlowID,
 			Status:         job.Status,
 			Tag:            job.Tag,
 			Total:          job.Total,
@@ -104,7 +104,7 @@ type queryFuzzResultEntry struct {
 	ID             string            `json:"id"`
 	FuzzID         string            `json:"fuzz_id"`
 	IndexNum       int               `json:"index"`
-	SessionID      string            `json:"session_id"`
+	FlowID      string            `json:"flow_id"`
 	Payloads       map[string]string `json:"payloads"`
 	StatusCode     int               `json:"status_code"`
 	ResponseLength int               `json:"response_length"`
@@ -146,7 +146,7 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		limit = defaultListLimit
 	}
 
-	opts := session.FuzzResultListOptions{
+	opts := flow.FuzzResultListOptions{
 		SortBy: input.SortBy,
 		Limit:  limit,
 		Offset: input.Offset,
@@ -186,7 +186,7 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 			ID:             r.ID,
 			FuzzID:         r.FuzzID,
 			IndexNum:       r.IndexNum,
-			SessionID:      r.SessionID,
+			FlowID:      r.FlowID,
 			Payloads:       payloads,
 			StatusCode:     r.StatusCode,
 			ResponseLength: r.ResponseLength,
@@ -210,7 +210,7 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 
 // buildFuzzResultsSummary computes aggregate statistics for fuzz results.
 // It fetches all matching results (without pagination) to compute the summary.
-func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opts session.FuzzResultListOptions) (*queryFuzzResultsSummary, error) {
+func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opts flow.FuzzResultListOptions) (*queryFuzzResultsSummary, error) {
 	// Fetch all matching results without pagination for summary computation.
 	allOpts := opts
 	allOpts.Limit = 0

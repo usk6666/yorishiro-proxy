@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -158,7 +158,7 @@ func TestRecordWebSocketError_Basic(t *testing.T) {
 		connID:     "conn-ws-1",
 		clientAddr: "127.0.0.1:5000",
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: "127.0.0.1:5000"},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:5000"},
 		req:        req,
 	}
 
@@ -167,18 +167,18 @@ func TestRecordWebSocketError_Basic(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "error" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "error")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
 	}
 	if entry.Session.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "WebSocket")
 	}
-	if entry.Session.SessionType != "bidirectional" {
-		t.Errorf("sessionType = %q, want %q", entry.Session.SessionType, "bidirectional")
+	if entry.Session.FlowType != "bidirectional" {
+		t.Errorf("sessionType = %q, want %q", entry.Session.FlowType, "bidirectional")
 	}
 	if entry.Session.ConnID != "conn-ws-1" {
 		t.Errorf("connID = %q, want %q", entry.Session.ConnID, "conn-ws-1")
@@ -187,7 +187,7 @@ func TestRecordWebSocketError_Basic(t *testing.T) {
 		t.Errorf("duration = %v, want positive", entry.Session.Duration)
 	}
 	if entry.Session.Tags == nil || entry.Session.Tags["error"] == "" {
-		t.Error("session should have 'error' tag with error message")
+		t.Error("flow should have 'error' tag with error message")
 	}
 	if !strings.Contains(entry.Session.Tags["error"], "connection refused") {
 		t.Errorf("error tag = %q, should contain 'connection refused'", entry.Session.Tags["error"])
@@ -244,7 +244,7 @@ func TestRecordWebSocketError_WithTLSConnInfo(t *testing.T) {
 		connID:     "conn-wss-1",
 		clientAddr: "127.0.0.1:5000",
 		start:      start,
-		connInfo: &session.ConnectionInfo{
+		connInfo: &flow.ConnectionInfo{
 			ClientAddr: "127.0.0.1:5000",
 			TLSVersion: "TLS 1.3",
 			TLSCipher:  "TLS_AES_128_GCM_SHA256",
@@ -258,12 +258,12 @@ func TestRecordWebSocketError_WithTLSConnInfo(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "error" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "error")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
 	}
 	if entry.Session.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "WebSocket")
@@ -282,7 +282,7 @@ func TestRecordWebSocketError_WithTLSConnInfo(t *testing.T) {
 }
 
 // TestWS_UpstreamDialFailure_RecordsSession verifies that when a WebSocket
-// upstream dial fails, the proxy records the session with State="error" and
+// upstream dial fails, the proxy records the flow with State="error" and
 // the upgrade request as a send message.
 func TestWS_UpstreamDialFailure_RecordsSession(t *testing.T) {
 	store := &mockStore{}
@@ -327,21 +327,21 @@ func TestWS_UpstreamDialFailure_RecordsSession(t *testing.T) {
 	// Wait for async recording to complete.
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify session was recorded with error state.
+	// Verify flow was recorded with error state.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry (error), got %d", len(entries))
+		t.Fatalf("expected 1 flow entry (error), got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "error" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "error")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
 	}
 	if entry.Session.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "WebSocket")
 	}
 	if entry.Session.Tags == nil || entry.Session.Tags["error"] == "" {
-		t.Error("session should have 'error' tag with error message")
+		t.Error("flow should have 'error' tag with error message")
 	}
 
 	// Verify send message is present.
@@ -359,7 +359,7 @@ func TestWS_UpstreamDialFailure_RecordsSession(t *testing.T) {
 }
 
 // TestWSS_UpstreamDialFailure_RecordsSession verifies that when a WSS upstream
-// dial fails through a CONNECT tunnel, the proxy records the session with
+// dial fails through a CONNECT tunnel, the proxy records the flow with
 // State="error" and the upgrade request as a send message.
 func TestWSS_UpstreamDialFailure_RecordsSession(t *testing.T) {
 	issuer, rootCAs := newTestIssuer(t)
@@ -406,15 +406,15 @@ func TestWSS_UpstreamDialFailure_RecordsSession(t *testing.T) {
 	// Wait for recording.
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify error session was recorded.
+	// Verify error flow was recorded.
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry (error), got %d", len(entries))
+		t.Fatalf("expected 1 flow entry (error), got %d", len(entries))
 	}
 
 	entry := entries[0]
 	if entry.Session.State != "error" {
-		t.Errorf("session state = %q, want %q", entry.Session.State, "error")
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
 	}
 	if entry.Session.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "WebSocket")

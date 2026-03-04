@@ -8,31 +8,31 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// newTestFuzzStore returns a *session.SQLiteStore that satisfies both session.Store
-// and session.FuzzStore for testing.
-func newTestFuzzStore(t *testing.T) *session.SQLiteStore {
+// newTestFuzzStore returns a *flow.SQLiteStore that satisfies both flow.Store
+// and flow.FuzzStore for testing.
+func newTestFuzzStore(t *testing.T) *flow.SQLiteStore {
 	t.Helper()
 	return newTestSQLiteStore(t)
 }
 
 // newTestSQLiteStore creates an SQLiteStore for testing (returns concrete type).
-func newTestSQLiteStore(t *testing.T) *session.SQLiteStore {
+func newTestSQLiteStore(t *testing.T) *flow.SQLiteStore {
 	t.Helper()
 	store := newTestStore(t)
-	// newTestStore returns session.Store; we know it's *session.SQLiteStore in tests.
-	sqlStore, ok := store.(*session.SQLiteStore)
+	// newTestStore returns flow.Store; we know it's *flow.SQLiteStore in tests.
+	sqlStore, ok := store.(*flow.SQLiteStore)
 	if !ok {
-		t.Fatalf("expected *session.SQLiteStore, got %T", store)
+		t.Fatalf("expected *flow.SQLiteStore, got %T", store)
 	}
 	return sqlStore
 }
 
 // setupFuzzQueryTestSession creates an MCP client session for fuzz query tests
 // with both store and fuzzStore configured.
-func setupFuzzQueryTestSession(t *testing.T, store session.Store, fuzzStore session.FuzzStore) *gomcp.ClientSession {
+func setupFuzzQueryTestSession(t *testing.T, store flow.Store, fuzzStore flow.FuzzStore) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -65,12 +65,12 @@ func setupFuzzQueryTestSession(t *testing.T, store session.Store, fuzzStore sess
 }
 
 // seedFuzzJob creates a fuzz job in the store for testing.
-func seedFuzzJob(t *testing.T, store session.FuzzStore, status, tag string) *session.FuzzJob {
+func seedFuzzJob(t *testing.T, store flow.FuzzStore, status, tag string) *flow.FuzzJob {
 	t.Helper()
 	ctx := context.Background()
 
-	job := &session.FuzzJob{
-		SessionID: "sess-template",
+	job := &flow.FuzzJob{
+		FlowID: "sess-template",
 		Config:    `{"attack_type":"sequential"}`,
 		Status:    status,
 		Tag:       tag,
@@ -91,25 +91,25 @@ func seedFuzzJob(t *testing.T, store session.FuzzStore, status, tag string) *ses
 }
 
 // seedFuzzResult creates a fuzz result in the store for testing.
-func seedFuzzResult(t *testing.T, store *session.SQLiteStore, fuzzID string, index, statusCode, durationMs int, body string) *session.FuzzResult {
+func seedFuzzResult(t *testing.T, store *flow.SQLiteStore, fuzzID string, index, statusCode, durationMs int, body string) *flow.FuzzResult {
 	t.Helper()
 	ctx := context.Background()
 
-	// Create a result session with a receive message.
-	sess := &session.Session{
+	// Create a result flow with a receive message.
+	fl := &flow.Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now(),
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Append receive message with body.
-	msg := &session.Message{
-		ID:         sess.ID + "-recv",
-		SessionID:  sess.ID,
+	msg := &flow.Message{
+		ID:         fl.ID + "-recv",
+		FlowID:  fl.ID,
 		Sequence:   0,
 		Direction:  "receive",
 		Timestamp:  time.Now(),
@@ -120,10 +120,10 @@ func seedFuzzResult(t *testing.T, store *session.SQLiteStore, fuzzID string, ind
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	result := &session.FuzzResult{
+	result := &flow.FuzzResult{
 		FuzzID:         fuzzID,
 		IndexNum:       index,
-		SessionID:      sess.ID,
+		FlowID:      fl.ID,
 		Payloads:       `{"pos-0":"payload-` + fmt.Sprintf("%d", index) + `"}`,
 		StatusCode:     statusCode,
 		ResponseLength: len(body),
@@ -202,8 +202,8 @@ func TestQuery_FuzzJobs_WithData(t *testing.T) {
 		if job.ID == "" {
 			t.Error("job ID is empty")
 		}
-		if job.SessionID != "sess-template" {
-			t.Errorf("session_id = %q, want sess-template", job.SessionID)
+		if job.FlowID != "sess-template" {
+			t.Errorf("flow_id = %q, want sess-template", job.FlowID)
 		}
 		if job.CreatedAt == "" {
 			t.Error("created_at is empty")
@@ -396,8 +396,8 @@ func TestQuery_FuzzJobs_Fields(t *testing.T) {
 	if _, ok := jobs[0]["tag"]; ok {
 		t.Error("tag field should NOT be present in filtered result")
 	}
-	if _, ok := jobs[0]["session_id"]; ok {
-		t.Error("session_id field should NOT be present in filtered result")
+	if _, ok := jobs[0]["flow_id"]; ok {
+		t.Error("flow_id field should NOT be present in filtered result")
 	}
 }
 
@@ -747,8 +747,8 @@ func TestQuery_FuzzResults_Fields(t *testing.T) {
 	if _, ok := results[0]["payloads"]; ok {
 		t.Error("payloads field should NOT be present in filtered result")
 	}
-	if _, ok := results[0]["session_id"]; ok {
-		t.Error("session_id field should NOT be present in filtered result")
+	if _, ok := results[0]["flow_id"]; ok {
+		t.Error("flow_id field should NOT be present in filtered result")
 	}
 }
 
@@ -799,14 +799,14 @@ func TestQuery_FuzzResults_ErrorField(t *testing.T) {
 	job := seedFuzzJob(t, store, "completed", "test")
 
 	// Create a result with an error.
-	sess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	fl := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	errResult := &session.FuzzResult{
+	errResult := &flow.FuzzResult{
 		FuzzID:    job.ID,
 		IndexNum:  0,
-		SessionID: sess.ID,
+		FlowID: fl.ID,
 		Payloads:  `{"pos-0":"test"}`,
 		Error:     "connection refused",
 	}

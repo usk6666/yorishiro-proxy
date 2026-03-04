@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // relayBufSize is the buffer size for bidirectional data relay.
@@ -17,10 +17,10 @@ import (
 const relayBufSize = 32 * 1024
 
 // relay copies data bidirectionally between a client and an upstream
-// connection, recording each chunk as a message in the session store.
+// connection, recording each chunk as a message in the flow store.
 type relay struct {
-	store     session.SessionWriter
-	sessionID string
+	store     flow.FlowWriter
+	flowID string
 	logger    *slog.Logger
 	seq       atomic.Int64 // next message sequence number
 }
@@ -79,7 +79,7 @@ func (r *relay) run(ctx context.Context, client, upstream net.Conn) error {
 }
 
 // copyAndRecord reads from src and writes to dst, recording each chunk as a
-// message in the session store. The direction is "send" (client -> upstream)
+// message in the flow store. The direction is "send" (client -> upstream)
 // or "receive" (upstream -> client).
 func (r *relay) copyAndRecord(ctx context.Context, dst, src net.Conn, direction string) error {
 	buf := make([]byte, relayBufSize)
@@ -107,7 +107,7 @@ func (r *relay) copyAndRecord(ctx context.Context, dst, src net.Conn, direction 
 	}
 }
 
-// record appends a message to the session store for one data chunk.
+// record appends a message to the flow store for one data chunk.
 // Recording errors are logged but do not interrupt the relay.
 func (r *relay) record(ctx context.Context, direction string, data []byte) {
 	if r.store == nil {
@@ -120,8 +120,8 @@ func (r *relay) record(ctx context.Context, direction string, data []byte) {
 	raw := make([]byte, len(data))
 	copy(raw, data)
 
-	msg := &session.Message{
-		SessionID: r.sessionID,
+	msg := &flow.Message{
+		FlowID: r.flowID,
 		Sequence:  seq,
 		Direction: direction,
 		Timestamp: time.Now(),
@@ -133,7 +133,7 @@ func (r *relay) record(ctx context.Context, direction string, data []byte) {
 
 	if err := r.store.AppendMessage(ctx, msg); err != nil {
 		r.logger.Error("TCP message record failed",
-			"session_id", r.sessionID,
+			"flow_id", r.flowID,
 			"seq", seq,
 			"direction", direction,
 			"error", err)

@@ -1,6 +1,6 @@
 // Package http2 implements an HTTP/2 protocol handler for the yorishiro-proxy.
 // It supports both h2 (TLS via ALPN) and h2c (cleartext) HTTP/2 connections.
-// Each HTTP/2 stream is recorded as an individual unary session.
+// Each HTTP/2 stream is recorded as an individual unary flow.
 package http2
 
 import (
@@ -25,7 +25,7 @@ import (
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // http2Preface is the HTTP/2 connection preface sent by clients.
@@ -43,13 +43,13 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 type Handler struct {
 	proxy.HandlerBase
 
-	// grpcHandler processes gRPC session recording when Content-Type: application/grpc
+	// grpcHandler processes gRPC flow recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
 	grpcHandler *protogrpc.Handler
 }
 
-// NewHandler creates a new HTTP/2 handler with session recording.
-func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
+// NewHandler creates a new HTTP/2 handler with flow recording.
+func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 	return &Handler{
 		HandlerBase: proxy.HandlerBase{
 			Store:  store,
@@ -61,7 +61,7 @@ func NewHandler(store session.SessionWriter, logger *slog.Logger) *Handler {
 	}
 }
 
-// SetGRPCHandler sets the gRPC handler used for gRPC-specific session recording.
+// SetGRPCHandler sets the gRPC handler used for gRPC-specific flow recording.
 // When set, streams with Content-Type: application/grpc are recorded as gRPC
 // sessions with parsed service/method metadata instead of plain HTTP/2.
 func (h *Handler) SetGRPCHandler(gh *protogrpc.Handler) {
@@ -160,7 +160,7 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 	h2Server.ServeConn(conn, opts)
 
 	// Wait for all in-flight handlers to complete before returning,
-	// so that session recording finishes before the connection is closed.
+	// so that flow recording finishes before the connection is closed.
 	// We must check after ServeConn returns because new handlers cannot
 	// be dispatched after that point, making the counter monotonically
 	// decreasing from here. (F-2)
@@ -175,7 +175,7 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 }
 
 // handleStream proxies a single HTTP/2 stream to the upstream server
-// and records the session.
+// and records the flow.
 func (h *Handler) handleStream(
 	ctx context.Context,
 	w gohttp.ResponseWriter,
@@ -231,9 +231,9 @@ func (h *Handler) handleStream(
 		Fragment: req.URL.Fragment,
 	}
 
-	// Build the connection info for session recording (without ServerAddr and
+	// Build the connection info for flow recording (without ServerAddr and
 	// TLSServerCertSubject which are only known after upstream connection).
-	connInfo := &session.ConnectionInfo{
+	connInfo := &flow.ConnectionInfo{
 		ClientAddr:  clientAddr,
 		TLSVersion:  tlsMeta.Version,
 		TLSCipher:   tlsMeta.CipherSuite,
@@ -319,7 +319,7 @@ func (h *Handler) handleStream(
 				w.WriteHeader(gohttp.StatusBadRequest)
 				return
 			}
-			// Update recordReqBody and srp for session recording.
+			// Update recordReqBody and srp for flow recording.
 			if action.OverrideBody != nil {
 				recordReqBody = []byte(*action.OverrideBody)
 				srp.reqBody = recordReqBody
@@ -387,7 +387,7 @@ func (h *Handler) handleStream(
 
 	// Record the receive (response) phase.
 	if isGRPC {
-		// gRPC session recording is handled by the gRPC handler.
+		// gRPC flow recording is handled by the gRPC handler.
 		if h.shouldCapture(req.Method, reqURL) {
 			var trailers map[string][]string
 			if resp.Trailer != nil {
@@ -417,7 +417,7 @@ func (h *Handler) handleStream(
 				TLSServerCertSubject: tlsCertSubject,
 			}
 			if err := h.grpcHandler.RecordSession(ctx, info); err != nil {
-				logger.Error("gRPC session recording failed", "error", err)
+				logger.Error("gRPC flow recording failed", "error", err)
 			}
 		}
 	} else {

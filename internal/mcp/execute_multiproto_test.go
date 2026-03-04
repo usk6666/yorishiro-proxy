@@ -7,11 +7,11 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // setupMultiProtoExecSession creates a connected MCP client session for multi-protocol execute tests.
-func setupMultiProtoExecSession(t *testing.T, store session.Store) *gomcp.ClientSession {
+func setupMultiProtoExecSession(t *testing.T, store flow.Store) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -80,7 +80,7 @@ func unmarshalExecMultiProtoResult(t *testing.T, result *gomcp.CallToolResult, d
 
 // --- Test: tcp_replay action ---
 
-func TestExecuteMultiProto_TCPReplay_RequiresSessionID(t *testing.T) {
+func TestExecuteMultiProto_TCPReplay_RequiresFlowID(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMultiProtoExecSession(t, store)
 
@@ -89,7 +89,7 @@ func TestExecuteMultiProto_TCPReplay_RequiresSessionID(t *testing.T) {
 		"params": map[string]any{},
 	})
 	if !result.IsError {
-		t.Fatal("expected IsError=true for missing session_id")
+		t.Fatal("expected IsError=true for missing flow_id")
 	}
 }
 
@@ -102,7 +102,7 @@ func TestExecuteMultiProto_TCPReplay_RequiresTCPProtocol(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"session_id": "http-1",
+			"flow_id": "http-1",
 		},
 	})
 	if !result.IsError {
@@ -114,16 +114,16 @@ func TestExecuteMultiProto_TCPReplay_NoSendMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "tcp-empty",
 		Protocol:    "TCP",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &session.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	cs := setupMultiProtoExecSession(t, store)
@@ -131,7 +131,7 @@ func TestExecuteMultiProto_TCPReplay_NoSendMessages(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"session_id": "tcp-empty",
+			"flow_id": "tcp-empty",
 		},
 	})
 	if !result.IsError {
@@ -143,20 +143,20 @@ func TestExecuteMultiProto_TCPReplay_NoTargetAddr(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "tcp-no-target",
 		Protocol:    "TCP",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        "tcp-no-target-send",
-		SessionID: "tcp-no-target",
+		FlowID: "tcp-no-target",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -171,7 +171,7 @@ func TestExecuteMultiProto_TCPReplay_NoTargetAddr(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"session_id": "tcp-no-target",
+			"flow_id": "tcp-no-target",
 		},
 	})
 	if !result.IsError {
@@ -186,21 +186,21 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 	addr, cleanup := newRawEchoServer(t)
 	t.Cleanup(cleanup)
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "tcp-replay",
 		Protocol:    "TCP",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &session.ConnectionInfo{ServerAddr: "original:1234"},
+		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "original:1234"},
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        "tcp-replay-send",
-		SessionID: "tcp-replay",
+		FlowID: "tcp-replay",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -215,7 +215,7 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"session_id":  "tcp-replay",
+			"flow_id":  "tcp-replay",
 			"target_addr": addr,
 			"tag":         "test-replay",
 		},
@@ -227,8 +227,8 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 	var out executeReplayRawResult
 	unmarshalExecMultiProtoResult(t, result, &out)
 
-	if out.NewSessionID == "" {
-		t.Error("new_session_id should not be empty")
+	if out.NewFlowID == "" {
+		t.Error("new_flow_id should not be empty")
 	}
 	if out.MessagesSent != 1 {
 		t.Errorf("messages_sent = %d, want 1", out.MessagesSent)
@@ -250,7 +250,7 @@ func TestExecuteMultiProto_TCPReplay_NilStore(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"session_id": "any",
+			"flow_id": "any",
 		},
 	})
 	if !result.IsError {
@@ -258,22 +258,22 @@ func TestExecuteMultiProto_TCPReplay_NilStore(t *testing.T) {
 	}
 }
 
-// --- Test: resend for WebSocket sessions ---
+// --- Test: resend for WebSocket flows ---
 
 func TestExecuteMultiProto_Resend_WebSocket_RequiresMessageSequence(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "ws-resend-1",
 		Protocol:    "WebSocket",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &session.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	cs := setupMultiProtoExecSession(t, store)
@@ -281,7 +281,7 @@ func TestExecuteMultiProto_Resend_WebSocket_RequiresMessageSequence(t *testing.T
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": "ws-resend-1",
+			"flow_id": "ws-resend-1",
 		},
 	})
 	if !result.IsError {
@@ -293,21 +293,21 @@ func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "ws-resend-2",
 		Protocol:    "WebSocket",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &session.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        "ws-msg-0",
-		SessionID: "ws-resend-2",
+		FlowID: "ws-resend-2",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -323,7 +323,7 @@ func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":       "ws-resend-2",
+			"flow_id":       "ws-resend-2",
 			"message_sequence": 99,
 		},
 	})
@@ -336,21 +336,21 @@ func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "ws-resend-3",
 		Protocol:    "WebSocket",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &session.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	recvMsg := &session.Message{
+	recvMsg := &flow.Message{
 		ID:        "ws-msg-1",
-		SessionID: "ws-resend-3",
+		FlowID: "ws-resend-3",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
@@ -365,7 +365,7 @@ func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":       "ws-resend-3",
+			"flow_id":       "ws-resend-3",
 			"message_sequence": 1,
 		},
 	})

@@ -8,25 +8,25 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// seedStreamingSession creates a streaming session with multiple messages for testing.
-func seedStreamingSession(t *testing.T, store session.Store, id, protocol, sessionType string, msgCount int, metadata map[string]string) {
+// seedStreamingSession creates a streaming flow with multiple messages for testing.
+func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionType string, msgCount int, metadata map[string]string) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          id,
 		ConnID:      "conn-" + id,
 		Protocol:    protocol,
-		SessionType: sessionType,
+		FlowType: sessionType,
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    500 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession(%s): %v", id, err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	for i := 0; i < msgCount; i++ {
@@ -34,9 +34,9 @@ func seedStreamingSession(t *testing.T, store session.Store, id, protocol, sessi
 		if i%2 == 1 {
 			dir = "receive"
 		}
-		msg := &session.Message{
+		msg := &flow.Message{
 			ID:        fmt.Sprintf("%s-msg-%d", id, i),
-			SessionID: id,
+			FlowID: id,
 			Sequence:  i,
 			Direction: dir,
 			Timestamp: time.Now().UTC(),
@@ -59,21 +59,21 @@ func TestQuery_Sessions_FilterByProtocol_WebSocket(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{Protocol: "WebSocket"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].Protocol != "WebSocket" {
-		t.Errorf("protocol = %q, want WebSocket", out.Sessions[0].Protocol)
+	if out.Flows[0].Protocol != "WebSocket" {
+		t.Errorf("protocol = %q, want WebSocket", out.Flows[0].Protocol)
 	}
 }
 
@@ -85,21 +85,21 @@ func TestQuery_Sessions_FilterByProtocol_TCP(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{Protocol: "TCP"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].Protocol != "TCP" {
-		t.Errorf("protocol = %q, want TCP", out.Sessions[0].Protocol)
+	if out.Flows[0].Protocol != "TCP" {
+		t.Errorf("protocol = %q, want TCP", out.Flows[0].Protocol)
 	}
 }
 
@@ -111,21 +111,21 @@ func TestQuery_Sessions_FilterByProtocol_GRPC(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "sessions",
+		Resource: "flows",
 		Filter:   &queryFilter{Protocol: "gRPC"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Sessions[0].Protocol != "gRPC" {
-		t.Errorf("protocol = %q, want gRPC", out.Sessions[0].Protocol)
+	if out.Flows[0].Protocol != "gRPC" {
+		t.Errorf("protocol = %q, want gRPC", out.Flows[0].Protocol)
 	}
 }
 
@@ -137,18 +137,18 @@ func TestQuery_Sessions_ProtocolSummary_WebSocket(t *testing.T) {
 
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Fatalf("count = %d, want 1", out.Count)
 	}
-	summary := out.Sessions[0].ProtocolSummary
+	summary := out.Flows[0].ProtocolSummary
 	if summary == nil {
 		t.Fatal("protocol_summary should not be nil for WebSocket")
 	}
@@ -161,21 +161,21 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "tcp-1",
 		Protocol:    "TCP",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    100 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        "tcp-1-send",
-		SessionID: "tcp-1",
+		FlowID: "tcp-1",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -185,9 +185,9 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	recvMsg := &session.Message{
+	recvMsg := &flow.Message{
 		ID:        "tcp-1-recv",
-		SessionID: "tcp-1",
+		FlowID: "tcp-1",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
@@ -199,18 +199,18 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Fatalf("count = %d, want 1", out.Count)
 	}
-	summary := out.Sessions[0].ProtocolSummary
+	summary := out.Flows[0].ProtocolSummary
 	if summary == nil {
 		t.Fatal("protocol_summary should not be nil for TCP")
 	}
@@ -226,22 +226,22 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "grpc-1",
 		Protocol:    "gRPC",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    50 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	parsedURL, _ := url.Parse("https://example.com/pkg.UserService/GetUser")
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        "grpc-1-send",
-		SessionID: "grpc-1",
+		FlowID: "grpc-1",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -254,9 +254,9 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	recvMsg := &session.Message{
+	recvMsg := &flow.Message{
 		ID:        "grpc-1-recv",
-		SessionID: "grpc-1",
+		FlowID: "grpc-1",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
@@ -269,18 +269,18 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 
 	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "sessions"})
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionsResult
+	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.Count != 1 {
 		t.Fatalf("count = %d, want 1", out.Count)
 	}
-	summary := out.Sessions[0].ProtocolSummary
+	summary := out.Flows[0].ProtocolSummary
 	if summary == nil {
 		t.Fatal("protocol_summary should not be nil for gRPC")
 	}
@@ -298,7 +298,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 	}
 }
 
-// --- Test: session resource for streaming sessions ---
+// --- Test: flow resource for streaming flows ---
 
 func TestQuery_Session_StreamingPreview(t *testing.T) {
 	store := newTestStore(t)
@@ -307,21 +307,21 @@ func TestQuery_Session_StreamingPreview(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "ws-detail",
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.ID != "ws-detail" {
 		t.Errorf("id = %q, want ws-detail", out.ID)
 	}
-	if out.SessionType != "bidirectional" {
-		t.Errorf("session_type = %q, want bidirectional", out.SessionType)
+	if out.FlowType != "bidirectional" {
+		t.Errorf("flow_type = %q, want bidirectional", out.FlowType)
 	}
 	if out.MessageCount != 15 {
 		t.Errorf("message_count = %d, want 15", out.MessageCount)
@@ -350,14 +350,14 @@ func TestQuery_Session_UnaryNoPreview(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "http-detail",
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	// Unary sessions should NOT have message_preview.
@@ -373,14 +373,14 @@ func TestQuery_Session_StreamingPreview_FewMessages(t *testing.T) {
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
-		Resource: "session",
+		Resource: "flow",
 		ID:       "ws-small",
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out querySessionResult
+	var out queryFlowResult
 	unmarshalQueryResult(t, result, &out)
 
 	if out.MessageCount != 3 {
@@ -477,20 +477,20 @@ func TestQuery_Messages_Metadata(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "ws-meta",
 		Protocol:    "WebSocket",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	msg := &session.Message{
+	msg := &flow.Message{
 		ID:        "ws-meta-msg-0",
-		SessionID: "ws-meta",
+		FlowID: "ws-meta",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -529,20 +529,20 @@ func TestQuery_Messages_GRPC_Metadata(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ID:          "grpc-meta",
 		Protocol:    "gRPC",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &session.Message{
+	sendMsg := &flow.Message{
 		ID:        "grpc-meta-send",
-		SessionID: "grpc-meta",
+		FlowID: "grpc-meta",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),

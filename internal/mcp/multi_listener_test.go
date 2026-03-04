@@ -11,7 +11,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// setupMultiListenerTestSession creates an MCP client session with a Manager for
+// setupMultiListenerTestSession creates an MCP client flow with a Manager for
 // testing multi-listener features.
 func setupMultiListenerTestSession(t *testing.T, manager *proxy.Manager) *gomcp.ClientSession {
 	t.Helper()

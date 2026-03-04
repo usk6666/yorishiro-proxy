@@ -368,7 +368,7 @@ func TestM3_Transform_PriorityOrdering(t *testing.T) {
 func TestM3_Transform_QueryAutoTransformRules(t *testing.T) {
 	pipeline := rules.NewPipeline()
 
-	// Set up a session with both scope and pipeline.
+	// Set up a flow with both scope and pipeline.
 	cs := setupTransformTestSession(t, pipeline)
 
 	// Add a rule.

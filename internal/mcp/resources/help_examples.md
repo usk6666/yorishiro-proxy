@@ -55,7 +55,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 {
   "action": "resend",
   "params": {
-    "session_id": "<original-session-id>",
+    "flow_id": "<original-flow-id>",
     "override_headers": {"Authorization": "Bearer <other-user-token>"}
   }
 }
@@ -67,7 +67,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 {
   "action": "resend",
   "params": {
-    "session_id": "<original-session-id>",
+    "flow_id": "<original-flow-id>",
     "override_headers": {"Authorization": ""}
   }
 }
@@ -75,17 +75,17 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ## API Endpoint Discovery
 
-### List all captured sessions
+### List all captured flows
 ```json
 // query
-{"resource": "sessions", "limit": 100}
+{"resource": "flows", "limit": 100}
 ```
 
 ### Filter by API endpoints
 ```json
 // query
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"url_pattern": "/api/", "method": "POST"}
 }
 ```
@@ -93,7 +93,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 ### Inspect a specific request/response
 ```json
 // query
-{"resource": "session", "id": "<session-id>"}
+{"resource": "flow", "id": "<flow-id>"}
 ```
 
 ## Parameter Tampering
@@ -104,7 +104,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 {
   "action": "resend",
   "params": {
-    "session_id": "<session-id>",
+    "flow_id": "<flow-id>",
     "override_url": "https://target.example.com/api/admin/users"
   }
 }
@@ -116,7 +116,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 {
   "action": "resend",
   "params": {
-    "session_id": "<session-id>",
+    "flow_id": "<flow-id>",
     "override_body": "{\"role\": \"admin\", \"user_id\": 1}"
   }
 }
@@ -130,7 +130,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 {
   "action": "resend_raw",
   "params": {
-    "session_id": "<session-id>",
+    "flow_id": "<flow-id>",
     "target_addr": "target.example.com:443",
     "use_tls": true
   }
@@ -160,22 +160,22 @@ Confirm the fingerprint has changed and `persisted` is true.
 }
 ```
 
-## Session Cleanup
+## Flow Cleanup
 
-### Delete old sessions
+### Delete old flows
 ```json
 // manage
 {
-  "action": "delete_sessions",
+  "action": "delete_flows",
   "params": {"older_than_days": 7, "confirm": true}
 }
 ```
 
-### Delete all sessions
+### Delete all flows
 ```json
 // manage
 {
-  "action": "delete_sessions",
+  "action": "delete_flows",
   "params": {"confirm": true}
 }
 ```

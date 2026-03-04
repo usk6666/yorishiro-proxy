@@ -13,10 +13,10 @@ Action-specific parameters (see below).
 ## Actions
 
 ### fuzz
-Start an asynchronous fuzz campaign against a recorded session. Returns fuzz_id immediately. Use `fuzz_pause`, `fuzz_resume`, `fuzz_cancel` for job control. Query `fuzz_results` resource for progress.
+Start an asynchronous fuzz campaign against a recorded flow. Returns fuzz_id immediately. Use `fuzz_pause`, `fuzz_resume`, `fuzz_cancel` for job control. Query `fuzz_results` resource for progress.
 
 **Parameters:**
-- **session_id** (string, required): ID of the template session to fuzz.
+- **flow_id** (string, required): ID of the template flow to fuzz.
 - **attack_type** (string, required): Fuzzing strategy. `"sequential"` tests one position at a time; `"parallel"` applies payloads to all positions simultaneously (zip).
 - **positions** (array, required): Payload injection points. Each position specifies:
   - **id** (string, required): Unique position identifier (e.g. `"pos-0"`).
@@ -79,7 +79,7 @@ Returns: fuzz_id, action, status.
 {
   "action": "fuzz",
   "params": {
-    "session_id": "abc-123",
+    "flow_id": "abc-123",
     "attack_type": "sequential",
     "positions": [
       {
@@ -107,7 +107,7 @@ Returns: fuzz_id, action, status.
 {
   "action": "fuzz",
   "params": {
-    "session_id": "abc-123",
+    "flow_id": "abc-123",
     "attack_type": "parallel",
     "positions": [
       {"id": "pos-0", "location": "query", "name": "username", "payload_set": "users"},

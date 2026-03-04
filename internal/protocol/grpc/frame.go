@@ -1,6 +1,6 @@
 // Package grpc implements gRPC protocol handling for the yorishiro-proxy.
 // It parses gRPC Length-Prefixed Messages over HTTP/2 and records gRPC
-// sessions (unary and streaming RPCs) to the session store.
+// sessions (unary and streaming RPCs) to the flow store.
 //
 // gRPC uses HTTP/2 as its transport and frames messages with a 5-byte header:
 //

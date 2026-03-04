@@ -55,7 +55,7 @@ export interface TransformRule {
   action: TransformAction;
 }
 
-/** Connection info for a session. */
+/** Connection info for a flow. */
 export interface ConnInfo {
   client_addr?: string;
   server_addr?: string;
@@ -209,8 +209,8 @@ export interface ConfigureResult {
 
 /** Resource types for the query tool. */
 export type QueryResource =
-  | "sessions"
-  | "session"
+  | "flows"
+  | "flow"
   | "messages"
   | "status"
   | "config"
@@ -249,11 +249,11 @@ export interface QueryParams {
 
 // --- Query response types ---
 
-/** Session entry in the sessions list. */
-export interface SessionEntry {
+/** Flow entry in the flows list. */
+export interface FlowEntry {
   id: string;
   protocol: string;
-  session_type: string;
+  flow_type: string;
   state: string;
   method: string;
   url: string;
@@ -265,14 +265,14 @@ export interface SessionEntry {
   duration_ms: number;
 }
 
-/** Response for query resource="sessions". */
-export interface SessionsResult {
-  sessions: SessionEntry[];
+/** Response for query resource="flows". */
+export interface FlowsResult {
+  flows: FlowEntry[];
   count: number;
   total: number;
 }
 
-/** Message entry in the messages list and session preview. */
+/** Message entry in the messages list and flow preview. */
 export interface MessageEntry {
   id: string;
   sequence: number;
@@ -296,12 +296,12 @@ export interface VariantRequest {
   body_encoding: string;
 }
 
-/** Response for query resource="session". */
-export interface SessionDetailResult {
+/** Response for query resource="flow". */
+export interface FlowDetailResult {
   id: string;
   conn_id: string;
   protocol: string;
-  session_type: string;
+  flow_type: string;
   state: string;
   method: string;
   url: string;
@@ -353,7 +353,7 @@ export interface StatusResult {
   max_connections: number;
   peek_timeout_ms: number;
   request_timeout_ms: number;
-  total_sessions: number;
+  total_flows: number;
   db_size_bytes: number;
   uptime_seconds: number;
   ca_initialized: boolean;
@@ -452,7 +452,7 @@ export interface GuardCondition {
 /** Macro step definition. */
 export interface MacroStep {
   id: string;
-  session_id: string;
+  flow_id: string;
   override_method?: string;
   override_url?: string;
   override_headers?: Record<string, string>;
@@ -479,7 +479,7 @@ export interface MacroDetailResult {
 /** Fuzz job entry. */
 export interface FuzzJobEntry {
   id: string;
-  session_id: string;
+  flow_id: string;
   status: string;
   tag: string;
   total: number;
@@ -501,7 +501,7 @@ export interface FuzzResultEntry {
   id: string;
   fuzz_id: string;
   index: number;
-  session_id: string;
+  flow_id: string;
   payloads: Record<string, string>;
   status_code: number;
   response_length: number;
@@ -526,8 +526,8 @@ export interface FuzzResultsResult {
 
 /** Map of query resource to its result type. */
 export interface QueryResultMap {
-  sessions: SessionsResult;
-  session: SessionDetailResult;
+  flows: FlowsResult;
+  flow: FlowDetailResult;
   messages: MessagesResult;
   status: StatusResult;
   config: ConfigResult;
@@ -548,7 +548,7 @@ export type ExecuteAction =
   | "resend"
   | "resend_raw"
   | "tcp_replay"
-  | "delete_sessions"
+  | "delete_flows"
   | "release"
   | "modify_and_forward"
   | "drop"
@@ -560,8 +560,8 @@ export type ExecuteAction =
   | "run_macro"
   | "delete_macro"
   | "regenerate_ca_cert"
-  | "export_sessions"
-  | "import_sessions";
+  | "export_flows"
+  | "import_flows";
 
 /** Body patch for resend. */
 export interface BodyPatch {
@@ -641,8 +641,8 @@ export interface ExportFilter {
 export interface ExecuteParams {
   action: ExecuteAction;
   params: {
-    // Session targeting
-    session_id?: string;
+    // Flow targeting
+    flow_id?: string;
     message_sequence?: number | null;
 
     // Resend overrides
@@ -666,7 +666,7 @@ export interface ExecuteParams {
     override_raw_base64?: string;
     patches?: RawPatch[];
 
-    // Delete sessions
+    // Delete flows
     older_than_days?: number | null;
     confirm?: boolean;
     protocol?: string;

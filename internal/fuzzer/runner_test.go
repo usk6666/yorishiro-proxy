@@ -11,18 +11,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // threadSafeMockFuzzJobStore is a thread-safe version of mockFuzzJobStore.
 type threadSafeMockFuzzJobStore struct {
 	mu      sync.Mutex
-	jobs    []*session.FuzzJob
-	results []*session.FuzzResult
+	jobs    []*flow.FuzzJob
+	results []*flow.FuzzResult
 	saveErr error
 }
 
-func (m *threadSafeMockFuzzJobStore) SaveFuzzJob(_ context.Context, job *session.FuzzJob) error {
+func (m *threadSafeMockFuzzJobStore) SaveFuzzJob(_ context.Context, job *flow.FuzzJob) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.saveErr != nil {
@@ -32,7 +32,7 @@ func (m *threadSafeMockFuzzJobStore) SaveFuzzJob(_ context.Context, job *session
 	return nil
 }
 
-func (m *threadSafeMockFuzzJobStore) UpdateFuzzJob(_ context.Context, job *session.FuzzJob) error {
+func (m *threadSafeMockFuzzJobStore) UpdateFuzzJob(_ context.Context, job *flow.FuzzJob) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, j := range m.jobs {
@@ -44,7 +44,7 @@ func (m *threadSafeMockFuzzJobStore) UpdateFuzzJob(_ context.Context, job *sessi
 	return nil
 }
 
-func (m *threadSafeMockFuzzJobStore) SaveFuzzResult(_ context.Context, result *session.FuzzResult) error {
+func (m *threadSafeMockFuzzJobStore) SaveFuzzResult(_ context.Context, result *flow.FuzzResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.saveErr != nil {
@@ -54,10 +54,10 @@ func (m *threadSafeMockFuzzJobStore) SaveFuzzResult(_ context.Context, result *s
 	return nil
 }
 
-func (m *threadSafeMockFuzzJobStore) getResults() []*session.FuzzResult {
+func (m *threadSafeMockFuzzJobStore) getResults() []*flow.FuzzResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	c := make([]*session.FuzzResult, len(m.results))
+	c := make([]*flow.FuzzResult, len(m.results))
 	for i, r := range m.results {
 		cpy := *r
 		c[i] = &cpy
@@ -65,10 +65,10 @@ func (m *threadSafeMockFuzzJobStore) getResults() []*session.FuzzResult {
 	return c
 }
 
-func (m *threadSafeMockFuzzJobStore) getJobs() []*session.FuzzJob {
+func (m *threadSafeMockFuzzJobStore) getJobs() []*flow.FuzzJob {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	c := make([]*session.FuzzJob, len(m.jobs))
+	c := make([]*flow.FuzzJob, len(m.jobs))
 	for i, j := range m.jobs {
 		cpy := *j
 		c[i] = &cpy
@@ -76,28 +76,28 @@ func (m *threadSafeMockFuzzJobStore) getJobs() []*session.FuzzJob {
 	return c
 }
 
-// threadSafeMockSessionRecorder is a thread-safe version of mockSessionRecorder.
-type threadSafeMockSessionRecorder struct {
+// threadSafeMockFlowRecorder is a thread-safe version of mockFlowRecorder.
+type threadSafeMockFlowRecorder struct {
 	mu       sync.Mutex
-	sessions []*session.Session
-	messages []*session.Message
+	flows []*flow.Flow
+	messages []*flow.Message
 	saveErr  error
 }
 
-func (m *threadSafeMockSessionRecorder) SaveSession(_ context.Context, s *session.Session) error {
+func (m *threadSafeMockFlowRecorder) SaveFlow(_ context.Context, s *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.saveErr != nil {
 		return m.saveErr
 	}
 	if s.ID == "" {
-		s.ID = fmt.Sprintf("sess-%d", len(m.sessions))
+		s.ID = fmt.Sprintf("sess-%d", len(m.flows))
 	}
-	m.sessions = append(m.sessions, s)
+	m.flows = append(m.flows, s)
 	return nil
 }
 
-func (m *threadSafeMockSessionRecorder) AppendMessage(_ context.Context, msg *session.Message) error {
+func (m *threadSafeMockFlowRecorder) AppendMessage(_ context.Context, msg *flow.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
@@ -138,18 +138,18 @@ func (m *threadSafeMockHTTPDoer) getCallCount() int {
 	return m.callCount
 }
 
-func newTestRunner(t *testing.T) (*Runner, *threadSafeMockFuzzJobStore, *threadSafeMockHTTPDoer, *mockSessionFetcher) {
+func newTestRunner(t *testing.T) (*Runner, *threadSafeMockFuzzJobStore, *threadSafeMockHTTPDoer, *mockFlowFetcher) {
 	t.Helper()
 	testURL, _ := url.Parse("http://example.com/api?key=val")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -160,7 +160,7 @@ func newTestRunner(t *testing.T) (*Runner, *threadSafeMockFuzzJobStore, *threadS
 		},
 	}
 
-	recorder := &threadSafeMockSessionRecorder{}
+	recorder := &threadSafeMockFlowRecorder{}
 	fuzzStore := &threadSafeMockFuzzJobStore{}
 	httpDoer := &threadSafeMockHTTPDoer{}
 
@@ -181,7 +181,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "valid config",
 			cfg: RunConfig{
 				Config: Config{
-					SessionID:  "sess-1",
+					FlowID:  "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -195,7 +195,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative concurrency",
 			cfg: RunConfig{
 				Config: Config{
-					SessionID:  "sess-1",
+					FlowID:  "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -210,7 +210,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "concurrency exceeds max",
 			cfg: RunConfig{
 				Config: Config{
-					SessionID:  "sess-1",
+					FlowID:  "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -225,7 +225,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "concurrency at max",
 			cfg: RunConfig{
 				Config: Config{
-					SessionID:  "sess-1",
+					FlowID:  "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -239,7 +239,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative rate limit",
 			cfg: RunConfig{
 				Config: Config{
-					SessionID:  "sess-1",
+					FlowID:  "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -254,7 +254,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative delay",
 			cfg: RunConfig{
 				Config: Config{
-					SessionID:  "sess-1",
+					FlowID:  "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -282,7 +282,7 @@ func TestRunner_Start_AsyncReturn(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -316,7 +316,7 @@ func TestRunner_Start_CompletesAsync(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -385,7 +385,7 @@ func TestRunner_Start_SessionNotFound(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "nonexistent",
+			FlowID:  "nonexistent",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -403,14 +403,14 @@ func TestRunner_Start_SessionNotFound(t *testing.T) {
 func TestRunner_PauseResumeCancel(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -422,7 +422,7 @@ func TestRunner_PauseResumeCancel(t *testing.T) {
 	// Create a slow HTTP doer so we can control timing.
 	slowDoer := &threadSafeMockHTTPDoer{}
 
-	recorder := &threadSafeMockSessionRecorder{}
+	recorder := &threadSafeMockFlowRecorder{}
 	fuzzStore := &threadSafeMockFuzzJobStore{}
 
 	engine := NewEngine(fetcher, recorder, fuzzStore, slowDoer, t.TempDir())
@@ -437,7 +437,7 @@ func TestRunner_PauseResumeCancel(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -502,7 +502,7 @@ func TestRunner_Concurrency(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -547,14 +547,14 @@ func TestRunner_Concurrency(t *testing.T) {
 func TestRunner_StopOnStatusCode(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -573,7 +573,7 @@ func TestRunner_StopOnStatusCode(t *testing.T) {
 		},
 	}
 
-	recorder := &threadSafeMockSessionRecorder{}
+	recorder := &threadSafeMockFlowRecorder{}
 	fuzzStore := &threadSafeMockFuzzJobStore{}
 
 	engine := NewEngine(fetcher, recorder, fuzzStore, doer, t.TempDir())
@@ -582,7 +582,7 @@ func TestRunner_StopOnStatusCode(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -633,14 +633,14 @@ func TestRunner_StopOnStatusCode(t *testing.T) {
 func TestRunner_StopOnErrorCount(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -653,7 +653,7 @@ func TestRunner_StopOnErrorCount(t *testing.T) {
 		err: fmt.Errorf("connection refused"),
 	}
 
-	recorder := &threadSafeMockSessionRecorder{}
+	recorder := &threadSafeMockFlowRecorder{}
 	fuzzStore := &threadSafeMockFuzzJobStore{}
 
 	engine := NewEngine(fetcher, recorder, fuzzStore, doer, t.TempDir())
@@ -662,7 +662,7 @@ func TestRunner_StopOnErrorCount(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -707,14 +707,14 @@ func TestRunner_StopOnErrorCount(t *testing.T) {
 func TestRunner_MaxRetries(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -727,7 +727,7 @@ func TestRunner_MaxRetries(t *testing.T) {
 		err: fmt.Errorf("transient error"),
 	}
 
-	recorder := &threadSafeMockSessionRecorder{}
+	recorder := &threadSafeMockFlowRecorder{}
 	fuzzStore := &threadSafeMockFuzzJobStore{}
 
 	engine := NewEngine(fetcher, recorder, fuzzStore, doer, t.TempDir())
@@ -736,7 +736,7 @@ func TestRunner_MaxRetries(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -778,7 +778,7 @@ func TestRunner_DefaultConcurrency(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			SessionID:  "template-1",
+			FlowID:  "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{

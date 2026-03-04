@@ -10,7 +10,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
-// setupTestSessionWithInterceptQueue creates an MCP client session with an intercept queue.
+// setupTestSessionWithInterceptQueue creates an MCP client flow with an intercept queue.
 func setupTestSessionWithInterceptQueue(t *testing.T, queue *intercept.Queue) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()

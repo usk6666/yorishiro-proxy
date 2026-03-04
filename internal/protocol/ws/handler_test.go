@@ -13,31 +13,31 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// mockStore is a thread-safe minimal in-memory session store for testing.
+// mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
 	mu       sync.Mutex
-	sessions []*session.Session
-	messages []*session.Message
+	flows []*flow.Flow
+	messages []*flow.Message
 }
 
-func (m *mockStore) SaveSession(_ context.Context, s *session.Session) error {
+func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s.ID == "" {
 		s.ID = uuid.New().String()
 	}
-	m.sessions = append(m.sessions, s)
+	m.flows = append(m.flows, s)
 	return nil
 }
 
-func (m *mockStore) UpdateSession(_ context.Context, id string, update session.SessionUpdate) error {
+func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, s := range m.sessions {
+	for _, s := range m.flows {
 		if s.ID == id {
 			if update.State != "" {
 				s.State = update.State
@@ -54,10 +54,10 @@ func (m *mockStore) UpdateSession(_ context.Context, id string, update session.S
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) GetSession(_ context.Context, id string) (*session.Session, error) {
+func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, s := range m.sessions {
+	for _, s := range m.flows {
 		if s.ID == id {
 			return s, nil
 		}
@@ -65,47 +65,47 @@ func (m *mockStore) GetSession(_ context.Context, id string) (*session.Session, 
 	return nil, fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) ListSessions(_ context.Context, _ session.ListOptions) ([]*session.Session, error) {
+func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*session.Session, len(m.sessions))
-	copy(result, m.sessions)
+	result := make([]*flow.Flow, len(m.flows))
+	copy(result, m.flows)
 	return result, nil
 }
 
-func (m *mockStore) CountSessions(_ context.Context, _ session.ListOptions) (int, error) {
+func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.sessions), nil
+	return len(m.flows), nil
 }
 
-func (m *mockStore) DeleteSession(_ context.Context, id string) error { return nil }
+func (m *mockStore) DeleteFlow(_ context.Context, id string) error { return nil }
 
-func (m *mockStore) DeleteAllSessions(_ context.Context) (int64, error) { return 0, nil }
+func (m *mockStore) DeleteAllFlows(_ context.Context) (int64, error) { return 0, nil }
 
-func (m *mockStore) DeleteSessionsByProtocol(_ context.Context, _ string) (int64, error) {
+func (m *mockStore) DeleteFlowsByProtocol(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (m *mockStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
 
 func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error) { return 0, nil }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *session.Message) error {
+func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, sessionID string, opts session.MessageListOptions) ([]*session.Message, error) {
+func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var result []*session.Message
+	var result []*flow.Message
 	for _, msg := range m.messages {
-		if msg.SessionID == sessionID {
+		if msg.FlowID == flowID {
 			if opts.Direction != "" && msg.Direction != opts.Direction {
 				continue
 			}
@@ -115,12 +115,12 @@ func (m *mockStore) GetMessages(_ context.Context, sessionID string, opts sessio
 	return result, nil
 }
 
-func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, error) {
+func (m *mockStore) CountMessages(_ context.Context, flowID string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
 	for _, msg := range m.messages {
-		if msg.SessionID == sessionID {
+		if msg.FlowID == flowID {
 			count++
 		}
 	}
@@ -128,24 +128,24 @@ func (m *mockStore) CountMessages(_ context.Context, sessionID string) (int, err
 }
 
 func (m *mockStore) SaveMacro(_ context.Context, _, _, _ string) error { return nil }
-func (m *mockStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
+func (m *mockStore) GetMacro(_ context.Context, _ string) (*flow.MacroRecord, error) {
 	return nil, fmt.Errorf("not found")
 }
-func (m *mockStore) ListMacros(_ context.Context) ([]*session.MacroRecord, error) { return nil, nil }
+func (m *mockStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) { return nil, nil }
 func (m *mockStore) DeleteMacro(_ context.Context, _ string) error                { return nil }
 
-func (m *mockStore) Sessions() []*session.Session {
+func (m *mockStore) Flows() []*flow.Flow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*session.Session, len(m.sessions))
-	copy(result, m.sessions)
+	result := make([]*flow.Flow, len(m.flows))
+	copy(result, m.flows)
 	return result
 }
 
-func (m *mockStore) Messages() []*session.Message {
+func (m *mockStore) Messages() []*flow.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*session.Message, len(m.messages))
+	result := make([]*flow.Message, len(m.messages))
 	copy(result, m.messages)
 	return result
 }
@@ -247,18 +247,18 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 		t.Fatal("handler did not finish within timeout")
 	}
 
-	// Verify session was recorded.
-	sessions := store.Sessions()
+	// Verify flow was recorded.
+	sessions := store.Flows()
 	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
+		t.Fatalf("expected 1 flow, got %d", len(sessions))
 	}
 
-	sess := sessions[0]
-	if sess.Protocol != "WebSocket" {
-		t.Errorf("protocol = %q, want %q", sess.Protocol, "WebSocket")
+	fl := sessions[0]
+	if fl.Protocol != "WebSocket" {
+		t.Errorf("protocol = %q, want %q", fl.Protocol, "WebSocket")
 	}
-	if sess.SessionType != "bidirectional" {
-		t.Errorf("session_type = %q, want %q", sess.SessionType, "bidirectional")
+	if fl.FlowType != "bidirectional" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
 	}
 
 	// Verify messages were recorded.
@@ -268,7 +268,7 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 	}
 
 	// Check first message (send: "hello").
-	var sendMsg *session.Message
+	var sendMsg *flow.Message
 	for _, msg := range messages {
 		if msg.Direction == "send" && string(msg.Body) == "hello" {
 			sendMsg = msg
@@ -283,7 +283,7 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 	}
 
 	// Check receive message ("world").
-	var recvMsg *session.Message
+	var recvMsg *flow.Message
 	for _, msg := range messages {
 		if msg.Direction == "receive" && string(msg.Body) == "world" {
 			recvMsg = msg
@@ -356,7 +356,7 @@ func TestHandleUpgrade_BinaryFrame(t *testing.T) {
 
 	// Check that binary frame was stored as raw_bytes.
 	messages := store.Messages()
-	var binaryMsg *session.Message
+	var binaryMsg *flow.Message
 	for _, msg := range messages {
 		if msg.Direction == "send" && msg.RawBytes != nil {
 			binaryMsg = msg
@@ -456,7 +456,7 @@ func TestHandleUpgrade_PingPongRelay(t *testing.T) {
 
 	// Verify ping and pong were recorded.
 	messages := store.Messages()
-	var pingMsg, pongMsg *session.Message
+	var pingMsg, pongMsg *flow.Message
 	for _, msg := range messages {
 		if msg.Metadata["opcode"] == "9" {
 			pingMsg = msg
@@ -549,7 +549,7 @@ func TestHandleUpgrade_FragmentedMessage(t *testing.T) {
 
 	// Check that the fragmented message was assembled and stored as one message.
 	messages := store.Messages()
-	var assembledMsg *session.Message
+	var assembledMsg *flow.Message
 	for _, msg := range messages {
 		if msg.Direction == "send" && string(msg.Body) == "Hello World" {
 			assembledMsg = msg
@@ -618,10 +618,10 @@ func TestHandleUpgrade_CloseFrameEndsRelay(t *testing.T) {
 		t.Fatal("handler did not finish after close frame")
 	}
 
-	// Verify session state is updated.
-	sessions := store.Sessions()
+	// Verify flow state is updated.
+	sessions := store.Flows()
 	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
+		t.Fatalf("expected 1 flow, got %d", len(sessions))
 	}
 }
 
@@ -723,7 +723,7 @@ func TestHandleUpgrade_ConnInfoRecorded(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "wss://example.com/ws", nil)
 	resp := &gohttp.Response{StatusCode: 101}
 
-	connInfo := &session.ConnectionInfo{
+	connInfo := &flow.ConnectionInfo{
 		ClientAddr: "10.0.0.1:12345",
 		ServerAddr: "93.184.216.34:443",
 		TLSVersion: "TLS 1.3",
@@ -750,20 +750,20 @@ func TestHandleUpgrade_ConnInfoRecorded(t *testing.T) {
 	}
 
 	// Verify ConnInfo was stored.
-	sessions := store.Sessions()
+	sessions := store.Flows()
 	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
+		t.Fatalf("expected 1 flow, got %d", len(sessions))
 	}
 
-	sess := sessions[0]
-	if sess.ConnInfo == nil {
+	fl := sessions[0]
+	if fl.ConnInfo == nil {
 		t.Fatal("ConnInfo is nil")
 	}
-	if sess.ConnInfo.TLSVersion != "TLS 1.3" {
-		t.Errorf("TLSVersion = %q, want %q", sess.ConnInfo.TLSVersion, "TLS 1.3")
+	if fl.ConnInfo.TLSVersion != "TLS 1.3" {
+		t.Errorf("TLSVersion = %q, want %q", fl.ConnInfo.TLSVersion, "TLS 1.3")
 	}
-	if sess.ConnInfo.TLSCipher != "TLS_AES_128_GCM_SHA256" {
-		t.Errorf("TLSCipher = %q, want %q", sess.ConnInfo.TLSCipher, "TLS_AES_128_GCM_SHA256")
+	if fl.ConnInfo.TLSCipher != "TLS_AES_128_GCM_SHA256" {
+		t.Errorf("TLSCipher = %q, want %q", fl.ConnInfo.TLSCipher, "TLS_AES_128_GCM_SHA256")
 	}
 }
 
@@ -910,9 +910,9 @@ func TestHandleUpgrade_ConnectionDrop(t *testing.T) {
 		t.Fatal("handler did not finish after connection drop")
 	}
 
-	// Session should be recorded with error state.
-	sessions := store.Sessions()
+	// Flow should be recorded with error state.
+	sessions := store.Flows()
 	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
+		t.Fatalf("expected 1 flow, got %d", len(sessions))
 	}
 }

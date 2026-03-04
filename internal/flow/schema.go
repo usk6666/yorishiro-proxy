@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -106,10 +106,21 @@ ALTER TABLE sessions ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_sessions_blocked_by ON sessions(blocked_by);
 `
 
+// schemaV4 renames the flows table to flows, session_id columns to flow_id,
+// and session_type to flow_type across all tables, adopting mitmproxy-style "flow" terminology.
+const schemaV4 = `
+ALTER TABLE sessions RENAME TO flows;
+ALTER TABLE flows RENAME COLUMN session_type TO flow_type;
+ALTER TABLE messages RENAME COLUMN session_id TO flow_id;
+ALTER TABLE fuzz_jobs RENAME COLUMN session_id TO flow_id;
+ALTER TABLE fuzz_results RENAME COLUMN session_id TO flow_id;
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
 	2: schemaV2,
 	3: schemaV3,
+	4: schemaV4,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

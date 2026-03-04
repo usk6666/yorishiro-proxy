@@ -11,7 +11,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // --- M3 Integration: Resender ---
@@ -24,14 +24,14 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/users")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:    "HTTP/1.x",
-			SessionType: "unary",
+			FlowType: "unary",
 			State:       "complete",
 			Timestamp:   time.Now(),
 			Duration:    100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -40,7 +40,7 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":{"name":"alice","role":"viewer","active":true}}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -56,7 +56,7 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"body_patches": []any{
 				map[string]any{"json_path": "$.user.role", "value": "admin"},
 				map[string]any{"json_path": "$.user.name", "value": "eve"},
@@ -73,8 +73,8 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	if out.NewSessionID == "" {
-		t.Error("expected non-empty new_session_id")
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
 	}
 	if out.StatusCode != 200 {
 		t.Errorf("status_code = %d, want 200", out.StatusCode)
@@ -105,32 +105,32 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 		t.Errorf("user.name = %q, want eve", user["name"])
 	}
 
-	// Verify the new session was recorded in the store.
-	newSess, err := store.GetSession(context.Background(), out.NewSessionID)
+	// Verify the new flow was recorded in the store.
+	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
 	if err != nil {
-		t.Fatalf("get new session: %v", err)
+		t.Fatalf("get new flow: %v", err)
 	}
-	if newSess.State != "complete" {
-		t.Errorf("new session state = %q, want complete", newSess.State)
+	if newFl.State != "complete" {
+		t.Errorf("new flow state = %q, want complete", newFl.State)
 	}
 }
 
 // TestM3_Resend_DryRun verifies that dry_run mode returns a request preview
-// without actually sending the request or recording a new session.
+// without actually sending the request or recording a new flow.
 func TestM3_Resend_DryRun(t *testing.T) {
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
 	u, _ := url.Parse(echoServer.URL + "/api/data")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:    "HTTP/1.x",
-			SessionType: "unary",
+			FlowType: "unary",
 			State:       "complete",
 			Timestamp:   time.Now(),
 			Duration:    100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -138,7 +138,7 @@ func TestM3_Resend_DryRun(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -154,7 +154,7 @@ func TestM3_Resend_DryRun(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":      entry.Session.ID,
+			"flow_id":      entry.Session.ID,
 			"override_method": "PUT",
 			"override_url":    overrideURL,
 			"override_body":   `{"preview":"true"}`,
@@ -190,10 +190,10 @@ func TestM3_Resend_DryRun(t *testing.T) {
 		t.Errorf("body = %q, want {\"preview\":\"true\"}", out.RequestPreview.Body)
 	}
 
-	// Verify no new session was created (dry-run should NOT record).
-	sessions, err := store.ListSessions(context.Background(), session.ListOptions{})
+	// Verify no new flow was created (dry-run should NOT record).
+	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(sessions) != 1 {
 		t.Errorf("expected 1 session (original only), got %d", len(sessions))
@@ -212,14 +212,14 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/original")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:    "HTTP/1.x",
-			SessionType: "unary",
+			FlowType: "unary",
 			State:       "complete",
 			Timestamp:   time.Now(),
 			Duration:    100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -228,7 +228,7 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 			Headers:   map[string][]string{"Host": {"example.com"}},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -244,7 +244,7 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -264,8 +264,8 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	if out.NewSessionID == "" {
-		t.Error("expected non-empty new_session_id")
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
 	}
 	if out.ResponseSize == 0 {
 		t.Error("expected non-zero response_size")
@@ -276,7 +276,7 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 }
 
 // TestM3_Resend_E2E_ThroughProxy verifies the full lifecycle:
-// proxy_start -> HTTP through proxy -> query session -> resend with patches -> verify.
+// proxy_start -> HTTP through proxy -> query flow -> resend with patches -> verify.
 func TestM3_Resend_E2E_ThroughProxy(t *testing.T) {
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
@@ -299,17 +299,17 @@ func TestM3_Resend_E2E_ThroughProxy(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// Wait for session to be persisted.
+	// Wait for flow to be persisted.
 	time.Sleep(200 * time.Millisecond)
 
-	// 3. Query the recorded session.
-	listResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	// 3. Query the recorded flow.
+	listResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if listResult.Count != 1 {
 		t.Fatalf("query sessions count = %d, want 1", listResult.Count)
 	}
-	sessionID := listResult.Sessions[0].ID
+	flowID := listResult.Flows[0].ID
 
 	// 4. Attempt resend. Note: SSRF protection will block localhost.
 	// We verify the tool handles the error gracefully.
@@ -318,7 +318,7 @@ func TestM3_Resend_E2E_ThroughProxy(t *testing.T) {
 		Arguments: map[string]any{
 			"action": "resend",
 			"params": map[string]any{
-				"session_id":      sessionID,
+				"flow_id":      flowID,
 				"override_method": "PUT",
 				"tag":             "resend-test",
 			},

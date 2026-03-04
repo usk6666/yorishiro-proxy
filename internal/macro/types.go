@@ -93,8 +93,8 @@ type Macro struct {
 type Step struct {
 	// ID is a unique identifier for this step within the macro.
 	ID string
-	// SessionID references the recorded session to use as a template.
-	SessionID string
+	// FlowID references the recorded flow to use as a template.
+	FlowID string
 	// OverrideMethod overrides the HTTP method. Empty means use the original.
 	OverrideMethod string
 	// OverrideURL overrides the request URL. Empty means use the original.
@@ -177,7 +177,7 @@ type StepResult struct {
 // Result holds the outcome of a complete macro execution.
 //
 // NOTE (CWE-209): Error and StepResults[].Error may contain internal details
-// such as session IDs, URLs, and regex patterns. The Macro engine is an
+// such as flow IDs, URLs, and regex patterns. The Macro engine is an
 // internal library; callers (e.g., the MCP layer) MUST sanitize error messages
 // before exposing them to external clients.
 type Result struct {
@@ -206,7 +206,7 @@ type SendRequest struct {
 	// Body is the request body.
 	Body []byte
 	// StepID is the macro step identifier. Set by the engine before calling
-	// SendFunc so that callers can use it for logging or session recording.
+	// SendFunc so that callers can use it for logging or flow recording.
 	StepID string
 }
 
@@ -232,8 +232,8 @@ type SendResponse struct {
 // restrict which hosts or paths can be reached.
 type SendFunc func(ctx context.Context, req *SendRequest) (*SendResponse, error)
 
-// SessionFetcher retrieves session data needed by macro steps to build requests.
-type SessionFetcher interface {
-	// GetSessionRequest returns the send message data for a recorded session.
-	GetSessionRequest(ctx context.Context, sessionID string) (*SendRequest, error)
+// FlowFetcher retrieves session data needed by macro steps to build requests.
+type FlowFetcher interface {
+	// GetFlowRequest returns the send message data for a recorded flow.
+	GetFlowRequest(ctx context.Context, flowID string) (*SendRequest, error)
 }

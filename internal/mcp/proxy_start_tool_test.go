@@ -14,7 +14,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// setupProxyStartTestSession creates an MCP client session with Manager, CaptureScope,
+// setupProxyStartTestSession creates an MCP client flow with Manager, CaptureScope,
 // and PassthroughList for testing the proxy_start tool.
 func setupProxyStartTestSession(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList) *gomcp.ClientSession {
 	t.Helper()
@@ -845,7 +845,7 @@ func TestProxyStart_WithTCPForwards_InvalidTarget(t *testing.T) {
 	}
 }
 
-// setupProxyStartTestSessionWithTCPHandler creates an MCP client session with Manager,
+// setupProxyStartTestSessionWithTCPHandler creates an MCP client flow with Manager,
 // CaptureScope, PassthroughList, and TCP handler for testing the proxy_start tool.
 func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
 	t.Helper()

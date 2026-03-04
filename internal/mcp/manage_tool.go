@@ -14,13 +14,13 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // manageInput is the typed input for the manage tool.
 type manageInput struct {
 	// Action specifies the management action to execute.
-	// Available actions: delete_sessions, export_sessions, import_sessions, regenerate_ca_cert.
+	// Available actions: delete_flows, export_flows, import_flows, regenerate_ca_cert.
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
 	Params manageParams `json:"params"`
@@ -29,26 +29,26 @@ type manageInput struct {
 // manageParams holds the union of all manage action-specific parameters.
 // Only the fields relevant to the specified action are used.
 type manageParams struct {
-	// SessionID is used by delete_sessions (single deletion).
-	SessionID string `json:"session_id,omitempty" jsonschema:"session ID for single deletion"`
+	// FlowID is used by delete_flows (single deletion).
+	FlowID string `json:"flow_id,omitempty" jsonschema:"flow ID for single deletion"`
 
-	// delete_sessions parameters
-	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"delete sessions older than this many days"`
+	// delete_flows parameters
+	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"delete flows older than this many days"`
 	Confirm       bool   `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
-	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_sessions (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)"`
+	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)"`
 
-	// export_sessions parameters
+	// export_flows parameters
 	Format        string        `json:"format,omitempty" jsonschema:"export format (jsonl)"`
-	Filter        *exportFilter `json:"filter,omitempty" jsonschema:"session filter for export"`
+	Filter        *exportFilter `json:"filter,omitempty" jsonschema:"flow filter for export"`
 	IncludeBodies *bool         `json:"include_bodies,omitempty" jsonschema:"include message bodies in export (default: true)"`
 	OutputPath    string        `json:"output_path,omitempty" jsonschema:"file path to write export data"`
 
-	// import_sessions parameters
+	// import_flows parameters
 	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data"`
 	OnConflict string `json:"on_conflict,omitempty" jsonschema:"conflict policy: skip or replace (default: skip)"`
 }
 
-// exportFilter holds filter parameters for the export_sessions action.
+// exportFilter holds filter parameters for the export_flows action.
 type exportFilter struct {
 	Protocol   string `json:"protocol,omitempty"`
 	URLPattern string `json:"url_pattern,omitempty"`
@@ -57,17 +57,17 @@ type exportFilter struct {
 }
 
 // availableManageActions lists the valid action names for the manage tool.
-var availableManageActions = []string{"delete_sessions", "export_sessions", "import_sessions", "regenerate_ca_cert"}
+var availableManageActions = []string{"delete_flows", "export_flows", "import_flows", "regenerate_ca_cert"}
 
 // registerManage registers the manage MCP tool.
 func (s *Server) registerManage() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "manage",
-		Description: "Manage session data and CA certificates. " +
+		Description: "Manage flow data and CA certificates. " +
 			"Available actions: " +
-			"'delete_sessions' deletes sessions by ID, by age (older_than_days), by protocol, or all (confirm required); " +
-			"'export_sessions' exports sessions to JSONL format (optionally filtered, with or without bodies, to file or inline); " +
-			"'import_sessions' imports sessions from a JSONL file (supports skip/replace on ID conflict); " +
+			"'delete_flows' deletes flows by ID, by age (older_than_days), by protocol, or all (confirm required); " +
+			"'export_flows' exports flows to JSONL format (optionally filtered, with or without bodies, to file or inline); " +
+			"'import_flows' imports flows from a JSONL file (supports skip/replace on ID conflict); " +
 			"'regenerate_ca_cert' regenerates the CA certificate (auto-persist mode: saves to disk; ephemeral mode: in-memory only; explicit mode: error).",
 	}, s.handleManage)
 }
@@ -77,18 +77,18 @@ func (s *Server) handleManage(ctx context.Context, _ *gomcp.CallToolRequest, inp
 	switch input.Action {
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableManageActions, ", "))
-	case "delete_sessions":
-		return s.handleManageDeleteSessions(ctx, input.Params)
+	case "delete_flows":
+		return s.handleManageDeleteFlows(ctx, input.Params)
 	case "regenerate_ca_cert":
 		return s.handleManageRegenerateCA()
-	case "export_sessions":
-		result, err := s.handleManageExportSessions(ctx, input.Params)
+	case "export_flows":
+		result, err := s.handleManageExportFlows(ctx, input.Params)
 		if err != nil {
 			return nil, nil, err
 		}
 		return nil, result, nil
-	case "import_sessions":
-		result, err := s.handleManageImportSessions(ctx, input.Params)
+	case "import_flows":
+		result, err := s.handleManageImportFlows(ctx, input.Params)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -98,18 +98,18 @@ func (s *Server) handleManage(ctx context.Context, _ *gomcp.CallToolRequest, inp
 	}
 }
 
-// --- Delete sessions ---
+// --- Delete flows ---
 
-// executeDeleteSessionsResult is the structured output of the delete_sessions action.
-type executeDeleteSessionsResult struct {
+// executeDeleteFlowsResult is the structured output of the delete_flows action.
+type executeDeleteFlowsResult struct {
 	DeletedCount int64  `json:"deleted_count"`
 	CutoffTime   string `json:"cutoff_time,omitempty"`
 }
 
-// handleManageDeleteSessions handles the delete_sessions action within the manage tool.
-func (s *Server) handleManageDeleteSessions(ctx context.Context, params manageParams) (*gomcp.CallToolResult, *executeDeleteSessionsResult, error) {
+// handleManageDeleteFlows handles the delete_flows action within the manage tool.
+func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParams) (*gomcp.CallToolResult, *executeDeleteFlowsResult, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	if params.OlderThanDays != nil {
@@ -121,46 +121,46 @@ func (s *Server) handleManageDeleteSessions(ctx context.Context, params managePa
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with age-based deletion")
 		}
 		cutoff := time.Now().UTC().AddDate(0, 0, -days)
-		n, err := s.deps.store.DeleteSessionsOlderThan(ctx, cutoff)
+		n, err := s.deps.store.DeleteFlowsOlderThan(ctx, cutoff)
 		if err != nil {
-			return nil, nil, fmt.Errorf("delete old sessions: %w", err)
+			return nil, nil, fmt.Errorf("delete old flows: %w", err)
 		}
-		return nil, &executeDeleteSessionsResult{
+		return nil, &executeDeleteFlowsResult{
 			DeletedCount: n,
 			CutoffTime:   cutoff.Format(time.RFC3339),
 		}, nil
 	}
 
-	if params.SessionID != "" {
-		if _, err := s.deps.store.GetSession(ctx, params.SessionID); err != nil {
-			return nil, nil, fmt.Errorf("session not found: %s", params.SessionID)
+	if params.FlowID != "" {
+		if _, err := s.deps.store.GetFlow(ctx, params.FlowID); err != nil {
+			return nil, nil, fmt.Errorf("flow not found: %s", params.FlowID)
 		}
-		if err := s.deps.store.DeleteSession(ctx, params.SessionID); err != nil {
-			return nil, nil, fmt.Errorf("delete session: %w", err)
+		if err := s.deps.store.DeleteFlow(ctx, params.FlowID); err != nil {
+			return nil, nil, fmt.Errorf("delete flow: %w", err)
 		}
-		return nil, &executeDeleteSessionsResult{DeletedCount: 1}, nil
+		return nil, &executeDeleteFlowsResult{DeletedCount: 1}, nil
 	}
 
 	if params.Protocol != "" {
 		if !params.Confirm {
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with protocol-based deletion")
 		}
-		n, err := s.deps.store.DeleteSessionsByProtocol(ctx, params.Protocol)
+		n, err := s.deps.store.DeleteFlowsByProtocol(ctx, params.Protocol)
 		if err != nil {
-			return nil, nil, fmt.Errorf("delete sessions by protocol: %w", err)
+			return nil, nil, fmt.Errorf("delete flows by protocol: %w", err)
 		}
-		return nil, &executeDeleteSessionsResult{DeletedCount: n}, nil
+		return nil, &executeDeleteFlowsResult{DeletedCount: n}, nil
 	}
 
 	if params.Confirm {
-		n, err := s.deps.store.DeleteAllSessions(ctx)
+		n, err := s.deps.store.DeleteAllFlows(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("delete all sessions: %w", err)
+			return nil, nil, fmt.Errorf("delete all flows: %w", err)
 		}
-		return nil, &executeDeleteSessionsResult{DeletedCount: n}, nil
+		return nil, &executeDeleteFlowsResult{DeletedCount: n}, nil
 	}
 
-	return nil, nil, fmt.Errorf("delete_sessions requires one of: session_id, older_than_days, protocol (with confirm), or confirm=true for all deletion")
+	return nil, nil, fmt.Errorf("delete_flows requires one of: flow_id, older_than_days, protocol (with confirm), or confirm=true for all deletion")
 }
 
 // --- Regenerate CA cert ---
@@ -227,10 +227,10 @@ func (s *Server) handleManageRegenerateCA() (*gomcp.CallToolResult, *executeRege
 	return nil, result, nil
 }
 
-// --- Export/import sessions ---
+// --- Export/import flows ---
 
-// maxInlineExportSessions is the maximum number of sessions returned inline.
-const maxInlineExportSessions = 100
+// maxInlineExportFlows is the maximum number of flows returned inline.
+const maxInlineExportFlows = 100
 
 // validateFilePath sanitises and validates a user-supplied file path.
 func validateFilePath(path string) (string, error) {
@@ -251,18 +251,18 @@ func validateFilePath(path string) (string, error) {
 	return cleaned, nil
 }
 
-// executeExportSessionsResult is the structured output of the export_sessions action.
-type executeExportSessionsResult struct {
+// executeExportFlowsResult is the structured output of the export_flows action.
+type executeExportFlowsResult struct {
 	ExportedCount int    `json:"exported_count"`
 	Format        string `json:"format"`
 	OutputPath    string `json:"output_path,omitempty"`
 	Data          string `json:"data,omitempty"`
 }
 
-// handleManageExportSessions handles the export_sessions action within the manage tool.
-func (s *Server) handleManageExportSessions(ctx context.Context, params manageParams) (*executeExportSessionsResult, error) {
+// handleManageExportFlows handles the export_flows action within the manage tool.
+func (s *Server) handleManageExportFlows(ctx context.Context, params manageParams) (*executeExportFlowsResult, error) {
 	if s.deps.store == nil {
-		return nil, fmt.Errorf("session store is not initialized")
+		return nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	format := params.Format
@@ -278,7 +278,7 @@ func (s *Server) handleManageExportSessions(ctx context.Context, params managePa
 		includeBodies = *params.IncludeBodies
 	}
 
-	opts := session.ExportOptions{
+	opts := flow.ExportOptions{
 		IncludeBodies: includeBodies,
 	}
 
@@ -326,9 +326,9 @@ func (s *Server) handleManageExportSessions(ctx context.Context, params managePa
 			return nil, fmt.Errorf("set file permissions: %w", err)
 		}
 
-		n, err := session.ExportSessions(ctx, s.deps.store, tmpFile, opts)
+		n, err := flow.ExportFlows(ctx, s.deps.store, tmpFile, opts)
 		if err != nil {
-			return nil, fmt.Errorf("export sessions: %w", err)
+			return nil, fmt.Errorf("export flows: %w", err)
 		}
 
 		if err := tmpFile.Close(); err != nil {
@@ -346,44 +346,44 @@ func (s *Server) handleManageExportSessions(ctx context.Context, params managePa
 		}
 		success = true
 
-		return &executeExportSessionsResult{
+		return &executeExportFlowsResult{
 			ExportedCount: n,
 			Format:        format,
 			OutputPath:    cleanPath,
 		}, nil
 	}
 
-	opts.MaxSessions = maxInlineExportSessions
+	opts.MaxFlows = maxInlineExportFlows
 	var buf bytes.Buffer
-	n, err := session.ExportSessions(ctx, s.deps.store, &buf, opts)
+	n, err := flow.ExportFlows(ctx, s.deps.store, &buf, opts)
 	if err != nil {
-		return nil, fmt.Errorf("export sessions: %w", err)
+		return nil, fmt.Errorf("export flows: %w", err)
 	}
 
-	return &executeExportSessionsResult{
+	return &executeExportFlowsResult{
 		ExportedCount: n,
 		Format:        format,
 		Data:          buf.String(),
 	}, nil
 }
 
-// executeImportSessionsResult is the structured output of the import_sessions action.
-type executeImportSessionsResult struct {
+// executeImportFlowsResult is the structured output of the import_flows action.
+type executeImportFlowsResult struct {
 	Imported     int                   `json:"imported"`
 	Skipped      int                   `json:"skipped"`
 	Errors       int                   `json:"errors"`
 	Source       string                `json:"source"`
-	ErrorDetails []session.ImportError `json:"error_details,omitempty"`
+	ErrorDetails []flow.ImportError `json:"error_details,omitempty"`
 }
 
-// handleManageImportSessions handles the import_sessions action within the manage tool.
-func (s *Server) handleManageImportSessions(ctx context.Context, params manageParams) (*executeImportSessionsResult, error) {
+// handleManageImportFlows handles the import_flows action within the manage tool.
+func (s *Server) handleManageImportFlows(ctx context.Context, params manageParams) (*executeImportFlowsResult, error) {
 	if s.deps.store == nil {
-		return nil, fmt.Errorf("session store is not initialized")
+		return nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	if params.InputPath == "" {
-		return nil, fmt.Errorf("input_path is required for import_sessions action")
+		return nil, fmt.Errorf("input_path is required for import_flows action")
 	}
 
 	cleanPath, err := validateFilePath(params.InputPath)
@@ -391,13 +391,13 @@ func (s *Server) handleManageImportSessions(ctx context.Context, params managePa
 		return nil, fmt.Errorf("invalid input_path: %w", err)
 	}
 
-	conflict := session.ConflictSkip
+	conflict := flow.ConflictSkip
 	if params.OnConflict != "" {
 		switch params.OnConflict {
 		case "skip":
-			conflict = session.ConflictSkip
+			conflict = flow.ConflictSkip
 		case "replace":
-			conflict = session.ConflictReplace
+			conflict = flow.ConflictReplace
 		default:
 			return nil, fmt.Errorf("invalid on_conflict value %q: must be \"skip\" or \"replace\"", params.OnConflict)
 		}
@@ -409,16 +409,16 @@ func (s *Server) handleManageImportSessions(ctx context.Context, params managePa
 	}
 	defer f.Close()
 
-	result, err := session.ImportSessions(ctx, s.deps.store, f, session.ImportOptions{
+	result, err := flow.ImportFlows(ctx, s.deps.store, f, flow.ImportOptions{
 		OnConflict:       conflict,
 		MaxScannerBuffer: config.MaxImportScannerBuffer,
 		ValidateIDs:      true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("import sessions: %w", err)
+		return nil, fmt.Errorf("import flows: %w", err)
 	}
 
-	return &executeImportSessionsResult{
+	return &executeImportFlowsResult{
 		Imported:     result.Imported,
 		Skipped:      result.Skipped,
 		Errors:       result.Errors,

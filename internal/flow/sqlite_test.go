@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -37,24 +37,24 @@ func mustParseURL(raw string) *url.URL {
 	return u
 }
 
-// saveTestSession saves a session with one send and one receive message.
-func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.Time, method string, reqURL string, statusCode int, reqBody, respBody []byte) *Session {
+// saveTestSession saves a flow with one send and one receive message.
+func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.Time, method string, reqURL string, statusCode int, reqBody, respBody []byte) *Flow {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &Session{
+	fl := &Flow{
 		Protocol:    protocol,
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   ts,
 		Duration:    100 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	sendMsg := &Message{
-		SessionID: sess.ID,
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -68,7 +68,7 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 	}
 
 	recvMsg := &Message{
-		SessionID:  sess.ID,
+		FlowID:  fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  ts.Add(100 * time.Millisecond),
@@ -80,7 +80,7 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 		t.Fatalf("AppendMessage(receive): %v", err)
 	}
 
-	return sess
+	return fl
 }
 
 func TestNewSQLiteStore_BusyTimeout(t *testing.T) {
@@ -106,31 +106,31 @@ func TestSQLiteStore_SaveAndGetSession(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{
+	fl := &Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    150 * time.Millisecond,
 	}
 
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if sess.ID == "" {
-		t.Fatal("SaveSession did not assign ID")
+	if fl.ID == "" {
+		t.Fatal("SaveFlow did not assign ID")
 	}
 
-	got, err := store.GetSession(ctx, sess.ID)
+	got, err := store.GetFlow(ctx, fl.ID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
 
 	if got.Protocol != "HTTP/1.x" {
 		t.Errorf("Protocol = %q, want %q", got.Protocol, "HTTP/1.x")
 	}
-	if got.SessionType != "unary" {
-		t.Errorf("SessionType = %q, want %q", got.SessionType, "unary")
+	if got.FlowType != "unary" {
+		t.Errorf("FlowType = %q, want %q", got.FlowType, "unary")
 	}
 	if got.State != "complete" {
 		t.Errorf("State = %q, want %q", got.State, "complete")
@@ -144,7 +144,7 @@ func TestSQLiteStore_ConnInfo(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{
+	fl := &Flow{
 		Protocol:  "HTTPS",
 		Timestamp: time.Now().UTC(),
 		ConnInfo: &ConnectionInfo{
@@ -157,13 +157,13 @@ func TestSQLiteStore_ConnInfo(t *testing.T) {
 		},
 	}
 
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	got, err := store.GetSession(ctx, sess.ID)
+	got, err := store.GetFlow(ctx, fl.ID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
 
 	if got.ConnInfo == nil {
@@ -181,13 +181,13 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	sendMsg := &Message{
-		SessionID: sess.ID,
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -204,7 +204,7 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 	}
 
 	recvMsg := &Message{
-		SessionID:  sess.ID,
+		FlowID:  fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -216,7 +216,7 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 		t.Fatalf("AppendMessage(receive): %v", err)
 	}
 
-	msgs, err := store.GetMessages(ctx, sess.ID, MessageListOptions{})
+	msgs, err := store.GetMessages(ctx, fl.ID, MessageListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -238,18 +238,18 @@ func TestSQLiteStore_FilterByDirection(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveSession(ctx, sess)
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveFlow(ctx, fl)
 
-	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET"})
-	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200})
+	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET"})
+	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200})
 
-	sendMsgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{Direction: "send"})
+	sendMsgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{Direction: "send"})
 	if len(sendMsgs) != 1 {
 		t.Errorf("expected 1 send message, got %d", len(sendMsgs))
 	}
 
-	recvMsgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{Direction: "receive"})
+	recvMsgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{Direction: "receive"})
 	if len(recvMsgs) != 1 {
 		t.Errorf("expected 1 receive message, got %d", len(recvMsgs))
 	}
@@ -259,12 +259,12 @@ func TestSQLiteStore_CountMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveSession(ctx, sess)
-	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
-	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC()})
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveFlow(ctx, fl)
+	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC()})
 
-	count, err := store.CountMessages(ctx, sess.ID)
+	count, err := store.CountMessages(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("CountMessages: %v", err)
 	}
@@ -277,19 +277,19 @@ func TestSQLiteStore_UpdateSession(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{Protocol: "HTTP/1.x", State: "active", Timestamp: time.Now().UTC()}
-	store.SaveSession(ctx, sess)
+	fl := &Flow{Protocol: "HTTP/1.x", State: "active", Timestamp: time.Now().UTC()}
+	store.SaveFlow(ctx, fl)
 
-	err := store.UpdateSession(ctx, sess.ID, SessionUpdate{
+	err := store.UpdateFlow(ctx, fl.ID, FlowUpdate{
 		State:    "complete",
 		Duration: 500 * time.Millisecond,
 		Tags:     map[string]string{"smuggling": "cl_te"},
 	})
 	if err != nil {
-		t.Fatalf("UpdateSession: %v", err)
+		t.Fatalf("UpdateFlow: %v", err)
 	}
 
-	got, _ := store.GetSession(ctx, sess.ID)
+	got, _ := store.GetFlow(ctx, fl.ID)
 	if got.State != "complete" {
 		t.Errorf("State = %q, want %q", got.State, "complete")
 	}
@@ -330,9 +330,9 @@ func TestSQLiteStore_ListSessions_Filters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions, err := store.ListSessions(ctx, tt.opts)
+			sessions, err := store.ListFlows(ctx, tt.opts)
 			if err != nil {
-				t.Fatalf("ListSessions: %v", err)
+				t.Fatalf("ListFlows: %v", err)
 			}
 			if len(sessions) != tt.want {
 				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
@@ -347,33 +347,33 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create sessions with different states.
-	activeSession := &Session{
+	activeSession := &Flow{
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "active",
 		Timestamp:   now,
 	}
-	if err := store.SaveSession(ctx, activeSession); err != nil {
+	if err := store.SaveFlow(ctx, activeSession); err != nil {
 		t.Fatalf("SaveSession(active): %v", err)
 	}
 
-	completeSession := &Session{
+	completeSession := &Flow{
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   now,
 	}
-	if err := store.SaveSession(ctx, completeSession); err != nil {
+	if err := store.SaveFlow(ctx, completeSession); err != nil {
 		t.Fatalf("SaveSession(complete): %v", err)
 	}
 
-	errorSession := &Session{
+	errorSession := &Flow{
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "error",
 		Timestamp:   now,
 	}
-	if err := store.SaveSession(ctx, errorSession); err != nil {
+	if err := store.SaveFlow(ctx, errorSession); err != nil {
 		t.Fatalf("SaveSession(error): %v", err)
 	}
 
@@ -390,7 +390,7 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions, err := store.ListSessions(ctx, ListOptions{State: tt.state})
+			sessions, err := store.ListFlows(ctx, ListOptions{State: tt.state})
 			if err != nil {
 				t.Fatalf("ListSessions: %v", err)
 			}
@@ -398,7 +398,7 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
 			}
 
-			count, err := store.CountSessions(ctx, ListOptions{State: tt.state})
+			count, err := store.CountFlows(ctx, ListOptions{State: tt.state})
 			if err != nil {
 				t.Fatalf("CountSessions: %v", err)
 			}
@@ -417,17 +417,17 @@ func TestSQLiteStore_CountSessions(t *testing.T) {
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/a", 200, nil, nil)
 	saveTestSession(t, store, "HTTP/1.x", now, "POST", "http://example.com/b", 201, nil, nil)
 
-	count, err := store.CountSessions(ctx, ListOptions{Method: "GET"})
+	count, err := store.CountFlows(ctx, ListOptions{Method: "GET"})
 	if err != nil {
-		t.Fatalf("CountSessions: %v", err)
+		t.Fatalf("CountFlows: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("count = %d, want 1", count)
 	}
 
-	total, err := store.CountSessions(ctx, ListOptions{})
+	total, err := store.CountFlows(ctx, ListOptions{})
 	if err != nil {
-		t.Fatalf("CountSessions: %v", err)
+		t.Fatalf("CountFlows: %v", err)
 	}
 	if total != 2 {
 		t.Errorf("total = %d, want 2", total)
@@ -438,26 +438,26 @@ func TestSQLiteStore_DeleteSession_CascadeMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := saveTestSession(t, store, "HTTP/1.x", time.Now().UTC(), "GET", "http://example.com/del", 200, nil, nil)
+	fl := saveTestSession(t, store, "HTTP/1.x", time.Now().UTC(), "GET", "http://example.com/del", 200, nil, nil)
 
 	// Verify messages exist.
-	count, _ := store.CountMessages(ctx, sess.ID)
+	count, _ := store.CountMessages(ctx, fl.ID)
 	if count != 2 {
 		t.Fatalf("expected 2 messages before delete, got %d", count)
 	}
 
-	if err := store.DeleteSession(ctx, sess.ID); err != nil {
-		t.Fatalf("DeleteSession: %v", err)
+	if err := store.DeleteFlow(ctx, fl.ID); err != nil {
+		t.Fatalf("DeleteFlow: %v", err)
 	}
 
-	// Session should be gone.
-	_, err := store.GetSession(ctx, sess.ID)
+	// Flow should be gone.
+	_, err := store.GetFlow(ctx, fl.ID)
 	if err == nil {
-		t.Fatal("expected error for deleted session, got nil")
+		t.Fatal("expected error for deleted flow, got nil")
 	}
 
 	// Messages should be cascade-deleted.
-	count, _ = store.CountMessages(ctx, sess.ID)
+	count, _ = store.CountMessages(ctx, fl.ID)
 	if count != 0 {
 		t.Errorf("expected 0 messages after cascade delete, got %d", count)
 	}
@@ -471,15 +471,15 @@ func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/2", 200, nil, nil)
 
-	n, err := store.DeleteAllSessions(ctx)
+	n, err := store.DeleteAllFlows(ctx)
 	if err != nil {
-		t.Fatalf("DeleteAllSessions: %v", err)
+		t.Fatalf("DeleteAllFlows: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("deleted %d, want 2", n)
 	}
 
-	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	remaining, _ := store.ListFlows(ctx, ListOptions{})
 	if len(remaining) != 0 {
 		t.Errorf("expected 0 remaining, got %d", len(remaining))
 	}
@@ -493,15 +493,15 @@ func TestSQLiteStore_DeleteSessionsOlderThan(t *testing.T) {
 	saveTestSession(t, store, "HTTP/1.x", now.Add(-48*time.Hour), "GET", "http://a.com/old", 200, nil, nil)
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/new", 200, nil, nil)
 
-	n, err := store.DeleteSessionsOlderThan(ctx, now.Add(-24*time.Hour))
+	n, err := store.DeleteFlowsOlderThan(ctx, now.Add(-24*time.Hour))
 	if err != nil {
-		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+		t.Fatalf("DeleteFlowsOlderThan: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("deleted %d, want 1", n)
 	}
 
-	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	remaining, _ := store.ListFlows(ctx, ListOptions{})
 	if len(remaining) != 1 {
 		t.Errorf("expected 1 remaining, got %d", len(remaining))
 	}
@@ -533,14 +533,14 @@ func TestSQLiteStore_DeleteSessionsByProtocol(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n, err := store.DeleteSessionsByProtocol(ctx, tt.protocol)
+			n, err := store.DeleteFlowsByProtocol(ctx, tt.protocol)
 			if err != nil {
-				t.Fatalf("DeleteSessionsByProtocol: %v", err)
+				t.Fatalf("DeleteFlowsByProtocol: %v", err)
 			}
 			if n != tt.wantDeleted {
 				t.Errorf("deleted %d, want %d", n, tt.wantDeleted)
 			}
-			remaining, _ := store.ListSessions(ctx, ListOptions{})
+			remaining, _ := store.ListFlows(ctx, ListOptions{})
 			if len(remaining) != tt.wantRemaining {
 				t.Errorf("expected %d remaining, got %d", tt.wantRemaining, len(remaining))
 			}
@@ -555,15 +555,15 @@ func TestSQLiteStore_DeleteSessionsByProtocol_NoMatches(t *testing.T) {
 
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
 
-	n, err := store.DeleteSessionsByProtocol(ctx, "WebSocket")
+	n, err := store.DeleteFlowsByProtocol(ctx, "WebSocket")
 	if err != nil {
-		t.Fatalf("DeleteSessionsByProtocol: %v", err)
+		t.Fatalf("DeleteFlowsByProtocol: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("deleted %d, want 0", n)
 	}
 
-	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	remaining, _ := store.ListFlows(ctx, ListOptions{})
 	if len(remaining) != 1 {
 		t.Errorf("expected 1 remaining, got %d", len(remaining))
 	}
@@ -574,24 +574,24 @@ func TestSQLiteStore_DeleteSessionsByProtocol_CascadeMessages(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	sess := saveTestSession(t, store, "TCP", now, "GET", "http://a.com/tcp", 200, nil, nil)
+	fl := saveTestSession(t, store, "TCP", now, "GET", "http://a.com/tcp", 200, nil, nil)
 
 	// Verify messages exist before deletion.
-	count, _ := store.CountMessages(ctx, sess.ID)
+	count, _ := store.CountMessages(ctx, fl.ID)
 	if count != 2 {
 		t.Fatalf("expected 2 messages before delete, got %d", count)
 	}
 
-	n, err := store.DeleteSessionsByProtocol(ctx, "TCP")
+	n, err := store.DeleteFlowsByProtocol(ctx, "TCP")
 	if err != nil {
-		t.Fatalf("DeleteSessionsByProtocol: %v", err)
+		t.Fatalf("DeleteFlowsByProtocol: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("deleted %d, want 1", n)
 	}
 
 	// Messages should be cascade-deleted.
-	count, _ = store.CountMessages(ctx, sess.ID)
+	count, _ = store.CountMessages(ctx, fl.ID)
 	if count != 0 {
 		t.Errorf("expected 0 messages after cascade delete, got %d", count)
 	}
@@ -606,15 +606,15 @@ func TestSQLiteStore_DeleteExcessSessions(t *testing.T) {
 		saveTestSession(t, store, "HTTP/1.x", now.Add(time.Duration(i)*time.Second), "GET", fmt.Sprintf("http://a.com/%d", i), 200, nil, nil)
 	}
 
-	n, err := store.DeleteExcessSessions(ctx, 2)
+	n, err := store.DeleteExcessFlows(ctx, 2)
 	if err != nil {
-		t.Fatalf("DeleteExcessSessions: %v", err)
+		t.Fatalf("DeleteExcessFlows: %v", err)
 	}
 	if n != 3 {
 		t.Errorf("deleted %d, want 3", n)
 	}
 
-	remaining, _ := store.ListSessions(ctx, ListOptions{})
+	remaining, _ := store.ListFlows(ctx, ListOptions{})
 	if len(remaining) != 2 {
 		t.Errorf("expected 2 remaining, got %d", len(remaining))
 	}
@@ -624,19 +624,19 @@ func TestSQLiteStore_RawBytes(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveSession(ctx, sess)
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveFlow(ctx, fl)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	store.AppendMessage(ctx, &Message{
-		SessionID: sess.ID,
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		RawBytes:  rawReq,
 	})
 
-	msgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{Direction: "send"})
+	msgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{Direction: "send"})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 send message, got %d", len(msgs))
 	}
@@ -649,13 +649,13 @@ func TestSQLiteStore_SequenceUniqueness(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveSession(ctx, sess)
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveFlow(ctx, fl)
 
-	store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
 
 	// Duplicate sequence should fail.
-	err := store.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	err := store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
 	if err == nil {
 		t.Fatal("expected error for duplicate sequence, got nil")
 	}
@@ -666,8 +666,8 @@ func TestSQLiteStore_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	err := store.SaveSession(ctx, sess)
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	err := store.SaveFlow(ctx, fl)
 	if err == nil {
 		t.Fatal("expected error for cancelled context, got nil")
 	}
@@ -682,21 +682,21 @@ func TestSQLiteStore_ConcurrentSaves(t *testing.T) {
 
 	for i := 0; i < n; i++ {
 		go func(i int) {
-			sess := &Session{
+			fl := &Flow{
 				Protocol:  "HTTP/1.x",
 				Timestamp: time.Now().UTC(),
 			}
-			errCh <- store.SaveSession(ctx, sess)
+			errCh <- store.SaveFlow(ctx, fl)
 		}(i)
 	}
 
 	for i := 0; i < n; i++ {
 		if err := <-errCh; err != nil {
-			t.Fatalf("concurrent SaveSession: %v", err)
+			t.Fatalf("concurrent SaveFlow: %v", err)
 		}
 	}
 
-	sessions, _ := store.ListSessions(ctx, ListOptions{})
+	sessions, _ := store.ListFlows(ctx, ListOptions{})
 	if len(sessions) != n {
 		t.Errorf("expected %d sessions, got %d", n, len(sessions))
 	}
@@ -710,9 +710,9 @@ func TestSQLiteStore_LIKEWildcardEscape(t *testing.T) {
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/100%25_done", 200, nil, nil)
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/normal", 200, nil, nil)
 
-	sessions, err := store.ListSessions(ctx, ListOptions{URLPattern: "100%25_done"})
+	sessions, err := store.ListFlows(ctx, ListOptions{URLPattern: "100%25_done"})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(sessions) != 1 {
 		t.Errorf("expected 1 match for LIKE wildcard escape, got %d", len(sessions))
@@ -725,14 +725,14 @@ func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	ctx := context.Background()
 
-	// Create store and save a session.
+	// Create store and save a flow.
 	store1, err := NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore(1): %v", err)
 	}
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store1.SaveSession(ctx, sess)
-	store1.AppendMessage(ctx, &Message{SessionID: sess.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: mustParseURL("http://example.com/persist")})
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store1.SaveFlow(ctx, fl)
+	store1.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: mustParseURL("http://example.com/persist")})
 	store1.Close()
 
 	// Reopen and verify.
@@ -742,7 +742,7 @@ func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 	}
 	defer store2.Close()
 
-	sessions, _ := store2.ListSessions(ctx, ListOptions{})
+	sessions, _ := store2.ListFlows(ctx, ListOptions{})
 	if len(sessions) != 1 {
 		t.Fatalf("expected 1 session after reopen, got %d", len(sessions))
 	}
@@ -806,9 +806,9 @@ func TestSQLiteStore_FutureSchemaVersion(t *testing.T) {
 
 func TestSQLiteStore_GetNotFound(t *testing.T) {
 	store := newTestStore(t)
-	_, err := store.GetSession(context.Background(), "nonexistent")
+	_, err := store.GetFlow(context.Background(), "nonexistent")
 	if err == nil {
-		t.Fatal("expected error for nonexistent session, got nil")
+		t.Fatal("expected error for nonexistent flow, got nil")
 	}
 }
 
@@ -824,14 +824,14 @@ func TestSQLiteStore_Tags(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{
+	fl := &Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 		Tags:      map[string]string{"key1": "val1", "key2": "val2"},
 	}
-	store.SaveSession(ctx, sess)
+	store.SaveFlow(ctx, fl)
 
-	got, _ := store.GetSession(ctx, sess.ID)
+	got, _ := store.GetFlow(ctx, fl.ID)
 	if got.Tags["key1"] != "val1" {
 		t.Errorf("Tags[key1] = %q, want %q", got.Tags["key1"], "val1")
 	}
@@ -844,11 +844,11 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	sess := &Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveSession(ctx, sess)
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveFlow(ctx, fl)
 
 	store.AppendMessage(ctx, &Message{
-		SessionID:     sess.ID,
+		FlowID:     fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     time.Now().UTC(),
@@ -856,7 +856,7 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 		BodyTruncated: true,
 	})
 
-	msgs, _ := store.GetMessages(ctx, sess.ID, MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -895,18 +895,18 @@ func TestSQLiteStore_BlockedBy_SaveAndGet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sess := &Session{
+			fl := &Flow{
 				Protocol:  "HTTPS",
 				Timestamp: time.Now().UTC(),
 				BlockedBy: tt.blockedBy,
 			}
-			if err := store.SaveSession(ctx, sess); err != nil {
-				t.Fatalf("SaveSession: %v", err)
+			if err := store.SaveFlow(ctx, fl); err != nil {
+				t.Fatalf("SaveFlow: %v", err)
 			}
 
-			got, err := store.GetSession(ctx, sess.ID)
+			got, err := store.GetFlow(ctx, fl.ID)
 			if err != nil {
-				t.Fatalf("GetSession: %v", err)
+				t.Fatalf("GetFlow: %v", err)
 			}
 
 			if got.BlockedBy != tt.blockedBy {
@@ -921,23 +921,23 @@ func TestSQLiteStore_BlockedBy_ListFilter(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	// Save a normal session.
-	normalSess := &Session{
+	// Save a normal flow.
+	normalSess := &Flow{
 		Protocol:  "HTTPS",
 		Timestamp: now,
 	}
-	if err := store.SaveSession(ctx, normalSess); err != nil {
-		t.Fatalf("SaveSession(normal): %v", err)
+	if err := store.SaveFlow(ctx, normalSess); err != nil {
+		t.Fatalf("SaveFlow(normal): %v", err)
 	}
 
-	// Save a blocked session.
-	blockedSess := &Session{
+	// Save a blocked flow.
+	blockedSess := &Flow{
 		Protocol:  "HTTPS",
 		Timestamp: now,
 		BlockedBy: "target_scope",
 	}
-	if err := store.SaveSession(ctx, blockedSess); err != nil {
-		t.Fatalf("SaveSession(blocked): %v", err)
+	if err := store.SaveFlow(ctx, blockedSess); err != nil {
+		t.Fatalf("SaveFlow(blocked): %v", err)
 	}
 
 	tests := []struct {
@@ -952,9 +952,9 @@ func TestSQLiteStore_BlockedBy_ListFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions, err := store.ListSessions(ctx, tt.opts)
+			sessions, err := store.ListFlows(ctx, tt.opts)
 			if err != nil {
-				t.Fatalf("ListSessions: %v", err)
+				t.Fatalf("ListFlows: %v", err)
 			}
 			if len(sessions) != tt.want {
 				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
@@ -970,32 +970,32 @@ func TestSQLiteStore_BlockedBy_CountFilter(t *testing.T) {
 
 	// Save two normal sessions and one blocked.
 	for i := 0; i < 2; i++ {
-		if err := store.SaveSession(ctx, &Session{
+		if err := store.SaveFlow(ctx, &Flow{
 			Protocol:  "HTTPS",
 			Timestamp: now,
 		}); err != nil {
-			t.Fatalf("SaveSession(normal %d): %v", i, err)
+			t.Fatalf("SaveFlow(normal %d): %v", i, err)
 		}
 	}
-	if err := store.SaveSession(ctx, &Session{
+	if err := store.SaveFlow(ctx, &Flow{
 		Protocol:  "HTTPS",
 		Timestamp: now,
 		BlockedBy: "target_scope",
 	}); err != nil {
-		t.Fatalf("SaveSession(blocked): %v", err)
+		t.Fatalf("SaveFlow(blocked): %v", err)
 	}
 
-	count, err := store.CountSessions(ctx, ListOptions{BlockedBy: "target_scope"})
+	count, err := store.CountFlows(ctx, ListOptions{BlockedBy: "target_scope"})
 	if err != nil {
-		t.Fatalf("CountSessions: %v", err)
+		t.Fatalf("CountFlows: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("count = %d, want 1", count)
 	}
 
-	total, err := store.CountSessions(ctx, ListOptions{})
+	total, err := store.CountFlows(ctx, ListOptions{})
 	if err != nil {
-		t.Fatalf("CountSessions: %v", err)
+		t.Fatalf("CountFlows: %v", err)
 	}
 	if total != 3 {
 		t.Errorf("total = %d, want 3", total)
@@ -1006,18 +1006,18 @@ func TestSQLiteStore_BlockedBy_DefaultEmpty(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	// Save a session without setting BlockedBy — it should default to "".
-	sess := &Session{
+	// Save a flow without setting BlockedBy — it should default to "".
+	fl := &Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	got, err := store.GetSession(ctx, sess.ID)
+	got, err := store.GetFlow(ctx, fl.ID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
 	if got.BlockedBy != "" {
 		t.Errorf("BlockedBy = %q, want empty string", got.BlockedBy)
@@ -1031,19 +1031,19 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 
 	// A blocked session: has a send message (the request that was attempted)
 	// but no receive message (because it was blocked).
-	sess := &Session{
+	fl := &Flow{
 		Protocol:    "HTTPS",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   now,
 		BlockedBy:   "target_scope",
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	sendMsg := &Message{
-		SessionID: sess.ID,
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: now,
@@ -1056,15 +1056,15 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 	}
 
 	// Retrieve and verify.
-	got, err := store.GetSession(ctx, sess.ID)
+	got, err := store.GetFlow(ctx, fl.ID)
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
 	if got.BlockedBy != "target_scope" {
 		t.Errorf("BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
 	}
 
-	msgs, err := store.GetMessages(ctx, sess.ID, MessageListOptions{})
+	msgs, err := store.GetMessages(ctx, fl.ID, MessageListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -1103,7 +1103,8 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 		t.Fatalf("update version 2: %v", err)
 	}
 
-	// Insert a session into the V2 schema (no blocked_by column yet).
+	// Insert a flow into the V2 schema (no blocked_by column yet).
+	// Note: At V2, the table is still named "sessions" — it gets renamed to "flows" in V4.
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO sessions (id, conn_id, protocol, session_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1122,33 +1123,33 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	defer store.Close()
 
 	// Verify the old session has empty blocked_by.
-	sess, err := store.GetSession(ctx, "old-session-id")
+	fl, err := store.GetFlow(ctx, "old-session-id")
 	if err != nil {
-		t.Fatalf("GetSession: %v", err)
+		t.Fatalf("GetFlow: %v", err)
 	}
-	if sess.BlockedBy != "" {
-		t.Errorf("old session BlockedBy = %q, want empty", sess.BlockedBy)
+	if fl.BlockedBy != "" {
+		t.Errorf("old session BlockedBy = %q, want empty", fl.BlockedBy)
 	}
 
-	// Verify we can save a new session with blocked_by.
-	newSess := &Session{
+	// Verify we can save a new flow with blocked_by.
+	newSess := &Flow{
 		Protocol:  "HTTPS",
 		Timestamp: time.Now().UTC(),
 		BlockedBy: "target_scope",
 	}
-	if err := store.SaveSession(ctx, newSess); err != nil {
-		t.Fatalf("SaveSession(new): %v", err)
+	if err := store.SaveFlow(ctx, newSess); err != nil {
+		t.Fatalf("SaveFlow(new): %v", err)
 	}
 
-	got, err := store.GetSession(ctx, newSess.ID)
+	got, err := store.GetFlow(ctx, newSess.ID)
 	if err != nil {
-		t.Fatalf("GetSession(new): %v", err)
+		t.Fatalf("GetFlow(new): %v", err)
 	}
 	if got.BlockedBy != "target_scope" {
-		t.Errorf("new session BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
+		t.Errorf("new flow BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
 	}
 
-	// Verify schema version is now 3.
+	// Verify schema version is now 4 (V3 adds blocked_by, V4 renames sessions→flows).
 	checkDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open check db: %v", err)
@@ -1159,7 +1160,7 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("schema version = %d, want 3", version)
+	if version != 4 {
+		t.Errorf("schema version = %d, want 4", version)
 	}
 }

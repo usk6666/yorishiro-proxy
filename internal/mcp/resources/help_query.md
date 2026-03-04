@@ -1,26 +1,26 @@
 # query
 
-Unified information query tool. Retrieve sessions, session details, messages, proxy status, configuration, or CA certificate.
+Unified information query tool. Retrieve flows, flow details, messages, proxy status, configuration, or CA certificate.
 
 ## Parameters
 
 ### resource (string, required)
-The resource to query. One of: `sessions`, `session`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`, `fuzz_jobs`, `fuzz_results`.
+The resource to query. One of: `flows`, `flow`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`, `fuzz_jobs`, `fuzz_results`.
 
 ### id (string, conditional)
-Session ID or macro name. Required for `session`, `messages`, and `macro` resources.
+Flow ID or macro name. Required for `flow`, `messages`, and `macro` resources.
 
 ### fuzz_id (string, conditional)
 Fuzz job ID. Required for `fuzz_results` resource.
 
 ### filter (object, optional)
-Filter options for the `sessions`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
-- **protocol** (string): Protocol filter for sessions (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`).
-- **method** (string): HTTP method filter for sessions (e.g. `"GET"`, `"POST"`).
-- **url_pattern** (string): URL substring match for sessions (e.g. `"/api/"`).
-- **status_code** (integer): HTTP status code filter for sessions and fuzz_results (e.g. `200`, `404`).
-- **blocked_by** (string): Filter for blocked sessions (e.g. `"target_scope"`, `"intercept_drop"`).
-- **state** (string): Session lifecycle state filter (`"active"`, `"complete"`, `"error"`).
+Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
+- **protocol** (string): Protocol filter for flows (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`).
+- **method** (string): HTTP method filter for flows (e.g. `"GET"`, `"POST"`).
+- **url_pattern** (string): URL substring match for flows (e.g. `"/api/"`).
+- **status_code** (integer): HTTP status code filter for flows and fuzz_results (e.g. `200`, `404`).
+- **blocked_by** (string): Filter for blocked flows (e.g. `"target_scope"`, `"intercept_drop"`).
+- **state** (string): Flow lifecycle state filter (`"active"`, `"complete"`, `"error"`).
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
 - **status** (string): Job status filter for fuzz_jobs (e.g. `"running"`, `"completed"`).
@@ -35,49 +35,49 @@ Field to sort results by for the `fuzz_results` resource.
 Supported values: `index_num` (default), `status_code`, `duration_ms`, `response_length`.
 
 ### limit (integer, optional)
-Maximum number of items to return. Default: 50, max: 1000. Applies to `sessions`, `messages`, `fuzz_jobs`, and `fuzz_results`.
+Maximum number of items to return. Default: 50, max: 1000. Applies to `flows`, `messages`, `fuzz_jobs`, and `fuzz_results`.
 
 ### offset (integer, optional)
-Number of items to skip for pagination. Must be >= 0. Applies to `sessions`, `messages`, `fuzz_jobs`, and `fuzz_results`.
+Number of items to skip for pagination. Must be >= 0. Applies to `flows`, `messages`, `fuzz_jobs`, and `fuzz_results`.
 
 ## Resource Details
 
-### sessions
-List recorded proxy sessions with optional filtering and pagination.
+### flows
+List recorded proxy flows with optional filtering and pagination.
 
-Each session entry includes a `protocol_summary` field with protocol-specific information:
+Each flow entry includes a `protocol_summary` field with protocol-specific information:
 - **WebSocket**: `message_count`, `last_frame_type` (Text/Binary/Close/Ping/Pong)
 - **HTTP/2**: `stream_count`, `scheme`
 - **gRPC**: `service`, `method`, `grpc_status`, `grpc_status_name`
 - **TCP**: `send_bytes`, `receive_bytes`
 
-Returns: `sessions[]` (id, protocol, session_type, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
+Returns: `flows[]` (id, protocol, flow_type, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
 
-### session
-Get full details of a single session including request/response headers, bodies, and connection info.
+### flow
+Get full details of a single flow including request/response headers, bodies, and connection info.
 
-Session state indicates the lifecycle stage:
+Flow state indicates the lifecycle stage:
 - `"active"`: In progress (send recorded, awaiting receive)
 - `"complete"`: Finished successfully
 - `"error"`: Failed (e.g. 502 error, upstream connection failure)
 
-When intercept/transform modifies a request, the session contains variant messages. The `original_request` field is populated with the pre-modification request data for diff comparison. The main request fields show the modified (actually sent) version.
+When intercept/transform modifies a request, the flow contains variant messages. The `original_request` field is populated with the pre-modification request data for diff comparison. The main request fields show the modified (actually sent) version.
 
-For streaming sessions (`session_type` != `"unary"`), the response includes:
+For streaming flows (`flow_type` != `"unary"`), the response includes:
 - `message_preview`: The first 10 messages with full details (body, metadata, etc.)
-- `message_count`: Total number of messages in the session
+- `message_count`: Total number of messages in the flow
 - `protocol_summary`: Protocol-specific summary information
 
 Use the `messages` resource with `limit`/`offset` to page through all messages.
 
-Requires: `id` (session ID).
+Requires: `id` (flow ID).
 
-Returns: id, conn_id, protocol, session_type, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant sessions), timestamps.
+Returns: id, conn_id, protocol, flow_type, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
 
 ### messages
-Get paginated messages within a session. Supports direction filtering for streaming protocols.
+Get paginated messages within a flow. Supports direction filtering for streaming protocols.
 
-Requires: `id` (session ID). Supports `limit`, `offset`, and `filter.direction`.
+Requires: `id` (flow ID). Supports `limit`, `offset`, and `filter.direction`.
 
 Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, metadata, timestamp), `count`, `total`.
 
@@ -87,7 +87,7 @@ Returns: `messages[]` (id, sequence, direction, method, url, status_code, header
 ### status
 Get current proxy status and health metrics. No additional parameters.
 
-Returns: running, listen_addr, active_connections, total_sessions, db_size_bytes, uptime_seconds, ca_initialized.
+Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized.
 
 ### config
 Get current configuration including capture scope, TLS passthrough, TCP forwards, and enabled protocols. No additional parameters.
@@ -112,58 +112,58 @@ Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, ma
 
 ## Usage Examples
 
-### List all sessions
+### List all flows
 ```json
-{"resource": "sessions"}
+{"resource": "flows"}
 ```
 
-### Filter sessions by protocol
+### Filter flows by protocol
 ```json
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"protocol": "WebSocket"}
 }
 ```
 
-### Filter gRPC sessions
+### Filter gRPC flows
 ```json
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"protocol": "gRPC"}
 }
 ```
 
-### Filter sessions by method and URL
+### Filter flows by method and URL
 ```json
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"method": "POST", "url_pattern": "/api/login"},
   "limit": 10
 }
 ```
 
-### Filter sessions by state (e.g. active or error)
+### Filter flows by state (e.g. active or error)
 ```json
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"state": "error"}
 }
 ```
 
-### Filter blocked sessions
+### Filter blocked flows
 ```json
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"blocked_by": "intercept_drop"}
 }
 ```
 
-### Get session details
+### Get flow details
 ```json
-{"resource": "session", "id": "abc-123"}
+{"resource": "flow", "id": "abc-123"}
 ```
 
-### Get session messages with pagination
+### Get flow messages with pagination
 ```json
 {"resource": "messages", "id": "abc-123", "limit": 20, "offset": 0}
 ```
@@ -230,14 +230,14 @@ List fuzz jobs with optional filtering by status and tag.
 
 Supports `filter.status`, `filter.tag`, `fields`, `limit`, and `offset`.
 
-Returns: `jobs[]` (id, session_id, status, tag, total, completed_count, error_count, created_at, completed_at), `count`, `total`.
+Returns: `jobs[]` (id, flow_id, status, tag, total, completed_count, error_count, created_at, completed_at), `count`, `total`.
 
 ### fuzz_results
 Get results for a specific fuzz job with filtering, sorting, pagination, and aggregate summary.
 
 Requires: `fuzz_id` (fuzz job ID). Supports `filter.status_code`, `filter.body_contains`, `fields`, `sort_by`, `limit`, and `offset`.
 
-Returns: `results[]` (id, fuzz_id, index, session_id, payloads, status_code, response_length, duration_ms, error), `count`, `total`, `summary` (status_distribution, avg_duration_ms, total_duration_ms).
+Returns: `results[]` (id, fuzz_id, index, flow_id, payloads, status_code, response_length, duration_ms, error), `count`, `total`, `summary` (status_distribution, avg_duration_ms, total_duration_ms).
 
 ### List fuzz jobs
 ```json
@@ -255,7 +255,7 @@ Returns: `results[]` (id, fuzz_id, index, session_id, payloads, status_code, res
   "resource": "fuzz_results",
   "fuzz_id": "fuzz-789",
   "filter": {"status_code": 200, "body_contains": "admin"},
-  "fields": ["index", "session_id", "payloads", "status_code", "duration_ms"],
+  "fields": ["index", "flow_id", "payloads", "status_code", "duration_ms"],
   "sort_by": "status_code",
   "limit": 50,
   "offset": 0

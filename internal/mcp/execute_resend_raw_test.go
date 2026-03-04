@@ -10,7 +10,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // --- resend_raw with patches tests ---
@@ -26,12 +26,12 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -40,7 +40,7 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -56,7 +56,7 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -79,8 +79,8 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 	if out.ResponseSize == 0 {
 		t.Error("expected non-zero response_size")
 	}
-	if out.NewSessionID == "" {
-		t.Error("expected non-empty new_session_id")
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
 	}
 }
 
@@ -94,12 +94,12 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -108,7 +108,7 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -123,7 +123,7 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -158,12 +158,12 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -172,7 +172,7 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -187,7 +187,7 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -221,12 +221,12 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -235,7 +235,7 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -250,7 +250,7 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"dry_run":    true,
 		},
 	})
@@ -286,10 +286,10 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 		t.Errorf("data = %q, want %q", string(decoded), string(rawReq))
 	}
 
-	// Verify no new session was created (dry-run should NOT record).
-	sessions, err := store.ListSessions(context.Background(), session.ListOptions{})
+	// Verify no new flow was created (dry-run should NOT record).
+	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(sessions) != 1 {
 		t.Errorf("expected 1 session (original only), got %d", len(sessions))
@@ -303,12 +303,12 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -317,7 +317,7 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -332,7 +332,7 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"dry_run":    true,
 			"patches": []any{
 				map[string]any{
@@ -373,10 +373,10 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 		t.Errorf("patched data = %q, want %q", string(decoded), want)
 	}
 
-	// Verify no new session was created.
-	sessions, err := store.ListSessions(context.Background(), session.ListOptions{})
+	// Verify no new flow was created.
+	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(sessions) != 1 {
 		t.Errorf("expected 1 session (original only), got %d", len(sessions))
@@ -390,12 +390,12 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -404,7 +404,7 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -420,7 +420,7 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":         entry.Session.ID,
+			"flow_id":         entry.Session.ID,
 			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
 			"dry_run":            true,
 		},
@@ -466,12 +466,12 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/original")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -480,7 +480,7 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -496,7 +496,7 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":         entry.Session.ID,
+			"flow_id":         entry.Session.ID,
 			"target_addr":        addr,
 			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
 		},
@@ -514,8 +514,8 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 	if out.ResponseSize == 0 {
 		t.Error("expected non-zero response_size")
 	}
-	if out.NewSessionID == "" {
-		t.Error("expected non-empty new_session_id")
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
 	}
 }
 
@@ -526,12 +526,12 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -540,7 +540,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -556,7 +556,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":         entry.Session.ID,
+			"flow_id":         entry.Session.ID,
 			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
 			"patches": []any{
 				map[string]any{
@@ -599,12 +599,12 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -613,7 +613,7 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -628,7 +628,7 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 			"tag":         "raw-test-01",
 		},
@@ -647,13 +647,13 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 		t.Errorf("tag = %q, want raw-test-01", out.Tag)
 	}
 
-	// Verify the tag was stored on the session.
-	newSess, err := store.GetSession(context.Background(), out.NewSessionID)
+	// Verify the tag was stored on the flow.
+	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
 	if err != nil {
-		t.Fatalf("get new session: %v", err)
+		t.Fatalf("get new flow: %v", err)
 	}
-	if newSess.Tags == nil || newSess.Tags["tag"] != "raw-test-01" {
-		t.Errorf("session tags = %v, want tag=raw-test-01", newSess.Tags)
+	if newFl.Tags == nil || newFl.Tags["tag"] != "raw-test-01" {
+		t.Errorf("flow tags = %v, want tag=raw-test-01", newFl.Tags)
 	}
 }
 
@@ -669,12 +669,12 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -683,7 +683,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -698,7 +698,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -718,20 +718,20 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	// Verify a new session was created with correct metadata.
-	newSess, err := store.GetSession(context.Background(), out.NewSessionID)
+	// Verify a new flow was created with correct metadata.
+	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
 	if err != nil {
-		t.Fatalf("get new session: %v", err)
+		t.Fatalf("get new flow: %v", err)
 	}
-	if newSess.SessionType != "unary" {
-		t.Errorf("session_type = %q, want unary", newSess.SessionType)
+	if newFl.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want unary", newFl.FlowType)
 	}
-	if newSess.State != "complete" {
-		t.Errorf("state = %q, want complete", newSess.State)
+	if newFl.State != "complete" {
+		t.Errorf("state = %q, want complete", newFl.State)
 	}
 
 	// Verify send message has patched raw bytes.
-	sendMsgs, err := store.GetMessages(context.Background(), out.NewSessionID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		t.Fatalf("GetMessages(send): %v", err)
 	}
@@ -744,7 +744,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 	}
 
 	// Verify receive message exists.
-	recvMsgs, err := store.GetMessages(context.Background(), out.NewSessionID, session.MessageListOptions{Direction: "receive"})
+	recvMsgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages(receive): %v", err)
 	}
@@ -765,12 +765,12 @@ func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -779,7 +779,7 @@ func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -794,7 +794,7 @@ func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":         entry.Session.ID,
+			"flow_id":         entry.Session.ID,
 			"override_raw_base64": "not-valid-base64!!!",
 			"dry_run":            true,
 		},
@@ -811,12 +811,12 @@ func TestExecute_ResendRaw_InvalidPatch(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -825,7 +825,7 @@ func TestExecute_ResendRaw_InvalidPatch(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -841,7 +841,7 @@ func TestExecute_ResendRaw_InvalidPatch(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"patches": []any{
 				map[string]any{
 					"offset":      0,
@@ -863,12 +863,12 @@ func TestExecute_ResendRaw_PatchOffsetBeyondData(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -877,7 +877,7 @@ func TestExecute_ResendRaw_PatchOffsetBeyondData(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -892,7 +892,7 @@ func TestExecute_ResendRaw_PatchOffsetBeyondData(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"patches": []any{
 				map[string]any{
 					"offset":      100,

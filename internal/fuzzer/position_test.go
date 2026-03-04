@@ -58,8 +58,8 @@ func TestPosition_Validate(t *testing.T) {
 		{
 			name: "valid cookie replace",
 			pos: Position{
-				ID: "pos-4", Location: "cookie", Name: "session_id",
-				PayloadSet: "sessions",
+				ID: "pos-4", Location: "cookie", Name: "flow_id",
+				PayloadSet: "flows",
 			},
 		},
 		{

@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -10,7 +10,7 @@ func TestSaveMacro_Create(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	err := store.SaveMacro(ctx, "auth-flow", "Login and get token", `{"steps":[{"id":"login","session_id":"s1"}]}`)
+	err := store.SaveMacro(ctx, "auth-flow", "Login and get token", `{"steps":[{"id":"login","flow_id":"s1"}]}`)
 	if err != nil {
 		t.Fatalf("SaveMacro: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestSaveMacro_Create(t *testing.T) {
 	if rec.Description != "Login and get token" {
 		t.Errorf("Description = %q, want %q", rec.Description, "Login and get token")
 	}
-	if rec.ConfigJSON != `{"steps":[{"id":"login","session_id":"s1"}]}` {
+	if rec.ConfigJSON != `{"steps":[{"id":"login","flow_id":"s1"}]}` {
 		t.Errorf("ConfigJSON = %q", rec.ConfigJSON)
 	}
 	if rec.CreatedAt.IsZero() {
@@ -54,7 +54,7 @@ func TestSaveMacro_Upsert(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Update the same macro.
-	err = store.SaveMacro(ctx, "auth-flow", "v2 description", `{"steps":[{"id":"new","session_id":"s2"}]}`)
+	err = store.SaveMacro(ctx, "auth-flow", "v2 description", `{"steps":[{"id":"new","flow_id":"s2"}]}`)
 	if err != nil {
 		t.Fatalf("SaveMacro (update): %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSaveMacro_Upsert(t *testing.T) {
 	if rec2.Description != "v2 description" {
 		t.Errorf("Description after update = %q, want %q", rec2.Description, "v2 description")
 	}
-	if rec2.ConfigJSON != `{"steps":[{"id":"new","session_id":"s2"}]}` {
+	if rec2.ConfigJSON != `{"steps":[{"id":"new","flow_id":"s2"}]}` {
 		t.Errorf("ConfigJSON after update = %q", rec2.ConfigJSON)
 	}
 
@@ -163,7 +163,7 @@ func TestSaveMacro_EmptyDescription(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	err := store.SaveMacro(ctx, "minimal", "", `{"steps":[{"id":"s1","session_id":"sess-1"}]}`)
+	err := store.SaveMacro(ctx, "minimal", "", `{"steps":[{"id":"s1","flow_id":"fl-1"}]}`)
 	if err != nil {
 		t.Fatalf("SaveMacro: %v", err)
 	}

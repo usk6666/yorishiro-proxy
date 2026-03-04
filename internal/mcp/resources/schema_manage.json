@@ -8,19 +8,19 @@
     "action": {
       "type": "string",
       "description": "The action to execute.",
-      "enum": ["delete_sessions", "export_sessions", "import_sessions", "regenerate_ca_cert"]
+      "enum": ["delete_flows", "export_flows", "import_flows", "regenerate_ca_cert"]
     },
     "params": {
       "type": "object",
       "description": "Action-specific parameters.",
       "properties": {
-        "session_id": {
+        "flow_id": {
           "type": "string",
-          "description": "Session ID for single-session deletion."
+          "description": "Flow ID for single-flow deletion."
         },
         "older_than_days": {
           "type": "integer",
-          "description": "Delete sessions older than this many days. Must be >= 1.",
+          "description": "Delete flows older than this many days. Must be >= 1.",
           "minimum": 1
         },
         "confirm": {
@@ -29,7 +29,7 @@
         },
         "protocol": {
           "type": "string",
-          "description": "Protocol filter for delete_sessions (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)."
+          "description": "Protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)."
         },
         "format": {
           "type": "string",
@@ -38,7 +38,7 @@
         },
         "filter": {
           "type": "object",
-          "description": "Session filter for export_sessions.",
+          "description": "Flow filter for export_flows.",
           "properties": {
             "protocol": {
               "type": "string",
@@ -50,11 +50,11 @@
             },
             "time_after": {
               "type": "string",
-              "description": "Include sessions after this time (RFC3339 format)."
+              "description": "Include flows after this time (RFC3339 format)."
             },
             "time_before": {
               "type": "string",
-              "description": "Include sessions before this time (RFC3339 format)."
+              "description": "Include flows before this time (RFC3339 format)."
             }
           },
           "additionalProperties": false

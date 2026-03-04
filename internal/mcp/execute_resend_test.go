@@ -9,7 +9,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // --- Resend action (new name) tests ---
@@ -20,12 +20,12 @@ func TestExecute_Resend_Success(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -34,7 +34,7 @@ func TestExecute_Resend_Success(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"key":"value"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -50,7 +50,7 @@ func TestExecute_Resend_Success(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 	if result.IsError {
@@ -63,8 +63,8 @@ func TestExecute_Resend_Success(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	if out.NewSessionID == "" {
-		t.Error("expected non-empty new_session_id")
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
 	}
 	if out.StatusCode != 200 {
 		t.Errorf("status_code = %d, want 200", out.StatusCode)
@@ -82,12 +82,12 @@ func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -96,7 +96,7 @@ func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -111,7 +111,7 @@ func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 		},
 	})
@@ -128,12 +128,12 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/header-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -145,7 +145,7 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 				"X-Keep":     {"kept-value"},
 			},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -161,7 +161,7 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":     entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"remove_headers": []any{"X-Remove"},
 			"override_headers": map[string]any{
 				"X-Override": "overridden-value",
@@ -225,12 +225,12 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/body-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -239,7 +239,7 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"original":"body"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -254,7 +254,7 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":    entry.Session.ID,
+			"flow_id":    entry.Session.ID,
 			"override_body": `{"replaced":"body"}`,
 			"dry_run":       true,
 		},
@@ -280,12 +280,12 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/body-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -294,7 +294,7 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			Body:      []byte("original"),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -312,7 +312,7 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":           entry.Session.ID,
+			"flow_id":           entry.Session.ID,
 			"override_body_base64": b64,
 			"dry_run":              true,
 		},
@@ -339,12 +339,12 @@ func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/body-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -353,7 +353,7 @@ func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
 			Headers:   map[string][]string{},
 			Body:      []byte("original"),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -368,7 +368,7 @@ func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":           entry.Session.ID,
+			"flow_id":           entry.Session.ID,
 			"override_body_base64": "not-valid-base64!!!",
 			"dry_run":              true,
 		},
@@ -384,12 +384,12 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/priority-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -398,7 +398,7 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 			Headers:   map[string][]string{},
 			Body:      []byte(`{"name":"original"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -414,7 +414,7 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":    entry.Session.ID,
+			"flow_id":    entry.Session.ID,
 			"override_body": `{"full":"replace"}`,
 			"body_patches": []any{
 				map[string]any{"json_path": "$.name", "value": "patched"},
@@ -444,12 +444,12 @@ func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/patch-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -458,7 +458,7 @@ func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":{"name":"original","role":"viewer"}}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -473,7 +473,7 @@ func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"body_patches": []any{
 				map[string]any{"json_path": "$.user.name", "value": "injected"},
 				map[string]any{"json_path": "$.user.role", "value": "admin"},
@@ -511,12 +511,12 @@ func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/regex-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -525,7 +525,7 @@ func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/x-www-form-urlencoded"}},
 			Body:      []byte("csrf_token=abc123&name=test&role=user"),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -540,7 +540,7 @@ func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"body_patches": []any{
 				map[string]any{"regex": "csrf_token=[^&]+", "replace": "csrf_token=newvalue"},
 				map[string]any{"regex": "role=user", "replace": "role=admin"},
@@ -572,12 +572,12 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/dry-run")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -585,7 +585,7 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -601,7 +601,7 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":      entry.Session.ID,
+			"flow_id":      entry.Session.ID,
 			"override_method": "POST",
 			"override_url":    overrideURL,
 			"override_body":   "dry-run-body",
@@ -637,12 +637,12 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 		t.Errorf("body_encoding = %q, want text", out.RequestPreview.BodyEncoding)
 	}
 
-	// Verify no new session was created (dry-run should NOT record).
-	sessions, err := store.ListSessions(context.Background(), session.ListOptions{})
+	// Verify no new flow was created (dry-run should NOT record).
+	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
-	// Should only have the original session.
+	// Should only have the original flow.
 	if len(sessions) != 1 {
 		t.Errorf("expected 1 session (original only), got %d", len(sessions))
 	}
@@ -656,12 +656,12 @@ func TestExecute_Resend_Tag(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/tag-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -669,7 +669,7 @@ func TestExecute_Resend_Tag(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -684,7 +684,7 @@ func TestExecute_Resend_Tag(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"tag":        "auth-bypass-test-01",
 		},
 	})
@@ -702,13 +702,13 @@ func TestExecute_Resend_Tag(t *testing.T) {
 		t.Errorf("tag = %q, want auth-bypass-test-01", out.Tag)
 	}
 
-	// Verify the tag was stored on the session.
-	newSess, err := store.GetSession(context.Background(), out.NewSessionID)
+	// Verify the tag was stored on the flow.
+	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
 	if err != nil {
-		t.Fatalf("get new session: %v", err)
+		t.Fatalf("get new flow: %v", err)
 	}
-	if newSess.Tags == nil || newSess.Tags["tag"] != "auth-bypass-test-01" {
-		t.Errorf("session tags = %v, want tag=auth-bypass-test-01", newSess.Tags)
+	if newFl.Tags == nil || newFl.Tags["tag"] != "auth-bypass-test-01" {
+		t.Errorf("flow tags = %v, want tag=auth-bypass-test-01", newFl.Tags)
 	}
 }
 
@@ -720,12 +720,12 @@ func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/host-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -733,7 +733,7 @@ func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -758,7 +758,7 @@ func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
 			result := executeCallTool(t, cs, map[string]any{
 				"action": "resend",
 				"params": map[string]any{
-					"session_id":    entry.Session.ID,
+					"flow_id":    entry.Session.ID,
 					"override_host": tt.host,
 				},
 			})
@@ -935,12 +935,12 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/actual-send")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -949,7 +949,7 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":"original"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -964,7 +964,7 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 			"body_patches": []any{
 				map[string]any{"json_path": "$.user", "value": "modified"},
 			},
@@ -1009,12 +1009,12 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/remove-headers-test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1025,7 +1025,7 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 				"Accept":     {"*/*"},
 			},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1041,7 +1041,7 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":     entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"remove_headers": []any{"User-Agent"},
 		},
 	})
@@ -1086,12 +1086,12 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/remove-headers-dryrun")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1102,7 +1102,7 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 				"Accept":     {"*/*"},
 			},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1117,7 +1117,7 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id":     entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"remove_headers": []any{"User-Agent"},
 			"dry_run":        true,
 		},

@@ -23,7 +23,7 @@ package config
 
 const (
 	// MaxBodySize is the unified maximum size for both reading upstream
-	// response bodies into memory and recording bodies to the session store.
+	// response bodies into memory and recording bodies to the flow store.
 	// Previously two separate limits (maxResponseBodySize=64MB and
 	// maxBodyRecordSize=1MB), now unified at 254 MB so that entire
 	// responses can be captured and stored.
@@ -41,7 +41,7 @@ const (
 
 	// MaxWebSocketRecordPayloadSize limits the payload size recorded per
 	// WebSocket message. Payloads exceeding this size are truncated in the
-	// session store.
+	// flow store.
 	MaxWebSocketRecordPayloadSize = 254 << 20 // 254 MB
 
 	// MaxReplayResponseSize limits the response body size for MCP replay

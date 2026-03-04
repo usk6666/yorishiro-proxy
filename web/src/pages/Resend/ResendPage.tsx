@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
 import type {
-  SessionDetailResult,
+  FlowDetailResult,
   BodyPatch,
 } from "../../lib/mcp/types.js";
 import { Button } from "../../components/ui/Button.js";
@@ -36,7 +36,7 @@ const REQUEST_TABS = [
 
 /** Resend result from MCP execute. */
 export interface ResendResult {
-  session_id?: string;
+  new_flow_id?: string;
   method?: string;
   url?: string;
   request_headers?: Record<string, string[]>;
@@ -59,7 +59,7 @@ interface HistoryEntry {
   durationMs?: number;
   dryRun: boolean;
   tag: string;
-  sessionId?: string;
+  flowId?: string;
 }
 
 export function ResendPage() {
@@ -68,7 +68,7 @@ export function ResendPage() {
   const { addToast } = useToast();
   const { execute, loading: executing } = useExecute();
 
-  // Session ID input state.
+  // Flow ID input state.
   const [sessionIdInput, setSessionIdInput] = useState(routeSessionId ?? "");
   const [activeSessionId, setActiveSessionId] = useState(routeSessionId ?? "");
 
@@ -86,20 +86,20 @@ export function ResendPage() {
   const [response, setResponse] = useState<ResendResult | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
-  // Fetch original session data when activeSessionId changes.
+  // Fetch original flow data when activeSessionId changes.
   const {
     data: sessionData,
     loading: sessionLoading,
     error: sessionError,
-  } = useQuery("session", {
+  } = useQuery("flow", {
     id: activeSessionId,
     enabled: activeSessionId.length > 0,
   });
 
-  // Populate editor with session data when loaded.
+  // Populate editor with flow data when loaded.
   useEffect(() => {
     if (!sessionData) return;
-    const session = sessionData as SessionDetailResult;
+    const session = sessionData as FlowDetailResult;
     setMethod(session.method || "GET");
     setUrl(session.url || "");
     setBody(session.request_body || "");
@@ -127,7 +127,7 @@ export function ResendPage() {
     }
   }, [routeSessionId, activeSessionId]);
 
-  /** Load a session by ID from the input. */
+  /** Load a flow by ID from the input. */
   const handleLoadSession = useCallback(() => {
     const trimmed = sessionIdInput.trim();
     if (!trimmed) return;
@@ -141,7 +141,7 @@ export function ResendPage() {
   const handleSend = useCallback(
     async (isDryRun: boolean) => {
       if (!activeSessionId) {
-        addToast({ type: "warning", message: "No session selected" });
+        addToast({ type: "warning", message: "No flow selected" });
         return;
       }
 
@@ -161,7 +161,7 @@ export function ResendPage() {
         const result = await execute<ResendResult>({
           action: "resend",
           params: {
-            session_id: activeSessionId,
+            flow_id: activeSessionId,
             override_method: method,
             override_url: url,
             override_headers: Object.keys(overrideHeaders).length > 0 ? overrideHeaders : undefined,
@@ -184,7 +184,7 @@ export function ResendPage() {
             durationMs: result.duration_ms,
             dryRun: isDryRun,
             tag,
-            sessionId: result.session_id,
+            flowId: result.new_flow_id,
           },
           ...prev,
         ]);
@@ -205,7 +205,7 @@ export function ResendPage() {
     [activeSessionId, method, url, headers, body, bodyPatches, tag, execute, addToast],
   );
 
-  /** Whether the editor has a loaded session. */
+  /** Whether the editor has a loaded flow. */
   const hasSession = activeSessionId.length > 0 && sessionData != null;
 
   return (
@@ -217,11 +217,11 @@ export function ResendPage() {
         </p>
       </div>
 
-      {/* Session selector */}
+      {/* Flow selector */}
       <div className="resend-session-selector">
         <div className="resend-session-input-row">
           <Input
-            placeholder="Enter session ID..."
+            placeholder="Enter flow ID..."
             value={sessionIdInput}
             onChange={(e) => setSessionIdInput(e.target.value)}
             onKeyDown={(e) => {
@@ -235,12 +235,12 @@ export function ResendPage() {
         {sessionLoading && (
           <div className="resend-loading">
             <Spinner size="sm" />
-            <span>Loading session...</span>
+            <span>Loading flow...</span>
           </div>
         )}
         {sessionError && (
           <div className="resend-error">
-            Failed to load session: {sessionError.message}
+            Failed to load flow: {sessionError.message}
           </div>
         )}
       </div>
@@ -370,7 +370,7 @@ export function ResendPage() {
             ) : response ? (
               <ResponseViewer
                 response={response}
-                originalSession={sessionData as SessionDetailResult}
+                originalSession={sessionData as FlowDetailResult}
               />
             ) : (
               <div className="resend-empty-response">

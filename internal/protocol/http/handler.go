@@ -20,7 +20,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // maxRawCaptureSize limits the size of raw request/response bytes captured.
@@ -110,10 +110,10 @@ type Handler struct {
 	h2Handler         H2Handler
 }
 
-// NewHandler creates a new HTTP handler with session recording.
+// NewHandler creates a new HTTP handler with flow recording.
 // If issuer is non-nil, CONNECT requests are handled for HTTPS MITM;
 // otherwise CONNECT requests receive a 501 Not Implemented response.
-func NewHandler(store session.SessionWriter, issuer *cert.Issuer, logger *slog.Logger) *Handler {
+func NewHandler(store flow.FlowWriter, issuer *cert.Issuer, logger *slog.Logger) *Handler {
 	return &Handler{
 		HandlerBase: proxy.HandlerBase{
 			Store:     store,
@@ -307,7 +307,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		protocol:     "HTTP/1.x",
 		start:        start,
 		tags:         smugglingTags(smuggling),
-		connInfo:     &session.ConnectionInfo{ClientAddr: clientAddr},
+		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},
 		req:          req,
 		reqBody:      bodyResult.recordBody,
 		rawRequest:   rawRequest,
@@ -590,7 +590,7 @@ func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, log
 	logger.Info("request blocked by target scope", "target", target, "reason", reason)
 }
 
-// recordBlockedSession records a blocked request as a session with BlockedBy="target_scope".
+// recordBlockedSession records a blocked request as a flow with BlockedBy="target_scope".
 func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, logger *slog.Logger) {
 	if h.Store == nil {
 		return
@@ -600,25 +600,25 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 	}
 
 	duration := time.Since(start)
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      connID,
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
 		Tags:        smugglingTags(smuggling),
 		BlockedBy:   "target_scope",
-		ConnInfo: &session.ConnectionInfo{
+		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 		},
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("blocked session save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("blocked flow save failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		return
 	}
-	sendMsg := &session.Message{
-		SessionID:     sess.ID,
+	sendMsg := &flow.Message{
+		FlowID:     fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     start,

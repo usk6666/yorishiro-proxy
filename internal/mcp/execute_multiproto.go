@@ -11,13 +11,13 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // executeReplayRawResult is the structured output of the tcp_replay action.
 type executeReplayRawResult struct {
-	// NewSessionID is the session ID of the replayed session.
-	NewSessionID string `json:"new_session_id"`
+	// NewFlowID is the flow ID of the replayed flow.
+	NewFlowID string `json:"new_flow_id"`
 	// MessagesSent is the number of send messages replayed.
 	MessagesSent int `json:"messages_sent"`
 	// MessagesReceived is the number of response chunks received.
@@ -33,43 +33,43 @@ type executeReplayRawResult struct {
 }
 
 // handleExecuteReplayRaw handles the tcp_replay action for Raw TCP session replay.
-// It retrieves all send messages from the original session, establishes a TCP connection
+// It retrieves all send messages from the original flow, establishes a TCP connection
 // to the target, sends the data, and reads back the response.
 func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeReplayRawResult, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
-	if params.SessionID == "" {
-		return nil, nil, fmt.Errorf("session_id is required for tcp_replay action")
+	if params.FlowID == "" {
+		return nil, nil, fmt.Errorf("flow_id is required for tcp_replay action")
 	}
 
-	// Retrieve the session.
-	sess, err := s.deps.store.GetSession(ctx, params.SessionID)
+	// Retrieve the flow.
+	fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get session: %w", err)
+		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	if sess.Protocol != "TCP" {
-		return nil, nil, fmt.Errorf("tcp_replay is only supported for TCP sessions, got protocol %q", sess.Protocol)
+	if fl.Protocol != "TCP" {
+		return nil, nil, fmt.Errorf("tcp_replay is only supported for TCP sessions, got protocol %q", fl.Protocol)
 	}
 
 	// Retrieve all send messages.
-	sendMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, nil, fmt.Errorf("session %s has no send messages to replay", params.SessionID)
+		return nil, nil, fmt.Errorf("flow %s has no send messages to replay", params.FlowID)
 	}
 
 	// Determine target address.
 	targetAddr := params.TargetAddr
 	if targetAddr == "" {
-		if sess.ConnInfo != nil && sess.ConnInfo.ServerAddr != "" {
-			targetAddr = sess.ConnInfo.ServerAddr
+		if fl.ConnInfo != nil && fl.ConnInfo.ServerAddr != "" {
+			targetAddr = fl.ConnInfo.ServerAddr
 		} else {
-			return nil, nil, fmt.Errorf("session has no server address and no target_addr was provided")
+			return nil, nil, fmt.Errorf("flow has no server address and no target_addr was provided")
 		}
 	}
 
@@ -138,25 +138,25 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 	duration := time.Since(start)
 
-	// Record the replay as a new session.
+	// Record the replay as a new flow.
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
 	}
 
-	newSess := &session.Session{
+	newFl := &flow.Flow{
 		Protocol:    "TCP",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
 		Tags:        tags,
-		ConnInfo: &session.ConnectionInfo{
+		ConnInfo: &flow.ConnectionInfo{
 			ServerAddr: targetAddr,
 		},
 	}
 
-	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
+	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
 		return nil, nil, fmt.Errorf("save replay_raw session: %w", err)
 	}
 
@@ -164,8 +164,8 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	seq := 0
 	for _, msg := range sendMsgs {
 		if len(msg.Body) > 0 {
-			newMsg := &session.Message{
-				SessionID: newSess.ID,
+			newMsg := &flow.Message{
+				FlowID: newFl.ID,
 				Sequence:  seq,
 				Direction: "send",
 				Timestamp: start,
@@ -180,8 +180,8 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 
 	// Save receive message.
 	if len(respData) > 0 {
-		newRecvMsg := &session.Message{
-			SessionID: newSess.ID,
+		newRecvMsg := &flow.Message{
+			FlowID: newFl.ID,
 			Sequence:  seq,
 			Direction: "receive",
 			Timestamp: start.Add(duration),
@@ -198,7 +198,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	}
 
 	result := &executeReplayRawResult{
-		NewSessionID:       newSess.ID,
+		NewFlowID:       newFl.ID,
 		MessagesSent:       len(sendMsgs),
 		MessagesReceived:   messagesReceived,
 		TotalBytesSent:     totalBytesSent,
@@ -212,8 +212,8 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 
 // executeWebSocketResendResult is the structured output of a WebSocket resend action.
 type executeWebSocketResendResult struct {
-	// NewSessionID is the session ID of the new session recording the resend.
-	NewSessionID string `json:"new_session_id"`
+	// NewFlowID is the flow ID of the new flow recording the resend.
+	NewFlowID string `json:"new_flow_id"`
 	// MessageSequence is the sequence number of the resent message.
 	MessageSequence int `json:"message_sequence"`
 	// ResponseData is the first response frame body, Base64-encoded.
@@ -222,25 +222,25 @@ type executeWebSocketResendResult struct {
 	ResponseSize int `json:"response_size"`
 	// DurationMs is the round-trip duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
-	// Tag is the tag attached to the result session (if specified).
+	// Tag is the tag attached to the result flow (if specified).
 	Tag string `json:"tag,omitempty"`
 }
 
-// handleWebSocketResend handles resend for WebSocket sessions.
-// It sends a single message from the original session to the target server
+// handleWebSocketResend handles resend for WebSocket flows.
+// It sends a single message from the original flow to the target server
 // over a raw TCP connection, recording the exchange.
-func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Session, params executeParams) (*gomcp.CallToolResult, *executeWebSocketResendResult, error) {
+func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, params executeParams) (*gomcp.CallToolResult, *executeWebSocketResendResult, error) {
 	if params.MessageSequence == nil {
 		return nil, nil, fmt.Errorf("message_sequence is required for WebSocket resend")
 	}
 
 	// Get the specific message.
-	allMsgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+	allMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	var targetMsg *session.Message
+	var targetMsg *flow.Message
 	for _, msg := range allMsgs {
 		if msg.Sequence == *params.MessageSequence {
 			targetMsg = msg
@@ -248,7 +248,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 		}
 	}
 	if targetMsg == nil {
-		return nil, nil, fmt.Errorf("message with sequence %d not found in session %s", *params.MessageSequence, sess.ID)
+		return nil, nil, fmt.Errorf("message with sequence %d not found in flow %s", *params.MessageSequence, fl.ID)
 	}
 	if targetMsg.Direction != "send" {
 		return nil, nil, fmt.Errorf("message sequence %d is a %q message, only send messages can be resent", *params.MessageSequence, targetMsg.Direction)
@@ -257,12 +257,12 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 	// Determine target address from session or override.
 	targetAddr := params.TargetAddr
 	if targetAddr == "" {
-		// Try to derive from the session's first send message URL or ConnInfo.
-		if sess.ConnInfo != nil && sess.ConnInfo.ServerAddr != "" {
-			targetAddr = sess.ConnInfo.ServerAddr
+		// Try to derive from the flow's first send message URL or ConnInfo.
+		if fl.ConnInfo != nil && fl.ConnInfo.ServerAddr != "" {
+			targetAddr = fl.ConnInfo.ServerAddr
 		} else {
 			// Look for URL in first send message.
-			sendMsgs, _ := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+			sendMsgs, _ := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 			for _, m := range sendMsgs {
 				if m.URL != nil {
 					host := m.URL.Hostname()
@@ -293,7 +293,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 	useTLS := false
 	if params.UseTLS != nil {
 		useTLS = *params.UseTLS
-	} else if sess.ConnInfo != nil && sess.ConnInfo.TLSVersion != "" {
+	} else if fl.ConnInfo != nil && fl.ConnInfo.TLSVersion != "" {
 		useTLS = true
 	}
 
@@ -363,20 +363,20 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 		tags = map[string]string{"tag": params.Tag}
 	}
 
-	newSess := &session.Session{
+	newFl := &flow.Flow{
 		Protocol:    "WebSocket",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
 		Tags:        tags,
 	}
-	if err := s.deps.store.SaveSession(ctx, newSess); err != nil {
+	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
 		return nil, nil, fmt.Errorf("save WebSocket resend session: %w", err)
 	}
 
-	newSendMsg := &session.Message{
-		SessionID: newSess.ID,
+	newSendMsg := &flow.Message{
+		FlowID: newFl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -388,8 +388,8 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 	}
 
 	if len(respData) > 0 {
-		newRecvMsg := &session.Message{
-			SessionID: newSess.ID,
+		newRecvMsg := &flow.Message{
+			FlowID: newFl.ID,
 			Sequence:  1,
 			Direction: "receive",
 			Timestamp: start.Add(duration),
@@ -401,7 +401,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, sess *session.Sessio
 	}
 
 	result := &executeWebSocketResendResult{
-		NewSessionID:    newSess.ID,
+		NewFlowID:    newFl.ID,
 		MessageSequence: *params.MessageSequence,
 		ResponseData:    base64.StdEncoding.EncodeToString(respData),
 		ResponseSize:    len(respData),

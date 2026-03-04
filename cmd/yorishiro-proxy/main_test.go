@@ -16,7 +16,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 func TestInitCA(t *testing.T) {
@@ -329,7 +329,7 @@ func TestM3ComponentInitialization(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestM3ComponentInitialization(t *testing.T) {
 	}
 
 	// Verify FuzzEngine and FuzzRunner construction.
-	// The store satisfies SessionFetcher, SessionRecorder, and FuzzJobStore interfaces.
+	// The store satisfies FlowFetcher, FlowRecorder, and FuzzJobStore interfaces.
 	// Use the default HTTP client with explicit timeout (never http.DefaultClient).
 	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewDefaultHTTPClient(), "")
 	if fuzzEngine == nil {
@@ -383,8 +383,8 @@ func TestM3ComponentInitialization(t *testing.T) {
 		t.Error("fuzzRunner.Registry() returned unexpected registry")
 	}
 
-	// Verify the store satisfies session.FuzzStore interface.
-	var _ session.FuzzStore = store
+	// Verify the store satisfies flow.FuzzStore interface.
+	var _ flow.FuzzStore = store
 }
 
 // registerTestFlags registers all CLI flags on fs in the same way as runWithFlags.

@@ -294,7 +294,7 @@ func TestTargetScope_HTTPForwardProxy_DenyRule(t *testing.T) {
 }
 
 func TestTargetScope_HTTPForwardProxy_BlockedSessionRecording(t *testing.T) {
-	// When a request is blocked by target scope, a session should be recorded
+	// When a request is blocked by target scope, a flow should be recorded
 	// with BlockedBy="target_scope".
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.WriteHeader(gohttp.StatusOK)
@@ -334,12 +334,12 @@ func TestTargetScope_HTTPForwardProxy_BlockedSessionRecording(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// Wait for session recording.
+	// Wait for flow recording.
 	time.Sleep(100 * time.Millisecond)
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
@@ -357,7 +357,7 @@ func TestTargetScope_HTTPForwardProxy_BlockedSessionRecording(t *testing.T) {
 	}
 	// Blocked sessions should not have a receive message.
 	if entry.Receive != nil {
-		t.Error("blocked session should not have a receive message")
+		t.Error("blocked flow should not have a receive message")
 	}
 }
 
@@ -494,7 +494,7 @@ func TestTargetScope_CONNECT_NoRules_AllAllowed(t *testing.T) {
 }
 
 func TestTargetScope_CONNECT_BlockedSessionRecording(t *testing.T) {
-	// When a CONNECT request is blocked by target scope, a session should be
+	// When a CONNECT request is blocked by target scope, a flow should be
 	// recorded with BlockedBy="target_scope".
 	issuer, _ := newTestIssuer(t)
 	store := &mockStore{}
@@ -529,12 +529,12 @@ func TestTargetScope_CONNECT_BlockedSessionRecording(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// Wait for session recording.
+	// Wait for flow recording.
 	time.Sleep(100 * time.Millisecond)
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 
 	entry := entries[0]
@@ -887,7 +887,7 @@ func TestTargetScope_HTTPS_HostMismatchBlocked(t *testing.T) {
 
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 	if entries[0].Session.BlockedBy != "target_scope" {
 		t.Errorf("BlockedBy = %q, want %q", entries[0].Session.BlockedBy, "target_scope")

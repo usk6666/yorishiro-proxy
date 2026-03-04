@@ -11,7 +11,7 @@ TCP address to listen on. Must be a loopback address for security.
 - Only loopback addresses (127.0.0.1, ::1, localhost) are allowed
 
 ### capture_scope (object, optional)
-Controls which requests are recorded to the session store. If omitted, all requests are captured.
+Controls which requests are recorded to the flow store. If omitted, all requests are captured.
 
 - **includes** (array of scope rules): Only matching requests are captured. If empty, all requests match.
 - **excludes** (array of scope rules): Matching requests are excluded. Takes precedence over includes.

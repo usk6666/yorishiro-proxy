@@ -65,7 +65,7 @@ export interface UseQueryOptions {
   enabled?: boolean;
   /** Additional filter parameters. */
   filter?: QueryFilter;
-  /** Session or macro ID (for resource="session", "messages", "macro"). */
+  /** Flow or macro ID (for resource="flow", "messages", "macro"). */
   id?: string;
   /** Fuzz job ID (for resource="fuzz_results"). */
   fuzzId?: string;
@@ -98,7 +98,7 @@ export interface UseQueryResult<T> {
  *
  * @example
  * ```tsx
- * const { data, loading, error } = useQuery("sessions", {
+ * const { data, loading, error } = useQuery("flows", {
  *   pollInterval: 2000,
  *   limit: 50,
  * });
@@ -191,7 +191,7 @@ export interface UseExecuteResult {
  * const { execute, loading, error } = useExecute();
  * await execute({
  *   action: "resend",
- *   params: { session_id: "abc123" },
+ *   params: { flow_id: "abc123" },
  * });
  * ```
  */

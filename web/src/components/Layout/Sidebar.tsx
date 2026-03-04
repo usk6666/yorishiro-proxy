@@ -15,7 +15,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   {
     to: "/",
-    label: "Sessions",
+    label: "Flows",
     end: true,
     icon: <SessionsIcon />,
   },

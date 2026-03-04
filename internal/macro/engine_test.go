@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-// mockSessionFetcher is a test double for SessionFetcher.
-type mockSessionFetcher struct {
-	sessions map[string]*SendRequest
+// mockFlowFetcher is a test double for FlowFetcher.
+type mockFlowFetcher struct {
+	flows map[string]*SendRequest
 }
 
-func (m *mockSessionFetcher) GetSessionRequest(_ context.Context, sessionID string) (*SendRequest, error) {
-	req, ok := m.sessions[sessionID]
+func (m *mockFlowFetcher) GetFlowRequest(_ context.Context, flowID string) (*SendRequest, error) {
+	req, ok := m.flows[flowID]
 	if !ok {
-		return nil, fmt.Errorf("session %q not found", sessionID)
+		return nil, fmt.Errorf("flow %q not found", flowID)
 	}
 	return req, nil
 }
@@ -34,13 +34,13 @@ func mockSendFunc(responses map[string]*SendResponse) SendFunc {
 }
 
 func TestNewEngine(t *testing.T) {
-	fetcher := &mockSessionFetcher{}
+	fetcher := &mockFlowFetcher{}
 	send := func(context.Context, *SendRequest) (*SendResponse, error) { return nil, nil }
 
 	tests := []struct {
 		name    string
 		send    SendFunc
-		fetch   SessionFetcher
+		fetch   FlowFetcher
 		wantErr bool
 	}{
 		{name: "valid", send: send, fetch: fetcher},
@@ -71,7 +71,7 @@ func TestValidateMacro(t *testing.T) {
 		},
 		{
 			name:    "empty name",
-			macro:   &Macro{Steps: []Step{{ID: "s1", SessionID: "sess1"}}},
+			macro:   &Macro{Steps: []Step{{ID: "s1", FlowID: "sess1"}}},
 			wantErr: true,
 		},
 		{
@@ -84,7 +84,7 @@ func TestValidateMacro(t *testing.T) {
 			macro: func() *Macro {
 				steps := make([]Step, MaxSteps+1)
 				for i := range steps {
-					steps[i] = Step{ID: fmt.Sprintf("s%d", i), SessionID: "sess"}
+					steps[i] = Step{ID: fmt.Sprintf("s%d", i), FlowID: "sess"}
 				}
 				return &Macro{Name: "test", Steps: steps}
 			}(),
@@ -94,7 +94,7 @@ func TestValidateMacro(t *testing.T) {
 			name: "empty step ID",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{SessionID: "sess1"}},
+				Steps: []Step{{FlowID: "sess1"}},
 			},
 			wantErr: true,
 		},
@@ -103,14 +103,14 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", SessionID: "sess1"},
-					{ID: "s1", SessionID: "sess2"},
+					{ID: "s1", FlowID: "sess1"},
+					{ID: "s1", FlowID: "sess2"},
 				},
 			},
 			wantErr: true,
 		},
 		{
-			name: "empty session ID",
+			name: "empty flow ID",
 			macro: &Macro{
 				Name:  "test",
 				Steps: []Step{{ID: "s1"}},
@@ -121,7 +121,7 @@ func TestValidateMacro(t *testing.T) {
 			name: "invalid on_error",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{ID: "s1", SessionID: "sess1", OnError: "invalid"}},
+				Steps: []Step{{ID: "s1", FlowID: "sess1", OnError: "invalid"}},
 			},
 			wantErr: true,
 		},
@@ -130,8 +130,8 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", SessionID: "sess1", When: &Guard{Step: "s2"}},
-					{ID: "s2", SessionID: "sess2"},
+					{ID: "s1", FlowID: "sess1", When: &Guard{Step: "s2"}},
+					{ID: "s2", FlowID: "sess2"},
 				},
 			},
 			wantErr: true,
@@ -142,7 +142,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", SessionID: "sess1",
+						ID: "s1", FlowID: "sess1",
 						Extract: []ExtractionRule{{Source: ExtractionSourceBody, From: ExtractionFromResponse}},
 					},
 				},
@@ -155,7 +155,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", SessionID: "sess1",
+						ID: "s1", FlowID: "sess1",
 						Extract: []ExtractionRule{{Name: "var1", From: ExtractionFromResponse}},
 					},
 				},
@@ -168,7 +168,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", SessionID: "sess1",
+						ID: "s1", FlowID: "sess1",
 						Extract: []ExtractionRule{{Name: "var1", Source: ExtractionSourceBody}},
 					},
 				},
@@ -180,8 +180,8 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", SessionID: "sess1"},
-					{ID: "s2", SessionID: "sess2", When: &Guard{Step: "s1", StatusCode: intPtr(200)}},
+					{ID: "s1", FlowID: "sess1"},
+					{ID: "s2", FlowID: "sess2", When: &Guard{Step: "s1", StatusCode: intPtr(200)}},
 				},
 			},
 		},
@@ -190,9 +190,9 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", SessionID: "sess1", OnError: OnErrorAbort},
-					{ID: "s2", SessionID: "sess2", OnError: OnErrorSkip},
-					{ID: "s3", SessionID: "sess3", OnError: OnErrorRetry},
+					{ID: "s1", FlowID: "sess1", OnError: OnErrorAbort},
+					{ID: "s2", FlowID: "sess2", OnError: OnErrorSkip},
+					{ID: "s3", FlowID: "sess3", OnError: OnErrorRetry},
 				},
 			},
 		},
@@ -209,8 +209,8 @@ func TestValidateMacro(t *testing.T) {
 }
 
 func TestEngine_Run_SimpleSequence(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"login-session": {
 				Method:  "POST",
 				URL:     "https://example.com/login",
@@ -254,7 +254,7 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:        "login",
-				SessionID: "login-session",
+				FlowID: "login-session",
 				Extract: []ExtractionRule{
 					{
 						Name:       "session_cookie",
@@ -268,7 +268,7 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 			},
 			{
 				ID:        "get-csrf",
-				SessionID: "csrf-session",
+				FlowID: "csrf-session",
 				OverrideHeaders: map[string]string{
 					"Cookie": "PHPSESSID={{session_cookie}}",
 				},
@@ -319,8 +319,8 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 }
 
 func TestEngine_Run_VarOverride(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/api"},
 		},
 	}
@@ -335,7 +335,7 @@ func TestEngine_Run_VarOverride(t *testing.T) {
 
 	macro := &Macro{
 		Name:  "test",
-		Steps: []Step{{ID: "s1", SessionID: "sess1"}},
+		Steps: []Step{{ID: "s1", FlowID: "sess1"}},
 		InitialVars: map[string]string{
 			"key1": "initial",
 			"key2": "unchanged",
@@ -362,8 +362,8 @@ func TestEngine_Run_VarOverride(t *testing.T) {
 }
 
 func TestEngine_Run_StepGuardSkip(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/check"},
 			"sess2": {Method: "POST", URL: "https://example.com/mfa"},
 			"sess3": {Method: "GET", URL: "https://example.com/api"},
@@ -390,13 +390,13 @@ func TestEngine_Run_StepGuardSkip(t *testing.T) {
 	macro := &Macro{
 		Name: "conditional",
 		Steps: []Step{
-			{ID: "check", SessionID: "sess1"},
+			{ID: "check", FlowID: "sess1"},
 			{
 				ID:        "mfa",
-				SessionID: "sess2",
+				FlowID: "sess2",
 				When:      &Guard{Step: "check", StatusCode: intPtr(302)}, // Only if redirect
 			},
-			{ID: "api", SessionID: "sess3"},
+			{ID: "api", FlowID: "sess3"},
 		},
 	}
 
@@ -420,8 +420,8 @@ func TestEngine_Run_StepGuardSkip(t *testing.T) {
 }
 
 func TestEngine_Run_StepGuardExecute(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/check"},
 			"sess2": {Method: "POST", URL: "https://example.com/mfa"},
 		},
@@ -448,10 +448,10 @@ func TestEngine_Run_StepGuardExecute(t *testing.T) {
 	macro := &Macro{
 		Name: "conditional-execute",
 		Steps: []Step{
-			{ID: "check", SessionID: "sess1"},
+			{ID: "check", FlowID: "sess1"},
 			{
 				ID:        "mfa",
-				SessionID: "sess2",
+				FlowID: "sess2",
 				When: &Guard{
 					Step:        "check",
 					StatusCode:  intPtr(302),
@@ -475,8 +475,8 @@ func TestEngine_Run_StepGuardExecute(t *testing.T) {
 }
 
 func TestEngine_Run_OnErrorAbort(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/fail"},
 			"sess2": {Method: "GET", URL: "https://example.com/ok"},
 		},
@@ -497,8 +497,8 @@ func TestEngine_Run_OnErrorAbort(t *testing.T) {
 	macro := &Macro{
 		Name: "abort-test",
 		Steps: []Step{
-			{ID: "fail-step", SessionID: "sess1", OnError: OnErrorAbort},
-			{ID: "never-reached", SessionID: "sess2"},
+			{ID: "fail-step", FlowID: "sess1", OnError: OnErrorAbort},
+			{ID: "never-reached", FlowID: "sess2"},
 		},
 	}
 
@@ -522,8 +522,8 @@ func TestEngine_Run_OnErrorAbort(t *testing.T) {
 }
 
 func TestEngine_Run_OnErrorSkip(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/fail"},
 			"sess2": {Method: "GET", URL: "https://example.com/ok"},
 		},
@@ -544,8 +544,8 @@ func TestEngine_Run_OnErrorSkip(t *testing.T) {
 	macro := &Macro{
 		Name: "skip-test",
 		Steps: []Step{
-			{ID: "fail-step", SessionID: "sess1", OnError: OnErrorSkip},
-			{ID: "ok-step", SessionID: "sess2"},
+			{ID: "fail-step", FlowID: "sess1", OnError: OnErrorSkip},
+			{ID: "ok-step", FlowID: "sess2"},
 		},
 	}
 
@@ -574,8 +574,8 @@ func TestEngine_Run_OnErrorSkip(t *testing.T) {
 }
 
 func TestEngine_Run_OnErrorRetry(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/flaky"},
 		},
 	}
@@ -600,7 +600,7 @@ func TestEngine_Run_OnErrorRetry(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:           "flaky-step",
-				SessionID:    "sess1",
+				FlowID:    "sess1",
 				OnError:      OnErrorRetry,
 				RetryCount:   3,
 				RetryDelayMs: 1, // Minimal delay for tests.
@@ -622,8 +622,8 @@ func TestEngine_Run_OnErrorRetry(t *testing.T) {
 }
 
 func TestEngine_Run_OnErrorRetryExhausted(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/always-fail"},
 		},
 	}
@@ -642,7 +642,7 @@ func TestEngine_Run_OnErrorRetryExhausted(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:           "always-fail",
-				SessionID:    "sess1",
+				FlowID:    "sess1",
 				OnError:      OnErrorRetry,
 				RetryCount:   2,
 				RetryDelayMs: 1,
@@ -661,8 +661,8 @@ func TestEngine_Run_OnErrorRetryExhausted(t *testing.T) {
 }
 
 func TestEngine_Run_MacroTimeout(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/slow"},
 		},
 	}
@@ -685,7 +685,7 @@ func TestEngine_Run_MacroTimeout(t *testing.T) {
 		Name:      "timeout-test",
 		TimeoutMs: 100, // 100ms macro timeout.
 		Steps: []Step{
-			{ID: "slow-step", SessionID: "sess1", TimeoutMs: 5000},
+			{ID: "slow-step", FlowID: "sess1", TimeoutMs: 5000},
 		},
 	}
 
@@ -700,8 +700,8 @@ func TestEngine_Run_MacroTimeout(t *testing.T) {
 }
 
 func TestEngine_Run_StepTimeout(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/slow"},
 			"sess2": {Method: "GET", URL: "https://example.com/ok"},
 		},
@@ -730,11 +730,11 @@ func TestEngine_Run_StepTimeout(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:        "slow-step",
-				SessionID: "sess1",
+				FlowID: "sess1",
 				TimeoutMs: 100, // Short step timeout.
 				OnError:   OnErrorSkip,
 			},
-			{ID: "ok-step", SessionID: "sess2"},
+			{ID: "ok-step", FlowID: "sess2"},
 		},
 	}
 
@@ -752,8 +752,8 @@ func TestEngine_Run_StepTimeout(t *testing.T) {
 }
 
 func TestEngine_Run_TemplateExpansion(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {
 				Method:  "POST",
 				URL:     "https://example.com/api",
@@ -780,7 +780,7 @@ func TestEngine_Run_TemplateExpansion(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:        "s1",
-				SessionID: "sess1",
+				FlowID: "sess1",
 				OverrideHeaders: map[string]string{
 					"Cookie":       "sid={{session_cookie}}",
 					"X-CSRF-Token": "{{csrf}}",
@@ -820,8 +820,8 @@ func TestEngine_Run_TemplateExpansion(t *testing.T) {
 }
 
 func TestEngine_Run_RequiredExtractionFailure(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/api"},
 		},
 	}
@@ -843,7 +843,7 @@ func TestEngine_Run_RequiredExtractionFailure(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:        "s1",
-				SessionID: "sess1",
+				FlowID: "sess1",
 				Extract: []ExtractionRule{
 					{
 						Name:     "token",
@@ -869,8 +869,8 @@ func TestEngine_Run_RequiredExtractionFailure(t *testing.T) {
 }
 
 func TestEngine_Run_SessionFetchError(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{}, // Empty — no sessions.
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{}, // Empty — no sessions.
 	}
 
 	sendFunc := func(_ context.Context, _ *SendRequest) (*SendResponse, error) {
@@ -885,7 +885,7 @@ func TestEngine_Run_SessionFetchError(t *testing.T) {
 	macro := &Macro{
 		Name: "missing-session",
 		Steps: []Step{
-			{ID: "s1", SessionID: "nonexistent"},
+			{ID: "s1", FlowID: "nonexistent"},
 		},
 	}
 
@@ -901,8 +901,8 @@ func TestEngine_Run_SessionFetchError(t *testing.T) {
 
 func TestEngine_Run_KVStoreIndependence(t *testing.T) {
 	// Verify that each Run call gets an independent KV Store.
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/api"},
 		},
 	}
@@ -924,7 +924,7 @@ func TestEngine_Run_KVStoreIndependence(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:        "s1",
-				SessionID: "sess1",
+				FlowID: "sess1",
 				Extract: []ExtractionRule{
 					{
 						Name:       "token",
@@ -957,8 +957,8 @@ func TestEngine_Run_KVStoreIndependence(t *testing.T) {
 }
 
 func TestEngine_Run_ContextCancellation(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/api"},
 		},
 	}
@@ -987,7 +987,7 @@ func TestEngine_Run_ContextCancellation(t *testing.T) {
 		Name:      "cancel-test",
 		TimeoutMs: 10_000,
 		Steps: []Step{
-			{ID: "s1", SessionID: "sess1"},
+			{ID: "s1", FlowID: "sess1"},
 		},
 	}
 
@@ -1002,8 +1002,8 @@ func TestEngine_Run_ContextCancellation(t *testing.T) {
 }
 
 func TestEngine_Run_OverrideURL(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {
 				Method: "GET",
 				URL:    "https://example.com/original",
@@ -1027,7 +1027,7 @@ func TestEngine_Run_OverrideURL(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:          "s1",
-				SessionID:   "sess1",
+				FlowID:   "sess1",
 				OverrideURL: "https://example.com/{{path}}",
 			},
 		},
@@ -1048,8 +1048,8 @@ func TestEngine_Run_OverrideURL(t *testing.T) {
 }
 
 func TestEngine_Run_OverrideMethod(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		sessions: map[string]*SendRequest{
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
 			"sess1": {Method: "GET", URL: "https://example.com/api"},
 		},
 	}
@@ -1068,7 +1068,7 @@ func TestEngine_Run_OverrideMethod(t *testing.T) {
 	macro := &Macro{
 		Name: "method-override",
 		Steps: []Step{
-			{ID: "s1", SessionID: "sess1", OverrideMethod: "POST"},
+			{ID: "s1", FlowID: "sess1", OverrideMethod: "POST"},
 		},
 	}
 
@@ -1100,7 +1100,7 @@ func TestBuildRequest(t *testing.T) {
 	body := "new body with {{token}}"
 	step := &Step{
 		ID:             "s1",
-		SessionID:      "sess1",
+		FlowID:      "sess1",
 		OverrideMethod: "POST",
 		OverrideURL:    "https://example.com/new",
 		OverrideHeaders: map[string]string{
@@ -1150,7 +1150,7 @@ func TestBuildRequest_NoOverrides(t *testing.T) {
 		Body:    []byte("body"),
 	}
 
-	step := &Step{ID: "s1", SessionID: "sess1"}
+	step := &Step{ID: "s1", FlowID: "sess1"}
 	kvStore := map[string]string{}
 
 	req, err := buildRequest(step, base, kvStore)

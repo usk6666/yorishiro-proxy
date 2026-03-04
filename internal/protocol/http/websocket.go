@@ -15,7 +15,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // isWebSocketUpgrade checks if the HTTP request is a WebSocket upgrade request.
@@ -43,12 +43,12 @@ func headerContains(headerValue, token string) bool {
 }
 
 // wsErrorRecordParams holds the parameters needed to record a WebSocket
-// upgrade failure as an error session.
+// upgrade failure as an error flow.
 type wsErrorRecordParams struct {
 	connID     string
 	clientAddr string
 	start      time.Time
-	connInfo   *session.ConnectionInfo
+	connInfo   *flow.ConnectionInfo
 	req        *gohttp.Request
 }
 
@@ -87,7 +87,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 		connID:     connID,
 		clientAddr: clientAddr,
 		start:      start,
-		connInfo:   &session.ConnectionInfo{ClientAddr: clientAddr},
+		connInfo:   &flow.ConnectionInfo{ClientAddr: clientAddr},
 		req:        req,
 	}
 
@@ -137,7 +137,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 		return fmt.Errorf("write websocket 101 response to client: %w", err)
 	}
 
-	connInfo := &session.ConnectionInfo{
+	connInfo := &flow.ConnectionInfo{
 		ClientAddr: clientAddr,
 		ServerAddr: serverAddr,
 	}
@@ -181,7 +181,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 		connID:     connID,
 		clientAddr: clientAddr,
 		start:      start,
-		connInfo: &session.ConnectionInfo{
+		connInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 			TLSVersion: tlsMeta.Version,
 			TLSCipher:  tlsMeta.CipherSuite,
@@ -266,7 +266,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 		return fmt.Errorf("write wss 101 response to client: %w", err)
 	}
 
-	connInfo := &session.ConnectionInfo{
+	connInfo := &flow.ConnectionInfo{
 		ClientAddr:           clientAddr,
 		ServerAddr:           serverAddr,
 		TLSVersion:           tlsMeta.Version,
@@ -281,9 +281,9 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
-// recordWebSocketError records a WebSocket upgrade failure as an error session.
+// recordWebSocketError records a WebSocket upgrade failure as an error flow.
 // It creates a Session(State="error") with the upgrade request as the send
-// message (no receive message). The error is stored in the session tags.
+// message (no receive message). The error is stored in the flow tags.
 //
 // This is called from handleWebSocket and handleWebSocketTLS error paths where
 // the WebSocket upgrade could not complete (dial failure, TLS handshake failure,
@@ -305,24 +305,24 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 		"error": upstreamErr.Error(),
 	}
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      p.connID,
 		Protocol:    "WebSocket",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "error",
 		Timestamp:   p.start,
 		Duration:    duration,
 		Tags:        tags,
 		ConnInfo:    p.connInfo,
 	}
-	if err := h.Store.SaveSession(ctx, sess); err != nil {
-		logger.Error("websocket error session save failed",
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("websocket error flow save failed",
 			"method", p.req.Method, "url", p.req.URL.String(), "error", err)
 		return
 	}
 
-	sendMsg := &session.Message{
-		SessionID: sess.ID,
+	sendMsg := &flow.Message{
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: p.start,

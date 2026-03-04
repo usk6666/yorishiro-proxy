@@ -18,14 +18,14 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // startHTTPSProxyWithPassthrough creates and starts a proxy with TLS MITM
 // support and a configured passthrough list. Returns the listener, handler,
 // passthrough list, and cancel function.
-func startHTTPSProxyWithPassthrough(t *testing.T, ctx context.Context, store session.Store, ca *cert.CA, patterns []string) (*proxy.Listener, *protohttp.Handler, *proxy.PassthroughList, context.CancelFunc) {
+func startHTTPSProxyWithPassthrough(t *testing.T, ctx context.Context, store flow.Store, ca *cert.CA, patterns []string) (*proxy.Listener, *protohttp.Handler, *proxy.PassthroughList, context.CancelFunc) {
 	t.Helper()
 
 	pl := proxy.NewPassthroughList()
@@ -106,7 +106,7 @@ func TestIntegration_TLSPassthrough_RelayWithoutMITM(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -178,9 +178,9 @@ func TestIntegration_TLSPassthrough_RelayWithoutMITM(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "passthrough-response")
 	}
 
-	// Verify NO session was recorded (passthrough skips session recording).
+	// Verify NO flow was recorded (passthrough skips flow recording).
 	time.Sleep(200 * time.Millisecond)
-	entries, err := store.ListSessions(ctx, session.ListOptions{Limit: 10})
+	entries, err := store.ListFlows(ctx, flow.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("List sessions: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 
 	// Verify session WAS recorded (non-passthrough gets MITM'd).
 	time.Sleep(200 * time.Millisecond)
-	entries, err := store.ListSessions(ctx, session.ListOptions{Protocol: "HTTPS", Limit: 10})
+	entries, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
 		t.Fatalf("List sessions: %v", err)
 	}
@@ -250,11 +250,11 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 		t.Fatalf("expected 1 HTTPS session (MITM), got %d", len(entries))
 	}
 
-	sess := entries[0]
-	if sess.Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTPS")
+	fl := entries[0]
+	if fl.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
-	recvMsgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "receive"})
+	recvMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "receive"})
 	if mErr != nil {
 		t.Fatalf("GetMessages: %v", mErr)
 	}
@@ -281,7 +281,7 @@ func TestIntegration_TLSPassthrough_WildcardPattern(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	entries, err := store.ListSessions(ctx, session.ListOptions{Limit: 10})
+	entries, err := store.ListFlows(ctx, flow.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -428,8 +428,8 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// Session count should still be 1 (passthrough doesn't record).
-	entries, err = store.ListSessions(ctx, session.ListOptions{Limit: 10})
+	// Flow count should still be 1 (passthrough doesn't record).
+	entries, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestIntegration_TLSPassthrough_VerifyCertIsUpstream(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}

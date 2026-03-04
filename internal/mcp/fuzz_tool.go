@@ -7,7 +7,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // fuzzInput is the typed input for the fuzz tool.
@@ -22,8 +22,8 @@ type fuzzInput struct {
 // fuzzParams holds the union of all fuzz action-specific parameters.
 // Only the fields relevant to the specified action are used.
 type fuzzParams struct {
-	// SessionID is the template session for fuzz action.
-	SessionID string `json:"session_id,omitempty" jsonschema:"template session ID for fuzz"`
+	// FlowID is the template flow for fuzz action.
+	FlowID string `json:"flow_id,omitempty" jsonschema:"template flow ID for fuzz"`
 
 	// fuzz parameters
 	AttackType  string                       `json:"attack_type,omitempty" jsonschema:"fuzz attack type: sequential or parallel"`
@@ -91,8 +91,8 @@ type executeFuzzControlResult struct {
 
 // handleFuzzStart handles the fuzz action within the fuzz tool.
 func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp.CallToolResult, *fuzzer.AsyncResult, error) {
-	if params.SessionID == "" {
-		return nil, nil, fmt.Errorf("session_id is required for fuzz action")
+	if params.FlowID == "" {
+		return nil, nil, fmt.Errorf("flow_id is required for fuzz action")
 	}
 	if params.AttackType == "" {
 		return nil, nil, fmt.Errorf("attack_type is required for fuzz action")
@@ -105,16 +105,16 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		return nil, nil, fmt.Errorf("invalid hooks: %w", err)
 	}
 
-	// Target scope enforcement: check the template session's URL before starting fuzz.
+	// Target scope enforcement: check the template flow's URL before starting fuzz.
 	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
 		if s.deps.store == nil {
-			return nil, nil, fmt.Errorf("session store is not initialized")
+			return nil, nil, fmt.Errorf("flow store is not initialized")
 		}
-		templateSess, err := s.deps.store.GetSession(ctx, params.SessionID)
+		templateSess, err := s.deps.store.GetFlow(ctx, params.FlowID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("get template session for target scope check: %w", err)
+			return nil, nil, fmt.Errorf("get template flow for target scope check: %w", err)
 		}
-		sendMsgs, err := s.deps.store.GetMessages(ctx, templateSess.ID, session.MessageListOptions{Direction: "send"})
+		sendMsgs, err := s.deps.store.GetMessages(ctx, templateSess.ID, flow.MessageListOptions{Direction: "send"})
 		if err != nil {
 			return nil, nil, fmt.Errorf("get send messages for target scope check: %w", err)
 		}
@@ -131,7 +131,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 
 	cfg := fuzzer.RunConfig{
 		Config: fuzzer.Config{
-			SessionID:   params.SessionID,
+			FlowID:   params.FlowID,
 			AttackType:  params.AttackType,
 			Positions:   params.Positions,
 			PayloadSets: params.PayloadSets,

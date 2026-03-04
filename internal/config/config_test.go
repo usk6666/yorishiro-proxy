@@ -73,9 +73,9 @@ func TestValidate_InvalidFields(t *testing.T) {
 			errSub: "invalid log format",
 		},
 		{
-			name:   "retention_max_sessions negative",
-			modify: func(c *Config) { c.RetentionMaxSessions = -1 },
-			errSub: "retention_max_sessions must be >= 0",
+			name:   "retention_max_flows negative",
+			modify: func(c *Config) { c.RetentionMaxFlows = -1 },
+			errSub: "retention_max_flows must be >= 0",
 		},
 		{
 			name:   "retention_max_age negative",
@@ -167,12 +167,12 @@ func TestValidate_ValidFields(t *testing.T) {
 			modify: func(c *Config) { c.LogFormat = "Text" },
 		},
 		{
-			name:   "retention_max_sessions zero (unlimited)",
-			modify: func(c *Config) { c.RetentionMaxSessions = 0 },
+			name:   "retention_max_flows zero (unlimited)",
+			modify: func(c *Config) { c.RetentionMaxFlows = 0 },
 		},
 		{
-			name:   "retention_max_sessions positive",
-			modify: func(c *Config) { c.RetentionMaxSessions = 1000 },
+			name:   "retention_max_flows positive",
+			modify: func(c *Config) { c.RetentionMaxFlows = 1000 },
 		},
 		{
 			name:   "retention_max_age zero (unlimited)",
@@ -235,7 +235,7 @@ func TestDefault_FieldsHaveSensibleDefaults(t *testing.T) {
 		{"CACertPath", cfg.CACertPath, true},
 		{"CAKeyPath", cfg.CAKeyPath, true},
 		{"LogFile", cfg.LogFile, true},
-		{"RetentionMaxSessions", cfg.RetentionMaxSessions, true},
+		{"RetentionMaxFlows", cfg.RetentionMaxFlows, true},
 		{"RetentionMaxAge", cfg.RetentionMaxAge, true},
 		{"CleanupInterval", cfg.CleanupInterval, false},
 		{"MCPHTTPAddr", cfg.MCPHTTPAddr, true},

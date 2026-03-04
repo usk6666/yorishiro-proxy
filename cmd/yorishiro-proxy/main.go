@@ -27,7 +27,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -201,25 +201,25 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		return fmt.Errorf("ensure db directory: %w", err)
 	}
 
-	// Initialize SQLite session store.
-	store, err := session.NewSQLiteStore(ctx, cfg.DBPath, logger)
+	// Initialize SQLite flow store.
+	store, err := flow.NewSQLiteStore(ctx, cfg.DBPath, logger)
 	if err != nil {
-		return fmt.Errorf("init session store: %w", err)
+		return fmt.Errorf("init flow store: %w", err)
 	}
 	defer store.Close()
 
-	// Start session cleaner if retention policy is configured.
-	cleanerCfg := session.CleanerConfig{
-		MaxSessions: cfg.RetentionMaxSessions,
-		MaxAge:      cfg.RetentionMaxAge,
-		Interval:    cfg.CleanupInterval,
+	// Start flow cleaner if retention policy is configured.
+	cleanerCfg := flow.CleanerConfig{
+		MaxFlows: cfg.RetentionMaxFlows,
+		MaxAge:   cfg.RetentionMaxAge,
+		Interval: cfg.CleanupInterval,
 	}
 	if cleanerCfg.Enabled() {
-		cleaner := session.NewCleaner(store, cleanerCfg, logger)
+		cleaner := flow.NewCleaner(store, cleanerCfg, logger)
 		cleaner.Start(ctx)
 		defer cleaner.Stop()
-		logger.Info("session cleaner started",
-			"max_sessions", cleanerCfg.MaxSessions,
+		logger.Info("flow cleaner started",
+			"max_flows", cleanerCfg.MaxFlows,
 			"max_age", cleanerCfg.MaxAge,
 			"interval", cleanerCfg.Interval)
 	}
@@ -248,7 +248,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	httpHandler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	httpHandler.SetPassthroughList(passthrough)
 
-	// Create shared capture scope for controlling session recording.
+	// Create shared capture scope for controlling flow recording.
 	scope := proxy.NewCaptureScope()
 	httpHandler.SetCaptureScope(scope)
 
@@ -361,7 +361,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Always start stdio transport (single session via Server.Run).
+	// Always start stdio transport (single flow via Server.Run).
 	g.Go(func() error {
 		transport := &gomcp.StdioTransport{}
 		if err := mcpServer.Run(gctx, transport); err != nil {
@@ -375,7 +375,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		return nil
 	})
 
-	// Optionally start Streamable HTTP transport (multi-session via Server.Connect).
+	// Optionally start Streamable HTTP transport (multi-flow via Server.Connect).
 	if cfg.MCPHTTPAddr != "" {
 		g.Go(func() error {
 			if err := mcpServer.RunHTTP(gctx, cfg.MCPHTTPAddr); err != nil {

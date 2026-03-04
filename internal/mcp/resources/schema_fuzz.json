@@ -14,9 +14,9 @@
       "type": "object",
       "description": "Action-specific parameters.",
       "properties": {
-        "session_id": {
+        "flow_id": {
           "type": "string",
-          "description": "Template session ID for fuzz action."
+          "description": "Template flow ID for fuzz action."
         },
         "attack_type": {
           "type": "string",

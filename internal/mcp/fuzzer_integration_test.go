@@ -15,7 +15,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -34,9 +34,9 @@ func callFuzz(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp
 	return result
 }
 
-// setupFuzzTestSession creates an MCP client session with a real fuzzer runner,
-// backed by a real SQLite store (which satisfies both session.Store and session.FuzzStore).
-func setupFuzzTestSession(t *testing.T, store session.Store, fuzzStore session.FuzzStore, doer *http.Client) *gomcp.ClientSession {
+// setupFuzzTestSession creates an MCP client flow with a real fuzzer runner,
+// backed by a real SQLite store (which satisfies both flow.Store and flow.FuzzStore).
+func setupFuzzTestSession(t *testing.T, store flow.Store, fuzzStore flow.FuzzStore, doer *http.Client) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -71,12 +71,12 @@ func setupFuzzTestSession(t *testing.T, store session.Store, fuzzStore session.F
 	return cs
 }
 
-// newFuzzTestStore creates a SQLite store that satisfies both session.Store and session.FuzzStore.
-func newFuzzTestStore(t *testing.T) *session.SQLiteStore {
+// newFuzzTestStore creates a SQLite store that satisfies both flow.Store and flow.FuzzStore.
+func newFuzzTestStore(t *testing.T) *flow.SQLiteStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "fuzz_test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(context.Background(), dbPath, logger)
+	store, err := flow.NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -84,24 +84,24 @@ func newFuzzTestStore(t *testing.T) *session.SQLiteStore {
 	return store
 }
 
-// saveFuzzTemplateSession creates a template session suitable for fuzzing.
-func saveFuzzTemplateSession(t *testing.T, store session.Store, serverURL string) string {
+// saveFuzzTemplateSession creates a template flow suitable for fuzzing.
+func saveFuzzTemplateSession(t *testing.T, store flow.Store, serverURL string) string {
 	t.Helper()
 	ctx := context.Background()
 
 	u, _ := url.Parse(serverURL + "/api/login")
-	sess := &session.Session{
+	fl := &flow.Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    50 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &session.Message{
-		SessionID: sess.ID,
+	sendMsg := &flow.Message{
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -113,7 +113,7 @@ func saveFuzzTemplateSession(t *testing.T, store session.Store, serverURL string
 	if err := store.AppendMessage(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	return sess.ID
+	return fl.ID
 }
 
 // TestM3_Fuzz_Sequential verifies that a sequential fuzz campaign executes all
@@ -137,7 +137,7 @@ func TestM3_Fuzz_Sequential(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"session_id":  sessID,
+			"flow_id":  sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -258,7 +258,7 @@ func TestM3_Fuzz_PauseResume(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"session_id":  sessID,
+			"flow_id":  sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -350,7 +350,7 @@ func TestM3_Fuzz_Cancel(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"session_id":  sessID,
+			"flow_id":  sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -450,7 +450,7 @@ func TestM3_Fuzz_StopOnStatusCode(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"session_id":  sessID,
+			"flow_id":  sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -528,7 +528,7 @@ func TestM3_Fuzz_QueryFuzzResults(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"session_id":  sessID,
+			"flow_id":  sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{

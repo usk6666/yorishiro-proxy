@@ -10,11 +10,11 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// setupConfigureTestSessionWithManager creates a connected MCP client session
+// setupConfigureTestSessionWithManager creates a connected MCP client flow
 // with a running proxy manager for testing configure tool limits/timeouts.
 func setupConfigureTestSessionWithManager(t *testing.T, manager *proxy.Manager, extraOpts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
@@ -553,8 +553,8 @@ func TestQuery_Status_NoManager_ShowsDefaults(t *testing.T) {
 	}
 }
 
-// setupQueryStatusTestSession creates an MCP client session with a manager for query status tests.
-func setupQueryStatusTestSession(t *testing.T, store session.Store, manager *proxy.Manager, opts ...ServerOption) *gomcp.ClientSession {
+// setupQueryStatusTestSession creates an MCP client flow with a manager for query status tests.
+func setupQueryStatusTestSession(t *testing.T, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 

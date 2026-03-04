@@ -10,54 +10,54 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// mockSessionFetcher implements SessionFetcher for testing.
-type mockSessionFetcher struct {
-	session  *session.Session
-	messages []*session.Message
+// mockFlowFetcher implements FlowFetcher for testing.
+type mockFlowFetcher struct {
+	fl       *flow.Flow
+	messages []*flow.Message
 	getErr   error
 	msgErr   error
 }
 
-func (m *mockSessionFetcher) GetSession(_ context.Context, id string) (*session.Session, error) {
+func (m *mockFlowFetcher) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
 	if m.getErr != nil {
 		return nil, m.getErr
 	}
-	if m.session == nil {
-		return nil, fmt.Errorf("session not found")
+	if m.fl == nil {
+		return nil, fmt.Errorf("flow not found")
 	}
-	return m.session, nil
+	return m.fl, nil
 }
 
-func (m *mockSessionFetcher) GetMessages(_ context.Context, _ string, _ session.MessageListOptions) ([]*session.Message, error) {
+func (m *mockFlowFetcher) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
 	if m.msgErr != nil {
 		return nil, m.msgErr
 	}
 	return m.messages, nil
 }
 
-// mockSessionRecorder implements SessionRecorder for testing.
-type mockSessionRecorder struct {
-	sessions []*session.Session
-	messages []*session.Message
+// mockFlowRecorder implements FlowRecorder for testing.
+type mockFlowRecorder struct {
+	flows []*flow.Flow
+	messages []*flow.Message
 	saveErr  error
 	msgErr   error
 }
 
-func (m *mockSessionRecorder) SaveSession(_ context.Context, s *session.Session) error {
+func (m *mockFlowRecorder) SaveFlow(_ context.Context, s *flow.Flow) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
 	if s.ID == "" {
-		s.ID = fmt.Sprintf("sess-%d", len(m.sessions))
+		s.ID = fmt.Sprintf("sess-%d", len(m.flows))
 	}
-	m.sessions = append(m.sessions, s)
+	m.flows = append(m.flows, s)
 	return nil
 }
 
-func (m *mockSessionRecorder) AppendMessage(_ context.Context, msg *session.Message) error {
+func (m *mockFlowRecorder) AppendMessage(_ context.Context, msg *flow.Message) error {
 	if m.msgErr != nil {
 		return m.msgErr
 	}
@@ -67,12 +67,12 @@ func (m *mockSessionRecorder) AppendMessage(_ context.Context, msg *session.Mess
 
 // mockFuzzJobStore implements FuzzJobStore for testing.
 type mockFuzzJobStore struct {
-	jobs    []*session.FuzzJob
-	results []*session.FuzzResult
+	jobs    []*flow.FuzzJob
+	results []*flow.FuzzResult
 	saveErr error
 }
 
-func (m *mockFuzzJobStore) SaveFuzzJob(_ context.Context, job *session.FuzzJob) error {
+func (m *mockFuzzJobStore) SaveFuzzJob(_ context.Context, job *flow.FuzzJob) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
@@ -80,7 +80,7 @@ func (m *mockFuzzJobStore) SaveFuzzJob(_ context.Context, job *session.FuzzJob) 
 	return nil
 }
 
-func (m *mockFuzzJobStore) UpdateFuzzJob(_ context.Context, job *session.FuzzJob) error {
+func (m *mockFuzzJobStore) UpdateFuzzJob(_ context.Context, job *flow.FuzzJob) error {
 	for i, j := range m.jobs {
 		if j.ID == job.ID {
 			m.jobs[i] = job
@@ -90,7 +90,7 @@ func (m *mockFuzzJobStore) UpdateFuzzJob(_ context.Context, job *session.FuzzJob
 	return nil
 }
 
-func (m *mockFuzzJobStore) SaveFuzzResult(_ context.Context, result *session.FuzzResult) error {
+func (m *mockFuzzJobStore) SaveFuzzResult(_ context.Context, result *flow.FuzzResult) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
@@ -138,7 +138,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: Config{
-				SessionID:  "sess-1",
+				FlowID:  "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X-A", PayloadSet: "set-a"},
@@ -149,19 +149,19 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:    "missing session_id",
+			name:    "missing flow_id",
 			cfg:     Config{AttackType: "sequential"},
 			wantErr: true,
 		},
 		{
 			name:    "missing attack_type",
-			cfg:     Config{SessionID: "sess-1"},
+			cfg:     Config{FlowID: "sess-1"},
 			wantErr: true,
 		},
 		{
 			name: "invalid attack_type",
 			cfg: Config{
-				SessionID:  "sess-1",
+				FlowID:  "sess-1",
 				AttackType: "invalid",
 				Positions:  []Position{{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"}},
 				PayloadSets: map[string]PayloadSet{
@@ -173,7 +173,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "no positions",
 			cfg: Config{
-				SessionID:  "sess-1",
+				FlowID:  "sess-1",
 				AttackType: "sequential",
 			},
 			wantErr: true,
@@ -181,7 +181,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "duplicate position ids",
 			cfg: Config{
-				SessionID:  "sess-1",
+				FlowID:  "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -196,7 +196,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "missing payload set reference",
 			cfg: Config{
-				SessionID:  "sess-1",
+				FlowID:  "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "missing"},
@@ -220,14 +220,14 @@ func TestConfig_Validate(t *testing.T) {
 func TestEngine_Run_Sequential(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api?key=val")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -240,7 +240,7 @@ func TestEngine_Run_Sequential(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 	httpDoer := &mockHTTPDoer{
 		responses: []*http.Response{
@@ -253,7 +253,7 @@ func TestEngine_Run_Sequential(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		SessionID:  "template-1",
+		FlowID:  "template-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{
@@ -300,8 +300,8 @@ func TestEngine_Run_Sequential(t *testing.T) {
 	}
 
 	// Verify sessions were recorded.
-	if len(recorder.sessions) != 3 {
-		t.Fatalf("recorded sessions = %d, want 3", len(recorder.sessions))
+	if len(recorder.flows) != 3 {
+		t.Fatalf("recorded flows = %d, want 3", len(recorder.flows))
 	}
 
 	// Verify messages (send + receive for each iteration).
@@ -320,14 +320,14 @@ func TestEngine_Run_Sequential(t *testing.T) {
 func TestEngine_Run_Parallel(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/login")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "POST",
 				URL:       testURL,
@@ -337,7 +337,7 @@ func TestEngine_Run_Parallel(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 	httpDoer := &mockHTTPDoer{
 		responses: []*http.Response{
@@ -349,7 +349,7 @@ func TestEngine_Run_Parallel(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		SessionID:  "template-1",
+		FlowID:  "template-1",
 		AttackType: "parallel",
 		Positions: []Position{
 			{ID: "pos-0", Location: "body_json", JSONPath: "$.username", PayloadSet: "users"},
@@ -378,14 +378,14 @@ func TestEngine_Run_Parallel(t *testing.T) {
 func TestEngine_Run_WithRemovePosition(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api?debug=true&key=val")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "template-1",
+				FlowID: "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -394,14 +394,14 @@ func TestEngine_Run_WithRemovePosition(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 	httpDoer := &mockHTTPDoer{}
 
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		SessionID:  "template-1",
+		FlowID:  "template-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "query", Name: "debug", Mode: "remove"},
@@ -433,13 +433,13 @@ func TestEngine_Run_InvalidConfig(t *testing.T) {
 }
 
 func TestEngine_Run_SessionNotFound(t *testing.T) {
-	fetcher := &mockSessionFetcher{
+	fetcher := &mockFlowFetcher{
 		getErr: fmt.Errorf("not found"),
 	}
 	engine := NewEngine(fetcher, nil, nil, nil, "")
 
 	cfg := Config{
-		SessionID:  "nonexistent",
+		FlowID:  "nonexistent",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -456,17 +456,17 @@ func TestEngine_Run_SessionNotFound(t *testing.T) {
 }
 
 func TestEngine_Run_NoSendMessages(t *testing.T) {
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{}, // no send messages
+		messages: []*flow.Message{}, // no send messages
 	}
 	engine := NewEngine(fetcher, nil, nil, nil, "")
 
 	cfg := Config{
-		SessionID:  "sess-1",
+		FlowID:  "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -485,14 +485,14 @@ func TestEngine_Run_NoSendMessages(t *testing.T) {
 func TestEngine_Run_ContextCancelled(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "sess-1",
+				FlowID: "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -501,7 +501,7 @@ func TestEngine_Run_ContextCancelled(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 
 	// Create a doer that blocks until context is cancelled.
@@ -515,7 +515,7 @@ func TestEngine_Run_ContextCancelled(t *testing.T) {
 	cancel() // Cancel immediately.
 
 	cfg := Config{
-		SessionID:  "sess-1",
+		FlowID:  "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -534,14 +534,14 @@ func TestEngine_Run_ContextCancelled(t *testing.T) {
 func TestEngine_Run_HTTPError(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "sess-1",
+				FlowID: "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -550,7 +550,7 @@ func TestEngine_Run_HTTPError(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 	httpDoer := &mockHTTPDoer{
 		err: fmt.Errorf("connection refused"),
@@ -559,7 +559,7 @@ func TestEngine_Run_HTTPError(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		SessionID:  "sess-1",
+		FlowID:  "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -594,14 +594,14 @@ func TestEngine_Run_HTTPError(t *testing.T) {
 func TestEngine_Run_RangePayloads(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/user/1")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "sess-1",
+				FlowID: "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -610,7 +610,7 @@ func TestEngine_Run_RangePayloads(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 	httpDoer := &mockHTTPDoer{}
 
@@ -618,7 +618,7 @@ func TestEngine_Run_RangePayloads(t *testing.T) {
 
 	start, end := 1, 3
 	cfg := Config{
-		SessionID:  "sess-1",
+		FlowID:  "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "path", Match: "/user/(\\d+)", PayloadSet: "ids"},
@@ -644,14 +644,14 @@ func TestEngine_Run_RangePayloads(t *testing.T) {
 func TestEngine_Run_TimeoutMs(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "sess-1",
+				FlowID: "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -660,14 +660,14 @@ func TestEngine_Run_TimeoutMs(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 	httpDoer := &mockHTTPDoer{}
 
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		SessionID:  "sess-1",
+		FlowID:  "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -689,7 +689,7 @@ func TestEngine_Run_TimeoutMs(t *testing.T) {
 
 func TestBuildRequestData(t *testing.T) {
 	u, _ := url.Parse("http://example.com/path")
-	msg := &session.Message{
+	msg := &flow.Message{
 		Method: "POST",
 		URL:    u,
 		Headers: map[string][]string{
@@ -739,14 +739,14 @@ func TestResolvePayloads(t *testing.T) {
 func TestEngine_Run_JobTimestamps(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	fetcher := &mockSessionFetcher{
-		session: &session.Session{
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*session.Message{
+		messages: []*flow.Message{
 			{
-				SessionID: "sess-1",
+				FlowID: "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -755,7 +755,7 @@ func TestEngine_Run_JobTimestamps(t *testing.T) {
 		},
 	}
 
-	recorder := &mockSessionRecorder{}
+	recorder := &mockFlowRecorder{}
 	fuzzStore := &mockFuzzJobStore{}
 	httpDoer := &mockHTTPDoer{}
 
@@ -764,7 +764,7 @@ func TestEngine_Run_JobTimestamps(t *testing.T) {
 	before := time.Now()
 
 	cfg := Config{
-		SessionID:  "sess-1",
+		FlowID:  "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},

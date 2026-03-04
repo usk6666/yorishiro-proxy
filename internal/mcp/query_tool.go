@@ -12,23 +12,23 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // queryInput is the typed input for the query tool.
 type queryInput struct {
-	// Resource specifies what to query: sessions, session, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results.
-	Resource string `json:"resource" jsonschema:"resource to query: sessions, session, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results"`
+	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results.
+	Resource string `json:"resource" jsonschema:"resource to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results"`
 
-	// ID is required for session and messages resources.
-	// For session: the session ID. For messages: the session_id.
-	ID string `json:"id,omitempty" jsonschema:"session ID (required for session and messages resources)"`
+	// ID is required for flow and messages resources.
+	// For flow: the flow ID. For messages: the flow_id.
+	ID string `json:"id,omitempty" jsonschema:"flow ID (required for flow and messages resources)"`
 
 	// FuzzID is required for the fuzz_results resource (fuzz job ID).
 	FuzzID string `json:"fuzz_id,omitempty" jsonschema:"fuzz job ID (required for fuzz_results resource)"`
 
-	// Filter is used with the sessions and fuzz resources for filtering results.
-	Filter *queryFilter `json:"filter,omitempty" jsonschema:"filter options for sessions and fuzz resources"`
+	// Filter is used with the flows and fuzz resources for filtering results.
+	Filter *queryFilter `json:"filter,omitempty" jsonschema:"filter options for flows and fuzz resources"`
 
 	// Fields controls which fields are returned in the response.
 	// If empty, all fields are returned.
@@ -44,20 +44,20 @@ type queryInput struct {
 	Offset int `json:"offset,omitempty" jsonschema:"number of items to skip for pagination (must be >= 0)"`
 }
 
-// queryFilter contains filter options for the sessions and fuzz resources.
+// queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
-	// Protocol filters sessions by protocol (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP").
+	// Protocol filters flows by protocol (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP").
 	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)"`
-	// Method filters sessions by HTTP method (e.g. "GET", "POST").
+	// Method filters flows by HTTP method (e.g. "GET", "POST").
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`
-	// URLPattern filters sessions by URL using a substring search pattern.
+	// URLPattern filters flows by URL using a substring search pattern.
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
-	// StatusCode filters sessions/fuzz_results by HTTP response status code.
+	// StatusCode filters flows/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
-	// BlockedBy filters sessions by blocked_by value (e.g. "target_scope", "intercept_drop").
+	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop").
 	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop)"`
-	// State filters sessions by lifecycle state ("active", "complete", or "error").
-	State string `json:"state,omitempty" jsonschema:"session lifecycle state filter (active, complete, error)"`
+	// State filters flows by lifecycle state ("active", "complete", or "error").
+	State string `json:"state,omitempty" jsonschema:"flow lifecycle state filter (active, complete, error)"`
 	// Direction filters messages by direction ("send" or "receive").
 	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
 	// BodyContains filters fuzz_results by response body substring.
@@ -69,28 +69,28 @@ type queryFilter struct {
 }
 
 // availableResources lists all valid resource names for error messages.
-var availableResources = []string{"sessions", "session", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"}
+var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"}
 
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "query",
-		Description: "Unified information query tool. Retrieve sessions, session details, messages, " +
+		Description: "Unified information query tool. Retrieve flows, flow details, messages, " +
 			"proxy status, configuration, CA certificate, intercept queue, macro definitions, or fuzz results. " +
-			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
-			"The 'id' parameter is required for session, messages, and macro resources. " +
+			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
+			"The 'id' parameter is required for flow, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering sessions by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop), and state (active, complete, error); " +
+			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop), and state (active, complete, error); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code and body_contains. " +
-			"Sessions include protocol_summary with protocol-specific information. " +
-			"Session state indicates lifecycle: 'active' (in progress), 'complete' (finished), 'error' (failed with 502 etc.). " +
-			"Streaming sessions (session_type != unary) include message_preview with the first 10 messages. " +
+			"Flows include protocol_summary with protocol-specific information. " +
+			"Flow state indicates lifecycle: 'active' (in progress), 'complete' (finished), 'error' (failed with 502 etc.). " +
+			"Streaming flows (flow_type != unary) include message_preview with the first 10 messages. " +
 			"Messages include metadata with protocol-specific fields (e.g. WebSocket opcode, gRPC service/method/grpc_status, variant original/modified). " +
-			"When intercept/transform modifies a request, the session contains variant messages: original (seq=0, variant=original) and modified (seq=1, variant=modified). " +
+			"When intercept/transform modifies a request, the flow contains variant messages: original (seq=0, variant=original) and modified (seq=1, variant=modified). " +
 			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
 			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
-			"Results are paginated with limit/offset for sessions, messages, fuzz_jobs, and fuzz_results resources. " +
+			"Results are paginated with limit/offset for flows, messages, fuzz_jobs, and fuzz_results resources. " +
 			"'intercept_queue' returns currently blocked requests waiting for release/modify_and_forward/drop actions.",
 	}, s.handleQuery)
 }
@@ -98,10 +98,10 @@ func (s *Server) registerQuery() {
 // handleQuery dispatches the query request to the appropriate resource handler.
 func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, input queryInput) (*gomcp.CallToolResult, any, error) {
 	switch input.Resource {
-	case "sessions":
-		return s.handleQuerySessions(ctx, input)
-	case "session":
-		return s.handleQuerySession(ctx, input)
+	case "flows":
+		return s.handleQueryFlows(ctx, input)
+	case "flow":
+		return s.handleQueryFlow(ctx, input)
 	case "messages":
 		return s.handleQueryMessages(ctx, input)
 	case "status":
@@ -127,13 +127,13 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 	}
 }
 
-// --- sessions resource ---
+// --- flows resource ---
 
-// querySessionsEntry is a single session entry in the sessions query response.
-type querySessionsEntry struct {
+// queryFlowsEntry is a single flow entry in the flows query response.
+type queryFlowsEntry struct {
 	ID              string            `json:"id"`
 	Protocol        string            `json:"protocol"`
-	SessionType     string            `json:"session_type"`
+	FlowType     string            `json:"flow_type"`
 	State           string            `json:"state"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
@@ -145,17 +145,17 @@ type querySessionsEntry struct {
 	DurationMs      int64             `json:"duration_ms"`
 }
 
-// querySessionsResult is the response for the sessions resource.
-type querySessionsResult struct {
-	Sessions []querySessionsEntry `json:"sessions"`
+// queryFlowsResult is the response for the flows resource.
+type queryFlowsResult struct {
+	Flows []queryFlowsEntry `json:"flows"`
 	Count    int                  `json:"count"`
 	Total    int                  `json:"total"`
 }
 
-// handleQuerySessions returns a paginated list of sessions with message summary data.
-func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *querySessionsResult, error) {
+// handleQueryFlows returns a paginated list of flows with message summary data.
+func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowsResult, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	if input.Offset < 0 {
@@ -167,7 +167,7 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 		limit = defaultListLimit
 	}
 
-	opts := session.ListOptions{
+	opts := flow.ListOptions{
 		Limit:  limit,
 		Offset: input.Offset,
 	}
@@ -180,22 +180,22 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 		opts.State = input.Filter.State
 	}
 
-	sessionList, err := s.deps.store.ListSessions(ctx, opts)
+	flowList, err := s.deps.store.ListFlows(ctx, opts)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list sessions: %w", err)
+		return nil, nil, fmt.Errorf("list flows: %w", err)
 	}
 
-	total, err := s.deps.store.CountSessions(ctx, opts)
+	total, err := s.deps.store.CountFlows(ctx, opts)
 	if err != nil {
-		return nil, nil, fmt.Errorf("count sessions: %w", err)
+		return nil, nil, fmt.Errorf("count flows: %w", err)
 	}
 
-	entries := make([]querySessionsEntry, 0, len(sessionList))
-	for _, sess := range sessionList {
+	entries := make([]queryFlowsEntry, 0, len(flowList))
+	for _, fl := range flowList {
 		// Fetch messages for method/url/status_code/message_count via JOIN data.
-		msgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+		msgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
 		if err != nil {
-			return nil, nil, fmt.Errorf("get messages for session %s: %w", sess.ID, err)
+			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
 
 		var method, urlStr string
@@ -217,40 +217,40 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 			}
 		}
 
-		summary := buildProtocolSummary(sess.Protocol, sess.SessionType, msgs)
+		summary := buildProtocolSummary(fl.Protocol, fl.FlowType, msgs)
 
-		entries = append(entries, querySessionsEntry{
-			ID:              sess.ID,
-			Protocol:        sess.Protocol,
-			SessionType:     sess.SessionType,
-			State:           sess.State,
+		entries = append(entries, queryFlowsEntry{
+			ID:              fl.ID,
+			Protocol:        fl.Protocol,
+			FlowType:     fl.FlowType,
+			State:           fl.State,
 			Method:          method,
 			URL:             urlStr,
 			StatusCode:      statusCode,
 			MessageCount:    len(msgs),
-			BlockedBy:       sess.BlockedBy,
+			BlockedBy:       fl.BlockedBy,
 			ProtocolSummary: summary,
-			Timestamp:       sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-			DurationMs:      sess.Duration.Milliseconds(),
+			Timestamp:       fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			DurationMs:      fl.Duration.Milliseconds(),
 		})
 	}
 
-	result := &querySessionsResult{
-		Sessions: entries,
+	result := &queryFlowsResult{
+		Flows: entries,
 		Count:    len(entries),
 		Total:    total,
 	}
 	return nil, result, nil
 }
 
-// --- session resource ---
+// --- flow resource ---
 
-// querySessionResult is the response for the session resource.
-type querySessionResult struct {
+// queryFlowResult is the response for the flow resource.
+type queryFlowResult struct {
 	ID                    string              `json:"id"`
 	ConnID                string              `json:"conn_id"`
 	Protocol              string              `json:"protocol"`
-	SessionType           string              `json:"session_type"`
+	FlowType           string              `json:"flow_type"`
 	State                 string              `json:"state"`
 	Method                string              `json:"method"`
 	URL                   string              `json:"url"`
@@ -275,7 +275,7 @@ type querySessionResult struct {
 	MessagePreview        []queryMessageEntry `json:"message_preview,omitempty"`
 	// OriginalRequest holds the original (pre-modification) request data
 	// when a variant exists (intercept/transform modified the request).
-	// Only populated when the session contains variant messages.
+	// Only populated when the flow contains variant messages.
 	OriginalRequest *queryVariantRequest `json:"original_request,omitempty"`
 }
 
@@ -288,32 +288,32 @@ type queryVariantRequest struct {
 	BodyEncoding string              `json:"body_encoding"`
 }
 
-// streamPreviewLimit is the maximum number of messages to include in a streaming session preview.
+// streamPreviewLimit is the maximum number of messages to include in a streaming flow preview.
 const streamPreviewLimit = 10
 
-// handleQuerySession returns detailed information about a single session.
-func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *querySessionResult, error) {
+// handleQueryFlow returns detailed information about a single flow.
+func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowResult, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	if input.ID == "" {
-		return nil, nil, fmt.Errorf("id is required for session resource")
+		return nil, nil, fmt.Errorf("id is required for flow resource")
 	}
 
-	sess, err := s.deps.store.GetSession(ctx, input.ID)
+	fl, err := s.deps.store.GetFlow(ctx, input.ID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get session: %w", err)
+		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	msgs, err := s.deps.store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+	msgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
 	// Collect send messages (may include original + modified variants) and the first receive.
-	var sendMsgs []*session.Message
-	var recvMsg *session.Message
+	var sendMsgs []*flow.Message
+	var recvMsg *flow.Message
 	for _, msg := range msgs {
 		if msg.Direction == "send" {
 			sendMsgs = append(sendMsgs, msg)
@@ -326,7 +326,7 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 	// Determine the effective send message (the one actually sent to the server).
 	// If variants exist, the "modified" variant is the effective request.
 	// The "original" variant is preserved separately for diff display.
-	var sendMsg, originalSendMsg *session.Message
+	var sendMsg, originalSendMsg *flow.Message
 	if len(sendMsgs) > 1 {
 		for _, m := range sendMsgs {
 			variant := m.Metadata["variant"]
@@ -395,25 +395,25 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 	respBodyStr, respEncoding := encodeBody(respBody)
 
 	var connInfo *connInfoResult
-	if sess.ConnInfo != nil {
+	if fl.ConnInfo != nil {
 		connInfo = &connInfoResult{
-			ClientAddr:           sess.ConnInfo.ClientAddr,
-			ServerAddr:           sess.ConnInfo.ServerAddr,
-			TLSVersion:           sess.ConnInfo.TLSVersion,
-			TLSCipher:            sess.ConnInfo.TLSCipher,
-			TLSALPN:              sess.ConnInfo.TLSALPN,
-			TLSServerCertSubject: sess.ConnInfo.TLSServerCertSubject,
+			ClientAddr:           fl.ConnInfo.ClientAddr,
+			ServerAddr:           fl.ConnInfo.ServerAddr,
+			TLSVersion:           fl.ConnInfo.TLSVersion,
+			TLSCipher:            fl.ConnInfo.TLSCipher,
+			TLSALPN:              fl.ConnInfo.TLSALPN,
+			TLSServerCertSubject: fl.ConnInfo.TLSServerCertSubject,
 		}
 	}
 
-	summary := buildProtocolSummary(sess.Protocol, sess.SessionType, msgs)
+	summary := buildProtocolSummary(fl.Protocol, fl.FlowType, msgs)
 
-	result := &querySessionResult{
-		ID:                    sess.ID,
-		ConnID:                sess.ConnID,
-		Protocol:              sess.Protocol,
-		SessionType:           sess.SessionType,
-		State:                 sess.State,
+	result := &queryFlowResult{
+		ID:                    fl.ID,
+		ConnID:                fl.ConnID,
+		Protocol:              fl.Protocol,
+		FlowType:           fl.FlowType,
+		State:                 fl.State,
 		Method:                method,
 		URL:                   urlStr,
 		RequestHeaders:        reqHeaders,
@@ -425,10 +425,10 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		ResponseBodyEncoding:  respEncoding,
 		RequestBodyTruncated:  reqTruncated,
 		ResponseBodyTruncated: respTruncated,
-		Timestamp:             sess.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-		DurationMs:            sess.Duration.Milliseconds(),
-		Tags:                  sess.Tags,
-		BlockedBy:             sess.BlockedBy,
+		Timestamp:             fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		DurationMs:            fl.Duration.Milliseconds(),
+		Tags:                  fl.Tags,
+		BlockedBy:             fl.BlockedBy,
 		RawRequest:            rawReqStr,
 		RawResponse:           rawRespStr,
 		ConnInfo:              connInfo,
@@ -437,8 +437,8 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		OriginalRequest:       originalReq,
 	}
 
-	// For streaming sessions, include a message preview instead of full request/response.
-	if sess.SessionType != "unary" {
+	// For streaming flows, include a message preview instead of full request/response.
+	if fl.FlowType != "unary" {
 		previewLimit := streamPreviewLimit
 		if previewLimit > len(msgs) {
 			previewLimit = len(msgs)
@@ -495,10 +495,10 @@ type queryMessagesResult struct {
 	Total    int                 `json:"total"`
 }
 
-// handleQueryMessages returns paginated messages for a session.
+// handleQueryMessages returns paginated messages for a flow.
 func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMessagesResult, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	if input.ID == "" {
@@ -509,9 +509,9 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
 	}
 
-	// Verify the session exists.
-	if _, err := s.deps.store.GetSession(ctx, input.ID); err != nil {
-		return nil, nil, fmt.Errorf("get session: %w", err)
+	// Verify the flow exists.
+	if _, err := s.deps.store.GetFlow(ctx, input.ID); err != nil {
+		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
 	// Get total message count for pagination.
@@ -521,7 +521,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	// Build message list options with direction filter if specified.
-	msgOpts := session.MessageListOptions{}
+	msgOpts := flow.MessageListOptions{}
 	if input.Filter != nil && input.Filter.Direction != "" {
 		if input.Filter.Direction != "send" && input.Filter.Direction != "receive" {
 			return nil, nil, fmt.Errorf("direction filter must be \"send\" or \"receive\", got %q", input.Filter.Direction)
@@ -610,7 +610,7 @@ type queryStatusResult struct {
 	MaxConnections    int                        `json:"max_connections"`
 	PeekTimeoutMs     int64                      `json:"peek_timeout_ms"`
 	RequestTimeoutMs  int64                      `json:"request_timeout_ms"`
-	TotalSessions     int                        `json:"total_sessions"`
+	TotalFlows     int                        `json:"total_flows"`
 	DBSizeBytes       int64                      `json:"db_size_bytes"`
 	UptimeSeconds     int64                      `json:"uptime_seconds"`
 	CAInitialized     bool                       `json:"ca_initialized"`
@@ -661,11 +661,11 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 	}
 
 	if s.deps.store != nil {
-		count, err := s.deps.store.CountSessions(ctx, session.ListOptions{})
+		count, err := s.deps.store.CountFlows(ctx, flow.ListOptions{})
 		if err != nil {
-			return nil, nil, fmt.Errorf("count sessions: %w", err)
+			return nil, nil, fmt.Errorf("count flows: %w", err)
 		}
-		result.TotalSessions = count
+		result.TotalFlows = count
 	}
 
 	if s.deps.dbPath != "" {
@@ -905,7 +905,7 @@ type queryMacrosResult struct {
 // handleQueryMacros returns a list of all stored macro definitions.
 func (s *Server) handleQueryMacros(ctx context.Context) (*gomcp.CallToolResult, *queryMacrosResult, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	records, err := s.deps.store.ListMacros(ctx)
@@ -952,7 +952,7 @@ type queryMacroResult struct {
 // handleQueryMacro returns detailed information about a single macro definition.
 func (s *Server) handleQueryMacro(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMacroResult, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("session store is not initialized")
+		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 	if input.ID == "" {
 		return nil, nil, fmt.Errorf("id is required for macro resource (macro name)")

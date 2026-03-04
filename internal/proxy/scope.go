@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-// CaptureScope controls which requests are recorded to the session store.
+// CaptureScope controls which requests are recorded to the flow store.
 // It supports include and exclude patterns based on hostname, URL prefix,
 // and HTTP method. When include patterns are configured, only matching
 // requests are recorded. Exclude patterns take precedence over include
@@ -113,7 +113,7 @@ func (s *CaptureScope) Clear() {
 }
 
 // ShouldCapture reports whether a request with the given method and URL
-// should be recorded to the session store.
+// should be recorded to the flow store.
 //
 // The evaluation logic is:
 //  1. If the request matches any exclude rule, it is NOT captured.
