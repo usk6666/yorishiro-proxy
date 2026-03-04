@@ -1,6 +1,6 @@
 import { useCallback } from "react";
-import type { BodyPatch } from "../../lib/mcp/types.js";
 import { Button } from "../../components/ui/Button.js";
+import type { BodyPatch } from "../../lib/mcp/types.js";
 import "./BodyPatchEditor.css";
 
 export interface BodyPatchEditorProps {

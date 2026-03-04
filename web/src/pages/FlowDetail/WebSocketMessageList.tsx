@@ -10,11 +10,11 @@
  * - Close frame status code + reason parsing
  */
 
-import { useState, useMemo, useCallback } from "react";
-import type { MessageEntry } from "../../lib/mcp/types.js";
+import { useCallback, useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
+import type { MessageEntry } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------

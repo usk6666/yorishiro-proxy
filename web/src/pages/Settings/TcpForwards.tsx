@@ -1,7 +1,7 @@
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
+import { Badge, Button, Input, useToast } from "../../components/ui/index.js";
 import { useProxyControl } from "../../lib/mcp/hooks.js";
 import type { ConfigResult } from "../../lib/mcp/types.js";
-import { Badge, Button, Input, useToast } from "../../components/ui/index.js";
 
 interface TcpForwardsProps {
   config: ConfigResult;

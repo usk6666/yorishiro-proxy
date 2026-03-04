@@ -1,6 +1,6 @@
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
+import { Badge, Button, Input, useToast } from "../../components/ui/index.js";
 import { useSecurity } from "../../lib/mcp/hooks.js";
-import { Button, Input, Badge, useToast } from "../../components/ui/index.js";
 import type { SecurityTestTargetResult } from "../../lib/mcp/types.js";
 
 /**

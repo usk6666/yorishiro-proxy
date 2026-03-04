@@ -1,5 +1,5 @@
-import type { MessageEntry } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
+import type { MessageEntry } from "../../lib/mcp/types.js";
 import "./TcpMessageList.css";
 
 export interface TcpMessageListProps {

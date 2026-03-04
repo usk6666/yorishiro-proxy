@@ -1,21 +1,21 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { useQuery, useMacro } from "../../lib/mcp/hooks.js";
-import { useToast } from "../../components/ui/Toast.js";
-import type {
-  MacroStep,
-  ExtractionRule,
-  GuardCondition,
-  MacroDefineResult,
-  MacroRunResult,
-  MacroStepResult,
-} from "../../lib/mcp/types.js";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
-import { Tabs } from "../../components/ui/Tabs.js";
 import { Table } from "../../components/ui/Table.js";
+import { Tabs } from "../../components/ui/Tabs.js";
+import { useToast } from "../../components/ui/Toast.js";
+import { useMacro, useQuery } from "../../lib/mcp/hooks.js";
+import type {
+  ExtractionRule,
+  GuardCondition,
+  MacroDefineResult,
+  MacroRunResult,
+  MacroStep,
+  MacroStepResult,
+} from "../../lib/mcp/types.js";
 import "./MacroDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -169,10 +169,10 @@ function stepFromData(step: MacroStep): StepFormEntry {
     overrideUrl: step.override_url ?? "",
     overrideHeaders: step.override_headers
       ? Object.entries(step.override_headers).map(([k, v]) => ({
-          key: k,
-          id: uid(),
-          value: v,
-        }))
+        key: k,
+        id: uid(),
+        value: v,
+      }))
       : [],
     overrideBody: step.override_body ?? "",
     onError: step.on_error ?? "abort",
@@ -194,28 +194,28 @@ function stepFromData(step: MacroStep): StepFormEntry {
     guardEnabled: step.when != null,
     guard: step.when
       ? {
-          step: step.when.step ?? "",
-          statusCode:
-            step.when.status_code != null ? String(step.when.status_code) : "",
-          statusCodeRangeMin:
-            step.when.status_code_range
-              ? String(step.when.status_code_range[0])
-              : "",
-          statusCodeRangeMax:
-            step.when.status_code_range
-              ? String(step.when.status_code_range[1])
-              : "",
-          headerMatchEntries: step.when.header_match
-            ? Object.entries(step.when.header_match).map(([k, v]) => ({
-                key: k,
-                id: uid(),
-                value: v,
-              }))
-            : [],
-          bodyMatch: step.when.body_match ?? "",
-          extractedVar: step.when.extracted_var ?? "",
-          negate: step.when.negate ?? false,
-        }
+        step: step.when.step ?? "",
+        statusCode:
+          step.when.status_code != null ? String(step.when.status_code) : "",
+        statusCodeRangeMin:
+          step.when.status_code_range
+            ? String(step.when.status_code_range[0])
+            : "",
+        statusCodeRangeMax:
+          step.when.status_code_range
+            ? String(step.when.status_code_range[1])
+            : "",
+        headerMatchEntries: step.when.header_match
+          ? Object.entries(step.when.header_match).map(([k, v]) => ({
+            key: k,
+            id: uid(),
+            value: v,
+          }))
+          : [],
+        bodyMatch: step.when.body_match ?? "",
+        extractedVar: step.when.extracted_var ?? "",
+        negate: step.when.negate ?? false,
+      }
       : createEmptyGuard(),
   };
 }
@@ -348,10 +348,10 @@ export function MacroDetailPage() {
     setInitialVars(
       data.initial_vars
         ? Object.entries(data.initial_vars).map(([k, v]) => ({
-            key: k,
-            id: uid(),
-            value: v,
-          }))
+          key: k,
+          id: uid(),
+          value: v,
+        }))
         : [],
     );
     setSteps(
@@ -1104,33 +1104,33 @@ function StepEditor({
                   {(ext.source === "body" ||
                     ext.source === "header" ||
                     ext.source === "url") && (
-                    <>
-                      <div className="macro-field">
-                        <label className="macro-field-label">Regex</label>
-                        <Input
-                          placeholder="token=(\\w+)"
-                          value={ext.regex}
-                          onChange={(e) =>
-                            updateExtraction(ext.key, {
-                              regex: e.target.value,
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="macro-field">
-                        <label className="macro-field-label">Group</label>
-                        <Input
-                          type="number"
-                          value={ext.group}
-                          onChange={(e) =>
-                            updateExtraction(ext.key, {
-                              group: e.target.value,
-                            })
-                          }
-                        />
-                      </div>
-                    </>
-                  )}
+                      <>
+                        <div className="macro-field">
+                          <label className="macro-field-label">Regex</label>
+                          <Input
+                            placeholder="token=(\\w+)"
+                            value={ext.regex}
+                            onChange={(e) =>
+                              updateExtraction(ext.key, {
+                                regex: e.target.value,
+                              })
+                            }
+                          />
+                        </div>
+                        <div className="macro-field">
+                          <label className="macro-field-label">Group</label>
+                          <Input
+                            type="number"
+                            value={ext.group}
+                            onChange={(e) =>
+                              updateExtraction(ext.key, {
+                                group: e.target.value,
+                              })
+                            }
+                          />
+                        </div>
+                      </>
+                    )}
                   {ext.source === "body_json" && (
                     <div className="macro-field macro-field-grow">
                       <label className="macro-field-label">JSON Path</label>
