@@ -627,6 +627,12 @@ export interface ExportFilter {
 /** Available execute actions. */
 export type ExecuteAction = "resend" | "resend_raw" | "tcp_replay";
 
+/** A single header key-value pair, allowing duplicate keys. */
+export interface ExecuteHeaderEntry {
+  key: string;
+  value: string;
+}
+
 /** Parameters for the execute tool (resend / resend_raw / tcp_replay). */
 export interface ExecuteParams {
   action: ExecuteAction;
@@ -638,9 +644,9 @@ export interface ExecuteParams {
     // Resend overrides
     override_method?: string;
     override_url?: string;
-    override_headers?: Record<string, string>;
+    override_headers?: ExecuteHeaderEntry[];
     override_body?: string | null;
-    add_headers?: Record<string, string>;
+    add_headers?: ExecuteHeaderEntry[];
     remove_headers?: string[];
     override_body_base64?: string | null;
     body_patches?: BodyPatch[];

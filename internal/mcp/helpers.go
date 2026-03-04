@@ -47,6 +47,20 @@ func validateHeaderValues(headers map[string]string) error {
 	return nil
 }
 
+// validateHeaderEntries checks that header entries do not contain CR or LF
+// characters in keys or values, which would enable HTTP header injection (CWE-113).
+func validateHeaderEntries(entries HeaderEntries) error {
+	for _, e := range entries {
+		if strings.ContainsAny(e.Key, "\r\n") {
+			return fmt.Errorf("header key %q contains CR/LF characters", e.Key)
+		}
+		if strings.ContainsAny(e.Value, "\r\n") {
+			return fmt.Errorf("header value for %q contains CR/LF characters", e.Key)
+		}
+	}
+	return nil
+}
+
 // validateHeaderKeys checks that header key names do not contain CR or LF characters.
 func validateHeaderKeys(keys []string) error {
 	for _, k := range keys {

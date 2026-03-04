@@ -31,14 +31,48 @@
           "description": "URL override for resend. Must include scheme and host."
         },
         "override_headers": {
-          "type": "object",
-          "description": "Header overrides for resend as key-value pairs (replaces matching headers).",
-          "additionalProperties": { "type": "string" }
+          "oneOf": [
+            {
+              "type": "array",
+              "description": "Header overrides as array of {key,value} entries (replaces matching headers). Supports duplicate keys for sending multiple values with the same header name.",
+              "items": {
+                "type": "object",
+                "required": ["key", "value"],
+                "properties": {
+                  "key": { "type": "string" },
+                  "value": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "description": "Legacy format: header overrides as key-value map (one value per key).",
+              "additionalProperties": { "type": "string" }
+            }
+          ]
         },
         "add_headers": {
-          "type": "object",
-          "description": "Headers to add (appended to existing values for same key).",
-          "additionalProperties": { "type": "string" }
+          "oneOf": [
+            {
+              "type": "array",
+              "description": "Headers to add as array of {key,value} entries (appended to existing values). Supports duplicate keys.",
+              "items": {
+                "type": "object",
+                "required": ["key", "value"],
+                "properties": {
+                  "key": { "type": "string" },
+                  "value": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "description": "Legacy format: headers to add as key-value map (one value per key).",
+              "additionalProperties": { "type": "string" }
+            }
+          ]
         },
         "remove_headers": {
           "type": "array",
