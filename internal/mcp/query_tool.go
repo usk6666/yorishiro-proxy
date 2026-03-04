@@ -54,8 +54,10 @@ type queryFilter struct {
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
 	// StatusCode filters sessions/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
-	// BlockedBy filters sessions by blocked_by value (e.g. "target_scope").
-	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope)"`
+	// BlockedBy filters sessions by blocked_by value (e.g. "target_scope", "intercept_drop").
+	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop)"`
+	// State filters sessions by lifecycle state ("active", "complete", or "error").
+	State string `json:"state,omitempty" jsonschema:"session lifecycle state filter (active, complete, error)"`
 	// Direction filters messages by direction ("send" or "receive").
 	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
 	// BodyContains filters fuzz_results by response body substring.
@@ -78,12 +80,14 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of: sessions, session, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
 			"The 'id' parameter is required for session, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering sessions by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP), method, url_pattern, and status_code; " +
+			"The 'filter' parameter supports filtering sessions by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop), and state (active, complete, error); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code and body_contains. " +
 			"Sessions include protocol_summary with protocol-specific information. " +
+			"Session state indicates lifecycle: 'active' (in progress), 'complete' (finished), 'error' (failed with 502 etc.). " +
 			"Streaming sessions (session_type != unary) include message_preview with the first 10 messages. " +
-			"Messages include metadata with protocol-specific fields (e.g. WebSocket opcode, gRPC service/method/grpc_status). " +
+			"Messages include metadata with protocol-specific fields (e.g. WebSocket opcode, gRPC service/method/grpc_status, variant original/modified). " +
+			"When intercept/transform modifies a request, the session contains variant messages: original (seq=0, variant=original) and modified (seq=1, variant=modified). " +
 			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
 			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
 			"Results are paginated with limit/offset for sessions, messages, fuzz_jobs, and fuzz_results resources. " +
@@ -173,6 +177,7 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 		opts.URLPattern = input.Filter.URLPattern
 		opts.StatusCode = input.Filter.StatusCode
 		opts.BlockedBy = input.Filter.BlockedBy
+		opts.State = input.Filter.State
 	}
 
 	sessionList, err := s.deps.store.ListSessions(ctx, opts)
@@ -196,10 +201,15 @@ func (s *Server) handleQuerySessions(ctx context.Context, input queryInput) (*go
 		var method, urlStr string
 		var statusCode int
 		for _, msg := range msgs {
-			if msg.Direction == "send" && method == "" {
-				method = msg.Method
-				if msg.URL != nil {
-					urlStr = msg.URL.String()
+			if msg.Direction == "send" {
+				// For variant messages, prefer the "modified" variant
+				// as it represents what was actually sent.
+				variant := msg.Metadata["variant"]
+				if method == "" || variant == "modified" {
+					method = msg.Method
+					if msg.URL != nil {
+						urlStr = msg.URL.String()
+					}
 				}
 			}
 			if msg.Direction == "receive" && statusCode == 0 {
@@ -263,6 +273,19 @@ type querySessionResult struct {
 	MessageCount          int                 `json:"message_count"`
 	ProtocolSummary       map[string]string   `json:"protocol_summary,omitempty"`
 	MessagePreview        []queryMessageEntry `json:"message_preview,omitempty"`
+	// OriginalRequest holds the original (pre-modification) request data
+	// when a variant exists (intercept/transform modified the request).
+	// Only populated when the session contains variant messages.
+	OriginalRequest *queryVariantRequest `json:"original_request,omitempty"`
+}
+
+// queryVariantRequest represents the original request before intercept/transform modification.
+type queryVariantRequest struct {
+	Method       string              `json:"method"`
+	URL          string              `json:"url"`
+	Headers      map[string][]string `json:"headers"`
+	Body         string              `json:"body"`
+	BodyEncoding string              `json:"body_encoding"`
 }
 
 // streamPreviewLimit is the maximum number of messages to include in a streaming session preview.
@@ -288,14 +311,38 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	var sendMsg, recvMsg *session.Message
+	// Collect send messages (may include original + modified variants) and the first receive.
+	var sendMsgs []*session.Message
+	var recvMsg *session.Message
 	for _, msg := range msgs {
-		if msg.Direction == "send" && sendMsg == nil {
-			sendMsg = msg
+		if msg.Direction == "send" {
+			sendMsgs = append(sendMsgs, msg)
 		}
 		if msg.Direction == "receive" && recvMsg == nil {
 			recvMsg = msg
 		}
+	}
+
+	// Determine the effective send message (the one actually sent to the server).
+	// If variants exist, the "modified" variant is the effective request.
+	// The "original" variant is preserved separately for diff display.
+	var sendMsg, originalSendMsg *session.Message
+	if len(sendMsgs) > 1 {
+		for _, m := range sendMsgs {
+			variant := m.Metadata["variant"]
+			if variant == "modified" {
+				sendMsg = m
+			} else if variant == "original" {
+				originalSendMsg = m
+			}
+		}
+		// Fallback: if no variant metadata, use the last send message.
+		if sendMsg == nil {
+			sendMsg = sendMsgs[len(sendMsgs)-1]
+			originalSendMsg = sendMsgs[0]
+		}
+	} else if len(sendMsgs) == 1 {
+		sendMsg = sendMsgs[0]
 	}
 
 	var urlStr, method string
@@ -324,6 +371,23 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		respTruncated = recvMsg.BodyTruncated
 		if len(recvMsg.RawBytes) > 0 {
 			rawRespStr = base64.StdEncoding.EncodeToString(recvMsg.RawBytes)
+		}
+	}
+
+	// Build original request variant if available.
+	var originalReq *queryVariantRequest
+	if originalSendMsg != nil {
+		origBodyStr, origBodyEnc := encodeBody(originalSendMsg.Body)
+		var origURLStr string
+		if originalSendMsg.URL != nil {
+			origURLStr = originalSendMsg.URL.String()
+		}
+		originalReq = &queryVariantRequest{
+			Method:       originalSendMsg.Method,
+			URL:          origURLStr,
+			Headers:      originalSendMsg.Headers,
+			Body:         origBodyStr,
+			BodyEncoding: origBodyEnc,
 		}
 	}
 
@@ -370,6 +434,7 @@ func (s *Server) handleQuerySession(ctx context.Context, input queryInput) (*gom
 		ConnInfo:              connInfo,
 		MessageCount:          len(msgs),
 		ProtocolSummary:       summary,
+		OriginalRequest:       originalReq,
 	}
 
 	// For streaming sessions, include a message preview instead of full request/response.

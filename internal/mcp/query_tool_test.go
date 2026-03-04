@@ -1158,3 +1158,339 @@ func TestQuery_Session_NormalHasNoBlockedBy(t *testing.T) {
 	}
 }
 
+// --- Test: state filter ---
+
+// seedSessionWithState creates a session with a specific state and messages.
+func seedSessionWithState(t *testing.T, store session.Store, id, protocol, method, urlStr, state string, statusCode int) {
+	t.Helper()
+	ctx := context.Background()
+
+	sess := &session.Session{
+		ID:          id,
+		ConnID:      "conn-" + id,
+		Protocol:    protocol,
+		SessionType: "unary",
+		State:       state,
+		Timestamp:   time.Now().UTC(),
+		Duration:    100 * time.Millisecond,
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession(%s): %v", id, err)
+	}
+
+	parsedURL, _ := url.Parse(urlStr)
+	sendMsg := &session.Message{
+		ID:        id + "-send",
+		SessionID: id,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    method,
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      []byte("request body"),
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	if statusCode > 0 {
+		recvMsg := &session.Message{
+			ID:         id + "-recv",
+			SessionID:  id,
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now().UTC(),
+			StatusCode: statusCode,
+			Headers:    map[string][]string{"Content-Type": {"text/plain"}},
+			Body:       []byte("response body"),
+		}
+		if err := store.AppendMessage(ctx, recvMsg); err != nil {
+			t.Fatalf("AppendMessage(recv): %v", err)
+		}
+	}
+}
+
+func TestQuery_Sessions_FilterByState(t *testing.T) {
+	store := newTestStore(t)
+	seedSessionWithState(t, store, "active-1", "HTTPS", "GET", "https://example.com/a", "active", 0)
+	seedSessionWithState(t, store, "complete-1", "HTTPS", "GET", "https://example.com/b", "complete", 200)
+	seedSessionWithState(t, store, "error-1", "HTTPS", "GET", "https://example.com/c", "error", 0)
+	seedSessionWithState(t, store, "complete-2", "HTTPS", "POST", "https://example.com/d", "complete", 201)
+
+	cs := setupQueryTestSession(t, store)
+
+	tests := []struct {
+		name      string
+		state     string
+		wantCount int
+	}{
+		{"active only", "active", 1},
+		{"complete only", "complete", 2},
+		{"error only", "error", 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := callQuery(t, cs, queryInput{
+				Resource: "sessions",
+				Filter:   &queryFilter{State: tt.state},
+			})
+			if result.IsError {
+				t.Fatalf("expected success, got error: %v", result.Content)
+			}
+
+			var out querySessionsResult
+			unmarshalQueryResult(t, result, &out)
+
+			if out.Count != tt.wantCount {
+				t.Errorf("count = %d, want %d", out.Count, tt.wantCount)
+			}
+			if out.Total != tt.wantCount {
+				t.Errorf("total = %d, want %d", out.Total, tt.wantCount)
+			}
+			for _, s := range out.Sessions {
+				if s.State != tt.state {
+					t.Errorf("session %s state = %q, want %q", s.ID, s.State, tt.state)
+				}
+			}
+		})
+	}
+}
+
+func TestQuery_Session_ErrorStateNoResponse(t *testing.T) {
+	store := newTestStore(t)
+	// Error session with send only (no receive)
+	seedSessionWithState(t, store, "err-sess", "HTTPS", "POST", "https://example.com/fail", "error", 0)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "err-sess",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.State != "error" {
+		t.Errorf("state = %q, want %q", out.State, "error")
+	}
+	if out.ResponseStatusCode != 0 {
+		t.Errorf("response_status_code = %d, want 0", out.ResponseStatusCode)
+	}
+	if out.MessageCount != 1 {
+		t.Errorf("message_count = %d, want 1", out.MessageCount)
+	}
+}
+
+// --- Test: variant messages ---
+
+// seedVariantSession creates a session with original and modified variant send messages.
+func seedVariantSession(t *testing.T, store session.Store, id string) {
+	t.Helper()
+	ctx := context.Background()
+
+	sess := &session.Session{
+		ID:          id,
+		ConnID:      "conn-" + id,
+		Protocol:    "HTTPS",
+		SessionType: "unary",
+		State:       "complete",
+		Timestamp:   time.Now().UTC(),
+		Duration:    200 * time.Millisecond,
+	}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatalf("SaveSession(%s): %v", id, err)
+	}
+
+	origURL, _ := url.Parse("https://example.com/original")
+	originalSend := &session.Message{
+		ID:        id + "-send-orig",
+		SessionID: id,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       origURL,
+		Headers:   map[string][]string{"Host": {"example.com"}, "X-Original": {"true"}},
+		Body:      []byte("original body"),
+		Metadata:  map[string]string{"variant": "original"},
+	}
+	if err := store.AppendMessage(ctx, originalSend); err != nil {
+		t.Fatalf("AppendMessage(original send): %v", err)
+	}
+
+	modURL, _ := url.Parse("https://example.com/modified")
+	modifiedSend := &session.Message{
+		ID:        id + "-send-mod",
+		SessionID: id,
+		Sequence:  1,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "POST",
+		URL:       modURL,
+		Headers:   map[string][]string{"Host": {"example.com"}, "X-Modified": {"true"}},
+		Body:      []byte("modified body"),
+		Metadata:  map[string]string{"variant": "modified"},
+	}
+	if err := store.AppendMessage(ctx, modifiedSend); err != nil {
+		t.Fatalf("AppendMessage(modified send): %v", err)
+	}
+
+	recvMsg := &session.Message{
+		ID:         id + "-recv",
+		SessionID:  id,
+		Sequence:   2,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"ok":true}`),
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage(recv): %v", err)
+	}
+}
+
+func TestQuery_Session_VariantMessages(t *testing.T) {
+	store := newTestStore(t)
+	seedVariantSession(t, store, "variant-sess")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "variant-sess",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionResult
+	unmarshalQueryResult(t, result, &out)
+
+	// The effective request should be the modified version.
+	if out.Method != "POST" {
+		t.Errorf("method = %q, want POST (modified)", out.Method)
+	}
+	if out.URL != "https://example.com/modified" {
+		t.Errorf("url = %q, want https://example.com/modified", out.URL)
+	}
+	if out.RequestBody != "modified body" {
+		t.Errorf("request_body = %q, want 'modified body'", out.RequestBody)
+	}
+
+	// Original request should be populated.
+	if out.OriginalRequest == nil {
+		t.Fatal("original_request is nil, expected original variant data")
+	}
+	if out.OriginalRequest.Method != "GET" {
+		t.Errorf("original_request.method = %q, want GET", out.OriginalRequest.Method)
+	}
+	if out.OriginalRequest.URL != "https://example.com/original" {
+		t.Errorf("original_request.url = %q, want https://example.com/original", out.OriginalRequest.URL)
+	}
+	if out.OriginalRequest.Body != "original body" {
+		t.Errorf("original_request.body = %q, want 'original body'", out.OriginalRequest.Body)
+	}
+
+	// Response should still be present.
+	if out.ResponseStatusCode != 200 {
+		t.Errorf("response_status_code = %d, want 200", out.ResponseStatusCode)
+	}
+	if out.MessageCount != 3 {
+		t.Errorf("message_count = %d, want 3", out.MessageCount)
+	}
+}
+
+func TestQuery_Session_NoVariantMessages(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "normal-sess", "HTTPS", "GET", "https://example.com/normal", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "session",
+		ID:       "normal-sess",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionResult
+	unmarshalQueryResult(t, result, &out)
+
+	// No variant, so original_request should be nil.
+	if out.OriginalRequest != nil {
+		t.Errorf("original_request should be nil for non-variant session, got %+v", out.OriginalRequest)
+	}
+}
+
+func TestQuery_Sessions_VariantUsesModifiedMethod(t *testing.T) {
+	store := newTestStore(t)
+	seedVariantSession(t, store, "variant-list")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Fatalf("count = %d, want 1", out.Count)
+	}
+
+	// The sessions list should use the modified method/URL.
+	if out.Sessions[0].Method != "POST" {
+		t.Errorf("method = %q, want POST (modified)", out.Sessions[0].Method)
+	}
+	if out.Sessions[0].URL != "https://example.com/modified" {
+		t.Errorf("url = %q, want https://example.com/modified", out.Sessions[0].URL)
+	}
+}
+
+// --- Test: intercept_drop blocked_by filter ---
+
+func TestQuery_Sessions_FilterByInterceptDrop(t *testing.T) {
+	store := newTestStore(t)
+	seedSession(t, store, "normal", "HTTPS", "GET", "https://example.com/ok", 200)
+	seedBlockedSession(t, store, "dropped", "HTTPS", "GET", "https://example.com/drop", "intercept_drop")
+	seedBlockedSession(t, store, "scoped", "HTTPS", "GET", "https://evil.com/admin", "target_scope")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "sessions",
+		Filter:   &queryFilter{BlockedBy: "intercept_drop"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out querySessionsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Errorf("count = %d, want 1", out.Count)
+	}
+	if out.Total != 1 {
+		t.Errorf("total = %d, want 1", out.Total)
+	}
+	if out.Sessions[0].ID != "dropped" {
+		t.Errorf("id = %q, want dropped", out.Sessions[0].ID)
+	}
+	if out.Sessions[0].BlockedBy != "intercept_drop" {
+		t.Errorf("blocked_by = %q, want intercept_drop", out.Sessions[0].BlockedBy)
+	}
+}
+
