@@ -234,3 +234,96 @@ func TestRecordHTTPSession_TLSConnInfo(t *testing.T) {
 		t.Errorf("TLSServerCertSubject = %q, want %q", ci.TLSServerCertSubject, "CN=example.com")
 	}
 }
+
+func TestRequestHeaders_InjectsHost(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		wantHost string
+	}{
+		{
+			name:     "host from req.Host",
+			host:     "example.com",
+			wantHost: "example.com",
+		},
+		{
+			name:     "empty host is not injected",
+			host:     "",
+			wantHost: "",
+		},
+		{
+			name:     "host with port",
+			host:     "example.com:8080",
+			wantHost: "example.com:8080",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+			req.Host = tt.host
+			req.Header.Set("X-Custom", "value")
+
+			headers := requestHeaders(req)
+
+			// Verify the original header is preserved.
+			if headers.Get("X-Custom") != "value" {
+				t.Errorf("X-Custom = %q, want %q", headers.Get("X-Custom"), "value")
+			}
+
+			if tt.wantHost == "" {
+				if _, ok := headers["Host"]; ok {
+					t.Errorf("Host header should not be present for empty host")
+				}
+			} else {
+				if headers.Get("Host") != tt.wantHost {
+					t.Errorf("Host = %q, want %q", headers.Get("Host"), tt.wantHost)
+				}
+			}
+
+			// Verify it does not mutate the original req.Header.
+			if _, ok := req.Header["Host"]; ok {
+				t.Error("requestHeaders should not mutate req.Header")
+			}
+		})
+	}
+}
+
+func TestRecordHTTPSession_HostHeader(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	// Go's net/http sets Host on req.Host, not in req.Header.
+	// Verify that the recording includes it.
+	req.Host = "example.com"
+
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     gohttp.Header{},
+	}
+
+	handler.recordHTTPSession(ctx, sessionRecordParams{
+		protocol: "HTTP/1.x",
+		start:    time.Now(),
+		duration: time.Millisecond,
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:      req,
+		resp:     resp,
+		respBody: []byte("ok"),
+	}, logger)
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	hostVals := entries[0].Send.Headers["Host"]
+	if len(hostVals) != 1 || hostVals[0] != "example.com" {
+		t.Errorf("Host header = %v, want [example.com]", hostVals)
+	}
+}
