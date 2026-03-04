@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
-import type { QueryFilter, FlowEntry } from "../../lib/mcp/types.js";
+import type { QueryFilter, FlowEntry, ManageImportFlowsResult } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Input } from "../../components/ui/Input.js";
@@ -132,6 +132,12 @@ export function FlowsPage() {
 
   // --- Selection state ---
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // --- Import dialog state ---
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importPath, setImportPath] = useState("");
+  const [importConflictPolicy, setImportConflictPolicy] = useState<"skip" | "replace">("skip");
+  const [importResult, setImportResult] = useState<ManageImportFlowsResult | null>(null);
 
   // --- Build query filter ---
   const filter = useMemo<QueryFilter | undefined>(() => {
@@ -307,6 +313,46 @@ export function FlowsPage() {
     }
   }, [manage, addToast]);
 
+  // --- Import flows ---
+  const handleImportOpen = useCallback(() => {
+    setImportPath("");
+    setImportConflictPolicy("skip");
+    setImportResult(null);
+    setShowImportDialog(true);
+  }, []);
+
+  const handleImportClose = useCallback(() => {
+    setShowImportDialog(false);
+    setImportPath("");
+    setImportConflictPolicy("skip");
+    setImportResult(null);
+  }, []);
+
+  const handleImportExecute = useCallback(async () => {
+    if (!importPath.trim()) return;
+
+    try {
+      const result = await manage<ManageImportFlowsResult>({
+        action: "import_flows",
+        params: {
+          input_path: importPath.trim(),
+          on_conflict: importConflictPolicy,
+        },
+      });
+      setImportResult(result);
+      addToast({
+        type: "success",
+        message: `Imported ${result.imported} flow(s)`,
+      });
+      await refetch();
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Import failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [importPath, importConflictPolicy, manage, addToast, refetch]);
+
   // --- Pagination ---
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.floor(offset / pageSize) + 1;
@@ -370,6 +416,14 @@ export function FlowsPage() {
             disabled={executeLoading}
           >
             Export
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleImportOpen}
+            disabled={executeLoading}
+          >
+            Import
           </Button>
         </div>
         <div className="flows-toolbar-right">
@@ -643,6 +697,109 @@ export function FlowsPage() {
             </div>
           </div>
         </>
+      )}
+
+      {/* Import dialog */}
+      {showImportDialog && (
+        <div className="flows-dialog-overlay" onClick={handleImportClose}>
+          <div className="flows-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3 className="flows-dialog-title">Import Flows</h3>
+            <p className="flows-dialog-description">
+              Import flows from a JSONL file on the server.
+            </p>
+
+            <div className="flows-dialog-field">
+              <Input
+                label="File path"
+                placeholder="/path/to/flows.jsonl"
+                value={importPath}
+                onChange={(e) => setImportPath(e.target.value)}
+              />
+              <span className="flows-dialog-hint">
+                Server-side path to the JSONL file
+              </span>
+            </div>
+
+            <div className="flows-dialog-field">
+              <label className="flows-dialog-label">Conflict policy</label>
+              <select
+                className="flows-dialog-select"
+                value={importConflictPolicy}
+                onChange={(e) =>
+                  setImportConflictPolicy(e.target.value as "skip" | "replace")
+                }
+              >
+                <option value="skip">Skip (keep existing)</option>
+                <option value="replace">Replace (overwrite existing)</option>
+              </select>
+            </div>
+
+            {/* Import result summary */}
+            {importResult && (
+              <div className="flows-import-result">
+                <div className="flows-import-result-row">
+                  <span className="flows-import-result-label">Imported:</span>
+                  <span className="flows-import-result-value flows-import-result-value--success">
+                    {importResult.imported}
+                  </span>
+                </div>
+                <div className="flows-import-result-row">
+                  <span className="flows-import-result-label">Skipped:</span>
+                  <span className="flows-import-result-value">
+                    {importResult.skipped}
+                  </span>
+                </div>
+                <div className="flows-import-result-row">
+                  <span className="flows-import-result-label">Errors:</span>
+                  <span
+                    className={`flows-import-result-value${
+                      importResult.errors > 0
+                        ? " flows-import-result-value--error"
+                        : ""
+                    }`}
+                  >
+                    {importResult.errors}
+                  </span>
+                </div>
+                {importResult.error_details &&
+                  importResult.error_details.length > 0 && (
+                    <div className="flows-import-errors">
+                      <span className="flows-import-errors-title">
+                        Error details:
+                      </span>
+                      <ul className="flows-import-errors-list">
+                        {importResult.error_details.map((detail) => (
+                          <li key={detail.index}>
+                            Line {detail.index}: {detail.error}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+              </div>
+            )}
+
+            <div className="flows-dialog-actions">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleImportClose}
+              >
+                {importResult ? "Close" : "Cancel"}
+              </Button>
+              {!importResult && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleImportExecute}
+                  disabled={executeLoading || !importPath.trim()}
+                >
+                  {executeLoading ? "Importing..." : "Import"}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

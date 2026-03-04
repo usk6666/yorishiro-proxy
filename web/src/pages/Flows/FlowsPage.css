@@ -342,3 +342,140 @@
   font-family: var(--font-mono);
   margin-top: var(--space-xs);
 }
+
+/* --- Import dialog --- */
+
+.flows-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.flows-dialog {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+  max-width: 480px;
+  width: 100%;
+}
+
+.flows-dialog-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-xs) 0;
+}
+
+.flows-dialog-description {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-lg) 0;
+}
+
+.flows-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+.flows-dialog-label {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.flows-dialog-select {
+  height: 32px;
+  padding: 0 var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.flows-dialog-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+}
+
+.flows-dialog-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.flows-dialog-actions {
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+  margin-top: var(--space-lg);
+}
+
+/* --- Import result summary --- */
+
+.flows-import-result {
+  padding: var(--space-md);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  margin-top: var(--space-sm);
+}
+
+.flows-import-result-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-xs) 0;
+}
+
+.flows-import-result-label {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.flows-import-result-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.flows-import-result-value--success {
+  color: var(--accent-success);
+}
+
+.flows-import-result-value--error {
+  color: var(--accent-danger);
+}
+
+.flows-import-errors {
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-default);
+}
+
+.flows-import-errors-title {
+  font-size: var(--font-size-xs);
+  color: var(--accent-danger);
+  font-weight: 600;
+}
+
+.flows-import-errors-list {
+  margin: var(--space-xs) 0 0 var(--space-md);
+  padding: 0;
+  list-style: none;
+}
+
+.flows-import-errors-list li {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  padding: var(--space-xs) 0;
+}
