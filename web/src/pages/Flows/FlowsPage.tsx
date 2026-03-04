@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
+import { useDialog } from "../../components/ui/Dialog.js";
 import type { QueryFilter, FlowEntry } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
@@ -113,6 +114,7 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
 export function FlowsPage() {
   const navigate = useNavigate();
   const { addToast } = useToast();
+  const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
 
   // --- Filter state ---
@@ -268,9 +270,13 @@ export function FlowsPage() {
     if (selectedIds.size === 0) return;
 
     const count = selectedIds.size;
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${count} flow(s)? This action cannot be undone.`,
-    );
+    const confirmed = await showDialog({
+      title: "Delete Flows",
+      message: `Are you sure you want to delete ${count} flow(s)? This action cannot be undone.`,
+      variant: "confirm",
+      confirmLabel: "Delete",
+      confirmVariant: "danger",
+    });
     if (!confirmed) return;
 
     try {
@@ -289,7 +295,7 @@ export function FlowsPage() {
         message: `Failed to delete flows: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedIds, manage, addToast, refetch]);
+  }, [selectedIds, showDialog, manage, addToast, refetch]);
 
   // --- Export flows ---
   const handleExport = useCallback(async () => {

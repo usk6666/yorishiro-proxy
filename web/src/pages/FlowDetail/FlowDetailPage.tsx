@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
+import { useDialog } from "../../components/ui/Dialog.js";
 import type {
   FlowDetailResult,
   MessageEntry,
@@ -131,6 +132,7 @@ export function FlowDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { addToast } = useToast();
+  const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
 
   // Tabs state
@@ -178,9 +180,13 @@ export function FlowDetailPage() {
   const handleDelete = useCallback(async () => {
     if (!id) return;
 
-    const confirmed = window.confirm(
-      "Are you sure you want to delete this flow? This action cannot be undone.",
-    );
+    const confirmed = await showDialog({
+      title: "Delete Flow",
+      message: "Are you sure you want to delete this flow? This action cannot be undone.",
+      variant: "confirm",
+      confirmLabel: "Delete",
+      confirmVariant: "danger",
+    });
     if (!confirmed) return;
 
     try {
@@ -196,7 +202,7 @@ export function FlowDetailPage() {
         message: `Failed to delete flow: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [id, manage, addToast, navigate]);
+  }, [id, showDialog, manage, addToast, navigate]);
 
   // Navigate to resend view
   const handleResend = useCallback(() => {
