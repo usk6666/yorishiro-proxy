@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
+import { useQuery, useFuzz } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
 import type {
   QueryFilter,
@@ -91,7 +91,7 @@ export function FuzzResultsPage() {
   const { fuzzId } = useParams<{ fuzzId: string }>();
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const { execute, loading: executeLoading } = useExecute();
+  const { fuzz: fuzzAction, loading: executeLoading } = useFuzz();
 
   // --- Filter state ---
   const [statusCodeFilter, setStatusCodeFilter] = useState<string>("");
@@ -263,7 +263,7 @@ export function FuzzResultsPage() {
     async (action: "fuzz_pause" | "fuzz_resume" | "fuzz_cancel") => {
       if (!fuzzId) return;
       try {
-        await execute({ action, params: { fuzz_id: fuzzId } });
+        await fuzzAction({ action, params: { fuzz_id: fuzzId } });
         addToast({
           type: "success",
           message: `Job ${action.replace("fuzz_", "")}d`,
@@ -275,7 +275,7 @@ export function FuzzResultsPage() {
         });
       }
     },
-    [fuzzId, execute, addToast],
+    [fuzzId, fuzzAction, addToast],
   );
 
   if (!fuzzId) {

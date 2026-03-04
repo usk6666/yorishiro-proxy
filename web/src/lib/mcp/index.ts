@@ -1,12 +1,17 @@
 /**
  * MCP Client SDK for yorishiro-proxy Web UI.
  *
- * Provides typed access to yorishiro-proxy's 5 MCP tools:
+ * Provides typed access to yorishiro-proxy's 10 MCP tools:
  * - proxy_start: Start proxy listeners
  * - proxy_stop: Stop proxy listeners
  * - configure: Configure runtime proxy settings
  * - query: Query flows, status, config, and other resources
- * - execute: Execute actions (resend, fuzz, delete, etc.)
+ * - execute: Resend and replay recorded requests (resend, resend_raw, tcp_replay)
+ * - manage: Manage flow data and CA certificates (delete_flows, export_flows, import_flows, regenerate_ca_cert)
+ * - fuzz: Execute fuzz testing campaigns (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel)
+ * - macro: Define and execute macro workflows (define_macro, run_macro, delete_macro)
+ * - intercept: Act on intercepted requests (release, modify_and_forward, drop)
+ * - security: Configure target scope and security settings
  */
 
 // Client
@@ -22,6 +27,11 @@ export {
   useMcpClient,
   useQuery,
   useExecute,
+  useManage,
+  useFuzz,
+  useMacro,
+  useInterceptAction,
+  useSecurity,
   useConfigure,
   useProxyControl,
 } from "./hooks.js";
@@ -30,6 +40,11 @@ export type {
   UseQueryOptions,
   UseQueryResult,
   UseExecuteResult,
+  UseManageResult,
+  UseFuzzResult,
+  UseMacroResult,
+  UseInterceptActionResult,
+  UseSecurityResult,
   UseConfigureResult,
   UseProxyControlResult,
 } from "./hooks.js";
@@ -70,6 +85,7 @@ export type {
   FlowEntry,
   FlowsResult,
   MessageEntry,
+  VariantRequest,
   FlowDetailResult,
   MessagesResult,
   ListenerStatusEntry,
@@ -92,8 +108,7 @@ export type {
   FuzzResultsResult,
   QueryResultMap,
 
-  // execute
-  ExecuteAction,
+  // Shared execute/fuzz types
   BodyPatch,
   RawPatch,
   FuzzPosition,
@@ -102,7 +117,53 @@ export type {
   HookConfig,
   HooksInput,
   ExportFilter,
+
+  // execute
+  ExecuteAction,
   ExecuteParams,
+  ExecuteResendResult,
+  ExecuteDryRunResult,
+  ExecuteResendRawResult,
+  ExecuteRawDryRunResult,
+
+  // manage
+  ManageAction,
+  ManageParams,
+  ManageDeleteFlowsResult,
+  ManageRegenerateCACertResult,
+  ManageExportFlowsResult,
+  ImportErrorDetail,
+  ManageImportFlowsResult,
+
+  // fuzz
+  FuzzAction,
+  FuzzToolParams,
+  FuzzStartResult,
+  FuzzControlResult,
+
+  // macro
+  MacroAction,
+  MacroToolParams,
+  MacroDefineResult,
+  MacroStepResult,
+  MacroRunResult,
+  MacroDeleteResult,
+
+  // intercept
+  InterceptAction,
+  InterceptActionParams,
+  InterceptActionResult,
+
+  // security
+  SecurityAction,
+  TargetRule,
+  SecurityParams,
+  SecuritySetScopeResult,
+  PolicyLayerResult,
+  AgentLayerResult,
+  SecurityGetScopeResult,
+  TestedTarget,
+  SecurityTestTargetResult,
 
   // Connection
   ConnectionStatus,

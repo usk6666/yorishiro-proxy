@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
+import { useQuery, useInterceptAction } from "../../lib/mcp/hooks.js";
 import type {
   InterceptQueueEntry,
   InterceptQueueResult,
@@ -29,7 +29,7 @@ export function InterceptPage() {
   const [editBody, setEditBody] = useState("");
 
   const { addToast } = useToast();
-  const { execute, loading: executeLoading } = useExecute();
+  const { interceptAction, loading: executeLoading } = useInterceptAction();
 
   // Poll intercept queue every second
   const {
@@ -81,7 +81,7 @@ export function InterceptPage() {
   const handleRelease = useCallback(async () => {
     if (!selectedId) return;
     try {
-      await execute({
+      await interceptAction({
         action: "release",
         params: { intercept_id: selectedId },
       });
@@ -94,7 +94,7 @@ export function InterceptPage() {
         message: `Release failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedId, execute, addToast, refetchQueue]);
+  }, [selectedId, interceptAction, addToast, refetchQueue]);
 
   // Modify & Forward: apply edits and forward
   const handleModifyAndForward = useCallback(async () => {
@@ -115,7 +115,7 @@ export function InterceptPage() {
     }
 
     try {
-      await execute({
+      await interceptAction({
         action: "modify_and_forward",
         params: {
           intercept_id: selectedId,
@@ -134,13 +134,13 @@ export function InterceptPage() {
         message: `Modify & Forward failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedId, editMethod, editUrl, editHeaders, editBody, execute, addToast, refetchQueue]);
+  }, [selectedId, editMethod, editUrl, editHeaders, editBody, interceptAction, addToast, refetchQueue]);
 
   // Drop: discard request
   const handleDrop = useCallback(async () => {
     if (!selectedId) return;
     try {
-      await execute({
+      await interceptAction({
         action: "drop",
         params: { intercept_id: selectedId },
       });
@@ -153,7 +153,7 @@ export function InterceptPage() {
         message: `Drop failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedId, execute, addToast, refetchQueue]);
+  }, [selectedId, interceptAction, addToast, refetchQueue]);
 
   return (
     <div className="page intercept-page">

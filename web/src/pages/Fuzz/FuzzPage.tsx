@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
+import { useQuery, useFuzz } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
 import type {
   QueryFilter,
@@ -108,7 +108,7 @@ function progressPercent(job: FuzzJobEntry): number {
 export function FuzzPage() {
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const { execute, loading: executeLoading } = useExecute();
+  const { fuzz: fuzzAction, loading: executeLoading } = useFuzz();
 
   const [activeTab, setActiveTab] = useState("jobs");
 
@@ -216,7 +216,7 @@ export function FuzzPage() {
     ) => {
       e.stopPropagation();
       try {
-        await execute({ action, params: { fuzz_id: fuzzId } });
+        await fuzzAction({ action, params: { fuzz_id: fuzzId } });
         addToast({
           type: "success",
           message: `Job ${action.replace("fuzz_", "")}d`,
@@ -229,7 +229,7 @@ export function FuzzPage() {
         });
       }
     },
-    [execute, addToast, refetch],
+    [fuzzAction, addToast, refetch],
   );
 
   // --- Campaign creation callback ---
@@ -547,7 +547,7 @@ function createEmptyPayloadSet(): PayloadSetFormEntry {
 
 function CampaignCreator({ onCreated }: CampaignCreatorProps) {
   const { addToast } = useToast();
-  const { execute, loading: executing } = useExecute();
+  const { fuzz: fuzzAction, loading: executing } = useFuzz();
 
   // Base flow
   const [flowId, setFlowId] = useState("");
@@ -714,7 +714,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
     }
 
     try {
-      await execute({
+      await fuzzAction({
         action: "fuzz",
         params: {
           flow_id: flowId.trim(),
@@ -754,7 +754,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
     stopLatencyMs,
     preSendMacro,
     postReceiveMacro,
-    execute,
+    fuzzAction,
     addToast,
     onCreated,
   ]);

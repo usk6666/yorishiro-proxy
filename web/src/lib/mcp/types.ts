@@ -1,6 +1,9 @@
 /**
- * TypeScript type definitions for yorishiro-proxy's 5 MCP tools.
+ * TypeScript type definitions for yorishiro-proxy's 10 MCP tools.
  * These types mirror the Go structs in internal/mcp/.
+ *
+ * Tools: proxy_start, proxy_stop, configure, query, execute,
+ *        manage, fuzz, macro, intercept, security
  */
 
 // ---------------------------------------------------------------------------
@@ -540,28 +543,8 @@ export interface QueryResultMap {
 }
 
 // ---------------------------------------------------------------------------
-// execute tool
+// Shared execute/fuzz types
 // ---------------------------------------------------------------------------
-
-/** Available execute actions. */
-export type ExecuteAction =
-  | "resend"
-  | "resend_raw"
-  | "tcp_replay"
-  | "delete_flows"
-  | "release"
-  | "modify_and_forward"
-  | "drop"
-  | "fuzz"
-  | "fuzz_pause"
-  | "fuzz_resume"
-  | "fuzz_cancel"
-  | "define_macro"
-  | "run_macro"
-  | "delete_macro"
-  | "regenerate_ca_cert"
-  | "export_flows"
-  | "import_flows";
 
 /** Body patch for resend. */
 export interface BodyPatch {
@@ -629,7 +612,7 @@ export interface HooksInput {
   post_receive?: HookConfig | null;
 }
 
-/** Export filter. */
+/** Export filter for manage tool. */
 export interface ExportFilter {
   protocol?: string;
   url_pattern?: string;
@@ -637,7 +620,14 @@ export interface ExportFilter {
   time_before?: string;
 }
 
-/** Parameters for the execute tool. */
+// ---------------------------------------------------------------------------
+// execute tool — resend, resend_raw, tcp_replay
+// ---------------------------------------------------------------------------
+
+/** Available execute actions. */
+export type ExecuteAction = "resend" | "resend_raw" | "tcp_replay";
+
+/** Parameters for the execute tool (resend / resend_raw / tcp_replay). */
 export interface ExecuteParams {
   action: ExecuteAction;
   params: {
@@ -666,44 +656,337 @@ export interface ExecuteParams {
     override_raw_base64?: string;
     patches?: RawPatch[];
 
-    // Delete flows
+    // Hooks
+    hooks?: HooksInput | null;
+  };
+}
+
+/** Result of a resend action. */
+export interface ExecuteResendResult {
+  new_flow_id: string;
+  status_code: number;
+  response_headers: Record<string, string[]>;
+  response_body: string;
+  response_body_encoding: string;
+  duration_ms: number;
+  tag?: string;
+}
+
+/** Result of a dry-run resend action. */
+export interface ExecuteDryRunResult {
+  dry_run: true;
+  request_preview: {
+    method: string;
+    url: string;
+    headers: Record<string, string[]>;
+    body: string;
+    body_encoding: string;
+  };
+}
+
+/** Result of a resend_raw action. */
+export interface ExecuteResendRawResult {
+  new_flow_id: string;
+  response_data: string;
+  response_size: number;
+  duration_ms: number;
+  tag?: string;
+}
+
+/** Result of a raw dry-run action. */
+export interface ExecuteRawDryRunResult {
+  dry_run: true;
+  raw_preview: {
+    data_base64: string;
+    data_size: number;
+    patches_applied: number;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// manage tool — delete_flows, export_flows, import_flows, regenerate_ca_cert
+// ---------------------------------------------------------------------------
+
+/** Available manage actions. */
+export type ManageAction =
+  | "delete_flows"
+  | "export_flows"
+  | "import_flows"
+  | "regenerate_ca_cert";
+
+/** Parameters for the manage tool. */
+export interface ManageParams {
+  action: ManageAction;
+  params: {
+    // delete_flows
+    flow_id?: string;
     older_than_days?: number | null;
     confirm?: boolean;
     protocol?: string;
 
-    // Intercept queue
-    intercept_id?: string;
+    // export_flows
+    format?: string;
+    filter?: ExportFilter | null;
+    include_bodies?: boolean | null;
+    output_path?: string;
 
-    // Fuzz
+    // import_flows
+    input_path?: string;
+    on_conflict?: string;
+  };
+}
+
+/** Result of delete_flows action. */
+export interface ManageDeleteFlowsResult {
+  deleted_count: number;
+  cutoff_time?: string;
+}
+
+/** Result of regenerate_ca_cert action. */
+export interface ManageRegenerateCACertResult {
+  fingerprint: string;
+  subject: string;
+  not_after: string;
+  persisted: boolean;
+  cert_path?: string;
+  install_hint?: string;
+}
+
+/** Result of export_flows action. */
+export interface ManageExportFlowsResult {
+  exported_count: number;
+  format: string;
+  output_path?: string;
+  data?: string;
+}
+
+/** Import error detail. */
+export interface ImportErrorDetail {
+  index: number;
+  error: string;
+}
+
+/** Result of import_flows action. */
+export interface ManageImportFlowsResult {
+  imported: number;
+  skipped: number;
+  errors: number;
+  source: string;
+  error_details?: ImportErrorDetail[];
+}
+
+// ---------------------------------------------------------------------------
+// fuzz tool — fuzz, fuzz_pause, fuzz_resume, fuzz_cancel
+// ---------------------------------------------------------------------------
+
+/** Available fuzz actions. */
+export type FuzzAction = "fuzz" | "fuzz_pause" | "fuzz_resume" | "fuzz_cancel";
+
+/** Parameters for the fuzz tool. */
+export interface FuzzToolParams {
+  action: FuzzAction;
+  params: {
+    // fuzz start
+    flow_id?: string;
     attack_type?: string;
     positions?: FuzzPosition[];
     payload_sets?: Record<string, FuzzPayloadSet>;
+    tag?: string;
     concurrency?: number | null;
     rate_limit_rps?: number | null;
     delay_ms?: number | null;
     max_retries?: number | null;
+    timeout_ms?: number | null;
     stop_on?: FuzzStopCondition | null;
+
+    // fuzz control (pause/resume/cancel)
     fuzz_id?: string;
 
-    // Hooks
+    // hooks
     hooks?: HooksInput | null;
+  };
+}
 
-    // Macro
+/** Result of fuzz start action. */
+export interface FuzzStartResult {
+  fuzz_id: string;
+  flow_id: string;
+  status: string;
+  total: number;
+  tag: string;
+}
+
+/** Result of fuzz control actions (pause/resume/cancel). */
+export interface FuzzControlResult {
+  fuzz_id: string;
+  action: string;
+  status: string;
+}
+
+// ---------------------------------------------------------------------------
+// macro tool — define_macro, run_macro, delete_macro
+// ---------------------------------------------------------------------------
+
+/** Available macro actions. */
+export type MacroAction = "define_macro" | "run_macro" | "delete_macro";
+
+/** Parameters for the macro tool. */
+export interface MacroToolParams {
+  action: MacroAction;
+  params: {
     name?: string;
     description?: string;
     steps?: MacroStep[];
     initial_vars?: Record<string, string>;
     macro_timeout_ms?: number;
     vars?: Record<string, string>;
-
-    // Export/Import
-    format?: string;
-    filter?: ExportFilter | null;
-    include_bodies?: boolean | null;
-    output_path?: string;
-    input_path?: string;
-    on_conflict?: string;
   };
+}
+
+/** Result of define_macro action. */
+export interface MacroDefineResult {
+  name: string;
+  step_count: number;
+  created: boolean;
+}
+
+/** Step result entry for run_macro. */
+export interface MacroStepResult {
+  id: string;
+  status: string;
+  status_code?: number;
+  duration_ms?: number;
+  error?: string;
+}
+
+/** Result of run_macro action. */
+export interface MacroRunResult {
+  macro_name: string;
+  status: string;
+  steps_executed: number;
+  kv_store: Record<string, string>;
+  step_results: MacroStepResult[];
+  error?: string;
+}
+
+/** Result of delete_macro action. */
+export interface MacroDeleteResult {
+  name: string;
+  deleted: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// intercept tool — release, modify_and_forward, drop
+// ---------------------------------------------------------------------------
+
+/** Available intercept actions. */
+export type InterceptAction = "release" | "modify_and_forward" | "drop";
+
+/** Parameters for the intercept tool. */
+export interface InterceptActionParams {
+  action: InterceptAction;
+  params: {
+    intercept_id?: string;
+
+    // modify_and_forward mutation parameters
+    override_method?: string;
+    override_url?: string;
+    override_headers?: Record<string, string>;
+    add_headers?: Record<string, string>;
+    remove_headers?: string[];
+    override_body?: string | null;
+  };
+}
+
+/** Result of intercept actions. */
+export interface InterceptActionResult {
+  intercept_id: string;
+  action: string;
+  status: string;
+}
+
+// ---------------------------------------------------------------------------
+// security tool — set_target_scope, update_target_scope, get_target_scope, test_target
+// ---------------------------------------------------------------------------
+
+/** Available security actions. */
+export type SecurityAction =
+  | "set_target_scope"
+  | "update_target_scope"
+  | "get_target_scope"
+  | "test_target";
+
+/** Target rule for security tool. */
+export interface TargetRule {
+  hostname: string;
+  ports?: number[];
+  path_prefix?: string;
+  schemes?: string[];
+}
+
+/** Parameters for the security tool. */
+export interface SecurityParams {
+  action: SecurityAction;
+  params: {
+    // set_target_scope
+    allows?: TargetRule[];
+    denies?: TargetRule[];
+
+    // update_target_scope
+    add_allows?: TargetRule[];
+    remove_allows?: TargetRule[];
+    add_denies?: TargetRule[];
+    remove_denies?: TargetRule[];
+
+    // test_target
+    url?: string;
+  };
+}
+
+/** Result of set_target_scope / update_target_scope actions. */
+export interface SecuritySetScopeResult {
+  status: string;
+  allows: TargetRule[];
+  denies: TargetRule[];
+  mode: string;
+}
+
+/** Policy layer result for get_target_scope. */
+export interface PolicyLayerResult {
+  allows: TargetRule[];
+  denies: TargetRule[];
+  source: string;
+  immutable: boolean;
+}
+
+/** Agent layer result for get_target_scope. */
+export interface AgentLayerResult {
+  allows: TargetRule[];
+  denies: TargetRule[];
+}
+
+/** Result of get_target_scope action. */
+export interface SecurityGetScopeResult {
+  policy: PolicyLayerResult;
+  agent: AgentLayerResult;
+  effective_mode: string;
+}
+
+/** Tested target info in test_target result. */
+export interface TestedTarget {
+  hostname: string;
+  port: number;
+  scheme: string;
+  path: string;
+}
+
+/** Result of test_target action. */
+export interface SecurityTestTargetResult {
+  allowed: boolean;
+  reason: string;
+  layer: string;
+  matched_rule?: TargetRule | null;
+  tested_target: TestedTarget;
 }
 
 // ---------------------------------------------------------------------------

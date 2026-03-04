@@ -3,6 +3,10 @@
  *
  * Uses the official MCP TypeScript SDK's Client and StreamableHTTPClientTransport
  * to connect to yorishiro-proxy's /mcp endpoint via Streamable HTTP.
+ *
+ * Provides typed access to yorishiro-proxy's 10 MCP tools:
+ * proxy_start, proxy_stop, configure, query, execute,
+ * manage, fuzz, macro, intercept, security
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -12,6 +16,10 @@ import type {
   ConfigureParams,
   ConfigureResult,
   ExecuteParams,
+  FuzzToolParams,
+  InterceptActionParams,
+  MacroToolParams,
+  ManageParams,
   ProxyStartParams,
   ProxyStartResult,
   ProxyStopParams,
@@ -19,6 +27,7 @@ import type {
   QueryParams,
   QueryResource,
   QueryResultMap,
+  SecurityParams,
 } from "./types.js";
 
 /** Configuration for the MCP client. */
@@ -39,7 +48,7 @@ export type McpClientEventListener = (event: McpClientEvent) => void;
 
 /**
  * McpClient wraps the MCP SDK Client to provide typed access
- * to yorishiro-proxy's 5 MCP tools.
+ * to yorishiro-proxy's 10 MCP tools.
  */
 export class McpClient {
   private client: Client | null = null;
@@ -220,10 +229,45 @@ export class McpClient {
     return this.callTool<QueryResultMap[R]>("query", params as unknown as Record<string, unknown>);
   }
 
-  /** Execute an action (resend, delete, fuzz, etc.). */
+  /** Execute a resend action (resend, resend_raw, tcp_replay). */
   async execute<T = unknown>(
     params: ExecuteParams,
   ): Promise<T> {
     return this.callTool<T>("execute", params as unknown as Record<string, unknown>);
+  }
+
+  /** Manage flow data and CA certificates (delete_flows, export_flows, import_flows, regenerate_ca_cert). */
+  async manage<T = unknown>(
+    params: ManageParams,
+  ): Promise<T> {
+    return this.callTool<T>("manage", params as unknown as Record<string, unknown>);
+  }
+
+  /** Execute fuzz testing campaigns (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel). */
+  async fuzz<T = unknown>(
+    params: FuzzToolParams,
+  ): Promise<T> {
+    return this.callTool<T>("fuzz", params as unknown as Record<string, unknown>);
+  }
+
+  /** Define and execute macro workflows (define_macro, run_macro, delete_macro). */
+  async macro<T = unknown>(
+    params: MacroToolParams,
+  ): Promise<T> {
+    return this.callTool<T>("macro", params as unknown as Record<string, unknown>);
+  }
+
+  /** Act on intercepted requests (release, modify_and_forward, drop). */
+  async interceptAction<T = unknown>(
+    params: InterceptActionParams,
+  ): Promise<T> {
+    return this.callTool<T>("intercept", params as unknown as Record<string, unknown>);
+  }
+
+  /** Configure security settings and target scope rules. */
+  async security<T = unknown>(
+    params: SecurityParams,
+  ): Promise<T> {
+    return this.callTool<T>("security", params as unknown as Record<string, unknown>);
   }
 }
