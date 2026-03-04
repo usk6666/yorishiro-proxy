@@ -1,6 +1,7 @@
 package http2
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	gohttp "net/http"
@@ -30,6 +31,10 @@ type sendRecordParams struct {
 // subsequent recordReceive or recordSendError calls can reference it.
 type sendRecordResult struct {
 	sessionID string
+	// recvSequence is the sequence number to use for the receive message.
+	// Defaults to 1 (send=0, receive=1). When variant recording produces
+	// two send messages (original=0, modified=1), this is set to 2.
+	recvSequence int
 }
 
 // recordSend records the send phase of an HTTP/2 session: creates the session
@@ -77,7 +82,150 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		logger.Error("HTTP/2 send message save failed", "error", err)
 	}
 
-	return &sendRecordResult{sessionID: sess.ID}
+	return &sendRecordResult{sessionID: sess.ID, recvSequence: 1}
+}
+
+// requestSnapshot holds a copy of the request headers and body taken before
+// intercept processing. It is used to detect whether modifications occurred
+// and, if so, to record the original (unmodified) version as a separate send
+// message.
+type requestSnapshot struct {
+	headers gohttp.Header
+	body    []byte
+}
+
+// snapshotRequest creates a deep copy of the request headers and body for
+// later comparison.
+func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
+	snap := requestSnapshot{}
+	if headers != nil {
+		snap.headers = headers.Clone()
+	}
+	if body != nil {
+		snap.body = make([]byte, len(body))
+		copy(snap.body, body)
+	}
+	return snap
+}
+
+// requestModified reports whether the request headers or body have been changed
+// relative to the snapshot.
+func requestModified(snap requestSnapshot, currentHeaders gohttp.Header, currentBody []byte) bool {
+	if !bytes.Equal(snap.body, currentBody) {
+		return true
+	}
+	return headersModified(snap.headers, currentHeaders)
+}
+
+// headersModified reports whether two header maps differ.
+func headersModified(a, b gohttp.Header) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for key, aVals := range a {
+		bVals, ok := b[key]
+		if !ok || len(aVals) != len(bVals) {
+			return true
+		}
+		for i := range aVals {
+			if aVals[i] != bVals[i] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// recordSendWithVariant records the send phase with variant support. If the
+// request was modified by intercept (detected by comparing snap against the
+// current outbound request), it records two send messages:
+//   - Sequence 0: original (variant="original") with the snapshot's headers/body
+//   - Sequence 1: modified (variant="modified") with the current headers/body
+//
+// If no modification occurred (snap is nil or headers/body unchanged), this
+// behaves identically to recordSend (single send at sequence 0, no variant
+// metadata).
+func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams, snap *requestSnapshot, logger *slog.Logger) *sendRecordResult {
+	if h.Store == nil {
+		return nil
+	}
+
+	if !h.shouldCapture(p.req.Method, p.reqURL) {
+		return nil
+	}
+
+	// Detect whether modification occurred.
+	modified := snap != nil && requestModified(*snap, p.req.Header, p.reqBody)
+
+	sess := &session.Session{
+		ConnID:      p.connID,
+		Protocol:    "HTTP/2",
+		SessionType: "unary",
+		State:       "active",
+		Timestamp:   p.start,
+		ConnInfo:    p.connInfo,
+	}
+	if err := h.Store.SaveSession(ctx, sess); err != nil {
+		logger.Error("HTTP/2 session save failed",
+			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+		return nil
+	}
+
+	if modified {
+		// Record the original (unmodified) request as sequence 0.
+		originalMsg := &session.Message{
+			SessionID:     sess.ID,
+			Sequence:      0,
+			Direction:     "send",
+			Timestamp:     p.start,
+			Method:        p.req.Method,
+			URL:           p.reqURL,
+			Headers:       snap.headers,
+			Body:          snap.body,
+			BodyTruncated: p.reqTruncated,
+			Metadata:      map[string]string{"variant": "original"},
+		}
+		if err := h.Store.AppendMessage(ctx, originalMsg); err != nil {
+			logger.Error("HTTP/2 original send message save failed", "error", err)
+		}
+
+		// Record the modified request as sequence 1.
+		modifiedMsg := &session.Message{
+			SessionID:     sess.ID,
+			Sequence:      1,
+			Direction:     "send",
+			Timestamp:     p.start,
+			Method:        p.req.Method,
+			URL:           p.reqURL,
+			Headers:       p.req.Header,
+			Body:          p.reqBody,
+			BodyTruncated: p.reqTruncated,
+			Metadata:      map[string]string{"variant": "modified"},
+		}
+		if err := h.Store.AppendMessage(ctx, modifiedMsg); err != nil {
+			logger.Error("HTTP/2 modified send message save failed", "error", err)
+		}
+
+		return &sendRecordResult{sessionID: sess.ID, recvSequence: 2}
+	}
+
+	// No modification: single send message without variant metadata.
+	sendMsg := &session.Message{
+		SessionID:     sess.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     p.start,
+		Method:        p.req.Method,
+		URL:           p.reqURL,
+		Headers:       p.req.Header,
+		Body:          p.reqBody,
+		BodyTruncated: p.reqTruncated,
+	}
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("HTTP/2 send message save failed", "error", err)
+	}
+
+	return &sendRecordResult{sessionID: sess.ID, recvSequence: 1}
 }
 
 // receiveRecordParams holds the parameters needed to record the receive phase
@@ -131,7 +279,7 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 
 	recvMsg := &session.Message{
 		SessionID:     sendResult.sessionID,
-		Sequence:      1,
+		Sequence:      sendResult.recvSequence,
 		Direction:     "receive",
 		Timestamp:     p.start.Add(p.duration),
 		StatusCode:    p.resp.StatusCode,
