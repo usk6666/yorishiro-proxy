@@ -1,5 +1,5 @@
 /**
- * Styles for the Session Detail page and its sub-components.
+ * Styles for the Flow Detail page and its sub-components.
  */
 
 /* --- Back navigation --- */
@@ -8,7 +8,7 @@
   margin-bottom: var(--space-sm);
 }
 
-/* --- Session header --- */
+/* --- Flow header --- */
 
 .sd-header {
   padding: var(--space-md);
@@ -36,7 +36,7 @@
   gap: var(--space-sm);
 }
 
-.sd-session-id {
+.sd-flow-id {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   color: var(--text-muted);
@@ -405,7 +405,7 @@
   margin-bottom: var(--space-md);
 }
 
-/* --- Messages table (streaming sessions) --- */
+/* --- Messages table (streaming flows) --- */
 
 .sd-messages-loading {
   display: flex;

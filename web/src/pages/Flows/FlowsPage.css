@@ -1,10 +1,10 @@
 /**
- * Styles for the Sessions list page.
+ * Styles for the Flows list page.
  */
 
 /* --- Toolbar --- */
 
-.sessions-toolbar {
+.flows-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -13,14 +13,14 @@
   flex-wrap: wrap;
 }
 
-.sessions-toolbar-left {
+.flows-toolbar-left {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
   flex-wrap: wrap;
 }
 
-.sessions-toolbar-right {
+.flows-toolbar-right {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -28,7 +28,7 @@
 
 /* --- Filters --- */
 
-.sessions-filters {
+.flows-filters {
   display: flex;
   align-items: flex-start;
   gap: var(--space-md);
@@ -40,13 +40,13 @@
   flex-wrap: wrap;
 }
 
-.sessions-filter-group {
+.flows-filter-group {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
 }
 
-.sessions-filter-label {
+.flows-filter-label {
   font-size: var(--font-size-xs);
   color: var(--text-secondary);
   text-transform: uppercase;
@@ -54,13 +54,13 @@
   font-weight: 600;
 }
 
-.sessions-filter-checkboxes {
+.flows-filter-checkboxes {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-xs) var(--space-sm);
 }
 
-.sessions-filter-checkbox {
+.flows-filter-checkbox {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
@@ -70,12 +70,12 @@
   user-select: none;
 }
 
-.sessions-filter-checkbox input[type="checkbox"] {
+.flows-filter-checkbox input[type="checkbox"] {
   accent-color: var(--accent-primary);
   cursor: pointer;
 }
 
-.sessions-filter-select {
+.flows-filter-select {
   height: 28px;
   padding: 0 var(--space-sm);
   font-family: var(--font-mono);
@@ -86,41 +86,41 @@
   border-radius: var(--radius-sm);
 }
 
-.sessions-filter-select:focus {
+.flows-filter-select:focus {
   outline: none;
   border-color: var(--accent-primary);
 }
 
-.sessions-url-filter {
+.flows-url-filter {
   min-width: 200px;
 }
 
-.sessions-url-filter .input {
+.flows-url-filter .input {
   height: 28px;
   font-size: var(--font-size-xs);
 }
 
 /* --- Table --- */
 
-.sessions-table-wrapper {
+.flows-table-wrapper {
   margin-top: var(--space-md);
 }
 
-.sessions-table .table tbody tr {
+.flows-table .table tbody tr {
   cursor: pointer;
 }
 
-.sessions-table .table tbody tr.sessions-row--selected {
+.flows-table .table tbody tr.flows-row--selected {
   background-color: var(--sidebar-active);
 }
 
-.sessions-cell-id {
+.flows-cell-id {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   color: var(--text-secondary);
 }
 
-.sessions-cell-url {
+.flows-cell-url {
   max-width: 400px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -129,27 +129,27 @@
   font-size: var(--font-size-xs);
 }
 
-.sessions-cell-method {
+.flows-cell-method {
   font-family: var(--font-mono);
   font-weight: 600;
   font-size: var(--font-size-xs);
 }
 
-.sessions-cell-size {
+.flows-cell-size {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   color: var(--text-secondary);
   white-space: nowrap;
 }
 
-.sessions-cell-duration {
+.flows-cell-duration {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   color: var(--text-secondary);
   white-space: nowrap;
 }
 
-.sessions-cell-timestamp {
+.flows-cell-timestamp {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   color: var(--text-secondary);
@@ -194,18 +194,18 @@
 
 /* --- Selection checkbox in table header --- */
 
-.sessions-select-cell {
+.flows-select-cell {
   width: 32px;
 }
 
-.sessions-select-cell input[type="checkbox"] {
+.flows-select-cell input[type="checkbox"] {
   accent-color: var(--accent-primary);
   cursor: pointer;
 }
 
 /* --- Pagination --- */
 
-.sessions-pagination {
+.flows-pagination {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -214,19 +214,19 @@
   padding: var(--space-sm) 0;
 }
 
-.sessions-pagination-info {
+.flows-pagination-info {
   font-size: var(--font-size-xs);
   color: var(--text-secondary);
   font-family: var(--font-mono);
 }
 
-.sessions-pagination-controls {
+.flows-pagination-controls {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
 }
 
-.sessions-page-size {
+.flows-page-size {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
@@ -234,7 +234,7 @@
   color: var(--text-secondary);
 }
 
-.sessions-page-size select {
+.flows-page-size select {
   height: 24px;
   padding: 0 var(--space-xs);
   font-family: var(--font-mono);
@@ -247,7 +247,7 @@
 
 /* --- Auto-refresh --- */
 
-.sessions-refresh-control {
+.flows-refresh-control {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
@@ -255,7 +255,7 @@
   color: var(--text-secondary);
 }
 
-.sessions-refresh-control select {
+.flows-refresh-control select {
   height: 24px;
   padding: 0 var(--space-xs);
   font-family: var(--font-mono);
@@ -268,7 +268,7 @@
 
 /* --- Empty / Loading / Error states --- */
 
-.sessions-empty {
+.flows-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -282,7 +282,7 @@
   gap: var(--space-sm);
 }
 
-.sessions-loading {
+.flows-loading {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -290,7 +290,7 @@
   margin-top: var(--space-md);
 }
 
-.sessions-error {
+.flows-error {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -305,7 +305,7 @@
 
 /* --- Bulk actions bar --- */
 
-.sessions-bulk-bar {
+.flows-bulk-bar {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -318,25 +318,25 @@
   color: var(--text-secondary);
 }
 
-.sessions-bulk-count {
+.flows-bulk-count {
   font-family: var(--font-mono);
   color: var(--text-primary);
 }
 
 /* --- Header with description --- */
 
-.sessions-header {
+.flows-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
 }
 
-.sessions-header-info {
+.flows-header-info {
   display: flex;
   flex-direction: column;
 }
 
-.sessions-total {
+.flows-total {
   font-size: var(--font-size-xs);
   color: var(--text-muted);
   font-family: var(--font-mono);

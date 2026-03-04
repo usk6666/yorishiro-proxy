@@ -2,7 +2,7 @@
  * HeadersTable — Displays HTTP headers as a key-value table.
  */
 
-import "./SessionDetailPage.css";
+import "./FlowDetailPage.css";
 
 export interface HeadersTableProps {
   headers: Record<string, string[]> | undefined;
