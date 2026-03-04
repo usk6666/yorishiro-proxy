@@ -1,0 +1,204 @@
+/**
+ * Styles for CodeViewer component.
+ *
+ * Dark theme syntax highlighting colors are defined here to match
+ * the yorishiro-proxy dark theme. No external highlight.js theme is imported.
+ */
+
+/* --- Container --- */
+
+.code-viewer {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background-color: var(--bg-primary);
+}
+
+.code-viewer-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* --- Toolbar --- */
+
+.code-viewer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-muted);
+  flex-wrap: wrap;
+}
+
+.code-viewer-toolbar-left,
+.code-viewer-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.code-viewer-toggle {
+  padding: 2px var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.code-viewer-toggle:hover {
+  color: var(--text-secondary);
+  background-color: var(--bg-secondary);
+}
+
+.code-viewer-toggle--active {
+  color: var(--text-primary);
+  background-color: var(--bg-secondary);
+  border-color: var(--accent-primary);
+}
+
+.code-viewer-copy-btn {
+  padding: 2px var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.code-viewer-copy-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-secondary);
+}
+
+.code-viewer-large-hint {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* --- Scrollable code area --- */
+
+.code-viewer-scroll {
+  overflow: auto;
+  max-height: 500px;
+}
+
+.code-viewer-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+/* --- Lines --- */
+
+.code-viewer-line:hover {
+  background-color: var(--bg-secondary);
+}
+
+.code-viewer-line-number {
+  text-align: right;
+  padding: 0 var(--space-sm) 0 var(--space-sm);
+  color: var(--text-muted);
+  user-select: none;
+  white-space: nowrap;
+  vertical-align: top;
+  border-right: 1px solid var(--border-muted);
+}
+
+.code-viewer-line-content {
+  padding: 0 var(--space-sm);
+  color: var(--text-primary);
+  white-space: pre;
+}
+
+/* Word-wrap mode */
+.code-viewer--wrap .code-viewer-line-content {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* --- highlight.js token colors (dark theme) --- */
+
+/* Strings */
+.code-viewer-line-content .hljs-string,
+.code-viewer-line-content .hljs-template-variable,
+.code-viewer-line-content .hljs-addition {
+  color: #a5d6ff;
+}
+
+/* Keywords / tags */
+.code-viewer-line-content .hljs-keyword,
+.code-viewer-line-content .hljs-selector-tag,
+.code-viewer-line-content .hljs-tag {
+  color: #ff7b72;
+}
+
+/* Numbers / literals */
+.code-viewer-line-content .hljs-number,
+.code-viewer-line-content .hljs-literal,
+.code-viewer-line-content .hljs-variable,
+.code-viewer-line-content .hljs-template-tag {
+  color: #79c0ff;
+}
+
+/* Attributes / property names */
+.code-viewer-line-content .hljs-attr,
+.code-viewer-line-content .hljs-attribute,
+.code-viewer-line-content .hljs-selector-attr,
+.code-viewer-line-content .hljs-selector-pseudo {
+  color: #d2a8ff;
+}
+
+/* Comments */
+.code-viewer-line-content .hljs-comment,
+.code-viewer-line-content .hljs-quote {
+  color: #8b949e;
+  font-style: italic;
+}
+
+/* Names / symbols */
+.code-viewer-line-content .hljs-name,
+.code-viewer-line-content .hljs-symbol,
+.code-viewer-line-content .hljs-bullet {
+  color: #ffa657;
+}
+
+/* Built-in / type */
+.code-viewer-line-content .hljs-built_in,
+.code-viewer-line-content .hljs-type,
+.code-viewer-line-content .hljs-title,
+.code-viewer-line-content .hljs-section {
+  color: #d2a8ff;
+}
+
+/* Punctuation */
+.code-viewer-line-content .hljs-punctuation {
+  color: var(--text-secondary);
+}
+
+/* Deletion (diff) */
+.code-viewer-line-content .hljs-deletion {
+  color: #ffa198;
+  background-color: rgba(248, 81, 73, 0.1);
+}
+
+/* Meta / link */
+.code-viewer-line-content .hljs-meta,
+.code-viewer-line-content .hljs-link {
+  color: #79c0ff;
+}

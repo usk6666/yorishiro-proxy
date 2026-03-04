@@ -10,6 +10,7 @@ import type {
 } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
+import { CodeViewer } from "../../components/ui/CodeViewer.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
@@ -670,9 +671,22 @@ export function FuzzResultsPage() {
                     <h4 className="fuzz-results-detail-section-title">
                       Response Body
                     </h4>
-                    <pre className="fuzz-results-detail-body">
-                      {detailFlow.response_body || "(empty)"}
-                    </pre>
+                    {detailFlow.response_body ? (
+                      <CodeViewer
+                        code={detailFlow.response_body}
+                        contentType={
+                          (() => {
+                            const hdrs = detailFlow.response_headers ?? {};
+                            for (const [k, v] of Object.entries(hdrs)) {
+                              if (k.toLowerCase() === "content-type" && v.length > 0) return v[0];
+                            }
+                            return "";
+                          })()
+                        }
+                      />
+                    ) : (
+                      <div className="fuzz-results-detail-empty">(empty)</div>
+                    )}
                   </div>
                 </>
               )}
