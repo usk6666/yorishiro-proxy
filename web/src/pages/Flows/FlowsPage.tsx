@@ -12,6 +12,19 @@ import { Table } from "../../components/ui/Table.js";
 import "./FlowsPage.css";
 
 // ---------------------------------------------------------------------------
+// useDebounce — returns a debounced copy of `value` that only updates after
+// `delay` milliseconds of inactivity.
+// ---------------------------------------------------------------------------
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -127,6 +140,11 @@ export function FlowsPage() {
   const [bodyContains, setBodyContains] = useState<string>("");
   const [tagFilter, setTagFilter] = useState<string>("");
 
+  // Debounce text inputs to avoid firing expensive queries on every keystroke
+  const debouncedUrlPattern = useDebounce(urlPattern, 300);
+  const debouncedBodyContains = useDebounce(bodyContains, 300);
+  const debouncedTagFilter = useDebounce(tagFilter, 300);
+
   // --- Pagination state ---
   const [pageSize, setPageSize] = useState<number>(50);
   const [offset, setOffset] = useState(0);
@@ -147,8 +165,8 @@ export function FlowsPage() {
     if (selectedMethod) {
       f.method = selectedMethod;
     }
-    if (urlPattern.trim()) {
-      f.url_pattern = urlPattern.trim();
+    if (debouncedUrlPattern.trim()) {
+      f.url_pattern = debouncedUrlPattern.trim();
     }
     if (statusCodeRange) {
       const code = parseInt(statusCodeRange, 10);
@@ -159,14 +177,14 @@ export function FlowsPage() {
     if (selectedState) {
       f.state = selectedState;
     }
-    if (bodyContains.trim()) {
-      f.body_contains = bodyContains.trim();
+    if (debouncedBodyContains.trim()) {
+      f.body_contains = debouncedBodyContains.trim();
     }
-    if (tagFilter.trim()) {
-      f.tag = tagFilter.trim();
+    if (debouncedTagFilter.trim()) {
+      f.tag = debouncedTagFilter.trim();
     }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange, selectedState, bodyContains, tagFilter]);
+  }, [selectedProtocol, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedState, debouncedBodyContains, debouncedTagFilter]);
 
   // --- Query flows ---
   const { data, loading, error, refetch } = useQuery("flows", {
@@ -191,7 +209,18 @@ export function FlowsPage() {
     prevFilterKey.current = key;
   }, [filter, pageSize, offset, refetch]);
 
-  // Reset offset when filter changes
+  // Reset offset and selection when debounced text filters change
+  const prevTextFilterKey = useRef("");
+  useEffect(() => {
+    const key = JSON.stringify({ debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter });
+    if (prevTextFilterKey.current && prevTextFilterKey.current !== key) {
+      setOffset(0);
+      setSelectedIds(new Set());
+    }
+    prevTextFilterKey.current = key;
+  }, [debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter]);
+
+  // Reset offset when filter changes (used by non-debounced filter controls)
   const handleFilterChange = useCallback(() => {
     setOffset(0);
     setSelectedIds(new Set());
@@ -233,31 +262,28 @@ export function FlowsPage() {
     [handleFilterChange],
   );
 
-  // --- URL pattern ---
+  // --- URL pattern (debounced — offset/selection reset via effect) ---
   const handleUrlChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setUrlPattern(e.target.value);
-      handleFilterChange();
     },
-    [handleFilterChange],
+    [],
   );
 
-  // --- Body contains ---
+  // --- Body contains (debounced — offset/selection reset via effect) ---
   const handleBodyContainsChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setBodyContains(e.target.value);
-      handleFilterChange();
     },
-    [handleFilterChange],
+    [],
   );
 
-  // --- Tag filter ---
+  // --- Tag filter (debounced — offset/selection reset via effect) ---
   const handleTagFilterChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setTagFilter(e.target.value);
-      handleFilterChange();
     },
-    [handleFilterChange],
+    [],
   );
 
   // --- Row click → navigate to detail ---

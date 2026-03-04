@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { useConfigure, useQuery } from "../../lib/mcp/hooks.js";
+import { useConfigure } from "../../lib/mcp/hooks.js";
 import type { ConfigResult, InterceptRule } from "../../lib/mcp/types.js";
 import { Button, Input, useToast } from "../../components/ui/index.js";
 
@@ -15,8 +15,7 @@ const TIMEOUT_BEHAVIOR_OPTIONS = ["auto_release", "auto_drop"] as const;
  * InterceptRules — manage intercept rules for request/response interception.
  *
  * Note: The config query does not return individual rule details.
- * We query the status to get intercept_queue info and manage rules
- * via the configure tool's intercept_rules section.
+ * We manage rules via the configure tool's intercept_rules section.
  */
 export function InterceptRules({ config: _config, onRefresh }: InterceptRulesProps) {
   const { addToast } = useToast();
@@ -36,18 +35,8 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
   const [actionId, setActionId] = useState("");
 
   // Intercept queue settings
-  const { data: statusData } = useQuery("status");
   const [queueTimeoutMs, setQueueTimeoutMs] = useState("");
   const [queueTimeoutBehavior, setQueueTimeoutBehavior] = useState<"auto_release" | "auto_drop">("auto_release");
-  const [queueSettingsLoaded, setQueueSettingsLoaded] = useState(false);
-
-  // Load current intercept queue settings from status
-  if (statusData && !queueSettingsLoaded) {
-    // Status result doesn't directly contain intercept_queue config,
-    // but we can initialize with sensible defaults.
-    // The actual values will be reflected after the first configure call.
-    setQueueSettingsLoaded(true);
-  }
 
   const resetForm = () => {
     setRuleId("");
@@ -163,10 +152,15 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
   }, [actionId, configure, addToast, onRefresh]);
 
   const handleSaveQueueSettings = useCallback(async () => {
-    const timeoutMs = queueTimeoutMs.trim() ? parseInt(queueTimeoutMs.trim(), 10) : null;
-    if (queueTimeoutMs.trim() && (isNaN(timeoutMs as number) || (timeoutMs as number) < 0)) {
-      addToast({ type: "warning", message: "Timeout must be a non-negative number" });
-      return;
+    let timeoutMs: number | null = null;
+    const trimmed = queueTimeoutMs.trim();
+    if (trimmed) {
+      const parsed = parseInt(trimmed, 10);
+      if (isNaN(parsed) || parsed < 0) {
+        addToast({ type: "warning", message: "Timeout must be a non-negative number" });
+        return;
+      }
+      timeoutMs = parsed;
     }
 
     try {
