@@ -124,6 +124,8 @@ export function FlowsPage() {
   const [statusCodeRange, setStatusCodeRange] = useState<string>("");
   const [urlPattern, setUrlPattern] = useState<string>("");
   const [selectedState, setSelectedState] = useState<string>("");
+  const [bodyContains, setBodyContains] = useState<string>("");
+  const [tagFilter, setTagFilter] = useState<string>("");
 
   // --- Pagination state ---
   const [pageSize, setPageSize] = useState<number>(50);
@@ -157,8 +159,14 @@ export function FlowsPage() {
     if (selectedState) {
       f.state = selectedState;
     }
+    if (bodyContains.trim()) {
+      f.body_contains = bodyContains.trim();
+    }
+    if (tagFilter.trim()) {
+      f.tag = tagFilter.trim();
+    }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange, selectedState]);
+  }, [selectedProtocol, selectedMethod, urlPattern, statusCodeRange, selectedState, bodyContains, tagFilter]);
 
   // --- Query flows ---
   const { data, loading, error, refetch } = useQuery("flows", {
@@ -229,6 +237,24 @@ export function FlowsPage() {
   const handleUrlChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setUrlPattern(e.target.value);
+      handleFilterChange();
+    },
+    [handleFilterChange],
+  );
+
+  // --- Body contains ---
+  const handleBodyContainsChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setBodyContains(e.target.value);
+      handleFilterChange();
+    },
+    [handleFilterChange],
+  );
+
+  // --- Tag filter ---
+  const handleTagFilterChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setTagFilter(e.target.value);
       handleFilterChange();
     },
     [handleFilterChange],
@@ -474,6 +500,24 @@ export function FlowsPage() {
               placeholder="Filter by URL..."
               value={urlPattern}
               onChange={handleUrlChange}
+            />
+          </div>
+
+          <div className="flows-filter-group flows-text-filter">
+            <span className="flows-filter-label">Body Contains</span>
+            <Input
+              placeholder="Search response body..."
+              value={bodyContains}
+              onChange={handleBodyContainsChange}
+            />
+          </div>
+
+          <div className="flows-filter-group flows-text-filter">
+            <span className="flows-filter-label">Tag</span>
+            <Input
+              placeholder="Filter by tag..."
+              value={tagFilter}
+              onChange={handleTagFilterChange}
             />
           </div>
         </div>

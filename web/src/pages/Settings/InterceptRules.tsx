@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { useConfigure } from "../../lib/mcp/hooks.js";
+import { useConfigure, useQuery } from "../../lib/mcp/hooks.js";
 import type { ConfigResult, InterceptRule } from "../../lib/mcp/types.js";
 import { Button, Input, useToast } from "../../components/ui/index.js";
 
@@ -9,6 +9,7 @@ interface InterceptRulesProps {
 }
 
 const DIRECTION_OPTIONS = ["request", "response", "both"] as const;
+const TIMEOUT_BEHAVIOR_OPTIONS = ["auto_release", "auto_drop"] as const;
 
 /**
  * InterceptRules — manage intercept rules for request/response interception.
@@ -33,6 +34,20 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
 
   // Remove/enable/disable by ID
   const [actionId, setActionId] = useState("");
+
+  // Intercept queue settings
+  const { data: statusData } = useQuery("status");
+  const [queueTimeoutMs, setQueueTimeoutMs] = useState("");
+  const [queueTimeoutBehavior, setQueueTimeoutBehavior] = useState<"auto_release" | "auto_drop">("auto_release");
+  const [queueSettingsLoaded, setQueueSettingsLoaded] = useState(false);
+
+  // Load current intercept queue settings from status
+  if (statusData && !queueSettingsLoaded) {
+    // Status result doesn't directly contain intercept_queue config,
+    // but we can initialize with sensible defaults.
+    // The actual values will be reflected after the first configure call.
+    setQueueSettingsLoaded(true);
+  }
 
   const resetForm = () => {
     setRuleId("");
@@ -146,6 +161,30 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
       });
     }
   }, [actionId, configure, addToast, onRefresh]);
+
+  const handleSaveQueueSettings = useCallback(async () => {
+    const timeoutMs = queueTimeoutMs.trim() ? parseInt(queueTimeoutMs.trim(), 10) : null;
+    if (queueTimeoutMs.trim() && (isNaN(timeoutMs as number) || (timeoutMs as number) < 0)) {
+      addToast({ type: "warning", message: "Timeout must be a non-negative number" });
+      return;
+    }
+
+    try {
+      await configure({
+        intercept_queue: {
+          timeout_ms: timeoutMs,
+          timeout_behavior: queueTimeoutBehavior,
+        },
+      });
+      addToast({ type: "success", message: "Intercept queue settings updated" });
+      onRefresh();
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to update queue settings: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [queueTimeoutMs, queueTimeoutBehavior, configure, addToast, onRefresh]);
 
   return (
     <div className="settings-section">
@@ -261,6 +300,51 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
           </div>
         </div>
       )}
+
+      {/* Intercept Queue Settings */}
+      <div className="settings-card">
+        <div className="settings-card-header">
+          <span className="settings-card-title">Intercept Queue</span>
+        </div>
+        <div className="settings-card-body">
+          <p className="settings-section-desc">
+            Configure timeout behavior for intercepted requests waiting in the queue.
+            When the timeout expires, the request is automatically released or dropped.
+          </p>
+          <div className="settings-form-row">
+            <Input
+              label="Timeout (ms)"
+              type="number"
+              value={queueTimeoutMs}
+              onChange={(e) => setQueueTimeoutMs(e.target.value)}
+              placeholder="e.g. 30000 (leave empty for default)"
+            />
+            <div className="input-wrapper">
+              <label className="input-label" htmlFor="queue-timeout-behavior">Timeout Behavior</label>
+              <select
+                id="queue-timeout-behavior"
+                className="settings-select"
+                value={queueTimeoutBehavior}
+                onChange={(e) => setQueueTimeoutBehavior(e.target.value as "auto_release" | "auto_drop")}
+              >
+                {TIMEOUT_BEHAVIOR_OPTIONS.map((b) => (
+                  <option key={b} value={b}>{b === "auto_release" ? "Auto Release" : "Auto Drop"}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="settings-add-form-actions">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSaveQueueSettings}
+              disabled={configureLoading}
+            >
+              Save Queue Settings
+            </Button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
