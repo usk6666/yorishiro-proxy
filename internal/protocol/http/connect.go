@@ -377,7 +377,10 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		reqTruncated: bodyResult.truncated,
 	}
 
-	// Step 4: Intercept check + modifications.
+	// Step 4: Snapshot + Intercept check + modifications.
+	// Snapshot headers/body before intercept/transform for variant recording.
+	snap := snapshotRequest(req.Header, bodyResult.recordBody)
+
 	var dropped bool
 	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
 	if dropped {
@@ -391,7 +394,9 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	sp.reqBody = bodyResult.recordBody
 
 	// Progressive recording: record send (session + request) before forwarding.
-	sendResult := h.recordSend(ctx, sp, logger)
+	// Uses variant-aware recording to capture both original and modified
+	// versions when intercept/transform changed the request.
+	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
 
 	// Step 6: Forward upstream.
 	fwd, err := h.forwardUpstream(ctx, conn, req, logger)

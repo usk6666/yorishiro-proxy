@@ -294,6 +294,11 @@ func (h *Handler) handleStream(
 	}
 	removeHTTP2HopByHop(outReq.Header)
 
+	// Snapshot headers/body before intercept for variant recording.
+	// If intercept modifies the request, both the original and modified
+	// versions are recorded as separate send messages.
+	snap := snapshotRequest(outReq.Header, recordReqBody)
+
 	// Intercept check: if an intercept engine and queue are configured,
 	// check if the request matches any intercept rules. If so, enqueue
 	// the request and block until the AI agent responds with an action.
@@ -314,11 +319,13 @@ func (h *Handler) handleStream(
 				w.WriteHeader(gohttp.StatusBadRequest)
 				return
 			}
-			// Update recordReqBody for session recording if body changed.
+			// Update recordReqBody and srp for session recording.
 			if action.OverrideBody != nil {
 				recordReqBody = []byte(*action.OverrideBody)
 				srp.reqBody = recordReqBody
 			}
+			// Update srp headers to reflect the modified outbound request.
+			srp.req = outReq
 		case intercept.ActionRelease:
 			// Continue with the original request.
 		}
@@ -330,10 +337,12 @@ func (h *Handler) handleStream(
 
 	// Progressive recording: record the send (request) phase before forwarding
 	// to upstream, so even if the upstream fails, the request is persisted.
+	// Uses variant-aware recording to capture both original and modified
+	// versions when intercept changed the request.
 	// gRPC sessions use their own recording path (grpcHandler.RecordSession).
 	var sendResult *sendRecordResult
 	if !isGRPC {
-		sendResult = h.recordSend(ctx, srp, logger)
+		sendResult = h.recordSendWithVariant(ctx, srp, &snap, logger)
 	}
 
 	// Forward to upstream.

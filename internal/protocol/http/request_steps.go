@@ -167,6 +167,58 @@ func writeResponseToClient(conn net.Conn, resp *gohttp.Response, body []byte) er
 	return nil
 }
 
+// requestSnapshot holds a copy of the request headers and body taken before
+// intercept/transform processing. It is used to detect whether modifications
+// occurred and, if so, to record the original (unmodified) version as a
+// separate send message.
+type requestSnapshot struct {
+	headers gohttp.Header
+	body    []byte
+}
+
+// snapshotRequest creates a deep copy of the request headers and body for
+// later comparison. The snapshot captures the state before intercept/transform
+// processing so that we can detect changes and record both versions.
+func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
+	snap := requestSnapshot{}
+	if headers != nil {
+		snap.headers = headers.Clone()
+	}
+	if body != nil {
+		snap.body = make([]byte, len(body))
+		copy(snap.body, body)
+	}
+	return snap
+}
+
+// requestModified reports whether the request headers or body have been changed
+// relative to the snapshot taken before intercept/transform processing.
+func requestModified(snap requestSnapshot, currentHeaders gohttp.Header, currentBody []byte) bool {
+	if !bytes.Equal(snap.body, currentBody) {
+		return true
+	}
+	return headersModified(snap.headers, currentHeaders)
+}
+
+// headersModified reports whether two header maps differ.
+func headersModified(a, b gohttp.Header) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for key, aVals := range a {
+		bVals, ok := b[key]
+		if !ok || len(aVals) != len(bVals) {
+			return true
+		}
+		for i := range aVals {
+			if aVals[i] != bVals[i] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // logHTTPRequest logs the completed HTTP request with method, URL, status, and
 // duration.
 func logHTTPRequest(logger *slog.Logger, req *gohttp.Request, statusCode int, duration time.Duration) {
