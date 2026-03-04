@@ -520,6 +520,169 @@
   grid-column: 1 / -1;
 }
 
+/* --- gRPC Panel --- */
+
+.sd-grpc-panel {
+  margin-top: var(--space-lg);
+}
+
+.sd-grpc-overview {
+  padding: var(--space-md);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.sd-grpc-overview-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
+}
+
+/* Service / Method display */
+
+.sd-grpc-service-method {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.sd-grpc-service-method-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sd-grpc-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.sd-grpc-service-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--accent-info);
+}
+
+.sd-grpc-separator {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  color: var(--text-muted);
+  margin: 0 var(--space-xs);
+  align-self: flex-end;
+}
+
+.sd-grpc-method-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--accent-primary);
+}
+
+/* gRPC badges row */
+
+.sd-grpc-badges {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.sd-grpc-status {
+  display: inline-flex;
+}
+
+/* gRPC Metadata section */
+
+.sd-grpc-metadata-panel {
+  margin-top: var(--space-md);
+}
+
+.sd-grpc-subsection-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-sm);
+}
+
+.sd-grpc-metadata-tables {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.sd-grpc-metadata-section {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.sd-grpc-metadata-section-title {
+  display: block;
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background-color: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-default);
+}
+
+/* Protobuf body viewers */
+
+.sd-grpc-bodies {
+  margin-top: var(--space-md);
+}
+
+.sd-grpc-bodies-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+}
+
+@media (max-width: 960px) {
+  .sd-grpc-bodies-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sd-grpc-protobuf-body {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.sd-grpc-protobuf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  background-color: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.sd-grpc-protobuf-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sd-body-content--base64 {
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
 /* --- Messages pagination --- */
 
 .sd-messages-pagination {
