@@ -7,6 +7,8 @@ import { InterceptPage } from "./pages/Intercept/InterceptPage.js";
 import { ResendPage } from "./pages/Resend/ResendPage.js";
 import { FuzzPage } from "./pages/Fuzz/FuzzPage.js";
 import { FuzzResultsPage } from "./pages/Fuzz/FuzzResultsPage.js";
+import { MacrosPage } from "./pages/Macros/MacrosPage.js";
+import { MacroDetailPage } from "./pages/Macros/MacroDetailPage.js";
 import { SettingsPage } from "./pages/Settings/SettingsPage.js";
 
 function App() {
@@ -21,6 +23,8 @@ function App() {
         <Route path="resend/:flowId" element={<ResendPage />} />
         <Route path="fuzz" element={<FuzzPage />} />
         <Route path="fuzz/:fuzzId" element={<FuzzResultsPage />} />
+        <Route path="macros" element={<MacrosPage />} />
+        <Route path="macros/:name" element={<MacroDetailPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>

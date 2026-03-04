@@ -1,0 +1,140 @@
+/**
+ * Styles for the Macros list page.
+ */
+
+/* --- Header --- */
+
+.macros-header {
+  display: flex;
+  flex-direction: column;
+}
+
+.macros-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+/* --- Table --- */
+
+.macros-table-wrapper {
+  margin-top: var(--space-lg);
+}
+
+.macros-table .table tbody tr {
+  cursor: pointer;
+}
+
+.macros-cell-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.macros-cell-desc {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.macros-text-muted {
+  color: var(--text-muted);
+}
+
+.macros-cell-time {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.macros-cell-actions {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.macros-row:hover {
+  background-color: var(--bg-secondary);
+}
+
+/* --- Empty / Loading / Error states --- */
+
+.macros-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  margin-top: var(--space-lg);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  gap: var(--space-sm);
+}
+
+.macros-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  margin-top: var(--space-lg);
+}
+
+.macros-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100px;
+  margin-top: var(--space-lg);
+  border: 1px solid var(--accent-danger);
+  border-radius: var(--radius-md);
+  color: var(--accent-danger);
+  font-size: var(--font-size-sm);
+  padding: var(--space-md);
+}
+
+/* --- Delete confirmation dialog --- */
+
+.macros-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.macros-dialog {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+  max-width: 400px;
+  width: 100%;
+}
+
+.macros-dialog-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-sm) 0;
+}
+
+.macros-dialog-body {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-md) 0;
+}
+
+.macros-dialog-actions {
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+}
