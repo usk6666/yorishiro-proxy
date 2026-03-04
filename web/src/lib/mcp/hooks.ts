@@ -1,9 +1,10 @@
 /**
- * React hooks for interacting with yorishiro-proxy's MCP tools.
+ * React hooks for interacting with yorishiro-proxy's 10 MCP tools.
  *
  * These hooks provide a convenient, type-safe API for React components
- * to query data, execute actions, configure the proxy, and control
- * proxy listeners.
+ * to query data, execute actions, manage flows, run fuzz campaigns,
+ * define macros, act on intercepted requests, configure security,
+ * configure the proxy, and control proxy listeners.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
@@ -13,6 +14,10 @@ import type {
   ConfigureParams,
   ConfigureResult,
   ExecuteParams,
+  FuzzToolParams,
+  InterceptActionParams,
+  MacroToolParams,
+  ManageParams,
   ProxyStartParams,
   ProxyStartResult,
   ProxyStopParams,
@@ -20,6 +25,7 @@ import type {
   QueryResource,
   QueryResultMap,
   QueryFilter,
+  SecurityParams,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -170,12 +176,12 @@ export function useQuery<R extends QueryResource>(
 }
 
 // ---------------------------------------------------------------------------
-// useExecute — execute tool
+// useExecute — execute tool (resend, resend_raw, tcp_replay)
 // ---------------------------------------------------------------------------
 
 /** Return type for useExecute. */
 export interface UseExecuteResult {
-  /** Execute an action. Returns the tool result. */
+  /** Execute a resend action (resend, resend_raw, tcp_replay). Returns the tool result. */
   execute: <T = unknown>(params: ExecuteParams) => Promise<T>;
   /** Whether an execution is in progress. */
   loading: boolean;
@@ -184,7 +190,7 @@ export interface UseExecuteResult {
 }
 
 /**
- * Hook to call the MCP execute tool.
+ * Hook to call the MCP execute tool (resend, resend_raw, tcp_replay).
  *
  * @example
  * ```tsx
@@ -224,6 +230,291 @@ export function useExecute(): UseExecuteResult {
   );
 
   return { execute, loading, error };
+}
+
+// ---------------------------------------------------------------------------
+// useManage — manage tool (delete_flows, export_flows, import_flows, regenerate_ca_cert)
+// ---------------------------------------------------------------------------
+
+/** Return type for useManage. */
+export interface UseManageResult {
+  /** Execute a manage action. Returns the tool result. */
+  manage: <T = unknown>(params: ManageParams) => Promise<T>;
+  /** Whether a manage operation is in progress. */
+  loading: boolean;
+  /** Last manage error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Hook to call the MCP manage tool (delete_flows, export_flows, import_flows, regenerate_ca_cert).
+ *
+ * @example
+ * ```tsx
+ * const { manage, loading, error } = useManage();
+ * await manage({
+ *   action: "delete_flows",
+ *   params: { flow_id: "abc123", confirm: true },
+ * });
+ * ```
+ */
+export function useManage(): UseManageResult {
+  const { client, status } = useMcpContext();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const manage = useCallback(
+    async <T = unknown>(params: ManageParams): Promise<T> => {
+      if (!client || status !== "connected") {
+        throw new Error("MCP client is not connected");
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await client.manage<T>(params);
+        return result;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        throw e;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client, status],
+  );
+
+  return { manage, loading, error };
+}
+
+// ---------------------------------------------------------------------------
+// useFuzz — fuzz tool (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel)
+// ---------------------------------------------------------------------------
+
+/** Return type for useFuzz. */
+export interface UseFuzzResult {
+  /** Execute a fuzz action. Returns the tool result. */
+  fuzz: <T = unknown>(params: FuzzToolParams) => Promise<T>;
+  /** Whether a fuzz operation is in progress. */
+  loading: boolean;
+  /** Last fuzz error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Hook to call the MCP fuzz tool (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel).
+ *
+ * @example
+ * ```tsx
+ * const { fuzz, loading, error } = useFuzz();
+ * await fuzz({
+ *   action: "fuzz",
+ *   params: { flow_id: "abc123", attack_type: "sequential", positions: [...] },
+ * });
+ * ```
+ */
+export function useFuzz(): UseFuzzResult {
+  const { client, status } = useMcpContext();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const fuzz = useCallback(
+    async <T = unknown>(params: FuzzToolParams): Promise<T> => {
+      if (!client || status !== "connected") {
+        throw new Error("MCP client is not connected");
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await client.fuzz<T>(params);
+        return result;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        throw e;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client, status],
+  );
+
+  return { fuzz, loading, error };
+}
+
+// ---------------------------------------------------------------------------
+// useMacro — macro tool (define_macro, run_macro, delete_macro)
+// ---------------------------------------------------------------------------
+
+/** Return type for useMacro. */
+export interface UseMacroResult {
+  /** Execute a macro action. Returns the tool result. */
+  macro: <T = unknown>(params: MacroToolParams) => Promise<T>;
+  /** Whether a macro operation is in progress. */
+  loading: boolean;
+  /** Last macro error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Hook to call the MCP macro tool (define_macro, run_macro, delete_macro).
+ *
+ * @example
+ * ```tsx
+ * const { macro, loading, error } = useMacro();
+ * await macro({
+ *   action: "run_macro",
+ *   params: { name: "my-macro" },
+ * });
+ * ```
+ */
+export function useMacro(): UseMacroResult {
+  const { client, status } = useMcpContext();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const macro = useCallback(
+    async <T = unknown>(params: MacroToolParams): Promise<T> => {
+      if (!client || status !== "connected") {
+        throw new Error("MCP client is not connected");
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await client.macro<T>(params);
+        return result;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        throw e;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client, status],
+  );
+
+  return { macro, loading, error };
+}
+
+// ---------------------------------------------------------------------------
+// useInterceptAction — intercept tool (release, modify_and_forward, drop)
+// ---------------------------------------------------------------------------
+
+/** Return type for useInterceptAction. */
+export interface UseInterceptActionResult {
+  /** Execute an intercept queue action. Returns the tool result. */
+  interceptAction: <T = unknown>(params: InterceptActionParams) => Promise<T>;
+  /** Whether an intercept action is in progress. */
+  loading: boolean;
+  /** Last intercept action error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Hook to call the MCP intercept tool (release, modify_and_forward, drop).
+ *
+ * @example
+ * ```tsx
+ * const { interceptAction, loading, error } = useInterceptAction();
+ * await interceptAction({
+ *   action: "release",
+ *   params: { intercept_id: "abc123" },
+ * });
+ * ```
+ */
+export function useInterceptAction(): UseInterceptActionResult {
+  const { client, status } = useMcpContext();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const interceptAction = useCallback(
+    async <T = unknown>(params: InterceptActionParams): Promise<T> => {
+      if (!client || status !== "connected") {
+        throw new Error("MCP client is not connected");
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await client.interceptAction<T>(params);
+        return result;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        throw e;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client, status],
+  );
+
+  return { interceptAction, loading, error };
+}
+
+// ---------------------------------------------------------------------------
+// useSecurity — security tool (set_target_scope, update_target_scope, get_target_scope, test_target)
+// ---------------------------------------------------------------------------
+
+/** Return type for useSecurity. */
+export interface UseSecurityResult {
+  /** Execute a security action. Returns the tool result. */
+  security: <T = unknown>(params: SecurityParams) => Promise<T>;
+  /** Whether a security operation is in progress. */
+  loading: boolean;
+  /** Last security error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Hook to call the MCP security tool (set_target_scope, update_target_scope, get_target_scope, test_target).
+ *
+ * @example
+ * ```tsx
+ * const { security, loading, error } = useSecurity();
+ * const result = await security({
+ *   action: "get_target_scope",
+ *   params: {},
+ * });
+ * ```
+ */
+export function useSecurity(): UseSecurityResult {
+  const { client, status } = useMcpContext();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const security = useCallback(
+    async <T = unknown>(params: SecurityParams): Promise<T> => {
+      if (!client || status !== "connected") {
+        throw new Error("MCP client is not connected");
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await client.security<T>(params);
+        return result;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        throw e;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client, status],
+  );
+
+  return { security, loading, error };
 }
 
 // ---------------------------------------------------------------------------

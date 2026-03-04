@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
+import { useQuery, useManage } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
 import type {
   FlowDetailResult,
@@ -131,7 +131,7 @@ export function SessionDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const { execute, loading: executeLoading } = useExecute();
+  const { manage, loading: executeLoading } = useManage();
 
   // Tabs state
   const [requestTab, setRequestTab] = useState("headers");
@@ -184,7 +184,7 @@ export function SessionDetailPage() {
     if (!confirmed) return;
 
     try {
-      await execute({
+      await manage({
         action: "delete_flows",
         params: { flow_id: id, confirm: true },
       });
@@ -196,7 +196,7 @@ export function SessionDetailPage() {
         message: `Failed to delete flow: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [id, execute, addToast, navigate]);
+  }, [id, manage, addToast, navigate]);
 
   // Navigate to resend view
   const handleResend = useCallback(() => {
