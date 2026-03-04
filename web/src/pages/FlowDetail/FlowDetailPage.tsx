@@ -13,6 +13,8 @@ import { Tabs } from "../../components/ui/Tabs.js";
 import { HeadersTable } from "./HeadersTable.js";
 import { BodyViewer } from "./BodyViewer.js";
 import { MessageList } from "./MessageList.js";
+import { generateCurl } from "../../lib/export/curl.js";
+import { buildHar, downloadHar } from "../../lib/export/har.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -209,6 +211,37 @@ export function FlowDetailPage() {
     navigate("/");
   }, [navigate]);
 
+  // Copy request as cURL command
+  const handleCopyCurl = useCallback(async () => {
+    if (!flowData) return;
+    try {
+      const curl = generateCurl(flowData);
+      await navigator.clipboard.writeText(curl);
+      addToast({ type: "success", message: "cURL command copied to clipboard" });
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to copy: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [flowData, addToast]);
+
+  // Export flow as HAR file
+  const handleExportHar = useCallback(() => {
+    if (!flowData) return;
+    try {
+      const har = buildHar(flowData);
+      const shortFlowId = flowData.id.length > 8 ? flowData.id.slice(0, 8) : flowData.id;
+      downloadHar(har, `flow-${shortFlowId}.har`);
+      addToast({ type: "success", message: "HAR file downloaded" });
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to export HAR: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [flowData, addToast]);
+
   // Message page navigation
   const handleMessagesPageChange = useCallback((newOffset: number) => {
     setMessagesOffset(newOffset);
@@ -282,6 +315,12 @@ export function FlowDetailPage() {
           <div className="sd-header-actions">
             <Button variant="primary" size="sm" onClick={handleResend}>
               Resend
+            </Button>
+            <Button variant="secondary" size="sm" onClick={handleCopyCurl}>
+              Copy as cURL
+            </Button>
+            <Button variant="secondary" size="sm" onClick={handleExportHar}>
+              Export HAR
             </Button>
             <Button
               variant="danger"
