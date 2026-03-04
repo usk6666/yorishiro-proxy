@@ -277,6 +277,40 @@
   word-break: break-all;
 }
 
+/* TCP Forwards */
+.dashboard-tcp-forwards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.dashboard-tcp-forward {
+  display: flex;
+  align-items: center;
+  padding: var(--space-md);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+}
+
+.dashboard-tcp-forward-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.dashboard-tcp-forward-arrow {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.dashboard-tcp-forward-upstream {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
 /* Empty state */
 .dashboard-empty {
   display: flex;
