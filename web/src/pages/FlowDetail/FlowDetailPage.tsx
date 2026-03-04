@@ -15,6 +15,7 @@ import { HeadersTable } from "./HeadersTable.js";
 import { BodyViewer } from "./BodyViewer.js";
 import { MessageList } from "./MessageList.js";
 import { WebSocketMessageList } from "./WebSocketMessageList.js";
+import { GrpcPanel } from "./GrpcPanel.js";
 import { generateCurl } from "../../lib/export/curl.js";
 import { buildHar, downloadHar } from "../../lib/export/har.js";
 import "./FlowDetailPage.css";
@@ -116,6 +117,11 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
 /** Whether a flow is a streaming type (WebSocket, gRPC server/client streaming). */
 function isStreamingFlow(flow: FlowDetailResult): boolean {
   return flow.flow_type !== "unary";
+}
+
+/** Whether a flow is a gRPC flow. */
+function isGrpcFlow(flow: FlowDetailResult): boolean {
+  return flow.protocol === "gRPC";
 }
 
 /** Whether a flow has a response (error/drop flows may not have one). */
@@ -447,6 +453,11 @@ export function FlowDetailPage() {
           </div>
         )}
       </div>
+
+      {/* gRPC structured details panel */}
+      {isGrpcFlow(flowData) && (
+        <GrpcPanel flow={flowData} />
+      )}
 
       {/* Streaming flow: Messages list */}
       {streaming && (
