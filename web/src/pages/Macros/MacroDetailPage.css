@@ -1,0 +1,349 @@
+/**
+ * Styles for the Macro detail/edit page.
+ */
+
+/* --- Header --- */
+
+.macro-detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.macro-detail-header .btn--ghost {
+  align-self: flex-start;
+}
+
+.macro-detail-tabs {
+  margin-top: var(--space-lg);
+}
+
+/* --- Editor / Run panel --- */
+
+.macro-editor,
+.macro-run-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+/* --- Sections --- */
+
+.macro-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.macro-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.macro-section-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.macro-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* --- Fields --- */
+
+.macro-fields-row {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.macro-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 120px;
+}
+
+.macro-field-grow {
+  flex: 1;
+}
+
+.macro-field-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.macro-field-checkbox {
+  justify-content: flex-end;
+  min-width: auto;
+}
+
+.macro-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.macro-checkbox-label input[type="checkbox"] {
+  cursor: pointer;
+}
+
+/* --- KV pair row --- */
+
+.macro-kv-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-end;
+}
+
+.macro-kv-row .input {
+  flex: 1;
+}
+
+/* --- Select --- */
+
+.macro-select {
+  height: 32px;
+  padding: 0 var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  width: 100%;
+}
+
+.macro-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+/* --- Textarea --- */
+
+.macro-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+
+.macro-textarea:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.macro-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* --- Step entry --- */
+
+.macro-step-entry {
+  padding: var(--space-sm);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.macro-step-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.macro-step-header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.macro-step-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.macro-step-reorder {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.macro-step-reorder .btn {
+  padding: 0 var(--space-xs);
+  line-height: 1;
+  font-size: var(--font-size-xs);
+}
+
+.macro-step-index {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.macro-step-id-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.macro-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-muted);
+}
+
+/* --- Sub-step sections --- */
+
+.macro-substep-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.macro-substep-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.macro-subsection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* --- Extraction entry --- */
+
+.macro-extraction-entry {
+  padding: var(--space-sm);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+/* --- Guard --- */
+
+.macro-guard-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+}
+
+/* --- Actions bar --- */
+
+.macro-actions {
+  display: flex;
+  gap: var(--space-sm);
+  padding-top: var(--space-sm);
+}
+
+/* --- Run result --- */
+
+.macro-run-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.macro-result-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+}
+
+.macro-result-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.macro-result-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.macro-result-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.macro-result-error .macro-result-value {
+  color: var(--accent-danger);
+}
+
+/* --- Table cells --- */
+
+.macro-cell-mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.macro-cell-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  word-break: break-all;
+  max-width: 400px;
+}
+
+.macro-cell-error {
+  font-size: var(--font-size-xs);
+  color: var(--accent-danger);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Error / Loading (reuse from MacrosPage) --- */
+
+.macro-detail-page .macros-loading {
+  margin-top: var(--space-lg);
+}
+
+.macro-detail-page .macros-error {
+  margin-top: var(--space-lg);
+}
