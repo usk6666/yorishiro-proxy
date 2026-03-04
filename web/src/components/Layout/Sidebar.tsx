@@ -45,6 +45,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: <MacroIcon />,
   },
   {
+    to: "/security",
+    label: "Security",
+    icon: <SecurityIcon />,
+  },
+  {
     to: "/settings",
     label: "Settings",
     icon: <SettingsIcon />,
@@ -134,6 +139,14 @@ function MacroIcon() {
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="2 4 6 8 2 12" />
       <line x1="8" y1="12" x2="14" y2="12" />
+    </svg>
+  );
+}
+
+function SecurityIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 1.5L2.5 4v4c0 3.5 2.5 5.5 5.5 7 3-1.5 5.5-3.5 5.5-7V4L8 1.5z" />
     </svg>
   );
 }
