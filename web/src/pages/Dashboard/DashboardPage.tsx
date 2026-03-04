@@ -120,12 +120,19 @@ export function DashboardPage() {
     filter: { status: "running" },
   });
 
+  // Fetch config for TCP forwards
+  const {
+    data: configData,
+    refetch: refetchConfig,
+  } = useQuery("config", { pollInterval: POLL_INTERVAL });
+
   const handleRefreshAll = useCallback(() => {
     refetchStatus();
     refetchFlows();
     refetchIntercept();
     refetchFuzz();
-  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz]);
+    refetchConfig();
+  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz, refetchConfig]);
 
   // Build protocol breakdown
   const protocolCounts: Record<string, number> = {};
@@ -282,6 +289,24 @@ export function DashboardPage() {
                 <div className="dashboard-listener-stats">
                   <span>{listener.active_connections} conn</span>
                   <span>Uptime: {formatUptime(listener.uptime_seconds)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* TCP Forwards section */}
+      {configData?.tcp_forwards && Object.keys(configData.tcp_forwards).length > 0 && (
+        <div className="dashboard-section">
+          <h2 className="dashboard-section-title">TCP Forwards</h2>
+          <div className="dashboard-tcp-forwards">
+            {Object.entries(configData.tcp_forwards).map(([port, upstream]) => (
+              <div key={port} className="dashboard-tcp-forward">
+                <div className="dashboard-tcp-forward-info">
+                  <Badge variant="info">:{port}</Badge>
+                  <span className="dashboard-tcp-forward-arrow">{"->"}</span>
+                  <span className="dashboard-tcp-forward-upstream">{upstream}</span>
                 </div>
               </div>
             ))}
