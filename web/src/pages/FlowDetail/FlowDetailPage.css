@@ -686,3 +686,105 @@
   gap: var(--space-sm);
   align-items: center;
 }
+
+/* --- HTTP/2 specific styles --- */
+
+.sd-h2-info {
+  display: flex;
+  gap: var(--space-lg);
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-muted);
+  flex-wrap: wrap;
+}
+
+.sd-h2-info-badges {
+  display: flex;
+  gap: var(--space-lg);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* --- HTTP/2 pseudo-headers --- */
+
+.sd-h2-pseudo-headers {
+  padding: var(--space-md);
+}
+
+.sd-h2-pseudo-headers-title {
+  display: block;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-sm);
+}
+
+.sd-h2-pseudo-headers-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.sd-h2-pseudo-header-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+}
+
+.sd-h2-pseudo-header-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--accent-info);
+  white-space: nowrap;
+  min-width: 100px;
+}
+
+.sd-h2-pseudo-header-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+/* --- HTTP/2 stream groups --- */
+
+.sd-h2-stream-groups {
+  margin-top: var(--space-sm);
+}
+
+.sd-h2-stream-groups-title {
+  display: block;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-sm);
+}
+
+.sd-h2-stream-groups-list {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.sd-h2-stream-group-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+
+.sd-h2-stream-group-stats {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
