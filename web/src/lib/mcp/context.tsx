@@ -7,16 +7,16 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useRef,
   useState,
-  useCallback,
   type ReactNode,
 } from "react";
+import { clearStoredToken } from "../auth.js";
 import { McpClient, type McpClientConfig } from "./client.js";
 import type { ConnectionStatus } from "./types.js";
-import { clearStoredToken } from "../auth.js";
 
 /** Values exposed by the MCP context. */
 export interface McpContextValue {

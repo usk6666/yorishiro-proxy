@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Tabs } from "../../components/ui/Tabs.js";
 import "./TcpResponseViewer.css";
 

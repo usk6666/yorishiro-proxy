@@ -1,5 +1,5 @@
-import type { ConfigResult } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/index.js";
+import type { ConfigResult } from "../../lib/mcp/types.js";
 
 /**
  * All supported protocol names, matching the validProtocols set in the Go backend

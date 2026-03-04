@@ -1,7 +1,7 @@
-import { useState, useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Button, Input, useToast } from "../../components/ui/index.js";
 import { useConfigure } from "../../lib/mcp/hooks.js";
 import type { StatusResult } from "../../lib/mcp/types.js";
-import { Button, Input, useToast } from "../../components/ui/index.js";
 
 interface ConnectionSettingsProps {
   status: StatusResult;

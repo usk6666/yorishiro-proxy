@@ -1,4 +1,4 @@
-import type { TableHTMLAttributes, ReactNode } from "react";
+import type { ReactNode, TableHTMLAttributes } from "react";
 import "./Table.css";
 
 export interface TableProps extends TableHTMLAttributes<HTMLTableElement> {

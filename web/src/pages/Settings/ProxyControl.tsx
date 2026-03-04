@@ -1,7 +1,7 @@
-import { useState, useCallback } from "react";
-import { useQuery, useProxyControl } from "../../lib/mcp/hooks.js";
-import type { StatusResult } from "../../lib/mcp/types.js";
+import { useCallback, useState } from "react";
 import { Badge, Button, Input, Spinner, useToast } from "../../components/ui/index.js";
+import { useProxyControl, useQuery } from "../../lib/mcp/hooks.js";
+import type { StatusResult } from "../../lib/mcp/types.js";
 
 /**
  * All supported protocol names, matching the validProtocols set in the Go backend

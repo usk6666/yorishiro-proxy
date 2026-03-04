@@ -282,17 +282,17 @@
     background-color var(--transition-fast);
 }
 
-.intercept-toggle input:checked + .intercept-toggle-slider {
+.intercept-toggle input:checked+.intercept-toggle-slider {
   background-color: rgba(88, 166, 255, 0.2);
   border-color: var(--accent-primary);
 }
 
-.intercept-toggle input:checked + .intercept-toggle-slider::before {
+.intercept-toggle input:checked+.intercept-toggle-slider::before {
   transform: translateX(16px);
   background-color: var(--accent-primary);
 }
 
-.intercept-toggle input:disabled + .intercept-toggle-slider {
+.intercept-toggle input:disabled+.intercept-toggle-slider {
   cursor: not-allowed;
   opacity: 0.5;
 }

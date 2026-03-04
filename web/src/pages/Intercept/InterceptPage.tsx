@@ -1,15 +1,15 @@
-import { useState, useCallback, useEffect } from "react";
-import { useQuery, useInterceptAction } from "../../lib/mcp/hooks.js";
+import { useCallback, useEffect, useState } from "react";
+import { Badge, Button, Spinner, Table, Tabs, useToast } from "../../components/ui/index.js";
+import { useInterceptAction, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   InterceptQueueEntry,
   InterceptQueueResult,
 } from "../../lib/mcp/types.js";
-import { Badge, Button, Spinner, Table, Tabs, useToast } from "../../components/ui/index.js";
-import { HeaderEditor } from "./HeaderEditor.js";
-import type { HeaderRow } from "./HeaderEditor.js";
 import { BodyEditor } from "./BodyEditor.js";
-import { RulesPanel } from "./RulesPanel.js";
+import type { HeaderRow } from "./HeaderEditor.js";
+import { HeaderEditor } from "./HeaderEditor.js";
 import "./InterceptPage.css";
+import { RulesPanel } from "./RulesPanel.js";
 
 const TABS = [
   { id: "queue", label: "Queue" },
