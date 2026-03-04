@@ -10,6 +10,7 @@ import { FuzzResultsPage } from "./pages/Fuzz/FuzzResultsPage.js";
 import { MacrosPage } from "./pages/Macros/MacrosPage.js";
 import { MacroDetailPage } from "./pages/Macros/MacroDetailPage.js";
 import { SettingsPage } from "./pages/Settings/SettingsPage.js";
+import { SecurityPage } from "./pages/Security/SecurityPage.js";
 
 function App() {
   return (
@@ -25,6 +26,7 @@ function App() {
         <Route path="fuzz/:fuzzId" element={<FuzzResultsPage />} />
         <Route path="macros" element={<MacrosPage />} />
         <Route path="macros/:name" element={<MacroDetailPage />} />
+        <Route path="security" element={<SecurityPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>

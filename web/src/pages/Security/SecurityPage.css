@@ -1,0 +1,289 @@
+/**
+ * Security page styles.
+ * Follows the same pattern as SettingsPage.css.
+ */
+
+/* Page content layout */
+.security-page .security-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+  margin-top: var(--space-lg);
+}
+
+/* Section layout */
+.security-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.security-section-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.security-section-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.security-section-desc {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* Card-like containers */
+.security-card {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-secondary);
+}
+
+.security-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.security-card-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.security-card-body {
+  padding: var(--space-lg);
+}
+
+/* Enforcement mode grid */
+.security-mode-grid {
+  display: flex;
+  gap: var(--space-xl);
+}
+
+.security-mode-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.security-mode-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Rule list items */
+.security-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.security-rule-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-primary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+.security-rule-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.security-rule-hostname {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.security-rule-details {
+  display: flex;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.security-rule-meta {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.security-rule-actions {
+  display: flex;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+  margin-left: var(--space-sm);
+}
+
+/* Empty states */
+.security-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Loading state */
+.security-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+/* Error state */
+.security-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: var(--accent-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* Add rule form */
+.security-add-form {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+  background-color: var(--bg-primary);
+}
+
+.security-add-form-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-md);
+}
+
+.security-form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.security-form-row:last-child {
+  margin-bottom: 0;
+}
+
+.security-form-row .input-wrapper {
+  flex: 1;
+}
+
+.security-add-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+/* Schemes checkbox group */
+.security-schemes-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.security-schemes-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.security-schemes-options {
+  display: flex;
+  gap: var(--space-md);
+}
+
+.security-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.security-checkbox input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+}
+
+/* URL test tool */
+.security-url-test-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-sm);
+}
+
+.security-url-test-form .input-wrapper {
+  flex: 1;
+}
+
+/* Test result */
+.security-test-result {
+  margin-top: var(--space-lg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-primary);
+  overflow: hidden;
+}
+
+.security-test-result-header {
+  display: flex;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.security-test-result-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+}
+
+.security-test-result-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.security-test-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.security-test-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  word-break: break-all;
+}
