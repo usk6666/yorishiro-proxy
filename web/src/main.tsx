@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { McpProvider } from "./lib/mcp/index.js";
-import { ToastProvider } from "./components/ui/index.js";
+import { ToastProvider, DialogProvider } from "./components/ui/index.js";
 import { initAuth } from "./lib/auth.js";
 import App from "./App.js";
 import "./styles/global.css";
@@ -16,7 +16,9 @@ createRoot(document.getElementById("root")!).render(
     <McpProvider config={mcpConfig}>
       <BrowserRouter>
         <ToastProvider>
-          <App />
+          <DialogProvider>
+            <App />
+          </DialogProvider>
         </ToastProvider>
       </BrowserRouter>
     </McpProvider>

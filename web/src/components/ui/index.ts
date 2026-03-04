@@ -18,3 +18,6 @@ export type { Tab, TabsProps } from "./Tabs.js";
 
 export { ToastProvider, useToast } from "./Toast.js";
 export type { ToastMessage } from "./Toast.js";
+
+export { DialogProvider, useDialog } from "./Dialog.js";
+export type { DialogOptions } from "./Dialog.js";
