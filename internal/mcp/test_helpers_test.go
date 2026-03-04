@@ -18,7 +18,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -32,12 +32,12 @@ func newTestCA(t *testing.T) *cert.CA {
 	return ca
 }
 
-// newTestStore creates a SQLite session store for testing.
-func newTestStore(t *testing.T) session.Store {
+// newTestStore creates a SQLite flow store for testing.
+func newTestStore(t *testing.T) flow.Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(context.Background(), dbPath, logger)
+	store, err := flow.NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -47,9 +47,9 @@ func newTestStore(t *testing.T) session.Store {
 
 // setupTestSession creates a connected MCP client session for testing tools.
 // It returns the client session and a cleanup function.
-func setupTestSession(t *testing.T, ca *cert.CA, store ...session.Store) *gomcp.ClientSession {
+func setupTestSession(t *testing.T, ca *cert.CA, store ...flow.Store) *gomcp.ClientSession {
 	t.Helper()
-	var st0 session.Store
+	var st0 flow.Store
 	if len(store) > 0 {
 		st0 = store[0]
 	}
@@ -57,8 +57,8 @@ func setupTestSession(t *testing.T, ca *cert.CA, store ...session.Store) *gomcp.
 }
 
 // setupTestSessionWithStore creates a connected MCP client session for testing tools
-// with a custom session store.
-func setupTestSessionWithStore(t *testing.T, ca *cert.CA, store session.Store) *gomcp.ClientSession {
+// with a custom flow store.
+func setupTestSessionWithStore(t *testing.T, ca *cert.CA, store flow.Store) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -87,31 +87,31 @@ func setupTestSessionWithStore(t *testing.T, ca *cert.CA, store session.Store) *
 
 // testEntry is a convenience struct for creating test sessions with send/receive messages.
 type testEntry struct {
-	Session *session.Session
-	Send    *session.Message
-	Receive *session.Message
+	Session *flow.Flow
+	Send    *flow.Message
+	Receive *flow.Message
 }
 
-// saveTestEntry saves a session with send and receive messages and returns a testEntry.
-func saveTestEntry(t *testing.T, store session.Store, sess *session.Session, send *session.Message, recv *session.Message) *testEntry {
+// saveTestEntry saves a flow with send and receive messages and returns a testEntry.
+func saveTestEntry(t *testing.T, store flow.Store, fl *flow.Flow, send *flow.Message, recv *flow.Message) *testEntry {
 	t.Helper()
 	ctx := context.Background()
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 	if send != nil {
-		send.SessionID = sess.ID
+		send.FlowID = fl.ID
 		if err := store.AppendMessage(ctx, send); err != nil {
 			t.Fatalf("AppendMessage(send): %v", err)
 		}
 	}
 	if recv != nil {
-		recv.SessionID = sess.ID
+		recv.FlowID = fl.ID
 		if err := store.AppendMessage(ctx, recv); err != nil {
 			t.Fatalf("AppendMessage(recv): %v", err)
 		}
 	}
-	return &testEntry{Session: sess, Send: send, Receive: recv}
+	return &testEntry{Session: fl, Send: send, Receive: recv}
 }
 
 // stubDetector is a minimal ProtocolDetector for testing.
@@ -119,7 +119,7 @@ type stubDetector struct{}
 
 func (d *stubDetector) Detect(_ []byte) proxy.ProtocolHandler { return nil }
 
-// setupTestSessionWithManager creates an MCP client session with a ProxyManager for testing.
+// setupTestSessionWithManager creates an MCP client flow with a ProxyManager for testing.
 func setupTestSessionWithManager(t *testing.T, manager *proxy.Manager) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()

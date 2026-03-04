@@ -11,12 +11,12 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // setupMacroTestSession creates an MCP client session for macro action tests.
 // It uses a permissive HTTP client to allow localhost connections.
-func setupMacroTestSession(t *testing.T, store session.Store) *gomcp.ClientSession {
+func setupMacroTestSession(t *testing.T, store flow.Store) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -97,11 +97,11 @@ func TestExecute_DefineMacro_Success(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "login",
-					"session_id": "recorded-login",
+					"flow_id": "recorded-login",
 				},
 				map[string]any{
 					"id":         "get-csrf",
-					"session_id": "recorded-csrf",
+					"flow_id": "recorded-csrf",
 				},
 			},
 			"initial_vars":    map[string]any{"password": "admin123"},
@@ -134,7 +134,7 @@ func TestExecute_DefineMacro_Upsert(t *testing.T) {
 	steps := []any{
 		map[string]any{
 			"id":         "step1",
-			"session_id": "s1",
+			"flow_id": "s1",
 		},
 	}
 
@@ -184,7 +184,7 @@ func TestExecute_DefineMacro_MissingName(t *testing.T) {
 		"action": "define_macro",
 		"params": map[string]any{
 			"steps": []any{
-				map[string]any{"id": "s1", "session_id": "sess"},
+				map[string]any{"id": "s1", "flow_id": "sess"},
 			},
 		},
 	})
@@ -224,7 +224,7 @@ func TestExecute_DefineMacro_InvalidStep_MissingID(t *testing.T) {
 			"params": map[string]any{
 				"name": "bad-step",
 				"steps": []any{
-					map[string]any{"session_id": "sess"},
+					map[string]any{"flow_id": "sess"},
 				},
 			},
 		},
@@ -238,7 +238,7 @@ func TestExecute_DefineMacro_InvalidStep_MissingID(t *testing.T) {
 	}
 }
 
-func TestExecute_DefineMacro_InvalidStep_MissingSessionID(t *testing.T) {
+func TestExecute_DefineMacro_InvalidStep_MissingFlowID(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -262,7 +262,7 @@ func TestExecute_DefineMacro_InvalidStep_MissingSessionID(t *testing.T) {
 		return
 	}
 	if !result.IsError {
-		t.Fatal("expected error for step without session_id")
+		t.Fatal("expected error for step without flow_id")
 	}
 }
 
@@ -275,8 +275,8 @@ func TestExecute_DefineMacro_DuplicateStepID(t *testing.T) {
 		"params": map[string]any{
 			"name": "dup-steps",
 			"steps": []any{
-				map[string]any{"id": "s1", "session_id": "sess"},
-				map[string]any{"id": "s1", "session_id": "sess2"},
+				map[string]any{"id": "s1", "flow_id": "sess"},
+				map[string]any{"id": "s1", "flow_id": "sess2"},
 			},
 		},
 	})
@@ -301,20 +301,20 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 	u, _ := url.Parse(echoServer.URL + "/api/login")
 	ctx := context.Background()
 
-	// Save a session that the macro step will reference.
-	sess := &session.Session{
+	// Save a flow that the macro step will reference.
+	fl := &flow.Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    100 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &session.Message{
-		SessionID: sess.ID,
+	sendMsg := &flow.Message{
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -329,7 +329,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 
 	cs := setupMacroTestSession(t, store)
 
-	// Define a macro that references the session.
+	// Define a macro that references the flow.
 	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
@@ -337,7 +337,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "login",
-					"session_id": sess.ID,
+					"flow_id": fl.ID,
 					"extract": []any{
 						map[string]any{
 							"name":        "token",
@@ -405,15 +405,15 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	ctx := context.Background()
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, sess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &session.Message{
-		SessionID: sess.ID,
+	sendMsg := &flow.Message{
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -436,7 +436,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "step1",
-					"session_id": sess.ID,
+					"flow_id": fl.ID,
 				},
 			},
 			"initial_vars": map[string]any{"key1": "default-value"},
@@ -503,7 +503,7 @@ func TestExecute_DeleteMacro_Success(t *testing.T) {
 		"params": map[string]any{
 			"name": "to-delete",
 			"steps": []any{
-				map[string]any{"id": "s1", "session_id": "sess"},
+				map[string]any{"id": "s1", "flow_id": "sess"},
 			},
 		},
 	})
@@ -583,7 +583,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "login",
-					"session_id": "sess-1",
+					"flow_id": "sess-1",
 					"extract": []any{
 						map[string]any{
 							"name":        "cookie",
@@ -597,7 +597,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 				},
 				map[string]any{
 					"id":         "mfa",
-					"session_id": "sess-2",
+					"flow_id": "sess-2",
 					"when": map[string]any{
 						"step":        "login",
 						"status_code": 302,
@@ -651,7 +651,7 @@ func TestExecute_DefineMacro_NoStore(t *testing.T) {
 		"params": map[string]any{
 			"name": "test",
 			"steps": []any{
-				map[string]any{"id": "s1", "session_id": "sess"},
+				map[string]any{"id": "s1", "flow_id": "sess"},
 			},
 		},
 	})
@@ -675,20 +675,20 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Save a template session for step1.
+	// Save a template flow for step1.
 	u1, _ := url.Parse(echoServer.URL + "/api/step1")
-	sess1 := &session.Session{
+	sess1 := &flow.Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    50 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess1); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, sess1); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: sess1.ID,
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: sess1.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -699,20 +699,20 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	// Save a template session for step2.
+	// Save a template flow for step2.
 	u2, _ := url.Parse(echoServer.URL + "/api/step2")
-	sess2 := &session.Session{
+	sess2 := &flow.Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   time.Now().UTC(),
 		Duration:    50 * time.Millisecond,
 	}
-	if err := store.SaveSession(ctx, sess2); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, sess2); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: sess2.ID,
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: sess2.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -734,11 +734,11 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "step1",
-					"session_id": sess1.ID,
+					"flow_id": sess1.ID,
 				},
 				map[string]any{
 					"id":         "step2",
-					"session_id": sess2.ID,
+					"flow_id": sess2.ID,
 				},
 			},
 		},
@@ -748,9 +748,9 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	}
 
 	// Count sessions before running the macro.
-	beforeSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	beforeSessions, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
 	if err != nil {
-		t.Fatalf("ListSessions before: %v", err)
+		t.Fatalf("ListFlows before: %v", err)
 	}
 	beforeCount := len(beforeSessions)
 
@@ -775,77 +775,77 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 		t.Fatalf("StepsExecuted = %d, want 2", out.StepsExecuted)
 	}
 
-	// After running, there should be 2 new sessions (one per step).
-	afterSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	// After running, there should be 2 new flows (one per step).
+	afterFlows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
 	if err != nil {
-		t.Fatalf("ListSessions after: %v", err)
+		t.Fatalf("ListFlows after: %v", err)
 	}
-	newCount := len(afterSessions) - beforeCount
+	newCount := len(afterFlows) - beforeCount
 	if newCount != 2 {
-		t.Errorf("new sessions = %d, want 2 (one per macro step)", newCount)
+		t.Errorf("new flows = %d, want 2 (one per macro step)", newCount)
 	}
 
-	// Find the macro-recorded sessions by checking tags.
-	var macroSessions []*session.Session
-	for _, s := range afterSessions {
+	// Find the macro-recorded flows by checking tags.
+	var macroFlows []*flow.Flow
+	for _, s := range afterFlows {
 		if s.Tags != nil && s.Tags["macro"] == "record-test" {
-			macroSessions = append(macroSessions, s)
+			macroFlows = append(macroFlows, s)
 		}
 	}
-	if len(macroSessions) != 2 {
-		t.Fatalf("macro-tagged sessions = %d, want 2", len(macroSessions))
+	if len(macroFlows) != 2 {
+		t.Fatalf("macro-tagged sessions = %d, want 2", len(macroFlows))
 	}
 
 	// Verify each macro session has the correct tags and messages.
 	stepIDs := map[string]bool{}
-	for _, ms := range macroSessions {
+	for _, ms := range macroFlows {
 		if ms.Protocol != "HTTP/1.x" {
-			t.Errorf("session %s: Protocol = %q, want HTTP/1.x", ms.ID, ms.Protocol)
+			t.Errorf("flow %s: Protocol = %q, want HTTP/1.x", ms.ID, ms.Protocol)
 		}
-		if ms.SessionType != "unary" {
-			t.Errorf("session %s: SessionType = %q, want unary", ms.ID, ms.SessionType)
+		if ms.FlowType != "unary" {
+			t.Errorf("flow %s: FlowType = %q, want unary", ms.ID, ms.FlowType)
 		}
 		if ms.State != "complete" {
-			t.Errorf("session %s: State = %q, want complete", ms.ID, ms.State)
+			t.Errorf("flow %s: State = %q, want complete", ms.ID, ms.State)
 		}
 		if ms.Tags["macro"] != "record-test" {
-			t.Errorf("session %s: Tags[macro] = %q, want record-test", ms.ID, ms.Tags["macro"])
+			t.Errorf("flow %s: Tags[macro] = %q, want record-test", ms.ID, ms.Tags["macro"])
 		}
 		stepID := ms.Tags["macro_step"]
 		if stepID == "" {
-			t.Errorf("session %s: Tags[macro_step] is empty", ms.ID)
+			t.Errorf("flow %s: Tags[macro_step] is empty", ms.ID)
 		}
 		stepIDs[stepID] = true
 
 		// Check send message exists.
-		sendMsgs, err := store.GetMessages(ctx, ms.ID, session.MessageListOptions{Direction: "send"})
+		sendMsgs, err := store.GetMessages(ctx, ms.ID, flow.MessageListOptions{Direction: "send"})
 		if err != nil {
-			t.Errorf("GetMessages(send) for session %s: %v", ms.ID, err)
+			t.Errorf("GetMessages(send) for flow %s: %v", ms.ID, err)
 			continue
 		}
 		if len(sendMsgs) != 1 {
-			t.Errorf("session %s: send messages = %d, want 1", ms.ID, len(sendMsgs))
+			t.Errorf("flow %s: send messages = %d, want 1", ms.ID, len(sendMsgs))
 			continue
 		}
 		if sendMsgs[0].Method == "" {
-			t.Errorf("session %s: send message has empty method", ms.ID)
+			t.Errorf("flow %s: send message has empty method", ms.ID)
 		}
 		if sendMsgs[0].URL == nil {
-			t.Errorf("session %s: send message has nil URL", ms.ID)
+			t.Errorf("flow %s: send message has nil URL", ms.ID)
 		}
 
 		// Check receive message exists.
-		recvMsgs, err := store.GetMessages(ctx, ms.ID, session.MessageListOptions{Direction: "receive"})
+		recvMsgs, err := store.GetMessages(ctx, ms.ID, flow.MessageListOptions{Direction: "receive"})
 		if err != nil {
-			t.Errorf("GetMessages(receive) for session %s: %v", ms.ID, err)
+			t.Errorf("GetMessages(receive) for flow %s: %v", ms.ID, err)
 			continue
 		}
 		if len(recvMsgs) != 1 {
-			t.Errorf("session %s: receive messages = %d, want 1", ms.ID, len(recvMsgs))
+			t.Errorf("flow %s: receive messages = %d, want 1", ms.ID, len(recvMsgs))
 			continue
 		}
 		if recvMsgs[0].StatusCode != 200 {
-			t.Errorf("session %s: receive StatusCode = %d, want 200", ms.ID, recvMsgs[0].StatusCode)
+			t.Errorf("flow %s: receive StatusCode = %d, want 200", ms.ID, recvMsgs[0].StatusCode)
 		}
 	}
 
@@ -877,12 +877,12 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	ctx := context.Background()
 
 	loginURL, _ := url.Parse(loginServer.URL + "/login")
-	loginSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, loginSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	loginSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, loginSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: loginSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: loginSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -890,12 +890,12 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	}
 
 	mfaURL, _ := url.Parse(mfaServer.URL + "/mfa")
-	mfaSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, mfaSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	mfaSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, mfaSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: mfaSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: mfaSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: mfaURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -912,11 +912,11 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "login",
-					"session_id": loginSess.ID,
+					"flow_id": loginSess.ID,
 				},
 				map[string]any{
 					"id":         "mfa",
-					"session_id": mfaSess.ID,
+					"flow_id": mfaSess.ID,
 					"when": map[string]any{
 						"step":        "login",
 						"status_code": 302, // Login returns 200, so MFA is skipped.
@@ -943,21 +943,21 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	}
 
 	// Only the executed step should create a macro session (not the skipped one).
-	allSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	allFlows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
-	var macroSessions []*session.Session
-	for _, s := range allSessions {
+	var macroFlows []*flow.Flow
+	for _, s := range allFlows {
 		if s.Tags != nil && s.Tags["macro"] == "skip-test" {
-			macroSessions = append(macroSessions, s)
+			macroFlows = append(macroFlows, s)
 		}
 	}
-	if len(macroSessions) != 1 {
-		t.Errorf("macro-tagged sessions = %d, want 1 (only executed step)", len(macroSessions))
+	if len(macroFlows) != 1 {
+		t.Errorf("macro-tagged sessions = %d, want 1 (only executed step)", len(macroFlows))
 	}
-	if len(macroSessions) > 0 && macroSessions[0].Tags["macro_step"] != "login" {
-		t.Errorf("macro_step = %q, want login", macroSessions[0].Tags["macro_step"])
+	if len(macroFlows) > 0 && macroFlows[0].Tags["macro_step"] != "login" {
+		t.Errorf("macro_step = %q, want login", macroFlows[0].Tags["macro_step"])
 	}
 }
 
@@ -982,28 +982,28 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Save token session.
+	// Save token flow.
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, tokenSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	tokenSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: tokenSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: tokenSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
 		Headers: map[string][]string{},
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	// Save target session.
+	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api/data")
-	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1020,7 +1020,7 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "get-token",
-					"session_id": tokenSess.ID,
+					"flow_id": tokenSess.ID,
 					"extract": []any{
 						map[string]any{
 							"name":        "auth_token",
@@ -1035,9 +1035,9 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 	})
 
 	// Count sessions before resend.
-	beforeSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	beforeSessions, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	beforeCount := len(beforeSessions)
 
@@ -1045,7 +1045,7 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 	resendResult := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
 					"macro":        "hook-macro",
@@ -1058,31 +1058,31 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 		t.Fatalf("resend with hook failed: %v", resendResult.Content)
 	}
 
-	// Check that the hook macro step was recorded as a session.
-	afterSessions, err := store.ListSessions(ctx, session.ListOptions{Limit: 100})
+	// Check that the hook macro step was recorded as a flow.
+	afterFlows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 
-	var hookSessions []*session.Session
-	for _, s := range afterSessions {
+	var hookFlows []*flow.Flow
+	for _, s := range afterFlows {
 		if s.Tags != nil && s.Tags["macro"] == "hook-macro" {
-			hookSessions = append(hookSessions, s)
+			hookFlows = append(hookFlows, s)
 		}
 	}
 
-	if len(hookSessions) != 1 {
-		t.Errorf("hook macro sessions = %d, want 1", len(hookSessions))
+	if len(hookFlows) != 1 {
+		t.Errorf("hook macro sessions = %d, want 1", len(hookFlows))
 	}
-	if len(hookSessions) > 0 {
-		if hookSessions[0].Tags["macro_step"] != "get-token" {
-			t.Errorf("macro_step = %q, want get-token", hookSessions[0].Tags["macro_step"])
+	if len(hookFlows) > 0 {
+		if hookFlows[0].Tags["macro_step"] != "get-token" {
+			t.Errorf("macro_step = %q, want get-token", hookFlows[0].Tags["macro_step"])
 		}
 	}
 
-	// The total new sessions should be at least 2: 1 for the hook macro step + 1 for the resend itself.
-	newCount := len(afterSessions) - beforeCount
+	// The total new flows should be at least 2: 1 for the hook macro step + 1 for the resend itself.
+	newCount := len(afterFlows) - beforeCount
 	if newCount < 2 {
-		t.Errorf("new sessions = %d, want >= 2 (hook macro + resend)", newCount)
+		t.Errorf("new flows = %d, want >= 2 (hook macro + resend)", newCount)
 	}
 }

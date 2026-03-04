@@ -18,7 +18,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -26,7 +26,7 @@ import (
 // integration test. It extends testEnv with TargetScope for policy-layer testing.
 type policyTestEnv struct {
 	cs          *gomcp.ClientSession
-	store       session.Store
+	store       flow.Store
 	manager     *proxy.Manager
 	targetScope *proxy.TargetScope
 	httpHandler *protohttp.Handler
@@ -42,7 +42,7 @@ func setupPolicyTestEnv(t *testing.T, ts *proxy.TargetScope) *policyTestEnv {
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "policy-integration.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -148,8 +148,8 @@ func sendProxyRequest(t *testing.T, proxyAddr, targetURL string) (*gohttp.Respon
 	return client.Get(targetURL)
 }
 
-// waitForSessions waits briefly for sessions to be persisted to the store.
-func waitForSessions() {
+// waitForFlows waits briefly for sessions to be persisted to the store.
+func waitForFlows() {
 	time.Sleep(200 * time.Millisecond)
 }
 
@@ -218,11 +218,11 @@ func TestPolicyIntegration_PolicyDenyCannotBeOverridden(t *testing.T) {
 	}
 
 	// Step 4: Verify resend of blocked session is also blocked.
-	waitForSessions()
+	waitForFlows()
 
-	// Find the blocked session.
-	sessResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	// Find the blocked flow.
+	sessResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 		"filter": map[string]any{
 			"blocked_by": "target_scope",
 		},
@@ -237,7 +237,7 @@ func TestPolicyIntegration_PolicyDenyCannotBeOverridden(t *testing.T) {
 		Arguments: map[string]any{
 			"action": "resend",
 			"params": map[string]any{
-				"session_id": sessResult.Sessions[0].ID,
+				"flow_id": sessResult.Flows[0].ID,
 			},
 		},
 	})
@@ -448,17 +448,17 @@ func TestPolicyIntegration_AgentDenyEnforcedByProxy(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusForbidden)
 	}
 
-	waitForSessions()
+	waitForFlows()
 
-	// Verify the session was recorded with blocked_by.
-	sessResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	// Verify the flow was recorded with blocked_by.
+	sessResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 		"filter": map[string]any{
 			"blocked_by": "target_scope",
 		},
 	})
 	if sessResult.Count == 0 {
-		t.Error("expected at least one blocked session recorded")
+		t.Error("expected at least one blocked flow recorded")
 	}
 }
 
@@ -595,7 +595,7 @@ func TestPolicyIntegration_GetTargetScopeTwoLayers(t *testing.T) {
 	}
 }
 
-// --- Scenario 6: Blocked session recording ---
+// --- Scenario 6: Blocked flow recording ---
 
 func TestPolicyIntegration_BlockedSessionRecording(t *testing.T) {
 	ts := proxy.NewTargetScope()
@@ -626,11 +626,11 @@ func TestPolicyIntegration_BlockedSessionRecording(t *testing.T) {
 		t.Errorf("request 1 status = %d, want %d", resp1.StatusCode, gohttp.StatusForbidden)
 	}
 
-	waitForSessions()
+	waitForFlows()
 
 	// Step 2: Verify blocked sessions are recorded with blocked_by = "target_scope".
-	sessResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	sessResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 		"filter": map[string]any{
 			"blocked_by": "target_scope",
 		},
@@ -640,31 +640,31 @@ func TestPolicyIntegration_BlockedSessionRecording(t *testing.T) {
 	}
 
 	// Verify the blocked_by field is populated.
-	for _, s := range sessResult.Sessions {
+	for _, s := range sessResult.Flows {
 		if s.BlockedBy != "target_scope" {
-			t.Errorf("session %s blocked_by = %q, want %q", s.ID, s.BlockedBy, "target_scope")
+			t.Errorf("flow %s blocked_by = %q, want %q", s.ID, s.BlockedBy, "target_scope")
 		}
 	}
 
 	// Step 3: Verify query can filter by blocked_by.
-	normalResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	normalResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	// All sessions should have blocked_by set since all requests are blocked.
-	for _, s := range normalResult.Sessions {
+	for _, s := range normalResult.Flows {
 		if s.BlockedBy != "target_scope" {
-			t.Errorf("session %s blocked_by = %q, want %q", s.ID, s.BlockedBy, "target_scope")
+			t.Errorf("flow %s blocked_by = %q, want %q", s.ID, s.BlockedBy, "target_scope")
 		}
 	}
 
 	// Step 4: Verify session detail also has blocked_by.
 	if sessResult.Count > 0 {
-		sessionDetail := callTool[querySessionResult](t, env.cs, "query", map[string]any{
-			"resource": "session",
-			"id":       sessResult.Sessions[0].ID,
+		sessionDetail := callTool[queryFlowResult](t, env.cs, "query", map[string]any{
+			"resource": "flow",
+			"id":       sessResult.Flows[0].ID,
 		})
 		if sessionDetail.BlockedBy != "target_scope" {
-			t.Errorf("session detail blocked_by = %q, want %q", sessionDetail.BlockedBy, "target_scope")
+			t.Errorf("flow detail blocked_by = %q, want %q", sessionDetail.BlockedBy, "target_scope")
 		}
 	}
 }
@@ -697,18 +697,18 @@ func TestPolicyIntegration_AgentDenyBlockedSessionRecording(t *testing.T) {
 			resp.StatusCode, gohttp.StatusOK, body)
 	}
 
-	waitForSessions()
+	waitForFlows()
 
 	// Verify the allowed session has no blocked_by.
-	allowedSessions := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	allowedFlows := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
-	if allowedSessions.Count == 0 {
+	if allowedFlows.Count == 0 {
 		t.Fatal("expected at least one session")
 	}
-	for _, s := range allowedSessions.Sessions {
+	for _, s := range allowedFlows.Flows {
 		if s.BlockedBy != "" {
-			t.Errorf("allowed session %s blocked_by = %q, want empty", s.ID, s.BlockedBy)
+			t.Errorf("allowed flow %s blocked_by = %q, want empty", s.ID, s.BlockedBy)
 		}
 	}
 }
@@ -835,17 +835,17 @@ func TestPolicyIntegration_BackwardCompatibility_ProxyWorks(t *testing.T) {
 		t.Errorf("response body = %q, want to contain %q", body, "hello from upstream")
 	}
 
-	waitForSessions()
+	waitForFlows()
 
-	// Verify session was recorded normally.
-	sessResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	// Verify flow was recorded normally.
+	sessResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if sessResult.Count != 1 {
 		t.Fatalf("sessions count = %d, want 1", sessResult.Count)
 	}
-	if sessResult.Sessions[0].BlockedBy != "" {
-		t.Errorf("session blocked_by = %q, want empty", sessResult.Sessions[0].BlockedBy)
+	if sessResult.Flows[0].BlockedBy != "" {
+		t.Errorf("flow blocked_by = %q, want empty", sessResult.Flows[0].BlockedBy)
 	}
 }
 
@@ -892,15 +892,15 @@ func TestPolicyIntegration_ExecuteResendBlockedByPolicy(t *testing.T) {
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
-	// Create a session targeting a host not in the policy allow list.
+	// Create a flow targeting a host not in the policy allow list.
 	u, _ := url.Parse("http://evil.com/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -908,7 +908,7 @@ func TestPolicyIntegration_ExecuteResendBlockedByPolicy(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -928,7 +928,7 @@ func TestPolicyIntegration_ExecuteResendBlockedByPolicy(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -947,12 +947,12 @@ func TestPolicyIntegration_ExecuteResendAllowedByPolicy(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -960,7 +960,7 @@ func TestPolicyIntegration_ExecuteResendAllowedByPolicy(t *testing.T) {
 			URL:       serverURL,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -980,7 +980,7 @@ func TestPolicyIntegration_ExecuteResendAllowedByPolicy(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 
@@ -1303,13 +1303,13 @@ func TestPolicyIntegration_ExecuteFuzzBlockedByPolicy(t *testing.T) {
 
 	u, _ := url.Parse("http://evil.com/api/test")
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			ID:        "fuzz-policy-blocked",
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1317,7 +1317,7 @@ func TestPolicyIntegration_ExecuteFuzzBlockedByPolicy(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Content-Type": {"text/plain"}},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1336,7 +1336,7 @@ func TestPolicyIntegration_ExecuteFuzzBlockedByPolicy(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"session_id":  "fuzz-policy-blocked",
+			"flow_id":  "fuzz-policy-blocked",
 			"attack_type": "sequential",
 			"positions": []map[string]any{
 				{
@@ -1371,13 +1371,13 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 
 	u, _ := url.Parse("http://evil.com/api/login")
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			ID:        "macro-policy-blocked",
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1386,7 +1386,7 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":"admin"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1429,7 +1429,7 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 			"steps": []map[string]any{
 				{
 					"id":         "step-1",
-					"session_id": "macro-policy-blocked",
+					"flow_id": "macro-policy-blocked",
 				},
 			},
 		},

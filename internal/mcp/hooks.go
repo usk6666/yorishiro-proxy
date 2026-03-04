@@ -16,7 +16,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // hooksInput holds the hook configuration for resend/fuzz actions.
@@ -312,7 +312,7 @@ func (he *hookExecutor) shouldRunPostReceive(h *hookConfig, statusCode int, resp
 func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map[string]string) (*macro.Result, error) {
 	d := he.d
 	if d.store == nil {
-		return nil, fmt.Errorf("session store is not initialized")
+		return nil, fmt.Errorf("flow store is not initialized")
 	}
 
 	// Load macro from DB.
@@ -347,8 +347,8 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 					}
 				}
 			}
-			// Check the session's URL for this step.
-			sendMsgs, msgErr := d.store.GetMessages(ctx, step.SessionID, session.MessageListOptions{Direction: "send"})
+			// Check the flow's URL for this step.
+			sendMsgs, msgErr := d.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
 			if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 				// Only check session URL if no override_url (override takes precedence).
 				if step.OverrideURL == "" {
@@ -362,7 +362,7 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 
 	// Create engine with HTTP client and session fetcher.
 	sendFunc := hookMacroSendFunc(d, macroName)
-	fetcher := &storeSessionFetcher{store: d.store}
+	fetcher := &storeFlowFetcher{store: d.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
 	if err != nil {
@@ -433,7 +433,7 @@ func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
 		}
 		duration := time.Since(start)
 
-		// Record the macro step as a session so it appears in session history.
+		// Record the macro step as a flow so it appears in session history.
 		if d.store != nil {
 			recordMacroStepSessionDeps(ctx, d, macroName, req, resp, respBody, httpReq, start, duration)
 		}
@@ -447,7 +447,7 @@ func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
 	}
 }
 
-// recordMacroStepSessionDeps saves a macro step's HTTP exchange as a session.
+// recordMacroStepSessionDeps saves a macro step's HTTP exchange as a flow.
 // This is a deps-based version used by hookMacroSendFunc.
 func recordMacroStepSessionDeps(
 	ctx context.Context,
@@ -465,15 +465,15 @@ func recordMacroStepSessionDeps(
 		"macro_step": req.StepID,
 	}
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
 		Tags:        tags,
 	}
-	if err := d.store.SaveSession(ctx, sess); err != nil {
+	if err := d.store.SaveFlow(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -486,8 +486,8 @@ func recordMacroStepSessionDeps(
 
 	parsedURL := httpReq.URL
 
-	sendMsg := &session.Message{
-		SessionID: sess.ID,
+	sendMsg := &flow.Message{
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -507,8 +507,8 @@ func recordMacroStepSessionDeps(
 		respHeaders[key] = values
 	}
 
-	recvMsg := &session.Message{
-		SessionID:  sess.ID,
+	recvMsg := &flow.Message{
+		FlowID:  fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),

@@ -168,11 +168,11 @@ func TestInsecureSkipVerify_HTTPSConnectToSelfSignedServer(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "https-self-signed-ok")
 	}
 
-	// Verify session was recorded.
+	// Verify flow was recorded.
 	time.Sleep(100 * time.Millisecond)
 	entries := store.Entries()
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 session entry, got %d", len(entries))
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
 	}
 	if entries[0].Session.Protocol != "HTTPS" {
 		t.Errorf("protocol = %q, want %q", entries[0].Session.Protocol, "HTTPS")

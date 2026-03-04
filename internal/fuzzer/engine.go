@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // maxResponseSize is the maximum response body size (1 MB) to prevent OOM.
@@ -21,8 +21,8 @@ const maxResponseSize = 1 << 20
 
 // Config holds the configuration for a fuzz job.
 type Config struct {
-	// SessionID is the template session to fuzz.
-	SessionID string `json:"session_id"`
+	// FlowID is the template flow to fuzz.
+	FlowID string `json:"flow_id"`
 	// AttackType is the fuzzing strategy: sequential or parallel.
 	AttackType string `json:"attack_type"`
 	// Positions defines where to inject payloads.
@@ -37,8 +37,8 @@ type Config struct {
 
 // Validate checks that a Config is well-formed.
 func (c *Config) Validate() error {
-	if c.SessionID == "" {
-		return fmt.Errorf("session_id is required")
+	if c.FlowID == "" {
+		return fmt.Errorf("flow_id is required")
 	}
 	if c.AttackType == "" {
 		return fmt.Errorf("attack_type is required")
@@ -80,23 +80,23 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// SessionFetcher retrieves session data needed by the fuzz engine.
-type SessionFetcher interface {
-	GetSession(ctx context.Context, id string) (*session.Session, error)
-	GetMessages(ctx context.Context, sessionID string, opts session.MessageListOptions) ([]*session.Message, error)
+// FlowFetcher retrieves flow data needed by the fuzz engine.
+type FlowFetcher interface {
+	GetFlow(ctx context.Context, id string) (*flow.Flow, error)
+	GetMessages(ctx context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error)
 }
 
-// SessionRecorder persists new sessions and messages created during fuzzing.
-type SessionRecorder interface {
-	SaveSession(ctx context.Context, s *session.Session) error
-	AppendMessage(ctx context.Context, msg *session.Message) error
+// FlowRecorder persists new flows and messages created during fuzzing.
+type FlowRecorder interface {
+	SaveFlow(ctx context.Context, s *flow.Flow) error
+	AppendMessage(ctx context.Context, msg *flow.Message) error
 }
 
 // FuzzJobStore persists fuzz job and result data.
 type FuzzJobStore interface {
-	SaveFuzzJob(ctx context.Context, job *session.FuzzJob) error
-	UpdateFuzzJob(ctx context.Context, job *session.FuzzJob) error
-	SaveFuzzResult(ctx context.Context, result *session.FuzzResult) error
+	SaveFuzzJob(ctx context.Context, job *flow.FuzzJob) error
+	UpdateFuzzJob(ctx context.Context, job *flow.FuzzJob) error
+	SaveFuzzResult(ctx context.Context, result *flow.FuzzResult) error
 }
 
 // HTTPDoer abstracts HTTP request execution.
@@ -106,18 +106,18 @@ type HTTPDoer interface {
 
 // Engine executes fuzz campaigns.
 type Engine struct {
-	sessionFetcher  SessionFetcher
-	sessionRecorder SessionRecorder
+	flowFetcher  FlowFetcher
+	flowRecorder FlowRecorder
 	fuzzStore       FuzzJobStore
 	httpDoer        HTTPDoer
 	wordlistDir     string
 }
 
 // NewEngine creates a new fuzz engine.
-func NewEngine(fetcher SessionFetcher, recorder SessionRecorder, fuzzStore FuzzJobStore, doer HTTPDoer, wordlistDir string) *Engine {
+func NewEngine(fetcher FlowFetcher, recorder FlowRecorder, fuzzStore FuzzJobStore, doer HTTPDoer, wordlistDir string) *Engine {
 	return &Engine{
-		sessionFetcher:  fetcher,
-		sessionRecorder: recorder,
+		flowFetcher:  fetcher,
+		flowRecorder: recorder,
 		fuzzStore:       fuzzStore,
 		httpDoer:        doer,
 		wordlistDir:     wordlistDir,
@@ -147,22 +147,22 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("invalid fuzz config: %w", err)
 	}
 
-	// Fetch the template session.
-	sess, err := e.sessionFetcher.GetSession(ctx, cfg.SessionID)
+	// Fetch the template flow.
+	fl, err := e.flowFetcher.GetFlow(ctx, cfg.FlowID)
 	if err != nil {
-		return nil, fmt.Errorf("get template session: %w", err)
+		return nil, fmt.Errorf("get template flow: %w", err)
 	}
 
-	sendMsgs, err := e.sessionFetcher.GetMessages(ctx, sess.ID, session.MessageListOptions{Direction: "send"})
+	sendMsgs, err := e.flowFetcher.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, fmt.Errorf("template session %s has no send messages", cfg.SessionID)
+		return nil, fmt.Errorf("template flow %s has no send messages", cfg.FlowID)
 	}
 	sendMsg := sendMsgs[0]
 
-	// Build the base request data from the template session (deep clone).
+	// Build the base request data from the template flow (deep clone).
 	baseData := BuildRequestData(sendMsg)
 
 	// Resolve payload sets.
@@ -189,9 +189,9 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	// Create fuzz job in DB.
 	now := time.Now()
-	job := &session.FuzzJob{
+	job := &flow.FuzzJob{
 		ID:        uuid.New().String(),
-		SessionID: cfg.SessionID,
+		FlowID: cfg.FlowID,
 		Config:    string(configJSON),
 		Status:    "running",
 		Tag:       cfg.Tag,
@@ -230,7 +230,7 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 		default:
 		}
 
-		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, sess.Protocol, timeout, job.ID, nil)
+		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, fl.Protocol, timeout, job.ID, nil)
 		if err := e.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
 			// Log and continue; don't abort the entire job for a DB write failure.
 			errorCount++
@@ -265,7 +265,7 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 }
 
 // executeFuzzCase applies positions to the template, sends the request,
-// records the session, and returns a FuzzResult.
+// records the flow, and returns a FuzzResult.
 func (e *Engine) executeFuzzCase(
 	ctx context.Context,
 	baseData *RequestData,
@@ -275,11 +275,11 @@ func (e *Engine) executeFuzzCase(
 	timeout time.Duration,
 	fuzzID string,
 	doerOverride HTTPDoer,
-) *session.FuzzResult {
-	result := &session.FuzzResult{
+) *flow.FuzzResult {
+	result := &flow.FuzzResult{
 		FuzzID:   fuzzID,
 		IndexNum: fc.Index,
-		Payloads: session.PayloadsToJSON(fc.Payloads),
+		Payloads: flow.PayloadsToJSON(fc.Payloads),
 	}
 
 	// Clone and apply positions.
@@ -291,14 +291,14 @@ func (e *Engine) executeFuzzCase(
 		}
 		if err := ApplyPosition(data, pos, payload); err != nil {
 			result.Error = fmt.Sprintf("apply position %s: %s", pos.ID, err.Error())
-			// SessionID left empty for error results (no FK to sessions table).
+			// FlowID left empty for error results (no FK to flows table).
 			return result
 		}
 	}
 
 	if data.URL == nil {
-		result.Error = "template session has no URL"
-		// SessionID left empty for error results (no FK to sessions table).
+		result.Error = "template flow has no URL"
+		// FlowID left empty for error results (no FK to flows table).
 		return result
 	}
 
@@ -314,7 +314,7 @@ func (e *Engine) executeFuzzCase(
 	httpReq, err := http.NewRequestWithContext(reqCtx, data.Method, data.URL.String(), body)
 	if err != nil {
 		result.Error = fmt.Sprintf("create request: %s", err.Error())
-		// SessionID left empty for error results (no FK to sessions table).
+		// FlowID left empty for error results (no FK to flows table).
 		return result
 	}
 
@@ -339,7 +339,7 @@ func (e *Engine) executeFuzzCase(
 		duration := time.Since(start)
 		result.Error = fmt.Sprintf("send request: %s", err.Error())
 		result.DurationMs = int(duration.Milliseconds())
-		// SessionID left empty for error results (no FK to sessions table).
+		// FlowID left empty for error results (no FK to flows table).
 		return result
 	}
 	defer resp.Body.Close()
@@ -349,7 +349,7 @@ func (e *Engine) executeFuzzCase(
 		duration := time.Since(start)
 		result.Error = fmt.Sprintf("read response: %s", err.Error())
 		result.DurationMs = int(duration.Milliseconds())
-		// SessionID left empty for error results (no FK to sessions table).
+		// FlowID left empty for error results (no FK to flows table).
 		return result
 	}
 	duration := time.Since(start)
@@ -366,25 +366,25 @@ func (e *Engine) executeFuzzCase(
 		recordedHeaders[key] = values
 	}
 
-	// Record the fuzz iteration as a new session.
-	newSess := &session.Session{
+	// Record the fuzz iteration as a new flow.
+	newFl := &flow.Flow{
 		Protocol:    protocol,
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
 		Tags:        map[string]string{"fuzz_id": fuzzID},
 	}
 
-	if err := e.sessionRecorder.SaveSession(ctx, newSess); err != nil {
-		result.Error = fmt.Sprintf("save session: %s", err.Error())
-		// SessionID left empty for error results (no FK to sessions table).
+	if err := e.flowRecorder.SaveFlow(ctx, newFl); err != nil {
+		result.Error = fmt.Sprintf("save flow: %s", err.Error())
+		// FlowID left empty for error results (no FK to flows table).
 		return result
 	}
 
 	// Save send message.
-	newSendMsg := &session.Message{
-		SessionID: newSess.ID,
+	newSendMsg := &flow.Message{
+		FlowID: newFl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -393,15 +393,15 @@ func (e *Engine) executeFuzzCase(
 		Headers:   recordedHeaders,
 		Body:      data.Body,
 	}
-	if err := e.sessionRecorder.AppendMessage(ctx, newSendMsg); err != nil {
+	if err := e.flowRecorder.AppendMessage(ctx, newSendMsg); err != nil {
 		result.Error = fmt.Sprintf("save send message: %s", err.Error())
-		result.SessionID = newSess.ID
+		result.FlowID = newFl.ID
 		return result
 	}
 
 	// Save receive message.
-	newRecvMsg := &session.Message{
-		SessionID:  newSess.ID,
+	newRecvMsg := &flow.Message{
+		FlowID:  newFl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),
@@ -409,13 +409,13 @@ func (e *Engine) executeFuzzCase(
 		Headers:    respHeaders,
 		Body:       respBody,
 	}
-	if err := e.sessionRecorder.AppendMessage(ctx, newRecvMsg); err != nil {
+	if err := e.flowRecorder.AppendMessage(ctx, newRecvMsg); err != nil {
 		result.Error = fmt.Sprintf("save receive message: %s", err.Error())
-		result.SessionID = newSess.ID
+		result.FlowID = newFl.ID
 		return result
 	}
 
-	result.SessionID = newSess.ID
+	result.FlowID = newFl.ID
 	result.StatusCode = resp.StatusCode
 	result.ResponseLength = len(respBody)
 	result.DurationMs = int(duration.Milliseconds())
@@ -440,7 +440,7 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	hooks HookCallbacks,
 	hookState *HookState,
 	doerOverride HTTPDoer,
-) *session.FuzzResult {
+) *flow.FuzzResult {
 	if hooks == nil {
 		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride)
 	}
@@ -450,10 +450,10 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	kvStore, err := hooks.PreSend(ctx, hookState)
 	hookState.Mu.Unlock()
 	if err != nil {
-		return &session.FuzzResult{
+		return &flow.FuzzResult{
 			FuzzID:   fuzzID,
 			IndexNum: fc.Index,
-			Payloads: session.PayloadsToJSON(fc.Payloads),
+			Payloads: flow.PayloadsToJSON(fc.Payloads),
 			Error:    fmt.Sprintf("pre_send hook: %s", err.Error()),
 		}
 	}
@@ -473,8 +473,8 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	// Pass the kvStore from PreSend so that post_receive hooks can access
 	// values produced by pre_send (e.g., auth_session for logout).
 	if result.Error == "" && result.StatusCode != 0 {
-		// Retrieve the response body from the recorded session for the hook.
-		respBody := e.fetchResponseBody(ctx, result.SessionID)
+		// Retrieve the response body from the recorded flow for the hook.
+		respBody := e.fetchResponseBody(ctx, result.FlowID)
 		hookState.Mu.Lock()
 		postErr := hooks.PostSend(ctx, hookState, result.StatusCode, respBody, kvStore)
 		hookState.Mu.Unlock()
@@ -542,21 +542,21 @@ func expandSimpleTemplate(input string, kvStore map[string]string) string {
 	return result
 }
 
-// fetchResponseBody retrieves the response body from a recorded session.
-// Returns nil if the session or response body cannot be retrieved.
-func (e *Engine) fetchResponseBody(ctx context.Context, sessionID string) []byte {
-	if sessionID == "" {
+// fetchResponseBody retrieves the response body from a recorded flow.
+// Returns nil if the flow or response body cannot be retrieved.
+func (e *Engine) fetchResponseBody(ctx context.Context, flowID string) []byte {
+	if flowID == "" {
 		return nil
 	}
-	msgs, err := e.sessionFetcher.GetMessages(ctx, sessionID, session.MessageListOptions{Direction: "receive"})
+	msgs, err := e.flowFetcher.GetMessages(ctx, flowID, flow.MessageListOptions{Direction: "receive"})
 	if err != nil || len(msgs) == 0 {
 		return nil
 	}
 	return msgs[0].Body
 }
 
-// BuildRequestData extracts mutable request data from a session's send message.
-func BuildRequestData(sendMsg *session.Message) *RequestData {
+// BuildRequestData extracts mutable request data from a flow's send message.
+func BuildRequestData(sendMsg *flow.Message) *RequestData {
 	data := &RequestData{
 		Method: sendMsg.Method,
 		Body:   sendMsg.Body,

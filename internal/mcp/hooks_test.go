@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // --- validateHooks tests ---
@@ -402,15 +402,15 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 
 	// Save the token session (referenced by macro step).
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &session.Session{
+	tokenSess := &flow.Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, tokenSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	tokenSendMsg := &session.Message{
-		SessionID: tokenSess.ID,
+	tokenSendMsg := &flow.Message{
+		FlowID: tokenSess.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -424,15 +424,15 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 
 	// Save the target session (referenced by resend).
 	targetURL, _ := url.Parse(targetServer.URL + "/api/data")
-	targetSess := &session.Session{
+	targetSess := &flow.Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	targetSendMsg := &session.Message{
-		SessionID: targetSess.ID,
+	targetSendMsg := &flow.Message{
+		FlowID: targetSess.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -454,7 +454,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "get-token",
-					"session_id": tokenSess.ID,
+					"flow_id": tokenSess.ID,
 					"extract": []any{
 						map[string]any{
 							"name":        "token",
@@ -475,7 +475,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 	resendResult := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"override_headers": map[string]any{
 				"X-Token": "{{token}}",
 			},
@@ -530,17 +530,17 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Save macro step session.
+	// Save macro step flow.
 	macroURL, _ := url.Parse(macroServer.URL + "/log")
-	macroSess := &session.Session{
+	macroSess := &flow.Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, macroSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, macroSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("log entry"),
@@ -548,17 +548,17 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	// Save target session.
+	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &session.Session{
+	targetSess := &flow.Flow{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -575,7 +575,7 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "log",
-					"session_id": macroSess.ID,
+					"flow_id": macroSess.ID,
 				},
 			},
 		},
@@ -585,7 +585,7 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 	result := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"hooks": map[string]any{
 				"post_receive": map[string]any{
 					"macro":         "log-response",
@@ -611,14 +611,14 @@ func TestExecute_Resend_WithInvalidHooks(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	// Save a minimal target session.
+	// Save a minimal target flow.
 	targetURL, _ := url.Parse("https://example.com/api")
-	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -631,7 +631,7 @@ func TestExecute_Resend_WithInvalidHooks(t *testing.T) {
 	result := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
 					"macro":        "some-macro",
@@ -666,28 +666,28 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Save token session.
+	// Save token flow.
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, tokenSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	tokenSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: tokenSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: tokenSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
 		Headers: map[string][]string{},
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	// Save target session.
+	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -704,7 +704,7 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "get-token",
-					"session_id": tokenSess.ID,
+					"flow_id": tokenSess.ID,
 					"extract": []any{
 						map[string]any{
 							"name":        "token",
@@ -722,7 +722,7 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 	result := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"override_headers": map[string]any{
 				"Authorization": "Bearer {{token | base64}}",
 			},
@@ -786,12 +786,12 @@ func TestExecute_Resend_WithNonexistentHookMacro(t *testing.T) {
 	ctx := context.Background()
 
 	targetURL, _ := url.Parse("https://example.com/api")
-	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -803,7 +803,7 @@ func TestExecute_Resend_WithNonexistentHookMacro(t *testing.T) {
 	result := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
 					"macro": "nonexistent-macro",
@@ -838,14 +838,14 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Save macro step session.
+	// Save macro step flow.
 	macroURL, _ := url.Parse(macroStepServer.URL + "/login")
-	macroSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, macroSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, macroSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("password={{password}}"),
@@ -853,14 +853,14 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	// Save target session.
+	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -877,11 +877,11 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":            "login",
-					"session_id":    macroSess.ID,
+					"flow_id":    macroSess.ID,
 					"override_body": stringPtr("password={{password}}"),
 					"extract": []any{
 						map[string]any{
-							"name":        "session_id",
+							"name":        "flow_id",
 							"from":        "response",
 							"source":      "header",
 							"header_name": "X-Session",
@@ -897,9 +897,9 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 	result := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"override_headers": map[string]any{
-				"Cookie": "sid={{session_id}}",
+				"Cookie": "sid={{flow_id}}",
 			},
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
@@ -934,14 +934,14 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	// Save macro step session.
+	// Save macro step flow.
 	macroURL, _ := url.Parse(macroServer.URL + "/logout")
-	macroSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, macroSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, macroSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Cookie": {"{{auth_session}}"}},
 	}); err != nil {
@@ -958,7 +958,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "logout",
-					"session_id": macroSess.ID,
+					"flow_id": macroSess.ID,
 				},
 			},
 		},
@@ -998,12 +998,12 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 	ctx := context.Background()
 
 	macroURL, _ := url.Parse(macroServer.URL + "/cleanup")
-	macroSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, macroSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, macroSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1019,7 +1019,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "cleanup",
-					"session_id": macroSess.ID,
+					"flow_id": macroSess.ID,
 				},
 			},
 		},
@@ -1056,12 +1056,12 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 	ctx := context.Background()
 
 	macroURL, _ := url.Parse(macroServer.URL + "/cleanup")
-	macroSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, macroSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, macroSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1077,7 +1077,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "cleanup",
-					"session_id": macroSess.ID,
+					"flow_id": macroSess.ID,
 				},
 			},
 		},
@@ -1136,12 +1136,12 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 
 	// Save login session (for pre_send macro).
 	loginURL, _ := url.Parse(loginServer.URL + "/login")
-	loginSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, loginSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	loginSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, loginSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: loginSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: loginSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1150,26 +1150,26 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 
 	// Save logout session (for post_receive macro).
 	logoutURL, _ := url.Parse(logoutServer.URL + "/logout")
-	logoutSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, logoutSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	logoutSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, logoutSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: logoutSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: logoutSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: logoutURL,
 		Headers: map[string][]string{"Cookie": {"{{auth_session}}"}},
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	// Save target session.
+	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &session.Session{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveSession(ctx, targetSess); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, targetSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &session.Message{
-		SessionID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1186,7 +1186,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":         "login",
-					"session_id": loginSess.ID,
+					"flow_id": loginSess.ID,
 					"extract": []any{
 						map[string]any{
 							"name":        "auth_session",
@@ -1211,7 +1211,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":               "logout",
-					"session_id":       logoutSess.ID,
+					"flow_id":       logoutSess.ID,
 					"override_headers": map[string]any{"Cookie": "{{auth_session}}"},
 				},
 			},
@@ -1223,7 +1223,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 	result := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"session_id": targetSess.ID,
+			"flow_id": targetSess.ID,
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
 					"macro": "login-macro",

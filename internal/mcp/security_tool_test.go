@@ -10,7 +10,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
-// setupSecurityTestSession creates an MCP client session with a TargetScope for testing.
+// setupSecurityTestSession creates an MCP client flow with a TargetScope for testing.
 func setupSecurityTestSession(t *testing.T, ts *proxy.TargetScope) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()

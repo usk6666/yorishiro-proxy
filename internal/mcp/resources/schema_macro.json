@@ -27,10 +27,10 @@
           "description": "Macro steps (define_macro).",
           "items": {
             "type": "object",
-            "required": ["id", "session_id"],
+            "required": ["id", "flow_id"],
             "properties": {
               "id": { "type": "string" },
-              "session_id": { "type": "string" },
+              "flow_id": { "type": "string" },
               "override_method": { "type": "string" },
               "override_url": { "type": "string" },
               "override_headers": { "type": "object", "additionalProperties": { "type": "string" } },

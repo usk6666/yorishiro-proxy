@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useExecute } from "../../lib/mcp/hooks.js";
 import { useToast } from "../../components/ui/Toast.js";
 import type {
-  SessionDetailResult,
+  FlowDetailResult,
   MessageEntry,
 } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
@@ -33,7 +33,7 @@ const RESPONSE_TABS = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Return a shortened session ID for display (first 8 characters). */
+/** Return a shortened flow ID for display (first 8 characters). */
 function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
@@ -95,7 +95,7 @@ function formatTimestamp(ts: string): string {
   }
 }
 
-/** Get the Badge variant for a session state. */
+/** Get the Badge variant for a flow state. */
 function stateVariant(state: string): "default" | "success" | "warning" | "danger" | "info" {
   switch (state) {
     case "complete":
@@ -109,13 +109,13 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
   }
 }
 
-/** Whether a session is a streaming type (WebSocket, gRPC server/client streaming). */
-function isStreamingSession(session: SessionDetailResult): boolean {
-  return session.session_type !== "unary";
+/** Whether a flow is a streaming type (WebSocket, gRPC server/client streaming). */
+function isStreamingFlow(flow: FlowDetailResult): boolean {
+  return flow.flow_type !== "unary";
 }
 
-/** Whether a session has a response (error/drop sessions may not have one). */
-function hasResponse(session: SessionDetailResult): boolean {
+/** Whether a flow has a response (error/drop flows may not have one). */
+function hasResponse(session: FlowDetailResult): boolean {
   return (
     session.response_status_code > 0 ||
     (session.response_headers != null &&
@@ -137,22 +137,22 @@ export function SessionDetailPage() {
   const [requestTab, setRequestTab] = useState("headers");
   const [responseTab, setResponseTab] = useState("headers");
 
-  // Messages pagination state (for streaming sessions)
+  // Messages pagination state (for streaming flows)
   const [messagesOffset, setMessagesOffset] = useState(0);
   const messagesLimit = 50;
 
-  // Fetch session detail
+  // Fetch flow detail
   const {
     data: session,
     loading: sessionLoading,
     error: sessionError,
     refetch: refetchSession,
-  } = useQuery("session", {
+  } = useQuery("flow", {
     id: id ?? "",
     enabled: !!id,
   });
 
-  // Fetch messages for streaming sessions
+  // Fetch messages for streaming flows
   const {
     data: messagesData,
     loading: messagesLoading,
@@ -161,7 +161,7 @@ export function SessionDetailPage() {
     id: id ?? "",
     limit: messagesLimit,
     offset: messagesOffset,
-    enabled: !!id && !!session && isStreamingSession(session),
+    enabled: !!id && !!session && isStreamingFlow(session),
   });
 
   // Refetch messages when offset changes
@@ -174,26 +174,26 @@ export function SessionDetailPage() {
     prevOffsetKey.current = key;
   }, [messagesOffset, refetchMessages]);
 
-  // Delete session handler
+  // Delete flow handler
   const handleDelete = useCallback(async () => {
     if (!id) return;
 
     const confirmed = window.confirm(
-      "Are you sure you want to delete this session? This action cannot be undone.",
+      "Are you sure you want to delete this flow? This action cannot be undone.",
     );
     if (!confirmed) return;
 
     try {
       await execute({
-        action: "delete_sessions",
-        params: { session_id: id, confirm: true },
+        action: "delete_flows",
+        params: { flow_id: id, confirm: true },
       });
-      addToast({ type: "success", message: "Session deleted" });
+      addToast({ type: "success", message: "Flow deleted" });
       navigate("/");
     } catch (err) {
       addToast({
         type: "error",
-        message: `Failed to delete session: ${err instanceof Error ? err.message : String(err)}`,
+        message: `Failed to delete flow: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }, [id, execute, addToast, navigate]);
@@ -204,7 +204,7 @@ export function SessionDetailPage() {
     navigate(`/resend/${id}`);
   }, [id, navigate]);
 
-  // Navigate back to sessions list
+  // Navigate back to flows list
   const handleBack = useCallback(() => {
     navigate("/");
   }, [navigate]);
@@ -230,10 +230,10 @@ export function SessionDetailPage() {
     return (
       <div className="page session-detail-page">
         <div className="sd-error">
-          Failed to load session: {sessionError.message}
+          Failed to load flow: {sessionError.message}
         </div>
         <Button variant="secondary" size="sm" onClick={handleBack}>
-          Back to Sessions
+          Back to Flows
         </Button>
       </div>
     );
@@ -243,15 +243,15 @@ export function SessionDetailPage() {
   if (!session) {
     return (
       <div className="page session-detail-page">
-        <div className="sd-empty">Session not found.</div>
+        <div className="sd-empty">Flow not found.</div>
         <Button variant="secondary" size="sm" onClick={handleBack}>
-          Back to Sessions
+          Back to Flows
         </Button>
       </div>
     );
   }
 
-  const streaming = isStreamingSession(session);
+  const streaming = isStreamingFlow(session);
   const messages: MessageEntry[] = messagesData?.messages ?? session.message_preview ?? [];
   const totalMessages = messagesData?.total ?? session.message_count;
 
@@ -260,16 +260,16 @@ export function SessionDetailPage() {
       {/* Back navigation */}
       <div className="sd-back-row">
         <Button variant="ghost" size="sm" onClick={handleBack}>
-          &larr; Sessions
+          &larr; Flows
         </Button>
       </div>
 
-      {/* Session summary header */}
+      {/* Flow summary header */}
       <div className="sd-header">
         <div className="sd-header-top">
           <div className="sd-header-info">
             <div className="sd-header-title-row">
-              <h1 className="page-title">Session Detail</h1>
+              <h1 className="page-title">Flow Detail</h1>
               <span className="sd-session-id">{shortId(session.id)}</span>
             </div>
             <div className="sd-url-display" title={session.url}>
@@ -327,7 +327,7 @@ export function SessionDetailPage() {
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">Type</span>
-            <Badge variant="default">{session.session_type}</Badge>
+            <Badge variant="default">{session.flow_type}</Badge>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">State</span>
@@ -402,7 +402,7 @@ export function SessionDetailPage() {
         )}
       </div>
 
-      {/* Streaming session: Messages list */}
+      {/* Streaming flow: Messages list */}
       {streaming && (
         <div className="sd-section">
           <h2 className="sd-section-title">Messages</h2>

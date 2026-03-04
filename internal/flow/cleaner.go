@@ -1,4 +1,4 @@
-package session
+package flow
 
 import (
 	"context"
@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// CleanerConfig holds the configuration for the session cleaner.
+// CleanerConfig holds the configuration for the flow cleaner.
 type CleanerConfig struct {
-	// MaxSessions is the maximum number of sessions to retain. 0 means unlimited.
-	MaxSessions int
-	// MaxAge is the maximum age of sessions to retain. 0 means unlimited.
+	// MaxFlows is the maximum number of flows to retain. 0 means unlimited.
+	MaxFlows int
+	// MaxAge is the maximum age of flows to retain. 0 means unlimited.
 	MaxAge time.Duration
 	// Interval is the time between automatic cleanup runs.
 	Interval time.Duration
@@ -19,10 +19,10 @@ type CleanerConfig struct {
 
 // Enabled returns true if any retention policy is configured.
 func (c CleanerConfig) Enabled() bool {
-	return c.MaxSessions > 0 || c.MaxAge > 0
+	return c.MaxFlows > 0 || c.MaxAge > 0
 }
 
-// Cleaner periodically removes expired or excess sessions from the store.
+// Cleaner periodically removes expired or excess flows from the store.
 type Cleaner struct {
 	store  Store
 	config CleanerConfig
@@ -41,34 +41,34 @@ func NewCleaner(store Store, config CleanerConfig, logger *slog.Logger) *Cleaner
 	}
 }
 
-// RunOnce performs a single cleanup pass. It deletes sessions older than MaxAge
-// first (which may reduce the count), then deletes excess sessions beyond MaxSessions.
-// It returns the total number of deleted sessions.
+// RunOnce performs a single cleanup pass. It deletes flows older than MaxAge
+// first (which may reduce the count), then deletes excess flows beyond MaxFlows.
+// It returns the total number of deleted flows.
 func (c *Cleaner) RunOnce(ctx context.Context) (int64, error) {
 	var total int64
 
 	// Delete by age first — this may reduce the count enough to skip excess deletion.
 	if c.config.MaxAge > 0 {
 		cutoff := time.Now().UTC().Add(-c.config.MaxAge)
-		n, err := c.store.DeleteSessionsOlderThan(ctx, cutoff)
+		n, err := c.store.DeleteFlowsOlderThan(ctx, cutoff)
 		if err != nil {
 			return total, err
 		}
 		total += n
 		if n > 0 {
-			c.logger.Info("cleaned up old sessions", "deleted", n, "max_age", c.config.MaxAge)
+			c.logger.Info("cleaned up old flows", "deleted", n, "max_age", c.config.MaxAge)
 		}
 	}
 
 	// Delete by count.
-	if c.config.MaxSessions > 0 {
-		n, err := c.store.DeleteExcessSessions(ctx, c.config.MaxSessions)
+	if c.config.MaxFlows > 0 {
+		n, err := c.store.DeleteExcessFlows(ctx, c.config.MaxFlows)
 		if err != nil {
 			return total, err
 		}
 		total += n
 		if n > 0 {
-			c.logger.Info("cleaned up excess sessions", "deleted", n, "max_sessions", c.config.MaxSessions)
+			c.logger.Info("cleaned up excess flows", "deleted", n, "max_flows", c.config.MaxFlows)
 		}
 	}
 

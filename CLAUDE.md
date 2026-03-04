@@ -34,7 +34,7 @@ internal/
     http/                  # HTTP/1.x, HTTPS MITM 実装
       handler.go           # HTTP forward proxy ハンドラ
       connect.go           # CONNECT トンネル・HTTPS MITM
-  session/                 # リクエスト/レスポンス記録・セッション管理
+  flow/                    # リクエスト/レスポンス記録・フロー管理
   cert/                    # TLS 証明書生成・CA 管理
     ca.go                  # ルート CA 生成・読み込み
     issuer.go              # 動的サーバ証明書発行

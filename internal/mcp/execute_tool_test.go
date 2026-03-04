@@ -15,11 +15,11 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// setupTestSessionWithExecuteDoer creates an MCP client session with a custom HTTP doer for execute replay testing.
-func setupTestSessionWithExecuteDoer(t *testing.T, store session.Store, doer httpDoer) *gomcp.ClientSession {
+// setupTestSessionWithExecuteDoer creates an MCP client flow with a custom HTTP doer for execute replay testing.
+func setupTestSessionWithExecuteDoer(t *testing.T, store flow.Store, doer httpDoer) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -47,8 +47,8 @@ func setupTestSessionWithExecuteDoer(t *testing.T, store session.Store, doer htt
 	return cs
 }
 
-// setupTestSessionWithExecuteRawDialer creates an MCP client session with a custom raw dialer for execute replay_raw testing.
-func setupTestSessionWithExecuteRawDialer(t *testing.T, store session.Store, dialer rawDialer) *gomcp.ClientSession {
+// setupTestSessionWithExecuteRawDialer creates an MCP client flow with a custom raw dialer for execute replay_raw testing.
+func setupTestSessionWithExecuteRawDialer(t *testing.T, store flow.Store, dialer rawDialer) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -110,12 +110,12 @@ func TestExecute_Replay_Success(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
 			Duration:  250 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
@@ -124,7 +124,7 @@ func TestExecute_Replay_Success(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}, "X-Custom": {"original"}},
 			Body:      []byte(`{"key":"value"}`),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
@@ -139,7 +139,7 @@ func TestExecute_Replay_Success(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 	if result.IsError {
@@ -152,11 +152,11 @@ func TestExecute_Replay_Success(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	if out.NewSessionID == "" {
-		t.Error("expected non-empty new_session_id")
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
 	}
-	if out.NewSessionID == entry.Session.ID {
-		t.Error("new_session_id should differ from original session_id")
+	if out.NewFlowID == entry.Session.ID {
+		t.Error("new_flow_id should differ from original flow_id")
 	}
 	if out.StatusCode != 200 {
 		t.Errorf("status_code = %d, want 200", out.StatusCode)
@@ -180,16 +180,16 @@ func TestExecute_Replay_Success(t *testing.T) {
 		t.Errorf("echo body = %q, want {\"key\":\"value\"}", echo["body"])
 	}
 
-	// Verify the replay was recorded as a new session.
-	newSess, err := store.GetSession(context.Background(), out.NewSessionID)
+	// Verify the replay was recorded as a new flow.
+	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
 	if err != nil {
-		t.Fatalf("get new session: %v", err)
+		t.Fatalf("get new flow: %v", err)
 	}
-	if newSess.SessionType != "unary" {
-		t.Errorf("session_type = %q, want unary", newSess.SessionType)
+	if newFl.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want unary", newFl.FlowType)
 	}
-	if newSess.State != "complete" {
-		t.Errorf("state = %q, want complete", newSess.State)
+	if newFl.State != "complete" {
+		t.Errorf("state = %q, want complete", newFl.State)
 	}
 }
 
@@ -199,12 +199,12 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/original")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -212,7 +212,7 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -229,7 +229,7 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"session_id":      entry.Session.ID,
+			"flow_id":      entry.Session.ID,
 			"override_method": "PATCH",
 			"override_url":    overrideURL,
 			"override_headers": map[string]any{
@@ -264,18 +264,18 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 	}
 }
 
-func TestExecute_Replay_EmptySessionID(t *testing.T) {
+func TestExecute_Replay_EmptyFlowID(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
 
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"session_id": "",
+			"flow_id": "",
 		},
 	})
 	if !result.IsError {
-		t.Fatal("expected error for empty session_id")
+		t.Fatal("expected error for empty flow_id")
 	}
 }
 
@@ -286,7 +286,7 @@ func TestExecute_Replay_NonexistentSession(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"session_id": "nonexistent-id",
+			"flow_id": "nonexistent-id",
 		},
 	})
 	if !result.IsError {
@@ -300,7 +300,7 @@ func TestExecute_Replay_NilStore(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"session_id": "some-id",
+			"flow_id": "some-id",
 		},
 	})
 	if !result.IsError {
@@ -314,12 +314,12 @@ func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -327,7 +327,7 @@ func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -353,7 +353,7 @@ func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
 			result := executeCallTool(t, cs, map[string]any{
 				"action": "replay",
 				"params": map[string]any{
-					"session_id":   entry.Session.ID,
+					"flow_id":   entry.Session.ID,
 					"override_url": tt.url,
 				},
 			})
@@ -368,13 +368,13 @@ func TestExecute_Replay_NoSendMessages(t *testing.T) {
 	store := newTestStore(t)
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
 		nil, // no send message
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -389,11 +389,11 @@ func TestExecute_Replay_NoSendMessages(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 	if !result.IsError {
-		t.Fatal("expected error for session with no send messages")
+		t.Fatal("expected error for flow with no send messages")
 	}
 }
 
@@ -410,12 +410,12 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/raw-test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -424,7 +424,7 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 			Headers:   map[string][]string{"Host": {"example.com"}, "X-Custom": {"preserved"}},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -439,7 +439,7 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay_raw",
 		"params": map[string]any{
-			"session_id":  entry.Session.ID,
+			"flow_id":  entry.Session.ID,
 			"target_addr": addr,
 		},
 	})
@@ -478,12 +478,12 @@ func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/no-raw")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -491,7 +491,7 @@ func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -506,7 +506,7 @@ func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 	if !result.IsError {
@@ -514,18 +514,18 @@ func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
 	}
 }
 
-func TestExecute_ReplayRaw_EmptySessionID(t *testing.T) {
+func TestExecute_ReplayRaw_EmptyFlowID(t *testing.T) {
 	store := newTestStore(t)
 	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
 
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay_raw",
 		"params": map[string]any{
-			"session_id": "",
+			"flow_id": "",
 		},
 	})
 	if !result.IsError {
-		t.Fatal("expected error for empty session_id")
+		t.Fatal("expected error for empty flow_id")
 	}
 }
 
@@ -536,7 +536,7 @@ func TestExecute_ReplayRaw_NonexistentSession(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay_raw",
 		"params": map[string]any{
-			"session_id": "nonexistent-id",
+			"flow_id": "nonexistent-id",
 		},
 	})
 	if !result.IsError {
@@ -550,7 +550,7 @@ func TestExecute_ReplayRaw_NilStore(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay_raw",
 		"params": map[string]any{
-			"session_id": "some-id",
+			"flow_id": "some-id",
 		},
 	})
 	if !result.IsError {
@@ -568,12 +568,12 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -582,7 +582,7 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -598,7 +598,7 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay_raw",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 	if result.IsError {
@@ -616,21 +616,21 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 	}
 }
 
-// --- DeleteSessions action tests ---
+// --- DeleteFlows action tests ---
 
-func TestExecute_DeleteSessions_ByID(t *testing.T) {
+func TestExecute_DeleteFlows_ByID(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	u, _ := url.Parse("http://example.com/api/test")
 	entry := saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -638,7 +638,7 @@ func TestExecute_DeleteSessions_ByID(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -649,16 +649,16 @@ func TestExecute_DeleteSessions_ByID(t *testing.T) {
 	)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
-			"session_id": entry.Session.ID,
+			"flow_id": entry.Session.ID,
 		},
 	})
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDeleteSessionsResult
+	var out executeDeleteFlowsResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -667,14 +667,14 @@ func TestExecute_DeleteSessions_ByID(t *testing.T) {
 		t.Errorf("deleted_count = %d, want 1", out.DeletedCount)
 	}
 
-	// Verify the session was actually deleted.
-	_, err := store.GetSession(context.Background(), entry.Session.ID)
+	// Verify the flow was actually deleted.
+	_, err := store.GetFlow(context.Background(), entry.Session.ID)
 	if err == nil {
-		t.Error("expected error when getting deleted session")
+		t.Error("expected error when getting deleted flow")
 	}
 }
 
-func TestExecute_DeleteSessions_All(t *testing.T) {
+func TestExecute_DeleteFlows_All(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -682,12 +682,12 @@ func TestExecute_DeleteSessions_All(t *testing.T) {
 	u, _ := url.Parse("http://example.com/api/test")
 	for i := 0; i < 3; i++ {
 		saveTestEntry(t, store,
-			&session.Session{
+			&flow.Flow{
 				Protocol:  "HTTP/1.x",
 				Timestamp: time.Now(),
 				Duration:  100 * time.Millisecond,
 			},
-			&session.Message{
+			&flow.Message{
 				Sequence:  0,
 				Direction: "send",
 				Timestamp: time.Now(),
@@ -695,7 +695,7 @@ func TestExecute_DeleteSessions_All(t *testing.T) {
 				URL:       u,
 				Headers:   map[string][]string{},
 			},
-			&session.Message{
+			&flow.Message{
 				Sequence:   1,
 				Direction:  "receive",
 				Timestamp:  time.Now(),
@@ -707,7 +707,7 @@ func TestExecute_DeleteSessions_All(t *testing.T) {
 	}
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"confirm": true,
 		},
@@ -716,7 +716,7 @@ func TestExecute_DeleteSessions_All(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDeleteSessionsResult
+	var out executeDeleteFlowsResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -726,16 +726,16 @@ func TestExecute_DeleteSessions_All(t *testing.T) {
 	}
 
 	// Verify all sessions were deleted.
-	remaining, err := store.ListSessions(context.Background(), session.ListOptions{})
+	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 0 {
 		t.Errorf("expected 0 remaining sessions, got %d", len(remaining))
 	}
 }
 
-func TestExecute_DeleteSessions_OlderThanDays(t *testing.T) {
+func TestExecute_DeleteFlows_OlderThanDays(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -745,18 +745,18 @@ func TestExecute_DeleteSessions_OlderThanDays(t *testing.T) {
 
 	// Insert old session (5 days ago).
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: now.Add(-120 * time.Hour),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: now.Add(-120 * time.Hour),
 			Method:    "GET",
 			URL:       u,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  now.Add(-120 * time.Hour),
@@ -766,18 +766,18 @@ func TestExecute_DeleteSessions_OlderThanDays(t *testing.T) {
 
 	// Insert recent session (1 hour ago).
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: now.Add(-1 * time.Hour),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: now.Add(-1 * time.Hour),
 			Method:    "GET",
 			URL:       u,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  now.Add(-1 * time.Hour),
@@ -786,7 +786,7 @@ func TestExecute_DeleteSessions_OlderThanDays(t *testing.T) {
 	)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"older_than_days": 3,
 			"confirm":         true,
@@ -796,7 +796,7 @@ func TestExecute_DeleteSessions_OlderThanDays(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDeleteSessionsResult
+	var out executeDeleteFlowsResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -809,22 +809,22 @@ func TestExecute_DeleteSessions_OlderThanDays(t *testing.T) {
 	}
 
 	// Verify only the recent session remains.
-	remaining, err := store.ListSessions(context.Background(), session.ListOptions{})
+	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 1 {
-		t.Errorf("expected 1 remaining session, got %d", len(remaining))
+		t.Errorf("expected 1 remaining flow, got %d", len(remaining))
 	}
 }
 
-func TestExecute_DeleteSessions_OlderThanDays_InvalidDays(t *testing.T) {
+func TestExecute_DeleteFlows_OlderThanDays_InvalidDays(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"older_than_days": 0,
 			"confirm":         true,
@@ -835,13 +835,13 @@ func TestExecute_DeleteSessions_OlderThanDays_InvalidDays(t *testing.T) {
 	}
 }
 
-func TestExecute_DeleteSessions_OlderThanDays_RequiresConfirm(t *testing.T) {
+func TestExecute_DeleteFlows_OlderThanDays_RequiresConfirm(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"older_than_days": 7,
 			"confirm":         false,
@@ -852,13 +852,13 @@ func TestExecute_DeleteSessions_OlderThanDays_RequiresConfirm(t *testing.T) {
 	}
 }
 
-func TestExecute_DeleteSessions_NoParamsError(t *testing.T) {
+func TestExecute_DeleteFlows_NoParamsError(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{},
 	})
 	if !result.IsError {
@@ -866,29 +866,29 @@ func TestExecute_DeleteSessions_NoParamsError(t *testing.T) {
 	}
 }
 
-func TestExecute_DeleteSessions_NonexistentSession(t *testing.T) {
+func TestExecute_DeleteFlows_NonexistentSession(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
-			"session_id": "nonexistent-id",
+			"flow_id": "nonexistent-id",
 		},
 	})
 	if !result.IsError {
-		t.Fatal("expected error for nonexistent session_id")
+		t.Fatal("expected error for nonexistent flow_id")
 	}
 }
 
-func TestExecute_DeleteSessions_NilStore(t *testing.T) {
+func TestExecute_DeleteFlows_NilStore(t *testing.T) {
 	cs := setupTestSessionWithExecuteDoer(t, nil, newPermissiveClient())
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
-			"session_id": "some-id",
+			"flow_id": "some-id",
 		},
 	})
 	if !result.IsError {
@@ -932,7 +932,7 @@ func TestExecute_EmptyAction(t *testing.T) {
 	}
 }
 
-func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
+func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -941,12 +941,12 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 	// Create sessions with different protocols.
 	for i := 0; i < 2; i++ {
 		saveTestEntry(t, store,
-			&session.Session{
+			&flow.Flow{
 				Protocol:  "HTTP/1.x",
 				Timestamp: time.Now(),
 				Duration:  100 * time.Millisecond,
 			},
-			&session.Message{
+			&flow.Message{
 				Sequence:  0,
 				Direction: "send",
 				Timestamp: time.Now(),
@@ -954,7 +954,7 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 				URL:       u,
 				Headers:   map[string][]string{},
 			},
-			&session.Message{
+			&flow.Message{
 				Sequence:   1,
 				Direction:  "receive",
 				Timestamp:  time.Now(),
@@ -965,12 +965,12 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 		)
 	}
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "TCP",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -978,7 +978,7 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -988,12 +988,12 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 		},
 	)
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "WebSocket",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1001,7 +1001,7 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1012,7 +1012,7 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 	)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"protocol": "TCP",
 			"confirm":  true,
@@ -1022,7 +1022,7 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDeleteSessionsResult
+	var out executeDeleteFlowsResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -1032,9 +1032,9 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 	}
 
 	// Verify only TCP sessions were deleted, others remain.
-	remaining, err := store.ListSessions(context.Background(), session.ListOptions{})
+	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 3 {
 		t.Errorf("expected 3 remaining sessions, got %d", len(remaining))
@@ -1047,13 +1047,13 @@ func TestExecute_DeleteSessions_ByProtocol(t *testing.T) {
 	}
 }
 
-func TestExecute_DeleteSessions_ByProtocol_RequiresConfirm(t *testing.T) {
+func TestExecute_DeleteFlows_ByProtocol_RequiresConfirm(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"protocol": "TCP",
 			"confirm":  false,
@@ -1068,19 +1068,19 @@ func TestExecute_DeleteSessions_ByProtocol_RequiresConfirm(t *testing.T) {
 	}
 }
 
-func TestExecute_DeleteSessions_ByProtocol_NoMatches(t *testing.T) {
+func TestExecute_DeleteFlows_ByProtocol_NoMatches(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	u, _ := url.Parse("http://example.com/api/test")
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1088,7 +1088,7 @@ func TestExecute_DeleteSessions_ByProtocol_NoMatches(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1099,7 +1099,7 @@ func TestExecute_DeleteSessions_ByProtocol_NoMatches(t *testing.T) {
 	)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"protocol": "gRPC",
 			"confirm":  true,
@@ -1109,7 +1109,7 @@ func TestExecute_DeleteSessions_ByProtocol_NoMatches(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDeleteSessionsResult
+	var out executeDeleteFlowsResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -1119,34 +1119,34 @@ func TestExecute_DeleteSessions_ByProtocol_NoMatches(t *testing.T) {
 	}
 
 	// Verify no sessions were deleted.
-	remaining, err := store.ListSessions(context.Background(), session.ListOptions{})
+	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(remaining) != 1 {
-		t.Errorf("expected 1 remaining session, got %d", len(remaining))
+		t.Errorf("expected 1 remaining flow, got %d", len(remaining))
 	}
 }
 
-func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
+func TestExecute_DeleteFlows_NothingToDelete(t *testing.T) {
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
 
 	u, _ := url.Parse("http://example.com/recent")
 	saveTestEntry(t, store,
-		&session.Session{
+		&flow.Flow{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now().UTC(),
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now().UTC(),
 			Method:    "GET",
 			URL:       u,
 		},
-		&session.Message{
+		&flow.Message{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now().UTC(),
@@ -1155,7 +1155,7 @@ func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
 	)
 
 	result := manageCallTool(t, cs, map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
 			"older_than_days": 30,
 			"confirm":         true,
@@ -1165,7 +1165,7 @@ func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDeleteSessionsResult
+	var out executeDeleteFlowsResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -1179,7 +1179,7 @@ func TestExecute_DeleteSessions_NothingToDelete(t *testing.T) {
 
 // --- regenerate_ca_cert action tests ---
 
-// setupTestSessionForRegenerate creates an MCP client session with CA and issuer
+// setupTestSessionForRegenerate creates an MCP client flow with CA and issuer
 // for regenerate_ca_cert testing.
 func setupTestSessionForRegenerate(t *testing.T, ca *cert.CA, issuer *cert.Issuer) *gomcp.ClientSession {
 	t.Helper()

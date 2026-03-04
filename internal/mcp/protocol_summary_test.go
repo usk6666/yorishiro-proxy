@@ -3,11 +3,11 @@ package mcp
 import (
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 func TestBuildProtocolSummary_WebSocket(t *testing.T) {
-	msgs := []*session.Message{
+	msgs := []*flow.Message{
 		{Sequence: 0, Direction: "send", Body: []byte("hello"), Metadata: map[string]string{"opcode": "1"}},
 		{Sequence: 1, Direction: "receive", Body: []byte("world"), Metadata: map[string]string{"opcode": "1"}},
 		{Sequence: 2, Direction: "send", Body: []byte("bye"), Metadata: map[string]string{"opcode": "8"}},
@@ -41,7 +41,7 @@ func TestBuildProtocolSummary_WebSocket_Empty(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_HTTP2(t *testing.T) {
-	msgs := []*session.Message{
+	msgs := []*flow.Message{
 		{Sequence: 0, Direction: "send", Method: "GET"},
 		{Sequence: 1, Direction: "receive", StatusCode: 200},
 	}
@@ -57,7 +57,7 @@ func TestBuildProtocolSummary_HTTP2(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_GRPC(t *testing.T) {
-	msgs := []*session.Message{
+	msgs := []*flow.Message{
 		{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "UserService", "method": "GetUser"}},
 		{Sequence: 1, Direction: "receive", Metadata: map[string]string{"grpc_status": "0"}},
 	}
@@ -82,7 +82,7 @@ func TestBuildProtocolSummary_GRPC(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_TCP(t *testing.T) {
-	msgs := []*session.Message{
+	msgs := []*flow.Message{
 		{Sequence: 0, Direction: "send", Body: []byte("hello")},
 		{Sequence: 1, Direction: "receive", Body: []byte("world!")},
 		{Sequence: 2, Direction: "send", Body: []byte("bye")},
@@ -102,7 +102,7 @@ func TestBuildProtocolSummary_TCP(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_HTTP(t *testing.T) {
-	msgs := []*session.Message{
+	msgs := []*flow.Message{
 		{Sequence: 0, Direction: "send"},
 		{Sequence: 1, Direction: "receive"},
 	}

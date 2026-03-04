@@ -19,21 +19,21 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // testEnv holds all the components needed for an MCP integration test.
 type testEnv struct {
 	cs          *gomcp.ClientSession
-	store       session.Store
+	store       flow.Store
 	manager     *proxy.Manager
 	scope       *proxy.CaptureScope
 	passthrough *proxy.PassthroughList
 }
 
 // setupIntegrationEnv creates a fully-wired MCP test environment with a real
-// session store, CA, and proxy manager connected via in-memory transport.
+// flow store, CA, and proxy manager connected via in-memory transport.
 func setupIntegrationEnv(t *testing.T) *testEnv {
 	t.Helper()
 	return setupIntegrationEnvWithOpts(t)
@@ -50,7 +50,7 @@ func setupIntegrationEnvWithOpts(t *testing.T, opts ...ServerOption) *testEnv {
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "integration.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -114,7 +114,7 @@ func setupIntegrationEnvWithScopeAndPassthrough(t *testing.T) *testEnv {
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "integration.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -262,8 +262,8 @@ func proxyHTTPClient(proxyAddr string) *gohttp.Client {
 }
 
 // TestIntegration_FullLifecycle tests the complete MCP tool lifecycle:
-// proxy_start -> HTTP request through proxy -> query sessions -> query session
-// -> execute replay -> execute delete_sessions -> proxy_stop.
+// proxy_start -> HTTP request through proxy -> query sessions -> query flow
+// -> execute replay -> execute delete_flows -> proxy_stop.
 func TestIntegration_FullLifecycle(t *testing.T) {
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
@@ -305,49 +305,49 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		t.Fatalf("upstream response body = %q, want %q", respBody, "hello from upstream")
 	}
 
-	// Wait for session to be persisted.
+	// Wait for flow to be persisted.
 	time.Sleep(200 * time.Millisecond)
 
 	// 3. List sessions via query tool.
-	listResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	listResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if listResult.Count != 1 {
 		t.Fatalf("query sessions count = %d, want 1", listResult.Count)
 	}
-	sessionEntry := listResult.Sessions[0]
-	if sessionEntry.Method != "GET" {
-		t.Errorf("session method = %q, want %q", sessionEntry.Method, "GET")
+	flowEntry := listResult.Flows[0]
+	if flowEntry.Method != "GET" {
+		t.Errorf("flow method = %q, want %q", flowEntry.Method, "GET")
 	}
-	if sessionEntry.StatusCode != 200 {
-		t.Errorf("session status_code = %d, want %d", sessionEntry.StatusCode, 200)
+	if flowEntry.StatusCode != 200 {
+		t.Errorf("flow status_code = %d, want %d", flowEntry.StatusCode, 200)
 	}
-	if !strings.Contains(sessionEntry.URL, "/api/test") {
-		t.Errorf("session URL = %q, want to contain /api/test", sessionEntry.URL)
+	if !strings.Contains(flowEntry.URL, "/api/test") {
+		t.Errorf("flow URL = %q, want to contain /api/test", flowEntry.URL)
 	}
 
-	// 4. Get session details via query tool.
-	getResult := callTool[querySessionResult](t, env.cs, "query", map[string]any{
-		"resource": "session",
-		"id":       sessionEntry.ID,
+	// 4. Get flow details via query tool.
+	getResult := callTool[queryFlowResult](t, env.cs, "query", map[string]any{
+		"resource": "flow",
+		"id":       flowEntry.ID,
 	})
-	if getResult.ID != sessionEntry.ID {
-		t.Errorf("query session ID = %q, want %q", getResult.ID, sessionEntry.ID)
+	if getResult.ID != flowEntry.ID {
+		t.Errorf("query flow ID = %q, want %q", getResult.ID, flowEntry.ID)
 	}
 	if getResult.Method != "GET" {
-		t.Errorf("query session method = %q, want %q", getResult.Method, "GET")
+		t.Errorf("query flow method = %q, want %q", getResult.Method, "GET")
 	}
 	if getResult.ResponseStatusCode != 200 {
-		t.Errorf("query session response status = %d, want %d", getResult.ResponseStatusCode, 200)
+		t.Errorf("query flow response status = %d, want %d", getResult.ResponseStatusCode, 200)
 	}
 	if getResult.ResponseBody != "hello from upstream" {
-		t.Errorf("query session response body = %q, want %q", getResult.ResponseBody, "hello from upstream")
+		t.Errorf("query flow response body = %q, want %q", getResult.ResponseBody, "hello from upstream")
 	}
 	if getResult.ResponseBodyEncoding != "text" {
-		t.Errorf("query session response body encoding = %q, want %q", getResult.ResponseBodyEncoding, "text")
+		t.Errorf("query flow response body encoding = %q, want %q", getResult.ResponseBodyEncoding, "text")
 	}
 	if getResult.DurationMs < 0 {
-		t.Errorf("query session duration = %d, want >= 0", getResult.DurationMs)
+		t.Errorf("query flow duration = %d, want >= 0", getResult.DurationMs)
 	}
 
 	// 5. Replay the request via execute tool.
@@ -359,7 +359,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		Arguments: map[string]any{
 			"action": "replay",
 			"params": map[string]any{
-				"session_id": sessionEntry.ID,
+				"flow_id": flowEntry.ID,
 			},
 		},
 	})
@@ -375,33 +375,33 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		if ok {
 			json.Unmarshal([]byte(tc.Text), &rr)
 		}
-		if rr.NewSessionID == "" {
-			t.Error("execute replay returned empty new_session_id")
+		if rr.NewFlowID == "" {
+			t.Error("execute replay returned empty new_flow_id")
 		}
 		if rr.StatusCode != 200 {
 			t.Errorf("execute replay status_code = %d, want 200", rr.StatusCode)
 		}
 	}
 
-	// 6. Delete the session via manage tool.
-	deleteResult := callTool[executeDeleteSessionsResult](t, env.cs, "manage", map[string]any{
-		"action": "delete_sessions",
+	// 6. Delete the flow via manage tool.
+	deleteResult := callTool[executeDeleteFlowsResult](t, env.cs, "manage", map[string]any{
+		"action": "delete_flows",
 		"params": map[string]any{
-			"session_id": sessionEntry.ID,
+			"flow_id": flowEntry.ID,
 		},
 	})
 	if deleteResult.DeletedCount != 1 {
-		t.Errorf("execute delete_sessions deleted_count = %d, want 1", deleteResult.DeletedCount)
+		t.Errorf("execute delete_flows deleted_count = %d, want 1", deleteResult.DeletedCount)
 	}
 
 	// Verify session is gone.
-	listAfterDelete := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	listAfterDelete := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
-	// May have a replay session if replay succeeded.
-	for _, s := range listAfterDelete.Sessions {
-		if s.ID == sessionEntry.ID {
-			t.Error("deleted session still appears in query sessions")
+	// May have a replay flow if replay succeeded.
+	for _, s := range listAfterDelete.Flows {
+		if s.ID == flowEntry.ID {
+			t.Error("deleted flow still appears in query sessions")
 		}
 	}
 
@@ -481,26 +481,26 @@ func TestIntegration_ProxyStart_DoubleStart(t *testing.T) {
 	})
 }
 
-// TestIntegration_QuerySession_NotFound verifies that querying a session returns an
-// error for a non-existent session ID.
+// TestIntegration_QuerySession_NotFound verifies that querying a flow returns an
+// error for a non-existent flow ID.
 func TestIntegration_QuerySession_NotFound(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	callToolExpectError(t, env.cs, "query", map[string]any{
-		"resource": "session",
-		"id":       "nonexistent-session-id",
+		"resource": "flow",
+		"id":       "nonexistent-flow-id",
 	})
 }
 
-// TestIntegration_ExecuteDeleteSessions_NotFound verifies that deleting a session
-// returns an error for a non-existent session ID.
-func TestIntegration_ExecuteDeleteSessions_NotFound(t *testing.T) {
+// TestIntegration_ExecuteDeleteFlows_NotFound verifies that deleting a flow
+// returns an error for a non-existent flow ID.
+func TestIntegration_ExecuteDeleteFlows_NotFound(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	callToolExpectError(t, env.cs, "manage", map[string]any{
-		"action": "delete_sessions",
+		"action": "delete_flows",
 		"params": map[string]any{
-			"session_id": "nonexistent-session-id",
+			"flow_id": "nonexistent-flow-id",
 		},
 	})
 }
@@ -513,7 +513,7 @@ func TestIntegration_ExecuteReplay_NoSession(t *testing.T) {
 	callToolExpectError(t, env.cs, "execute", map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"session_id": "nonexistent-session-id",
+			"flow_id": "nonexistent-flow-id",
 		},
 	})
 }
@@ -523,8 +523,8 @@ func TestIntegration_ExecuteReplay_NoSession(t *testing.T) {
 func TestIntegration_QuerySessions_Empty(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	result := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	result := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if result.Count != 0 {
 		t.Errorf("query sessions count = %d, want 0", result.Count)
@@ -532,8 +532,8 @@ func TestIntegration_QuerySessions_Empty(t *testing.T) {
 	if result.Total != 0 {
 		t.Errorf("query sessions total = %d, want 0", result.Total)
 	}
-	if len(result.Sessions) != 0 {
-		t.Errorf("query sessions length = %d, want 0", len(result.Sessions))
+	if len(result.Flows) != 0 {
+		t.Errorf("query sessions length = %d, want 0", len(result.Flows))
 	}
 }
 
@@ -650,16 +650,16 @@ func TestIntegration_MultipleRequests(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// List all sessions.
-	allResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	allResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if allResult.Count != 2 {
 		t.Fatalf("query sessions count = %d, want 2", allResult.Count)
 	}
 
 	// Filter by method.
-	getResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	getResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 		"filter": map[string]any{
 			"method": "GET",
 		},
@@ -668,8 +668,8 @@ func TestIntegration_MultipleRequests(t *testing.T) {
 		t.Errorf("query sessions(method=GET) count = %d, want 1", getResult.Count)
 	}
 
-	postResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	postResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 		"filter": map[string]any{
 			"method": "POST",
 		},
@@ -679,8 +679,8 @@ func TestIntegration_MultipleRequests(t *testing.T) {
 	}
 
 	// Filter by URL pattern.
-	urlResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	urlResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 		"filter": map[string]any{
 			"url_pattern": "/api/users",
 		},
@@ -690,19 +690,19 @@ func TestIntegration_MultipleRequests(t *testing.T) {
 	}
 
 	// Delete all sessions via manage tool.
-	delResult := callTool[executeDeleteSessionsResult](t, env.cs, "manage", map[string]any{
-		"action": "delete_sessions",
+	delResult := callTool[executeDeleteFlowsResult](t, env.cs, "manage", map[string]any{
+		"action": "delete_flows",
 		"params": map[string]any{
 			"confirm": true,
 		},
 	})
 	if delResult.DeletedCount != 2 {
-		t.Errorf("execute delete_sessions(confirm) deleted_count = %d, want 2", delResult.DeletedCount)
+		t.Errorf("execute delete_flows(confirm) deleted_count = %d, want 2", delResult.DeletedCount)
 	}
 
 	// Verify empty.
-	emptyResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	emptyResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if emptyResult.Count != 0 {
 		t.Errorf("query sessions after delete_all count = %d, want 0", emptyResult.Count)
@@ -765,14 +765,14 @@ func TestIntegration_Configure_CaptureScopeMerge(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify only the in-scope request was recorded.
-	listResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	listResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if listResult.Count != 1 {
 		t.Fatalf("query sessions count = %d, want 1 (only in-scope)", listResult.Count)
 	}
-	if !strings.Contains(listResult.Sessions[0].URL, "/in-scope/data") {
-		t.Errorf("recorded session URL = %q, want to contain /in-scope/data", listResult.Sessions[0].URL)
+	if !strings.Contains(listResult.Flows[0].URL, "/in-scope/data") {
+		t.Errorf("recorded flow URL = %q, want to contain /in-scope/data", listResult.Flows[0].URL)
 	}
 
 	// Close idle connections before stopping.
@@ -969,7 +969,7 @@ func TestIntegration_Configure_ProxyNotRunning(t *testing.T) {
 }
 
 // TestIntegration_QueryMessages verifies that query messages returns the correct
-// send/receive messages for a recorded HTTP session, including sequence, direction,
+// send/receive messages for a recorded HTTP flow, including sequence, direction,
 // method, URL, headers, and body fields.
 func TestIntegration_QueryMessages(t *testing.T) {
 	upstreamAddr := startUpstreamServer(t)
@@ -997,22 +997,22 @@ func TestIntegration_QueryMessages(t *testing.T) {
 		t.Fatalf("upstream response status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
 
-	// Wait for session to be persisted.
+	// Wait for flow to be persisted.
 	time.Sleep(200 * time.Millisecond)
 
-	// Get the session ID.
-	listResult := callTool[querySessionsResult](t, env.cs, "query", map[string]any{
-		"resource": "sessions",
+	// Get the flow ID.
+	listResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if listResult.Count != 1 {
 		t.Fatalf("query sessions count = %d, want 1", listResult.Count)
 	}
-	sessionID := listResult.Sessions[0].ID
+	flowID := listResult.Flows[0].ID
 
-	// Query messages for this session.
+	// Query messages for this flow.
 	msgsResult := callTool[queryMessagesResult](t, env.cs, "query", map[string]any{
 		"resource": "messages",
-		"id":       sessionID,
+		"id":       flowID,
 	})
 
 	// Should have at least 2 messages: send (request) and receive (response).
@@ -1145,8 +1145,8 @@ func TestIntegration_QueryStatus(t *testing.T) {
 	if statusAfter.UptimeSeconds < 0 {
 		t.Errorf("query status uptime_seconds = %d, want >= 0", statusAfter.UptimeSeconds)
 	}
-	if statusAfter.TotalSessions < 0 {
-		t.Errorf("query status total_sessions = %d, want >= 0", statusAfter.TotalSessions)
+	if statusAfter.TotalFlows < 0 {
+		t.Errorf("query status total_flows = %d, want >= 0", statusAfter.TotalFlows)
 	}
 	if !statusAfter.CAInitialized {
 		t.Error("query status ca_initialized = false, want true")

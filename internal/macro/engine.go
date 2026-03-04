@@ -10,20 +10,20 @@ import (
 // applying templates, extracting values, and evaluating step guards.
 type Engine struct {
 	sendFunc       SendFunc
-	sessionFetcher SessionFetcher
+	flowFetcher FlowFetcher
 }
 
 // NewEngine creates a new macro engine with the given dependencies.
-func NewEngine(sendFunc SendFunc, fetcher SessionFetcher) (*Engine, error) {
+func NewEngine(sendFunc SendFunc, fetcher FlowFetcher) (*Engine, error) {
 	if sendFunc == nil {
 		return nil, fmt.Errorf("sendFunc is required")
 	}
 	if fetcher == nil {
-		return nil, fmt.Errorf("sessionFetcher is required")
+		return nil, fmt.Errorf("flowFetcher is required")
 	}
 	return &Engine{
 		sendFunc:       sendFunc,
-		sessionFetcher: fetcher,
+		flowFetcher: fetcher,
 	}, nil
 }
 
@@ -219,7 +219,7 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, kvStore map[string
 	}
 }
 
-// doStepExecution performs the actual step execution: fetch session, expand templates,
+// doStepExecution performs the actual step execution: fetch flow, expand templates,
 // send request, extract values.
 func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[string]string, stepTimeoutMs int) (*StepResult, *stepState, error) {
 	// Create step-level timeout context.
@@ -228,10 +228,10 @@ func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[st
 
 	start := time.Now()
 
-	// Fetch the template request from the recorded session.
-	baseReq, err := e.sessionFetcher.GetSessionRequest(stepCtx, step.SessionID)
+	// Fetch the template request from the recorded flow.
+	baseReq, err := e.flowFetcher.GetFlowRequest(stepCtx, step.FlowID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetch session %q: %w", step.SessionID, err)
+		return nil, nil, fmt.Errorf("fetch flow %q: %w", step.FlowID, err)
 	}
 
 	// Build the request with overrides and template expansion.
@@ -377,7 +377,7 @@ func validateMacro(m *Macro) error {
 		}
 		seenIDs[step.ID] = true
 
-		if step.SessionID == "" {
+		if step.FlowID == "" {
 			return fmt.Errorf("step %q has no session_id", step.ID)
 		}
 

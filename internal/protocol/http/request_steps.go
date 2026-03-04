@@ -34,7 +34,7 @@ type requestBodyResult struct {
 }
 
 // readAndCaptureRequestBody reads the full request body, replaces req.Body with
-// a re-readable copy, and returns the body bytes for session recording (truncated
+// a re-readable copy, and returns the body bytes for flow recording (truncated
 // to MaxBodySize if necessary).
 func readAndCaptureRequestBody(req *gohttp.Request, logger *slog.Logger) requestBodyResult {
 	if req.Body == nil {

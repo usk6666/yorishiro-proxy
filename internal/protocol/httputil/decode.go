@@ -49,7 +49,7 @@ func DecompressBody(body []byte, contentEncoding string, maxSize int64) ([]byte,
 }
 
 // RecordingHeaders returns a shallow copy of the response headers suitable for
-// session recording. When the body has been decompressed, Content-Encoding is
+// flow recording. When the body has been decompressed, Content-Encoding is
 // removed and Content-Length is updated to reflect the decoded body size.
 func RecordingHeaders(original gohttp.Header, decompressed bool, bodyLen int) gohttp.Header {
 	headers := original.Clone()

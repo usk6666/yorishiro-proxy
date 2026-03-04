@@ -52,7 +52,7 @@ type proxyStartInput struct {
 	// This setting takes precedence over HTTP_PROXY/HTTPS_PROXY environment variables.
 	UpstreamProxy string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL (http://host:port or socks5://host:port) for chaining proxies"`
 
-	// CaptureScope configures which requests are recorded to the session store.
+	// CaptureScope configures which requests are recorded to the flow store.
 	// If omitted, all requests are captured (default behavior).
 	CaptureScope *captureScopeInput `json:"capture_scope,omitempty" jsonschema:"capture scope configuration to control which requests are recorded"`
 

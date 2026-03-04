@@ -1,7 +1,7 @@
 // Package tcp implements a Raw TCP fallback handler for the proxy.
 // It catches any connection that is not matched by a more specific protocol
 // handler, relays data bidirectionally to a configured forwarding target,
-// and records all traffic chunks to the session store.
+// and records all traffic chunks to the flow store.
 package tcp
 
 import (
@@ -13,14 +13,14 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // Handler implements proxy.ProtocolHandler for raw TCP connections.
 // It acts as a fallback handler: Detect always returns true, so it must be
 // registered last in the protocol detector.
 type Handler struct {
-	store    session.SessionWriter
+	store    flow.FlowWriter
 	forwards map[string]string // listen port -> forward address
 	logger   *slog.Logger
 	mu       sync.Mutex
@@ -31,7 +31,7 @@ type Handler struct {
 // forwards maps local listen ports to upstream addresses
 // (e.g. {"3306": "db.example.com:3306"}). Connections arriving on a port
 // without a mapping are closed immediately.
-func NewHandler(store session.SessionWriter, forwards map[string]string, logger *slog.Logger) *Handler {
+func NewHandler(store flow.FlowWriter, forwards map[string]string, logger *slog.Logger) *Handler {
 	if forwards == nil {
 		forwards = make(map[string]string)
 	}
@@ -77,7 +77,7 @@ func (h *Handler) Detect(_ []byte) bool {
 
 // Handle takes ownership of the connection, establishes a forwarding connection
 // to the configured upstream target, and relays data bidirectionally while
-// recording all chunks to the session store.
+// recording all chunks to the flow store.
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	logger := proxy.LoggerFromContext(ctx, h.logger)
 	connID := proxy.ConnIDFromContext(ctx)
@@ -109,23 +109,23 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 
 	logger.Info("TCP relay established", "target", target)
 
-	// Create session record.
+	// Create flow record.
 	start := time.Now()
-	sess := &session.Session{
+	fl := &flow.Flow{
 		ConnID:      connID,
 		Protocol:    "TCP",
-		SessionType: "bidirectional",
+		FlowType: "bidirectional",
 		State:       "active",
 		Timestamp:   start,
-		ConnInfo: &session.ConnectionInfo{
+		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 			ServerAddr: target,
 		},
 	}
 
 	if h.store != nil {
-		if err := h.store.SaveSession(ctx, sess); err != nil {
-			logger.Error("TCP session save failed", "error", err)
+		if err := h.store.SaveFlow(ctx, fl); err != nil {
+			logger.Error("TCP flow save failed", "error", err)
 			// Continue relaying even if recording fails.
 		}
 	}
@@ -133,19 +133,19 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	// Run bidirectional relay with recording.
 	r := &relay{
 		store:     h.store,
-		sessionID: sess.ID,
+		flowID: fl.ID,
 		logger:    logger,
 	}
 	relayErr := r.run(ctx, conn, upstream)
 
-	// Update session state to complete.
+	// Update flow state to complete.
 	duration := time.Since(start)
 	if h.store != nil {
 		state := "complete"
 		if relayErr != nil && ctx.Err() == nil {
 			state = "error"
 		}
-		if err := h.store.UpdateSession(ctx, sess.ID, session.SessionUpdate{
+		if err := h.store.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{
 			State:    state,
 			Duration: duration,
 		}); err != nil {

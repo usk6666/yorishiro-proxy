@@ -1,5 +1,5 @@
 /**
- * MessageList — Displays streaming session messages (WebSocket, gRPC).
+ * MessageList — Displays streaming flow messages (WebSocket, gRPC).
  *
  * Shows direction, sequence, content, and metadata with pagination support.
  */

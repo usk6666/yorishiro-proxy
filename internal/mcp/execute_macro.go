@@ -15,7 +15,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // macroParams holds parameters for macro-related execute actions.
@@ -37,7 +37,7 @@ type macroParams struct {
 // macroStepInput represents a single macro step in the MCP input.
 type macroStepInput struct {
 	ID              string            `json:"id"`
-	SessionID       string            `json:"session_id"`
+	FlowID       string            `json:"flow_id"`
 	OverrideMethod  string            `json:"override_method,omitempty"`
 	OverrideURL     string            `json:"override_url,omitempty"`
 	OverrideHeaders map[string]string `json:"override_headers,omitempty"`
@@ -118,7 +118,7 @@ type executeDeleteMacroResult struct {
 // It validates the macro definition, serializes the config to JSON, and upserts into DB.
 func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParams) (*executeDefineMacroResult, error) {
 	if s.deps.store == nil {
-		return nil, fmt.Errorf("session store is not initialized")
+		return nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.Name == "" {
 		return nil, fmt.Errorf("name is required for define_macro action")
@@ -177,7 +177,7 @@ func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParam
 // Access control is handled by the target scope enforcement layer.
 func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) (*executeRunMacroResult, error) {
 	if s.deps.store == nil {
-		return nil, fmt.Errorf("session store is not initialized")
+		return nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.Name == "" {
 		return nil, fmt.Errorf("name is required for run_macro action")
@@ -213,8 +213,8 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 					}
 				}
 			}
-			// Check the session's URL for this step.
-			sendMsgs, msgErr := s.deps.store.GetMessages(ctx, step.SessionID, session.MessageListOptions{Direction: "send"})
+			// Check the flow's URL for this step.
+			sendMsgs, msgErr := s.deps.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
 			if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 				// Only check session URL if no override_url (override takes precedence).
 				if step.OverrideURL == "" {
@@ -228,7 +228,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 
 	// Create engine with HTTP client and session fetcher.
 	sendFunc := s.macroSendFunc(params.Name)
-	fetcher := &storeSessionFetcher{store: s.deps.store}
+	fetcher := &storeFlowFetcher{store: s.deps.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
 	if err != nil {
@@ -265,7 +265,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 // handleExecuteDeleteMacro handles the delete_macro action.
 func (s *Server) handleExecuteDeleteMacro(ctx context.Context, params macroParams) (*executeDeleteMacroResult, error) {
 	if s.deps.store == nil {
-		return nil, fmt.Errorf("session store is not initialized")
+		return nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.Name == "" {
 		return nil, fmt.Errorf("name is required for delete_macro action")
@@ -317,7 +317,7 @@ func configToMacro(name, description string, cfg macroConfig) (*macro.Macro, err
 func stepInputToStep(s macroStepInput) macro.Step {
 	step := macro.Step{
 		ID:              s.ID,
-		SessionID:       s.SessionID,
+		FlowID:       s.FlowID,
 		OverrideMethod:  s.OverrideMethod,
 		OverrideURL:     s.OverrideURL,
 		OverrideHeaders: s.OverrideHeaders,
@@ -380,8 +380,8 @@ func validateMacroDefinition(m *macro.Macro) error {
 		}
 		seenIDs[step.ID] = true
 
-		if step.SessionID == "" {
-			return fmt.Errorf("step %q has no session_id", step.ID)
+		if step.FlowID == "" {
+			return fmt.Errorf("step %q has no flow_id", step.ID)
 		}
 
 		if step.OnError != "" && step.OnError != macro.OnErrorAbort && step.OnError != macro.OnErrorSkip && step.OnError != macro.OnErrorRetry {
@@ -413,7 +413,7 @@ func validateMacroDefinition(m *macro.Macro) error {
 
 // macroSendFunc returns a macro.SendFunc for macro step execution.
 // The macroName parameter is embedded in the closure so that each step's
-// HTTP exchange can be recorded as a session with macro metadata tags.
+// HTTP exchange can be recorded as a flow with macro metadata tags.
 // Access control is handled by the target scope enforcement layer.
 func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 	return func(ctx context.Context, req *macro.SendRequest) (*macro.SendResponse, error) {
@@ -469,7 +469,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		}
 		duration := time.Since(start)
 
-		// Record the macro step as a session so it appears in session history.
+		// Record the macro step as a flow so it appears in session history.
 		if s.deps.store != nil {
 			s.recordMacroStepSession(ctx, macroName, req, resp, respBody, httpReq, start, duration)
 		}
@@ -483,9 +483,9 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 	}
 }
 
-// recordMacroStepSession saves a macro step's HTTP exchange as a session with
+// recordMacroStepSession saves a macro step's HTTP exchange as a flow with
 // send and receive messages. Errors are logged but not propagated to avoid
-// disrupting macro execution when session recording fails.
+// disrupting macro execution when flow recording fails.
 func (s *Server) recordMacroStepSession(
 	ctx context.Context,
 	macroName string,
@@ -501,15 +501,15 @@ func (s *Server) recordMacroStepSession(
 		"macro_step": req.StepID,
 	}
 
-	sess := &session.Session{
+	fl := &flow.Flow{
 		Protocol:    "HTTP/1.x",
-		SessionType: "unary",
+		FlowType: "unary",
 		State:       "complete",
 		Timestamp:   start,
 		Duration:    duration,
 		Tags:        tags,
 	}
-	if err := s.deps.store.SaveSession(ctx, sess); err != nil {
+	if err := s.deps.store.SaveFlow(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -523,8 +523,8 @@ func (s *Server) recordMacroStepSession(
 
 	parsedURL := httpReq.URL
 
-	sendMsg := &session.Message{
-		SessionID: sess.ID,
+	sendMsg := &flow.Message{
+		FlowID: fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -544,8 +544,8 @@ func (s *Server) recordMacroStepSession(
 		respHeaders[key] = values
 	}
 
-	recvMsg := &session.Message{
-		SessionID:  sess.ID,
+	recvMsg := &flow.Message{
+		FlowID:  fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),
@@ -559,20 +559,20 @@ func (s *Server) recordMacroStepSession(
 	}
 }
 
-// storeSessionFetcher implements macro.SessionFetcher using the session store.
-type storeSessionFetcher struct {
-	store session.SessionReader
+// storeFlowFetcher implements macro.FlowFetcher using the flow store.
+type storeFlowFetcher struct {
+	store flow.FlowReader
 }
 
-// GetSessionRequest retrieves the send message from a recorded session
+// GetFlowRequest retrieves the send message from a recorded flow
 // and converts it to a macro.SendRequest.
-func (f *storeSessionFetcher) GetSessionRequest(ctx context.Context, sessionID string) (*macro.SendRequest, error) {
-	msgs, err := f.store.GetMessages(ctx, sessionID, session.MessageListOptions{Direction: "send"})
+func (f *storeFlowFetcher) GetFlowRequest(ctx context.Context, flowID string) (*macro.SendRequest, error) {
+	msgs, err := f.store.GetMessages(ctx, flowID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
-		return nil, fmt.Errorf("get send messages for session %s: %w", sessionID, err)
+		return nil, fmt.Errorf("get send messages for flow %s: %w", flowID, err)
 	}
 	if len(msgs) == 0 {
-		return nil, fmt.Errorf("session %s has no send messages", sessionID)
+		return nil, fmt.Errorf("flow %s has no send messages", flowID)
 	}
 
 	msg := msgs[0]

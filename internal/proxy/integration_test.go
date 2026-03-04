@@ -20,11 +20,11 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-func startProxy(t *testing.T, ctx context.Context, store session.Store) (*proxy.Listener, context.CancelFunc) {
+func startProxy(t *testing.T, ctx context.Context, store flow.Store) (*proxy.Listener, context.CancelFunc) {
 	t.Helper()
 
 	logger := testutil.DiscardLogger()
@@ -87,7 +87,7 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -120,18 +120,18 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 	}
 
 	// Poll for session and messages to be persisted.
-	var sessions []*session.Session
-	var send, recv *session.Message
+	var flows []*flow.Flow
+	var send, recv *flow.Message
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		sessions, err = store.ListSessions(ctx, session.ListOptions{Limit: 10})
+		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
 		if err != nil {
-			t.Fatalf("ListSessions: %v", err)
+			t.Fatalf("ListFlows: %v", err)
 		}
-		if len(sessions) != 1 {
+		if len(flows) != 1 {
 			continue
 		}
-		msgs, mErr := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+		msgs, mErr := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -147,13 +147,13 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 			break
 		}
 	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(flows))
 	}
 
-	sess := sessions[0]
-	if sess.Protocol != "HTTP/1.x" {
-		t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTP/1.x")
+	fl := flows[0]
+	if fl.Protocol != "HTTP/1.x" {
+		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTP/1.x")
 	}
 	if send == nil {
 		t.Fatal("send message not found")
@@ -162,20 +162,20 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 		t.Fatal("receive message not found")
 	}
 	if send.Method != "GET" {
-		t.Errorf("session method = %q, want %q", send.Method, "GET")
+		t.Errorf("flow method = %q, want %q", send.Method, "GET")
 	}
 	if send.URL == nil || send.URL.Path != "/test-path" {
 		path := ""
 		if send.URL != nil {
 			path = send.URL.Path
 		}
-		t.Errorf("session URL path = %q, want %q", path, "/test-path")
+		t.Errorf("flow URL path = %q, want %q", path, "/test-path")
 	}
 	if recv.StatusCode != 200 {
-		t.Errorf("session status = %d, want %d", recv.StatusCode, 200)
+		t.Errorf("flow status = %d, want %d", recv.StatusCode, 200)
 	}
 	if string(recv.Body) != "hello from upstream" {
-		t.Errorf("session response body = %q, want %q", recv.Body, "hello from upstream")
+		t.Errorf("flow response body = %q, want %q", recv.Body, "hello from upstream")
 	}
 }
 
@@ -185,7 +185,7 @@ func TestIntegration_MalformedHTTPRequests(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestIntegration_PartialHTTPRequest(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestIntegration_TransferEncodingChunked(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestIntegration_MalformedChunkedEncoding(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestIntegration_HTTPForwardProxy_POST(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -594,14 +594,14 @@ func TestIntegration_HTTPForwardProxy_POST(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	sessions, err := store.ListSessions(ctx, session.ListOptions{Method: "POST"})
+	flows, err := store.ListFlows(ctx, flow.ListOptions{Method: "POST"})
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListFlows: %v", err)
 	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 POST session, got %d", len(sessions))
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 POST flow, got %d", len(flows))
 	}
-	recvMsgs, err := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{Direction: "receive"})
+	recvMsgs, err := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -609,7 +609,7 @@ func TestIntegration_HTTPForwardProxy_POST(t *testing.T) {
 		t.Fatal("no receive message found")
 	}
 	if recvMsgs[0].StatusCode != 201 {
-		t.Errorf("session status = %d, want %d", recvMsgs[0].StatusCode, 201)
+		t.Errorf("flow status = %d, want %d", recvMsgs[0].StatusCode, 201)
 	}
 }
 
@@ -693,7 +693,7 @@ func TestIntegration_LargeBodyBoundary_HTTP(t *testing.T) {
 
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			logger := testutil.DiscardLogger()
-			store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+			store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 			if err != nil {
 				t.Fatalf("NewSQLiteStore: %v", err)
 			}
@@ -736,18 +736,18 @@ func TestIntegration_LargeBodyBoundary_HTTP(t *testing.T) {
 			}
 
 			// Poll for session and messages to be persisted (large bodies may take longer to save).
-			var sessions []*session.Session
-			var send, recv *session.Message
+			var flows []*flow.Flow
+			var send, recv *flow.Message
 			for i := 0; i < 50; i++ {
 				time.Sleep(100 * time.Millisecond)
-				sessions, err = store.ListSessions(ctx, session.ListOptions{Limit: 10})
+				flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
 				if err != nil {
-					t.Fatalf("ListSessions: %v", err)
+					t.Fatalf("ListFlows: %v", err)
 				}
-				if len(sessions) != 1 {
+				if len(flows) != 1 {
 					continue
 				}
-				msgs, err := store.GetMessages(ctx, sessions[0].ID, session.MessageListOptions{})
+				msgs, err := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
 				if err != nil {
 					t.Fatalf("GetMessages: %v", err)
 				}
@@ -763,10 +763,10 @@ func TestIntegration_LargeBodyBoundary_HTTP(t *testing.T) {
 					break
 				}
 			}
-			if len(sessions) != 1 {
-				t.Fatalf("expected 1 session, got %d", len(sessions))
+			if len(flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(flows))
 			}
-			sess := sessions[0]
+			fl := flows[0]
 			if send == nil {
 				t.Fatal("send message not found")
 			}
@@ -803,8 +803,8 @@ func TestIntegration_LargeBodyBoundary_HTTP(t *testing.T) {
 			}
 
 			// Verify metadata.
-			if sess.Protocol != "HTTP/1.x" {
-				t.Errorf("protocol = %q, want %q", sess.Protocol, "HTTP/1.x")
+			if fl.Protocol != "HTTP/1.x" {
+				t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTP/1.x")
 			}
 			if send.Method != "POST" {
 				t.Errorf("method = %q, want %q", send.Method, "POST")
@@ -842,7 +842,7 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 	// Create temporary SQLite database.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -890,19 +890,19 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 	wg.Wait()
 
 	// Poll for all sessions and their messages to be persisted.
-	var sessions []*session.Session
+	var flows []*flow.Flow
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		sessions, err = store.ListSessions(ctx, session.ListOptions{Limit: numClients + 10})
+		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: numClients + 10})
 		if err != nil {
-			t.Fatalf("ListSessions: %v", err)
+			t.Fatalf("ListFlows: %v", err)
 		}
-		if len(sessions) < numClients {
+		if len(flows) < numClients {
 			continue
 		}
 		// Also verify all sessions have messages.
 		allHaveMessages := true
-		for _, s := range sessions {
+		for _, s := range flows {
 			mc, cErr := store.CountMessages(ctx, s.ID)
 			if cErr != nil {
 				t.Fatalf("CountMessages: %v", cErr)
@@ -916,23 +916,23 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 			break
 		}
 	}
-	if len(sessions) != numClients {
-		t.Fatalf("expected %d sessions, got %d", numClients, len(sessions))
+	if len(flows) != numClients {
+		t.Fatalf("expected %d flows, got %d", numClients, len(flows))
 	}
 
 	// Verify each client's session is distinct and data is not mixed.
 	seenPaths := make(map[string]bool)
 	seenBodies := make(map[string]bool)
-	for _, sess := range sessions {
-		if sess.Protocol != "HTTP/1.x" {
-			t.Errorf("session protocol = %q, want %q", sess.Protocol, "HTTP/1.x")
+	for _, fl := range flows {
+		if fl.Protocol != "HTTP/1.x" {
+			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTP/1.x")
 		}
 
-		msgs, mErr := store.GetMessages(ctx, sess.ID, session.MessageListOptions{})
+		msgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
-		var send, recv *session.Message
+		var send, recv *flow.Message
 		for _, m := range msgs {
 			switch m.Direction {
 			case "send":
@@ -951,7 +951,7 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 		}
 
 		if send.Method != "POST" {
-			t.Errorf("session method = %q, want %q", send.Method, "POST")
+			t.Errorf("flow method = %q, want %q", send.Method, "POST")
 		}
 		if send.URL == nil {
 			t.Error("request URL is nil")
@@ -969,27 +969,27 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 		}
 		expectedReqBody := fmt.Sprintf(`{"client":%d}`, pathID)
 		if string(send.Body) != expectedReqBody {
-			t.Errorf("session path %s: request body = %q, want %q (data mixed between sessions)",
+			t.Errorf("flow path %s: request body = %q, want %q (data mixed between flows)",
 				path, send.Body, expectedReqBody)
 		}
 
 		// Verify response body matches.
 		expectedRespBody := fmt.Sprintf("echo:%s:%s", path, expectedReqBody)
 		if string(recv.Body) != expectedRespBody {
-			t.Errorf("session path %s: response body = %q, want %q (data mixed between sessions)",
+			t.Errorf("flow path %s: response body = %q, want %q (data mixed between flows)",
 				path, recv.Body, expectedRespBody)
 		}
 
 		seenBodies[string(send.Body)] = true
 
 		if recv.StatusCode != 200 {
-			t.Errorf("session path %s: status = %d, want %d", path, recv.StatusCode, 200)
+			t.Errorf("flow path %s: status = %d, want %d", path, recv.StatusCode, 200)
 		}
-		if sess.ID == "" {
-			t.Errorf("session path %s: ID is empty", path)
+		if fl.ID == "" {
+			t.Errorf("flow path %s: ID is empty", path)
 		}
-		if sess.Duration < 0 {
-			t.Errorf("session path %s: duration = %v, want non-negative", path, sess.Duration)
+		if fl.Duration < 0 {
+			t.Errorf("flow path %s: duration = %v, want non-negative", path, fl.Duration)
 		}
 	}
 
@@ -1000,66 +1000,66 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 	for i := 0; i < numClients; i++ {
 		expectedPath := fmt.Sprintf("/concurrent/%d", i)
 		if !seenPaths[expectedPath] {
-			t.Errorf("missing session for path %q", expectedPath)
+			t.Errorf("missing flow for path %q", expectedPath)
 		}
 	}
 }
 
 // --- Error Recovery Integration Tests ---
 
-// failingStore is a session.Store that always returns an error from SaveSession.
+// failingStore is a flow.Store that always returns an error from SaveFlow.
 // It is used to verify that the proxy continues forwarding traffic even when
 // session persistence fails (USK-36 fix).
 type failingStore struct {
 	saveCallCount atomic.Int64
 }
 
-func (s *failingStore) SaveSession(_ context.Context, _ *session.Session) error {
+func (s *failingStore) SaveFlow(_ context.Context, _ *flow.Flow) error {
 	s.saveCallCount.Add(1)
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) UpdateSession(_ context.Context, _ string, _ session.SessionUpdate) error {
+func (s *failingStore) UpdateFlow(_ context.Context, _ string, _ flow.FlowUpdate) error {
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) GetSession(_ context.Context, _ string) (*session.Session, error) {
+func (s *failingStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) ListSessions(_ context.Context, _ session.ListOptions) ([]*session.Session, error) {
+func (s *failingStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) CountSessions(_ context.Context, _ session.ListOptions) (int, error) {
+func (s *failingStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
 	return 0, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) DeleteSession(_ context.Context, _ string) error {
+func (s *failingStore) DeleteFlow(_ context.Context, _ string) error {
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteAllSessions(_ context.Context) (int64, error) {
+func (s *failingStore) DeleteAllFlows(_ context.Context) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteSessionsByProtocol(_ context.Context, _ string) (int64, error) {
+func (s *failingStore) DeleteFlowsByProtocol(_ context.Context, _ string) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteSessionsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (s *failingStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error) {
+func (s *failingStore) DeleteExcessFlows(_ context.Context, _ int) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) AppendMessage(_ context.Context, _ *session.Message) error {
+func (s *failingStore) AppendMessage(_ context.Context, _ *flow.Message) error {
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) GetMessages(_ context.Context, _ string, _ session.MessageListOptions) ([]*session.Message, error) {
+func (s *failingStore) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 
@@ -1070,10 +1070,10 @@ func (s *failingStore) CountMessages(_ context.Context, _ string) (int, error) {
 func (s *failingStore) SaveMacro(_ context.Context, _, _, _ string) error {
 	return errors.New("simulated DB write failure")
 }
-func (s *failingStore) GetMacro(_ context.Context, _ string) (*session.MacroRecord, error) {
+func (s *failingStore) GetMacro(_ context.Context, _ string) (*flow.MacroRecord, error) {
 	return nil, errors.New("simulated DB read failure")
 }
-func (s *failingStore) ListMacros(_ context.Context) ([]*session.MacroRecord, error) {
+func (s *failingStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 func (s *failingStore) DeleteMacro(_ context.Context, _ string) error {
@@ -1081,7 +1081,7 @@ func (s *failingStore) DeleteMacro(_ context.Context, _ string) error {
 }
 
 func TestIntegration_ProxyContinuesOnSessionSaveFailure(t *testing.T) {
-	// Verifies that when session.Store.Save fails, the proxy still forwards
+	// Verifies that when flow.Store.Save fails, the proxy still forwards
 	// the upstream response to the client (USK-36 fix).
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1131,14 +1131,14 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure(t *testing.T) {
 		t.Errorf("X-Test header = %q, want %q", resp.Header.Get("X-Test"), "ok")
 	}
 
-	// Verify that SaveSession was actually called (and failed).
-	// SaveSession is invoked asynchronously after the response is forwarded,
+	// Verify that SaveFlow was actually called (and failed).
+	// SaveFlow is invoked asynchronously after the response is forwarded,
 	// so we poll with a bounded deadline instead of asserting immediately.
 	deadline := time.After(2 * time.Second)
 	for store.saveCallCount.Load() == 0 {
 		select {
 		case <-deadline:
-			t.Fatal("expected SaveSession to be called at least once, but it was not after 2s")
+			t.Fatal("expected SaveFlow to be called at least once, but it was not after 2s")
 			return
 		case <-time.After(10 * time.Millisecond):
 			// retry
@@ -1148,7 +1148,7 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure(t *testing.T) {
 
 func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *testing.T) {
 	// Verifies that multiple sequential requests through the same proxy continue
-	// to work even when every SaveSession call fails. This tests the keep-alive
+	// to work even when every SaveFlow call fails. This tests the keep-alive
 	// connection behavior under persistent save failures.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1195,9 +1195,9 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *test
 		}
 	}
 
-	// All SaveSession calls should have been attempted (and failed).
+	// All SaveFlow calls should have been attempted (and failed).
 	// Because the HTTP handler writes the response to the client before calling
-	// store.SaveSession(), the last SaveSession may still be in-flight when the
+	// store.SaveFlow(), the last SaveFlow may still be in-flight when the
 	// final client.Get() returns. Poll with a bounded deadline instead of
 	// asserting immediately.
 	deadline := time.After(5 * time.Second)
@@ -1207,7 +1207,7 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *test
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for SaveSession call count to reach %d (got %d)", numRequests, store.saveCallCount.Load())
+			t.Fatalf("timed out waiting for SaveFlow call count to reach %d (got %d)", numRequests, store.saveCallCount.Load())
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -1240,7 +1240,7 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_WithRealDB(t *testing.T)
 	// covered by the failingStore tests above.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	realStore, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	realStore, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -1306,7 +1306,7 @@ func TestIntegration_ProxyContextCancellation(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}

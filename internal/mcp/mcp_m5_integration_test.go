@@ -19,7 +19,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -28,7 +28,7 @@ import (
 // m5HTTPEnv holds the components needed for an HTTP-transport MCP integration test.
 type m5HTTPEnv struct {
 	mcpServer *Server
-	store     session.Store
+	store     flow.Store
 	manager   *proxy.Manager
 	addr      string // HTTP server listen address (127.0.0.1:<port>)
 	token     string // Bearer token for authentication
@@ -47,7 +47,7 @@ func setupM5HTTPEnv(t *testing.T, token string) *m5HTTPEnv {
 	// Create a temporary SQLite store.
 	dbPath := filepath.Join(t.TempDir(), "m5-integration.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		cancel()
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -237,30 +237,30 @@ func TestM5_HTTPTransport_BasicOperations(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Query sessions via HTTP MCP client.
-	listResult := callTool[querySessionsResult](t, cs, "query", map[string]any{
-		"resource": "sessions",
+	listResult := callTool[queryFlowsResult](t, cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if listResult.Count != 1 {
 		t.Fatalf("query sessions count = %d, want 1", listResult.Count)
 	}
-	entry := listResult.Sessions[0]
+	entry := listResult.Flows[0]
 	if entry.Method != "GET" {
-		t.Errorf("session method = %q, want %q", entry.Method, "GET")
+		t.Errorf("flow method = %q, want %q", entry.Method, "GET")
 	}
 	if !strings.Contains(entry.URL, "/api/m5-test") {
-		t.Errorf("session URL = %q, want to contain /api/m5-test", entry.URL)
+		t.Errorf("flow URL = %q, want to contain /api/m5-test", entry.URL)
 	}
 
 	// Query session detail.
-	detailResult := callTool[querySessionResult](t, cs, "query", map[string]any{
-		"resource": "session",
+	detailResult := callTool[queryFlowResult](t, cs, "query", map[string]any{
+		"resource": "flow",
 		"id":       entry.ID,
 	})
 	if detailResult.ID != entry.ID {
-		t.Errorf("session detail ID = %q, want %q", detailResult.ID, entry.ID)
+		t.Errorf("flow detail ID = %q, want %q", detailResult.ID, entry.ID)
 	}
 	if detailResult.ResponseStatusCode != 200 {
-		t.Errorf("session response status = %d, want 200", detailResult.ResponseStatusCode)
+		t.Errorf("flow response status = %d, want 200", detailResult.ResponseStatusCode)
 	}
 
 	// Query status.
@@ -325,22 +325,22 @@ func TestM5_MultiClient_ConcurrentAccess(t *testing.T) {
 
 	// Both clients should see the same sessions (shared DB).
 	var wg sync.WaitGroup
-	var result1, result2 querySessionsResult
+	var result1, result2 queryFlowsResult
 	var err1, err2 error
 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		r, e := callToolSafe[querySessionsResult](cs1, "query", map[string]any{
-			"resource": "sessions",
+		r, e := callToolSafe[queryFlowsResult](cs1, "query", map[string]any{
+			"resource": "flows",
 		})
 		result1 = r
 		err1 = e
 	}()
 	go func() {
 		defer wg.Done()
-		r, e := callToolSafe[querySessionsResult](cs2, "query", map[string]any{
-			"resource": "sessions",
+		r, e := callToolSafe[queryFlowsResult](cs2, "query", map[string]any{
+			"resource": "flows",
 		})
 		result2 = r
 		err2 = e
@@ -361,11 +361,11 @@ func TestM5_MultiClient_ConcurrentAccess(t *testing.T) {
 		t.Errorf("client2 sessions count = %d, want 1", result2.Count)
 	}
 
-	// Both clients should return the same session ID.
+	// Both clients should return the same flow ID.
 	if result1.Count > 0 && result2.Count > 0 {
-		if result1.Sessions[0].ID != result2.Sessions[0].ID {
-			t.Errorf("clients see different session IDs: %q vs %q",
-				result1.Sessions[0].ID, result2.Sessions[0].ID)
+		if result1.Flows[0].ID != result2.Flows[0].ID {
+			t.Errorf("clients see different flow IDs: %q vs %q",
+				result1.Flows[0].ID, result2.Flows[0].ID)
 		}
 	}
 
@@ -590,7 +590,7 @@ func TestM5_GracefulShutdown_WithActiveProxy(t *testing.T) {
 // --- Test: HTTP Transport Without Auth (Optional Middleware) ---
 
 // TestM5_HTTPTransport_ToolOperations tests various tool operations over HTTP
-// transport: configure, execute delete_sessions.
+// transport: configure, execute delete_flows.
 func TestM5_HTTPTransport_ToolOperations(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
@@ -633,29 +633,29 @@ func TestM5_HTTPTransport_ToolOperations(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify session exists.
-	listResult := callTool[querySessionsResult](t, cs, "query", map[string]any{
-		"resource": "sessions",
+	listResult := callTool[queryFlowsResult](t, cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if listResult.Count != 1 {
 		t.Fatalf("sessions count = %d, want 1", listResult.Count)
 	}
 
-	sessionID := listResult.Sessions[0].ID
+	flowID := listResult.Flows[0].ID
 
 	// Query messages.
 	msgsResult := callTool[queryMessagesResult](t, cs, "query", map[string]any{
 		"resource": "messages",
-		"id":       sessionID,
+		"id":       flowID,
 	})
 	if msgsResult.Count < 2 {
 		t.Fatalf("messages count = %d, want >= 2", msgsResult.Count)
 	}
 
-	// Delete session.
-	delResult := callTool[executeDeleteSessionsResult](t, cs, "manage", map[string]any{
-		"action": "delete_sessions",
+	// Delete flow.
+	delResult := callTool[executeDeleteFlowsResult](t, cs, "manage", map[string]any{
+		"action": "delete_flows",
 		"params": map[string]any{
-			"session_id": sessionID,
+			"flow_id": flowID,
 		},
 	})
 	if delResult.DeletedCount != 1 {
@@ -663,8 +663,8 @@ func TestM5_HTTPTransport_ToolOperations(t *testing.T) {
 	}
 
 	// Verify deleted.
-	emptyResult := callTool[querySessionsResult](t, cs, "query", map[string]any{
-		"resource": "sessions",
+	emptyResult := callTool[queryFlowsResult](t, cs, "query", map[string]any{
+		"resource": "flows",
 	})
 	if emptyResult.Count != 0 {
 		t.Errorf("sessions after delete = %d, want 0", emptyResult.Count)
@@ -761,7 +761,7 @@ func TestM5_StdioAndHTTP_SharedState(t *testing.T) {
 	// Create shared components.
 	dbPath := filepath.Join(t.TempDir(), "m5-dual.db")
 	logger := testutil.DiscardLogger()
-	store, err := session.NewSQLiteStore(ctx, dbPath, logger)
+	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -856,25 +856,25 @@ func TestM5_StdioAndHTTP_SharedState(t *testing.T) {
 	resp.Body.Close()
 	time.Sleep(200 * time.Millisecond)
 
-	// HTTP client: Query sessions (should see the session created via stdio proxy).
-	httpSessions := callTool[querySessionsResult](t, httpCS, "query", map[string]any{
-		"resource": "sessions",
+	// HTTP client: Query sessions (should see the flow created via stdio proxy).
+	httpFlows := callTool[queryFlowsResult](t, httpCS, "query", map[string]any{
+		"resource": "flows",
 	})
-	if httpSessions.Count != 1 {
-		t.Fatalf("HTTP client sessions = %d, want 1", httpSessions.Count)
+	if httpFlows.Count != 1 {
+		t.Fatalf("HTTP client sessions = %d, want 1", httpFlows.Count)
 	}
 
-	// stdio client: Also sees the same session.
-	stdioSessions := callTool[querySessionsResult](t, stdioCS, "query", map[string]any{
-		"resource": "sessions",
+	// stdio client: Also sees the same flow.
+	stdioFlows := callTool[queryFlowsResult](t, stdioCS, "query", map[string]any{
+		"resource": "flows",
 	})
-	if stdioSessions.Count != 1 {
-		t.Fatalf("stdio client sessions = %d, want 1", stdioSessions.Count)
+	if stdioFlows.Count != 1 {
+		t.Fatalf("stdio client sessions = %d, want 1", stdioFlows.Count)
 	}
 
-	if httpSessions.Sessions[0].ID != stdioSessions.Sessions[0].ID {
-		t.Errorf("session IDs differ: HTTP=%q, stdio=%q",
-			httpSessions.Sessions[0].ID, stdioSessions.Sessions[0].ID)
+	if httpFlows.Flows[0].ID != stdioFlows.Flows[0].ID {
+		t.Errorf("flow IDs differ: HTTP=%q, stdio=%q",
+			httpFlows.Flows[0].ID, stdioFlows.Flows[0].ID)
 	}
 
 	// Close idle connections before stopping.

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/session"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -94,7 +94,7 @@ func TestRecordSendWithVariant_NoModification_H2(t *testing.T) {
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:   "conn-1",
 		start:    time.Now(),
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqURL:   reqURL,
 		reqBody:  body,
@@ -107,7 +107,7 @@ func TestRecordSendWithVariant_NoModification_H2(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 1", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -137,7 +137,7 @@ func TestRecordSendWithVariant_BodyModified_H2(t *testing.T) {
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:   "conn-2",
 		start:    time.Now(),
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqURL:   reqURL,
 		reqBody:  modifiedBody,
@@ -150,7 +150,7 @@ func TestRecordSendWithVariant_BodyModified_H2(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 2", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -194,7 +194,7 @@ func TestRecordSendWithVariant_HeaderModified_H2(t *testing.T) {
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:   "conn-3",
 		start:    time.Now(),
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqURL:   reqURL,
 		reqBody:  body,
@@ -207,7 +207,7 @@ func TestRecordSendWithVariant_HeaderModified_H2(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 2", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -232,7 +232,7 @@ func TestRecordSendWithVariant_NilSnap_H2(t *testing.T) {
 
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		start:    time.Now(),
-		connInfo: &session.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
 		reqURL:   reqURL,
 	}, nil, logger)
@@ -286,7 +286,7 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 	sendResult := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:   "conn-lifecycle",
 		start:    start,
-		connInfo: &session.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
+		connInfo: &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
 		req:      req,
 		reqURL:   reqURL,
 		reqBody:  modifiedBody,
@@ -312,7 +312,7 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 	}, logger)
 
 	// Verify: 3 messages total with correct sequences.
-	msgs, _ := store.GetMessages(ctx, sendResult.sessionID, session.MessageListOptions{})
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
 	if len(msgs) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(msgs))
 	}
@@ -336,8 +336,8 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 		}
 	}
 
-	// Session should be complete.
-	sess, _ := store.GetSession(ctx, sendResult.sessionID)
+	// Flow should be complete.
+	sess, _ := store.GetFlow(ctx, sendResult.flowID)
 	if sess.State != "complete" {
 		t.Errorf("state = %q, want %q", sess.State, "complete")
 	}

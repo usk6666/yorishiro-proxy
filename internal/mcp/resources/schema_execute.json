@@ -14,13 +14,13 @@
       "type": "object",
       "description": "Action-specific parameters.",
       "properties": {
-        "session_id": {
+        "flow_id": {
           "type": "string",
-          "description": "Session ID for resend, resend_raw, or tcp_replay."
+          "description": "Flow ID for resend, resend_raw, or tcp_replay."
         },
         "message_sequence": {
           "type": "integer",
-          "description": "Message sequence number for WebSocket/streaming resend. Required for WebSocket sessions."
+          "description": "Message sequence number for WebSocket/streaming resend. Required for WebSocket flows."
         },
         "override_method": {
           "type": "string",
@@ -86,7 +86,7 @@
         },
         "tag": {
           "type": "string",
-          "description": "Tag to attach to the result session."
+          "description": "Tag to attach to the result flow."
         },
         "target_addr": {
           "type": "string",
