@@ -13,7 +13,7 @@ import { Tabs } from "../../components/ui/Tabs.js";
 import { HeadersTable } from "./HeadersTable.js";
 import { BodyViewer } from "./BodyViewer.js";
 import { MessageList } from "./MessageList.js";
-import "./SessionDetailPage.css";
+import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -115,11 +115,11 @@ function isStreamingFlow(flow: FlowDetailResult): boolean {
 }
 
 /** Whether a flow has a response (error/drop flows may not have one). */
-function hasResponse(session: FlowDetailResult): boolean {
+function hasResponse(flow: FlowDetailResult): boolean {
   return (
-    session.response_status_code > 0 ||
-    (session.response_headers != null &&
-      Object.keys(session.response_headers).length > 0)
+    flow.response_status_code > 0 ||
+    (flow.response_headers != null &&
+      Object.keys(flow.response_headers).length > 0)
   );
 }
 
@@ -127,7 +127,7 @@ function hasResponse(session: FlowDetailResult): boolean {
 // Component
 // ---------------------------------------------------------------------------
 
-export function SessionDetailPage() {
+export function FlowDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { addToast } = useToast();
@@ -143,10 +143,10 @@ export function SessionDetailPage() {
 
   // Fetch flow detail
   const {
-    data: session,
-    loading: sessionLoading,
-    error: sessionError,
-    refetch: refetchSession,
+    data: flowData,
+    loading: flowLoading,
+    error: flowError,
+    refetch: refetchFlow,
   } = useQuery("flow", {
     id: id ?? "",
     enabled: !!id,
@@ -161,7 +161,7 @@ export function SessionDetailPage() {
     id: id ?? "",
     limit: messagesLimit,
     offset: messagesOffset,
-    enabled: !!id && !!session && isStreamingFlow(session),
+    enabled: !!id && !!flowData && isStreamingFlow(flowData),
   });
 
   // Refetch messages when offset changes
@@ -215,9 +215,9 @@ export function SessionDetailPage() {
   }, []);
 
   // Loading state
-  if (sessionLoading && !session) {
+  if (flowLoading && !flowData) {
     return (
-      <div className="page session-detail-page">
+      <div className="page flow-detail-page">
         <div className="sd-loading">
           <Spinner size="lg" />
         </div>
@@ -226,11 +226,11 @@ export function SessionDetailPage() {
   }
 
   // Error state
-  if (sessionError) {
+  if (flowError) {
     return (
-      <div className="page session-detail-page">
+      <div className="page flow-detail-page">
         <div className="sd-error">
-          Failed to load flow: {sessionError.message}
+          Failed to load flow: {flowError.message}
         </div>
         <Button variant="secondary" size="sm" onClick={handleBack}>
           Back to Flows
@@ -240,9 +240,9 @@ export function SessionDetailPage() {
   }
 
   // No data
-  if (!session) {
+  if (!flowData) {
     return (
-      <div className="page session-detail-page">
+      <div className="page flow-detail-page">
         <div className="sd-empty">Flow not found.</div>
         <Button variant="secondary" size="sm" onClick={handleBack}>
           Back to Flows
@@ -251,12 +251,12 @@ export function SessionDetailPage() {
     );
   }
 
-  const streaming = isStreamingFlow(session);
-  const messages: MessageEntry[] = messagesData?.messages ?? session.message_preview ?? [];
-  const totalMessages = messagesData?.total ?? session.message_count;
+  const streaming = isStreamingFlow(flowData);
+  const messages: MessageEntry[] = messagesData?.messages ?? flowData.message_preview ?? [];
+  const totalMessages = messagesData?.total ?? flowData.message_count;
 
   return (
-    <div className="page session-detail-page">
+    <div className="page flow-detail-page">
       {/* Back navigation */}
       <div className="sd-back-row">
         <Button variant="ghost" size="sm" onClick={handleBack}>
@@ -270,13 +270,13 @@ export function SessionDetailPage() {
           <div className="sd-header-info">
             <div className="sd-header-title-row">
               <h1 className="page-title">Flow Detail</h1>
-              <span className="sd-session-id">{shortId(session.id)}</span>
+              <span className="sd-flow-id">{shortId(flowData.id)}</span>
             </div>
-            <div className="sd-url-display" title={session.url}>
-              {session.method && (
-                <span className="sd-method">{session.method}</span>
+            <div className="sd-url-display" title={flowData.url}>
+              {flowData.method && (
+                <span className="sd-method">{flowData.method}</span>
               )}
-              <span className="sd-url">{session.url}</span>
+              <span className="sd-url">{flowData.url}</span>
             </div>
           </div>
           <div className="sd-header-actions">
@@ -291,7 +291,7 @@ export function SessionDetailPage() {
             >
               Delete
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => refetchSession()}>
+            <Button variant="secondary" size="sm" onClick={() => refetchFlow()}>
               Refresh
             </Button>
           </div>
@@ -301,56 +301,56 @@ export function SessionDetailPage() {
         <div className="sd-meta">
           <div className="sd-meta-item">
             <span className="sd-meta-label">Protocol</span>
-            <Badge variant={protocolVariant(session.protocol)}>
-              {session.protocol}
+            <Badge variant={protocolVariant(flowData.protocol)}>
+              {flowData.protocol}
             </Badge>
           </div>
-          {session.response_status_code > 0 && (
+          {flowData.response_status_code > 0 && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Status</span>
-              <span className={statusCodeClass(session.response_status_code)}>
-                {session.response_status_code}
+              <span className={statusCodeClass(flowData.response_status_code)}>
+                {flowData.response_status_code}
               </span>
             </div>
           )}
           <div className="sd-meta-item">
             <span className="sd-meta-label">Duration</span>
             <span className="sd-meta-value">
-              {formatDuration(session.duration_ms)}
+              {formatDuration(flowData.duration_ms)}
             </span>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">Timestamp</span>
             <span className="sd-meta-value">
-              {formatTimestamp(session.timestamp)}
+              {formatTimestamp(flowData.timestamp)}
             </span>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">Type</span>
-            <Badge variant="default">{session.flow_type}</Badge>
+            <Badge variant="default">{flowData.flow_type}</Badge>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">State</span>
-            <Badge variant={stateVariant(session.state)}>{session.state}</Badge>
+            <Badge variant={stateVariant(flowData.state)}>{flowData.state}</Badge>
           </div>
-          {session.blocked_by && (
+          {flowData.blocked_by && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Blocked By</span>
-              <Badge variant="warning">{session.blocked_by}</Badge>
+              <Badge variant="warning">{flowData.blocked_by}</Badge>
             </div>
           )}
-          {session.message_count > 0 && (
+          {flowData.message_count > 0 && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Messages</span>
-              <span className="sd-meta-value">{session.message_count}</span>
+              <span className="sd-meta-value">{flowData.message_count}</span>
             </div>
           )}
         </div>
 
         {/* Tags */}
-        {session.tags && Object.keys(session.tags).length > 0 && (
+        {flowData.tags && Object.keys(flowData.tags).length > 0 && (
           <div className="sd-tags">
-            {Object.entries(session.tags).map(([key, value]) => (
+            {Object.entries(flowData.tags).map(([key, value]) => (
               <Badge key={key} variant="info">
                 {key}: {value}
               </Badge>
@@ -359,10 +359,10 @@ export function SessionDetailPage() {
         )}
 
         {/* Protocol summary */}
-        {session.protocol_summary &&
-          Object.keys(session.protocol_summary).length > 0 && (
+        {flowData.protocol_summary &&
+          Object.keys(flowData.protocol_summary).length > 0 && (
             <div className="sd-protocol-summary">
-              {Object.entries(session.protocol_summary).map(([key, value]) => (
+              {Object.entries(flowData.protocol_summary).map(([key, value]) => (
                 <div key={key} className="sd-meta-item">
                   <span className="sd-meta-label">{key}</span>
                   <span className="sd-meta-value">{value}</span>
@@ -372,29 +372,29 @@ export function SessionDetailPage() {
           )}
 
         {/* Connection info */}
-        {session.conn_info && (
+        {flowData.conn_info && (
           <div className="sd-conn-info">
-            {session.conn_info.client_addr && (
+            {flowData.conn_info.client_addr && (
               <div className="sd-meta-item">
                 <span className="sd-meta-label">Client</span>
                 <span className="sd-meta-value">
-                  {session.conn_info.client_addr}
+                  {flowData.conn_info.client_addr}
                 </span>
               </div>
             )}
-            {session.conn_info.server_addr && (
+            {flowData.conn_info.server_addr && (
               <div className="sd-meta-item">
                 <span className="sd-meta-label">Server</span>
                 <span className="sd-meta-value">
-                  {session.conn_info.server_addr}
+                  {flowData.conn_info.server_addr}
                 </span>
               </div>
             )}
-            {session.conn_info.tls_version && (
+            {flowData.conn_info.tls_version && (
               <div className="sd-meta-item">
                 <span className="sd-meta-label">TLS</span>
                 <span className="sd-meta-value">
-                  {session.conn_info.tls_version}
+                  {flowData.conn_info.tls_version}
                 </span>
               </div>
             )}
@@ -413,13 +413,13 @@ export function SessionDetailPage() {
             limit={messagesLimit}
             loading={messagesLoading}
             onPageChange={handleMessagesPageChange}
-            protocol={session.protocol}
+            protocol={flowData.protocol}
           />
         </div>
       )}
 
       {/* Variant diff: original vs modified request */}
-      {session.original_request && (
+      {flowData.original_request && (
         <div className="sd-section">
           <h2 className="sd-section-title">Request Modification (Original vs Modified)</h2>
           <div className="sd-panels">
@@ -435,14 +435,14 @@ export function SessionDetailPage() {
                 onTabChange={setRequestTab}
               >
                 {requestTab === "headers" && (
-                  <HeadersTable headers={session.original_request.headers} />
+                  <HeadersTable headers={flowData.original_request.headers} />
                 )}
                 {requestTab === "body" && (
                   <BodyViewer
-                    body={session.original_request.body}
-                    encoding={session.original_request.body_encoding}
+                    body={flowData.original_request.body}
+                    encoding={flowData.original_request.body_encoding}
                     truncated={false}
-                    headers={session.original_request.headers}
+                    headers={flowData.original_request.headers}
                   />
                 )}
               </Tabs>
@@ -460,14 +460,14 @@ export function SessionDetailPage() {
                 onTabChange={setRequestTab}
               >
                 {requestTab === "headers" && (
-                  <HeadersTable headers={session.request_headers} />
+                  <HeadersTable headers={flowData.request_headers} />
                 )}
                 {requestTab === "body" && (
                   <BodyViewer
-                    body={session.request_body}
-                    encoding={session.request_body_encoding}
-                    truncated={session.request_body_truncated}
-                    headers={session.request_headers}
+                    body={flowData.request_body}
+                    encoding={flowData.request_body_encoding}
+                    truncated={flowData.request_body_truncated}
+                    headers={flowData.request_headers}
                   />
                 )}
               </Tabs>
@@ -479,7 +479,7 @@ export function SessionDetailPage() {
       {/* Request / Response panels */}
       <div className="sd-panels">
         {/* Request panel (shown when no variant diff) */}
-        {!session.original_request && (
+        {!flowData.original_request && (
           <div className="sd-panel">
             <div className="sd-panel-header">
               <span className="sd-panel-title">Request</span>
@@ -490,14 +490,14 @@ export function SessionDetailPage() {
               onTabChange={setRequestTab}
             >
               {requestTab === "headers" && (
-                <HeadersTable headers={session.request_headers} />
+                <HeadersTable headers={flowData.request_headers} />
               )}
               {requestTab === "body" && (
                 <BodyViewer
-                  body={session.request_body}
-                  encoding={session.request_body_encoding}
-                  truncated={session.request_body_truncated}
-                  headers={session.request_headers}
+                  body={flowData.request_body}
+                  encoding={flowData.request_body_encoding}
+                  truncated={flowData.request_body_truncated}
+                  headers={flowData.request_headers}
                 />
               )}
             </Tabs>
@@ -505,55 +505,55 @@ export function SessionDetailPage() {
         )}
 
         {/* Response panel */}
-        <div className={session.original_request ? "sd-panel sd-panel--full-width" : "sd-panel"}>
+        <div className={flowData.original_request ? "sd-panel sd-panel--full-width" : "sd-panel"}>
           <div className="sd-panel-header">
             <span className="sd-panel-title">Response</span>
-            {session.response_status_code > 0 && (
+            {flowData.response_status_code > 0 && (
               <Badge
                 variant={
-                  session.response_status_code < 300
+                  flowData.response_status_code < 300
                     ? "success"
-                    : session.response_status_code < 400
+                    : flowData.response_status_code < 400
                       ? "info"
-                      : session.response_status_code < 500
+                      : flowData.response_status_code < 500
                         ? "warning"
                         : "danger"
                 }
               >
-                {session.response_status_code}
+                {flowData.response_status_code}
               </Badge>
             )}
-            {!hasResponse(session) && (
+            {!hasResponse(flowData) && (
               <Badge variant="danger">No Response</Badge>
             )}
           </div>
-          {hasResponse(session) ? (
+          {hasResponse(flowData) ? (
             <Tabs
               tabs={RESPONSE_TABS}
               activeTab={responseTab}
               onTabChange={setResponseTab}
             >
               {responseTab === "headers" && (
-                <HeadersTable headers={session.response_headers} />
+                <HeadersTable headers={flowData.response_headers} />
               )}
               {responseTab === "body" && (
                 <BodyViewer
-                  body={session.response_body}
-                  encoding={session.response_body_encoding}
-                  truncated={session.response_body_truncated}
-                  headers={session.response_headers}
+                  body={flowData.response_body}
+                  encoding={flowData.response_body_encoding}
+                  truncated={flowData.response_body_truncated}
+                  headers={flowData.response_headers}
                 />
               )}
             </Tabs>
           ) : (
             <div className="sd-no-response">
-              {session.state === "error"
-                ? "This session ended with an error. No response was received from the upstream server."
-                : session.state === "active"
-                  ? "This session is still active. The response has not been received yet."
-                  : session.blocked_by === "intercept_drop"
+              {flowData.state === "error"
+                ? "This flow ended with an error. No response was received from the upstream server."
+                : flowData.state === "active"
+                  ? "This flow is still active. The response has not been received yet."
+                  : flowData.blocked_by === "intercept_drop"
                     ? "This request was dropped by an intercept rule. No response was generated."
-                    : "No response data available for this session."}
+                    : "No response data available for this flow."}
             </div>
           )}
         </div>

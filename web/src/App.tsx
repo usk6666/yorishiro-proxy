@@ -1,8 +1,8 @@
 import { Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout/index.js";
 import { DashboardPage } from "./pages/Dashboard/DashboardPage.js";
-import { SessionsPage } from "./pages/Sessions/SessionsPage.js";
-import { SessionDetailPage } from "./pages/SessionDetail/SessionDetailPage.js";
+import { FlowsPage } from "./pages/Flows/FlowsPage.js";
+import { FlowDetailPage } from "./pages/FlowDetail/FlowDetailPage.js";
 import { InterceptPage } from "./pages/Intercept/InterceptPage.js";
 import { ResendPage } from "./pages/Resend/ResendPage.js";
 import { FuzzPage } from "./pages/Fuzz/FuzzPage.js";
@@ -13,12 +13,12 @@ function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<SessionsPage />} />
-        <Route path="flows/:id" element={<SessionDetailPage />} />
+        <Route index element={<FlowsPage />} />
+        <Route path="flows/:id" element={<FlowDetailPage />} />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="intercept" element={<InterceptPage />} />
         <Route path="resend" element={<ResendPage />} />
-        <Route path="resend/:sessionId" element={<ResendPage />} />
+        <Route path="resend/:flowId" element={<ResendPage />} />
         <Route path="fuzz" element={<FuzzPage />} />
         <Route path="fuzz/:fuzzId" element={<FuzzResultsPage />} />
         <Route path="settings" element={<SettingsPage />} />

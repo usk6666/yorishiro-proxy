@@ -17,7 +17,7 @@ const NAV_ITEMS: NavItem[] = [
     to: "/",
     label: "Flows",
     end: true,
-    icon: <SessionsIcon />,
+    icon: <FlowsIcon />,
   },
   {
     to: "/dashboard",
@@ -88,7 +88,7 @@ function DashboardIcon() {
   );
 }
 
-function SessionsIcon() {
+function FlowsIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="2" width="12" height="12" rx="2" />

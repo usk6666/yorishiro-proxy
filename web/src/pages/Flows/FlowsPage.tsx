@@ -8,7 +8,7 @@ import { Button } from "../../components/ui/Button.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
-import "./SessionsPage.css";
+import "./FlowsPage.css";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -16,7 +16,7 @@ import "./SessionsPage.css";
 
 const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP"] as const;
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] as const;
-const SESSION_STATES = ["active", "complete", "error"] as const;
+const FLOW_STATES = ["active", "complete", "error"] as const;
 const PAGE_SIZES = [25, 50, 100] as const;
 const POLL_INTERVALS = [
   { label: "Off", value: 0 },
@@ -92,7 +92,7 @@ function formatMessageCount(count: number): string {
   return String(count);
 }
 
-/** Get the Badge variant for a session state. */
+/** Get the Badge variant for a flow state. */
 function stateVariant(state: string): "default" | "success" | "warning" | "danger" | "info" {
   switch (state) {
     case "complete":
@@ -110,7 +110,7 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
 // Component
 // ---------------------------------------------------------------------------
 
-export function SessionsPage() {
+export function FlowsPage() {
   const navigate = useNavigate();
   const { addToast } = useToast();
   const { manage, loading: executeLoading } = useManage();
@@ -166,7 +166,7 @@ export function SessionsPage() {
     offset,
   });
 
-  const sessions = data?.flows ?? [];
+  const flows = data?.flows ?? [];
   const total = data?.total ?? 0;
 
   // Trigger refetch when filter/pagination options change.
@@ -214,7 +214,7 @@ export function SessionsPage() {
     [handleFilterChange],
   );
 
-  // --- Session state ---
+  // --- Flow state ---
   const handleStateChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       setSelectedState(e.target.value);
@@ -234,8 +234,8 @@ export function SessionsPage() {
 
   // --- Row click → navigate to detail ---
   const handleRowClick = useCallback(
-    (session: FlowEntry) => {
-      navigate(`/flows/${session.id}`);
+    (flow: FlowEntry) => {
+      navigate(`/flows/${flow.id}`);
     },
     [navigate],
   );
@@ -256,12 +256,12 @@ export function SessionsPage() {
 
   const toggleSelectAll = useCallback(() => {
     setSelectedIds((prev) => {
-      if (prev.size === sessions.length && sessions.length > 0) {
+      if (prev.size === flows.length && flows.length > 0) {
         return new Set();
       }
-      return new Set(sessions.map((s) => s.id));
+      return new Set(flows.map((s) => s.id));
     });
-  }, [sessions]);
+  }, [flows]);
 
   // --- Delete flows ---
   const handleDeleteSelected = useCallback(async () => {
@@ -337,22 +337,22 @@ export function SessionsPage() {
 
   // --- Render ---
   return (
-    <div className="page sessions-page">
-      <div className="sessions-header">
-        <div className="sessions-header-info">
+    <div className="page flows-page">
+      <div className="flows-header">
+        <div className="flows-header-info">
           <h1 className="page-title">Flows</h1>
           <p className="page-description">
             Captured HTTP/HTTPS, WebSocket, gRPC, and TCP flows.
           </p>
           {total > 0 && (
-            <span className="sessions-total">{total} total flows</span>
+            <span className="flows-total">{total} total flows</span>
           )}
         </div>
       </div>
 
       {/* Toolbar */}
-      <div className="sessions-toolbar">
-        <div className="sessions-toolbar-left">
+      <div className="flows-toolbar">
+        <div className="flows-toolbar-left">
           <Button
             variant={showFilters ? "primary" : "secondary"}
             size="sm"
@@ -372,8 +372,8 @@ export function SessionsPage() {
             Export
           </Button>
         </div>
-        <div className="sessions-toolbar-right">
-          <div className="sessions-refresh-control">
+        <div className="flows-toolbar-right">
+          <div className="flows-refresh-control">
             <span>Auto:</span>
             <select value={pollInterval} onChange={handlePollChange}>
               {POLL_INTERVALS.map((opt) => (
@@ -388,11 +388,11 @@ export function SessionsPage() {
 
       {/* Filters panel */}
       {showFilters && (
-        <div className="sessions-filters">
-          <div className="sessions-filter-group">
-            <span className="sessions-filter-label">Protocol</span>
-            <div className="sessions-filter-checkboxes">
-              <label className="sessions-filter-checkbox">
+        <div className="flows-filters">
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">Protocol</span>
+            <div className="flows-filter-checkboxes">
+              <label className="flows-filter-checkbox">
                 <input
                   type="radio"
                   name="protocol-filter"
@@ -402,7 +402,7 @@ export function SessionsPage() {
                 All
               </label>
               {PROTOCOLS.map((proto) => (
-                <label key={proto} className="sessions-filter-checkbox">
+                <label key={proto} className="flows-filter-checkbox">
                   <input
                     type="radio"
                     name="protocol-filter"
@@ -415,10 +415,10 @@ export function SessionsPage() {
             </div>
           </div>
 
-          <div className="sessions-filter-group">
-            <span className="sessions-filter-label">Method</span>
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">Method</span>
             <select
-              className="sessions-filter-select"
+              className="flows-filter-select"
               value={selectedMethod}
               onChange={handleMethodChange}
             >
@@ -431,10 +431,10 @@ export function SessionsPage() {
             </select>
           </div>
 
-          <div className="sessions-filter-group">
-            <span className="sessions-filter-label">Status</span>
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">Status</span>
             <select
-              className="sessions-filter-select"
+              className="flows-filter-select"
               value={statusCodeRange}
               onChange={handleStatusCodeChange}
             >
@@ -446,15 +446,15 @@ export function SessionsPage() {
             </select>
           </div>
 
-          <div className="sessions-filter-group">
-            <span className="sessions-filter-label">Session State</span>
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">Flow State</span>
             <select
-              className="sessions-filter-select"
+              className="flows-filter-select"
               value={selectedState}
               onChange={handleStateChange}
             >
               <option value="">All</option>
-              {SESSION_STATES.map((s) => (
+              {FLOW_STATES.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
@@ -462,8 +462,8 @@ export function SessionsPage() {
             </select>
           </div>
 
-          <div className="sessions-filter-group sessions-url-filter">
-            <span className="sessions-filter-label">URL Pattern</span>
+          <div className="flows-filter-group flows-url-filter">
+            <span className="flows-filter-label">URL Pattern</span>
             <Input
               placeholder="Filter by URL..."
               value={urlPattern}
@@ -475,8 +475,8 @@ export function SessionsPage() {
 
       {/* Bulk actions bar */}
       {selectedIds.size > 0 && (
-        <div className="sessions-bulk-bar">
-          <span className="sessions-bulk-count">{selectedIds.size}</span>
+        <div className="flows-bulk-bar">
+          <span className="flows-bulk-count">{selectedIds.size}</span>
           <span>selected</span>
           <Button
             variant="danger"
@@ -498,39 +498,39 @@ export function SessionsPage() {
 
       {/* Error state */}
       {error && (
-        <div className="sessions-error">
+        <div className="flows-error">
           Error loading flows: {error.message}
         </div>
       )}
 
       {/* Loading state (initial only) */}
       {loading && !data && (
-        <div className="sessions-loading">
+        <div className="flows-loading">
           <Spinner size="lg" />
         </div>
       )}
 
       {/* Empty state */}
-      {!loading && !error && data && sessions.length === 0 && (
-        <div className="sessions-empty">
+      {!loading && !error && data && flows.length === 0 && (
+        <div className="flows-empty">
           <span>No flows captured yet.</span>
           <span>Start the proxy and send some traffic to see flows here.</span>
         </div>
       )}
 
       {/* Flow table */}
-      {sessions.length > 0 && (
+      {flows.length > 0 && (
         <>
-          <div className="sessions-table-wrapper">
-            <Table className="sessions-table">
+          <div className="flows-table-wrapper">
+            <Table className="flows-table">
               <thead>
                 <tr>
-                  <th className="sessions-select-cell">
+                  <th className="flows-select-cell">
                     <input
                       type="checkbox"
                       checked={
-                        selectedIds.size === sessions.length &&
-                        sessions.length > 0
+                        selectedIds.size === flows.length &&
+                        flows.length > 0
                       }
                       onChange={toggleSelectAll}
                     />
@@ -547,56 +547,56 @@ export function SessionsPage() {
                 </tr>
               </thead>
               <tbody>
-                {sessions.map((session) => (
+                {flows.map((flow) => (
                   <tr
-                    key={session.id}
+                    key={flow.id}
                     className={
-                      selectedIds.has(session.id)
-                        ? "sessions-row--selected"
+                      selectedIds.has(flow.id)
+                        ? "flows-row--selected"
                         : ""
                     }
-                    onClick={() => handleRowClick(session)}
+                    onClick={() => handleRowClick(flow)}
                   >
-                    <td className="sessions-select-cell">
+                    <td className="flows-select-cell">
                       <input
                         type="checkbox"
-                        checked={selectedIds.has(session.id)}
-                        onClick={(e) => toggleSelect(session.id, e)}
+                        checked={selectedIds.has(flow.id)}
+                        onClick={(e) => toggleSelect(flow.id, e)}
                         readOnly
                       />
                     </td>
-                    <td className="sessions-cell-id">{shortId(session.id)}</td>
+                    <td className="flows-cell-id">{shortId(flow.id)}</td>
                     <td>
-                      <Badge variant={protocolVariant(session.protocol)}>
-                        {session.protocol}
+                      <Badge variant={protocolVariant(flow.protocol)}>
+                        {flow.protocol}
                       </Badge>
                     </td>
                     <td>
-                      <Badge variant={stateVariant(session.state)}>
-                        {session.state}
+                      <Badge variant={stateVariant(flow.state)}>
+                        {flow.state}
                       </Badge>
                     </td>
-                    <td className="sessions-cell-method">{session.method}</td>
-                    <td className="sessions-cell-url" title={session.url}>
-                      {session.url}
+                    <td className="flows-cell-method">{flow.method}</td>
+                    <td className="flows-cell-url" title={flow.url}>
+                      {flow.url}
                     </td>
                     <td>
-                      {session.status_code > 0 ? (
-                        <span className={statusCodeClass(session.status_code)}>
-                          {session.status_code}
+                      {flow.status_code > 0 ? (
+                        <span className={statusCodeClass(flow.status_code)}>
+                          {flow.status_code}
                         </span>
                       ) : (
                         <span className="status-code--other">--</span>
                       )}
                     </td>
-                    <td className="sessions-cell-size">
-                      {formatMessageCount(session.message_count)}
+                    <td className="flows-cell-size">
+                      {formatMessageCount(flow.message_count)}
                     </td>
-                    <td className="sessions-cell-duration">
-                      {formatDuration(session.duration_ms)}
+                    <td className="flows-cell-duration">
+                      {formatDuration(flow.duration_ms)}
                     </td>
-                    <td className="sessions-cell-timestamp">
-                      {formatTimestamp(session.timestamp)}
+                    <td className="flows-cell-timestamp">
+                      {formatTimestamp(flow.timestamp)}
                     </td>
                   </tr>
                 ))}
@@ -605,13 +605,13 @@ export function SessionsPage() {
           </div>
 
           {/* Pagination */}
-          <div className="sessions-pagination">
-            <div className="sessions-pagination-info">
+          <div className="flows-pagination">
+            <div className="flows-pagination-info">
               Showing {offset + 1}--{Math.min(offset + pageSize, total)} of{" "}
               {total}
             </div>
-            <div className="sessions-pagination-controls">
-              <div className="sessions-page-size">
+            <div className="flows-pagination-controls">
+              <div className="flows-page-size">
                 <span>Rows:</span>
                 <select value={pageSize} onChange={handlePageSizeChange}>
                   {PAGE_SIZES.map((s) => (
@@ -629,7 +629,7 @@ export function SessionsPage() {
               >
                 Prev
               </Button>
-              <span className="sessions-pagination-info">
+              <span className="flows-pagination-info">
                 {currentPage} / {totalPages}
               </span>
               <Button

@@ -9,7 +9,7 @@
  */
 
 import { useState, useMemo } from "react";
-import "./SessionDetailPage.css";
+import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
 // Types

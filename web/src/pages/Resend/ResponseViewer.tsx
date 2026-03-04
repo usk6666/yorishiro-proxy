@@ -13,14 +13,14 @@ const RESPONSE_TABS = [
 
 export interface ResponseViewerProps {
   response: ResendResult;
-  originalSession: FlowDetailResult;
+  originalFlow: FlowDetailResult;
 }
 
 /**
  * Displays the response from a resend operation,
  * including body, headers, and a diff with the original response.
  */
-export function ResponseViewer({ response, originalSession }: ResponseViewerProps) {
+export function ResponseViewer({ response, originalFlow }: ResponseViewerProps) {
   const [activeTab, setActiveTab] = useState("body");
 
   return (
@@ -63,8 +63,8 @@ export function ResponseViewer({ response, originalSession }: ResponseViewerProp
         )}
         {activeTab === "diff" && (
           <DiffView
-            originalBody={originalSession.response_body}
-            originalStatus={originalSession.response_status_code}
+            originalBody={originalFlow.response_body}
+            originalStatus={originalFlow.response_status_code}
             newBody={response.response_body}
             newStatus={response.response_status_code}
           />

@@ -11,7 +11,7 @@ import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { BodyViewer } from "./BodyViewer.js";
-import "./SessionDetailPage.css";
+import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
 // Types

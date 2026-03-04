@@ -3,18 +3,18 @@
   margin-bottom: var(--space-lg);
 }
 
-/* Session selector */
-.resend-session-selector {
+/* Flow selector */
+.resend-flow-selector {
   margin-bottom: var(--space-lg);
 }
 
-.resend-session-input-row {
+.resend-flow-input-row {
   display: flex;
   gap: var(--space-sm);
   align-items: flex-end;
 }
 
-.resend-session-input-row .input-wrapper {
+.resend-flow-input-row .input-wrapper {
   flex: 1;
   max-width: 480px;
 }
