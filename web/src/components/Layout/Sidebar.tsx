@@ -17,7 +17,7 @@ const NAV_ITEMS: NavItem[] = [
     to: "/",
     label: "Flows",
     end: true,
-    icon: <SessionsIcon />,
+    icon: <FlowsIcon />,
   },
   {
     to: "/dashboard",
@@ -38,6 +38,11 @@ const NAV_ITEMS: NavItem[] = [
     to: "/fuzz",
     label: "Fuzz",
     icon: <FuzzIcon />,
+  },
+  {
+    to: "/macros",
+    label: "Macros",
+    icon: <MacroIcon />,
   },
   {
     to: "/security",
@@ -93,7 +98,7 @@ function DashboardIcon() {
   );
 }
 
-function SessionsIcon() {
+function FlowsIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="2" width="12" height="12" rx="2" />
@@ -125,6 +130,15 @@ function FuzzIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M2 13L5 4L8 10L11 6L14 13" />
+    </svg>
+  );
+}
+
+function MacroIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="2 4 6 8 2 12" />
+      <line x1="8" y1="12" x2="14" y2="12" />
     </svg>
   );
 }

@@ -106,7 +106,7 @@ export function FuzzResultsPage() {
   const [selectedResult, setSelectedResult] = useState<FuzzResultEntry | null>(
     null,
   );
-  const [detailSession, setDetailSession] = useState<FlowDetailResult | null>(
+  const [detailFlow, setDetailFlow] = useState<FlowDetailResult | null>(
     null,
   );
   const [detailLoading, setDetailLoading] = useState(false);
@@ -234,23 +234,23 @@ export function FuzzResultsPage() {
     async (result: FuzzResultEntry) => {
       setSelectedResult(result);
       if (!result.flow_id) {
-        setDetailSession(null);
+        setDetailFlow(null);
         return;
       }
 
       setDetailLoading(true);
       try {
         if (!client || mcpStatus !== "connected") {
-          setDetailSession(null);
+          setDetailFlow(null);
           return;
         }
-        const session = await client.query({
+        const flowDetail = await client.query({
           resource: "flow",
           id: result.flow_id,
         });
-        setDetailSession(session as FlowDetailResult);
+        setDetailFlow(flowDetail as FlowDetailResult);
       } catch {
-        setDetailSession(null);
+        setDetailFlow(null);
       } finally {
         setDetailLoading(false);
       }
@@ -641,7 +641,7 @@ export function FuzzResultsPage() {
                 </div>
               )}
 
-              {detailSession && !detailLoading && (
+              {detailFlow && !detailLoading && (
                 <>
                   {/* Response headers */}
                   <div className="fuzz-results-detail-section">
@@ -649,7 +649,7 @@ export function FuzzResultsPage() {
                       Response Headers
                     </h4>
                     <div className="fuzz-results-detail-headers">
-                      {Object.entries(detailSession.response_headers ?? {}).map(
+                      {Object.entries(detailFlow.response_headers ?? {}).map(
                         ([name, values]) => (
                           <div
                             key={name}
@@ -671,7 +671,7 @@ export function FuzzResultsPage() {
                       Response Body
                     </h4>
                     <pre className="fuzz-results-detail-body">
-                      {detailSession.response_body || "(empty)"}
+                      {detailFlow.response_body || "(empty)"}
                     </pre>
                   </div>
                 </>
