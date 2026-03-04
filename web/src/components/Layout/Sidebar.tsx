@@ -40,6 +40,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: <FuzzIcon />,
   },
   {
+    to: "/security",
+    label: "Security",
+    icon: <SecurityIcon />,
+  },
+  {
     to: "/settings",
     label: "Settings",
     icon: <SettingsIcon />,
@@ -120,6 +125,14 @@ function FuzzIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M2 13L5 4L8 10L11 6L14 13" />
+    </svg>
+  );
+}
+
+function SecurityIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 1.5L2.5 4v4c0 3.5 2.5 5.5 5.5 7 3-1.5 5.5-3.5 5.5-7V4L8 1.5z" />
     </svg>
   );
 }

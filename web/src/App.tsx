@@ -8,6 +8,7 @@ import { ResendPage } from "./pages/Resend/ResendPage.js";
 import { FuzzPage } from "./pages/Fuzz/FuzzPage.js";
 import { FuzzResultsPage } from "./pages/Fuzz/FuzzResultsPage.js";
 import { SettingsPage } from "./pages/Settings/SettingsPage.js";
+import { SecurityPage } from "./pages/Security/SecurityPage.js";
 
 function App() {
   return (
@@ -21,6 +22,7 @@ function App() {
         <Route path="resend/:sessionId" element={<ResendPage />} />
         <Route path="fuzz" element={<FuzzPage />} />
         <Route path="fuzz/:fuzzId" element={<FuzzResultsPage />} />
+        <Route path="security" element={<SecurityPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>
