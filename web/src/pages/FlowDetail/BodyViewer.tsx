@@ -1,14 +1,18 @@
 /**
- * BodyViewer — Displays request/response body with Raw/Pretty/Hex modes.
+ * BodyViewer -- Displays request/response body with Raw/Pretty/Hex modes.
  *
  * Content-Type detection for pretty-printing:
  * - JSON: formatted with indentation
- * - HTML/XML: displayed as-is in monospace (no dangerouslySetInnerHTML)
+ * - HTML/XML: displayed as-is with syntax highlighting
  * - Binary (base64): hex dump display
  * - Images: inline preview for image/* content types
+ *
+ * Text modes (raw / pretty) delegate rendering to CodeViewer for
+ * syntax highlighting, line numbers, copy, and word-wrap support.
  */
 
 import { useState, useMemo } from "react";
+import { CodeViewer } from "../../components/ui/CodeViewer.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -149,7 +153,7 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
 
   const [viewMode, setViewMode] = useState<ViewMode>(defaultMode);
 
-  // Formatted content
+  // Formatted content for text modes
   const displayContent = useMemo<string>(() => {
     if (!body) return "";
 
@@ -157,7 +161,6 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
       if (isBinary) {
         return hexDump(body);
       }
-      // For text content, encode to base64 first then hex dump
       const encoded = btoa(
         Array.from(new TextEncoder().encode(body))
           .map((b) => String.fromCharCode(b))
@@ -171,7 +174,6 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
         const pretty = tryPrettyJson(body);
         if (pretty) return pretty;
       }
-      // For HTML/XML, return as-is (displayed in monospace <pre>)
       return body;
     }
 
@@ -182,6 +184,9 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
 
     return body;
   }, [body, viewMode, isBinary, contentType]);
+
+  // Whether to use CodeViewer (text-based modes, not hex or preview)
+  const useCodeViewer = viewMode === "raw" || viewMode === "pretty";
 
   if (!body) {
     return <div className="sd-empty-section">Empty body</div>;
@@ -225,9 +230,17 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
         </div>
       )}
 
-      {/* Text content */}
-      {viewMode !== "preview" && (
-        <pre className={`sd-body-content ${viewMode === "hex" ? "sd-body-content--hex" : ""}`}>
+      {/* Syntax-highlighted text content (raw / pretty modes) */}
+      {useCodeViewer && (
+        <CodeViewer
+          code={displayContent}
+          contentType={contentType}
+        />
+      )}
+
+      {/* Hex dump (not highlighted, uses existing monospace style) */}
+      {viewMode === "hex" && (
+        <pre className="sd-body-content sd-body-content--hex">
           {displayContent}
         </pre>
       )}
