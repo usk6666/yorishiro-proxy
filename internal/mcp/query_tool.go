@@ -445,7 +445,12 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		}
 		preview := make([]queryMessageEntry, 0, previewLimit)
 		for _, msg := range msgs[:previewLimit] {
-			bodyStr, bodyEnc := encodeBody(msg.Body)
+			// Use Body for text content; fall back to RawBytes for binary protocols.
+			bodyData := msg.Body
+			if len(bodyData) == 0 && len(msg.RawBytes) > 0 {
+				bodyData = msg.RawBytes
+			}
+			bodyStr, bodyEnc := encodeBody(bodyData)
 			var msgURLStr string
 			if msg.URL != nil {
 				msgURLStr = msg.URL.String()
@@ -559,7 +564,13 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 
 	entries := make([]queryMessageEntry, 0, len(pageMsgs))
 	for _, msg := range pageMsgs {
-		bodyStr, bodyEnc := encodeBody(msg.Body)
+		// Use Body for text content; fall back to RawBytes for binary protocols
+		// (e.g. WebSocket binary/control frames store payload in RawBytes).
+		bodyData := msg.Body
+		if len(bodyData) == 0 && len(msg.RawBytes) > 0 {
+			bodyData = msg.RawBytes
+		}
+		bodyStr, bodyEnc := encodeBody(bodyData)
 
 		var urlStr string
 		if msg.URL != nil {

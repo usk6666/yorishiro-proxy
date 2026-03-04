@@ -542,3 +542,147 @@
   align-items: center;
   gap: var(--space-sm);
 }
+
+/* --- WebSocket Message List --- */
+
+.sd-ws-messages {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.sd-ws-message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-sm);
+}
+
+.sd-ws-msg-row {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  border-left: 3px solid transparent;
+}
+
+.sd-ws-msg-row:hover {
+  background-color: var(--bg-tertiary);
+}
+
+.sd-ws-msg-row--send {
+  border-left-color: var(--accent-success);
+}
+
+.sd-ws-msg-row--recv {
+  border-left-color: var(--accent-info);
+}
+
+.sd-ws-msg-row--control {
+  opacity: 0.75;
+}
+
+.sd-ws-msg-row--control:hover {
+  opacity: 1;
+}
+
+.sd-ws-msg-row--selected {
+  background-color: var(--sidebar-active);
+}
+
+.sd-ws-msg-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: 2px;
+}
+
+.sd-ws-msg-seq {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  min-width: 28px;
+}
+
+.sd-ws-msg-direction {
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  width: 16px;
+  text-align: center;
+}
+
+.sd-ws-msg-direction--send {
+  color: var(--accent-success);
+}
+
+.sd-ws-msg-direction--recv {
+  color: var(--accent-info);
+}
+
+.sd-ws-msg-size {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.sd-ws-msg-time {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.sd-ws-msg-preview {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: calc(28px + var(--space-sm));
+}
+
+/* --- WebSocket Message Detail --- */
+
+.sd-ws-detail {
+  margin-top: var(--space-md);
+}
+
+.sd-ws-detail-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.sd-ws-detail-size {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.sd-ws-close-info {
+  display: flex;
+  gap: var(--space-lg);
+  margin-bottom: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  background-color: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.2);
+  border-radius: var(--radius-sm);
+  flex-wrap: wrap;
+}
+
+.sd-ws-body-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.sd-ws-body-controls {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}

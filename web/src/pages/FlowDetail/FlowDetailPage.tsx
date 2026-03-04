@@ -14,6 +14,7 @@ import { Tabs } from "../../components/ui/Tabs.js";
 import { HeadersTable } from "./HeadersTable.js";
 import { BodyViewer } from "./BodyViewer.js";
 import { MessageList } from "./MessageList.js";
+import { WebSocketMessageList } from "./WebSocketMessageList.js";
 import { generateCurl } from "../../lib/export/curl.js";
 import { buildHar, downloadHar } from "../../lib/export/har.js";
 import "./FlowDetailPage.css";
@@ -451,15 +452,26 @@ export function FlowDetailPage() {
       {streaming && (
         <div className="sd-section">
           <h2 className="sd-section-title">Messages</h2>
-          <MessageList
-            messages={messages}
-            total={totalMessages}
-            offset={messagesOffset}
-            limit={messagesLimit}
-            loading={messagesLoading}
-            onPageChange={handleMessagesPageChange}
-            protocol={flowData.protocol}
-          />
+          {flowData.protocol === "WebSocket" ? (
+            <WebSocketMessageList
+              messages={messages}
+              total={totalMessages}
+              offset={messagesOffset}
+              limit={messagesLimit}
+              loading={messagesLoading}
+              onPageChange={handleMessagesPageChange}
+            />
+          ) : (
+            <MessageList
+              messages={messages}
+              total={totalMessages}
+              offset={messagesOffset}
+              limit={messagesLimit}
+              loading={messagesLoading}
+              onPageChange={handleMessagesPageChange}
+              protocol={flowData.protocol}
+            />
+          )}
         </div>
       )}
 
