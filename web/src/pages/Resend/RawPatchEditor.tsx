@@ -1,6 +1,6 @@
 import { useCallback } from "react";
-import type { RawPatch } from "../../lib/mcp/types.js";
 import { Button } from "../../components/ui/Button.js";
+import type { RawPatch } from "../../lib/mcp/types.js";
 import "./RawPatchEditor.css";
 
 export interface RawPatchEditorProps {

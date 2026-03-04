@@ -11,7 +11,7 @@
  * syntax highlighting, line numbers, copy, and word-wrap support.
  */
 
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { CodeViewer } from "../../components/ui/CodeViewer.js";
 import "./FlowDetailPage.css";
 

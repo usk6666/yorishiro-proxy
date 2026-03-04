@@ -1,12 +1,12 @@
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useMacro } from "../../lib/mcp/hooks.js";
-import { useToast } from "../../components/ui/Toast.js";
-import type { MacrosEntry, MacroDeleteResult } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
+import { useToast } from "../../components/ui/Toast.js";
+import { useMacro, useQuery } from "../../lib/mcp/hooks.js";
+import type { MacroDeleteResult, MacrosEntry } from "../../lib/mcp/types.js";
 import "./MacrosPage.css";
 
 // ---------------------------------------------------------------------------

@@ -7,12 +7,12 @@
  * configure the proxy, and control proxy listeners.
  */
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMcpContext } from "./context.js";
 import type {
-  ConnectionStatus,
   ConfigureParams,
   ConfigureResult,
+  ConnectionStatus,
   ExecuteParams,
   FuzzToolParams,
   InterceptActionParams,
@@ -22,9 +22,9 @@ import type {
   ProxyStartResult,
   ProxyStopParams,
   ProxyStopResult,
+  QueryFilter,
   QueryResource,
   QueryResultMap,
-  QueryFilter,
   SecurityParams,
 } from "./types.js";
 

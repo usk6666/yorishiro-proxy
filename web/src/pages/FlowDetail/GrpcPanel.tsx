@@ -9,9 +9,9 @@
  * - Protobuf body Base64/Hex display toggle
  */
 
-import { useState, useMemo, useCallback } from "react";
-import type { FlowDetailResult } from "../../lib/mcp/types.js";
+import { useCallback, useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge.js";
+import type { FlowDetailResult } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------

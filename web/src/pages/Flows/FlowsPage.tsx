@@ -1,14 +1,14 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useManage } from "../../lib/mcp/hooks.js";
-import { useToast } from "../../components/ui/Toast.js";
-import { useDialog } from "../../components/ui/Dialog.js";
-import type { QueryFilter, FlowEntry, ManageImportFlowsResult } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
+import { useDialog } from "../../components/ui/Dialog.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
+import { useToast } from "../../components/ui/Toast.js";
+import { useManage, useQuery } from "../../lib/mcp/hooks.js";
+import type { FlowEntry, ManageImportFlowsResult, QueryFilter } from "../../lib/mcp/types.js";
 import "./FlowsPage.css";
 
 // ---------------------------------------------------------------------------
@@ -828,11 +828,10 @@ export function FlowsPage() {
                 <div className="flows-import-result-row">
                   <span className="flows-import-result-label">Errors:</span>
                   <span
-                    className={`flows-import-result-value${
-                      importResult.errors > 0
+                    className={`flows-import-result-value${importResult.errors > 0
                         ? " flows-import-result-value--error"
                         : ""
-                    }`}
+                      }`}
                   >
                     {importResult.errors}
                   </span>

@@ -1,7 +1,7 @@
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
+import { Button, Input, useToast } from "../../components/ui/index.js";
 import { useConfigure } from "../../lib/mcp/hooks.js";
 import type { ConfigResult, TransformRule } from "../../lib/mcp/types.js";
-import { Button, Input, useToast } from "../../components/ui/index.js";
 
 interface AutoTransformRulesProps {
   config: ConfigResult;

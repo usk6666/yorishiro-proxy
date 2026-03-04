@@ -4,12 +4,12 @@
  * Shows direction, sequence, content, and metadata with pagination support.
  */
 
-import { useState, useMemo } from "react";
-import type { MessageEntry } from "../../lib/mcp/types.js";
+import { useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
+import type { MessageEntry } from "../../lib/mcp/types.js";
 import { BodyViewer } from "./BodyViewer.js";
 import "./FlowDetailPage.css";
 

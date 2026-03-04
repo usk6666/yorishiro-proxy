@@ -1,31 +1,31 @@
-import { useState, useCallback, useEffect, useRef } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { useQuery, useManage } from "../../lib/mcp/hooks.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { Badge } from "../../components/ui/Badge.js";
+import { Button } from "../../components/ui/Button.js";
 import { useDialog } from "../../components/ui/Dialog.js";
+import { Spinner } from "../../components/ui/Spinner.js";
+import { Tabs } from "../../components/ui/Tabs.js";
+import { useToast } from "../../components/ui/Toast.js";
+import { generateCurl } from "../../lib/export/curl.js";
+import { buildHar, downloadHar } from "../../lib/export/har.js";
+import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   FlowDetailResult,
   MessageEntry,
 } from "../../lib/mcp/types.js";
-import { Badge } from "../../components/ui/Badge.js";
-import { Button } from "../../components/ui/Button.js";
-import { Spinner } from "../../components/ui/Spinner.js";
-import { Tabs } from "../../components/ui/Tabs.js";
-import { HeadersTable } from "./HeadersTable.js";
 import { BodyViewer } from "./BodyViewer.js";
-import { MessageList } from "./MessageList.js";
-import { WebSocketMessageList } from "./WebSocketMessageList.js";
+import "./FlowDetailPage.css";
 import { GrpcPanel } from "./GrpcPanel.js";
+import { HeadersTable } from "./HeadersTable.js";
 import {
-  Http2Info,
   Http2Badge,
+  Http2Info,
   Http2PseudoHeaders,
   Http2StreamGroups,
   filterRegularHeaders,
 } from "./Http2Info.js";
-import { generateCurl } from "../../lib/export/curl.js";
-import { buildHar, downloadHar } from "../../lib/export/har.js";
-import "./FlowDetailPage.css";
+import { MessageList } from "./MessageList.js";
+import { WebSocketMessageList } from "./WebSocketMessageList.js";
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -218,17 +218,17 @@
     background-color var(--transition-fast);
 }
 
-.settings-toggle input:checked + .settings-toggle-slider {
+.settings-toggle input:checked+.settings-toggle-slider {
   background-color: rgba(88, 166, 255, 0.2);
   border-color: var(--accent-primary);
 }
 
-.settings-toggle input:checked + .settings-toggle-slider::before {
+.settings-toggle input:checked+.settings-toggle-slider::before {
   transform: translateX(16px);
   background-color: var(--accent-primary);
 }
 
-.settings-toggle input:disabled + .settings-toggle-slider {
+.settings-toggle input:disabled+.settings-toggle-slider {
   cursor: not-allowed;
   opacity: 0.5;
 }

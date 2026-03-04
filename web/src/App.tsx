@@ -1,16 +1,16 @@
-import { Routes, Route } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout/index.js";
 import { DashboardPage } from "./pages/Dashboard/DashboardPage.js";
-import { FlowsPage } from "./pages/Flows/FlowsPage.js";
 import { FlowDetailPage } from "./pages/FlowDetail/FlowDetailPage.js";
-import { InterceptPage } from "./pages/Intercept/InterceptPage.js";
-import { ResendPage } from "./pages/Resend/ResendPage.js";
+import { FlowsPage } from "./pages/Flows/FlowsPage.js";
 import { FuzzPage } from "./pages/Fuzz/FuzzPage.js";
 import { FuzzResultsPage } from "./pages/Fuzz/FuzzResultsPage.js";
-import { MacrosPage } from "./pages/Macros/MacrosPage.js";
+import { InterceptPage } from "./pages/Intercept/InterceptPage.js";
 import { MacroDetailPage } from "./pages/Macros/MacroDetailPage.js";
-import { SettingsPage } from "./pages/Settings/SettingsPage.js";
+import { MacrosPage } from "./pages/Macros/MacrosPage.js";
+import { ResendPage } from "./pages/Resend/ResendPage.js";
 import { SecurityPage } from "./pages/Security/SecurityPage.js";
+import { SettingsPage } from "./pages/Settings/SettingsPage.js";
 
 function App() {
   return (

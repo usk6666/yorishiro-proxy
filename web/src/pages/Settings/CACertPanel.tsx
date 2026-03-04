@@ -1,8 +1,8 @@
-import { useState, useCallback } from "react";
-import { useQuery, useManage } from "../../lib/mcp/hooks.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useCallback, useState } from "react";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
+import { useToast } from "../../components/ui/Toast.js";
+import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

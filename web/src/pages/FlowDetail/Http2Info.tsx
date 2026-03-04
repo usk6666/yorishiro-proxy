@@ -9,8 +9,8 @@
  * - Stream grouping for multi-stream message views
  */
 
-import type { FlowDetailResult, MessageEntry } from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
+import type { FlowDetailResult, MessageEntry } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------

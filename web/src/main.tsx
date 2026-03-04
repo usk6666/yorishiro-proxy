@@ -1,10 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
-import { McpProvider } from "./lib/mcp/index.js";
-import { ToastProvider, DialogProvider } from "./components/ui/index.js";
-import { initAuth } from "./lib/auth.js";
 import App from "./App.js";
+import { DialogProvider, ToastProvider } from "./components/ui/index.js";
+import { initAuth } from "./lib/auth.js";
+import { McpProvider } from "./lib/mcp/index.js";
 import "./styles/global.css";
 import "./styles/pages.css";
 

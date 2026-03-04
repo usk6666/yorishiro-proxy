@@ -1,5 +1,5 @@
-import type { ConfigResult } from "../../lib/mcp/types.js";
 import { Spinner } from "../../components/ui/index.js";
+import type { ConfigResult } from "../../lib/mcp/types.js";
 
 interface RulesPanelProps {
   configData: ConfigResult | null;

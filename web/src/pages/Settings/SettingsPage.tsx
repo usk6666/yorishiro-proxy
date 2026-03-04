@@ -1,16 +1,16 @@
-import { useState, useCallback } from "react";
-import { useQuery } from "../../lib/mcp/hooks.js";
+import { useCallback, useState } from "react";
 import { Spinner, Tabs } from "../../components/ui/index.js";
-import { ProxyControl } from "./ProxyControl.js";
-import { ProtocolFilter } from "./ProtocolFilter.js";
-import { CaptureScope } from "./CaptureScope.js";
-import { TlsPassthrough } from "./TlsPassthrough.js";
-import { TcpForwards } from "./TcpForwards.js";
-import { InterceptRules } from "./InterceptRules.js";
+import { useQuery } from "../../lib/mcp/hooks.js";
 import { AutoTransformRules } from "./AutoTransformRules.js";
-import { ConnectionSettings } from "./ConnectionSettings.js";
 import { CACertPanel } from "./CACertPanel.js";
+import { CaptureScope } from "./CaptureScope.js";
+import { ConnectionSettings } from "./ConnectionSettings.js";
+import { InterceptRules } from "./InterceptRules.js";
+import { ProtocolFilter } from "./ProtocolFilter.js";
+import { ProxyControl } from "./ProxyControl.js";
 import "./SettingsPage.css";
+import { TcpForwards } from "./TcpForwards.js";
+import { TlsPassthrough } from "./TlsPassthrough.js";
 
 const TABS = [
   { id: "proxy", label: "Proxy" },

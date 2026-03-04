@@ -12,9 +12,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type {
-  ConnectionStatus,
   ConfigureParams,
   ConfigureResult,
+  ConnectionStatus,
   ExecuteParams,
   FuzzToolParams,
   InterceptActionParams,
@@ -173,10 +173,10 @@ export class McpClient {
       // Extract error message from the MCP tool result.
       const errorText =
         result.content &&
-        Array.isArray(result.content) &&
-        result.content.length > 0 &&
-        typeof result.content[0] === "object" &&
-        "text" in result.content[0]
+          Array.isArray(result.content) &&
+          result.content.length > 0 &&
+          typeof result.content[0] === "object" &&
+          "text" in result.content[0]
           ? (result.content[0] as { text: string }).text
           : "Tool call failed";
       throw new Error(errorText);

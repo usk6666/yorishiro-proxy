@@ -1,8 +1,8 @@
-import { useState, useMemo } from "react";
-import type { FlowDetailResult } from "../../lib/mcp/types.js";
-import type { ResendResult } from "./ResendPage.js";
+import { useMemo, useState } from "react";
 import { CodeViewer } from "../../components/ui/CodeViewer.js";
 import { Tabs } from "../../components/ui/Tabs.js";
+import type { FlowDetailResult } from "../../lib/mcp/types.js";
+import type { ResendResult } from "./ResendPage.js";
 import "./ResponseViewer.css";
 
 /** Tabs for the response viewer. */

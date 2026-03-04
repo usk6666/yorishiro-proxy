@@ -1,12 +1,12 @@
 import { useCallback } from "react";
+import { Badge } from "../../components/ui/Badge.js";
+import { Button } from "../../components/ui/Button.js";
+import { Spinner } from "../../components/ui/Spinner.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
   FlowsResult,
   ListenerStatusEntry,
 } from "../../lib/mcp/types.js";
-import { Badge } from "../../components/ui/Badge.js";
-import { Button } from "../../components/ui/Button.js";
-import { Spinner } from "../../components/ui/Spinner.js";
 import "./DashboardPage.css";
 
 // ---------------------------------------------------------------------------
@@ -186,11 +186,10 @@ export function DashboardPage() {
             <div className="dashboard-status-content">
               <div className="dashboard-status-indicator">
                 <span
-                  className={`dashboard-status-dot ${
-                    statusData.running
+                  className={`dashboard-status-dot ${statusData.running
                       ? "dashboard-status-dot--running"
                       : "dashboard-status-dot--stopped"
-                  }`}
+                    }`}
                 />
                 <span className="dashboard-status-label">
                   {statusData.running ? "Running" : "Stopped"}
@@ -240,9 +239,8 @@ export function DashboardPage() {
         >
           {interceptData && (
             <div className="dashboard-metric">
-              <span className={`dashboard-metric-value ${
-                interceptData.count > 0 ? "dashboard-metric-value--warning" : ""
-              }`}>
+              <span className={`dashboard-metric-value ${interceptData.count > 0 ? "dashboard-metric-value--warning" : ""
+                }`}>
                 {interceptData.count}
               </span>
               <span className="dashboard-metric-label">pending</span>
@@ -256,9 +254,8 @@ export function DashboardPage() {
         >
           {fuzzData && (
             <div className="dashboard-metric">
-              <span className={`dashboard-metric-value ${
-                fuzzData.count > 0 ? "dashboard-metric-value--info" : ""
-              }`}>
+              <span className={`dashboard-metric-value ${fuzzData.count > 0 ? "dashboard-metric-value--info" : ""
+                }`}>
                 {fuzzData.count}
               </span>
               <span className="dashboard-metric-label">active</span>

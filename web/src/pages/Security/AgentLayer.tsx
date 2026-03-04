@@ -1,13 +1,13 @@
-import { useState, useCallback } from "react";
-import { useSecurity } from "../../lib/mcp/hooks.js";
+import { useCallback, useState } from "react";
 import { Button, useToast } from "../../components/ui/index.js";
+import { useSecurity } from "../../lib/mcp/hooks.js";
 import type {
   AgentLayerResult,
-  TargetRule,
   SecuritySetScopeResult,
+  TargetRule,
 } from "../../lib/mcp/types.js";
-import { RuleTable } from "./RuleTable.js";
 import { AddRuleForm } from "./AddRuleForm.js";
+import { RuleTable } from "./RuleTable.js";
 
 interface AgentLayerProps {
   agent: AgentLayerResult;

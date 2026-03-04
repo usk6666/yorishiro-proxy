@@ -1,13 +1,13 @@
-import { useState, useCallback, useEffect } from "react";
-import { useSecurity } from "../../lib/mcp/hooks.js";
-import { useMcpContext } from "../../lib/mcp/context.js";
+import { useCallback, useEffect, useState } from "react";
 import { Spinner } from "../../components/ui/index.js";
-import { PolicyLayer } from "./PolicyLayer.js";
+import { useMcpContext } from "../../lib/mcp/context.js";
+import { useSecurity } from "../../lib/mcp/hooks.js";
+import type { SecurityGetScopeResult } from "../../lib/mcp/types.js";
 import { AgentLayer } from "./AgentLayer.js";
 import { EnforcementMode } from "./EnforcementMode.js";
-import { UrlTestTool } from "./UrlTestTool.js";
-import type { SecurityGetScopeResult } from "../../lib/mcp/types.js";
+import { PolicyLayer } from "./PolicyLayer.js";
 import "./SecurityPage.css";
+import { UrlTestTool } from "./UrlTestTool.js";
 
 /**
  * SecurityPage -- Security Target Scope management page.

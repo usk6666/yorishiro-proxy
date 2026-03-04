@@ -1,21 +1,21 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useFuzz } from "../../lib/mcp/hooks.js";
-import { useToast } from "../../components/ui/Toast.js";
-import type {
-  QueryFilter,
-  FuzzJobEntry,
-  FuzzPosition,
-  FuzzPayloadSet,
-  FuzzStopCondition,
-  MacrosEntry,
-} from "../../lib/mcp/types.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { Tabs } from "../../components/ui/Tabs.js";
+import { useToast } from "../../components/ui/Toast.js";
+import { useFuzz, useQuery } from "../../lib/mcp/hooks.js";
+import type {
+  FuzzJobEntry,
+  FuzzPayloadSet,
+  FuzzPosition,
+  FuzzStopCondition,
+  MacrosEntry,
+  QueryFilter,
+} from "../../lib/mcp/types.js";
 import "./FuzzPage.css";
 
 // ---------------------------------------------------------------------------

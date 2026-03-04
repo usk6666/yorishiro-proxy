@@ -12,12 +12,12 @@
  * Uses highlight.js (BSD-3-Clause) for syntax highlighting.
  */
 
-import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import hljs from "highlight.js/lib/core";
+import css from "highlight.js/lib/languages/css";
+import javascript from "highlight.js/lib/languages/javascript";
 import json from "highlight.js/lib/languages/json";
 import xml from "highlight.js/lib/languages/xml";
-import javascript from "highlight.js/lib/languages/javascript";
-import css from "highlight.js/lib/languages/css";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./CodeViewer.css";
 
 // Register only the languages we need to keep the bundle small.
