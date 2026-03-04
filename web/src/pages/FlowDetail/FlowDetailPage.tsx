@@ -16,6 +16,13 @@ import { BodyViewer } from "./BodyViewer.js";
 import { MessageList } from "./MessageList.js";
 import { WebSocketMessageList } from "./WebSocketMessageList.js";
 import { GrpcPanel } from "./GrpcPanel.js";
+import {
+  Http2Info,
+  Http2Badge,
+  Http2PseudoHeaders,
+  Http2StreamGroups,
+  filterRegularHeaders,
+} from "./Http2Info.js";
 import { generateCurl } from "../../lib/export/curl.js";
 import { buildHar, downloadHar } from "../../lib/export/har.js";
 import "./FlowDetailPage.css";
@@ -29,7 +36,19 @@ const REQUEST_TABS = [
   { id: "body", label: "Body" },
 ];
 
+const REQUEST_TABS_H2 = [
+  { id: "pseudo", label: "Pseudo-Headers" },
+  { id: "headers", label: "Headers" },
+  { id: "body", label: "Body" },
+];
+
 const RESPONSE_TABS = [
+  { id: "headers", label: "Headers" },
+  { id: "body", label: "Body" },
+];
+
+const RESPONSE_TABS_H2 = [
+  { id: "pseudo", label: "Pseudo-Headers" },
   { id: "headers", label: "Headers" },
   { id: "body", label: "Body" },
 ];
@@ -301,6 +320,18 @@ export function FlowDetailPage() {
   const messages: MessageEntry[] = messagesData?.messages ?? flowData.message_preview ?? [];
   const totalMessages = messagesData?.total ?? flowData.message_count;
 
+  const isH2 = flowData.protocol === "HTTP/2";
+  const reqTabs = isH2 ? REQUEST_TABS_H2 : REQUEST_TABS;
+  const resTabs = isH2 ? RESPONSE_TABS_H2 : RESPONSE_TABS;
+
+  // For HTTP/2, separate pseudo-headers from regular headers.
+  const displayReqHeaders = isH2
+    ? filterRegularHeaders(flowData.request_headers)
+    : flowData.request_headers;
+  const displayRespHeaders = isH2
+    ? filterRegularHeaders(flowData.response_headers)
+    : flowData.response_headers;
+
   return (
     <div className="page flow-detail-page">
       {/* Back navigation */}
@@ -356,6 +387,9 @@ export function FlowDetailPage() {
             <Badge variant={protocolVariant(flowData.protocol)}>
               {flowData.protocol}
             </Badge>
+            {flowData.protocol === "HTTP/2" && (
+              <Http2Badge flow={flowData} />
+            )}
           </div>
           {flowData.response_status_code > 0 && (
             <div className="sd-meta-item">
@@ -423,6 +457,11 @@ export function FlowDetailPage() {
             </div>
           )}
 
+        {/* HTTP/2 specific info */}
+        {flowData.protocol === "HTTP/2" && (
+          <Http2Info flow={flowData} />
+        )}
+
         {/* Connection info */}
         {flowData.conn_info && (
           <div className="sd-conn-info">
@@ -450,6 +489,14 @@ export function FlowDetailPage() {
                 </span>
               </div>
             )}
+            {flowData.conn_info.tls_alpn && (
+              <div className="sd-meta-item">
+                <span className="sd-meta-label">ALPN</span>
+                <span className="sd-meta-value">
+                  {flowData.conn_info.tls_alpn}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -457,6 +504,11 @@ export function FlowDetailPage() {
       {/* gRPC structured details panel */}
       {isGrpcFlow(flowData) && (
         <GrpcPanel flow={flowData} />
+      {/* HTTP/2 Stream Grouping (for multi-stream message previews) */}
+      {flowData.protocol === "HTTP/2" && messages.length > 0 && (
+        <div className="sd-section">
+          <Http2StreamGroups messages={messages} />
+        </div>
       )}
 
       {/* Streaming flow: Messages list */}
@@ -498,12 +550,24 @@ export function FlowDetailPage() {
                 <Badge variant="default">original</Badge>
               </div>
               <Tabs
-                tabs={REQUEST_TABS}
+                tabs={reqTabs}
                 activeTab={requestTab}
                 onTabChange={setRequestTab}
               >
+                {requestTab === "pseudo" && isH2 && (
+                  <Http2PseudoHeaders
+                    headers={flowData.original_request.headers}
+                    type="request"
+                  />
+                )}
                 {requestTab === "headers" && (
-                  <HeadersTable headers={flowData.original_request.headers} />
+                  <HeadersTable
+                    headers={
+                      isH2
+                        ? filterRegularHeaders(flowData.original_request.headers)
+                        : flowData.original_request.headers
+                    }
+                  />
                 )}
                 {requestTab === "body" && (
                   <BodyViewer
@@ -523,12 +587,18 @@ export function FlowDetailPage() {
                 <Badge variant="warning">modified</Badge>
               </div>
               <Tabs
-                tabs={REQUEST_TABS}
+                tabs={reqTabs}
                 activeTab={requestTab}
                 onTabChange={setRequestTab}
               >
+                {requestTab === "pseudo" && isH2 && (
+                  <Http2PseudoHeaders
+                    headers={flowData.request_headers}
+                    type="request"
+                  />
+                )}
                 {requestTab === "headers" && (
-                  <HeadersTable headers={flowData.request_headers} />
+                  <HeadersTable headers={displayReqHeaders} />
                 )}
                 {requestTab === "body" && (
                   <BodyViewer
@@ -553,12 +623,18 @@ export function FlowDetailPage() {
               <span className="sd-panel-title">Request</span>
             </div>
             <Tabs
-              tabs={REQUEST_TABS}
+              tabs={reqTabs}
               activeTab={requestTab}
               onTabChange={setRequestTab}
             >
+              {requestTab === "pseudo" && isH2 && (
+                <Http2PseudoHeaders
+                  headers={flowData.request_headers}
+                  type="request"
+                />
+              )}
               {requestTab === "headers" && (
-                <HeadersTable headers={flowData.request_headers} />
+                <HeadersTable headers={displayReqHeaders} />
               )}
               {requestTab === "body" && (
                 <BodyViewer
@@ -597,12 +673,18 @@ export function FlowDetailPage() {
           </div>
           {hasResponse(flowData) ? (
             <Tabs
-              tabs={RESPONSE_TABS}
+              tabs={resTabs}
               activeTab={responseTab}
               onTabChange={setResponseTab}
             >
+              {responseTab === "pseudo" && isH2 && (
+                <Http2PseudoHeaders
+                  headers={flowData.response_headers}
+                  type="response"
+                />
+              )}
               {responseTab === "headers" && (
-                <HeadersTable headers={flowData.response_headers} />
+                <HeadersTable headers={displayRespHeaders} />
               )}
               {responseTab === "body" && (
                 <BodyViewer
