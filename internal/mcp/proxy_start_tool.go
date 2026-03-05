@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -330,6 +331,11 @@ func validateTCPForwards(forwards map[string]string) error {
 		if port == "" {
 			return fmt.Errorf("port key cannot be empty")
 		}
+		// Validate port key is a valid port number (0-65535).
+		// Port 0 is allowed as it means OS-assigned ephemeral port.
+		if err := validatePortNumber(port, true); err != nil {
+			return fmt.Errorf("invalid port key %q: %w", port, err)
+		}
 		if target == "" {
 			return fmt.Errorf("target for port %q cannot be empty", port)
 		}
@@ -344,6 +350,28 @@ func validateTCPForwards(forwards map[string]string) error {
 		if p == "" {
 			return fmt.Errorf("invalid target %q for port %q: port cannot be empty", target, port)
 		}
+		// Validate target port is a valid port number (1-65535).
+		if err := validatePortNumber(p, false); err != nil {
+			return fmt.Errorf("invalid target %q for port %q: %w", target, port, err)
+		}
+	}
+	return nil
+}
+
+// validatePortNumber checks that s is a valid TCP port number.
+// If allowZero is true, the range is 0-65535 (for listen ports where 0 means
+// OS-assigned ephemeral port). Otherwise the range is 1-65535.
+func validatePortNumber(s string, allowZero bool) error {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("port must be a number, got %q", s)
+	}
+	minPort := 1
+	if allowZero {
+		minPort = 0
+	}
+	if n < minPort || n > 65535 {
+		return fmt.Errorf("port must be between %d and 65535, got %d", minPort, n)
 	}
 	return nil
 }
