@@ -17,6 +17,9 @@ const (
 	MaxSteps = 50
 	// DefaultRetryCount is the default number of retries for retry on_error policy.
 	DefaultRetryCount = 3
+	// MaxRetryCount is the maximum allowed retry count per step to prevent
+	// excessive request volume (CWE-770).
+	MaxRetryCount = 10
 	// DefaultRetryDelayMs is the default delay between retries in milliseconds.
 	DefaultRetryDelayMs = 1000
 
