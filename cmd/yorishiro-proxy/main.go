@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -357,7 +358,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 			return mcp.BearerAuthMiddleware(next, token)
 		}))
 		logger.Info("WebUI available",
-			"url", fmt.Sprintf("http://%s/?token=%s", cfg.MCPHTTPAddr, token))
+			"url", fmt.Sprintf("http://%s/?token=%s", cfg.MCPHTTPAddr, url.QueryEscape(token)))
 	}
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
@@ -386,7 +387,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		if !cfg.NoOpenBrowser {
 			capturedToken := webUIToken
 			onListening = func(addr string) {
-				url := fmt.Sprintf("http://%s/?token=%s", addr, capturedToken)
+				url := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
 				if err := openBrowser(url); err != nil {
 					logger.Warn("failed to open browser", "url", url, "error", err)
 				}
