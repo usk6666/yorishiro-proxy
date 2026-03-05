@@ -45,11 +45,11 @@ playwright-cli を使って対象アプリケーションの操作を行う。
 
 **重要**: 後で Macro のステップとして参照するため、各操作を意識的に分けて行う。
 
-## Step 3: キャプチャされたセッション確認
+## Step 3: キャプチャされたフロー確認
 
 ```json
 // query
-{"resource": "sessions", "limit": 50}
+{"resource": "flows", "limit": 50}
 ```
 
 特定の URL パターンでフィルタする:
@@ -57,19 +57,19 @@ playwright-cli を使って対象アプリケーションの操作を行う。
 ```json
 // query
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"url_pattern": "/api/", "method": "POST"},
   "limit": 50
 }
 ```
 
-## Step 4: セッション詳細の確認
+## Step 4: フロー詳細の確認
 
-各セッションの詳細を確認し、Macro で使うセッション ID を特定する。
+各フローの詳細を確認し、Macro で使うフロー ID を特定する。
 
 ```json
 // query
-{"resource": "session", "id": "<session-id>"}
+{"resource": "flow", "id": "<flow-id>"}
 ```
 
 レスポンスから以下を確認する:
@@ -78,20 +78,20 @@ playwright-cli を使って対象アプリケーションの操作を行う。
 - セッションクッキーの名前
 - レスポンスの JSON 構造 (抽出ルール設計のため)
 
-## Step 5: セッション ID のマッピング
+## Step 5: フロー ID のマッピング
 
-キャプチャしたセッションを用途別に整理する:
+キャプチャしたフローを用途別に整理する:
 
 ```
-login-session:          <session-id-1>  -- ログインリクエスト
-csrf-page-session:      <session-id-2>  -- CSRF トークン取得ページ
-target-api-session:     <session-id-3>  -- テスト対象 API
-create-item-session:    <session-id-4>  -- テスト用リソース作成
-delete-item-session:    <session-id-5>  -- テスト用リソース削除
-logout-session:         <session-id-6>  -- ログアウト
+login-flow:          <flow-id-1>  -- ログインリクエスト
+csrf-page-flow:      <flow-id-2>  -- CSRF トークン取得ページ
+target-api-flow:     <flow-id-3>  -- テスト対象 API
+create-item-flow:    <flow-id-4>  -- テスト用リソース作成
+delete-item-flow:    <flow-id-5>  -- テスト用リソース削除
+logout-flow:         <flow-id-6>  -- ログアウト
 ```
 
-これらのセッション ID を Macro 定義 (`define_macro`) の各ステップで `session_id` として参照する。
+これらのフロー ID を Macro 定義 (`define_macro`) の各ステップで `flow_id` として参照する。
 
 ## 実行中のスコープ変更
 
@@ -108,6 +108,6 @@ logout-session:         <session-id-6>  -- ログアウト
 
 ## Tips
 
-- キャプチャ中に不要なセッションが増えたら、スコープを絞る
-- セッション一覧が多い場合は `filter` と `limit` を活用する
-- WebSocket セッションは `protocol` フィルタで確認: `{"filter": {"protocol": "WebSocket"}}`
+- キャプチャ中に不要なフローが増えたら、スコープを絞る
+- フロー一覧が多い場合は `filter` と `limit` を活用する
+- WebSocket フローは `protocol` フィルタで確認: `{"filter": {"protocol": "WebSocket"}}`

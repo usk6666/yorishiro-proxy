@@ -241,11 +241,11 @@ Authorization ヘッダを操作する:
 低権限ユーザーのトークンで管理者 API にアクセスする:
 
 ```json
-// execute (resend)
+// resend
 {
   "action": "resend",
   "params": {
-    "session_id": "<admin-api-session-id>",
+    "flow_id": "<admin-api-flow-id>",
     "override_headers": {
       "Authorization": "Bearer <low-privilege-user-token>"
     },
