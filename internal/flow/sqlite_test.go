@@ -1164,3 +1164,205 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 		t.Errorf("schema version = %d, want 4", version)
 	}
 }
+
+func TestGetFlow_PrefixMatch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a flow with a known ID.
+	fl := &Flow{
+		ID:        "abcdef12-3456-7890-abcd-ef1234567890",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		id      string
+		wantID  string
+		wantErr string
+	}{
+		{
+			name:   "full UUID exact match",
+			id:     "abcdef12-3456-7890-abcd-ef1234567890",
+			wantID: "abcdef12-3456-7890-abcd-ef1234567890",
+		},
+		{
+			name:   "8-char prefix match",
+			id:     "abcdef12",
+			wantID: "abcdef12-3456-7890-abcd-ef1234567890",
+		},
+		{
+			name:    "8-char prefix no match",
+			id:      "xxxxxxxx",
+			wantErr: "flow not found",
+		},
+		{
+			name:    "full UUID no match",
+			id:      "00000000-0000-0000-0000-000000000000",
+			wantErr: "flow not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := store.GetFlow(ctx, tt.id)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("GetFlow() error = nil, wantErr %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("GetFlow() error = %q, want containing %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetFlow() unexpected error: %v", err)
+			}
+			if got.ID != tt.wantID {
+				t.Errorf("GetFlow() ID = %q, want %q", got.ID, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestValidateFlowID(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{name: "full UUID (36 chars)", id: "abcdef12-3456-7890-abcd-ef1234567890", wantErr: false},
+		{name: "8-char prefix", id: "abcdef12", wantErr: false},
+		{name: "empty string", id: "", wantErr: true},
+		{name: "1 char", id: "a", wantErr: true},
+		{name: "7 chars", id: "abcdef1", wantErr: true},
+		{name: "9 chars", id: "abcdef12-", wantErr: true},
+		{name: "20 chars", id: "abcdef12-3456-7890-a", wantErr: true},
+		{name: "35 chars", id: "abcdef12-3456-7890-abcd-ef123456789", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateFlowID(tt.id)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateFlowID(%q) error = %v, wantErr %v", tt.id, err, tt.wantErr)
+			}
+			if tt.wantErr && err != nil {
+				if !strings.Contains(err.Error(), "invalid flow ID") {
+					t.Errorf("ValidateFlowID(%q) error = %q, want containing 'invalid flow ID'", tt.id, err.Error())
+				}
+			}
+		})
+	}
+}
+
+func TestGetFlow_PrefixMatch_Ambiguous(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create two flows that share the same 8-char prefix.
+	fl1 := &Flow{
+		ID:        "abcdef12-1111-1111-1111-111111111111",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+	}
+	fl2 := &Flow{
+		ID:        "abcdef12-2222-2222-2222-222222222222",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, fl1); err != nil {
+		t.Fatalf("SaveFlow fl1: %v", err)
+	}
+	if err := store.SaveFlow(ctx, fl2); err != nil {
+		t.Fatalf("SaveFlow fl2: %v", err)
+	}
+
+	// 8-char prefix should be ambiguous.
+	_, err := store.GetFlow(ctx, "abcdef12")
+	if err == nil {
+		t.Fatal("GetFlow() expected ambiguous error, got nil")
+	}
+	if !strings.Contains(err.Error(), "ambiguous flow ID prefix") {
+		t.Errorf("GetFlow() error = %q, want containing 'ambiguous flow ID prefix'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "matched 2 flows") {
+		t.Errorf("GetFlow() error = %q, want containing 'matched 2 flows'", err.Error())
+	}
+
+	// Full UUID should still work for each flow.
+	got1, err := store.GetFlow(ctx, fl1.ID)
+	if err != nil {
+		t.Fatalf("GetFlow(fl1 full ID): %v", err)
+	}
+	if got1.ID != fl1.ID {
+		t.Errorf("GetFlow(fl1) ID = %q, want %q", got1.ID, fl1.ID)
+	}
+
+	got2, err := store.GetFlow(ctx, fl2.ID)
+	if err != nil {
+		t.Fatalf("GetFlow(fl2 full ID): %v", err)
+	}
+	if got2.ID != fl2.ID {
+		t.Errorf("GetFlow(fl2) ID = %q, want %q", got2.ID, fl2.ID)
+	}
+}
+
+func TestGetFlow_PrefixMatch_UniqueAfterAmbiguity(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Two flows with different 8-char prefixes.
+	fl1 := &Flow{
+		ID:        "aaaaaaaa-1111-1111-1111-111111111111",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+	}
+	fl2 := &Flow{
+		ID:        "bbbbbbbb-2222-2222-2222-222222222222",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, fl1); err != nil {
+		t.Fatalf("SaveFlow fl1: %v", err)
+	}
+	if err := store.SaveFlow(ctx, fl2); err != nil {
+		t.Fatalf("SaveFlow fl2: %v", err)
+	}
+
+	// Each 8-char prefix should uniquely resolve.
+	got1, err := store.GetFlow(ctx, "aaaaaaaa")
+	if err != nil {
+		t.Fatalf("GetFlow(aaaaaaaa): %v", err)
+	}
+	if got1.ID != fl1.ID {
+		t.Errorf("GetFlow(aaaaaaaa) ID = %q, want %q", got1.ID, fl1.ID)
+	}
+
+	got2, err := store.GetFlow(ctx, "bbbbbbbb")
+	if err != nil {
+		t.Fatalf("GetFlow(bbbbbbbb): %v", err)
+	}
+	if got2.ID != fl2.ID {
+		t.Errorf("GetFlow(bbbbbbbb) ID = %q, want %q", got2.ID, fl2.ID)
+	}
+}

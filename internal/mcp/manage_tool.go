@@ -132,10 +132,11 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 	}
 
 	if params.FlowID != "" {
-		if _, err := s.deps.store.GetFlow(ctx, params.FlowID); err != nil {
+		fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
+		if err != nil {
 			return nil, nil, fmt.Errorf("flow not found: %s", params.FlowID)
 		}
-		if err := s.deps.store.DeleteFlow(ctx, params.FlowID); err != nil {
+		if err := s.deps.store.DeleteFlow(ctx, fl.ID); err != nil {
 			return nil, nil, fmt.Errorf("delete flow: %w", err)
 		}
 		return nil, &executeDeleteFlowsResult{DeletedCount: 1}, nil

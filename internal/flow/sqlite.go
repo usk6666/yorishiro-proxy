@@ -236,11 +236,74 @@ func (s *SQLiteStore) UpdateFlow(ctx context.Context, id string, update FlowUpda
 	})
 }
 
-// GetFlow retrieves a flow by ID.
+// GetFlow retrieves a flow by ID. It accepts either a full UUID (36 chars)
+// or an 8-character prefix. For prefix lookups, the ID must match exactly
+// one flow; ambiguous prefixes return an error.
 func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
+	// Try exact match first.
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+flowColumns+` FROM flows WHERE id = ?`, id)
-	return scanFlow(row)
+	fl, err := scanFlow(row)
+	if err == nil {
+		return fl, nil
+	}
+
+	// If the input is exactly 8 characters and exact match failed,
+	// attempt prefix resolution.
+	if len(id) == 8 {
+		resolved, resolveErr := s.resolvePrefix(ctx, id)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		row = s.db.QueryRowContext(ctx,
+			`SELECT `+flowColumns+` FROM flows WHERE id = ?`, resolved)
+		return scanFlow(row)
+	}
+
+	return nil, err
+}
+
+// resolvePrefix searches for flows matching the given 8-character ID prefix.
+// Returns the full ID if exactly one flow matches, or an error otherwise.
+func (s *SQLiteStore) resolvePrefix(ctx context.Context, prefix string) (string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM flows WHERE id LIKE ? LIMIT 2`, prefix+"%")
+	if err != nil {
+		return "", fmt.Errorf("resolve flow ID prefix: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []string
+	for rows.Next() {
+		var matchID string
+		if err := rows.Scan(&matchID); err != nil {
+			return "", fmt.Errorf("scan flow ID: %w", err)
+		}
+		matches = append(matches, matchID)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("resolve flow ID prefix: %w", err)
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("flow not found")
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("ambiguous flow ID prefix %q: matched %d flows", prefix, len(matches))
+	}
+}
+
+// ValidateFlowID checks that the given ID is a valid flow ID format:
+// either a full UUID (36 chars) or an 8-character prefix.
+// Returns an error for lengths 1-7 and 9-35.
+func ValidateFlowID(id string) error {
+	n := len(id)
+	if n == 36 || n == 8 {
+		return nil
+	}
+	return fmt.Errorf("invalid flow ID: must be full UUID (36 chars) or 8-char prefix")
 }
 
 // flowColumns is the list of columns selected in flow queries.
