@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="yorishiro-proxy_banner.png" alt="Yorishiro Proxy" width="600">
+  <img src="docs/images/yorishiro-proxy_banner.png" alt="Yorishiro Proxy" width="600">
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, giving AI agents full control over proxy operations through ten MCP tools. Designed for use with Claude Code and other MCP-compatible agents, it enables automated security testing workflows without manual UI interaction. An embedded Web UI is also available for visual inspection and interactive use.
 
 <p align="center">
-  <img src="yorishiro-proxy_webui_flows.png" alt="Web UI - Flows" width="800">
+  <img src="docs/images/yorishiro-proxy_webui_flows.png" alt="Web UI - Flows" width="800">
 </p>
 
 ## Features
