@@ -82,15 +82,15 @@ type macroConfig struct {
 	TimeoutMs   int               `json:"timeout_ms,omitempty"`
 }
 
-// executeDefineMacroResult is the structured output of the define_macro action.
-type executeDefineMacroResult struct {
+// macroDefineMacroResult is the structured output of the define_macro action.
+type macroDefineMacroResult struct {
 	Name      string `json:"name"`
 	StepCount int    `json:"step_count"`
 	Created   bool   `json:"created"`
 }
 
-// executeRunMacroResult is the structured output of the run_macro action.
-type executeRunMacroResult struct {
+// macroRunMacroResult is the structured output of the run_macro action.
+type macroRunMacroResult struct {
 	MacroName     string                 `json:"macro_name"`
 	Status        string                 `json:"status"`
 	StepsExecuted int                    `json:"steps_executed"`
@@ -108,15 +108,15 @@ type macroStepResultEntry struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// executeDeleteMacroResult is the structured output of the delete_macro action.
-type executeDeleteMacroResult struct {
+// macroDeleteMacroResult is the structured output of the delete_macro action.
+type macroDeleteMacroResult struct {
 	Name    string `json:"name"`
 	Deleted bool   `json:"deleted"`
 }
 
-// handleExecuteDefineMacro handles the define_macro action.
+// handleDefineMacro handles the define_macro action.
 // It validates the macro definition, serializes the config to JSON, and upserts into DB.
-func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParams) (*executeDefineMacroResult, error) {
+func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*macroDefineMacroResult, error) {
 	if s.deps.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
@@ -165,17 +165,17 @@ func (s *Server) handleExecuteDefineMacro(ctx context.Context, params macroParam
 		return nil, fmt.Errorf("save macro: %w", err)
 	}
 
-	return &executeDefineMacroResult{
+	return &macroDefineMacroResult{
 		Name:      params.Name,
 		StepCount: len(params.Steps),
 		Created:   isNew,
 	}, nil
 }
 
-// handleExecuteRunMacro handles the run_macro action.
+// handleRunMacro handles the run_macro action.
 // It loads the macro from DB, creates a macro.Engine, and runs it.
 // Access control is handled by the target scope enforcement layer.
-func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) (*executeRunMacroResult, error) {
+func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macroRunMacroResult, error) {
 	if s.deps.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
@@ -252,7 +252,7 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 		}
 	}
 
-	return &executeRunMacroResult{
+	return &macroRunMacroResult{
 		MacroName:     result.MacroName,
 		Status:        result.Status,
 		StepsExecuted: result.StepsExecuted,
@@ -262,8 +262,8 @@ func (s *Server) handleExecuteRunMacro(ctx context.Context, params macroParams) 
 	}, nil
 }
 
-// handleExecuteDeleteMacro handles the delete_macro action.
-func (s *Server) handleExecuteDeleteMacro(ctx context.Context, params macroParams) (*executeDeleteMacroResult, error) {
+// handleDeleteMacro handles the delete_macro action.
+func (s *Server) handleDeleteMacro(ctx context.Context, params macroParams) (*macroDeleteMacroResult, error) {
 	if s.deps.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
@@ -275,7 +275,7 @@ func (s *Server) handleExecuteDeleteMacro(ctx context.Context, params macroParam
 		return nil, fmt.Errorf("delete macro: %w", err)
 	}
 
-	return &executeDeleteMacroResult{
+	return &macroDeleteMacroResult{
 		Name:    params.Name,
 		Deleted: true,
 	}, nil

@@ -67,7 +67,7 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -168,7 +168,7 @@ func TestM3_Resend_DryRun(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -258,7 +258,7 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -313,8 +313,8 @@ func TestM3_Resend_E2E_ThroughProxy(t *testing.T) {
 
 	// 4. Attempt resend. Note: SSRF protection will block localhost.
 	// We verify the tool handles the error gracefully.
-	resendResult, resendErr := env.cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "execute",
+	resendToolResult, resendErr := env.cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "resend",
 		Arguments: map[string]any{
 			"action": "resend",
 			"params": map[string]any{
@@ -330,9 +330,9 @@ func TestM3_Resend_E2E_ThroughProxy(t *testing.T) {
 
 	// The resend may fail due to SSRF protection (target is localhost).
 	// Either outcome is acceptable: success means SSRF relaxed, error means it's blocked.
-	if !resendResult.IsError {
-		var rr executeResendResult
-		tc, ok := resendResult.Content[0].(*gomcp.TextContent)
+	if !resendToolResult.IsError {
+		var rr resendActionResult
+		tc, ok := resendToolResult.Content[0].(*gomcp.TextContent)
 		if ok {
 			json.Unmarshal([]byte(tc.Text), &rr)
 		}

@@ -6,7 +6,7 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
-import { useExecute, useQuery } from "../../lib/mcp/hooks.js";
+import { useResend, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   BodyPatch,
   FlowDetailResult,
@@ -53,7 +53,7 @@ const TCP_MODE_TABS = [
   { id: "tcp_replay", label: "TCP Replay" },
 ];
 
-/** Resend result from MCP execute. */
+/** Resend result from MCP resend tool. */
 export interface ResendResult {
   new_flow_id?: string;
   method?: string;
@@ -94,7 +94,7 @@ export function ResendPage() {
   const { flowId: routeFlowId } = useParams<{ flowId: string }>();
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const { execute, loading: executing } = useExecute();
+  const { resend, loading: executing } = useResend();
 
   // Flow ID input state.
   const [flowIdInput, setFlowIdInput] = useState(routeFlowId ?? "");
@@ -221,7 +221,7 @@ export function ResendPage() {
         .map((h) => ({ key: h.key.trim(), value: h.value }));
 
       try {
-        const result = await execute<ResendResult>({
+        const result = await resend<ResendResult>({
           action: "resend",
           params: {
             flow_id: activeFlowId,
@@ -266,7 +266,7 @@ export function ResendPage() {
         });
       }
     },
-    [activeFlowId, method, url, headers, body, bodyPatches, tag, execute, addToast],
+    [activeFlowId, method, url, headers, body, bodyPatches, tag, resend, addToast],
   );
 
   /** Send TCP resend_raw request. */
@@ -282,7 +282,7 @@ export function ResendPage() {
       }
 
       try {
-        const result = await execute<TcpResendResult>({
+        const result = await resend<TcpResendResult>({
           action: "resend_raw",
           params: {
             flow_id: activeFlowId,
@@ -325,7 +325,7 @@ export function ResendPage() {
         });
       }
     },
-    [activeFlowId, targetAddr, useTls, rawPatches, tag, execute, addToast],
+    [activeFlowId, targetAddr, useTls, rawPatches, tag, resend, addToast],
   );
 
   /** Send TCP replay request. */
@@ -340,7 +340,7 @@ export function ResendPage() {
     }
 
     try {
-      const result = await execute<TcpResendResult>({
+      const result = await resend<TcpResendResult>({
         action: "tcp_replay",
         params: {
           flow_id: activeFlowId,
@@ -378,7 +378,7 @@ export function ResendPage() {
         message: err instanceof Error ? err.message : "TCP replay failed",
       });
     }
-  }, [activeFlowId, targetAddr, useTls, tag, execute, addToast]);
+  }, [activeFlowId, targetAddr, useTls, tag, resend, addToast]);
 
   /** Whether the editor has a loaded flow. */
   const hasFlow = activeFlowId.length > 0 && flow != null;

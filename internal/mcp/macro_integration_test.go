@@ -77,7 +77,7 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 		t.Fatalf("define_macro failed: %v", defineResult.Content)
 	}
 
-	var defOut executeDefineMacroResult
+	var defOut macroDefineMacroResult
 	unmarshalExecuteResult(t, defineResult, &defOut)
 	if defOut.StepCount != 1 {
 		t.Errorf("StepCount = %d, want 1", defOut.StepCount)
@@ -97,7 +97,7 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", runResult.Content)
 	}
 
-	var runOut executeRunMacroResult
+	var runOut macroRunMacroResult
 	unmarshalExecuteResult(t, runResult, &runOut)
 
 	if runOut.MacroName != "auth-flow" {
@@ -213,7 +213,7 @@ func TestM3_Macro_StepGuard_When(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", runResult.Content)
 	}
 
-	var runOut executeRunMacroResult
+	var runOut macroRunMacroResult
 	unmarshalExecuteResult(t, runResult, &runOut)
 
 	if runOut.Status != "completed" {
@@ -310,7 +310,7 @@ func TestM3_Macro_StepGuard_Skipped(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", runResult.Content)
 	}
 
-	var runOut executeRunMacroResult
+	var runOut macroRunMacroResult
 	unmarshalExecuteResult(t, runResult, &runOut)
 
 	if runOut.Status != "completed" {
@@ -417,7 +417,7 @@ func TestM3_Hook_ResendPreSendTemplateExpansion(t *testing.T) {
 		t.Fatalf("resend with hook failed: %v", resendResult.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	unmarshalExecuteResult(t, resendResult, &out)
 
 	if out.StatusCode != 200 {
@@ -514,7 +514,7 @@ func TestM3_Hook_PostReceiveOnStatus(t *testing.T) {
 		t.Fatalf("resend with post_receive hook failed: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	unmarshalExecuteResult(t, result, &out)
 
 	// The main request should still return 401.
@@ -598,7 +598,7 @@ func TestM3_Macro_QueryMacros(t *testing.T) {
 		t.Fatalf("delete_macro error: %v", deleteResult.Content)
 	}
 
-	var delOut executeDeleteMacroResult
+	var delOut macroDeleteMacroResult
 	unmarshalExecuteResult(t, deleteResult, &delOut)
 	if !delOut.Deleted {
 		t.Error("expected Deleted=true")
@@ -671,7 +671,7 @@ func TestM3_Macro_VarsOverrideRuntime(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", runResult.Content)
 	}
 
-	var out executeRunMacroResult
+	var out macroRunMacroResult
 	unmarshalExecuteResult(t, runResult, &out)
 
 	if out.KVStore["env"] != "production" {

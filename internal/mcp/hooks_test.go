@@ -244,7 +244,7 @@ func TestShouldRunPostReceive_OnMatch(t *testing.T) {
 // --- expandParamsWithKVStore tests ---
 
 func TestExpandParamsWithKVStore_URL(t *testing.T) {
-	params := executeParams{
+	params := resendParams{
 		OverrideURL: "https://{{host}}/api/{{path}}",
 	}
 	kvStore := map[string]string{
@@ -261,7 +261,7 @@ func TestExpandParamsWithKVStore_URL(t *testing.T) {
 }
 
 func TestExpandParamsWithKVStore_Headers(t *testing.T) {
-	params := executeParams{
+	params := resendParams{
 		OverrideHeaders: HeaderEntries{
 			{Key: "Cookie", Value: "sid={{session_cookie}}"},
 			{Key: "X-CSRF-Token", Value: "{{csrf_token}}"},
@@ -300,7 +300,7 @@ func TestExpandParamsWithKVStore_Headers(t *testing.T) {
 
 func TestExpandParamsWithKVStore_Body(t *testing.T) {
 	body := `{"username":"admin","password":"{{password}}"}`
-	params := executeParams{
+	params := resendParams{
 		OverrideBody: &body,
 	}
 	kvStore := map[string]string{
@@ -316,7 +316,7 @@ func TestExpandParamsWithKVStore_Body(t *testing.T) {
 }
 
 func TestExpandParamsWithKVStore_EmptyKVStore(t *testing.T) {
-	params := executeParams{
+	params := resendParams{
 		OverrideURL: "https://{{host}}/api",
 	}
 	if err := expandParamsWithKVStore(&params, nil); err != nil {
@@ -499,7 +499,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 		t.Fatalf("resend with hooks failed: %v", resendResult.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	unmarshalExecuteResult(t, resendResult, &out)
 
 	if out.StatusCode != 200 {
@@ -609,7 +609,7 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 		t.Fatalf("resend with post_receive hook failed: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	unmarshalExecuteResult(t, result, &out)
 	if out.StatusCode != 401 {
 		t.Errorf("StatusCode = %d, want 401", out.StatusCode)
@@ -746,7 +746,7 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 		t.Fatalf("resend with encoder hook failed: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	unmarshalExecuteResult(t, result, &out)
 
 	// The token "hello world" base64-encoded is "aGVsbG8gd29ybGQ=".
@@ -922,7 +922,7 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 		t.Fatalf("resend with hook vars failed: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	unmarshalExecuteResult(t, result, &out)
 	if out.StatusCode != 200 {
 		t.Errorf("StatusCode = %d, want 200", out.StatusCode)
@@ -1247,7 +1247,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 		t.Fatalf("resend with both hooks failed: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	unmarshalExecuteResult(t, result, &out)
 	if out.StatusCode != 200 {
 		t.Errorf("StatusCode = %d, want 200", out.StatusCode)

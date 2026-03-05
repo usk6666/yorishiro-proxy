@@ -51,7 +51,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Resend with different auth tokens
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
@@ -63,7 +63,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Test without authentication (remove auth header)
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
@@ -100,7 +100,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Resend with modified URL
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
@@ -112,7 +112,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Resend with modified body
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
@@ -126,7 +126,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Resend raw bytes to preserve header formatting
 ```json
-// execute
+// resend
 {
   "action": "resend_raw",
   "params": {

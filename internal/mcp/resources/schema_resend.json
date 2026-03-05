@@ -1,13 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "execute input",
-  "description": "Input schema for the execute tool.",
+  "title": "resend input",
+  "description": "Input schema for the resend tool.",
   "type": "object",
   "required": ["action", "params"],
   "properties": {
     "action": {
       "type": "string",
-      "description": "The action to execute. 'replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'.",
+      "description": "The action to perform. 'replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'.",
       "enum": ["resend", "resend_raw", "tcp_replay", "replay", "replay_raw"]
     },
     "params": {
@@ -31,48 +31,14 @@
           "description": "URL override for resend. Must include scheme and host."
         },
         "override_headers": {
-          "oneOf": [
-            {
-              "type": "array",
-              "description": "Header overrides as array of {key,value} entries (replaces matching headers). Supports duplicate keys for sending multiple values with the same header name.",
-              "items": {
-                "type": "object",
-                "required": ["key", "value"],
-                "properties": {
-                  "key": { "type": "string" },
-                  "value": { "type": "string" }
-                },
-                "additionalProperties": false
-              }
-            },
-            {
-              "type": "object",
-              "description": "Legacy format: header overrides as key-value map (one value per key).",
-              "additionalProperties": { "type": "string" }
-            }
-          ]
+          "type": "object",
+          "description": "Header overrides for resend as key-value pairs (replaces matching headers).",
+          "additionalProperties": { "type": "string" }
         },
         "add_headers": {
-          "oneOf": [
-            {
-              "type": "array",
-              "description": "Headers to add as array of {key,value} entries (appended to existing values). Supports duplicate keys.",
-              "items": {
-                "type": "object",
-                "required": ["key", "value"],
-                "properties": {
-                  "key": { "type": "string" },
-                  "value": { "type": "string" }
-                },
-                "additionalProperties": false
-              }
-            },
-            {
-              "type": "object",
-              "description": "Legacy format: headers to add as key-value map (one value per key).",
-              "additionalProperties": { "type": "string" }
-            }
-          ]
+          "type": "object",
+          "description": "Headers to add (appended to existing values for same key).",
+          "additionalProperties": { "type": "string" }
         },
         "remove_headers": {
           "type": "array",

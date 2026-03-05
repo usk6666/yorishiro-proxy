@@ -6,10 +6,10 @@
  * - proxy_stop: Stop proxy listeners
  * - configure: Configure runtime proxy settings
  * - query: Query flows, status, config, and other resources
- * - execute: Resend and replay recorded requests (resend, resend_raw, tcp_replay)
+ * - resend: Resend and replay recorded requests (resend, resend_raw, tcp_replay)
  * - manage: Manage flow data and CA certificates (delete_flows, export_flows, import_flows, regenerate_ca_cert)
  * - fuzz: Execute fuzz testing campaigns (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel)
- * - macro: Define and execute macro workflows (define_macro, run_macro, delete_macro)
+ * - macro: Define and run macro workflows (define_macro, run_macro, delete_macro)
  * - intercept: Act on intercepted requests (release, modify_and_forward, drop)
  * - security: Configure target scope and security settings
  */
@@ -24,17 +24,17 @@ export type { McpContextValue, McpProviderProps } from "./context.js";
 
 // Hooks
 export {
-  useConfigure, useExecute, useFuzz, useInterceptAction, useMacro, useManage, useMcpClient, useProxyControl, useQuery, useSecurity
+  useConfigure, useExecute, useFuzz, useInterceptAction, useMacro, useManage, useMcpClient, useProxyControl, useQuery, useResend, useSecurity
 } from "./hooks.js";
 export type {
   UseConfigureResult, UseExecuteResult, UseFuzzResult, UseInterceptActionResult, UseMacroResult, UseManageResult, UseMcpClientResult, UseProxyControlResult, UseQueryOptions,
-  UseQueryResult, UseSecurityResult
+  UseQueryResult, UseResendResult, UseSecurityResult
 } from "./hooks.js";
 
 // Types
 export type {
   AgentLayerResult,
-  // Shared execute/fuzz types
+  // Shared resend/fuzz types
   BodyPatch, CACertResult,
   // proxy_start
   CaptureScope, ConfigResult, ConfigureAutoTransform,
@@ -43,7 +43,7 @@ export type {
   ConfigureResult, ConfigureTLSPassthrough,
   // Connection
   ConnectionStatus, ConnInfo,
-  // execute
+  // resend
   ExecuteAction, ExecuteDryRunResult, ExecuteParams, ExecuteRawDryRunResult, ExecuteResendRawResult, ExecuteResendResult, ExportFilter, ExtractionRule, FlowDetailResult, FlowEntry,
   FlowsResult,
   // fuzz

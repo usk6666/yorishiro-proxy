@@ -103,7 +103,7 @@ func TestValidateHeaderKeys_CRLF(t *testing.T) {
 }
 
 func TestValidateResendHeaders_Clean(t *testing.T) {
-	params := executeParams{
+	params := resendParams{
 		OverrideHeaders: HeaderEntries{
 			{Key: "Content-Type", Value: "text/plain"},
 		},
@@ -118,7 +118,7 @@ func TestValidateResendHeaders_Clean(t *testing.T) {
 }
 
 func TestValidateResendHeaders_CRLFInOverride(t *testing.T) {
-	params := executeParams{
+	params := resendParams{
 		OverrideHeaders: HeaderEntries{
 			{Key: "X-Evil", Value: "value\r\nInjected: evil"},
 		},
@@ -130,7 +130,7 @@ func TestValidateResendHeaders_CRLFInOverride(t *testing.T) {
 }
 
 func TestValidateResendHeaders_CRLFInAdd(t *testing.T) {
-	params := executeParams{
+	params := resendParams{
 		AddHeaders: HeaderEntries{
 			{Key: "X-Evil", Value: "value\r\nInjected: evil"},
 		},
@@ -142,7 +142,7 @@ func TestValidateResendHeaders_CRLFInAdd(t *testing.T) {
 }
 
 func TestValidateResendHeaders_CRLFInRemoveKey(t *testing.T) {
-	params := executeParams{
+	params := resendParams{
 		RemoveHeaders: []string{"X-Evil\r\nInjected"},
 	}
 	err := validateResendHeaders(params)

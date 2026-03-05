@@ -61,7 +61,7 @@ func callMacro(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomc
 func callExecute(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
 	t.Helper()
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name:      "execute",
+		Name:      "resend",
 		Arguments: args,
 	})
 	if err != nil {
@@ -113,7 +113,7 @@ func TestExecute_DefineMacro_Success(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDefineMacroResult
+	var out macroDefineMacroResult
 	unmarshalExecuteResult(t, result, &out)
 
 	if out.Name != "auth-flow" {
@@ -150,7 +150,7 @@ func TestExecute_DefineMacro_Upsert(t *testing.T) {
 		t.Fatalf("first define failed: %v", result1.Content)
 	}
 
-	var out1 executeDefineMacroResult
+	var out1 macroDefineMacroResult
 	unmarshalExecuteResult(t, result1, &out1)
 	if !out1.Created {
 		t.Error("first define should report Created=true")
@@ -169,7 +169,7 @@ func TestExecute_DefineMacro_Upsert(t *testing.T) {
 		t.Fatalf("second define failed: %v", result2.Content)
 	}
 
-	var out2 executeDefineMacroResult
+	var out2 macroDefineMacroResult
 	unmarshalExecuteResult(t, result2, &out2)
 	if out2.Created {
 		t.Error("second define should report Created=false (update)")
@@ -365,7 +365,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", runResult.Content)
 	}
 
-	var out executeRunMacroResult
+	var out macroRunMacroResult
 	unmarshalExecuteResult(t, runResult, &out)
 
 	if out.MacroName != "test-macro" {
@@ -455,7 +455,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", result.Content)
 	}
 
-	var out executeRunMacroResult
+	var out macroRunMacroResult
 	unmarshalExecuteResult(t, result, &out)
 
 	if out.KVStore["key1"] != "overridden" {
@@ -520,7 +520,7 @@ func TestExecute_DeleteMacro_Success(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDeleteMacroResult
+	var out macroDeleteMacroResult
 	unmarshalExecuteResult(t, result, &out)
 
 	if out.Name != "to-delete" {
@@ -615,7 +615,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDefineMacroResult
+	var out macroDefineMacroResult
 	unmarshalExecuteResult(t, result, &out)
 
 	if out.StepCount != 2 {
@@ -765,7 +765,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", runResult.Content)
 	}
 
-	var out executeRunMacroResult
+	var out macroRunMacroResult
 	unmarshalExecuteResult(t, runResult, &out)
 
 	if out.Status != "completed" {
@@ -935,7 +935,7 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 		t.Fatalf("run_macro failed: %v", runResult.Content)
 	}
 
-	var out executeRunMacroResult
+	var out macroRunMacroResult
 	unmarshalExecuteResult(t, runResult, &out)
 
 	if out.StepsExecuted != 1 {
