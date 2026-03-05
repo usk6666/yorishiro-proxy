@@ -34,7 +34,7 @@ const HTTP_METHODS = [
   "OPTIONS",
 ] as const;
 
-/** Tabs for the HTTP request editor panel. */
+/** Tabs for the HTTP request editor panel (structured mode). */
 const HTTP_REQUEST_TABS = [
   { id: "headers", label: "Headers" },
   { id: "body", label: "Body" },
@@ -51,6 +51,12 @@ const TCP_REQUEST_TABS = [
 const TCP_MODE_TABS = [
   { id: "resend_raw", label: "Resend Raw" },
   { id: "tcp_replay", label: "TCP Replay" },
+];
+
+/** HTTP editor mode tabs: structured vs raw. */
+const HTTP_MODE_TABS = [
+  { id: "structured", label: "Structured" },
+  { id: "raw", label: "Raw" },
 ];
 
 /** Resend result from MCP resend tool. */
@@ -90,6 +96,149 @@ function isTcpFlow(flow: FlowDetailResult): boolean {
   return proto === "tcp" || proto === "raw";
 }
 
+/** Check if a flow is HTTP/2 or gRPC (no raw bytes stored). */
+function isHttp2Flow(flow: FlowDetailResult): boolean {
+  const proto = (flow.protocol || "").toLowerCase();
+  return proto === "http/2" || proto === "h2" || proto === "grpc";
+}
+
+/**
+ * Decode base64-encoded raw request bytes to a text string.
+ * Returns null if decoding fails or the data is empty.
+ */
+function decodeRawRequest(base64Data: string): string | null {
+  if (!base64Data) return null;
+  try {
+    return atob(base64Data);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reconstruct an HTTP/1.1 raw message from parsed flow data.
+ * Used for HTTP/2 and gRPC flows that don't store raw bytes.
+ *
+ * Format:
+ *   {Method} {RequestURI} HTTP/1.1\r\n
+ *   Host: {host}\r\n
+ *   {Headers}\r\n
+ *   \r\n
+ *   {Body}
+ */
+function reconstructHttp11(flow: FlowDetailResult): string {
+  const method = flow.method || "GET";
+  const urlStr = flow.url || "/";
+
+  // Extract request URI (path + query) and host from the URL.
+  let requestUri = "/";
+  let host = "";
+  try {
+    const parsed = new URL(urlStr);
+    requestUri = parsed.pathname + parsed.search;
+    host = parsed.host;
+  } catch {
+    // If URL parsing fails, use the raw URL as-is.
+    requestUri = urlStr;
+  }
+
+  const lines: string[] = [];
+  lines.push(`${method} ${requestUri} HTTP/1.1`);
+
+  // Track which headers have been added to avoid duplicating Host.
+  const addedHeaders = new Set<string>();
+
+  // Add Host header first if not already in request_headers.
+  const hasHostHeader = flow.request_headers
+    ? Object.keys(flow.request_headers).some((k) => k.toLowerCase() === "host")
+    : false;
+
+  if (!hasHostHeader && host) {
+    lines.push(`Host: ${host}`);
+  }
+
+  // Add all recorded headers.
+  if (flow.request_headers) {
+    for (const [key, values] of Object.entries(flow.request_headers)) {
+      for (const value of values) {
+        lines.push(`${key}: ${value}`);
+      }
+      addedHeaders.add(key.toLowerCase());
+    }
+  }
+
+  // Empty line to separate headers from body.
+  lines.push("");
+
+  // Join with \r\n (HTTP line endings).
+  let raw = lines.join("\r\n");
+
+  // Append body if present.
+  const bodyText = flow.request_body || "";
+  if (bodyText) {
+    raw += "\r\n" + bodyText;
+  }
+
+  return raw;
+}
+
+/**
+ * Extract target address (host:port) from a flow URL.
+ * Returns host:port suitable for raw TCP connection.
+ */
+function extractTargetAddr(flow: FlowDetailResult): string {
+  // Prefer server_addr from connection info.
+  if (flow.conn_info?.server_addr) {
+    return flow.conn_info.server_addr;
+  }
+
+  // Fall back to parsing URL.
+  const urlStr = flow.url || "";
+  try {
+    const parsed = new URL(urlStr);
+    const host = parsed.hostname;
+    const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+    return `${host}:${port}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Determine if TLS should be used from a flow's connection info or URL.
+ */
+function extractUseTls(flow: FlowDetailResult): boolean {
+  if (flow.conn_info?.tls_version) {
+    return true;
+  }
+  const urlStr = flow.url || "";
+  try {
+    return new URL(urlStr).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Encode a string to base64 (handles binary content).
+ */
+function stringToBase64(str: string): string {
+  // Use btoa for ASCII-safe encoding. For raw HTTP messages,
+  // content is typically ASCII/Latin-1 compatible.
+  try {
+    return btoa(str);
+  } catch {
+    // For strings with characters outside Latin-1, use TextEncoder.
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(str);
+    let binary = "";
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+    return btoa(binary);
+  }
+}
+
 export function ResendPage() {
   const { flowId: routeFlowId } = useParams<{ flowId: string }>();
   const navigate = useNavigate();
@@ -100,12 +249,18 @@ export function ResendPage() {
   const [flowIdInput, setFlowIdInput] = useState(routeFlowId ?? "");
   const [activeFlowId, setActiveFlowId] = useState(routeFlowId ?? "");
 
-  // HTTP request editor state.
+  // HTTP request editor state (structured mode).
   const [method, setMethod] = useState("GET");
   const [url, setUrl] = useState("");
   const [headers, setHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [body, setBody] = useState("");
   const [bodyPatches, setBodyPatches] = useState<BodyPatch[]>([]);
+
+  // HTTP raw editor state.
+  const [httpEditorMode, setHttpEditorMode] = useState<"structured" | "raw">("structured");
+  const [rawHttpText, setRawHttpText] = useState("");
+  const [rawTargetAddr, setRawTargetAddr] = useState("");
+  const [rawUseTls, setRawUseTls] = useState(false);
 
   // TCP-specific state.
   const [targetAddr, setTargetAddr] = useState("");
@@ -122,6 +277,7 @@ export function ResendPage() {
   const [tcpRequestTab, setTcpRequestTab] = useState("messages");
   const [httpResponse, setHttpResponse] = useState<ResendResult | null>(null);
   const [tcpResponse, setTcpResponse] = useState<TcpResendResult | null>(null);
+  const [rawResponse, setRawResponse] = useState<TcpResendResult | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
   // Fetch original flow data when activeFlowId changes.
@@ -137,6 +293,7 @@ export function ResendPage() {
   // Determine protocol mode from flow data.
   const flow = flowData as FlowDetailResult | null;
   const isTcp = useMemo(() => flow != null && isTcpFlow(flow), [flow]);
+  const isH2 = useMemo(() => flow != null && isHttp2Flow(flow), [flow]);
 
   // Fetch messages for TCP flows.
   const {
@@ -159,6 +316,7 @@ export function ResendPage() {
     setTag("");
     setHttpResponse(null);
     setTcpResponse(null);
+    setRawResponse(null);
 
     if (isTcpFlow(flow)) {
       // TCP flow: populate target address from connection info.
@@ -168,12 +326,13 @@ export function ResendPage() {
       setTcpMode("resend_raw");
       setTcpRequestTab("messages");
     } else {
-      // HTTP flow: populate editor fields.
+      // HTTP flow: populate structured editor fields.
       setMethod(flow.method || "GET");
       setUrl(flow.url || "");
       setBody(flow.request_body || "");
       setBodyPatches([]);
       setRequestTab("headers");
+      setHttpEditorMode("structured");
 
       // Convert headers from Record<string, string[]> to key-value pairs.
       const headerPairs: Array<{ key: string; value: string }> = [];
@@ -185,6 +344,21 @@ export function ResendPage() {
         }
       }
       setHeaders(headerPairs);
+
+      // Populate raw editor fields.
+      const isH2Flow = isHttp2Flow(flow);
+      if (!isH2Flow && flow.raw_request) {
+        // HTTP/1.x: decode the recorded raw bytes.
+        const decoded = decodeRawRequest(flow.raw_request);
+        setRawHttpText(decoded ?? reconstructHttp11(flow));
+      } else {
+        // HTTP/2 or no raw bytes: reconstruct HTTP/1.1 from parsed data.
+        setRawHttpText(reconstructHttp11(flow));
+      }
+
+      // Set target address for raw mode.
+      setRawTargetAddr(extractTargetAddr(flow));
+      setRawUseTls(extractUseTls(flow));
     }
   }, [flow]);
 
@@ -206,7 +380,7 @@ export function ResendPage() {
     }
   }, [flowIdInput, routeFlowId, navigate]);
 
-  /** Send HTTP resend request. */
+  /** Send HTTP resend request (structured mode). */
   const handleHttpSend = useCallback(
     async (isDryRun: boolean) => {
       if (!activeFlowId) {
@@ -267,6 +441,70 @@ export function ResendPage() {
       }
     },
     [activeFlowId, method, url, headers, body, bodyPatches, tag, resend, addToast],
+  );
+
+  /** Send HTTP raw resend request (raw mode). */
+  const handleHttpRawSend = useCallback(
+    async (isDryRun: boolean) => {
+      if (!activeFlowId) {
+        addToast({ type: "warning", message: "No flow selected" });
+        return;
+      }
+      if (!rawTargetAddr.trim()) {
+        addToast({ type: "warning", message: "Target address is required for raw mode" });
+        return;
+      }
+      if (!rawHttpText.trim()) {
+        addToast({ type: "warning", message: "Raw HTTP message cannot be empty" });
+        return;
+      }
+
+      try {
+        const rawBase64 = stringToBase64(rawHttpText);
+        const result = await resend<TcpResendResult>({
+          action: "resend_raw",
+          params: {
+            flow_id: activeFlowId,
+            target_addr: rawTargetAddr.trim(),
+            use_tls: rawUseTls || undefined,
+            override_raw_base64: rawBase64,
+            dry_run: isDryRun,
+            tag: tag || undefined,
+          },
+        });
+
+        setRawResponse(result);
+
+        setHistory((prev) => [
+          {
+            timestamp: new Date().toISOString(),
+            protocol: "http",
+            action: "resend_raw",
+            method: "RAW",
+            url: rawTargetAddr.trim(),
+            responseSize: result.response_size,
+            durationMs: result.duration_ms,
+            dryRun: isDryRun,
+            tag,
+            flowId: result.new_flow_id,
+          },
+          ...prev,
+        ]);
+
+        addToast({
+          type: "success",
+          message: isDryRun
+            ? "Dry-run preview generated"
+            : `Raw resend complete (${result.response_size ?? 0} bytes)`,
+        });
+      } catch (err) {
+        addToast({
+          type: "error",
+          message: err instanceof Error ? err.message : "Raw resend failed",
+        });
+      }
+    },
+    [activeFlowId, rawTargetAddr, rawUseTls, rawHttpText, tag, resend, addToast],
   );
 
   /** Send TCP resend_raw request. */
@@ -388,7 +626,7 @@ export function ResendPage() {
       <div className="resend-header">
         <h1 className="page-title">Resend</h1>
         <p className="page-description">
-          Edit and resend captured requests. Supports HTTP resend, raw TCP byte patching, and TCP replay.
+          Edit and resend captured requests. Supports HTTP resend, raw HTTP editing, raw TCP byte patching, and TCP replay.
         </p>
       </div>
 
@@ -430,114 +668,223 @@ export function ResendPage() {
             <div className="resend-panel-header">
               <span className="resend-panel-title">Request</span>
               <Badge variant="info">{activeFlowId.slice(0, 8)}</Badge>
-              <Badge variant="default">HTTP</Badge>
-            </div>
-
-            {/* Method + URL */}
-            <div className="resend-method-url-row">
-              <select
-                className="resend-method-select"
-                value={method}
-                onChange={(e) => setMethod(e.target.value)}
-              >
-                {HTTP_METHODS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-              <input
-                className="resend-url-input"
-                type="text"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com/api/endpoint"
-              />
-            </div>
-
-            {/* Tag input */}
-            <div className="resend-tag-row">
-              <Input
-                placeholder="Tag (optional)"
-                value={tag}
-                onChange={(e) => setTag(e.target.value)}
-              />
-            </div>
-
-            {/* Request body tabs */}
-            <Tabs
-              tabs={HTTP_REQUEST_TABS}
-              activeTab={requestTab}
-              onTabChange={setRequestTab}
-            >
-              {requestTab === "headers" && (
-                <HeaderEditor headers={headers} onChange={setHeaders} />
+              <Badge variant="default">{isH2 ? "HTTP/2" : "HTTP"}</Badge>
+              {httpEditorMode === "raw" && (
+                <Badge variant="warning">RAW</Badge>
               )}
-              {requestTab === "body" && (
-                <div className="resend-body-editor">
+            </div>
+
+            {/* HTTP editor mode tabs: Structured / Raw */}
+            <Tabs
+              tabs={HTTP_MODE_TABS}
+              activeTab={httpEditorMode}
+              onTabChange={(id) => setHttpEditorMode(id as "structured" | "raw")}
+              className="resend-http-mode-tabs"
+            />
+
+            {httpEditorMode === "structured" && (
+              <>
+                {/* Method + URL */}
+                <div className="resend-method-url-row">
+                  <select
+                    className="resend-method-select"
+                    value={method}
+                    onChange={(e) => setMethod(e.target.value)}
+                  >
+                    {HTTP_METHODS.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="resend-url-input"
+                    type="text"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    placeholder="https://example.com/api/endpoint"
+                  />
+                </div>
+
+                {/* Tag input */}
+                <div className="resend-tag-row">
+                  <Input
+                    placeholder="Tag (optional)"
+                    value={tag}
+                    onChange={(e) => setTag(e.target.value)}
+                  />
+                </div>
+
+                {/* Request body tabs */}
+                <Tabs
+                  tabs={HTTP_REQUEST_TABS}
+                  activeTab={requestTab}
+                  onTabChange={setRequestTab}
+                >
+                  {requestTab === "headers" && (
+                    <HeaderEditor headers={headers} onChange={setHeaders} />
+                  )}
+                  {requestTab === "body" && (
+                    <div className="resend-body-editor">
+                      <textarea
+                        className="resend-body-textarea"
+                        value={body}
+                        onChange={(e) => setBody(e.target.value)}
+                        placeholder="Request body..."
+                        spellCheck={false}
+                      />
+                    </div>
+                  )}
+                  {requestTab === "patches" && (
+                    <BodyPatchEditor patches={bodyPatches} onChange={setBodyPatches} />
+                  )}
+                </Tabs>
+
+                {/* Action buttons */}
+                <div className="resend-actions">
+                  <Button
+                    variant="primary"
+                    onClick={() => handleHttpSend(dryRun)}
+                    disabled={executing}
+                  >
+                    {executing ? "Sending..." : dryRun ? "Send (Dry Run)" : "Send"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => handleHttpSend(true)}
+                    disabled={executing}
+                  >
+                    Dry Run
+                  </Button>
+                  <label className="resend-dryrun-toggle">
+                    <input
+                      type="checkbox"
+                      checked={dryRun}
+                      onChange={(e) => setDryRun(e.target.checked)}
+                    />
+                    <span>Default dry-run</span>
+                  </label>
+                </div>
+              </>
+            )}
+
+            {httpEditorMode === "raw" && (
+              <>
+                {/* Downgrade notice for HTTP/2 */}
+                {isH2 && (
+                  <div className="resend-raw-downgrade-notice">
+                    This HTTP/2 request has been reconstructed as HTTP/1.1 for raw editing.
+                    Header casing and order may differ from the original HTTP/2 pseudo-headers.
+                  </div>
+                )}
+
+                {/* Target address + TLS for raw mode */}
+                <div className="resend-tcp-target-row">
+                  <input
+                    className="resend-url-input"
+                    type="text"
+                    value={rawTargetAddr}
+                    onChange={(e) => setRawTargetAddr(e.target.value)}
+                    placeholder="host:port (e.g. example.com:443)"
+                  />
+                  <label className="resend-tls-toggle">
+                    <input
+                      type="checkbox"
+                      checked={rawUseTls}
+                      onChange={(e) => setRawUseTls(e.target.checked)}
+                    />
+                    <span>TLS</span>
+                  </label>
+                </div>
+
+                {/* Tag input */}
+                <div className="resend-tag-row">
+                  <Input
+                    placeholder="Tag (optional)"
+                    value={tag}
+                    onChange={(e) => setTag(e.target.value)}
+                  />
+                </div>
+
+                {/* Raw HTTP text editor */}
+                <div className="resend-raw-editor">
                   <textarea
-                    className="resend-body-textarea"
-                    value={body}
-                    onChange={(e) => setBody(e.target.value)}
-                    placeholder="Request body..."
+                    className="resend-raw-textarea"
+                    value={rawHttpText}
+                    onChange={(e) => setRawHttpText(e.target.value)}
+                    placeholder={"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"}
                     spellCheck={false}
                   />
                 </div>
-              )}
-              {requestTab === "patches" && (
-                <BodyPatchEditor patches={bodyPatches} onChange={setBodyPatches} />
-              )}
-            </Tabs>
 
-            {/* Action buttons */}
-            <div className="resend-actions">
-              <Button
-                variant="primary"
-                onClick={() => handleHttpSend(dryRun)}
-                disabled={executing}
-              >
-                {executing ? "Sending..." : dryRun ? "Send (Dry Run)" : "Send"}
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => handleHttpSend(true)}
-                disabled={executing}
-              >
-                Dry Run
-              </Button>
-              <label className="resend-dryrun-toggle">
-                <input
-                  type="checkbox"
-                  checked={dryRun}
-                  onChange={(e) => setDryRun(e.target.checked)}
-                />
-                <span>Default dry-run</span>
-              </label>
-            </div>
+                {/* Raw mode action buttons */}
+                <div className="resend-actions">
+                  <Button
+                    variant="primary"
+                    onClick={() => handleHttpRawSend(dryRun)}
+                    disabled={executing || !rawTargetAddr.trim()}
+                  >
+                    {executing ? "Sending..." : dryRun ? "Send Raw (Dry Run)" : "Send Raw"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => handleHttpRawSend(true)}
+                    disabled={executing || !rawTargetAddr.trim()}
+                  >
+                    Dry Run
+                  </Button>
+                  <label className="resend-dryrun-toggle">
+                    <input
+                      type="checkbox"
+                      checked={dryRun}
+                      onChange={(e) => setDryRun(e.target.checked)}
+                    />
+                    <span>Default dry-run</span>
+                  </label>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Right: Response viewer */}
           <div className="resend-panel resend-response-panel">
             <div className="resend-panel-header">
               <span className="resend-panel-title">Response</span>
-              {httpResponse?.dry_run && <Badge variant="warning">DRY RUN</Badge>}
-              {httpResponse?.response_status_code != null && (
-                <Badge
-                  variant={
-                    httpResponse.response_status_code < 300
-                      ? "success"
-                      : httpResponse.response_status_code < 400
-                        ? "info"
-                        : httpResponse.response_status_code < 500
-                          ? "warning"
-                          : "danger"
-                  }
-                >
-                  {httpResponse.response_status_code}
-                </Badge>
+              {httpEditorMode === "structured" && (
+                <>
+                  {httpResponse?.dry_run && <Badge variant="warning">DRY RUN</Badge>}
+                  {httpResponse?.response_status_code != null && (
+                    <Badge
+                      variant={
+                        httpResponse.response_status_code < 300
+                          ? "success"
+                          : httpResponse.response_status_code < 400
+                            ? "info"
+                            : httpResponse.response_status_code < 500
+                              ? "warning"
+                              : "danger"
+                      }
+                    >
+                      {httpResponse.response_status_code}
+                    </Badge>
+                  )}
+                  {httpResponse?.duration_ms != null && (
+                    <span className="resend-duration">{httpResponse.duration_ms}ms</span>
+                  )}
+                </>
               )}
-              {httpResponse?.duration_ms != null && (
-                <span className="resend-duration">{httpResponse.duration_ms}ms</span>
+              {httpEditorMode === "raw" && (
+                <>
+                  {rawResponse?.dry_run && <Badge variant="warning">DRY RUN</Badge>}
+                  {rawResponse?.response_size != null && (
+                    <Badge variant="info">
+                      {rawResponse.response_size} bytes
+                    </Badge>
+                  )}
+                  {rawResponse?.duration_ms != null && (
+                    <span className="resend-duration">{rawResponse.duration_ms}ms</span>
+                  )}
+                </>
               )}
             </div>
 
@@ -546,14 +893,22 @@ export function ResendPage() {
                 <Spinner size="sm" />
                 <span>Sending request...</span>
               </div>
-            ) : httpResponse ? (
-              <ResponseViewer
-                response={httpResponse}
-                originalFlow={flow}
-              />
+            ) : httpEditorMode === "structured" ? (
+              httpResponse ? (
+                <ResponseViewer
+                  response={httpResponse}
+                  originalFlow={flow}
+                />
+              ) : (
+                <div className="resend-empty-response">
+                  Send a request to see the response here.
+                </div>
+              )
+            ) : rawResponse ? (
+              <TcpResponseViewer response={rawResponse} />
             ) : (
               <div className="resend-empty-response">
-                Send a request to see the response here.
+                Send a raw request to see the response here.
               </div>
             )}
           </div>
@@ -714,7 +1069,7 @@ export function ResendPage() {
           <div className="resend-history-list">
             {history.map((entry, idx) => (
               <div key={idx} className="resend-history-entry">
-                {entry.protocol === "http" ? (
+                {entry.protocol === "http" && entry.action !== "resend_raw" ? (
                   <Badge
                     variant={
                       entry.statusCode == null
@@ -735,7 +1090,7 @@ export function ResendPage() {
                 )}
                 <span className="resend-history-method">{entry.method}</span>
                 <span className="resend-history-url">{entry.url}</span>
-                {entry.protocol === "tcp" && (
+                {(entry.protocol === "tcp" || entry.action === "resend_raw") && (
                   <Badge variant="warning">{entry.action === "tcp_replay" ? "REPLAY" : "RAW"}</Badge>
                 )}
                 {entry.dryRun && <Badge variant="warning">DRY</Badge>}
