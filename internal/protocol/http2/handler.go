@@ -14,6 +14,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -376,6 +377,28 @@ func (h *Handler) handleStream(
 		logger.Warn("HTTP/2 failed to read response body", "error", err)
 	}
 
+	// Response intercept: check if the response matches any intercept rules
+	// and allow the AI agent to modify or drop it before sending to the client.
+	if action, intercepted := h.interceptResponse(ctx, req, resp, fullRespBody, logger); intercepted {
+		switch action.Type {
+		case intercept.ActionDrop:
+			w.WriteHeader(gohttp.StatusBadGateway)
+			logger.Info("intercepted HTTP/2 response dropped",
+				"method", req.Method, "url", outURL.String(), "status", resp.StatusCode)
+			return
+		case intercept.ActionModifyAndForward:
+			var modErr error
+			resp, fullRespBody, modErr = applyResponseModifications(resp, action, fullRespBody)
+			if modErr != nil {
+				logger.Error("HTTP/2 response intercept modification failed", "error", modErr)
+				w.WriteHeader(gohttp.StatusBadGateway)
+				return
+			}
+		case intercept.ActionRelease:
+			// Continue with the original response.
+		}
+	}
+
 	// Write response headers back to the client.
 	for key, vals := range resp.Header {
 		for _, val := range vals {
@@ -597,6 +620,108 @@ func applyInterceptModifications(req *gohttp.Request, action intercept.Intercept
 	}
 
 	return req, nil
+}
+
+// interceptResponse checks if the response matches any intercept rules and,
+// if so, enqueues it for AI agent review. It blocks until the agent responds
+// or the timeout expires. Returns the action and true if intercepted, or a
+// zero-value action and false if not intercepted.
+func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
+		return intercept.InterceptAction{}, false
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	if len(matchedRules) == 0 {
+		return intercept.InterceptAction{}, false
+	}
+
+	logger.Info("HTTP/2 response intercepted",
+		"method", req.Method,
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"matched_rules", matchedRules)
+
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		req.Method, req.URL, resp.StatusCode, resp.Header, body, matchedRules,
+	)
+	defer h.InterceptQueue.Remove(id)
+
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	select {
+	case action := <-actionCh:
+		return action, true
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			logger.Info("intercepted HTTP/2 response cancelled (proxy shutdown)", "id", id)
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		}
+		logger.Info("intercepted HTTP/2 response timed out", "id", id, "behavior", string(behavior))
+		switch behavior {
+		case intercept.TimeoutAutoDrop:
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		default:
+			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
+		}
+	}
+}
+
+// applyResponseModifications applies the modifications from a modify_and_forward
+// action to the HTTP/2 response. It returns the modified response, body, and an
+// error if validation fails (e.g., invalid status code, CRLF injection).
+func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
+	// Override status code with range validation (S-1: CWE-20).
+	if action.OverrideStatus > 0 {
+		if action.OverrideStatus < 100 || action.OverrideStatus > 999 {
+			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
+		}
+		resp.StatusCode = action.OverrideStatus
+		resp.Status = fmt.Sprintf("%d %s", action.OverrideStatus, gohttp.StatusText(action.OverrideStatus))
+	}
+
+	// Validate response header values for CRLF injection (S-2: CWE-113).
+	for key, val := range action.OverrideResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for key, val := range action.AddResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for _, key := range action.RemoveResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") {
+			return resp, body, fmt.Errorf("remove response header key %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+
+	// Remove response headers first.
+	for _, key := range action.RemoveResponseHeaders {
+		resp.Header.Del(key)
+	}
+
+	// Override response headers.
+	for key, val := range action.OverrideResponseHeaders {
+		resp.Header.Set(key, val)
+	}
+
+	// Add response headers.
+	for key, val := range action.AddResponseHeaders {
+		resp.Header.Add(key, val)
+	}
+
+	// Override response body and update Content-Length (F-1).
+	if action.OverrideResponseBody != nil {
+		body = []byte(*action.OverrideResponseBody)
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+
+	return resp, body, nil
 }
 
 // isGRPCContentType reports whether the Content-Type indicates a gRPC request.

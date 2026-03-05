@@ -21,16 +21,23 @@ type interceptInput struct {
 // interceptParams holds the union of all intercept action-specific parameters.
 // Only the fields relevant to the specified action are used.
 type interceptParams struct {
-	// InterceptID is the intercepted request ID (required for all actions).
-	InterceptID string `json:"intercept_id,omitempty" jsonschema:"intercepted request ID for release/modify_and_forward/drop"`
+	// InterceptID is the intercepted request/response ID (required for all actions).
+	InterceptID string `json:"intercept_id,omitempty" jsonschema:"intercepted request/response ID for release/modify_and_forward/drop"`
 
-	// modify_and_forward mutation parameters
-	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override"`
-	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"URL override"`
-	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides"`
-	AddHeaders      map[string]string `json:"add_headers,omitempty" jsonschema:"headers to add"`
-	RemoveHeaders   []string          `json:"remove_headers,omitempty" jsonschema:"headers to remove"`
-	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override"`
+	// --- Request modify_and_forward mutation parameters ---
+	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override (request phase)"`
+	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"URL override (request phase)"`
+	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides (request phase)"`
+	AddHeaders      map[string]string `json:"add_headers,omitempty" jsonschema:"headers to add (request phase)"`
+	RemoveHeaders   []string          `json:"remove_headers,omitempty" jsonschema:"headers to remove (request phase)"`
+	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override (request phase)"`
+
+	// --- Response modify_and_forward mutation parameters ---
+	OverrideStatus          int               `json:"override_status,omitempty" jsonschema:"HTTP status code override (response phase)"`
+	OverrideResponseHeaders map[string]string `json:"override_response_headers,omitempty" jsonschema:"response header overrides (response phase)"`
+	AddResponseHeaders      map[string]string `json:"add_response_headers,omitempty" jsonschema:"response headers to add (response phase)"`
+	RemoveResponseHeaders   []string          `json:"remove_response_headers,omitempty" jsonschema:"response headers to remove (response phase)"`
+	OverrideResponseBody    *string           `json:"override_response_body,omitempty" jsonschema:"response body override (response phase)"`
 }
 
 // availableInterceptActions lists the valid action names for the intercept tool.
@@ -40,11 +47,13 @@ var availableInterceptActions = []string{"release", "modify_and_forward", "drop"
 func (s *Server) registerIntercept() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "intercept",
-		Description: "Act on intercepted requests in the intercept queue. " +
+		Description: "Act on intercepted requests or responses in the intercept queue. " +
+			"Items have a 'phase' field: 'request' (pre-send) or 'response' (post-receive). " +
 			"Available actions: " +
-			"'release' forwards an intercepted request as-is (requires intercept_id); " +
-			"'modify_and_forward' forwards an intercepted request with mutations (requires intercept_id); " +
-			"'drop' discards an intercepted request returning 502 to the client (requires intercept_id).",
+			"'release' forwards the intercepted item as-is (requires intercept_id); " +
+			"'modify_and_forward' forwards with mutations — use request params (override_method, override_url, override_headers, add_headers, remove_headers, override_body) for request phase, " +
+			"response params (override_status, override_response_headers, add_response_headers, remove_response_headers, override_response_body) for response phase (requires intercept_id); " +
+			"'drop' discards the item returning 502 to the client (requires intercept_id).",
 	}, s.handleInterceptTool)
 }
 
@@ -103,6 +112,7 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 		return nil, nil, fmt.Errorf("intercept_id is required for modify_and_forward action")
 	}
 
+	// Validate request header params.
 	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
 		return nil, nil, fmt.Errorf("override_headers: %w", err)
 	}
@@ -111,6 +121,16 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 	}
 	if err := validateHeaderKeys(params.RemoveHeaders); err != nil {
 		return nil, nil, fmt.Errorf("remove_headers: %w", err)
+	}
+	// Validate response header params.
+	if err := validateHeaderValues(params.OverrideResponseHeaders); err != nil {
+		return nil, nil, fmt.Errorf("override_response_headers: %w", err)
+	}
+	if err := validateHeaderValues(params.AddResponseHeaders); err != nil {
+		return nil, nil, fmt.Errorf("add_response_headers: %w", err)
+	}
+	if err := validateHeaderKeys(params.RemoveResponseHeaders); err != nil {
+		return nil, nil, fmt.Errorf("remove_response_headers: %w", err)
 	}
 
 	action := intercept.InterceptAction{
@@ -121,6 +141,12 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 		AddHeaders:      params.AddHeaders,
 		RemoveHeaders:   params.RemoveHeaders,
 		OverrideBody:    params.OverrideBody,
+		// Response modification fields.
+		OverrideStatus:          params.OverrideStatus,
+		OverrideResponseHeaders: params.OverrideResponseHeaders,
+		AddResponseHeaders:      params.AddResponseHeaders,
+		RemoveResponseHeaders:   params.RemoveResponseHeaders,
+		OverrideResponseBody:    params.OverrideResponseBody,
 	}
 
 	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
