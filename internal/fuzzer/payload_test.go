@@ -24,6 +24,15 @@ func TestPayloadSet_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "wordlist exceeds max payload count",
+			ps:      PayloadSet{Type: "wordlist", Values: make([]string, maxPayloadCount+1)},
+			wantErr: true,
+		},
+		{
+			name: "wordlist at max payload count",
+			ps:   PayloadSet{Type: "wordlist", Values: make([]string, maxPayloadCount)},
+		},
+		{
 			name: "valid file",
 			ps:   PayloadSet{Type: "file", Path: "passwords.txt"},
 		},
@@ -226,6 +235,32 @@ func TestPayloadSet_GenerateFile_EmptyLines(t *testing.T) {
 	// Empty lines should be skipped.
 	if len(got) != 2 {
 		t.Errorf("got %d payloads, want 2 (empty lines should be skipped)", len(got))
+	}
+}
+
+func TestPayloadSet_GenerateFile_ExceedsMaxLines(t *testing.T) {
+	baseDir := t.TempDir()
+
+	// Create a file with maxPayloadCount+1 non-empty lines.
+	f, err := os.Create(filepath.Join(baseDir, "huge.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= maxPayloadCount; i++ {
+		if _, err := f.WriteString("x\n"); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+	}
+	f.Close()
+
+	ps := PayloadSet{
+		Type: "file",
+		Path: "huge.txt",
+	}
+	_, err = ps.Generate(baseDir)
+	if err == nil {
+		t.Fatal("Generate() expected error for file exceeding max line count, got nil")
 	}
 }
 
