@@ -85,7 +85,13 @@ To also enable the Web UI:
 }
 ```
 
-Then open `http://127.0.0.1:3000` in your browser.
+On startup, the log (stderr or the file specified by `-log-file`) prints the access URL including an authentication token:
+
+```
+WebUI available url=http://127.0.0.1:3000/?token=<random-token>
+```
+
+Open this URL in your browser. The token is auto-generated each launch; use `-mcp-http-token` to set a fixed value.
 
 ### 3. First Capture
 
