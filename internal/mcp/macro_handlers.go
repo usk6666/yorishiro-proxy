@@ -456,6 +456,13 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 			}
 		}
 
+		// Target scope enforcement after template expansion: the pre-run check
+		// validates static URLs, but templates like {{target_url}} produce the
+		// final URL only at send time. Check httpReq.URL to close the TOCTOU gap.
+		if err := s.checkTargetScopeURL(httpReq.URL); err != nil {
+			return nil, fmt.Errorf("macro step target scope check: %w", err)
+		}
+
 		start := time.Now()
 		resp, err := client.Do(httpReq)
 		if err != nil {
