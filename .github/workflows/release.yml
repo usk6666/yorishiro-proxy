@@ -18,19 +18,19 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
           go-version: "1.25.x"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version: "24"
           cache: "pnpm"
@@ -39,9 +39,11 @@ jobs:
       # Determine version from tag or workflow_dispatch input.
       - name: Determine version
         id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            VERSION="${{ github.event.inputs.tag }}"
+          if [ -n "${INPUT_TAG}" ]; then
+            VERSION="${INPUT_TAG}"
           elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME}"
           else
@@ -105,8 +107,8 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           PRERELEASE=""
           if echo "${VERSION}" | grep -qE '[-](alpha|beta|rc)'; then
             PRERELEASE="--prerelease"
@@ -128,8 +130,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           if gh release view "${VERSION}" > /dev/null 2>&1; then
             echo "Uploading assets to existing release ${VERSION}..."
             gh release upload "${VERSION}" dist/* --clobber
@@ -140,7 +142,7 @@ jobs:
 
       - name: Upload build artifacts
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag == ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-binaries-${{ steps.version.outputs.version }}
           path: dist/
