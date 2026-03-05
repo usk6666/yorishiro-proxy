@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -458,28 +459,137 @@ func targetDefaultPort(scheme, portStr string) int {
 	}
 }
 
-// validateTargetRules validates that each target rule has a non-empty hostname.
+// validateTargetRules validates each target rule's hostname, ports, and schemes.
 func validateTargetRules(kind string, rules []targetRuleInput) error {
 	for i, r := range rules {
 		if r.Hostname == "" {
 			return fmt.Errorf("%s rule %d: hostname is required", kind, i)
 		}
+		if err := validateHostname(r.Hostname); err != nil {
+			return fmt.Errorf("%s rule %d: %w", kind, i, err)
+		}
+		for _, p := range r.Ports {
+			if p < 1 || p > 65535 {
+				return fmt.Errorf("%s rule %d: port %d is out of range (1-65535)", kind, i, p)
+			}
+		}
+		for _, s := range r.Schemes {
+			if !allowedSchemes[strings.ToLower(s)] {
+				return fmt.Errorf("%s rule %d: scheme %q is not allowed (use http or https)", kind, i, s)
+			}
+		}
 	}
 	return nil
 }
 
+// validateHostname checks that a hostname is valid for target rules.
+// It accepts exact hostnames, wildcard patterns (*.example.com), IPv4 addresses,
+// and bracketed IPv6 addresses ([::1]).
+func validateHostname(hostname string) error {
+	// Strip wildcard prefix for validation of the domain part.
+	h := hostname
+	if strings.HasPrefix(h, "*.") {
+		h = h[2:]
+		if h == "" {
+			return fmt.Errorf("hostname %q: wildcard must be followed by a domain", hostname)
+		}
+	}
+
+	// Reject trailing dots to prevent normalization mismatches.
+	if strings.HasSuffix(h, ".") {
+		return fmt.Errorf("hostname %q: trailing dot is not allowed", hostname)
+	}
+
+	// IPv6 bracket notation: [::1]
+	if strings.HasPrefix(h, "[") {
+		if !strings.HasSuffix(h, "]") {
+			return fmt.Errorf("hostname %q: mismatched brackets for IPv6 address", hostname)
+		}
+		inner := h[1 : len(h)-1]
+		if net.ParseIP(inner) == nil {
+			return fmt.Errorf("hostname %q: invalid IPv6 address", hostname)
+		}
+		return nil
+	}
+
+	// IPv4 literal: all digits and dots, parse as IP.
+	if isIPv4Like(h) {
+		if net.ParseIP(h) == nil {
+			return fmt.Errorf("hostname %q: invalid IPv4 address", hostname)
+		}
+		return nil
+	}
+
+	// Domain name validation: labels separated by dots.
+	return validateDomainName(h, hostname)
+}
+
+// isIPv4Like reports whether s looks like an IPv4 address (digits and dots only).
+func isIPv4Like(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && c != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// validateDomainName validates a DNS domain name.
+func validateDomainName(domain, original string) error {
+	if len(domain) > 253 {
+		return fmt.Errorf("hostname %q: domain name too long", original)
+	}
+	labels := strings.Split(domain, ".")
+	for _, label := range labels {
+		if label == "" {
+			return fmt.Errorf("hostname %q: empty label in domain name", original)
+		}
+		if len(label) > 63 {
+			return fmt.Errorf("hostname %q: label %q exceeds 63 characters", original, label)
+		}
+		for _, c := range label {
+			if !isValidLabelChar(c) {
+				return fmt.Errorf("hostname %q: invalid character %q in domain name", original, c)
+			}
+		}
+		// Labels must not start or end with hyphen.
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("hostname %q: label %q must not start or end with a hyphen", original, label)
+		}
+	}
+	return nil
+}
+
+// isValidLabelChar reports whether c is a valid DNS label character
+// (alphanumeric or hyphen).
+func isValidLabelChar(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
+}
+
 // toTargetRules converts a slice of targetRuleInput to proxy.TargetRule.
+// Schemes are normalized to lowercase.
 func toTargetRules(inputs []targetRuleInput) []proxy.TargetRule {
 	if len(inputs) == 0 {
 		return nil
 	}
 	rules := make([]proxy.TargetRule, len(inputs))
 	for i, input := range inputs {
+		schemes := input.Schemes
+		if len(schemes) > 0 {
+			normalized := make([]string, len(schemes))
+			for j, s := range schemes {
+				normalized[j] = strings.ToLower(s)
+			}
+			schemes = normalized
+		}
 		rules[i] = proxy.TargetRule{
 			Hostname:   input.Hostname,
 			Ports:      input.Ports,
 			PathPrefix: input.PathPrefix,
-			Schemes:    input.Schemes,
+			Schemes:    schemes,
 		}
 	}
 	return rules
