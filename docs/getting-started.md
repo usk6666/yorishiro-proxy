@@ -375,7 +375,15 @@ Add `-mcp-http-addr` to your `.mcp.json` configuration:
 }
 ```
 
-After restarting Claude Code, open `http://127.0.0.1:3000` in your browser to access the WebUI.
+After restarting Claude Code, check the log output (stderr or the file specified by `-log-file`) for a line like:
+
+```
+WebUI available url=http://127.0.0.1:3000/?token=<random-token>
+```
+
+Open this URL in your browser. The WebUI pages load without authentication, but the `?token=` query parameter is required for the frontend to communicate with the MCP API backend. Without the token, the dashboard will not be able to fetch or display data.
+
+The token is auto-generated on each launch. To use a fixed token, add `-mcp-http-token <your-token>` to the `args` in `.mcp.json`, or set the `YP_MCP_HTTP_TOKEN` environment variable.
 
 ### Browsing flows
 
