@@ -643,3 +643,92 @@ func TestRecordReceive_WithTLSCertSubject(t *testing.T) {
 			entry.Session.ConnInfo.ServerAddr, "93.184.216.34:443")
 	}
 }
+
+func TestRequestHeaders_InjectsHost(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		wantHost string
+	}{
+		{
+			name:     "host from req.Host",
+			host:     "example.com",
+			wantHost: "example.com",
+		},
+		{
+			name:     "empty host is not injected",
+			host:     "",
+			wantHost: "",
+		},
+		{
+			name:     "host with port",
+			host:     "example.com:8080",
+			wantHost: "example.com:8080",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &gohttp.Request{
+				Method: "GET",
+				Host:   tt.host,
+				Header: gohttp.Header{"X-Custom": {"value"}},
+			}
+
+			headers := requestHeaders(req)
+
+			if headers.Get("X-Custom") != "value" {
+				t.Errorf("X-Custom = %q, want %q", headers.Get("X-Custom"), "value")
+			}
+
+			if tt.wantHost == "" {
+				if _, ok := headers["Host"]; ok {
+					t.Errorf("Host header should not be present for empty host")
+				}
+			} else {
+				if headers.Get("Host") != tt.wantHost {
+					t.Errorf("Host = %q, want %q", headers.Get("Host"), tt.wantHost)
+				}
+			}
+
+			// Verify it does not mutate the original req.Header.
+			if _, ok := req.Header["Host"]; ok {
+				t.Error("requestHeaders should not mutate req.Header")
+			}
+		})
+	}
+}
+
+func TestRecordSend_HostHeader(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	req := &gohttp.Request{
+		Method: "GET",
+		Host:   "example.com",
+		Header: gohttp.Header{"Content-Type": {"application/json"}},
+	}
+	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}
+
+	result := handler.recordSend(context.Background(), sendRecordParams{
+		connID:     "conn-host",
+		clientAddr: "127.0.0.1:1234",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:        req,
+		reqURL:     reqURL,
+	}, testutil.DiscardLogger())
+
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	hostVals := entries[0].Send.Headers["Host"]
+	if len(hostVals) != 1 || hostVals[0] != "example.com" {
+		t.Errorf("Host header = %v, want [example.com]", hostVals)
+	}
+}

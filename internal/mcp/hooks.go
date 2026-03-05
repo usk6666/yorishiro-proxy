@@ -522,6 +522,22 @@ func recordMacroStepSessionDeps(
 	}
 }
 
+// expandHeaderEntries applies template expansion to each header entry's value.
+func expandHeaderEntries(entries HeaderEntries, kvStore map[string]string) (HeaderEntries, error) {
+	if len(entries) == 0 {
+		return entries, nil
+	}
+	result := make(HeaderEntries, len(entries))
+	for i, e := range entries {
+		expanded, err := macro.ExpandTemplate(e.Value, kvStore)
+		if err != nil {
+			return nil, fmt.Errorf("header %q: %w", e.Key, err)
+		}
+		result[i] = HeaderEntry{Key: e.Key, Value: expanded}
+	}
+	return result, nil
+}
+
 // expandParamsWithKVStore applies template expansion to the resend/fuzz override
 // parameters using the KV Store values from a pre_send hook execution.
 func expandParamsWithKVStore(params *resendParams, kvStore map[string]string) error {
@@ -540,7 +556,7 @@ func expandParamsWithKVStore(params *resendParams, kvStore map[string]string) er
 
 	// Expand override_headers values.
 	if len(params.OverrideHeaders) > 0 {
-		expanded, err := macro.ExpandHeaders(params.OverrideHeaders, kvStore)
+		expanded, err := expandHeaderEntries(params.OverrideHeaders, kvStore)
 		if err != nil {
 			return fmt.Errorf("expand override_headers: %w", err)
 		}
@@ -549,7 +565,7 @@ func expandParamsWithKVStore(params *resendParams, kvStore map[string]string) er
 
 	// Expand add_headers values.
 	if len(params.AddHeaders) > 0 {
-		expanded, err := macro.ExpandHeaders(params.AddHeaders, kvStore)
+		expanded, err := expandHeaderEntries(params.AddHeaders, kvStore)
 		if err != nil {
 			return fmt.Errorf("expand add_headers: %w", err)
 		}

@@ -214,16 +214,11 @@ export function ResendPage() {
         return;
       }
 
-      // Build override_headers from the key-value pairs.
-      const overrideHeaders: Record<string, string> = {};
-      for (const h of headers) {
-        const key = h.key.trim();
-        if (key) {
-          overrideHeaders[key] = key in overrideHeaders
-            ? `${overrideHeaders[key]}, ${h.value}`
-            : h.value;
-        }
-      }
+      // Build override_headers from the key-value pairs as array format.
+      // Array format supports duplicate keys (e.g., multiple Host headers).
+      const overrideHeaders = headers
+        .filter((h) => h.key.trim() !== "")
+        .map((h) => ({ key: h.key.trim(), value: h.value }));
 
       try {
         const result = await resend<ResendResult>({
@@ -232,7 +227,7 @@ export function ResendPage() {
             flow_id: activeFlowId,
             override_method: method,
             override_url: url,
-            override_headers: Object.keys(overrideHeaders).length > 0 ? overrideHeaders : undefined,
+            override_headers: overrideHeaders.length > 0 ? overrideHeaders : undefined,
             override_body: body || undefined,
             body_patches: bodyPatches.length > 0 ? bodyPatches : undefined,
             dry_run: isDryRun,

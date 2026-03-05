@@ -781,8 +781,8 @@ func TestBuildResendHeaders(t *testing.T) {
 
 	params := resendParams{
 		RemoveHeaders:   []string{"X-Remove-Me"},
-		OverrideHeaders: map[string]string{"Authorization": "Bearer new-token"},
-		AddHeaders:      map[string]string{"X-Multi": "val2", "X-New": "new-value"},
+		OverrideHeaders: HeaderEntries{{Key: "Authorization", Value: "Bearer new-token"}},
+		AddHeaders:      HeaderEntries{{Key: "X-Multi", Value: "val2"}, {Key: "X-New", Value: "new-value"}},
 	}
 
 	got := buildResendHeaders(original, params)
@@ -812,6 +812,47 @@ func TestBuildResendHeaders(t *testing.T) {
 	// X-New should be added.
 	if v := got["X-New"]; len(v) != 1 || v[0] != "new-value" {
 		t.Errorf("X-New = %v, want [new-value]", v)
+	}
+}
+
+func TestBuildResendHeaders_DuplicateKeys(t *testing.T) {
+	original := map[string][]string{
+		"Host": {"original.com"},
+	}
+
+	// Test duplicate header keys via override_headers.
+	params := resendParams{
+		OverrideHeaders: HeaderEntries{
+			{Key: "Host", Value: "evil.com"},
+			{Key: "Host", Value: "evil2.com"},
+		},
+	}
+
+	got := buildResendHeaders(original, params)
+
+	// Host should have both override values (original replaced).
+	if v := got["Host"]; len(v) != 2 || v[0] != "evil.com" || v[1] != "evil2.com" {
+		t.Errorf("Host = %v, want [evil.com, evil2.com]", v)
+	}
+}
+
+func TestBuildResendHeaders_DuplicateAddHeaders(t *testing.T) {
+	original := map[string][]string{
+		"Set-Cookie": {"cookie1=a"},
+	}
+
+	params := resendParams{
+		AddHeaders: HeaderEntries{
+			{Key: "Set-Cookie", Value: "cookie2=b"},
+			{Key: "Set-Cookie", Value: "cookie3=c"},
+		},
+	}
+
+	got := buildResendHeaders(original, params)
+
+	// Set-Cookie should have all three values.
+	if v := got["Set-Cookie"]; len(v) != 3 || v[0] != "cookie1=a" || v[1] != "cookie2=b" || v[2] != "cookie3=c" {
+		t.Errorf("Set-Cookie = %v, want [cookie1=a, cookie2=b, cookie3=c]", v)
 	}
 }
 
@@ -1167,6 +1208,208 @@ func TestBuildResendHeaders_RemoveHeaders_EmptySlice(t *testing.T) {
 	// Content-Type should be unchanged.
 	if v := got["Content-Type"]; len(v) != 1 || v[0] != "application/json" {
 		t.Errorf("Content-Type = %v, want [application/json]", v)
+	}
+}
+
+// --- HeaderEntries UnmarshalJSON tests ---
+
+func TestHeaderEntries_UnmarshalJSON_ArrayFormat(t *testing.T) {
+	input := `[{"key":"Host","value":"evil.com"},{"key":"Host","value":"evil2.com"}]`
+	var h HeaderEntries
+	if err := json.Unmarshal([]byte(input), &h); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(h) != 2 {
+		t.Fatalf("len = %d, want 2", len(h))
+	}
+	if h[0].Key != "Host" || h[0].Value != "evil.com" {
+		t.Errorf("h[0] = %+v, want {Key:Host, Value:evil.com}", h[0])
+	}
+	if h[1].Key != "Host" || h[1].Value != "evil2.com" {
+		t.Errorf("h[1] = %+v, want {Key:Host, Value:evil2.com}", h[1])
+	}
+}
+
+func TestHeaderEntries_UnmarshalJSON_LegacyMapFormat(t *testing.T) {
+	input := `{"Content-Type":"application/json","X-Custom":"value"}`
+	var h HeaderEntries
+	if err := json.Unmarshal([]byte(input), &h); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(h) != 2 {
+		t.Fatalf("len = %d, want 2", len(h))
+	}
+	// Map iteration order is not guaranteed, so check by key.
+	found := make(map[string]string)
+	for _, e := range h {
+		found[e.Key] = e.Value
+	}
+	if found["Content-Type"] != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", found["Content-Type"])
+	}
+	if found["X-Custom"] != "value" {
+		t.Errorf("X-Custom = %q, want value", found["X-Custom"])
+	}
+}
+
+func TestHeaderEntries_UnmarshalJSON_EmptyArray(t *testing.T) {
+	input := `[]`
+	var h HeaderEntries
+	if err := json.Unmarshal([]byte(input), &h); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(h) != 0 {
+		t.Fatalf("len = %d, want 0", len(h))
+	}
+}
+
+func TestHeaderEntries_UnmarshalJSON_EmptyMap(t *testing.T) {
+	input := `{}`
+	var h HeaderEntries
+	if err := json.Unmarshal([]byte(input), &h); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(h) != 0 {
+		t.Fatalf("len = %d, want 0", len(h))
+	}
+}
+
+func TestHeaderEntries_UnmarshalJSON_Invalid(t *testing.T) {
+	input := `"not valid"`
+	var h HeaderEntries
+	if err := json.Unmarshal([]byte(input), &h); err == nil {
+		t.Fatal("expected error for invalid input")
+	}
+}
+
+// --- Backward compatibility integration tests ---
+
+func TestExecute_Resend_DuplicateHeaders_ArrayFormat(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/dup-header-test")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{"Accept": {"text/html"}},
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	// Send with array format override_headers containing duplicate keys.
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+			"override_headers": []any{
+				map[string]any{"key": "X-Test", "value": "val1"},
+				map[string]any{"key": "X-Test", "value": "val2"},
+			},
+			"dry_run": true,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out resendDryRunResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// X-Test should have both values.
+	if vals, exists := out.RequestPreview.Headers["X-Test"]; !exists || len(vals) != 2 {
+		t.Errorf("X-Test = %v, want 2 values", vals)
+	} else {
+		if vals[0] != "val1" || vals[1] != "val2" {
+			t.Errorf("X-Test = %v, want [val1, val2]", vals)
+		}
+	}
+}
+
+func TestExecute_Resend_LegacyMapFormat_BackwardCompat(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/legacy-test")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{"Accept": {"text/html"}},
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	// Send with legacy map format (backward compat).
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+			"override_headers": map[string]any{
+				"X-Custom": "custom-value",
+			},
+			"add_headers": map[string]any{
+				"X-Added": "added-value",
+			},
+			"dry_run": true,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out resendDryRunResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// X-Custom should be overridden.
+	if vals, exists := out.RequestPreview.Headers["X-Custom"]; !exists || len(vals) != 1 || vals[0] != "custom-value" {
+		t.Errorf("X-Custom = %v, want [custom-value]", vals)
+	}
+
+	// X-Added should be present.
+	if vals, exists := out.RequestPreview.Headers["X-Added"]; !exists || len(vals) != 1 || vals[0] != "added-value" {
+		t.Errorf("X-Added = %v, want [added-value]", vals)
 	}
 }
 

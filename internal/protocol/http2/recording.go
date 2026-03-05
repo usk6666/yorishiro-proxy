@@ -9,9 +9,21 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
+
+// requestHeaders returns a clone of the request headers with the Host header
+// explicitly set from req.Host. Go's net/http strips the Host header from
+// Request.Header and stores it in Request.Host, so we must re-inject it for
+// accurate flow recording.
+func requestHeaders(req *gohttp.Request) gohttp.Header {
+	headers := req.Header.Clone()
+	if req.Host != "" {
+		headers["Host"] = []string{req.Host}
+	}
+	return headers
+}
 
 // sendRecordParams holds the parameters needed to record the send phase
 // (Session + request message) of an HTTP/2 flow.
@@ -74,7 +86,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           p.reqURL,
-		Headers:       p.req.Header,
+		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
 		BodyTruncated: p.reqTruncated,
 	}
@@ -172,6 +184,12 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	}
 
 	if modified {
+		// Inject Host into the snapshot headers (the snapshot was taken from
+		// req.Header which does not contain Host per Go's net/http design).
+		origHeaders := snap.headers.Clone()
+		if p.req.Host != "" {
+			origHeaders["Host"] = []string{p.req.Host}
+		}
 		// Record the original (unmodified) request as sequence 0.
 		originalMsg := &flow.Message{
 			FlowID:     fl.ID,
@@ -180,7 +198,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Timestamp:     p.start,
 			Method:        p.req.Method,
 			URL:           p.reqURL,
-			Headers:       snap.headers,
+			Headers:       origHeaders,
 			Body:          snap.body,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "original"},
@@ -197,7 +215,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Timestamp:     p.start,
 			Method:        p.req.Method,
 			URL:           p.reqURL,
-			Headers:       p.req.Header,
+			Headers:       requestHeaders(p.req),
 			Body:          p.reqBody,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "modified"},
@@ -217,7 +235,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           p.reqURL,
-		Headers:       p.req.Header,
+		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
 		BodyTruncated: p.reqTruncated,
 	}
@@ -365,7 +383,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           p.reqURL,
-		Headers:       p.req.Header,
+		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
 		BodyTruncated: p.reqTruncated,
 	}
@@ -413,7 +431,7 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           p.reqURL,
-		Headers:       p.req.Header,
+		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
 		BodyTruncated: p.reqTruncated,
 	}

@@ -104,11 +104,11 @@ func TestValidateHeaderKeys_CRLF(t *testing.T) {
 
 func TestValidateResendHeaders_Clean(t *testing.T) {
 	params := resendParams{
-		OverrideHeaders: map[string]string{
-			"Content-Type": "text/plain",
+		OverrideHeaders: HeaderEntries{
+			{Key: "Content-Type", Value: "text/plain"},
 		},
-		AddHeaders: map[string]string{
-			"X-Custom": "value",
+		AddHeaders: HeaderEntries{
+			{Key: "X-Custom", Value: "value"},
 		},
 		RemoveHeaders: []string{"X-Old"},
 	}
@@ -119,8 +119,8 @@ func TestValidateResendHeaders_Clean(t *testing.T) {
 
 func TestValidateResendHeaders_CRLFInOverride(t *testing.T) {
 	params := resendParams{
-		OverrideHeaders: map[string]string{
-			"X-Evil": "value\r\nInjected: evil",
+		OverrideHeaders: HeaderEntries{
+			{Key: "X-Evil", Value: "value\r\nInjected: evil"},
 		},
 	}
 	err := validateResendHeaders(params)
@@ -131,8 +131,8 @@ func TestValidateResendHeaders_CRLFInOverride(t *testing.T) {
 
 func TestValidateResendHeaders_CRLFInAdd(t *testing.T) {
 	params := resendParams{
-		AddHeaders: map[string]string{
-			"X-Evil": "value\r\nInjected: evil",
+		AddHeaders: HeaderEntries{
+			{Key: "X-Evil", Value: "value\r\nInjected: evil"},
 		},
 	}
 	err := validateResendHeaders(params)
