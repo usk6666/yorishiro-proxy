@@ -22,7 +22,6 @@ func (m *mockFlowFetcher) GetFlowRequest(_ context.Context, flowID string) (*Sen
 	return req, nil
 }
 
-
 func TestNewEngine(t *testing.T) {
 	fetcher := &mockFlowFetcher{}
 	send := func(context.Context, *SendRequest) (*SendResponse, error) { return nil, nil }

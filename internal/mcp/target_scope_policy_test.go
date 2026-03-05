@@ -1453,4 +1453,3 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 		t.Errorf("error message should mention target scope, got: %s", text)
 	}
 }
-
