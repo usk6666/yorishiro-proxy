@@ -342,7 +342,19 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	defer fwd.resp.Body.Close()
 
-	fullRespBody, rawResponse := h.readResponseBody(fwd.resp, logger)
+	fullRespBody, _ := h.readResponseBody(fwd.resp, logger)
+
+	// Response intercept: check if the response matches any intercept rules
+	// and allow the AI agent to modify or drop it before sending to the client.
+	var respDropped bool
+	fwd.resp, fullRespBody, respDropped = h.applyInterceptResponse(ctx, conn, req, fwd.resp, fullRespBody, logger)
+	if respDropped {
+		return nil
+	}
+	// Serialize raw response for recording. This is done after response intercept
+	// so that any modifications are reflected in the recorded bytes.
+	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
+
 	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
 		return err
 	}

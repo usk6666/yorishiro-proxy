@@ -176,6 +176,111 @@ func writeResponseToClient(conn net.Conn, resp *gohttp.Response, body []byte) er
 	return nil
 }
 
+// interceptResponse checks if the response matches any intercept rules and,
+// if so, enqueues it for AI agent review. It blocks until the agent responds
+// or the timeout expires. Returns the action and true if intercepted, or a
+// zero-value action and false if not intercepted.
+func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
+		return intercept.InterceptAction{}, false
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	if len(matchedRules) == 0 {
+		return intercept.InterceptAction{}, false
+	}
+
+	logger.Info("response intercepted",
+		"method", req.Method,
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"matched_rules", matchedRules)
+
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		req.Method, req.URL, resp.StatusCode, resp.Header, body, matchedRules,
+	)
+	defer h.InterceptQueue.Remove(id)
+
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	select {
+	case action := <-actionCh:
+		return action, true
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			logger.Info("intercepted response cancelled (proxy shutdown)", "id", id)
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		}
+		logger.Info("intercepted response timed out", "id", id, "behavior", string(behavior))
+		switch behavior {
+		case intercept.TimeoutAutoDrop:
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		default:
+			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
+		}
+	}
+}
+
+// applyInterceptResponse checks response intercept rules and applies any modifications.
+// It returns the (possibly modified) response, updated body, and a boolean indicating
+// whether the response was dropped (caller should return early with an error response).
+func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (*gohttp.Response, []byte, bool) {
+	action, intercepted := h.interceptResponse(ctx, req, resp, body, logger)
+	if !intercepted {
+		return resp, body, false
+	}
+
+	switch action.Type {
+	case intercept.ActionDrop:
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		logger.Info("intercepted response dropped",
+			"method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
+		return resp, body, true
+	case intercept.ActionModifyAndForward:
+		resp, body = applyResponseModifications(resp, action, body)
+		return resp, body, false
+	case intercept.ActionRelease:
+		// Continue with the original response.
+	}
+
+	return resp, body, false
+}
+
+// applyResponseModifications applies the modifications from a modify_and_forward
+// action to the HTTP response. It returns the modified response and body.
+func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte) {
+	// Override status code.
+	if action.OverrideStatus > 0 {
+		resp.StatusCode = action.OverrideStatus
+		resp.Status = fmt.Sprintf("%d %s", action.OverrideStatus, gohttp.StatusText(action.OverrideStatus))
+	}
+
+	// Remove response headers first.
+	for _, key := range action.RemoveResponseHeaders {
+		resp.Header.Del(key)
+	}
+
+	// Override response headers.
+	for key, val := range action.OverrideResponseHeaders {
+		resp.Header.Set(key, val)
+	}
+
+	// Add response headers.
+	for key, val := range action.AddResponseHeaders {
+		resp.Header.Add(key, val)
+	}
+
+	// Override response body.
+	if action.OverrideResponseBody != nil {
+		body = []byte(*action.OverrideResponseBody)
+	}
+
+	return resp, body
+}
+
 // requestSnapshot holds a copy of the request headers and body taken before
 // intercept/transform processing. It is used to detect whether modifications
 // occurred and, if so, to record the original (unmodified) version as a
