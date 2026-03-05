@@ -1281,6 +1281,7 @@ func TestValidateTargetRules(t *testing.T) {
 		rules   []targetRuleInput
 		wantErr bool
 	}{
+		// --- hostname validation ---
 		{
 			name:    "valid rules",
 			rules:   []targetRuleInput{{Hostname: "example.com"}, {Hostname: "*.test.com"}},
@@ -1306,6 +1307,133 @@ func TestValidateTargetRules(t *testing.T) {
 			rules:   []targetRuleInput{{Hostname: "ok.com"}, {Hostname: ""}},
 			wantErr: true,
 		},
+		{
+			name:    "trailing dot rejected",
+			rules:   []targetRuleInput{{Hostname: "example.com."}},
+			wantErr: true,
+		},
+		{
+			name:    "control character in hostname",
+			rules:   []targetRuleInput{{Hostname: "exam\x00ple.com"}},
+			wantErr: true,
+		},
+		{
+			name:    "space in hostname",
+			rules:   []targetRuleInput{{Hostname: "exam ple.com"}},
+			wantErr: true,
+		},
+		{
+			name:    "valid IPv4",
+			rules:   []targetRuleInput{{Hostname: "192.168.1.1"}},
+			wantErr: false,
+		},
+		{
+			name:    "invalid IPv4",
+			rules:   []targetRuleInput{{Hostname: "999.999.999.999"}},
+			wantErr: true,
+		},
+		{
+			name:    "valid IPv6 bracket",
+			rules:   []targetRuleInput{{Hostname: "[::1]"}},
+			wantErr: false,
+		},
+		{
+			name:    "invalid IPv6 bracket",
+			rules:   []targetRuleInput{{Hostname: "[not-ipv6]"}},
+			wantErr: true,
+		},
+		{
+			name:    "mismatched IPv6 bracket",
+			rules:   []targetRuleInput{{Hostname: "[::1"}},
+			wantErr: true,
+		},
+		{
+			name:    "wildcard with empty domain",
+			rules:   []targetRuleInput{{Hostname: "*."}},
+			wantErr: true,
+		},
+		{
+			name:    "label starting with hyphen",
+			rules:   []targetRuleInput{{Hostname: "-example.com"}},
+			wantErr: true,
+		},
+		{
+			name:    "label ending with hyphen",
+			rules:   []targetRuleInput{{Hostname: "example-.com"}},
+			wantErr: true,
+		},
+		{
+			name:    "valid single-label hostname",
+			rules:   []targetRuleInput{{Hostname: "localhost"}},
+			wantErr: false,
+		},
+		{
+			name:    "valid hyphenated label",
+			rules:   []targetRuleInput{{Hostname: "my-host.example.com"}},
+			wantErr: false,
+		},
+		// --- port validation ---
+		{
+			name:    "valid ports",
+			rules:   []targetRuleInput{{Hostname: "example.com", Ports: []int{80, 443, 8080}}},
+			wantErr: false,
+		},
+		{
+			name:    "port zero rejected",
+			rules:   []targetRuleInput{{Hostname: "example.com", Ports: []int{0}}},
+			wantErr: true,
+		},
+		{
+			name:    "negative port rejected",
+			rules:   []targetRuleInput{{Hostname: "example.com", Ports: []int{-1}}},
+			wantErr: true,
+		},
+		{
+			name:    "port above 65535 rejected",
+			rules:   []targetRuleInput{{Hostname: "example.com", Ports: []int{99999}}},
+			wantErr: true,
+		},
+		{
+			name:    "port 65535 accepted",
+			rules:   []targetRuleInput{{Hostname: "example.com", Ports: []int{65535}}},
+			wantErr: false,
+		},
+		{
+			name:    "port 1 accepted",
+			rules:   []targetRuleInput{{Hostname: "example.com", Ports: []int{1}}},
+			wantErr: false,
+		},
+		// --- scheme validation ---
+		{
+			name:    "valid schemes",
+			rules:   []targetRuleInput{{Hostname: "example.com", Schemes: []string{"http", "https"}}},
+			wantErr: false,
+		},
+		{
+			name:    "uppercase scheme accepted",
+			rules:   []targetRuleInput{{Hostname: "example.com", Schemes: []string{"HTTP", "HTTPS"}}},
+			wantErr: false,
+		},
+		{
+			name:    "ftp scheme rejected",
+			rules:   []targetRuleInput{{Hostname: "example.com", Schemes: []string{"ftp"}}},
+			wantErr: true,
+		},
+		{
+			name:    "file scheme rejected",
+			rules:   []targetRuleInput{{Hostname: "example.com", Schemes: []string{"file"}}},
+			wantErr: true,
+		},
+		{
+			name:    "javascript scheme rejected",
+			rules:   []targetRuleInput{{Hostname: "example.com", Schemes: []string{"javascript"}}},
+			wantErr: true,
+		},
+		{
+			name:    "empty schemes allowed (no filter)",
+			rules:   []targetRuleInput{{Hostname: "example.com", Schemes: []string{}}},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1313,6 +1441,35 @@ func TestValidateTargetRules(t *testing.T) {
 			err := validateTargetRules("test", tt.rules)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateTargetRules() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateHostname(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		wantErr  bool
+	}{
+		{"simple domain", "example.com", false},
+		{"subdomain", "sub.example.com", false},
+		{"wildcard", "*.example.com", false},
+		{"ipv4", "10.0.0.1", false},
+		{"ipv6 bracket", "[2001:db8::1]", false},
+		{"trailing dot", "example.com.", true},
+		{"wildcard trailing dot", "*.example.com.", true},
+		{"empty wildcard domain", "*.", true},
+		{"double dot", "example..com", true},
+		{"underscore rejected", "test_host.com", true},
+		{"label too long", strings.Repeat("a", 64) + ".com", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateHostname(tt.hostname)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateHostname(%q) error = %v, wantErr %v", tt.hostname, err, tt.wantErr)
 			}
 		})
 	}
@@ -1339,6 +1496,19 @@ func TestToTargetRules(t *testing.T) {
 	}
 	if len(r.Schemes) != 1 || r.Schemes[0] != "https" {
 		t.Errorf("schemes = %v, want [https]", r.Schemes)
+	}
+}
+
+func TestToTargetRules_SchemeNormalization(t *testing.T) {
+	inputs := []targetRuleInput{
+		{Hostname: "example.com", Schemes: []string{"HTTP", "HTTPS"}},
+	}
+	rules := toTargetRules(inputs)
+	if len(rules) != 1 {
+		t.Fatalf("len = %d, want 1", len(rules))
+	}
+	if rules[0].Schemes[0] != "http" || rules[0].Schemes[1] != "https" {
+		t.Errorf("schemes = %v, want [http, https]", rules[0].Schemes)
 	}
 }
 
