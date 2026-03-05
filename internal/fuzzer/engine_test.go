@@ -795,3 +795,253 @@ func TestEngine_Run_JobTimestamps(t *testing.T) {
 		t.Errorf("completed_at %v not in [%v, %v]", *job.CompletedAt, before, after)
 	}
 }
+
+func TestExecuteFuzzCase_TargetScopeChecker(t *testing.T) {
+	tests := []struct {
+		name       string
+		checker    func(u *url.URL) error
+		wantErr    string
+		wantDoCall bool
+	}{
+		{
+			name:       "nil checker allows request",
+			checker:    nil,
+			wantErr:    "",
+			wantDoCall: true,
+		},
+		{
+			name: "checker allows matching URL",
+			checker: func(u *url.URL) error {
+				return nil
+			},
+			wantErr:    "",
+			wantDoCall: true,
+		},
+		{
+			name: "checker blocks URL",
+			checker: func(u *url.URL) error {
+				return fmt.Errorf("request blocked by target scope: host %q is not in allow list", u.Hostname())
+			},
+			wantErr:    "target scope check: request blocked by target scope",
+			wantDoCall: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testURL, _ := url.Parse("http://example.com/api")
+			doerCalled := false
+			httpDoer := &mockHTTPDoer{
+				responses: []*http.Response{newMockResponse(200, "ok")},
+			}
+
+			recorder := &mockFlowRecorder{}
+			engine := NewEngine(nil, recorder, &mockFuzzJobStore{}, httpDoer, "")
+
+			// Wrap doer to track calls.
+			wrappedDoer := &trackingDoer{inner: httpDoer, called: &doerCalled}
+
+			baseData := &RequestData{
+				Method:  "GET",
+				URL:     testURL,
+				Headers: map[string][]string{},
+			}
+
+			fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
+
+			result := engine.executeFuzzCase(
+				context.Background(), baseData, nil, fc,
+				"HTTP/1.x", 5*time.Second, "fuzz-1", wrappedDoer, tt.checker,
+			)
+
+			if tt.wantErr != "" {
+				if result.Error == "" {
+					t.Fatalf("expected error containing %q, got no error", tt.wantErr)
+				}
+				if !strings.Contains(result.Error, tt.wantErr) {
+					t.Errorf("error = %q, want containing %q", result.Error, tt.wantErr)
+				}
+			} else {
+				if result.Error != "" {
+					t.Errorf("unexpected error: %s", result.Error)
+				}
+			}
+
+			if doerCalled != tt.wantDoCall {
+				t.Errorf("doer called = %v, want %v", doerCalled, tt.wantDoCall)
+			}
+		})
+	}
+}
+
+func TestExecuteFuzzCase_TargetScopeChecker_AfterPositionApply(t *testing.T) {
+	// Verify that the target scope checker is called with the URL AFTER
+	// position application (payload injection). The checker sees the modified
+	// URL path, not the original.
+	originalURL, _ := url.Parse("http://allowed.example.com/api/v1")
+
+	var checkedPath string
+	checker := func(u *url.URL) error {
+		checkedPath = u.Path
+		// Block any path containing "admin".
+		if strings.Contains(u.Path, "admin") {
+			return fmt.Errorf("request blocked by target scope: path %q is restricted", u.Path)
+		}
+		return nil
+	}
+
+	recorder := &mockFlowRecorder{}
+	httpDoer := &mockHTTPDoer{}
+	engine := NewEngine(nil, recorder, &mockFuzzJobStore{}, httpDoer, "")
+
+	baseData := &RequestData{
+		Method:  "GET",
+		URL:     originalURL,
+		Headers: map[string][]string{},
+	}
+
+	// Position that replaces the path with a payload.
+	positions := []Position{
+		{ID: "pos-0", Location: "path", Mode: "replace", PayloadSet: "paths"},
+	}
+
+	fc := FuzzCase{
+		Index:    0,
+		Payloads: map[string]string{"pos-0": "/admin/secret"},
+	}
+
+	result := engine.executeFuzzCase(
+		context.Background(), baseData, positions, fc,
+		"HTTP/1.x", 5*time.Second, "fuzz-1", nil, checker,
+	)
+
+	if checkedPath != "/admin/secret" {
+		t.Errorf("checker saw path %q, want %q", checkedPath, "/admin/secret")
+	}
+
+	if result.Error == "" {
+		t.Fatal("expected target scope check error, got none")
+	}
+	if !strings.Contains(result.Error, "target scope check") {
+		t.Errorf("error = %q, want containing 'target scope check'", result.Error)
+	}
+}
+
+func TestExecuteFuzzCaseWithHooks_TargetScopeChecker_AfterTemplateExpansion(t *testing.T) {
+	// Verify that the target scope checker is called after KV Store template
+	// expansion via pre_send hooks. The checker blocks all requests, so
+	// we can verify it was called with the expanded URL.
+	baseURL, _ := url.Parse("http://example.com/api?redirect={{target}}")
+
+	var checkedQuery string
+	checker := func(u *url.URL) error {
+		checkedQuery = u.RawQuery
+		// Block all requests — we just want to verify the checker is called
+		// with the expanded URL.
+		return fmt.Errorf("request blocked by target scope: all requests blocked for test")
+	}
+
+	recorder := &mockFlowRecorder{}
+	httpDoer := &mockHTTPDoer{}
+	engine := NewEngine(nil, recorder, &mockFuzzJobStore{}, httpDoer, "")
+
+	baseData := &RequestData{
+		Method:  "GET",
+		URL:     baseURL,
+		Headers: map[string][]string{},
+	}
+
+	fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
+
+	// The pre_send hook returns KV Store values. expandRequestData expands
+	// the URL string, replacing {{target}} with "evil.internal".
+	hooks := &mockHookCallbacksWithKV{
+		kvStore: map[string]string{"target": "evil.internal"},
+	}
+	hookState := &HookState{}
+
+	result := engine.executeFuzzCaseWithHooks(
+		context.Background(), baseData, nil, fc,
+		"HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState, nil, checker,
+	)
+
+	if checkedQuery == "" {
+		t.Fatal("target scope checker was not called")
+	}
+
+	// Verify the template was expanded before the checker was called.
+	if strings.Contains(checkedQuery, "{{target}}") {
+		t.Errorf("checker saw unexpanded template in query: %q", checkedQuery)
+	}
+	if !strings.Contains(checkedQuery, "evil.internal") {
+		t.Errorf("checker query %q does not contain expanded value 'evil.internal'", checkedQuery)
+	}
+
+	if result.Error == "" {
+		t.Fatal("expected target scope check error, got none")
+	}
+	if !strings.Contains(result.Error, "target scope check") {
+		t.Errorf("error = %q, want containing 'target scope check'", result.Error)
+	}
+}
+
+func TestExecuteFuzzCaseWithHooks_TargetScopeChecker_NilHooks(t *testing.T) {
+	// When hooks is nil, the checker should still be passed through to
+	// executeFuzzCase and applied.
+	testURL, _ := url.Parse("http://blocked.example.com/api")
+
+	checker := func(u *url.URL) error {
+		return fmt.Errorf("request blocked by target scope: host %q is not in allow list", u.Hostname())
+	}
+
+	recorder := &mockFlowRecorder{}
+	httpDoer := &mockHTTPDoer{}
+	engine := NewEngine(nil, recorder, &mockFuzzJobStore{}, httpDoer, "")
+
+	baseData := &RequestData{
+		Method:  "GET",
+		URL:     testURL,
+		Headers: map[string][]string{},
+	}
+
+	fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
+
+	// nil hooks - should delegate directly to executeFuzzCase with checker.
+	result := engine.executeFuzzCaseWithHooks(
+		context.Background(), baseData, nil, fc,
+		"HTTP/1.x", 5*time.Second, "fuzz-1", nil, nil, nil, checker,
+	)
+
+	if result.Error == "" {
+		t.Fatal("expected target scope check error, got none")
+	}
+	if !strings.Contains(result.Error, "target scope check") {
+		t.Errorf("error = %q, want containing 'target scope check'", result.Error)
+	}
+}
+
+// trackingDoer wraps an HTTPDoer and records whether Do was called.
+type trackingDoer struct {
+	inner  HTTPDoer
+	called *bool
+}
+
+func (d *trackingDoer) Do(req *http.Request) (*http.Response, error) {
+	*d.called = true
+	return d.inner.Do(req)
+}
+
+// mockHookCallbacksWithKV implements HookCallbacks returning specific KV Store values.
+type mockHookCallbacksWithKV struct {
+	kvStore map[string]string
+}
+
+func (m *mockHookCallbacksWithKV) PreSend(_ context.Context, _ *HookState) (map[string]string, error) {
+	return m.kvStore, nil
+}
+
+func (m *mockHookCallbacksWithKV) PostSend(_ context.Context, _ *HookState, _ int, _ []byte, _ map[string]string) error {
+	return nil
+}
+
+func (m *mockHookCallbacksWithKV) UpdateState(_ *HookState, _ int, _ bool) {}
