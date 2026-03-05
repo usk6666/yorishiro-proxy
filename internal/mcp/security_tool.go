@@ -401,15 +401,15 @@ func matchTargetRuleFields(rule proxy.TargetRule, scheme, hostname string, port 
 	return true
 }
 
-// matchHostnameLocal matches a hostname against a pattern (case-insensitive).
-// Supports wildcard prefix "*.example.com" to match all subdomains.
+// matchHostnameLocal performs case-insensitive hostname matching with wildcard support.
+// Pattern "*.example.com" matches "sub.example.com" but not "example.com".
 func matchHostnameLocal(pattern, hostname string) bool {
 	pattern = strings.ToLower(pattern)
 	hostname = strings.ToLower(hostname)
 
 	if strings.HasPrefix(pattern, "*.") {
 		suffix := pattern[1:] // ".example.com"
-		return strings.HasSuffix(hostname, suffix)
+		return strings.HasSuffix(hostname, suffix) && hostname != pattern[2:]
 	}
 	return pattern == hostname
 }
