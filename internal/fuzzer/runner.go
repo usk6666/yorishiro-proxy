@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,13 @@ type RunConfig struct {
 	// When set, this client is used instead of the engine's httpDoer.
 	// Not serialized to JSON (set at runtime only).
 	HTTPDoer HTTPDoer `json:"-"`
+
+	// TargetScopeChecker validates a URL against target scope rules before
+	// sending each fuzz request. This is called after position application
+	// and KV Store template expansion to prevent SSRF via payload injection.
+	// When nil, no target scope check is performed (open mode).
+	// Not serialized to JSON (set at runtime only).
+	TargetScopeChecker func(u *url.URL) error `json:"-"`
 }
 
 // Validate checks that a RunConfig is well-formed.
@@ -298,7 +306,7 @@ func (r *Runner) execute(
 				var result *flow.FuzzResult
 				attempts := 1 + cfg.MaxRetries
 				for attempt := 0; attempt < attempts; attempt++ {
-					result = r.engine.executeFuzzCaseWithHooks(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID, cfg.Hooks, hookState, cfg.HTTPDoer)
+					result = r.engine.executeFuzzCaseWithHooks(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID, cfg.Hooks, hookState, cfg.HTTPDoer, cfg.TargetScopeChecker)
 					if result.Error == "" {
 						break
 					}

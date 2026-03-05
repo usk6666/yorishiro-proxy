@@ -230,7 +230,7 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 		default:
 		}
 
-		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, fl.Protocol, timeout, job.ID, nil)
+		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, fl.Protocol, timeout, job.ID, nil, nil)
 		if err := e.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
 			// Log and continue; don't abort the entire job for a DB write failure.
 			errorCount++
@@ -275,6 +275,7 @@ func (e *Engine) executeFuzzCase(
 	timeout time.Duration,
 	fuzzID string,
 	doerOverride HTTPDoer,
+	targetScopeChecker func(u *url.URL) error,
 ) *flow.FuzzResult {
 	result := &flow.FuzzResult{
 		FuzzID:   fuzzID,
@@ -300,6 +301,15 @@ func (e *Engine) executeFuzzCase(
 		result.Error = "template flow has no URL"
 		// FlowID left empty for error results (no FK to flows table).
 		return result
+	}
+
+	// Target scope check: validate the final URL after position application
+	// and KV Store template expansion to prevent SSRF via payload injection.
+	if targetScopeChecker != nil {
+		if err := targetScopeChecker(data.URL); err != nil {
+			result.Error = fmt.Sprintf("target scope check: %s", err.Error())
+			return result
+		}
 	}
 
 	// Build HTTP request.
@@ -440,9 +450,10 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	hooks HookCallbacks,
 	hookState *HookState,
 	doerOverride HTTPDoer,
+	targetScopeChecker func(u *url.URL) error,
 ) *flow.FuzzResult {
 	if hooks == nil {
-		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride)
+		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker)
 	}
 
 	// Hold the lock for the full PreSend read-execute-writeback cycle (F-2).
@@ -467,7 +478,7 @@ func (e *Engine) executeFuzzCaseWithHooks(
 
 	// Execute the fuzz case with the (potentially modified) base data.
 	// The lock is NOT held here to allow concurrent HTTP requests.
-	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID, doerOverride)
+	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker)
 
 	// Execute post_receive hook if the request succeeded (has a response).
 	// Pass the kvStore from PreSend so that post_receive hooks can access
