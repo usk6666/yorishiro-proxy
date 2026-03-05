@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +109,39 @@ func TestValidateHooks_ValidPostReceiveIntervals(t *testing.T) {
 			err := validateHooks(hooks)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateHooks() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePostReceiveHook_MatchPatternLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		wantErr bool
+	}{
+		{
+			name:    "at max length accepted",
+			pattern: strings.Repeat("a", maxRegexPatternLen),
+			wantErr: false,
+		},
+		{
+			name:    "exceeds max length rejected",
+			pattern: strings.Repeat("a", maxRegexPatternLen+1),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &hookConfig{
+				Macro:        "test-macro",
+				RunInterval:  "on_match",
+				MatchPattern: tt.pattern,
+			}
+			err := validatePostReceiveHook(h)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validatePostReceiveHook() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
