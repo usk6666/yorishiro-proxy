@@ -51,6 +51,8 @@ make ensure-ui      # dist/ が存在しない場合のみ build-ui を実行（
 make test           # ensure-ui → go test -race -v ./...
 make test-cover     # ensure-ui → カバレッジレポート付きテスト
 make vet            # ensure-ui → go vet ./...
+make fmt            # gofmt -w . で全ファイルをフォーマット
+make lint           # gofmt check + go vet + staticcheck + ineffassign
 make bench          # ensure-ui → ベンチマーク実行
 make clean          # 成果物削除
 ```

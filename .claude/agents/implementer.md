@@ -151,11 +151,16 @@ func TestFunctionName_Scenario(t *testing.T) {
 すべてのコードを書いた後、以下を順に実行し、全てパスすることを確認する:
 
 ```bash
+gofmt -w .
+make lint
 make build
 make test
 ```
 
-失敗した場合は原因を特定して修正し、再度全てパスするまで繰り返す。
+- `gofmt -w .` でフォーマットを自動整形する
+- `make lint` は gofmt check + go vet + staticcheck + ineffassign を実行する
+- lint で指摘された問題は修正してから再実行する
+- 全てパスするまで繰り返す
 
 ## コミット
 
@@ -205,6 +210,7 @@ Linear: https://linear.app/usk6666/issue/{{ISSUE_ID}}
 
 - [ ] Issue の要件を全て満たしている
 - [ ] 新しいコードに対するテストが書かれている
+- [ ] `make lint` が全てパスする（gofmt, go vet, staticcheck, ineffassign）
 - [ ] `make build` が成功する
 - [ ] `make test` が全てパスする
 - [ ] コミットメッセージが Conventional Commits 形式
