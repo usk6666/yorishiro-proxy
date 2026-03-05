@@ -131,6 +131,11 @@ type Config struct {
 	// the embedded defaults. Excluded from JSON serialization.
 	// CLI flag: -ui-dir, env: YP_UI_DIR.
 	UIDir string `json:"-"`
+
+	// NoOpenBrowser disables automatic browser opening when -mcp-http-addr is set.
+	// When true, the WebUI URL is only logged to stderr without opening a browser.
+	// CLI flag: -no-open-browser, env: YP_NO_OPEN_BROWSER.
+	NoOpenBrowser bool `json:"-"`
 }
 
 // Default returns a Config with sensible defaults.
