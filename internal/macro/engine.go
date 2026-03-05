@@ -3,6 +3,7 @@ package macro
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -319,7 +320,15 @@ func buildRequest(step *Step, base *SendRequest, kvStore map[string]string) (*Se
 		if err != nil {
 			return nil, fmt.Errorf("expand override_headers: %w", err)
 		}
+		// Validate expanded header values for CRLF injection (CWE-113).
+		// Template expansion may introduce CR/LF characters from KV Store values.
 		for k, v := range expandedHeaders {
+			if strings.ContainsAny(k, "\r\n") {
+				return nil, fmt.Errorf("expanded header key %q contains CR/LF characters", k)
+			}
+			if strings.ContainsAny(v, "\r\n") {
+				return nil, fmt.Errorf("expanded header value for %q contains CR/LF characters", k)
+			}
 			req.Headers[k] = []string{v}
 		}
 	}
