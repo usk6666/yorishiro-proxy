@@ -68,9 +68,9 @@ func (r *ImportResult) addError(line int, flowID, reason string) {
 	r.Errors++
 	if len(r.ErrorDetails) < maxErrorDetails {
 		r.ErrorDetails = append(r.ErrorDetails, ImportError{
-			Line:      line,
+			Line:   line,
 			FlowID: flowID,
-			Reason:    reason,
+			Reason: reason,
 		})
 	}
 }
@@ -228,15 +228,15 @@ func exportToFlow(es *ExportFlow) (*Flow, error) {
 	}
 
 	fl := &Flow{
-		ID:          es.ID,
-		ConnID:      es.ConnID,
-		Protocol:    es.Protocol,
-		FlowType: es.FlowType,
-		State:       es.State,
-		Timestamp:   ts,
-		Duration:    time.Duration(es.DurationMs) * time.Millisecond,
-		Tags:        es.Tags,
-		BlockedBy:   es.BlockedBy,
+		ID:        es.ID,
+		ConnID:    es.ConnID,
+		Protocol:  es.Protocol,
+		FlowType:  es.FlowType,
+		State:     es.State,
+		Timestamp: ts,
+		Duration:  time.Duration(es.DurationMs) * time.Millisecond,
+		Tags:      es.Tags,
+		BlockedBy: es.BlockedBy,
 	}
 
 	if es.ConnInfo != nil {
@@ -262,7 +262,7 @@ func exportToMessage(em *ExportMessage) (*Message, error) {
 
 	msg := &Message{
 		ID:            em.ID,
-		FlowID:     em.FlowID,
+		FlowID:        em.FlowID,
 		Sequence:      em.Sequence,
 		Direction:     em.Direction,
 		Timestamp:     ts,

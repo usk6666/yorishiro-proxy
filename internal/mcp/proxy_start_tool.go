@@ -494,4 +494,3 @@ func (s *Server) currentRequestTimeout() time.Duration {
 	}
 	return 0
 }
-

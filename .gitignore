@@ -54,3 +54,13 @@ node_modules/
 *.swp
 *.swo
 *~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# TLS certificates and private keys
+*.pem
+*.key
+*.crt
+*.p12

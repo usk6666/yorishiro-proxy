@@ -167,7 +167,7 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 	now := time.Now()
 	job := &flow.FuzzJob{
 		ID:        uuid.New().String(),
-		FlowID: cfg.FlowID,
+		FlowID:    cfg.FlowID,
 		Config:    string(configJSON),
 		Status:    string(StatusRunning),
 		Tag:       cfg.Tag,
@@ -419,7 +419,7 @@ func (r *Runner) execute(
 	completedAt := time.Now()
 	finalJob := &flow.FuzzJob{
 		ID:             job.ID,
-		FlowID:      job.FlowID,
+		FlowID:         job.FlowID,
 		Config:         job.Config,
 		Status:         string(finalStatus),
 		Tag:            job.Tag,
@@ -441,7 +441,7 @@ func (r *Runner) updateJobProgress(ctx context.Context, job *flow.FuzzJob, compl
 	// Create a shallow copy to avoid data races.
 	update := &flow.FuzzJob{
 		ID:             job.ID,
-		FlowID:      job.FlowID,
+		FlowID:         job.FlowID,
 		Config:         job.Config,
 		Status:         string(StatusRunning),
 		Tag:            job.Tag,

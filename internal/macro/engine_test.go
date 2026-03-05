@@ -266,7 +266,7 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 		Name: "auth-flow",
 		Steps: []Step{
 			{
-				ID:        "login",
+				ID:     "login",
 				FlowID: "login-session",
 				Extract: []ExtractionRule{
 					{
@@ -280,7 +280,7 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 				},
 			},
 			{
-				ID:        "get-csrf",
+				ID:     "get-csrf",
 				FlowID: "csrf-session",
 				OverrideHeaders: map[string]string{
 					"Cookie": "PHPSESSID={{session_cookie}}",
@@ -405,9 +405,9 @@ func TestEngine_Run_StepGuardSkip(t *testing.T) {
 		Steps: []Step{
 			{ID: "check", FlowID: "sess1"},
 			{
-				ID:        "mfa",
+				ID:     "mfa",
 				FlowID: "sess2",
-				When:      &Guard{Step: "check", StatusCode: intPtr(302)}, // Only if redirect
+				When:   &Guard{Step: "check", StatusCode: intPtr(302)}, // Only if redirect
 			},
 			{ID: "api", FlowID: "sess3"},
 		},
@@ -463,7 +463,7 @@ func TestEngine_Run_StepGuardExecute(t *testing.T) {
 		Steps: []Step{
 			{ID: "check", FlowID: "sess1"},
 			{
-				ID:        "mfa",
+				ID:     "mfa",
 				FlowID: "sess2",
 				When: &Guard{
 					Step:        "check",
@@ -613,7 +613,7 @@ func TestEngine_Run_OnErrorRetry(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:           "flaky-step",
-				FlowID:    "sess1",
+				FlowID:       "sess1",
 				OnError:      OnErrorRetry,
 				RetryCount:   3,
 				RetryDelayMs: 1, // Minimal delay for tests.
@@ -655,7 +655,7 @@ func TestEngine_Run_OnErrorRetryExhausted(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:           "always-fail",
-				FlowID:    "sess1",
+				FlowID:       "sess1",
 				OnError:      OnErrorRetry,
 				RetryCount:   2,
 				RetryDelayMs: 1,
@@ -743,7 +743,7 @@ func TestEngine_Run_StepTimeout(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:        "slow-step",
-				FlowID: "sess1",
+				FlowID:    "sess1",
 				TimeoutMs: 100, // Short step timeout.
 				OnError:   OnErrorSkip,
 			},
@@ -792,7 +792,7 @@ func TestEngine_Run_TemplateExpansion(t *testing.T) {
 		Name: "template-test",
 		Steps: []Step{
 			{
-				ID:        "s1",
+				ID:     "s1",
 				FlowID: "sess1",
 				OverrideHeaders: map[string]string{
 					"Cookie":       "sid={{session_cookie}}",
@@ -855,7 +855,7 @@ func TestEngine_Run_RequiredExtractionFailure(t *testing.T) {
 		Name: "required-fail",
 		Steps: []Step{
 			{
-				ID:        "s1",
+				ID:     "s1",
 				FlowID: "sess1",
 				Extract: []ExtractionRule{
 					{
@@ -936,7 +936,7 @@ func TestEngine_Run_KVStoreIndependence(t *testing.T) {
 		Name: "kv-test",
 		Steps: []Step{
 			{
-				ID:        "s1",
+				ID:     "s1",
 				FlowID: "sess1",
 				Extract: []ExtractionRule{
 					{
@@ -1040,7 +1040,7 @@ func TestEngine_Run_OverrideURL(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:          "s1",
-				FlowID:   "sess1",
+				FlowID:      "sess1",
 				OverrideURL: "https://example.com/{{path}}",
 			},
 		},
@@ -1113,12 +1113,12 @@ func TestBuildRequest(t *testing.T) {
 	body := "new body with {{token}}"
 	step := &Step{
 		ID:             "s1",
-		FlowID:      "sess1",
+		FlowID:         "sess1",
 		OverrideMethod: "POST",
 		OverrideURL:    "https://example.com/new",
 		OverrideHeaders: map[string]string{
-			"Cookie":       "session={{token}}",
-			"X-Custom":     "static",
+			"Cookie":   "session={{token}}",
+			"X-Custom": "static",
 		},
 		OverrideBody: &body,
 	}
@@ -1237,7 +1237,7 @@ func TestBuildRequest_OverrideHeaders_CRLFInExpandedValue(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			step := &Step{
 				ID:              "step1",
-				FlowID:       "sess1",
+				FlowID:          "sess1",
 				OverrideHeaders: tt.headers,
 			}
 			base := &SendRequest{
@@ -1255,7 +1255,7 @@ func TestBuildRequest_OverrideHeaders_CRLFInExpandedValue(t *testing.T) {
 
 func TestBuildRequest_OverrideHeaders_CleanExpanded(t *testing.T) {
 	step := &Step{
-		ID:       "step1",
+		ID:     "step1",
 		FlowID: "sess1",
 		OverrideHeaders: map[string]string{
 			"Authorization": "Bearer {{token}}",

@@ -22,10 +22,10 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // http2Preface is the HTTP/2 connection preface sent by clients.
@@ -234,10 +234,10 @@ func (h *Handler) handleStream(
 	// Build the connection info for flow recording (without ServerAddr and
 	// TLSServerCertSubject which are only known after upstream connection).
 	connInfo := &flow.ConnectionInfo{
-		ClientAddr:  clientAddr,
-		TLSVersion:  tlsMeta.Version,
-		TLSCipher:   tlsMeta.CipherSuite,
-		TLSALPN:     tlsMeta.ALPN,
+		ClientAddr: clientAddr,
+		TLSVersion: tlsMeta.Version,
+		TLSCipher:  tlsMeta.CipherSuite,
+		TLSALPN:    tlsMeta.ALPN,
 	}
 
 	// Prepare send record params used across all recording paths.

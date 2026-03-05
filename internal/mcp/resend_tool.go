@@ -79,9 +79,9 @@ type resendParams struct {
 	OverrideBody       *string       `json:"override_body,omitempty"`
 
 	// resend extended mutation options
-	AddHeadersRaw  any           `json:"add_headers,omitempty"`
-	AddHeaders     HeaderEntries `json:"-"` // parsed from AddHeadersRaw
-	RemoveHeaders  []string      `json:"remove_headers,omitempty"`
+	AddHeadersRaw      any           `json:"add_headers,omitempty"`
+	AddHeaders         HeaderEntries `json:"-"` // parsed from AddHeadersRaw
+	RemoveHeaders      []string      `json:"remove_headers,omitempty"`
 	OverrideBodyBase64 *string       `json:"override_body_base64,omitempty"`
 	BodyPatches        []BodyPatch   `json:"body_patches,omitempty"`
 	OverrideHost       string        `json:"override_host,omitempty"`
@@ -203,7 +203,7 @@ func (s *Server) handleResend(ctx context.Context, _ *gomcp.CallToolRequest, inp
 
 // resendActionResult is the structured output of the resend action.
 type resendActionResult struct {
-	NewFlowID         string              `json:"new_flow_id"`
+	NewFlowID            string              `json:"new_flow_id"`
 	StatusCode           int                 `json:"status_code"`
 	ResponseHeaders      map[string][]string `json:"response_headers"`
 	ResponseBody         string              `json:"response_body"`
@@ -560,7 +560,7 @@ func (s *Server) resendHTTPClient(params resendParams) httpDoer {
 // --- Resend raw ---
 
 type resendRawResult struct {
-	NewFlowID string `json:"new_flow_id,omitempty"`
+	NewFlowID    string `json:"new_flow_id,omitempty"`
 	ResponseData string `json:"response_data"`
 	ResponseSize int    `json:"response_size"`
 	DurationMs   int64  `json:"duration_ms"`
@@ -620,7 +620,7 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 			DryRun: true,
 			RawPreview: &rawPreview{
 				DataBase64: base64.StdEncoding.EncodeToString(rawBytes),
-				DataSize: len(rawBytes), PatchesApplied: patchCount,
+				DataSize:   len(rawBytes), PatchesApplied: patchCount,
 			},
 		}, nil
 	}
@@ -725,7 +725,7 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 	}
 
 	return nil, &resendRawResult{
-		NewFlowID: newFl.ID,
+		NewFlowID:    newFl.ID,
 		ResponseData: base64.StdEncoding.EncodeToString(respData),
 		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
 		Tag: params.Tag,
@@ -752,4 +752,3 @@ func buildResendRawBytes(originalRaw []byte, params resendParams) ([]byte, int, 
 	}
 	return originalRaw, 0, nil
 }
-

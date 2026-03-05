@@ -134,12 +134,12 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 
 	// Save flow.
 	fl := &flow.Flow{
-		ConnID:      info.ConnID,
-		Protocol:    "gRPC",
-		FlowType: sessionType,
-		State:       "complete",
-		Timestamp:   info.Start,
-		Duration:    info.Duration,
+		ConnID:    info.ConnID,
+		Protocol:  "gRPC",
+		FlowType:  sessionType,
+		State:     "complete",
+		Timestamp: info.Start,
+		Duration:  info.Duration,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr:           info.ClientAddr,
 			ServerAddr:           info.ServerAddr,
@@ -195,7 +195,7 @@ func (h *Handler) recordSendMessages(
 	if len(frames) == 0 {
 		// Even with no frames, record the request metadata.
 		msg := &flow.Message{
-			FlowID: flowID,
+			FlowID:    flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -212,7 +212,7 @@ func (h *Handler) recordSendMessages(
 
 	for i, frame := range frames {
 		msg := &flow.Message{
-			FlowID: flowID,
+			FlowID:    flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -258,7 +258,7 @@ func (h *Handler) recordReceiveMessages(
 	if len(frames) == 0 {
 		// Record the response metadata even without frames (e.g., error responses).
 		msg := &flow.Message{
-			FlowID:  flowID,
+			FlowID:     flowID,
 			Sequence:   seq,
 			Direction:  "receive",
 			Timestamp:  info.Start.Add(info.Duration),
@@ -275,7 +275,7 @@ func (h *Handler) recordReceiveMessages(
 	for i, frame := range frames {
 		isLast := i == len(frames)-1
 		msg := &flow.Message{
-			FlowID: flowID,
+			FlowID:    flowID,
 			Sequence:  seq,
 			Direction: "receive",
 			Timestamp: info.Start.Add(info.Duration),

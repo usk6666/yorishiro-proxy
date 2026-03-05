@@ -14,10 +14,10 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -1335,7 +1335,7 @@ func TestPolicyIntegration_ExecuteFuzzBlockedByPolicy(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"flow_id":  "fuzz-policy-blocked",
+			"flow_id":     "fuzz-policy-blocked",
 			"attack_type": "sequential",
 			"positions": []map[string]any{
 				{
@@ -1427,7 +1427,7 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 			"name": "test-policy-blocked-macro",
 			"steps": []map[string]any{
 				{
-					"id":         "step-1",
+					"id":      "step-1",
 					"flow_id": "macro-policy-blocked",
 				},
 			},

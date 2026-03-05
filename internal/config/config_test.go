@@ -700,7 +700,7 @@ func TestValidateProjectName(t *testing.T) {
 		{"invalid leading dot", ".hidden", true},
 		{"invalid double dot", "foo..bar", true},
 		{"invalid space", "my project", true},
-		{"invalid slash", "path/name", true},   // won't reach here (has separator)
+		{"invalid slash", "path/name", true}, // won't reach here (has separator)
 		{"invalid at sign", "user@host", true},
 		{"invalid dollar", "price$100", true},
 		{"invalid unicode", "proje\u00e9t", true},

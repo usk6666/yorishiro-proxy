@@ -453,7 +453,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	tokenSendMsg := &flow.Message{
-		FlowID: tokenSess.ID,
+		FlowID:    tokenSess.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -475,7 +475,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	targetSendMsg := &flow.Message{
-		FlowID: targetSess.ID,
+		FlowID:    targetSess.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -496,7 +496,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 			"name": "auth-flow",
 			"steps": []any{
 				map[string]any{
-					"id":         "get-token",
+					"id":      "get-token",
 					"flow_id": tokenSess.ID,
 					"extract": []any{
 						map[string]any{
@@ -617,7 +617,7 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 			"name": "log-response",
 			"steps": []any{
 				map[string]any{
-					"id":         "log",
+					"id":      "log",
 					"flow_id": macroSess.ID,
 				},
 			},
@@ -746,7 +746,7 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 			"name": "token-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "get-token",
+					"id":      "get-token",
 					"flow_id": tokenSess.ID,
 					"extract": []any{
 						map[string]any{
@@ -920,7 +920,7 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":            "login",
-					"flow_id":    macroSess.ID,
+					"flow_id":       macroSess.ID,
 					"override_body": stringPtr("password={{password}}"),
 					"extract": []any{
 						map[string]any{
@@ -1000,7 +1000,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 			"name": "logout-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "logout",
+					"id":      "logout",
 					"flow_id": macroSess.ID,
 				},
 			},
@@ -1018,7 +1018,6 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	}
 	state := &hookState{}
 	executor := newHookExecutor(s.deps, hooks, state)
-
 
 	// Call executePostReceive with KV Store from pre_send that has the same key.
 	// pre_send KV Store should take precedence over hook config vars.
@@ -1061,7 +1060,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 			"name": "cleanup-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "cleanup",
+					"id":      "cleanup",
 					"flow_id": macroSess.ID,
 				},
 			},
@@ -1078,7 +1077,6 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 	}
 	state := &hookState{}
 	executor := newHookExecutor(s.deps, hooks, state)
-
 
 	// Call with nil kvStore — should not panic or error.
 	err := executor.executePostReceive(ctx, 200, []byte("ok"), nil)
@@ -1119,7 +1117,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 			"name": "cleanup-macro-2",
 			"steps": []any{
 				map[string]any{
-					"id":         "cleanup",
+					"id":      "cleanup",
 					"flow_id": macroSess.ID,
 				},
 			},
@@ -1136,7 +1134,6 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 	}
 	state := &hookState{}
 	executor := newHookExecutor(s.deps, hooks, state)
-
 
 	// Call with empty kvStore — should not modify behavior.
 	err := executor.executePostReceive(ctx, 200, []byte("ok"), map[string]string{})
@@ -1228,7 +1225,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 			"name": "login-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": loginSess.ID,
 					"extract": []any{
 						map[string]any{
@@ -1254,7 +1251,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 			"steps": []any{
 				map[string]any{
 					"id":               "logout",
-					"flow_id":       logoutSess.ID,
+					"flow_id":          logoutSess.ID,
 					"override_headers": map[string]any{"Cookie": "{{auth_session}}"},
 				},
 			},

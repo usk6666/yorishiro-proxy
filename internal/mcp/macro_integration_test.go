@@ -57,7 +57,7 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 			"description": "Login and extract session token",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": fl.ID,
 					"extract": []any{
 						map[string]any{
@@ -69,7 +69,7 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 					},
 				},
 			},
-			"initial_vars":    map[string]any{"password": "admin123"},
+			"initial_vars":     map[string]any{"password": "admin123"},
 			"macro_timeout_ms": 30000,
 		},
 	})
@@ -176,7 +176,7 @@ func TestM3_Macro_StepGuard_When(t *testing.T) {
 			"name": "login-mfa",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": loginSess.ID,
 					"extract": []any{
 						map[string]any{
@@ -188,7 +188,7 @@ func TestM3_Macro_StepGuard_When(t *testing.T) {
 					},
 				},
 				map[string]any{
-					"id":         "mfa",
+					"id":      "mfa",
 					"flow_id": mfaSess.ID,
 					"when": map[string]any{
 						"step":        "login",
@@ -287,11 +287,11 @@ func TestM3_Macro_StepGuard_Skipped(t *testing.T) {
 			"name": "login-mfa-skip",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": loginSess.ID,
 				},
 				map[string]any{
-					"id":         "mfa",
+					"id":      "mfa",
 					"flow_id": mfaSess.ID,
 					"when": map[string]any{
 						"step":        "login",
@@ -382,7 +382,7 @@ func TestM3_Hook_ResendPreSendTemplateExpansion(t *testing.T) {
 			"name": "auth-hook-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "get-token",
+					"id":      "get-token",
 					"flow_id": tokenSess.ID,
 					"extract": []any{
 						map[string]any{
@@ -488,7 +488,7 @@ func TestM3_Hook_PostReceiveOnStatus(t *testing.T) {
 			"name": "error-logger",
 			"steps": []any{
 				map[string]any{
-					"id":         "log-error",
+					"id":      "log-error",
 					"flow_id": macroSess.ID,
 				},
 			},

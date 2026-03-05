@@ -153,7 +153,7 @@ func TestRecordingHeaders(t *testing.T) {
 		original := gohttp.Header{
 			"Content-Encoding": {"gzip"},
 			"Content-Length":   {"42"},
-			"Content-Type":    {"application/json"},
+			"Content-Type":     {"application/json"},
 		}
 		got := RecordingHeaders(original, true, 100)
 

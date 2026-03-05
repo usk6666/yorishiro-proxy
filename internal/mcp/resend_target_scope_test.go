@@ -11,8 +11,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // setupExecuteWithTargetScope creates a Server with a configured TargetScope and
@@ -249,7 +249,7 @@ func TestExecuteResend_TargetScope_OverrideURL_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":   entry.Session.ID,
+			"flow_id":      entry.Session.ID,
 			"override_url": "http://evil.com/api/test",
 		},
 	})
@@ -303,7 +303,7 @@ func TestExecuteResend_TargetScope_OverrideHost_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":    entry.Session.ID,
+			"flow_id":       entry.Session.ID,
 			"override_host": "evil.com:8080",
 		},
 	})
@@ -428,7 +428,7 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":       entry.Session.ID,
+			"flow_id":          entry.Session.ID,
 			"follow_redirects": followRedirects,
 		},
 	})
@@ -537,7 +537,7 @@ func TestExecuteResendRaw_TargetScope_TargetAddr_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": "evil.com:80",
 		},
 	})
@@ -611,10 +611,10 @@ func TestExecuteTcpReplay_TargetScope_Blocked(t *testing.T) {
 
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:    "TCP",
-			FlowType: "bidirectional",
-			Timestamp:   time.Now(),
-			Duration:    100 * time.Millisecond,
+			Protocol:  "TCP",
+			FlowType:  "bidirectional",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 			ConnInfo: &flow.ConnectionInfo{
 				ServerAddr: "evil.com:1234",
 			},
@@ -661,10 +661,10 @@ func TestExecuteTcpReplay_TargetScope_TargetAddr_Blocked(t *testing.T) {
 
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:    "TCP",
-			FlowType: "bidirectional",
-			Timestamp:   time.Now(),
-			Duration:    100 * time.Millisecond,
+			Protocol:  "TCP",
+			FlowType:  "bidirectional",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 			ConnInfo: &flow.ConnectionInfo{
 				ServerAddr: "example.com:1234",
 			},
@@ -695,7 +695,7 @@ func TestExecuteTcpReplay_TargetScope_TargetAddr_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": "evil.com:1234",
 		},
 	})
@@ -716,10 +716,10 @@ func TestExecuteWebSocketResend_TargetScope_Blocked(t *testing.T) {
 
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:    "WebSocket",
-			FlowType: "bidirectional",
-			Timestamp:   time.Now(),
-			Duration:    100 * time.Millisecond,
+			Protocol:  "WebSocket",
+			FlowType:  "bidirectional",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 			ConnInfo: &flow.ConnectionInfo{
 				ServerAddr: "evil.com:443",
 				TLSVersion: "TLS 1.3",
@@ -751,7 +751,7 @@ func TestExecuteWebSocketResend_TargetScope_Blocked(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":       entry.Session.ID,
+			"flow_id":          entry.Session.ID,
 			"message_sequence": msgSeq,
 		},
 	})
@@ -805,7 +805,7 @@ func TestExecuteFuzz_TargetScope_Blocked(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"flow_id":  "fuzz-template-blocked",
+			"flow_id":     "fuzz-template-blocked",
 			"attack_type": "sequential",
 			"positions": []map[string]any{
 				{
@@ -898,7 +898,7 @@ func TestExecuteRunMacro_TargetScope_Blocked(t *testing.T) {
 			"name": "test-blocked-macro",
 			"steps": []map[string]any{
 				{
-					"id":         "step-1",
+					"id":      "step-1",
 					"flow_id": "macro-blocked-session",
 				},
 			},
@@ -988,7 +988,7 @@ func TestExecuteRunMacro_TargetScope_OverrideURL_Blocked(t *testing.T) {
 			"steps": []map[string]any{
 				{
 					"id":           "step-1",
-					"flow_id":   "macro-override-session",
+					"flow_id":      "macro-override-session",
 					"override_url": "http://evil.com/api/login",
 				},
 			},
@@ -1272,7 +1272,7 @@ func TestExecuteResend_TargetScope_DryRun_StillChecked(t *testing.T) {
 		"action": "resend",
 		"params": map[string]any{
 			"flow_id": entry.Session.ID,
-			"dry_run":    true,
+			"dry_run": true,
 		},
 	})
 
@@ -1326,7 +1326,7 @@ func TestExecuteResendRaw_TargetScope_DryRun_StillChecked(t *testing.T) {
 		"action": "resend_raw",
 		"params": map[string]any{
 			"flow_id": entry.Session.ID,
-			"dry_run":    true,
+			"dry_run": true,
 		},
 	})
 
