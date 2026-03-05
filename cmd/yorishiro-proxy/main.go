@@ -56,6 +56,7 @@ var envVarMap = map[string]string{
 	"mcp-http-token":     "YP_MCP_HTTP_TOKEN",
 	"ui-dir":             "YP_UI_DIR",
 	"target-policy-file": "YP_TARGET_POLICY_FILE",
+	"no-open-browser":    "YP_NO_OPEN_BROWSER",
 }
 
 func run(ctx context.Context) error {
@@ -104,6 +105,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: YP_MCP_HTTP_ADDR)")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: YP_MCP_HTTP_TOKEN)")
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
+	fs.BoolVar(&cfg.NoOpenBrowser, "no-open-browser", cfg.NoOpenBrowser, "disable auto-opening WebUI in browser (env: YP_NO_OPEN_BROWSER)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy %s\n\n", buildVersion())
@@ -344,11 +346,13 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	// Set up Bearer token authentication middleware for HTTP transport.
+	var webUIToken string
 	if cfg.MCPHTTPAddr != "" {
 		token, err := resolveHTTPToken(cfg.MCPHTTPToken, logger)
 		if err != nil {
 			return fmt.Errorf("MCP HTTP token: %w", err)
 		}
+		webUIToken = token
 		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
 			return mcp.BearerAuthMiddleware(next, token)
 		}))
@@ -377,8 +381,20 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	// Optionally start Streamable HTTP transport (multi-flow via Server.Connect).
 	if cfg.MCPHTTPAddr != "" {
+		// Build onListening callback to open browser when server is ready.
+		var onListening func(addr string)
+		if !cfg.NoOpenBrowser {
+			capturedToken := webUIToken
+			onListening = func(addr string) {
+				url := fmt.Sprintf("http://%s/?token=%s", addr, capturedToken)
+				if err := openBrowser(url); err != nil {
+					logger.Warn("failed to open browser", "url", url, "error", err)
+				}
+			}
+		}
+
 		g.Go(func() error {
-			if err := mcpServer.RunHTTP(gctx, cfg.MCPHTTPAddr); err != nil {
+			if err := mcpServer.RunHTTP(gctx, cfg.MCPHTTPAddr, onListening); err != nil {
 				// Context cancellation is expected during graceful shutdown.
 				if gctx.Err() != nil {
 					logger.Info("MCP HTTP server stopped")
@@ -442,6 +458,8 @@ func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string, 
 			if targetPolicyFile != nil && *targetPolicyFile == "" {
 				*targetPolicyFile = v
 			}
+		case "no-open-browser":
+			cfg.NoOpenBrowser = parseBool(v)
 		}
 	}
 }

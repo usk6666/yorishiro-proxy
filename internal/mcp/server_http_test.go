@@ -424,6 +424,116 @@ func TestRunHTTP_WithUIDir(t *testing.T) {
 	}
 }
 
+func TestRunHTTP_OnListeningCallback(t *testing.T) {
+	s := NewServer(context.Background(), nil, nil, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	callbackCh := make(chan string, 1)
+	onListening := func(listenAddr string) {
+		callbackCh <- listenAddr
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.RunHTTP(ctx, addr, onListening)
+	}()
+
+	// Wait for the callback to be invoked.
+	select {
+	case gotAddr := <-callbackCh:
+		if gotAddr == "" {
+			t.Error("onListening callback received empty address")
+		}
+		// Verify the server is actually accepting connections at this point.
+		conn, err := net.DialTimeout("tcp", gotAddr, 2*time.Second)
+		if err != nil {
+			t.Fatalf("server not accepting connections after onListening: %v", err)
+		}
+		conn.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("onListening callback was not invoked within timeout")
+	}
+}
+
+func TestRunHTTP_OnListeningNilCallback(t *testing.T) {
+	// Verify that nil callback does not cause panic.
+	s := NewServer(context.Background(), nil, nil, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.RunHTTP(ctx, addr, nil)
+	}()
+
+	if err := waitForServer(t, addr, 3*time.Second); err != nil {
+		cancel()
+		t.Fatalf("HTTP server did not start: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunHTTP returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunHTTP did not return within timeout")
+	}
+}
+
+func TestRunHTTP_NoCallback(t *testing.T) {
+	// Verify backward compatibility: RunHTTP works without onListening argument.
+	s := NewServer(context.Background(), nil, nil, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.RunHTTP(ctx, addr)
+	}()
+
+	if err := waitForServer(t, addr, 3*time.Second); err != nil {
+		cancel()
+		t.Fatalf("HTTP server did not start: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunHTTP returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunHTTP did not return within timeout")
+	}
+}
+
 // waitForServer polls until the server at addr is accepting TCP connections.
 func waitForServer(t *testing.T, addr string, timeout time.Duration) error {
 	t.Helper()

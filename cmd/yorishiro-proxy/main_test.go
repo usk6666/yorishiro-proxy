@@ -406,6 +406,7 @@ func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) (*string, *string) 
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "")
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "")
 	fs.StringVar(&targetPolicyFile, "target-policy-file", "", "")
+	fs.BoolVar(&cfg.NoOpenBrowser, "no-open-browser", cfg.NoOpenBrowser, "")
 	return &configFile, &targetPolicyFile
 }
 
@@ -553,6 +554,9 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 		{"ca-ephemeral TRUE", "YP_CA_EPHEMERAL", "TRUE", "CAEphemeral", true},
 		{"ca-ephemeral false", "YP_CA_EPHEMERAL", "false", "CAEphemeral", false},
 		{"insecure invalid", "YP_INSECURE", "invalid", "InsecureSkipVerify", false},
+		{"no-open-browser true", "YP_NO_OPEN_BROWSER", "true", "NoOpenBrowser", true},
+		{"no-open-browser false", "YP_NO_OPEN_BROWSER", "false", "NoOpenBrowser", false},
+		{"no-open-browser 1", "YP_NO_OPEN_BROWSER", "1", "NoOpenBrowser", true},
 	}
 
 	for _, tt := range tests {
@@ -717,6 +721,8 @@ func getBoolConfigField(cfg *config.Config, field string) bool {
 		return cfg.InsecureSkipVerify
 	case "CAEphemeral":
 		return cfg.CAEphemeral
+	case "NoOpenBrowser":
+		return cfg.NoOpenBrowser
 	default:
 		return false
 	}
@@ -912,5 +918,67 @@ func TestConvertTargetRules_FieldMapping(t *testing.T) {
 	}
 	if len(rule.Schemes) != 2 || rule.Schemes[0] != "http" || rule.Schemes[1] != "https" {
 		t.Errorf("Schemes = %v, want [http https]", rule.Schemes)
+	}
+}
+
+func TestNoOpenBrowserFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagArgs []string
+		envVars  map[string]string
+		want     bool
+	}{
+		{
+			name: "default is false",
+			want: false,
+		},
+		{
+			name:     "flag sets true",
+			flagArgs: []string{"-no-open-browser"},
+			want:     true,
+		},
+		{
+			name:    "env var sets true",
+			envVars: map[string]string{"YP_NO_OPEN_BROWSER": "true"},
+			want:    true,
+		},
+		{
+			name:    "env var sets 1",
+			envVars: map[string]string{"YP_NO_OPEN_BROWSER": "1"},
+			want:    true,
+		},
+		{
+			name:    "env var sets false",
+			envVars: map[string]string{"YP_NO_OPEN_BROWSER": "false"},
+			want:    false,
+		},
+		{
+			name:     "flag overrides env var",
+			flagArgs: []string{"-no-open-browser"},
+			envVars:  map[string]string{"YP_NO_OPEN_BROWSER": "false"},
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			cfg := config.Default()
+			cfgFile, policyFile := registerTestFlags(fs, cfg)
+
+			if err := fs.Parse(tt.flagArgs); err != nil {
+				t.Fatalf("flag.Parse: %v", err)
+			}
+
+			applyEnvFallback(fs, cfg, cfgFile, policyFile)
+
+			if cfg.NoOpenBrowser != tt.want {
+				t.Errorf("NoOpenBrowser = %v, want %v", cfg.NoOpenBrowser, tt.want)
+			}
+		})
 	}
 }

@@ -292,7 +292,12 @@ var shutdownTimeout = 30 * time.Second
 //
 // The addr must be a loopback address (e.g. "127.0.0.1:3000") to prevent
 // unauthenticated exposure on the network.
-func (s *Server) RunHTTP(ctx context.Context, addr string) error {
+//
+// The optional onListening callback is invoked once the server is listening
+// and ready to accept connections. The callback receives the resolved listen
+// address (useful when the port is assigned dynamically). If onListening is
+// nil it is silently ignored.
+func (s *Server) RunHTTP(ctx context.Context, addr string, onListening ...func(addr string)) error {
 	if err := validateLoopbackAddr(addr); err != nil {
 		return fmt.Errorf("MCP HTTP server: %w", err)
 	}
@@ -323,7 +328,6 @@ func (s *Server) RunHTTP(ctx context.Context, addr string) error {
 	mux.Handle("/", uiHandler)
 
 	httpServer := &http.Server{
-		Addr:    addr,
 		Handler: mux,
 		// ReadHeaderTimeout protects against Slowloris attacks (CWE-400).
 		// ReadTimeout is intentionally not set to avoid breaking SSE streams.
@@ -332,6 +336,14 @@ func (s *Server) RunHTTP(ctx context.Context, addr string) error {
 			return ctx
 		},
 	}
+
+	// Bind the listener explicitly so we can notify the caller before serving.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("MCP HTTP server: %w", err)
+	}
+
+	listenAddr := ln.Addr().String()
 
 	// Start shutdown goroutine that waits for context cancellation.
 	shutdownDone := make(chan struct{})
@@ -342,14 +354,22 @@ func (s *Server) RunHTTP(ctx context.Context, addr string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 
-		slog.Info("shutting down MCP HTTP server", "addr", addr)
+		slog.Info("shutting down MCP HTTP server", "addr", listenAddr)
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			slog.Warn("MCP HTTP server shutdown error", "error", err)
 		}
 	}()
 
-	slog.Info("starting MCP HTTP server", "addr", addr)
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	slog.Info("starting MCP HTTP server", "addr", listenAddr)
+
+	// Notify caller that the server is listening and ready to accept connections.
+	for _, cb := range onListening {
+		if cb != nil {
+			cb(listenAddr)
+		}
+	}
+
+	if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("MCP HTTP server: %w", err)
 	}
 
