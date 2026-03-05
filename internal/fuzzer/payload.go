@@ -34,6 +34,9 @@ func (ps *PayloadSet) Validate() error {
 		if len(ps.Values) == 0 {
 			return fmt.Errorf("wordlist payload set requires at least one value")
 		}
+		if len(ps.Values) > maxPayloadCount {
+			return fmt.Errorf("wordlist payload set contains %d values, exceeding maximum of %d", len(ps.Values), maxPayloadCount)
+		}
 	case "file":
 		if ps.Path == "" {
 			return fmt.Errorf("file payload set requires a path")
@@ -94,6 +97,9 @@ func (ps *PayloadSet) generateFromFile(baseDir string) ([]string, error) {
 		line := scanner.Text()
 		if line != "" {
 			payloads = append(payloads, line)
+			if len(payloads) > maxPayloadCount {
+				return nil, fmt.Errorf("wordlist file %q exceeds maximum of %d lines", ps.Path, maxPayloadCount)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
