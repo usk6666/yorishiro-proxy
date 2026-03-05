@@ -601,4 +601,3 @@ func TestHTTPConnectViaUpstreamProxyWithAuth(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "auth-proxy-ok")
 	}
 }
-
