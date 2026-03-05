@@ -71,6 +71,7 @@ Common CLI flags to include in `args`:
 | `-log-level debug` | Set log verbosity (`debug`, `info`, `warn`, `error`) |
 | `-db <name-or-path>` | SQLite database path or project name (e.g., `-db pentest-2026` creates `~/.yorishiro-proxy/pentest-2026.db`) |
 | `-ca-ephemeral` | Use an ephemeral in-memory CA (no persistent certificate files) |
+| `-mcp-http-addr <host:port>` | Enable Streamable HTTP transport and serve the WebUI (e.g., `-mcp-http-addr 127.0.0.1:3000`) |
 
 All flags also accept environment variables with the `YP_` prefix (e.g., `YP_INSECURE=true`, `YP_LOG_LEVEL=debug`). Priority: CLI flag > environment variable > config file > default value.
 
@@ -78,13 +79,18 @@ All flags also accept environment variables with the `YP_` prefix (e.g., `YP_INS
 
 ### Verify the connection
 
-After creating `.mcp.json`, restart Claude Code. You should see five MCP tools become available:
+After creating `.mcp.json`, restart Claude Code. You should see ten MCP tools become available:
 
 - `proxy_start` -- start the proxy listener
 - `proxy_stop` -- stop the proxy listener
-- `configure` -- change runtime settings
-- `query` -- retrieve sessions, status, and configuration
-- `execute` -- resend requests, run macros, start fuzz jobs
+- `configure` -- change runtime settings (capture scope, intercept rules, TLS passthrough, etc.)
+- `query` -- retrieve flows, status, configuration, and fuzz results
+- `resend` -- resend captured requests with optional mutations
+- `fuzz` -- start, pause, resume, and cancel fuzz campaigns
+- `macro` -- define and run multi-step macro workflows
+- `intercept` -- release, modify, or drop intercepted requests
+- `manage` -- delete, export, and import flows
+- `security` -- configure target scope rules
 
 ## CA Certificate Installation
 
@@ -133,7 +139,7 @@ If you are using playwright-cli for browser automation, you can skip CA certific
 
 ## First Capture (Manual Browser)
 
-This section demonstrates the basic workflow: start the proxy, route browser traffic through it, and inspect captured sessions.
+This section demonstrates the basic workflow: start the proxy, route browser traffic through it, and inspect captured flows.
 
 ### Step 1: Start the proxy
 
@@ -171,23 +177,23 @@ For HTTPS (requires CA certificate installed, or use `-k` to skip verification):
 curl -x http://127.0.0.1:8080 -k https://httpbin.org/get
 ```
 
-### Step 4: List captured sessions
+### Step 4: List captured flows
 
 ```json
 // query
-{"resource": "sessions"}
+{"resource": "flows"}
 ```
 
-This returns all captured sessions with their IDs, methods, URLs, status codes, and timestamps.
+This returns all captured flows with their IDs, methods, URLs, status codes, and timestamps.
 
-### Step 5: Filter sessions
+### Step 5: Filter flows
 
 To find specific requests:
 
 ```json
 // query
 {
-  "resource": "sessions",
+  "resource": "flows",
   "filter": {"url_pattern": "httpbin.org", "method": "GET"},
   "limit": 10
 }
@@ -237,37 +243,37 @@ Use playwright-cli to open a browser that routes through the proxy:
 playwright-cli open https://httpbin.org/get
 ```
 
-All browser traffic flows through yorishiro-proxy and is recorded as sessions.
+All browser traffic flows through yorishiro-proxy and is recorded as flows.
 
-### Step 4: View captured sessions
+### Step 4: View captured flows
 
 ```json
 // query
-{"resource": "sessions", "limit": 20}
+{"resource": "flows", "limit": 20}
 ```
 
 ## Inspecting Request Details
 
-Once you have captured sessions, you can drill into individual requests and responses.
+Once you have captured flows, you can drill into individual requests and responses.
 
-### View full session details
+### View full flow details
 
 ```json
 // query
-{"resource": "session", "id": "<session-id>"}
+{"resource": "flow", "id": "<flow-id>"}
 ```
 
 This returns the complete request and response, including headers, body, status code, and timing information.
 
-### View session messages
+### View flow messages
 
-For streaming protocols (WebSocket, gRPC, HTTP/2), sessions contain multiple messages. List them with:
+For streaming protocols (WebSocket, gRPC, HTTP/2), flows contain multiple messages. List them with:
 
 ```json
 // query
 {
   "resource": "messages",
-  "id": "<session-id>",
+  "id": "<flow-id>",
   "limit": 50
 }
 ```
@@ -278,23 +284,23 @@ Filter by direction to see only sent or received messages:
 // query
 {
   "resource": "messages",
-  "id": "<session-id>",
+  "id": "<flow-id>",
   "filter": {"direction": "send"}
 }
 ```
 
 ## Resending and Modifying Requests
 
-The `resend` action lets you replay a captured request with modifications -- useful for testing authorization, parameter tampering, and other vulnerability patterns.
+The `resend` tool lets you replay a captured request with modifications -- useful for testing authorization, parameter tampering, and other vulnerability patterns.
 
 ### Resend a request as-is
 
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
-    "session_id": "<session-id>"
+    "flow_id": "<flow-id>"
   }
 }
 ```
@@ -302,11 +308,11 @@ The `resend` action lets you replay a captured request with modifications -- use
 ### Resend with modified headers
 
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
-    "session_id": "<session-id>",
+    "flow_id": "<flow-id>",
     "override_headers": {"Authorization": "Bearer <different-token>"}
   }
 }
@@ -315,11 +321,11 @@ The `resend` action lets you replay a captured request with modifications -- use
 ### Resend with a modified body
 
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
-    "session_id": "<session-id>",
+    "flow_id": "<flow-id>",
     "body_patches": [
       {"json_path": "$.user.role", "value": "admin"}
     ]
@@ -330,11 +336,11 @@ The `resend` action lets you replay a captured request with modifications -- use
 ### Preview changes before sending (dry-run)
 
 ```json
-// execute
+// resend
 {
   "action": "resend",
   "params": {
-    "session_id": "<session-id>",
+    "flow_id": "<flow-id>",
     "override_method": "PUT",
     "override_headers": {"X-Custom": "test"},
     "dry_run": true
@@ -343,6 +349,89 @@ The `resend` action lets you replay a captured request with modifications -- use
 ```
 
 The dry-run returns the modified request without sending it, so you can verify the changes.
+
+## WebUI
+
+yorishiro-proxy includes a built-in web interface that provides a visual complement to the MCP tool workflow. The WebUI lets you browse captured flows, resend requests, run fuzz campaigns, and manage intercept rules -- all from your browser.
+
+### Accessing the WebUI
+
+To enable the WebUI, start yorishiro-proxy with the `-mcp-http-addr` flag. This activates the Streamable HTTP transport and serves the WebUI on the same address.
+
+Add `-mcp-http-addr` to your `.mcp.json` configuration:
+
+```json
+{
+  "mcpServers": {
+    "yorishiro-proxy": {
+      "command": "/path/to/bin/yorishiro-proxy",
+      "args": [
+        "-insecure",
+        "-log-file", "/tmp/yorishiro-proxy.log",
+        "-mcp-http-addr", "127.0.0.1:3000"
+      ]
+    }
+  }
+}
+```
+
+After restarting Claude Code, open `http://127.0.0.1:3000` in your browser to access the WebUI.
+
+### Browsing flows
+
+The **Flows** page is the default landing page. It displays all captured HTTP/HTTPS, WebSocket, gRPC, and Raw TCP flows in a sortable table.
+
+- **Filter flows** by protocol, HTTP method, URL pattern, or status code using the filter controls at the top of the page.
+- **Click a flow** to open its detail view, which shows the full request and response including headers, body, and timing information.
+- **Export flows** to JSONL format using the Export button in the toolbar.
+
+### Exporting as cURL or HAR
+
+From the flow detail view, you can export individual flows in standard formats:
+
+- **Copy as cURL** -- Copies a ready-to-run `curl` command to your clipboard, preserving the method, headers, and body of the original request.
+- **Export HAR** -- Downloads the flow as an HTTP Archive (HAR 1.2) JSON file, suitable for importing into other tools such as browser DevTools or Burp Suite.
+
+Both buttons are located in the toolbar at the top of the flow detail page.
+
+### Resending requests with the Resender
+
+The **Resend** page lets you replay captured requests with modifications through a visual editor.
+
+1. Navigate to a flow detail page and click the **Resend** button, or go to the Resend page directly and enter a flow ID.
+2. Modify the request as needed:
+   - Change the HTTP method or URL.
+   - Add, edit, or remove headers using the header editor.
+   - Apply body patches (JSON path-based) or edit the body directly.
+   - Use the raw HTTP editor to edit the entire request as plain text.
+3. Click **Send** to execute the modified request. The response appears in the response panel below.
+4. Use **Dry Run** to preview the modified request without sending it.
+
+### Fuzzing with the Fuzzer
+
+The **Fuzz** page provides an interface for running automated payload injection campaigns.
+
+1. Select a base flow to use as a template.
+2. Define **positions** -- locations in the request where payloads will be injected (URL parameters, headers, JSON body fields).
+3. Configure **payload sets** with values to inject (wordlists, numeric ranges, etc.).
+4. Choose the attack type: **sequential** (one position at a time) or **parallel** (all positions simultaneously).
+5. Click **Start** to launch the fuzz job.
+6. Monitor progress on the fuzz results page, which shows each request's status code, response size, and latency. Use the filter controls to find anomalous responses.
+
+### Intercepting requests
+
+The **Intercept** page lets you hold requests for manual inspection and modification before they are forwarded to the upstream server.
+
+1. Configure intercept rules in the **Rules** panel on the left side. Rules match on host pattern, path pattern, HTTP methods, and header values.
+2. Enable interception by toggling rules on. Matching requests appear in the intercept queue.
+3. For each intercepted request, choose one of three actions:
+   - **Release** -- forward the request as-is.
+   - **Modify and Forward** -- edit headers or body before forwarding.
+   - **Drop** -- discard the request and return a 502 response to the client.
+
+### Managing macros
+
+The **Macros** page lets you view and run multi-step workflows defined via the `macro` MCP tool. Each macro shows its steps, extraction rules, and execution history. Click **Run** to execute a macro and view the results of each step.
 
 ## Next Steps
 
@@ -390,7 +479,7 @@ Intercepted requests appear in the intercept queue. Release, modify, or drop the
 // query
 {"resource": "intercept_queue"}
 
-// execute
+// intercept
 {"action": "release", "params": {"intercept_id": "<id>"}}
 ```
 
@@ -399,7 +488,7 @@ Intercepted requests appear in the intercept queue. Release, modify, or drop the
 Automate multi-step workflows (e.g., login then access protected resource):
 
 ```json
-// execute
+// macro
 {
   "action": "define_macro",
   "params": {
@@ -408,7 +497,7 @@ Automate multi-step workflows (e.g., login then access protected resource):
     "steps": [
       {
         "id": "login",
-        "session_id": "<login-session-id>",
+        "flow_id": "<login-flow-id>",
         "extract": [
           {
             "name": "session_cookie",
@@ -422,7 +511,7 @@ Automate multi-step workflows (e.g., login then access protected resource):
       },
       {
         "id": "access",
-        "session_id": "<protected-session-id>",
+        "flow_id": "<protected-flow-id>",
         "override_headers": {"Cookie": "PHPSESSID={{session_cookie}}"}
       }
     ]
@@ -435,11 +524,11 @@ Automate multi-step workflows (e.g., login then access protected resource):
 Automate payload injection for parameter testing:
 
 ```json
-// execute
+// fuzz
 {
   "action": "fuzz",
   "params": {
-    "session_id": "<session-id>",
+    "flow_id": "<flow-id>",
     "attack_type": "sequential",
     "positions": [
       {
@@ -470,29 +559,29 @@ Monitor fuzz job progress:
 {"resource": "fuzz_results", "fuzz_id": "<fuzz-id>", "limit": 100}
 ```
 
-### Session export and import
+### Flow export and import
 
-Export captured sessions for sharing or archival:
+Export captured flows for sharing or archival:
 
 ```json
-// execute
+// manage
 {
-  "action": "export_sessions",
+  "action": "export_flows",
   "params": {
     "format": "jsonl",
-    "output_path": "/tmp/sessions.jsonl"
+    "output_path": "/tmp/flows.jsonl"
   }
 }
 ```
 
-Import sessions into another instance:
+Import flows into another instance:
 
 ```json
-// execute
+// manage
 {
-  "action": "import_sessions",
+  "action": "import_flows",
   "params": {
-    "input_path": "/tmp/sessions.jsonl",
+    "input_path": "/tmp/flows.jsonl",
     "on_conflict": "skip"
   }
 }
