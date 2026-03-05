@@ -45,7 +45,9 @@ Yorishiro Proxy は [MCP (Model Context Protocol)](https://modelcontextprotocol.
 
 ## クイックスタート
 
-### 1. ビルド
+### 1. バイナリの取得
+
+[GitHub Releases](https://github.com/usk6666/yorishiro-proxy/releases) ページからビルド済みバイナリをダウンロードするか、ソースからビルド:
 
 ```bash
 git clone https://github.com/usk6666/yorishiro-proxy.git

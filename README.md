@@ -45,7 +45,9 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 
 ## Quick Start
 
-### 1. Build
+### 1. Get the Binary
+
+Download a prebuilt binary from the [GitHub Releases](https://github.com/usk6666/yorishiro-proxy/releases) page, or build from source:
 
 ```bash
 git clone https://github.com/usk6666/yorishiro-proxy.git
