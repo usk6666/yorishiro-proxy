@@ -57,12 +57,12 @@ type transformActionInput struct {
 
 // transformRuleOutput is the JSON representation of an auto-transform rule for MCP tool output.
 type transformRuleOutput struct {
-	ID         string                      `json:"id"`
-	Enabled    bool                        `json:"enabled"`
-	Priority   int                         `json:"priority"`
-	Direction  string                      `json:"direction"`
-	Conditions transformConditionsOutput   `json:"conditions"`
-	Action     transformActionOutput       `json:"action"`
+	ID         string                    `json:"id"`
+	Enabled    bool                      `json:"enabled"`
+	Priority   int                       `json:"priority"`
+	Direction  string                    `json:"direction"`
+	Conditions transformConditionsOutput `json:"conditions"`
+	Action     transformActionOutput     `json:"action"`
 }
 
 // transformConditionsOutput is the JSON representation of transform conditions in output.

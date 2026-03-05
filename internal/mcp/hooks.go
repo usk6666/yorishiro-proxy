@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
 
 // hooksInput holds the hook configuration for resend/fuzz actions.
@@ -476,12 +476,12 @@ func recordMacroStepSessionDeps(
 	}
 
 	fl := &flow.Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   start,
-		Duration:    duration,
-		Tags:        tags,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: start,
+		Duration:  duration,
+		Tags:      tags,
 	}
 	if err := d.store.SaveFlow(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
@@ -497,7 +497,7 @@ func recordMacroStepSessionDeps(
 	parsedURL := httpReq.URL
 
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -518,7 +518,7 @@ func recordMacroStepSessionDeps(
 	}
 
 	recvMsg := &flow.Message{
-		FlowID:  fl.ID,
+		FlowID:     fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),

@@ -15,9 +15,9 @@ type benchHandler struct {
 	canHandle func(peek []byte) bool
 }
 
-func (h *benchHandler) Name() string                                    { return h.name }
-func (h *benchHandler) Detect(peek []byte) bool                         { return h.canHandle(peek) }
-func (h *benchHandler) Handle(_ context.Context, _ net.Conn) error      { return nil }
+func (h *benchHandler) Name() string                               { return h.name }
+func (h *benchHandler) Detect(peek []byte) bool                    { return h.canHandle(peek) }
+func (h *benchHandler) Handle(_ context.Context, _ net.Conn) error { return nil }
 
 var _ proxy.ProtocolHandler = (*benchHandler)(nil)
 
@@ -42,7 +42,7 @@ func BenchmarkDetect(b *testing.B) {
 		},
 	}
 	catchAllHandler := &benchHandler{
-		name: "raw",
+		name:      "raw",
 		canHandle: func([]byte) bool { return true },
 	}
 

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -19,7 +19,7 @@ import (
 
 type mockStore struct {
 	mu       sync.Mutex
-	flows []*flow.Flow
+	flows    []*flow.Flow
 	updates  []sessionUpdateCall
 	messages []*flow.Message
 
@@ -619,9 +619,9 @@ func TestNewHandler_NilForwards(t *testing.T) {
 
 func TestRelay_Record_NilStore(t *testing.T) {
 	r := &relay{
-		store:     nil,
+		store:  nil,
 		flowID: "test-session",
-		logger:    testutil.DiscardLogger(),
+		logger: testutil.DiscardLogger(),
 	}
 
 	// Should not panic.
@@ -631,9 +631,9 @@ func TestRelay_Record_NilStore(t *testing.T) {
 func TestRelay_SequenceNumbers(t *testing.T) {
 	store := &mockStore{}
 	r := &relay{
-		store:     store,
+		store:  store,
 		flowID: "test-session",
-		logger:    testutil.DiscardLogger(),
+		logger: testutil.DiscardLogger(),
 	}
 
 	for i := 0; i < 5; i++ {
@@ -656,9 +656,9 @@ func TestRelay_DataIsolation(t *testing.T) {
 	// Verify that recorded data is a copy, not a reference to the buffer.
 	store := &mockStore{}
 	r := &relay{
-		store:     store,
+		store:  store,
 		flowID: "test-session",
-		logger:    testutil.DiscardLogger(),
+		logger: testutil.DiscardLogger(),
 	}
 
 	buf := []byte("original data")

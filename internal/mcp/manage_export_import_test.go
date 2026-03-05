@@ -122,13 +122,13 @@ func makeExportTestSession(t *testing.T, store flow.Store, id string) {
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
 	fl := &flow.Flow{
-		ID:          id,
-		ConnID:      "conn-" + id,
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    100 * time.Millisecond,
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  100 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -136,7 +136,7 @@ func makeExportTestSession(t *testing.T, store flow.Store, id string) {
 
 	msg := &flow.Message{
 		ID:        "msg-" + id,
-		FlowID: id,
+		FlowID:    id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -365,13 +365,13 @@ func makeExportTestSessionUUID(t *testing.T, store flow.Store, sessID, msgID str
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
 	fl := &flow.Flow{
-		ID:          sessID,
-		ConnID:      "conn-" + sessID,
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    100 * time.Millisecond,
+		ID:        sessID,
+		ConnID:    "conn-" + sessID,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  100 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -379,7 +379,7 @@ func makeExportTestSessionUUID(t *testing.T, store flow.Store, sessID, msgID str
 
 	msg := &flow.Message{
 		ID:        msgID,
-		FlowID: sessID,
+		FlowID:    sessID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -398,13 +398,13 @@ func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID,
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
 	fl := &flow.Flow{
-		ID:          sessID,
-		Protocol:    protocol,
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    250 * time.Millisecond,
-		Tags:        map[string]string{"env": "test"},
+		ID:        sessID,
+		Protocol:  protocol,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  250 * time.Millisecond,
+		Tags:      map[string]string{"env": "test"},
 	}
 	// Resend-generated sessions have empty ConnID
 	if withConnInfo {
@@ -424,7 +424,7 @@ func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID,
 
 	sendMsg := &flow.Message{
 		ID:        sendMsgID,
-		FlowID: sessID,
+		FlowID:    sessID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -440,7 +440,7 @@ func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID,
 
 	recvMsg := &flow.Message{
 		ID:         recvMsgID,
-		FlowID:  sessID,
+		FlowID:     sessID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  ts.Add(250 * time.Millisecond),

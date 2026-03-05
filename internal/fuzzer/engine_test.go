@@ -40,7 +40,7 @@ func (m *mockFlowFetcher) GetMessages(_ context.Context, _ string, _ flow.Messag
 
 // mockFlowRecorder implements FlowRecorder for testing.
 type mockFlowRecorder struct {
-	flows []*flow.Flow
+	flows    []*flow.Flow
 	messages []*flow.Message
 	saveErr  error
 	msgErr   error
@@ -138,7 +138,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: Config{
-				FlowID:  "sess-1",
+				FlowID:     "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X-A", PayloadSet: "set-a"},
@@ -161,7 +161,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "invalid attack_type",
 			cfg: Config{
-				FlowID:  "sess-1",
+				FlowID:     "sess-1",
 				AttackType: "invalid",
 				Positions:  []Position{{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"}},
 				PayloadSets: map[string]PayloadSet{
@@ -173,7 +173,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "no positions",
 			cfg: Config{
-				FlowID:  "sess-1",
+				FlowID:     "sess-1",
 				AttackType: "sequential",
 			},
 			wantErr: true,
@@ -181,7 +181,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "duplicate position ids",
 			cfg: Config{
-				FlowID:  "sess-1",
+				FlowID:     "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -196,7 +196,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "missing payload set reference",
 			cfg: Config{
-				FlowID:  "sess-1",
+				FlowID:     "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "missing"},
@@ -227,7 +227,7 @@ func TestEngine_Run_Sequential(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -253,7 +253,7 @@ func TestEngine_Run_Sequential(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:  "template-1",
+		FlowID:     "template-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{
@@ -327,7 +327,7 @@ func TestEngine_Run_Parallel(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "POST",
 				URL:       testURL,
@@ -349,7 +349,7 @@ func TestEngine_Run_Parallel(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:  "template-1",
+		FlowID:     "template-1",
 		AttackType: "parallel",
 		Positions: []Position{
 			{ID: "pos-0", Location: "body_json", JSONPath: "$.username", PayloadSet: "users"},
@@ -385,7 +385,7 @@ func TestEngine_Run_WithRemovePosition(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -401,7 +401,7 @@ func TestEngine_Run_WithRemovePosition(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:  "template-1",
+		FlowID:     "template-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "query", Name: "debug", Mode: "remove"},
@@ -439,7 +439,7 @@ func TestEngine_Run_SessionNotFound(t *testing.T) {
 	engine := NewEngine(fetcher, nil, nil, nil, "")
 
 	cfg := Config{
-		FlowID:  "nonexistent",
+		FlowID:     "nonexistent",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -466,7 +466,7 @@ func TestEngine_Run_NoSendMessages(t *testing.T) {
 	engine := NewEngine(fetcher, nil, nil, nil, "")
 
 	cfg := Config{
-		FlowID:  "sess-1",
+		FlowID:     "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -492,7 +492,7 @@ func TestEngine_Run_ContextCancelled(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "sess-1",
+				FlowID:    "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -515,7 +515,7 @@ func TestEngine_Run_ContextCancelled(t *testing.T) {
 	cancel() // Cancel immediately.
 
 	cfg := Config{
-		FlowID:  "sess-1",
+		FlowID:     "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -541,7 +541,7 @@ func TestEngine_Run_HTTPError(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "sess-1",
+				FlowID:    "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -559,7 +559,7 @@ func TestEngine_Run_HTTPError(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:  "sess-1",
+		FlowID:     "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -601,7 +601,7 @@ func TestEngine_Run_RangePayloads(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "sess-1",
+				FlowID:    "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -618,7 +618,7 @@ func TestEngine_Run_RangePayloads(t *testing.T) {
 
 	start, end := 1, 3
 	cfg := Config{
-		FlowID:  "sess-1",
+		FlowID:     "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "path", Match: "/user/(\\d+)", PayloadSet: "ids"},
@@ -651,7 +651,7 @@ func TestEngine_Run_TimeoutMs(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "sess-1",
+				FlowID:    "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -667,7 +667,7 @@ func TestEngine_Run_TimeoutMs(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:  "sess-1",
+		FlowID:     "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -746,7 +746,7 @@ func TestEngine_Run_JobTimestamps(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "sess-1",
+				FlowID:    "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -764,7 +764,7 @@ func TestEngine_Run_JobTimestamps(t *testing.T) {
 	before := time.Now()
 
 	cfg := Config{
-		FlowID:  "sess-1",
+		FlowID:     "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},

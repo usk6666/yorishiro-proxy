@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // maxRawCaptureSize limits the size of raw request/response bytes captured.
@@ -601,14 +601,14 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 
 	duration := time.Since(start)
 	fl := &flow.Flow{
-		ConnID:      connID,
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   start,
-		Duration:    duration,
-		Tags:        smugglingTags(smuggling),
-		BlockedBy:   "target_scope",
+		ConnID:    connID,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: start,
+		Duration:  duration,
+		Tags:      smugglingTags(smuggling),
+		BlockedBy: "target_scope",
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 		},
@@ -618,7 +618,7 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 		return
 	}
 	sendMsg := &flow.Message{
-		FlowID:     fl.ID,
+		FlowID:        fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     start,

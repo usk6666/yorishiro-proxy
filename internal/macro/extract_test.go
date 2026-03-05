@@ -291,9 +291,9 @@ func TestExtractValues_BodyJSON(t *testing.T) {
 			body: `{"foo":"bar"}`,
 			rules: []ExtractionRule{
 				{
-					Name:   "val",
-					From:   ExtractionFromResponse,
-					Source: ExtractionSourceBodyJSON,
+					Name:    "val",
+					From:    ExtractionFromResponse,
+					Source:  ExtractionSourceBodyJSON,
 					Default: "fb",
 				},
 			},
@@ -342,11 +342,11 @@ func TestExtractValues_Status(t *testing.T) {
 
 func TestExtractValues_URL(t *testing.T) {
 	tests := []struct {
-		name    string
-		req     *SendRequest
-		resp    *SendResponse
-		rules   []ExtractionRule
-		wantKV  map[string]string
+		name   string
+		req    *SendRequest
+		resp   *SendResponse
+		rules  []ExtractionRule
+		wantKV map[string]string
 	}{
 		{
 			name: "extract from request URL",

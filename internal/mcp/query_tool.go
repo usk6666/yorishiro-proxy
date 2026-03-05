@@ -11,8 +11,8 @@ import (
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // queryInput is the typed input for the query tool.
@@ -133,7 +133,7 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 type queryFlowsEntry struct {
 	ID              string            `json:"id"`
 	Protocol        string            `json:"protocol"`
-	FlowType     string            `json:"flow_type"`
+	FlowType        string            `json:"flow_type"`
 	State           string            `json:"state"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
@@ -148,8 +148,8 @@ type queryFlowsEntry struct {
 // queryFlowsResult is the response for the flows resource.
 type queryFlowsResult struct {
 	Flows []queryFlowsEntry `json:"flows"`
-	Count    int                  `json:"count"`
-	Total    int                  `json:"total"`
+	Count int               `json:"count"`
+	Total int               `json:"total"`
 }
 
 // handleQueryFlows returns a paginated list of flows with message summary data.
@@ -222,7 +222,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 		entries = append(entries, queryFlowsEntry{
 			ID:              fl.ID,
 			Protocol:        fl.Protocol,
-			FlowType:     fl.FlowType,
+			FlowType:        fl.FlowType,
 			State:           fl.State,
 			Method:          method,
 			URL:             urlStr,
@@ -237,8 +237,8 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 
 	result := &queryFlowsResult{
 		Flows: entries,
-		Count:    len(entries),
-		Total:    total,
+		Count: len(entries),
+		Total: total,
 	}
 	return nil, result, nil
 }
@@ -250,7 +250,7 @@ type queryFlowResult struct {
 	ID                    string              `json:"id"`
 	ConnID                string              `json:"conn_id"`
 	Protocol              string              `json:"protocol"`
-	FlowType           string              `json:"flow_type"`
+	FlowType              string              `json:"flow_type"`
 	State                 string              `json:"state"`
 	Method                string              `json:"method"`
 	URL                   string              `json:"url"`
@@ -412,7 +412,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		ID:                    fl.ID,
 		ConnID:                fl.ConnID,
 		Protocol:              fl.Protocol,
-		FlowType:           fl.FlowType,
+		FlowType:              fl.FlowType,
 		State:                 fl.State,
 		Method:                method,
 		URL:                   urlStr,
@@ -616,14 +616,14 @@ type queryListenerStatusEntry struct {
 type queryStatusResult struct {
 	Running           bool                       `json:"running"`
 	ListenAddr        string                     `json:"listen_addr"`
-	Listeners         []queryListenerStatusEntry  `json:"listeners,omitempty"`
+	Listeners         []queryListenerStatusEntry `json:"listeners,omitempty"`
 	ListenerCount     int                        `json:"listener_count"`
 	UpstreamProxy     string                     `json:"upstream_proxy"`
 	ActiveConnections int                        `json:"active_connections"`
 	MaxConnections    int                        `json:"max_connections"`
 	PeekTimeoutMs     int64                      `json:"peek_timeout_ms"`
 	RequestTimeoutMs  int64                      `json:"request_timeout_ms"`
-	TotalFlows     int                        `json:"total_flows"`
+	TotalFlows        int                        `json:"total_flows"`
 	DBSizeBytes       int64                      `json:"db_size_bytes"`
 	UptimeSeconds     int64                      `json:"uptime_seconds"`
 	CAInitialized     bool                       `json:"ca_initialized"`
@@ -767,13 +767,13 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 
 // queryCACertResult is the response for the ca_cert resource.
 type queryCACertResult struct {
-	PEM          string `json:"pem"`
-	Fingerprint  string `json:"fingerprint"`
-	Subject      string `json:"subject"`
-	NotAfter     string `json:"not_after"`
-	Persisted    bool   `json:"persisted"`
-	CertPath     string `json:"cert_path,omitempty"`
-	InstallHint  string `json:"install_hint,omitempty"`
+	PEM         string `json:"pem"`
+	Fingerprint string `json:"fingerprint"`
+	Subject     string `json:"subject"`
+	NotAfter    string `json:"not_after"`
+	Persisted   bool   `json:"persisted"`
+	CertPath    string `json:"cert_path,omitempty"`
+	InstallHint string `json:"install_hint,omitempty"`
 }
 
 // handleQueryCACert returns the CA certificate PEM and metadata.
@@ -993,4 +993,3 @@ func (s *Server) handleQueryMacro(ctx context.Context, input queryInput) (*gomcp
 
 	return nil, result, nil
 }
-
