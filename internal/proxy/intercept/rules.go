@@ -24,6 +24,12 @@ const (
 	DirectionBoth Direction = "both"
 )
 
+// maxRegexPatternLen is the maximum allowed length (in bytes) for regex
+// patterns in intercept rules. This prevents excessive memory consumption
+// during regex compilation and CPU consumption during matching. Consistent
+// with the limits in the auto-transform, macro, body_patch, and fuzzer packages.
+const maxRegexPatternLen = 1024
+
 // validDirections contains all valid Direction values for validation.
 var validDirections = map[Direction]bool{
 	DirectionRequest:  true,
@@ -94,6 +100,9 @@ func compileRule(r Rule) (*compiledRule, error) {
 
 	// Compile host pattern.
 	if r.Conditions.HostPattern != "" {
+		if len(r.Conditions.HostPattern) > maxRegexPatternLen {
+			return nil, fmt.Errorf("host_pattern too long: %d > %d", len(r.Conditions.HostPattern), maxRegexPatternLen)
+		}
 		re, err := regexp.Compile(r.Conditions.HostPattern)
 		if err != nil {
 			return nil, fmt.Errorf("invalid host_pattern %q: %w", r.Conditions.HostPattern, err)
@@ -103,6 +112,9 @@ func compileRule(r Rule) (*compiledRule, error) {
 
 	// Compile path pattern.
 	if r.Conditions.PathPattern != "" {
+		if len(r.Conditions.PathPattern) > maxRegexPatternLen {
+			return nil, fmt.Errorf("path_pattern too long: %d > %d", len(r.Conditions.PathPattern), maxRegexPatternLen)
+		}
 		re, err := regexp.Compile(r.Conditions.PathPattern)
 		if err != nil {
 			return nil, fmt.Errorf("invalid path_pattern %q: %w", r.Conditions.PathPattern, err)
@@ -114,6 +126,9 @@ func compileRule(r Rule) (*compiledRule, error) {
 	if len(r.Conditions.HeaderMatch) > 0 {
 		cr.headerMatchRes = make(map[string]*regexp.Regexp, len(r.Conditions.HeaderMatch))
 		for name, pattern := range r.Conditions.HeaderMatch {
+			if len(pattern) > maxRegexPatternLen {
+				return nil, fmt.Errorf("header_match pattern for %q too long: %d > %d", name, len(pattern), maxRegexPatternLen)
+			}
 			re, err := regexp.Compile(pattern)
 			if err != nil {
 				return nil, fmt.Errorf("invalid header_match pattern for %q: %w", name, err)
