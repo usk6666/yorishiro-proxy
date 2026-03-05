@@ -90,11 +90,16 @@
 すべての修正を適用した後、以下を順に実行し、全てパスすることを確認する:
 
 ```bash
+gofmt -w .
+make lint
 make build
 make test
 ```
 
-失敗した場合は原因を特定して修正し、再度全てパスするまで繰り返す。
+- `gofmt -w .` でフォーマットを自動整形する
+- `make lint` は gofmt check + go vet + staticcheck + ineffassign を実行する
+- lint で指摘された問題は修正してから再実行する
+- 全てパスするまで繰り返す
 
 ## コミット
 

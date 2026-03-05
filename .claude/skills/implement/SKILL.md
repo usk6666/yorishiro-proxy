@@ -23,6 +23,8 @@ Linear Issue に基づいて実装から PR 作成までを行う一気通貫ワ
 5. **実装**: 計画に基づいてコードを実装
 6. **テスト作成**: 実装に対するテストを書く
 7. **検証**:
+   - `gofmt -w .` でフォーマットを自動整形
+   - `make lint` (gofmt check + go vet + staticcheck + ineffassign)
    - `make build`
    - `make test`
 8. **コミット**: Conventional Commits 形式でコミット
