@@ -10,7 +10,6 @@ import (
 	gohttp "net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -603,7 +602,3 @@ func TestHTTPConnectViaUpstreamProxyWithAuth(t *testing.T) {
 	}
 }
 
-// containsString checks if s contains substr (avoid importing strings in test).
-func containsString(s, substr string) bool {
-	return strings.Contains(s, substr)
-}

@@ -22,16 +22,6 @@ func (m *mockFlowFetcher) GetFlowRequest(_ context.Context, flowID string) (*Sen
 	return req, nil
 }
 
-// mockSendFunc creates a send function that returns predefined responses.
-func mockSendFunc(responses map[string]*SendResponse) SendFunc {
-	return func(_ context.Context, req *SendRequest) (*SendResponse, error) {
-		resp, ok := responses[req.URL]
-		if !ok {
-			return &SendResponse{StatusCode: 404, Body: []byte("not found")}, nil
-		}
-		return resp, nil
-	}
-}
 
 func TestNewEngine(t *testing.T) {
 	fetcher := &mockFlowFetcher{}

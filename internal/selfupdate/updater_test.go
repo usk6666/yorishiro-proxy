@@ -647,7 +647,7 @@ func TestUpdater_Upgrade_MissingChecksumAsset(t *testing.T) {
 	mock := newMockHTTPClient()
 
 	// Release with platform asset but no checksums.txt.
-	releaseJSON := fmt.Sprintf(`{
+	releaseJSON := `{
 		"tag_name": "v2.0.0",
 		"assets": [
 			{"name": "yorishiro-proxy-v2.0.0-linux-amd64", "browser_download_url": "https://example.com/binary-linux-amd64"},
@@ -656,7 +656,7 @@ func TestUpdater_Upgrade_MissingChecksumAsset(t *testing.T) {
 			{"name": "yorishiro-proxy-v2.0.0-darwin-arm64", "browser_download_url": "https://example.com/binary-darwin-arm64"},
 			{"name": "yorishiro-proxy-v2.0.0-windows-amd64.exe", "browser_download_url": "https://example.com/binary-windows-amd64.exe"}
 		]
-	}`)
+	}`
 	mock.addResponse(
 		"https://api.github.com/repos/usk6666/yorishiro-proxy/releases/latest",
 		http.StatusOK,
