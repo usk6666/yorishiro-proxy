@@ -349,6 +349,103 @@ func TestListener_ActiveConnections_NoSemaphore(t *testing.T) {
 	}
 }
 
+func TestListener_SetMaxConnections_RejectsAfterReduction(t *testing.T) {
+	handler := &slowHandler{delay: 2 * time.Second, name: "slow"}
+	detector := &slowDetector{handler: handler}
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:           "127.0.0.1:0",
+		Detector:       detector,
+		Logger:         testutil.DiscardLogger(),
+		MaxConnections: 10,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Open 3 connections (within the limit of 10).
+	conns := make([]net.Conn, 3)
+	for i := range conns {
+		conns[i] = dialAndSend(t, listener.Addr())
+		defer conns[i].Close()
+	}
+
+	if !waitForEntered(handler, 3, 2*time.Second) {
+		t.Fatalf("only %d/3 handlers entered", handler.entered.Load())
+	}
+
+	// Verify 3 active connections.
+	if got := listener.ActiveConnections(); got != 3 {
+		t.Fatalf("ActiveConnections = %d, want 3", got)
+	}
+
+	// Reduce the limit below the current active count.
+	listener.SetMaxConnections(2)
+
+	if got := listener.MaxConnections(); got != 2 {
+		t.Fatalf("MaxConnections = %d, want 2", got)
+	}
+
+	// New connection should be rejected because activeConns (3) > new limit (2).
+	rejConn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rejConn.Close()
+
+	rejConn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+
+	buf := make([]byte, 1)
+	rejConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = rejConn.Read(buf)
+	if err == nil {
+		t.Fatal("expected error reading from rejected connection after limit reduction")
+	}
+
+	// Only the original 3 handlers should have been entered.
+	if got := handler.entered.Load(); got != 3 {
+		t.Errorf("handler entered = %d, want 3", got)
+	}
+}
+
+func TestListener_SetMaxConnections_IgnoresInvalid(t *testing.T) {
+	handler := &slowHandler{delay: 0, name: "fast"}
+	detector := &slowDetector{handler: handler}
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:           "127.0.0.1:0",
+		Detector:       detector,
+		Logger:         testutil.DiscardLogger(),
+		MaxConnections: 5,
+	})
+
+	// Zero and negative values should be ignored.
+	listener.SetMaxConnections(0)
+	if got := listener.MaxConnections(); got != 5 {
+		t.Errorf("MaxConnections after SetMaxConnections(0) = %d, want 5", got)
+	}
+
+	listener.SetMaxConnections(-1)
+	if got := listener.MaxConnections(); got != 5 {
+		t.Errorf("MaxConnections after SetMaxConnections(-1) = %d, want 5", got)
+	}
+
+	// Positive values should be accepted.
+	listener.SetMaxConnections(10)
+	if got := listener.MaxConnections(); got != 10 {
+		t.Errorf("MaxConnections after SetMaxConnections(10) = %d, want 10", got)
+	}
+}
+
 func TestListener_PeekTimeout_DisconnectsSlowClient(t *testing.T) {
 	handler := &slowHandler{delay: 0, name: "fast"}
 	detector := &slowDetector{handler: handler}
