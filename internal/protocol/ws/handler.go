@@ -247,9 +247,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 					"flow_id", flowID, "direction", direction,
 					"accumulated", len(fragmentBuf), "incoming", len(frame.Payload),
 					"limit", config.MaxWebSocketMessageSize)
-				// Discard fragment buffer and send Close frame (1009 = message too big).
-				fragmentBuf = nil
-				inFragment = false
+				// Send Close frame (1009 = message too big).
 				closePayload := make([]byte, 2)
 				closePayload[0] = 0x03
 				closePayload[1] = 0xF1 // 1009
