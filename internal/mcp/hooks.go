@@ -121,6 +121,9 @@ func validatePostReceiveHook(h *hookConfig) error {
 		return fmt.Errorf("match_pattern is required for on_match run_interval")
 	}
 	if h.MatchPattern != "" {
+		if len(h.MatchPattern) > maxRegexPatternLen {
+			return fmt.Errorf("match_pattern too long: %d > %d", len(h.MatchPattern), maxRegexPatternLen)
+		}
 		re, err := regexp.Compile(h.MatchPattern)
 		if err != nil {
 			return fmt.Errorf("invalid match_pattern: %w", err)

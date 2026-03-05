@@ -3,6 +3,7 @@ package intercept
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -583,6 +584,99 @@ func TestMatchesResponse_NoConditions(t *testing.T) {
 	got := cr.matchesResponse(404, http.Header{"Content-Type": {"text/html"}})
 	if !got {
 		t.Error("matchesResponse() with no conditions should match all responses")
+	}
+}
+
+func TestCompileRule_PatternTooLong(t *testing.T) {
+	longPattern := strings.Repeat("a", maxRegexPatternLen+1)
+	exactPattern := strings.Repeat("a", maxRegexPatternLen)
+
+	tests := []struct {
+		name    string
+		rule    Rule
+		wantErr bool
+	}{
+		{
+			name: "host_pattern at max length accepted",
+			rule: Rule{
+				ID:        "r1",
+				Enabled:   true,
+				Direction: DirectionRequest,
+				Conditions: Conditions{
+					HostPattern: exactPattern,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "host_pattern exceeds max length rejected",
+			rule: Rule{
+				ID:        "r2",
+				Enabled:   true,
+				Direction: DirectionRequest,
+				Conditions: Conditions{
+					HostPattern: longPattern,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "path_pattern at max length accepted",
+			rule: Rule{
+				ID:        "r3",
+				Enabled:   true,
+				Direction: DirectionRequest,
+				Conditions: Conditions{
+					PathPattern: exactPattern,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "path_pattern exceeds max length rejected",
+			rule: Rule{
+				ID:        "r4",
+				Enabled:   true,
+				Direction: DirectionRequest,
+				Conditions: Conditions{
+					PathPattern: longPattern,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "header_match pattern at max length accepted",
+			rule: Rule{
+				ID:        "r5",
+				Enabled:   true,
+				Direction: DirectionRequest,
+				Conditions: Conditions{
+					HeaderMatch: map[string]string{"Content-Type": exactPattern},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "header_match pattern exceeds max length rejected",
+			rule: Rule{
+				ID:        "r6",
+				Enabled:   true,
+				Direction: DirectionRequest,
+				Conditions: Conditions{
+					HeaderMatch: map[string]string{"Content-Type": longPattern},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileRule(tt.rule)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("compileRule() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
