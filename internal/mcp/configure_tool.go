@@ -607,4 +607,3 @@ func (s *Server) autoTransformResult() *configureAutoTransformResult {
 		EnabledRules: enabled,
 	}
 }
-

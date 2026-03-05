@@ -6,9 +6,9 @@ import (
 
 func TestGetEncoder(t *testing.T) {
 	tests := []struct {
-		name     string
-		encoder  string
-		wantNil  bool
+		name    string
+		encoder string
+		wantNil bool
 	}{
 		{name: "url_encode exists", encoder: "url_encode"},
 		{name: "base64 exists", encoder: "base64"},

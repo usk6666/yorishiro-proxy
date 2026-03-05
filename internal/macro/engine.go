@@ -10,7 +10,7 @@ import (
 // Engine executes macros by running steps sequentially, managing the KV Store,
 // applying templates, extracting values, and evaluating step guards.
 type Engine struct {
-	sendFunc       SendFunc
+	sendFunc    SendFunc
 	flowFetcher FlowFetcher
 }
 
@@ -23,7 +23,7 @@ func NewEngine(sendFunc SendFunc, fetcher FlowFetcher) (*Engine, error) {
 		return nil, fmt.Errorf("flowFetcher is required")
 	}
 	return &Engine{
-		sendFunc:       sendFunc,
+		sendFunc:    sendFunc,
 		flowFetcher: fetcher,
 	}, nil
 }

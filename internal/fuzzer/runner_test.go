@@ -79,7 +79,7 @@ func (m *threadSafeMockFuzzJobStore) getJobs() []*flow.FuzzJob {
 // threadSafeMockFlowRecorder is a thread-safe version of mockFlowRecorder.
 type threadSafeMockFlowRecorder struct {
 	mu       sync.Mutex
-	flows []*flow.Flow
+	flows    []*flow.Flow
 	messages []*flow.Message
 	saveErr  error
 }
@@ -149,7 +149,7 @@ func newTestRunner(t *testing.T) (*Runner, *threadSafeMockFuzzJobStore, *threadS
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -181,7 +181,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "valid config",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:  "sess-1",
+					FlowID:     "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -195,7 +195,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative concurrency",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:  "sess-1",
+					FlowID:     "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -210,7 +210,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "concurrency exceeds max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:  "sess-1",
+					FlowID:     "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -225,7 +225,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "concurrency at max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:  "sess-1",
+					FlowID:     "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -239,7 +239,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative rate limit",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:  "sess-1",
+					FlowID:     "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -254,7 +254,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative delay",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:  "sess-1",
+					FlowID:     "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -269,7 +269,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative timeout_ms",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					FlowID:      "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -282,7 +282,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "timeout_ms exceeds max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					FlowID:      "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -295,7 +295,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "timeout_ms at max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					FlowID:      "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -307,7 +307,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "timeout_ms zero is valid",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					FlowID:      "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -332,7 +332,7 @@ func TestRunner_Start_AsyncReturn(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -366,7 +366,7 @@ func TestRunner_Start_CompletesAsync(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -435,7 +435,7 @@ func TestRunner_Start_SessionNotFound(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "nonexistent",
+			FlowID:     "nonexistent",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -460,7 +460,7 @@ func TestRunner_PauseResumeCancel(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -487,7 +487,7 @@ func TestRunner_PauseResumeCancel(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -552,7 +552,7 @@ func TestRunner_Concurrency(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -604,7 +604,7 @@ func TestRunner_StopOnStatusCode(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -632,7 +632,7 @@ func TestRunner_StopOnStatusCode(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -690,7 +690,7 @@ func TestRunner_StopOnErrorCount(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -712,7 +712,7 @@ func TestRunner_StopOnErrorCount(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -764,7 +764,7 @@ func TestRunner_MaxRetries(t *testing.T) {
 		},
 		messages: []*flow.Message{
 			{
-				FlowID: "template-1",
+				FlowID:    "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -786,7 +786,7 @@ func TestRunner_MaxRetries(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -828,7 +828,7 @@ func TestRunner_DefaultConcurrency(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:  "template-1",
+			FlowID:     "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{

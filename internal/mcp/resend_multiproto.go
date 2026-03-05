@@ -145,12 +145,12 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 	}
 
 	newFl := &flow.Flow{
-		Protocol:    "TCP",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   start,
-		Duration:    duration,
-		Tags:        tags,
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: start,
+		Duration:  duration,
+		Tags:      tags,
 		ConnInfo: &flow.ConnectionInfo{
 			ServerAddr: targetAddr,
 		},
@@ -165,7 +165,7 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 	for _, msg := range sendMsgs {
 		if len(msg.Body) > 0 {
 			newMsg := &flow.Message{
-				FlowID: newFl.ID,
+				FlowID:    newFl.ID,
 				Sequence:  seq,
 				Direction: "send",
 				Timestamp: start,
@@ -181,7 +181,7 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 	// Save receive message.
 	if len(respData) > 0 {
 		newRecvMsg := &flow.Message{
-			FlowID: newFl.ID,
+			FlowID:    newFl.ID,
 			Sequence:  seq,
 			Direction: "receive",
 			Timestamp: start.Add(duration),
@@ -198,7 +198,7 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 	}
 
 	result := &resendReplayRawResult{
-		NewFlowID:       newFl.ID,
+		NewFlowID:          newFl.ID,
 		MessagesSent:       len(sendMsgs),
 		MessagesReceived:   messagesReceived,
 		TotalBytesSent:     totalBytesSent,
@@ -364,19 +364,19 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 	}
 
 	newFl := &flow.Flow{
-		Protocol:    "WebSocket",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   start,
-		Duration:    duration,
-		Tags:        tags,
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: start,
+		Duration:  duration,
+		Tags:      tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
 		return nil, nil, fmt.Errorf("save WebSocket resend session: %w", err)
 	}
 
 	newSendMsg := &flow.Message{
-		FlowID: newFl.ID,
+		FlowID:    newFl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -389,7 +389,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 
 	if len(respData) > 0 {
 		newRecvMsg := &flow.Message{
-			FlowID: newFl.ID,
+			FlowID:    newFl.ID,
 			Sequence:  1,
 			Direction: "receive",
 			Timestamp: start.Add(duration),
@@ -401,7 +401,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 	}
 
 	result := &resendWebSocketResult{
-		NewFlowID:    newFl.ID,
+		NewFlowID:       newFl.ID,
 		MessageSequence: *params.MessageSequence,
 		ResponseData:    base64.StdEncoding.EncodeToString(respData),
 		ResponseSize:    len(respData),

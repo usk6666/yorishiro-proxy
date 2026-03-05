@@ -19,10 +19,10 @@ const relayBufSize = 32 * 1024
 // relay copies data bidirectionally between a client and an upstream
 // connection, recording each chunk as a message in the flow store.
 type relay struct {
-	store     flow.FlowWriter
+	store  flow.FlowWriter
 	flowID string
-	logger    *slog.Logger
-	seq       atomic.Int64 // next message sequence number
+	logger *slog.Logger
+	seq    atomic.Int64 // next message sequence number
 }
 
 // run performs the bidirectional relay until one side closes, an error occurs,
@@ -42,7 +42,7 @@ func (r *relay) run(ctx context.Context, client, upstream net.Conn) error {
 	}()
 
 	var (
-		once    sync.Once
+		once     sync.Once
 		firstErr error
 	)
 
@@ -121,7 +121,7 @@ func (r *relay) record(ctx context.Context, direction string, data []byte) {
 	copy(raw, data)
 
 	msg := &flow.Message{
-		FlowID: r.flowID,
+		FlowID:    r.flowID,
 		Sequence:  seq,
 		Direction: direction,
 		Timestamp: time.Now(),

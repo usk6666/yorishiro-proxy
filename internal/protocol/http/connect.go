@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // tlsMetadata holds TLS connection information extracted from the handshake.
@@ -517,12 +517,12 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 	}
 
 	fl := &flow.Flow{
-		ConnID:      connID,
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   start,
-		BlockedBy:   "target_scope",
+		ConnID:    connID,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: start,
+		BlockedBy: "target_scope",
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 		},
@@ -532,7 +532,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 		return
 	}
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -564,19 +564,19 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 
 	duration := time.Since(start)
 	fl := &flow.Flow{
-		ConnID:      connID,
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   start,
-		Duration:    duration,
-		Tags:        smugglingTags(smuggling),
-		BlockedBy:   "target_scope",
+		ConnID:    connID,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: start,
+		Duration:  duration,
+		Tags:      smugglingTags(smuggling),
+		BlockedBy: "target_scope",
 		ConnInfo: &flow.ConnectionInfo{
-			ClientAddr:  clientAddr,
-			TLSVersion:  tlsMeta.Version,
-			TLSCipher:   tlsMeta.CipherSuite,
-			TLSALPN:     tlsMeta.ALPN,
+			ClientAddr: clientAddr,
+			TLSVersion: tlsMeta.Version,
+			TLSCipher:  tlsMeta.CipherSuite,
+			TLSALPN:    tlsMeta.ALPN,
 		},
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
@@ -584,7 +584,7 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 		return
 	}
 	sendMsg := &flow.Message{
-		FlowID:     fl.ID,
+		FlowID:        fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     start,

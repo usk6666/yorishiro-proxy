@@ -327,7 +327,7 @@ func TestMatchWildcard(t *testing.T) {
 		{"*.example.com", "bar.baz.example.com", true},
 		{"*.example.com", "example.com", false},
 		{"*.example.com", "notexample.com", false},
-		{"example.com", "foo.example.com", false}, // not a wildcard pattern
+		{"example.com", "foo.example.com", false},  // not a wildcard pattern
 		{"*example.com", "foo.example.com", false}, // malformed: missing dot after *
 		{"*.com", "example.com", true},
 		{"*.com", "com", false},

@@ -34,12 +34,12 @@ func TestEvaluateGuard(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		guard      *Guard
-		states     map[string]*stepState
-		kvStore    map[string]string
-		want       bool
-		wantErr    bool
+		name    string
+		guard   *Guard
+		states  map[string]*stepState
+		kvStore map[string]string
+		want    bool
+		wantErr bool
 	}{
 		{
 			name:    "nil guard always true",

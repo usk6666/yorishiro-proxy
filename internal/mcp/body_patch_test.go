@@ -76,10 +76,10 @@ func TestApplyBodyPatches_JSONPath(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "json_path with nil value sets null",
-			body: `{"key":"val"}`,
+			name:    "json_path with nil value sets null",
+			body:    `{"key":"val"}`,
 			patches: []BodyPatch{{JSONPath: "$.key", Value: nil}},
-			want: map[string]any{"key": nil},
+			want:    map[string]any{"key": nil},
 		},
 		{
 			name:    "path with empty segment returns error",

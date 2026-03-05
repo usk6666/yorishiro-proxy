@@ -209,12 +209,12 @@ func TestApplyRawPatches_OffsetPatch(t *testing.T) {
 
 func TestApplyRawPatches_BinaryFindReplace(t *testing.T) {
 	tests := []struct {
-		name       string
-		data       []byte
-		find       []byte
-		replace    []byte
-		want       []byte
-		wantErr    bool
+		name    string
+		data    []byte
+		find    []byte
+		replace []byte
+		want    []byte
+		wantErr bool
 	}{
 		{
 			name:    "simple binary replace",

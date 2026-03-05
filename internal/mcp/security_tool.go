@@ -104,7 +104,7 @@ type policyLayerResult struct {
 	Allows    []proxy.TargetRule `json:"allows"`
 	Denies    []proxy.TargetRule `json:"denies"`
 	Source    string             `json:"source"`
-	Immutable bool              `json:"immutable"`
+	Immutable bool               `json:"immutable"`
 }
 
 // agentLayerResult represents the mutable Agent Layer in get_target_scope output.

@@ -12,8 +12,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // setupQueryTestSession creates an MCP client session for query tool tests.
@@ -89,13 +89,13 @@ func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr st
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          id,
-		ConnID:      "conn-" + id,
-		Protocol:    protocol,
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    150 * time.Millisecond,
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  protocol,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  150 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
@@ -105,7 +105,7 @@ func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr st
 
 	sendMsg := &flow.Message{
 		ID:        id + "-send",
-		FlowID: id,
+		FlowID:    id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -120,7 +120,7 @@ func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr st
 
 	recvMsg := &flow.Message{
 		ID:         id + "-recv",
-		FlowID:  id,
+		FlowID:     id,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -472,11 +472,11 @@ func TestQuery_Messages_Pagination(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "sess-many",
-		Protocol:    "HTTPS",
-		FlowType: "stream",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
+		ID:        "sess-many",
+		Protocol:  "HTTPS",
+		FlowType:  "stream",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -486,7 +486,7 @@ func TestQuery_Messages_Pagination(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		msg := &flow.Message{
 			ID:        fmt.Sprintf("msg-%d", i),
-			FlowID: "sess-many",
+			FlowID:    "sess-many",
 			Sequence:  i,
 			Direction: "send",
 			Timestamp: time.Now().UTC(),
@@ -992,14 +992,14 @@ func seedBlockedSession(t *testing.T, store flow.Store, id, protocol, method, ur
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          id,
-		ConnID:      "conn-" + id,
-		Protocol:    protocol,
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    0,
-		BlockedBy:   blockedBy,
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  protocol,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  0,
+		BlockedBy: blockedBy,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
@@ -1008,7 +1008,7 @@ func seedBlockedSession(t *testing.T, store flow.Store, id, protocol, method, ur
 	parsedURL, _ := url.Parse(urlStr)
 	sendMsg := &flow.Message{
 		ID:        id + "-send",
-		FlowID: id,
+		FlowID:    id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1166,13 +1166,13 @@ func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, 
 	ctx := context.Background()
 
 	sess := &flow.Flow{
-		ID:          id,
-		ConnID:      "conn-" + id,
-		Protocol:    protocol,
-		FlowType: "unary",
-		State:       state,
-		Timestamp:   time.Now().UTC(),
-		Duration:    100 * time.Millisecond,
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  protocol,
+		FlowType:  "unary",
+		State:     state,
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, sess); err != nil {
 		t.Fatalf("SaveSession(%s): %v", id, err)
@@ -1181,7 +1181,7 @@ func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, 
 	parsedURL, _ := url.Parse(urlStr)
 	sendMsg := &flow.Message{
 		ID:        id + "-send",
-		FlowID: id,
+		FlowID:    id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1197,7 +1197,7 @@ func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, 
 	if statusCode > 0 {
 		recvMsg := &flow.Message{
 			ID:         id + "-recv",
-			FlowID:  id,
+			FlowID:     id,
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now().UTC(),
@@ -1295,13 +1295,13 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 	ctx := context.Background()
 
 	sess := &flow.Flow{
-		ID:          id,
-		ConnID:      "conn-" + id,
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    200 * time.Millisecond,
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  200 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, sess); err != nil {
 		t.Fatalf("SaveSession(%s): %v", id, err)
@@ -1310,7 +1310,7 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 	origURL, _ := url.Parse("https://example.com/original")
 	originalSend := &flow.Message{
 		ID:        id + "-send-orig",
-		FlowID: id,
+		FlowID:    id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1327,7 +1327,7 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 	modURL, _ := url.Parse("https://example.com/modified")
 	modifiedSend := &flow.Message{
 		ID:        id + "-send-mod",
-		FlowID: id,
+		FlowID:    id,
 		Sequence:  1,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1343,7 +1343,7 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 
 	recvMsg := &flow.Message{
 		ID:         id + "-recv",
-		FlowID:  id,
+		FlowID:     id,
 		Sequence:   2,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -1493,4 +1493,3 @@ func TestQuery_Sessions_FilterByInterceptDrop(t *testing.T) {
 		t.Errorf("blocked_by = %q, want intercept_drop", out.Flows[0].BlockedBy)
 	}
 }
-

@@ -70,7 +70,7 @@ func seedFuzzJob(t *testing.T, store flow.FuzzStore, status, tag string) *flow.F
 	ctx := context.Background()
 
 	job := &flow.FuzzJob{
-		FlowID: "sess-template",
+		FlowID:    "sess-template",
 		Config:    `{"attack_type":"sequential"}`,
 		Status:    status,
 		Tag:       tag,
@@ -97,10 +97,10 @@ func seedFuzzResult(t *testing.T, store *flow.SQLiteStore, fuzzID string, index,
 
 	// Create a result flow with a receive message.
 	fl := &flow.Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now(),
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now(),
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -109,7 +109,7 @@ func seedFuzzResult(t *testing.T, store *flow.SQLiteStore, fuzzID string, index,
 	// Append receive message with body.
 	msg := &flow.Message{
 		ID:         fl.ID + "-recv",
-		FlowID:  fl.ID,
+		FlowID:     fl.ID,
 		Sequence:   0,
 		Direction:  "receive",
 		Timestamp:  time.Now(),
@@ -123,7 +123,7 @@ func seedFuzzResult(t *testing.T, store *flow.SQLiteStore, fuzzID string, index,
 	result := &flow.FuzzResult{
 		FuzzID:         fuzzID,
 		IndexNum:       index,
-		FlowID:      fl.ID,
+		FlowID:         fl.ID,
 		Payloads:       `{"pos-0":"payload-` + fmt.Sprintf("%d", index) + `"}`,
 		StatusCode:     statusCode,
 		ResponseLength: len(body),
@@ -804,11 +804,11 @@ func TestQuery_FuzzResults_ErrorField(t *testing.T) {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	errResult := &flow.FuzzResult{
-		FuzzID:    job.ID,
-		IndexNum:  0,
-		FlowID: fl.ID,
-		Payloads:  `{"pos-0":"test"}`,
-		Error:     "connection refused",
+		FuzzID:   job.ID,
+		IndexNum: 0,
+		FlowID:   fl.ID,
+		Payloads: `{"pos-0":"test"}`,
+		Error:    "connection refused",
 	}
 	if err := store.SaveFuzzResult(ctx, errResult); err != nil {
 		t.Fatalf("SaveFuzzResult: %v", err)

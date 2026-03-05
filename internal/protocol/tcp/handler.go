@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // Handler implements proxy.ProtocolHandler for raw TCP connections.
@@ -112,11 +112,11 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	// Create flow record.
 	start := time.Now()
 	fl := &flow.Flow{
-		ConnID:      connID,
-		Protocol:    "TCP",
-		FlowType: "bidirectional",
-		State:       "active",
-		Timestamp:   start,
+		ConnID:    connID,
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "active",
+		Timestamp: start,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 			ServerAddr: target,
@@ -132,9 +132,9 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 
 	// Run bidirectional relay with recording.
 	r := &relay{
-		store:     h.store,
+		store:  h.store,
 		flowID: fl.ID,
-		logger:    logger,
+		logger: logger,
 	}
 	relayErr := r.run(ctx, conn, upstream)
 

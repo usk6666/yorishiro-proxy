@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // isWebSocketUpgrade checks if the HTTP request is a WebSocket upgrade request.
@@ -306,14 +306,14 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 	}
 
 	fl := &flow.Flow{
-		ConnID:      p.connID,
-		Protocol:    "WebSocket",
-		FlowType: "bidirectional",
-		State:       "error",
-		Timestamp:   p.start,
-		Duration:    duration,
-		Tags:        tags,
-		ConnInfo:    p.connInfo,
+		ConnID:    p.connID,
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "error",
+		Timestamp: p.start,
+		Duration:  duration,
+		Tags:      tags,
+		ConnInfo:  p.connInfo,
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("websocket error flow save failed",
@@ -322,7 +322,7 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 	}
 
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: p.start,

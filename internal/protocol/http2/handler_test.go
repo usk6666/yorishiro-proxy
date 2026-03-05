@@ -19,8 +19,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -29,7 +29,7 @@ import (
 // mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
 	mu       sync.Mutex
-	flows []*flow.Flow
+	flows    []*flow.Flow
 	messages []*flow.Message
 }
 
@@ -166,7 +166,7 @@ func (m *mockStore) GetMacro(_ context.Context, _ string) (*flow.MacroRecord, er
 	return nil, fmt.Errorf("not found")
 }
 func (m *mockStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) { return nil, nil }
-func (m *mockStore) DeleteMacro(_ context.Context, _ string) error                { return nil }
+func (m *mockStore) DeleteMacro(_ context.Context, _ string) error             { return nil }
 
 // mockEntry is a convenience view of a recorded flow with its send/receive messages.
 type mockEntry struct {

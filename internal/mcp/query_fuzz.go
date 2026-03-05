@@ -15,7 +15,7 @@ import (
 // queryFuzzJobEntry is a single fuzz job entry in the fuzz_jobs query response.
 type queryFuzzJobEntry struct {
 	ID             string  `json:"id"`
-	FlowID      string  `json:"flow_id"`
+	FlowID         string  `json:"flow_id"`
 	Status         string  `json:"status"`
 	Tag            string  `json:"tag"`
 	Total          int     `json:"total"`
@@ -70,7 +70,7 @@ func (s *Server) handleQueryFuzzJobs(ctx context.Context, input queryInput) (*go
 	for _, job := range jobs {
 		entry := queryFuzzJobEntry{
 			ID:             job.ID,
-			FlowID:      job.FlowID,
+			FlowID:         job.FlowID,
 			Status:         job.Status,
 			Tag:            job.Tag,
 			Total:          job.Total,
@@ -104,7 +104,7 @@ type queryFuzzResultEntry struct {
 	ID             string            `json:"id"`
 	FuzzID         string            `json:"fuzz_id"`
 	IndexNum       int               `json:"index"`
-	FlowID      string            `json:"flow_id"`
+	FlowID         string            `json:"flow_id"`
 	Payloads       map[string]string `json:"payloads"`
 	StatusCode     int               `json:"status_code"`
 	ResponseLength int               `json:"response_length"`
@@ -186,7 +186,7 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 			ID:             r.ID,
 			FuzzID:         r.FuzzID,
 			IndexNum:       r.IndexNum,
-			FlowID:      r.FlowID,
+			FlowID:         r.FlowID,
 			Payloads:       payloads,
 			StatusCode:     r.StatusCode,
 			ResponseLength: r.ResponseLength,

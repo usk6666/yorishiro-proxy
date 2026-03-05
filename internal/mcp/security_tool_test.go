@@ -1590,34 +1590,34 @@ func TestValidateNotPolicyDenies(t *testing.T) {
 	)
 
 	tests := []struct {
-		name        string
+		name         string
 		removeDenies []proxy.TargetRule
-		wantErr     bool
+		wantErr      bool
 	}{
 		{
-			name:        "no removals",
+			name:         "no removals",
 			removeDenies: nil,
-			wantErr:     false,
+			wantErr:      false,
 		},
 		{
-			name:        "remove non-policy deny",
+			name:         "remove non-policy deny",
 			removeDenies: []proxy.TargetRule{{Hostname: "other.com"}},
-			wantErr:     false,
+			wantErr:      false,
 		},
 		{
-			name:        "remove matching policy deny",
+			name:         "remove matching policy deny",
 			removeDenies: []proxy.TargetRule{{Hostname: "*.internal.corp"}},
-			wantErr:     true,
+			wantErr:      true,
 		},
 		{
-			name:        "remove matching policy deny with ports",
+			name:         "remove matching policy deny with ports",
 			removeDenies: []proxy.TargetRule{{Hostname: "admin.target.com", Ports: []int{443}}},
-			wantErr:     true,
+			wantErr:      true,
 		},
 		{
-			name:        "remove similar but different hostname",
+			name:         "remove similar but different hostname",
 			removeDenies: []proxy.TargetRule{{Hostname: "admin.target.com"}},
-			wantErr:     false,
+			wantErr:      false,
 		},
 	}
 

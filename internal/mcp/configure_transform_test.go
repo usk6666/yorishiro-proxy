@@ -697,10 +697,10 @@ func TestConfigure_AutoTransform_ReplaceBodyAction(t *testing.T) {
 			AutoTransform: &configureAutoTransform{
 				Add: []transformRuleInput{
 					{
-						ID:        "replace-host",
-						Enabled:   true,
-						Priority:  10,
-						Direction: "request",
+						ID:         "replace-host",
+						Enabled:    true,
+						Priority:   10,
+						Direction:  "request",
 						Conditions: transformConditionsInput{},
 						Action: transformActionInput{
 							Type:    "replace_body",

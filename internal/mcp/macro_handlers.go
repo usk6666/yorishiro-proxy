@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
 
 // macroParams holds parameters for macro-related execute actions.
@@ -37,7 +37,7 @@ type macroParams struct {
 // macroStepInput represents a single macro step in the MCP input.
 type macroStepInput struct {
 	ID              string            `json:"id"`
-	FlowID       string            `json:"flow_id"`
+	FlowID          string            `json:"flow_id"`
 	OverrideMethod  string            `json:"override_method,omitempty"`
 	OverrideURL     string            `json:"override_url,omitempty"`
 	OverrideHeaders map[string]string `json:"override_headers,omitempty"`
@@ -317,7 +317,7 @@ func configToMacro(name, description string, cfg macroConfig) (*macro.Macro, err
 func stepInputToStep(s macroStepInput) macro.Step {
 	step := macro.Step{
 		ID:              s.ID,
-		FlowID:       s.FlowID,
+		FlowID:          s.FlowID,
 		OverrideMethod:  s.OverrideMethod,
 		OverrideURL:     s.OverrideURL,
 		OverrideHeaders: s.OverrideHeaders,
@@ -516,12 +516,12 @@ func (s *Server) recordMacroStepSession(
 	}
 
 	fl := &flow.Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   start,
-		Duration:    duration,
-		Tags:        tags,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: start,
+		Duration:  duration,
+		Tags:      tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
@@ -538,7 +538,7 @@ func (s *Server) recordMacroStepSession(
 	parsedURL := httpReq.URL
 
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -559,7 +559,7 @@ func (s *Server) recordMacroStepSession(
 	}
 
 	recvMsg := &flow.Message{
-		FlowID:  fl.ID,
+		FlowID:     fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),

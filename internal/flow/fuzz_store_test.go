@@ -11,7 +11,7 @@ func TestFuzzJobStore_SaveAndGet(t *testing.T) {
 	ctx := context.Background()
 
 	job := &FuzzJob{
-		FlowID: "fl-1",
+		FlowID:    "fl-1",
 		Config:    `{"attack_type":"sequential"}`,
 		Status:    "running",
 		Tag:       "test-tag",
@@ -54,7 +54,7 @@ func TestFuzzJobStore_Update(t *testing.T) {
 	ctx := context.Background()
 
 	job := &FuzzJob{
-		FlowID: "fl-1",
+		FlowID:    "fl-1",
 		Config:    `{}`,
 		Status:    "running",
 		CreatedAt: time.Now().UTC().Truncate(time.Millisecond),
@@ -110,10 +110,10 @@ func TestFuzzResultStore_SaveAndList(t *testing.T) {
 
 	// Create a template flow first (for FK reference).
 	fl := &Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now(),
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now(),
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -121,7 +121,7 @@ func TestFuzzResultStore_SaveAndList(t *testing.T) {
 
 	// Create a fuzz job.
 	job := &FuzzJob{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Config:    `{}`,
 		Status:    "running",
 		CreatedAt: time.Now().UTC(),
@@ -135,10 +135,10 @@ func TestFuzzResultStore_SaveAndList(t *testing.T) {
 	resultSessions := make([]*Flow, 3)
 	for i := range 3 {
 		s := &Flow{
-			Protocol:    "HTTP/1.x",
-			FlowType: "unary",
-			State:       "complete",
-			Timestamp:   time.Now(),
+			Protocol:  "HTTP/1.x",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now(),
 		}
 		if err := store.SaveFlow(ctx, s); err != nil {
 			t.Fatalf("SaveFlow for result: %v", err)
@@ -188,7 +188,7 @@ func TestFuzzResultStore_ListWithFilter(t *testing.T) {
 	}
 
 	job := &FuzzJob{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -249,7 +249,7 @@ func TestFuzzResultStore_ErrorField(t *testing.T) {
 	}
 
 	job := &FuzzJob{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -264,11 +264,11 @@ func TestFuzzResultStore_ErrorField(t *testing.T) {
 	}
 
 	r := &FuzzResult{
-		FuzzID:    job.ID,
-		IndexNum:  0,
-		FlowID: errSess.ID,
-		Payloads:  `{}`,
-		Error:     "connection refused",
+		FuzzID:   job.ID,
+		IndexNum: 0,
+		FlowID:   errSess.ID,
+		Payloads: `{}`,
+		Error:    "connection refused",
 	}
 	if err := store.SaveFuzzResult(ctx, r); err != nil {
 		t.Fatalf("SaveFuzzResult: %v", err)
@@ -316,7 +316,7 @@ func TestSchemaV2_Migration(t *testing.T) {
 
 	// Verify fuzz_jobs table exists.
 	job := &FuzzJob{
-		FlowID: "test",
+		FlowID:    "test",
 		Config:    `{}`,
 		Status:    "running",
 		CreatedAt: time.Now().UTC(),
@@ -356,7 +356,7 @@ func TestListFuzzJobs_WithData(t *testing.T) {
 		{"error", ""},
 	} {
 		job := &FuzzJob{
-			FlowID: "fl-1",
+			FlowID:    "fl-1",
 			Config:    `{}`,
 			Status:    tc.status,
 			Tag:       tc.tag,
@@ -430,7 +430,7 @@ func TestCountFuzzJobs(t *testing.T) {
 
 	for _, status := range []string{"running", "completed", "running"} {
 		job := &FuzzJob{
-			FlowID: "fl-1",
+			FlowID:    "fl-1",
 			Config:    `{}`,
 			Status:    status,
 			CreatedAt: time.Now().UTC(),
@@ -469,7 +469,7 @@ func TestCountFuzzResults(t *testing.T) {
 	}
 
 	job := &FuzzJob{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -526,7 +526,7 @@ func TestListFuzzResults_SortBy(t *testing.T) {
 	}
 
 	job := &FuzzJob{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -598,7 +598,7 @@ func TestListFuzzResults_BodyContains(t *testing.T) {
 	}
 
 	job := &FuzzJob{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -619,7 +619,7 @@ func TestListFuzzResults_BodyContains(t *testing.T) {
 		// Append a receive message with the body.
 		msg := &Message{
 			ID:        s.ID + "-recv",
-			FlowID: s.ID,
+			FlowID:    s.ID,
 			Sequence:  0,
 			Direction: "receive",
 			Timestamp: time.Now(),

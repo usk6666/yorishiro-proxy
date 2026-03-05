@@ -53,12 +53,12 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 
 	// Create the WebSocket flow record.
 	fl := &flow.Flow{
-		ConnID:      connID,
-		Protocol:    "WebSocket",
-		FlowType: "bidirectional",
-		State:       "active",
-		Timestamp:   start,
-		ConnInfo:    connInfo,
+		ConnID:    connID,
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "active",
+		Timestamp: start,
+		ConnInfo:  connInfo,
 	}
 
 	if h.store != nil {
@@ -187,12 +187,12 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 		// We need to write them masked to the server (re-mask with original key).
 		// For server->client: frames are unmasked; write them unmasked.
 		outFrame := &Frame{
-			Fin:    frame.Fin,
-			RSV1:   frame.RSV1,
-			RSV2:   frame.RSV2,
-			RSV3:   frame.RSV3,
-			Opcode: frame.Opcode,
-			Masked: frame.Masked,
+			Fin:     frame.Fin,
+			RSV1:    frame.RSV1,
+			RSV2:    frame.RSV2,
+			RSV3:    frame.RSV3,
+			Opcode:  frame.Opcode,
+			Masked:  frame.Masked,
 			Payload: frame.Payload,
 		}
 		if frame.Masked {
@@ -280,7 +280,7 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 	msgSeq := int(seq.Add(1) - 1)
 
 	msg := &flow.Message{
-		FlowID: flowID,
+		FlowID:    flowID,
 		Sequence:  msgSeq,
 		Direction: direction,
 		Timestamp: time.Now(),
@@ -323,7 +323,7 @@ func (h *Handler) recordControlFrame(ctx context.Context, frame *Frame, flowID, 
 	msgSeq := int(seq.Add(1) - 1)
 
 	msg := &flow.Message{
-		FlowID: flowID,
+		FlowID:    flowID,
 		Sequence:  msgSeq,
 		Direction: direction,
 		Timestamp: time.Now(),

@@ -229,7 +229,7 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay",
 		"params": map[string]any{
-			"flow_id":      entry.Session.ID,
+			"flow_id":         entry.Session.ID,
 			"override_method": "PATCH",
 			"override_url":    overrideURL,
 			"override_headers": map[string]any{
@@ -353,7 +353,7 @@ func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
 			result := executeCallTool(t, cs, map[string]any{
 				"action": "replay",
 				"params": map[string]any{
-					"flow_id":   entry.Session.ID,
+					"flow_id":      entry.Session.ID,
 					"override_url": tt.url,
 				},
 			})
@@ -439,7 +439,7 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "replay_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 		},
 	})

@@ -370,10 +370,10 @@ func (s *Server) handleManageExportFlows(ctx context.Context, params manageParam
 
 // executeImportFlowsResult is the structured output of the import_flows action.
 type executeImportFlowsResult struct {
-	Imported     int                   `json:"imported"`
-	Skipped      int                   `json:"skipped"`
-	Errors       int                   `json:"errors"`
-	Source       string                `json:"source"`
+	Imported     int                `json:"imported"`
+	Skipped      int                `json:"skipped"`
+	Errors       int                `json:"errors"`
+	Source       string             `json:"source"`
 	ErrorDetails []flow.ImportError `json:"error_details,omitempty"`
 }
 

@@ -399,7 +399,7 @@ func TestM3_Transform_QueryAutoTransformRules(t *testing.T) {
 
 	// Query config and verify auto_transform appears.
 	qResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "query",
+		Name:      "query",
 		Arguments: map[string]any{"resource": "config"},
 	})
 	if err != nil {

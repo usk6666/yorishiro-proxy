@@ -76,13 +76,13 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 	}
 
 	fl := &flow.Flow{
-		ConnID:      p.connID,
-		Protocol:    p.protocol,
-		FlowType: "unary",
-		State:       "active",
-		Timestamp:   p.start,
-		Tags:        p.tags,
-		ConnInfo:    p.connInfo,
+		ConnID:    p.connID,
+		Protocol:  p.protocol,
+		FlowType:  "unary",
+		State:     "active",
+		Timestamp: p.start,
+		Tags:      p.tags,
+		ConnInfo:  p.connInfo,
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("flow save failed", "method", p.req.Method, "url", reqURL.String(), "error", err)
@@ -90,7 +90,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 	}
 
 	sendMsg := &flow.Message{
-		FlowID:     fl.ID,
+		FlowID:        fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -138,13 +138,13 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	modified := snap != nil && requestModified(*snap, p.req.Header, p.reqBody)
 
 	fl := &flow.Flow{
-		ConnID:      p.connID,
-		Protocol:    p.protocol,
-		FlowType: "unary",
-		State:       "active",
-		Timestamp:   p.start,
-		Tags:        p.tags,
-		ConnInfo:    p.connInfo,
+		ConnID:    p.connID,
+		Protocol:  p.protocol,
+		FlowType:  "unary",
+		State:     "active",
+		Timestamp: p.start,
+		Tags:      p.tags,
+		ConnInfo:  p.connInfo,
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("flow save failed", "method", p.req.Method, "url", reqURL.String(), "error", err)
@@ -160,7 +160,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		}
 		// Record the original (unmodified) request as sequence 0.
 		originalMsg := &flow.Message{
-			FlowID:     fl.ID,
+			FlowID:        fl.ID,
 			Sequence:      0,
 			Direction:     "send",
 			Timestamp:     p.start,
@@ -178,7 +178,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 
 		// Record the modified request as sequence 1.
 		modifiedMsg := &flow.Message{
-			FlowID:     fl.ID,
+			FlowID:        fl.ID,
 			Sequence:      1,
 			Direction:     "send",
 			Timestamp:     p.start,
@@ -199,7 +199,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 
 	// No modification: single send message without variant metadata.
 	sendMsg := &flow.Message{
-		FlowID:     fl.ID,
+		FlowID:        fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -267,7 +267,7 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 	}
 
 	recvMsg := &flow.Message{
-		FlowID:     sendResult.flowID,
+		FlowID:        sendResult.flowID,
 		Sequence:      sendResult.recvSequence,
 		Direction:     "receive",
 		Timestamp:     p.start.Add(p.duration),
@@ -342,15 +342,15 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 
 	duration := time.Since(p.start)
 	fl := &flow.Flow{
-		ConnID:      p.connID,
-		Protocol:    p.protocol,
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   p.start,
-		Duration:    duration,
-		Tags:        p.tags,
-		BlockedBy:   "intercept_drop",
-		ConnInfo:    p.connInfo,
+		ConnID:    p.connID,
+		Protocol:  p.protocol,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: p.start,
+		Duration:  duration,
+		Tags:      p.tags,
+		BlockedBy: "intercept_drop",
+		ConnInfo:  p.connInfo,
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("intercept drop flow save failed", "method", p.req.Method, "url", reqURL.String(), "error", err)
@@ -358,7 +358,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	}
 
 	sendMsg := &flow.Message{
-		FlowID:     fl.ID,
+		FlowID:        fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,

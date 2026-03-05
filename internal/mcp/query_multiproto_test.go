@@ -17,13 +17,13 @@ func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionT
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          id,
-		ConnID:      "conn-" + id,
-		Protocol:    protocol,
-		FlowType: sessionType,
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    500 * time.Millisecond,
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  protocol,
+		FlowType:  sessionType,
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  500 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
@@ -36,7 +36,7 @@ func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionT
 		}
 		msg := &flow.Message{
 			ID:        fmt.Sprintf("%s-msg-%d", id, i),
-			FlowID: id,
+			FlowID:    id,
 			Sequence:  i,
 			Direction: dir,
 			Timestamp: time.Now().UTC(),
@@ -162,12 +162,12 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "tcp-1",
-		Protocol:    "TCP",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    100 * time.Millisecond,
+		ID:        "tcp-1",
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -175,7 +175,7 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 
 	sendMsg := &flow.Message{
 		ID:        "tcp-1-send",
-		FlowID: "tcp-1",
+		FlowID:    "tcp-1",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -187,7 +187,7 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 
 	recvMsg := &flow.Message{
 		ID:        "tcp-1-recv",
-		FlowID: "tcp-1",
+		FlowID:    "tcp-1",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
@@ -227,12 +227,12 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "grpc-1",
-		Protocol:    "gRPC",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    50 * time.Millisecond,
+		ID:        "grpc-1",
+		Protocol:  "gRPC",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -241,7 +241,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 	parsedURL, _ := url.Parse("https://example.com/pkg.UserService/GetUser")
 	sendMsg := &flow.Message{
 		ID:        "grpc-1-send",
-		FlowID: "grpc-1",
+		FlowID:    "grpc-1",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -256,7 +256,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 
 	recvMsg := &flow.Message{
 		ID:        "grpc-1-recv",
-		FlowID: "grpc-1",
+		FlowID:    "grpc-1",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
@@ -478,11 +478,11 @@ func TestQuery_Messages_Metadata(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "ws-meta",
-		Protocol:    "WebSocket",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
+		ID:        "ws-meta",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -490,7 +490,7 @@ func TestQuery_Messages_Metadata(t *testing.T) {
 
 	msg := &flow.Message{
 		ID:        "ws-meta-msg-0",
-		FlowID: "ws-meta",
+		FlowID:    "ws-meta",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -530,11 +530,11 @@ func TestQuery_Messages_GRPC_Metadata(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "grpc-meta",
-		Protocol:    "gRPC",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
+		ID:        "grpc-meta",
+		Protocol:  "gRPC",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -542,7 +542,7 @@ func TestQuery_Messages_GRPC_Metadata(t *testing.T) {
 
 	sendMsg := &flow.Message{
 		ID:        "grpc-meta-send",
-		FlowID: "grpc-meta",
+		FlowID:    "grpc-meta",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),

@@ -507,11 +507,11 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 	}
 
 	handler.recordReceive(ctx, sendResult, receiveRecordParams{
-		start:      start,
-		duration:   duration,
-		serverAddr: "93.184.216.34:80",
-		resp:       resp,
-		respBody:   []byte(`{"status":"created"}`),
+		start:       start,
+		duration:    duration,
+		serverAddr:  "93.184.216.34:80",
+		resp:        resp,
+		respBody:    []byte(`{"status":"created"}`),
 		rawResponse: []byte("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n"),
 	}, logger)
 

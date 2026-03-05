@@ -82,8 +82,8 @@ func TestRunner_InteractiveScope(t *testing.T) {
 	var out bytes.Buffer
 	prompter := &mockPrompter{
 		responses: []string{
-			"1",  // scope: project
-			"Y",  // install skills
+			"1", // scope: project
+			"Y", // install skills
 		},
 	}
 
@@ -118,8 +118,8 @@ func TestRunner_UserScope(t *testing.T) {
 	var out bytes.Buffer
 	prompter := &mockPrompter{
 		responses: []string{
-			"2",  // scope: user
-			"n",  // skip skills
+			"2", // scope: user
+			"n", // skip skills
 		},
 	}
 

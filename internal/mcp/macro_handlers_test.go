@@ -96,15 +96,15 @@ func TestExecute_DefineMacro_Success(t *testing.T) {
 			"description": "Login and get CSRF token",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": "recorded-login",
 				},
 				map[string]any{
-					"id":         "get-csrf",
+					"id":      "get-csrf",
 					"flow_id": "recorded-csrf",
 				},
 			},
-			"initial_vars":    map[string]any{"password": "admin123"},
+			"initial_vars":     map[string]any{"password": "admin123"},
 			"macro_timeout_ms": 60000,
 		},
 	})
@@ -133,7 +133,7 @@ func TestExecute_DefineMacro_Upsert(t *testing.T) {
 
 	steps := []any{
 		map[string]any{
-			"id":         "step1",
+			"id":      "step1",
 			"flow_id": "s1",
 		},
 	}
@@ -303,18 +303,18 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 
 	// Save a flow that the macro step will reference.
 	fl := &flow.Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    100 * time.Millisecond,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -336,7 +336,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 			"name": "test-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": fl.ID,
 					"extract": []any{
 						map[string]any{
@@ -413,7 +413,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -435,7 +435,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 			"name": "vars-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "step1",
+					"id":      "step1",
 					"flow_id": fl.ID,
 				},
 			},
@@ -582,7 +582,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 			"name": "complex-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": "sess-1",
 					"extract": []any{
 						map[string]any{
@@ -596,7 +596,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 					},
 				},
 				map[string]any{
-					"id":         "mfa",
+					"id":      "mfa",
 					"flow_id": "sess-2",
 					"when": map[string]any{
 						"step":        "login",
@@ -678,17 +678,17 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	// Save a template flow for step1.
 	u1, _ := url.Parse(echoServer.URL + "/api/step1")
 	sess1 := &flow.Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    50 * time.Millisecond,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, sess1); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: sess1.ID,
+		FlowID:    sess1.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -702,17 +702,17 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	// Save a template flow for step2.
 	u2, _ := url.Parse(echoServer.URL + "/api/step2")
 	sess2 := &flow.Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    50 * time.Millisecond,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, sess2); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: sess2.ID,
+		FlowID:    sess2.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -733,11 +733,11 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 			"name": "record-test",
 			"steps": []any{
 				map[string]any{
-					"id":         "step1",
+					"id":      "step1",
 					"flow_id": sess1.ID,
 				},
 				map[string]any{
-					"id":         "step2",
+					"id":      "step2",
 					"flow_id": sess2.ID,
 				},
 			},
@@ -911,11 +911,11 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 			"name": "skip-test",
 			"steps": []any{
 				map[string]any{
-					"id":         "login",
+					"id":      "login",
 					"flow_id": loginSess.ID,
 				},
 				map[string]any{
-					"id":         "mfa",
+					"id":      "mfa",
 					"flow_id": mfaSess.ID,
 					"when": map[string]any{
 						"step":        "login",
@@ -1019,7 +1019,7 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 			"name": "hook-macro",
 			"steps": []any{
 				map[string]any{
-					"id":         "get-token",
+					"id":      "get-token",
 					"flow_id": tokenSess.ID,
 					"extract": []any{
 						map[string]any{

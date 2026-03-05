@@ -8,8 +8,8 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // HandlerBase provides shared fields and setter methods for protocol handlers.

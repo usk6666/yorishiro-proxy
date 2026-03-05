@@ -18,14 +18,14 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 	ctx := context.Background()
 
 	fl := &Flow{
-		ID:          id,
-		ConnID:      "conn-" + id,
-		Protocol:    protocol,
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    150 * time.Millisecond,
-		Tags:        map[string]string{"env": "test"},
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  protocol,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  150 * time.Millisecond,
+		Tags:      map[string]string{"env": "test"},
 		ConnInfo: &ConnectionInfo{
 			ClientAddr:           "127.0.0.1:12345",
 			ServerAddr:           "93.184.216.34:443",
@@ -41,7 +41,7 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 
 	sendMsg := &Message{
 		ID:        "msg-send-" + id,
-		FlowID: id,
+		FlowID:    id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -58,7 +58,7 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 
 	recvMsg := &Message{
 		ID:            "msg-recv-" + id,
-		FlowID:     id,
+		FlowID:        id,
 		Sequence:      1,
 		Direction:     "receive",
 		Timestamp:     ts.Add(100 * time.Millisecond),
@@ -566,12 +566,12 @@ func TestExportSessionWithNilConnInfo(t *testing.T) {
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
 	fl := &Flow{
-		ID:          "fl-noconn",
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    50 * time.Millisecond,
+		ID:        "fl-noconn",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  50 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -611,12 +611,12 @@ func TestExportImportWithURLMessage(t *testing.T) {
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
 	fl := &Flow{
-		ID:          "fl-url",
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    100 * time.Millisecond,
+		ID:        "fl-url",
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  100 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -625,7 +625,7 @@ func TestExportImportWithURLMessage(t *testing.T) {
 	complexURL, _ := url.Parse("https://example.com/path?key=value&foo=bar#fragment")
 	msg := &Message{
 		ID:        "msg-url-1",
-		FlowID: "fl-url",
+		FlowID:    "fl-url",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -745,7 +745,7 @@ func TestExportMaxFlows(t *testing.T) {
 	var buf bytes.Buffer
 	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
 		IncludeBodies: true,
-		MaxFlows:   3,
+		MaxFlows:      3,
 	})
 	if err != nil {
 		t.Fatalf("ExportFlows: %v", err)
@@ -774,7 +774,7 @@ func TestExportMaxFlowsZeroMeansNoLimit(t *testing.T) {
 	var buf bytes.Buffer
 	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
 		IncludeBodies: true,
-		MaxFlows:   0,
+		MaxFlows:      0,
 	})
 	if err != nil {
 		t.Fatalf("ExportFlows: %v", err)
@@ -981,14 +981,14 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 	msgRecvID := "550e8400-e29b-41d4-a716-446655440003"
 
 	fl := &Flow{
-		ID:          sessID,
-		ConnID:      "conn-" + sessID,
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    150 * time.Millisecond,
-		Tags:        map[string]string{"env": "test"},
+		ID:        sessID,
+		ConnID:    "conn-" + sessID,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  150 * time.Millisecond,
+		Tags:      map[string]string{"env": "test"},
 		ConnInfo: &ConnectionInfo{
 			ClientAddr:           "127.0.0.1:12345",
 			ServerAddr:           "93.184.216.34:443",
@@ -1004,7 +1004,7 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 
 	sendMsg := &Message{
 		ID:        msgSendID,
-		FlowID: sessID,
+		FlowID:    sessID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -1020,14 +1020,14 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 	}
 
 	recvMsg := &Message{
-		ID:        msgRecvID,
-		FlowID: sessID,
-		Sequence:  1,
-		Direction: "receive",
-		Timestamp: ts.Add(100 * time.Millisecond),
+		ID:         msgRecvID,
+		FlowID:     sessID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  ts.Add(100 * time.Millisecond),
 		StatusCode: 200,
-		Headers:   map[string][]string{"Content-Type": {"text/html"}},
-		Body:      []byte("<html>OK</html>"),
+		Headers:    map[string][]string{"Content-Type": {"text/html"}},
+		Body:       []byte("<html>OK</html>"),
 	}
 	if err := store.AppendMessage(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(receive): %v", err)
@@ -1061,4 +1061,3 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
 	}
 }
-

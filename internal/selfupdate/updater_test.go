@@ -327,7 +327,7 @@ func TestParseChecksums(t *testing.T) {
 			name:  "standard sha256sum output",
 			input: "abc123  yorishiro-proxy-v1.0.0-linux-amd64\ndef456  yorishiro-proxy-v1.0.0-windows-amd64.exe\n",
 			want: map[string]string{
-				"yorishiro-proxy-v1.0.0-linux-amd64":     "abc123",
+				"yorishiro-proxy-v1.0.0-linux-amd64":       "abc123",
 				"yorishiro-proxy-v1.0.0-windows-amd64.exe": "def456",
 			},
 		},

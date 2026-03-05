@@ -111,7 +111,7 @@ func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 		},
 	})
@@ -161,7 +161,7 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":     entry.Session.ID,
+			"flow_id":        entry.Session.ID,
 			"remove_headers": []any{"X-Remove"},
 			"override_headers": map[string]any{
 				"X-Override": "overridden-value",
@@ -254,7 +254,7 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":    entry.Session.ID,
+			"flow_id":       entry.Session.ID,
 			"override_body": `{"replaced":"body"}`,
 			"dry_run":       true,
 		},
@@ -312,7 +312,7 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":           entry.Session.ID,
+			"flow_id":              entry.Session.ID,
 			"override_body_base64": b64,
 			"dry_run":              true,
 		},
@@ -368,7 +368,7 @@ func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":           entry.Session.ID,
+			"flow_id":              entry.Session.ID,
 			"override_body_base64": "not-valid-base64!!!",
 			"dry_run":              true,
 		},
@@ -414,7 +414,7 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":    entry.Session.ID,
+			"flow_id":       entry.Session.ID,
 			"override_body": `{"full":"replace"}`,
 			"body_patches": []any{
 				map[string]any{"json_path": "$.name", "value": "patched"},
@@ -601,7 +601,7 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":      entry.Session.ID,
+			"flow_id":         entry.Session.ID,
 			"override_method": "POST",
 			"override_url":    overrideURL,
 			"override_body":   "dry-run-body",
@@ -685,7 +685,7 @@ func TestExecute_Resend_Tag(t *testing.T) {
 		"action": "resend",
 		"params": map[string]any{
 			"flow_id": entry.Session.ID,
-			"tag":        "auth-bypass-test-01",
+			"tag":     "auth-bypass-test-01",
 		},
 	})
 	if result.IsError {
@@ -758,7 +758,7 @@ func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
 			result := executeCallTool(t, cs, map[string]any{
 				"action": "resend",
 				"params": map[string]any{
-					"flow_id":    entry.Session.ID,
+					"flow_id":       entry.Session.ID,
 					"override_host": tt.host,
 				},
 			})
@@ -1082,7 +1082,7 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":     entry.Session.ID,
+			"flow_id":        entry.Session.ID,
 			"remove_headers": []any{"User-Agent"},
 		},
 	})
@@ -1158,7 +1158,7 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":     entry.Session.ID,
+			"flow_id":        entry.Session.ID,
 			"remove_headers": []any{"User-Agent"},
 			"dry_run":        true,
 		},

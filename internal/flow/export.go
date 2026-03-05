@@ -38,23 +38,23 @@ type ExportOptions struct {
 
 // ExportRecord represents a single JSONL line in the export format.
 type ExportRecord struct {
-	Flow  *ExportFlow  `json:"flow"`
+	Flow     *ExportFlow      `json:"flow"`
 	Messages []*ExportMessage `json:"messages"`
 	Version  string           `json:"version"`
 }
 
 // ExportFlow is the JSON-serializable representation of a Flow.
 type ExportFlow struct {
-	ID          string            `json:"id"`
-	ConnID      string            `json:"conn_id"`
-	Protocol    string            `json:"protocol"`
-	FlowType string            `json:"flow_type"`
-	State       string            `json:"state"`
-	Timestamp   string            `json:"timestamp"`
-	DurationMs  int64             `json:"duration_ms"`
-	Tags        map[string]string `json:"tags,omitempty"`
-	ConnInfo    *ExportConnInfo   `json:"conn_info,omitempty"`
-	BlockedBy   string            `json:"blocked_by,omitempty"`
+	ID         string            `json:"id"`
+	ConnID     string            `json:"conn_id"`
+	Protocol   string            `json:"protocol"`
+	FlowType   string            `json:"flow_type"`
+	State      string            `json:"state"`
+	Timestamp  string            `json:"timestamp"`
+	DurationMs int64             `json:"duration_ms"`
+	Tags       map[string]string `json:"tags,omitempty"`
+	ConnInfo   *ExportConnInfo   `json:"conn_info,omitempty"`
+	BlockedBy  string            `json:"blocked_by,omitempty"`
 }
 
 // ExportConnInfo is the JSON-serializable representation of ConnectionInfo.
@@ -70,7 +70,7 @@ type ExportConnInfo struct {
 // ExportMessage is the JSON-serializable representation of a Message.
 type ExportMessage struct {
 	ID            string              `json:"id"`
-	FlowID     string              `json:"flow_id"`
+	FlowID        string              `json:"flow_id"`
 	Sequence      int                 `json:"sequence"`
 	Direction     string              `json:"direction"`
 	Timestamp     string              `json:"timestamp"`
@@ -127,7 +127,7 @@ func ExportFlows(ctx context.Context, store FlowReader, w io.Writer, opts Export
 		}
 
 		record := ExportRecord{
-			Flow:  flowToExport(fl),
+			Flow:     flowToExport(fl),
 			Messages: messagesToExport(messages, opts.IncludeBodies),
 			Version:  ExportFormatVersion,
 		}
@@ -144,15 +144,15 @@ func ExportFlows(ctx context.Context, store FlowReader, w io.Writer, opts Export
 // flowToExport converts a Flow to its export representation.
 func flowToExport(s *Flow) *ExportFlow {
 	es := &ExportFlow{
-		ID:          s.ID,
-		ConnID:      s.ConnID,
-		Protocol:    s.Protocol,
-		FlowType: s.FlowType,
-		State:       s.State,
-		Timestamp:   s.Timestamp.UTC().Format(time.RFC3339Nano),
-		DurationMs:  s.Duration.Milliseconds(),
-		Tags:        s.Tags,
-		BlockedBy:   s.BlockedBy,
+		ID:         s.ID,
+		ConnID:     s.ConnID,
+		Protocol:   s.Protocol,
+		FlowType:   s.FlowType,
+		State:      s.State,
+		Timestamp:  s.Timestamp.UTC().Format(time.RFC3339Nano),
+		DurationMs: s.Duration.Milliseconds(),
+		Tags:       s.Tags,
+		BlockedBy:  s.BlockedBy,
 	}
 	if s.ConnInfo != nil {
 		es.ConnInfo = &ExportConnInfo{
@@ -173,7 +173,7 @@ func messagesToExport(msgs []*Message, includeBodies bool) []*ExportMessage {
 	for i, m := range msgs {
 		em := &ExportMessage{
 			ID:            m.ID,
-			FlowID:     m.FlowID,
+			FlowID:        m.FlowID,
 			Sequence:      m.Sequence,
 			Direction:     m.Direction,
 			Timestamp:     m.Timestamp.UTC().Format(time.RFC3339Nano),

@@ -14,8 +14,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -91,17 +91,17 @@ func saveFuzzTemplateSession(t *testing.T, store flow.Store, serverURL string) s
 
 	u, _ := url.Parse(serverURL + "/api/login")
 	fl := &flow.Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    50 * time.Millisecond,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -137,7 +137,7 @@ func TestM3_Fuzz_Sequential(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"flow_id":  sessID,
+			"flow_id":     sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -258,7 +258,7 @@ func TestM3_Fuzz_PauseResume(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"flow_id":  sessID,
+			"flow_id":     sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -350,7 +350,7 @@ func TestM3_Fuzz_Cancel(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"flow_id":  sessID,
+			"flow_id":     sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -450,7 +450,7 @@ func TestM3_Fuzz_StopOnStatusCode(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"flow_id":  sessID,
+			"flow_id":     sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{
@@ -528,7 +528,7 @@ func TestM3_Fuzz_QueryFuzzResults(t *testing.T) {
 	result := callFuzz(t, cs, map[string]any{
 		"action": "fuzz",
 		"params": map[string]any{
-			"flow_id":  sessID,
+			"flow_id":     sessID,
 			"attack_type": "sequential",
 			"positions": []any{
 				map[string]any{

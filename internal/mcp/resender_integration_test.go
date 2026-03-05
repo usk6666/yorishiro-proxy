@@ -25,11 +25,11 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 	u, _ := url.Parse(echoServer.URL + "/api/users")
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:    "HTTP/1.x",
-			FlowType: "unary",
-			State:       "complete",
-			Timestamp:   time.Now(),
-			Duration:    100 * time.Millisecond,
+			Protocol:  "HTTP/1.x",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 		},
 		&flow.Message{
 			Sequence:  0,
@@ -124,11 +124,11 @@ func TestM3_Resend_DryRun(t *testing.T) {
 	u, _ := url.Parse(echoServer.URL + "/api/data")
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:    "HTTP/1.x",
-			FlowType: "unary",
-			State:       "complete",
-			Timestamp:   time.Now(),
-			Duration:    100 * time.Millisecond,
+			Protocol:  "HTTP/1.x",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 		},
 		&flow.Message{
 			Sequence:  0,
@@ -154,7 +154,7 @@ func TestM3_Resend_DryRun(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":      entry.Session.ID,
+			"flow_id":         entry.Session.ID,
 			"override_method": "PUT",
 			"override_url":    overrideURL,
 			"override_body":   `{"preview":"true"}`,
@@ -213,11 +213,11 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:    "HTTP/1.x",
-			FlowType: "unary",
-			State:       "complete",
-			Timestamp:   time.Now(),
-			Duration:    100 * time.Millisecond,
+			Protocol:  "HTTP/1.x",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 		},
 		&flow.Message{
 			Sequence:  0,
@@ -244,7 +244,7 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -318,7 +318,7 @@ func TestM3_Resend_E2E_ThroughProxy(t *testing.T) {
 		Arguments: map[string]any{
 			"action": "resend",
 			"params": map[string]any{
-				"flow_id":      flowID,
+				"flow_id":         flowID,
 				"override_method": "PUT",
 				"tag":             "resend-test",
 			},

@@ -17,7 +17,7 @@ func TestEngine_AddRule(t *testing.T) {
 		Direction: DirectionRequest,
 		Conditions: Conditions{
 			PathPattern: "/api/.*",
-			Methods:    []string{"POST"},
+			Methods:     []string{"POST"},
 		},
 	})
 	if err != nil {
@@ -133,7 +133,7 @@ func TestEngine_GetRule(t *testing.T) {
 		Enabled:   true,
 		Direction: DirectionRequest,
 		Conditions: Conditions{
-			PathPattern:  "/api/.*",
+			PathPattern: "/api/.*",
 			Methods:     []string{"POST", "PUT"},
 			HeaderMatch: map[string]string{"Content-Type": "application/json"},
 		},
