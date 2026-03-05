@@ -10,7 +10,7 @@ MCP (Model Context Protocol) サーバとして動作し、脆弱性診断のた
 ```
 Layer 4 TCP リスナ
   → プロトコル検出 (peek bytes)
-    → プロトコルハンドラ (HTTP/S, gRPC, WebSocket, Raw TCP, QUIC, ...)
+    → プロトコルハンドラ (HTTP/S, HTTP/2, gRPC, WebSocket, Raw TCP)
       → セッション記録 (Request/Response)
         → MCP Tool (傍受・リプレイ・検索)
 ```
