@@ -115,12 +115,12 @@ func TestExecuteMultiProto_TCPReplay_NoSendMessages(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "tcp-empty",
-		Protocol:    "TCP",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ID:        "tcp-empty",
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -144,11 +144,11 @@ func TestExecuteMultiProto_TCPReplay_NoTargetAddr(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "tcp-no-target",
-		Protocol:    "TCP",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
+		ID:        "tcp-no-target",
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -156,7 +156,7 @@ func TestExecuteMultiProto_TCPReplay_NoTargetAddr(t *testing.T) {
 
 	sendMsg := &flow.Message{
 		ID:        "tcp-no-target-send",
-		FlowID: "tcp-no-target",
+		FlowID:    "tcp-no-target",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -187,12 +187,12 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	fl := &flow.Flow{
-		ID:          "tcp-replay",
-		Protocol:    "TCP",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "original:1234"},
+		ID:        "tcp-replay",
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "original:1234"},
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -200,7 +200,7 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 
 	sendMsg := &flow.Message{
 		ID:        "tcp-replay-send",
-		FlowID: "tcp-replay",
+		FlowID:    "tcp-replay",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -215,7 +215,7 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"flow_id":  "tcp-replay",
+			"flow_id":     "tcp-replay",
 			"target_addr": addr,
 			"tag":         "test-replay",
 		},
@@ -265,12 +265,12 @@ func TestExecuteMultiProto_Resend_WebSocket_RequiresMessageSequence(t *testing.T
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "ws-resend-1",
-		Protocol:    "WebSocket",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ID:        "ws-resend-1",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -294,12 +294,12 @@ func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "ws-resend-2",
-		Protocol:    "WebSocket",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ID:        "ws-resend-2",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -307,7 +307,7 @@ func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
 
 	sendMsg := &flow.Message{
 		ID:        "ws-msg-0",
-		FlowID: "ws-resend-2",
+		FlowID:    "ws-resend-2",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -323,7 +323,7 @@ func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":       "ws-resend-2",
+			"flow_id":          "ws-resend-2",
 			"message_sequence": 99,
 		},
 	})
@@ -337,12 +337,12 @@ func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		ID:          "ws-resend-3",
-		Protocol:    "WebSocket",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
+		ID:        "ws-resend-3",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -350,7 +350,7 @@ func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
 
 	recvMsg := &flow.Message{
 		ID:        "ws-msg-1",
-		FlowID: "ws-resend-3",
+		FlowID:    "ws-resend-3",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
@@ -365,7 +365,7 @@ func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
-			"flow_id":       "ws-resend-3",
+			"flow_id":          "ws-resend-3",
 			"message_sequence": 1,
 		},
 	})

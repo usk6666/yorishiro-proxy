@@ -56,7 +56,7 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -123,7 +123,7 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -187,7 +187,7 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -251,7 +251,7 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 		"action": "resend_raw",
 		"params": map[string]any{
 			"flow_id": entry.Session.ID,
-			"dry_run":    true,
+			"dry_run": true,
 		},
 	})
 	if result.IsError {
@@ -333,7 +333,7 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 		"action": "resend_raw",
 		"params": map[string]any{
 			"flow_id": entry.Session.ID,
-			"dry_run":    true,
+			"dry_run": true,
 			"patches": []any{
 				map[string]any{
 					"find_text":    "example.com",
@@ -420,9 +420,9 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":         entry.Session.ID,
+			"flow_id":             entry.Session.ID,
 			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
-			"dry_run":            true,
+			"dry_run":             true,
 		},
 	})
 	if result.IsError {
@@ -496,8 +496,8 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":         entry.Session.ID,
-			"target_addr":        addr,
+			"flow_id":             entry.Session.ID,
+			"target_addr":         addr,
 			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
 		},
 	})
@@ -556,7 +556,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":         entry.Session.ID,
+			"flow_id":             entry.Session.ID,
 			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
 			"patches": []any{
 				map[string]any{
@@ -628,7 +628,7 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 			"tag":         "raw-test-01",
 		},
@@ -698,7 +698,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":  entry.Session.ID,
+			"flow_id":     entry.Session.ID,
 			"target_addr": addr,
 			"patches": []any{
 				map[string]any{
@@ -794,9 +794,9 @@ func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
 	result := executeCallTool(t, cs, map[string]any{
 		"action": "resend_raw",
 		"params": map[string]any{
-			"flow_id":         entry.Session.ID,
+			"flow_id":             entry.Session.ID,
 			"override_raw_base64": "not-valid-base64!!!",
-			"dry_run":            true,
+			"dry_run":             true,
 		},
 	})
 	if !result.IsError {

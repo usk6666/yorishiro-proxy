@@ -132,7 +132,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 
 	cfg := fuzzer.RunConfig{
 		Config: fuzzer.Config{
-			FlowID:   params.FlowID,
+			FlowID:      params.FlowID,
 			AttackType:  params.AttackType,
 			Positions:   params.Positions,
 			PayloadSets: params.PayloadSets,

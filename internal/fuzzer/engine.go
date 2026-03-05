@@ -108,9 +108,9 @@ type HTTPDoer interface {
 type Engine struct {
 	flowFetcher  FlowFetcher
 	flowRecorder FlowRecorder
-	fuzzStore       FuzzJobStore
-	httpDoer        HTTPDoer
-	wordlistDir     string
+	fuzzStore    FuzzJobStore
+	httpDoer     HTTPDoer
+	wordlistDir  string
 }
 
 // NewEngine creates a new fuzz engine.
@@ -118,9 +118,9 @@ func NewEngine(fetcher FlowFetcher, recorder FlowRecorder, fuzzStore FuzzJobStor
 	return &Engine{
 		flowFetcher:  fetcher,
 		flowRecorder: recorder,
-		fuzzStore:       fuzzStore,
-		httpDoer:        doer,
-		wordlistDir:     wordlistDir,
+		fuzzStore:    fuzzStore,
+		httpDoer:     doer,
+		wordlistDir:  wordlistDir,
 	}
 }
 
@@ -191,7 +191,7 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 	now := time.Now()
 	job := &flow.FuzzJob{
 		ID:        uuid.New().String(),
-		FlowID: cfg.FlowID,
+		FlowID:    cfg.FlowID,
 		Config:    string(configJSON),
 		Status:    "running",
 		Tag:       cfg.Tag,
@@ -378,12 +378,12 @@ func (e *Engine) executeFuzzCase(
 
 	// Record the fuzz iteration as a new flow.
 	newFl := &flow.Flow{
-		Protocol:    protocol,
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   start,
-		Duration:    duration,
-		Tags:        map[string]string{"fuzz_id": fuzzID},
+		Protocol:  protocol,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: start,
+		Duration:  duration,
+		Tags:      map[string]string{"fuzz_id": fuzzID},
 	}
 
 	if err := e.flowRecorder.SaveFlow(ctx, newFl); err != nil {
@@ -394,7 +394,7 @@ func (e *Engine) executeFuzzCase(
 
 	// Save send message.
 	newSendMsg := &flow.Message{
-		FlowID: newFl.ID,
+		FlowID:    newFl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -411,7 +411,7 @@ func (e *Engine) executeFuzzCase(
 
 	// Save receive message.
 	newRecvMsg := &flow.Message{
-		FlowID:  newFl.ID,
+		FlowID:     newFl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),

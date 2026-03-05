@@ -323,24 +323,24 @@ func TestApplyPosition_ReplaceCookie(t *testing.T) {
 		wantCookie string
 	}{
 		{
-			name:      "simple cookie replace",
-			cookieHdr: "session=old; other=keep",
-			pos:       Position{ID: "p0", Location: "cookie", Name: "session"},
-			payload:   "new-session",
+			name:       "simple cookie replace",
+			cookieHdr:  "session=old; other=keep",
+			pos:        Position{ID: "p0", Location: "cookie", Name: "session"},
+			payload:    "new-session",
 			wantCookie: "session=new-session; other=keep",
 		},
 		{
-			name:      "cookie not present creates it",
-			cookieHdr: "other=keep",
-			pos:       Position{ID: "p0", Location: "cookie", Name: "session"},
-			payload:   "new-val",
+			name:       "cookie not present creates it",
+			cookieHdr:  "other=keep",
+			pos:        Position{ID: "p0", Location: "cookie", Name: "session"},
+			payload:    "new-val",
 			wantCookie: "other=keep; session=new-val",
 		},
 		{
-			name:      "cookie replace with match pattern",
-			cookieHdr: "token=prefix_secret_suffix",
-			pos:       Position{ID: "p0", Location: "cookie", Name: "token", Match: "prefix_(.*)_suffix"},
-			payload:   "FUZZED",
+			name:       "cookie replace with match pattern",
+			cookieHdr:  "token=prefix_secret_suffix",
+			pos:        Position{ID: "p0", Location: "cookie", Name: "token", Match: "prefix_(.*)_suffix"},
+			payload:    "FUZZED",
 			wantCookie: "token=prefix_FUZZED_suffix",
 		},
 	}

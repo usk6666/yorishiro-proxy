@@ -181,7 +181,7 @@ func TestValidateMacroDefinition_OverrideHeaders_CRLFInValue(t *testing.T) {
 				Steps: []macro.Step{
 					{
 						ID:              "step1",
-						FlowID:       "flow-1",
+						FlowID:          "flow-1",
 						OverrideHeaders: tt.headers,
 					},
 				},
@@ -200,7 +200,7 @@ func TestValidateMacroDefinition_OverrideHeaders_CRLFInKey(t *testing.T) {
 		Steps: []macro.Step{
 			{
 				ID:              "step1",
-				FlowID:       "flow-1",
+				FlowID:          "flow-1",
 				OverrideHeaders: map[string]string{"X-Evil\r\nInjected": "value"},
 			},
 		},
@@ -216,8 +216,8 @@ func TestValidateMacroDefinition_OverrideHeaders_Clean(t *testing.T) {
 		Name: "test-macro",
 		Steps: []macro.Step{
 			{
-				ID:              "step1",
-				FlowID:       "flow-1",
+				ID:     "step1",
+				FlowID: "flow-1",
 				OverrideHeaders: map[string]string{
 					"Content-Type":  "application/json",
 					"Authorization": "Bearer token123",
@@ -236,7 +236,7 @@ func TestValidateMacroDefinition_OverrideHeaders_Empty(t *testing.T) {
 		Name: "test-macro",
 		Steps: []macro.Step{
 			{
-				ID:       "step1",
+				ID:     "step1",
 				FlowID: "flow-1",
 			},
 		},

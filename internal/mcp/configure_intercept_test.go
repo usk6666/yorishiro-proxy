@@ -64,7 +64,7 @@ func TestConfigure_InterceptRules_MergeAdd(t *testing.T) {
 						Direction: "request",
 						Conditions: interceptConditionsInput{
 							PathPattern: "/api/admin.*",
-							Methods:    []string{"POST", "PUT", "DELETE"},
+							Methods:     []string{"POST", "PUT", "DELETE"},
 							HeaderMatch: map[string]string{
 								"Content-Type": "application/json",
 							},
@@ -516,7 +516,7 @@ func TestProxyStart_InterceptRulesInputSerialization(t *testing.T) {
 				Direction: "request",
 				Conditions: interceptConditionsInput{
 					PathPattern: "/api/admin.*",
-					Methods:    []string{"POST", "PUT"},
+					Methods:     []string{"POST", "PUT"},
 					HeaderMatch: map[string]string{
 						"Content-Type": "application/json",
 					},
@@ -552,7 +552,7 @@ func TestInterceptHelpers_ToFromRoundTrip(t *testing.T) {
 		Enabled:   true,
 		Direction: "both",
 		Conditions: interceptConditionsInput{
-			PathPattern:  "/api/.*",
+			PathPattern: "/api/.*",
 			Methods:     []string{"POST", "PUT"},
 			HeaderMatch: map[string]string{"Content-Type": "json"},
 		},

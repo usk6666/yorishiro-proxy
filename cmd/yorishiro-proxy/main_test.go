@@ -13,10 +13,10 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 func TestInitCA(t *testing.T) {

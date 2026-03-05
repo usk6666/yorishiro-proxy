@@ -485,11 +485,11 @@ func TestWriteFrame_PayloadLengthEncoding(t *testing.T) {
 		expectedSize int // total frame size (header + payload)
 	}{
 		{"small (5 bytes)", 5, 2 + 5},           // 2-byte header
-		{"exactly 125", 125, 2 + 125},            // 2-byte header
-		{"126 bytes", 126, 4 + 126},              // 4-byte header (16-bit ext)
-		{"medium (1000 bytes)", 1000, 4 + 1000},   // 4-byte header (16-bit ext)
-		{"exactly 65535", 65535, 4 + 65535},        // 4-byte header (16-bit ext)
-		{"65536 bytes", 65536, 10 + 65536},        // 10-byte header (64-bit ext)
+		{"exactly 125", 125, 2 + 125},           // 2-byte header
+		{"126 bytes", 126, 4 + 126},             // 4-byte header (16-bit ext)
+		{"medium (1000 bytes)", 1000, 4 + 1000}, // 4-byte header (16-bit ext)
+		{"exactly 65535", 65535, 4 + 65535},     // 4-byte header (16-bit ext)
+		{"65536 bytes", 65536, 10 + 65536},      // 10-byte header (64-bit ext)
 	}
 
 	for _, tt := range tests {
@@ -578,10 +578,10 @@ func TestWriteFrame_WriteError(t *testing.T) {
 
 func TestMaskPayload(t *testing.T) {
 	tests := []struct {
-		name    string
-		key     [4]byte
-		data    []byte
-		want    []byte
+		name string
+		key  [4]byte
+		data []byte
+		want []byte
 	}{
 		{
 			name: "simple",

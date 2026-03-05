@@ -14,7 +14,7 @@ type mockHandler struct {
 	canHandle func(peek []byte) bool
 }
 
-func (h *mockHandler) Name() string           { return h.name }
+func (h *mockHandler) Name() string            { return h.name }
 func (h *mockHandler) Detect(peek []byte) bool { return h.canHandle(peek) }
 func (h *mockHandler) Handle(_ context.Context, _ net.Conn) error {
 	return nil

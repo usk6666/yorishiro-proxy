@@ -19,12 +19,12 @@ func seedM4Session(t *testing.T, store flow.Store, opts m4SessionOpts) string {
 	ctx := context.Background()
 
 	fl := &flow.Flow{
-		Protocol:    opts.Protocol,
-		FlowType: opts.FlowType,
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    opts.Duration,
-		ConnInfo:    opts.ConnInfo,
+		Protocol:  opts.Protocol,
+		FlowType:  opts.FlowType,
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  opts.Duration,
+		ConnInfo:  opts.ConnInfo,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -42,11 +42,11 @@ func seedM4Session(t *testing.T, store flow.Store, opts m4SessionOpts) string {
 
 // m4SessionOpts configures a flow for M4 integration tests.
 type m4SessionOpts struct {
-	Protocol    string
+	Protocol string
 	FlowType string
-	Duration    time.Duration
-	ConnInfo    *flow.ConnectionInfo
-	Messages    []*flow.Message
+	Duration time.Duration
+	ConnInfo *flow.ConnectionInfo
+	Messages []*flow.Message
 }
 
 // --- Test: HTTP/2 Session Recording and Query ---
@@ -56,9 +56,9 @@ func TestM4_HTTP2_SessionRecordingAndQuery(t *testing.T) {
 
 	reqURL, _ := url.Parse("https://api.example.com/v2/users")
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "HTTP/2",
+		Protocol: "HTTP/2",
 		FlowType: "unary",
-		Duration:    50 * time.Millisecond,
+		Duration: 50 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr:           "192.168.1.100:54321",
 			ServerAddr:           "93.184.216.34:443",
@@ -159,9 +159,9 @@ func TestM4_HTTP2_H2C_SessionRecordingAndQuery(t *testing.T) {
 
 	reqURL, _ := url.Parse("http://internal-service:8080/health")
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "HTTP/2",
+		Protocol: "HTTP/2",
 		FlowType: "unary",
-		Duration:    30 * time.Millisecond,
+		Duration: 30 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: "127.0.0.1:54321",
 			ServerAddr: "127.0.0.1:8080",
@@ -209,9 +209,9 @@ func TestM4_WebSocket_SessionRecordingAndQuery(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "WebSocket",
+		Protocol: "WebSocket",
 		FlowType: "bidirectional",
-		Duration:    2 * time.Second,
+		Duration: 2 * time.Second,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: "192.168.1.100:54321",
 			ServerAddr: "ws.example.com:443",
@@ -339,9 +339,9 @@ func TestM4_WebSocket_BinaryFrame(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "WebSocket",
+		Protocol: "WebSocket",
 		FlowType: "bidirectional",
-		Duration:    100 * time.Millisecond,
+		Duration: 100 * time.Millisecond,
 		Messages: []*flow.Message{
 			{
 				Sequence:  0,
@@ -372,9 +372,9 @@ func TestM4_GRPC_UnarySessionRecordingAndQuery(t *testing.T) {
 
 	reqURL, _ := url.Parse("https://api.example.com/pkg.UserService/GetUser")
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "gRPC",
+		Protocol: "gRPC",
 		FlowType: "unary",
-		Duration:    25 * time.Millisecond,
+		Duration: 25 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr:           "192.168.1.100:54321",
 			ServerAddr:           "93.184.216.34:443",
@@ -498,9 +498,9 @@ func TestM4_GRPC_StreamingSession(t *testing.T) {
 
 	reqURL, _ := url.Parse("https://api.example.com/pkg.StreamService/Subscribe")
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "gRPC",
+		Protocol: "gRPC",
 		FlowType: "stream",
-		Duration:    500 * time.Millisecond,
+		Duration: 500 * time.Millisecond,
 		Messages: []*flow.Message{
 			{
 				Sequence:  0,
@@ -554,9 +554,9 @@ func TestM4_TCP_SessionRecordingAndQuery(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "TCP",
+		Protocol: "TCP",
 		FlowType: "bidirectional",
-		Duration:    1 * time.Second,
+		Duration: 1 * time.Second,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: "192.168.1.100:54321",
 			ServerAddr: "db.example.com:3306",
@@ -651,9 +651,9 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 	// Seed sessions for multiple protocols.
 	reqURL1, _ := url.Parse("http://example.com/api")
 	seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "HTTP/2",
+		Protocol: "HTTP/2",
 		FlowType: "unary",
-		Duration:    10 * time.Millisecond,
+		Duration: 10 * time.Millisecond,
 		Messages: []*flow.Message{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: reqURL1},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200},
@@ -661,9 +661,9 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 	})
 
 	seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "gRPC",
+		Protocol: "gRPC",
 		FlowType: "unary",
-		Duration:    20 * time.Millisecond,
+		Duration: 20 * time.Millisecond,
 		Messages: []*flow.Message{
 			{
 				Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(),
@@ -677,18 +677,18 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 	})
 
 	seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "WebSocket",
+		Protocol: "WebSocket",
 		FlowType: "bidirectional",
-		Duration:    100 * time.Millisecond,
+		Duration: 100 * time.Millisecond,
 		Messages: []*flow.Message{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("ws-msg"), Metadata: map[string]string{"opcode": "1"}},
 		},
 	})
 
 	seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "TCP",
+		Protocol: "TCP",
 		FlowType: "bidirectional",
-		Duration:    200 * time.Millisecond,
+		Duration: 200 * time.Millisecond,
 		Messages: []*flow.Message{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("tcp-data")},
 		},
@@ -847,9 +847,9 @@ func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 	// Seed sessions for multiple protocols simulating concurrent usage.
 	httpURL, _ := url.Parse("http://example.com/api/data")
 	seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "HTTP/1.x",
+		Protocol: "HTTP/1.x",
 		FlowType: "unary",
-		Duration:    50 * time.Millisecond,
+		Duration: 50 * time.Millisecond,
 		Messages: []*flow.Message{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: httpURL, Headers: map[string][]string{"Host": {"example.com"}}},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200, Body: []byte("http-response")},
@@ -858,9 +858,9 @@ func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 
 	h2URL, _ := url.Parse("https://api.example.com/v2/resource")
 	seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "HTTP/2",
+		Protocol: "HTTP/2",
 		FlowType: "unary",
-		Duration:    30 * time.Millisecond,
+		Duration: 30 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			TLSALPN: "h2",
 		},
@@ -871,9 +871,9 @@ func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 	})
 
 	seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "WebSocket",
+		Protocol: "WebSocket",
 		FlowType: "bidirectional",
-		Duration:    2 * time.Second,
+		Duration: 2 * time.Second,
 		Messages: []*flow.Message{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("ws-hello"), Metadata: map[string]string{"opcode": "1"}},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), Body: []byte("ws-world"), Metadata: map[string]string{"opcode": "1"}},
@@ -946,19 +946,19 @@ func TestM4_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
 
 	// Create a TCP flow with a send message.
 	fl := &flow.Flow{
-		Protocol:    "TCP",
-		FlowType: "bidirectional",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    100 * time.Millisecond,
-		ConnInfo:    &flow.ConnectionInfo{ServerAddr: "original:1234"},
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "original:1234"},
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	sendMsg := &flow.Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -974,7 +974,7 @@ func TestM4_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
 	result := callExecMultiProto(t, cs, map[string]any{
 		"action": "tcp_replay",
 		"params": map[string]any{
-			"flow_id":  fl.ID,
+			"flow_id":     fl.ID,
 			"target_addr": addr,
 			"tag":         "m4-tcp-replay",
 		},
@@ -1021,10 +1021,10 @@ func TestM4_Execute_TCPReplay_ProtocolMismatch(t *testing.T) {
 
 	// Create a non-TCP flow.
 	fl := &flow.Flow{
-		Protocol:    "HTTP/2",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
+		Protocol:  "HTTP/2",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
@@ -1116,10 +1116,10 @@ func TestM4_Session_MessagePreview_LargeStreamingSession(t *testing.T) {
 	}
 
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "WebSocket",
+		Protocol: "WebSocket",
 		FlowType: "bidirectional",
-		Duration:    5 * time.Second,
-		Messages:    msgs,
+		Duration: 5 * time.Second,
+		Messages: msgs,
 	})
 
 	detail := callTool[queryFlowResult](t, env.cs, "query", map[string]any{
@@ -1148,9 +1148,9 @@ func TestM4_GRPC_ErrorStatusRecording(t *testing.T) {
 
 	reqURL, _ := url.Parse("https://api.example.com/pkg.AuthService/Authenticate")
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "gRPC",
+		Protocol: "gRPC",
 		FlowType: "unary",
-		Duration:    15 * time.Millisecond,
+		Duration: 15 * time.Millisecond,
 		Messages: []*flow.Message{
 			{
 				Sequence:  0,
@@ -1341,10 +1341,10 @@ func TestM4_Query_MessagesPagination_StreamingSession(t *testing.T) {
 	}
 
 	flowID := seedM4Session(t, env.store, m4SessionOpts{
-		Protocol:    "TCP",
+		Protocol: "TCP",
 		FlowType: "bidirectional",
-		Duration:    500 * time.Millisecond,
-		Messages:    msgs,
+		Duration: 500 * time.Millisecond,
+		Messages: msgs,
 	})
 
 	// Page 1: limit 3.

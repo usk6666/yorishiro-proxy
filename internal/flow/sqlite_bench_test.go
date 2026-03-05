@@ -31,12 +31,12 @@ func BenchmarkSaveSession(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		fl := &Flow{
-			ConnID:      fmt.Sprintf("conn-%d", i),
-			Protocol:    "HTTP/1.x",
-			FlowType: "unary",
-			State:       "complete",
-			Timestamp:   time.Now(),
-			Duration:    100 * time.Millisecond,
+			ConnID:    fmt.Sprintf("conn-%d", i),
+			Protocol:  "HTTP/1.x",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
 			ConnInfo: &ConnectionInfo{
 				ClientAddr: "127.0.0.1:12345",
 				ServerAddr: "93.184.216.34:443",
@@ -54,12 +54,12 @@ func BenchmarkAppendMessage(b *testing.B) {
 
 	// Create a parent flow.
 	fl := &Flow{
-		ConnID:      "bench-conn",
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now(),
-		Duration:    50 * time.Millisecond,
+		ConnID:    "bench-conn",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now(),
+		Duration:  50 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		b.Fatalf("SaveFlow: %v", err)
@@ -71,7 +71,7 @@ func BenchmarkAppendMessage(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msg := &Message{
-			FlowID: fl.ID,
+			FlowID:    fl.ID,
 			Sequence:  i,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -96,12 +96,12 @@ func BenchmarkListSessions(b *testing.B) {
 			// Pre-populate sessions.
 			for i := 0; i < n; i++ {
 				fl := &Flow{
-					ConnID:      fmt.Sprintf("conn-%d", i),
-					Protocol:    "HTTP/1.x",
-					FlowType: "unary",
-					State:       "complete",
-					Timestamp:   time.Now(),
-					Duration:    time.Duration(i) * time.Millisecond,
+					ConnID:    fmt.Sprintf("conn-%d", i),
+					Protocol:  "HTTP/1.x",
+					FlowType:  "unary",
+					State:     "complete",
+					Timestamp: time.Now(),
+					Duration:  time.Duration(i) * time.Millisecond,
 				}
 				if err := store.SaveFlow(ctx, fl); err != nil {
 					b.Fatalf("SaveFlow: %v", err)
@@ -127,12 +127,12 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 	// Pre-populate 100 flows with messages.
 	for i := 0; i < 100; i++ {
 		fl := &Flow{
-			ConnID:      fmt.Sprintf("conn-%d", i),
-			Protocol:    "HTTP/1.x",
-			FlowType: "unary",
-			State:       "complete",
-			Timestamp:   time.Now(),
-			Duration:    time.Duration(i) * time.Millisecond,
+			ConnID:    fmt.Sprintf("conn-%d", i),
+			Protocol:  "HTTP/1.x",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now(),
+			Duration:  time.Duration(i) * time.Millisecond,
 		}
 		if err := store.SaveFlow(ctx, fl); err != nil {
 			b.Fatalf("SaveFlow: %v", err)
@@ -140,7 +140,7 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 
 		u, _ := url.Parse(fmt.Sprintf("https://example.com/api/v1/resource/%d", i))
 		sendMsg := &Message{
-			FlowID: fl.ID,
+			FlowID:    fl.ID,
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -153,7 +153,7 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 		}
 
 		recvMsg := &Message{
-			FlowID:  fl.ID,
+			FlowID:     fl.ID,
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -195,12 +195,12 @@ func BenchmarkGetSession(b *testing.B) {
 
 	// Create a flow to look up.
 	fl := &Flow{
-		ConnID:      "bench-get",
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now(),
-		Duration:    50 * time.Millisecond,
+		ConnID:    "bench-get",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now(),
+		Duration:  50 * time.Millisecond,
 		ConnInfo: &ConnectionInfo{
 			ClientAddr: "127.0.0.1:12345",
 			ServerAddr: "93.184.216.34:443",

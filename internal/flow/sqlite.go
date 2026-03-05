@@ -665,7 +665,7 @@ type scannable interface {
 
 func scanFlow(row scannable) (*Flow, error) {
 	var (
-		fl           Flow
+		fl             Flow
 		tsStr          string
 		durationMs     int64
 		tagsStr        string

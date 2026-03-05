@@ -43,18 +43,18 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 	ctx := context.Background()
 
 	fl := &Flow{
-		Protocol:    protocol,
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   ts,
-		Duration:    100 * time.Millisecond,
+		Protocol:  protocol,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  100 * time.Millisecond,
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	sendMsg := &Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -68,7 +68,7 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 	}
 
 	recvMsg := &Message{
-		FlowID:  fl.ID,
+		FlowID:     fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  ts.Add(100 * time.Millisecond),
@@ -107,11 +107,11 @@ func TestSQLiteStore_SaveAndGetSession(t *testing.T) {
 	ctx := context.Background()
 
 	fl := &Flow{
-		Protocol:    "HTTP/1.x",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   time.Now().UTC(),
-		Duration:    150 * time.Millisecond,
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  150 * time.Millisecond,
 	}
 
 	if err := store.SaveFlow(ctx, fl); err != nil {
@@ -187,7 +187,7 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 	}
 
 	sendMsg := &Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -204,7 +204,7 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 	}
 
 	recvMsg := &Message{
-		FlowID:  fl.ID,
+		FlowID:     fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -348,30 +348,30 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 
 	// Create sessions with different states.
 	activeSession := &Flow{
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "active",
-		Timestamp:   now,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "active",
+		Timestamp: now,
 	}
 	if err := store.SaveFlow(ctx, activeSession); err != nil {
 		t.Fatalf("SaveSession(active): %v", err)
 	}
 
 	completeSession := &Flow{
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   now,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: now,
 	}
 	if err := store.SaveFlow(ctx, completeSession); err != nil {
 		t.Fatalf("SaveSession(complete): %v", err)
 	}
 
 	errorSession := &Flow{
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "error",
-		Timestamp:   now,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "error",
+		Timestamp: now,
 	}
 	if err := store.SaveFlow(ctx, errorSession); err != nil {
 		t.Fatalf("SaveSession(error): %v", err)
@@ -629,7 +629,7 @@ func TestSQLiteStore_RawBytes(t *testing.T) {
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	store.AppendMessage(ctx, &Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -848,7 +848,7 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 	store.SaveFlow(ctx, fl)
 
 	store.AppendMessage(ctx, &Message{
-		FlowID:     fl.ID,
+		FlowID:        fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     time.Now().UTC(),
@@ -1032,18 +1032,18 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 	// A blocked session: has a send message (the request that was attempted)
 	// but no receive message (because it was blocked).
 	fl := &Flow{
-		Protocol:    "HTTPS",
-		FlowType: "unary",
-		State:       "complete",
-		Timestamp:   now,
-		BlockedBy:   "target_scope",
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: now,
+		BlockedBy: "target_scope",
 	}
 	if err := store.SaveFlow(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	sendMsg := &Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: now,

@@ -36,7 +36,7 @@ func saveCleanerSession(t *testing.T, store *SQLiteStore, ts time.Time, reqURL s
 	}
 
 	msg := &Message{
-		FlowID: fl.ID,
+		FlowID:    fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -121,7 +121,7 @@ func TestCleaner_RunOnce_Disabled(t *testing.T) {
 func TestCleaner_Start_RunsAtStartup(t *testing.T) {
 	cleaner, store := newTestCleaner(t, CleanerConfig{
 		MaxFlows: 1,
-		Interval:    time.Hour,
+		Interval: time.Hour,
 	})
 	ctx := context.Background()
 

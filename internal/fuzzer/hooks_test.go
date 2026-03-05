@@ -14,13 +14,13 @@ import (
 
 // mockHookCallbacks implements HookCallbacks for testing.
 type mockHookCallbacks struct {
-	preSendKVStore    map[string]string
-	preSendErr        error
-	preSendCalls      int
-	postSendCalls     int
-	postSendErr       error
-	postSendKVStore   map[string]string // captured kvStore passed to PostSend
-	updateCalls       int
+	preSendKVStore  map[string]string
+	preSendErr      error
+	preSendCalls    int
+	postSendCalls   int
+	postSendErr     error
+	postSendKVStore map[string]string // captured kvStore passed to PostSend
+	updateCalls     int
 }
 
 func (m *mockHookCallbacks) PreSend(_ context.Context, _ *HookState) (map[string]string, error) {
@@ -420,7 +420,7 @@ func TestHookState_Initial(t *testing.T) {
 // --- memStore implements the interfaces needed for fuzzer engine tests ---
 
 type memStore struct {
-	flows map[string]*flow.Flow
+	flows    map[string]*flow.Flow
 	messages map[string][]*flow.Message
 	fuzzJobs map[string]*flow.FuzzJob
 	results  []*flow.FuzzResult
@@ -428,7 +428,7 @@ type memStore struct {
 
 func newMemStore() *memStore {
 	return &memStore{
-		flows: make(map[string]*flow.Flow),
+		flows:    make(map[string]*flow.Flow),
 		messages: make(map[string][]*flow.Message),
 		fuzzJobs: make(map[string]*flow.FuzzJob),
 	}

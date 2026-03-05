@@ -151,13 +151,13 @@ func TestExpandHeaders(t *testing.T) {
 			want:    map[string]string{"Cookie": "sid=abc123"},
 		},
 		{
-			name:    "multiple headers",
+			name: "multiple headers",
 			headers: map[string]string{
 				"Cookie":       "sid={{session}}",
 				"X-CSRF-Token": "{{csrf}}",
 			},
 			kvStore: map[string]string{"session": "abc", "csrf": "xyz"},
-			want:    map[string]string{
+			want: map[string]string{
 				"Cookie":       "sid=abc",
 				"X-CSRF-Token": "xyz",
 			},
