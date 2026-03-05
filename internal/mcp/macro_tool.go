@@ -56,21 +56,21 @@ func (s *Server) handleMacroTool(ctx context.Context, _ *gomcp.CallToolRequest, 
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableMacroActions, ", "))
 	case "define_macro":
 		mp := macroToolParamsToMacroParams(input.Params)
-		result, err := s.handleExecuteDefineMacro(ctx, mp)
+		result, err := s.handleDefineMacro(ctx, mp)
 		if err != nil {
 			return nil, nil, err
 		}
 		return nil, result, nil
 	case "run_macro":
 		mp := macroToolParamsToMacroParams(input.Params)
-		result, err := s.handleExecuteRunMacro(ctx, mp)
+		result, err := s.handleRunMacro(ctx, mp)
 		if err != nil {
 			return nil, nil, err
 		}
 		return nil, result, nil
 	case "delete_macro":
 		mp := macroToolParamsToMacroParams(input.Params)
-		result, err := s.handleExecuteDeleteMacro(ctx, mp)
+		result, err := s.handleDeleteMacro(ctx, mp)
 		if err != nil {
 			return nil, nil, err
 		}

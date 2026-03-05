@@ -5,7 +5,7 @@
  * to connect to yorishiro-proxy's /mcp endpoint via Streamable HTTP.
  *
  * Provides typed access to yorishiro-proxy's 10 MCP tools:
- * proxy_start, proxy_stop, configure, query, execute,
+ * proxy_start, proxy_stop, configure, query, resend,
  * manage, fuzz, macro, intercept, security
  */
 
@@ -230,10 +230,10 @@ export class McpClient {
   }
 
   /** Execute a resend action (resend, resend_raw, tcp_replay). */
-  async execute<T = unknown>(
+  async resend<T = unknown>(
     params: ExecuteParams,
   ): Promise<T> {
-    return this.callTool<T>("execute", params as unknown as Record<string, unknown>);
+    return this.callTool<T>("resend", params as unknown as Record<string, unknown>);
   }
 
   /** Manage flow data and CA certificates (delete_flows, export_flows, import_flows, regenerate_ca_cert). */

@@ -2,7 +2,7 @@
  * TypeScript type definitions for yorishiro-proxy's 10 MCP tools.
  * These types mirror the Go structs in internal/mcp/.
  *
- * Tools: proxy_start, proxy_stop, configure, query, execute,
+ * Tools: proxy_start, proxy_stop, configure, query, resend,
  *        manage, fuzz, macro, intercept, security
  */
 
@@ -543,7 +543,7 @@ export interface QueryResultMap {
 }
 
 // ---------------------------------------------------------------------------
-// Shared execute/fuzz types
+// Shared resend/fuzz types
 // ---------------------------------------------------------------------------
 
 /** Body patch for resend. */
@@ -621,13 +621,13 @@ export interface ExportFilter {
 }
 
 // ---------------------------------------------------------------------------
-// execute tool — resend, resend_raw, tcp_replay
+// resend tool — resend, resend_raw, tcp_replay
 // ---------------------------------------------------------------------------
 
-/** Available execute actions. */
+/** Available resend actions. */
 export type ExecuteAction = "resend" | "resend_raw" | "tcp_replay";
 
-/** Parameters for the execute tool (resend / resend_raw / tcp_replay). */
+/** Parameters for the resend tool (resend / resend_raw / tcp_replay). */
 export interface ExecuteParams {
   action: ExecuteAction;
   params: {

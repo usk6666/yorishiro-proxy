@@ -233,7 +233,7 @@ func TestPolicyIntegration_PolicyDenyCannotBeOverridden(t *testing.T) {
 
 	// Try to resend the blocked session via execute.
 	resendResult, err := env.cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "execute",
+		Name: "resend",
 		Arguments: map[string]any{
 			"action": "resend",
 			"params": map[string]any{
@@ -1467,7 +1467,7 @@ func executeCallToolRaw(t *testing.T, cs *gomcp.ClientSession, args map[string]a
 		t.Fatalf("unmarshal execute args: %v", err)
 	}
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name:      "execute",
+		Name:      "resend",
 		Arguments: argMap,
 	})
 	if err != nil {

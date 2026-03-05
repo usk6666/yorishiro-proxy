@@ -355,7 +355,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	// networks (SSRF protection). Since our upstream is on loopback, we need
 	// to handle the expected failure.
 	replayResult, replayErr := env.cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "execute",
+		Name: "resend",
 		Arguments: map[string]any{
 			"action": "replay",
 			"params": map[string]any{
@@ -370,13 +370,13 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	// This is expected behavior — we verify the tool ran and returned an error.
 	if !replayResult.IsError {
 		// If replay succeeded (e.g., SSRF protection is relaxed), verify the result.
-		var rr executeResendResult
+		var rr resendActionResult
 		tc, ok := replayResult.Content[0].(*gomcp.TextContent)
 		if ok {
 			json.Unmarshal([]byte(tc.Text), &rr)
 		}
 		if rr.NewFlowID == "" {
-			t.Error("execute replay returned empty new_flow_id")
+			t.Error("resend replay returned empty new_flow_id")
 		}
 		if rr.StatusCode != 200 {
 			t.Errorf("execute replay status_code = %d, want 200", rr.StatusCode)
@@ -510,7 +510,7 @@ func TestIntegration_ExecuteDeleteFlows_NotFound(t *testing.T) {
 func TestIntegration_ExecuteReplay_NoSession(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	callToolExpectError(t, env.cs, "execute", map[string]any{
+	callToolExpectError(t, env.cs, "resend", map[string]any{
 		"action": "replay",
 		"params": map[string]any{
 			"flow_id": "nonexistent-flow-id",
@@ -551,7 +551,7 @@ func TestIntegration_ListTools(t *testing.T) {
 		"proxy_stop":  false,
 		"configure":   false,
 		"query":       false,
-		"execute":     false,
+		"resend":      false,
 		"manage":      false,
 		"fuzz":        false,
 		"macro":       false,

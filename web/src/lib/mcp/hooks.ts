@@ -176,13 +176,13 @@ export function useQuery<R extends QueryResource>(
 }
 
 // ---------------------------------------------------------------------------
-// useExecute — execute tool (resend, resend_raw, tcp_replay)
+// useResend — resend tool (resend, resend_raw, tcp_replay)
 // ---------------------------------------------------------------------------
 
-/** Return type for useExecute. */
-export interface UseExecuteResult {
+/** Return type for useResend. */
+export interface UseResendResult {
   /** Execute a resend action (resend, resend_raw, tcp_replay). Returns the tool result. */
-  execute: <T = unknown>(params: ExecuteParams) => Promise<T>;
+  resend: <T = unknown>(params: ExecuteParams) => Promise<T>;
   /** Whether an execution is in progress. */
   loading: boolean;
   /** Last execution error, if any. */
@@ -190,23 +190,23 @@ export interface UseExecuteResult {
 }
 
 /**
- * Hook to call the MCP execute tool (resend, resend_raw, tcp_replay).
+ * Hook to call the MCP resend tool (resend, resend_raw, tcp_replay).
  *
  * @example
  * ```tsx
- * const { execute, loading, error } = useExecute();
- * await execute({
+ * const { resend, loading, error } = useResend();
+ * await resend({
  *   action: "resend",
  *   params: { flow_id: "abc123" },
  * });
  * ```
  */
-export function useExecute(): UseExecuteResult {
+export function useResend(): UseResendResult {
   const { client, status } = useMcpContext();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const execute = useCallback(
+  const resend = useCallback(
     async <T = unknown>(params: ExecuteParams): Promise<T> => {
       if (!client || status !== "connected") {
         throw new Error("MCP client is not connected");
@@ -216,7 +216,7 @@ export function useExecute(): UseExecuteResult {
       setError(null);
 
       try {
-        const result = await client.execute<T>(params);
+        const result = await client.resend<T>(params);
         return result;
       } catch (err) {
         const e = err instanceof Error ? err : new Error(String(err));
@@ -229,8 +229,15 @@ export function useExecute(): UseExecuteResult {
     [client, status],
   );
 
-  return { execute, loading, error };
+  return { resend, loading, error };
+
+  // Backward-compatible alias.
 }
+
+/** @deprecated Use useResend instead. */
+export const useExecute = useResend;
+/** @deprecated Use UseResendResult instead. */
+export type UseExecuteResult = UseResendResult;
 
 // ---------------------------------------------------------------------------
 // useManage — manage tool (delete_flows, export_flows, import_flows, regenerate_ca_cert)

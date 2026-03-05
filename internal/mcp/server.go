@@ -363,7 +363,7 @@ func (s *Server) registerTools() {
 	s.registerProxyStop()
 	s.registerConfigure()
 	s.registerQuery()
-	s.registerExecute()
+	s.registerResend()
 	s.registerManage()
 	s.registerFuzz()
 	s.registerMacro()

@@ -983,7 +983,7 @@ func TestM4_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out executeReplayRawResult
+	var out resendReplayRawResult
 	unmarshalExecMultiProtoResult(t, result, &out)
 
 	if out.NewFlowID == "" {
