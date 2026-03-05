@@ -17,6 +17,8 @@
   <a href="README-ja.md">日本語</a>
 </p>
 
+> **Beta** — APIs and configuration may change between minor versions.
+
 ---
 
 Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, giving AI agents full control over proxy operations through ten MCP tools. Designed for use with Claude Code and other MCP-compatible agents, it enables automated security testing workflows without manual UI interaction. An embedded Web UI is also available for visual inspection and interactive use.
