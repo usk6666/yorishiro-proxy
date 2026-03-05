@@ -97,6 +97,15 @@ func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *gohttp
 			httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
 			return req, recordReqBody, true
 		}
+		// Re-check target scope after URL override to prevent SSRF (CWE-918, S-1).
+		if action.OverrideURL != "" {
+			if blocked, reason := h.checkTargetScope(req.URL); blocked {
+				h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
+				logger.Warn("intercept override_url blocked by target scope",
+					"url", req.URL.String(), "reason", reason)
+				return req, recordReqBody, true
+			}
+		}
 		if action.OverrideBody != nil {
 			recordReqBody = []byte(*action.OverrideBody)
 		}
