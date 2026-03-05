@@ -14,8 +14,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// executeReplayRawResult is the structured output of the tcp_replay action.
-type executeReplayRawResult struct {
+// resendReplayRawResult is the structured output of the tcp_replay action.
+type resendReplayRawResult struct {
 	// NewFlowID is the flow ID of the replayed flow.
 	NewFlowID string `json:"new_flow_id"`
 	// MessagesSent is the number of send messages replayed.
@@ -32,10 +32,10 @@ type executeReplayRawResult struct {
 	Tag string `json:"tag,omitempty"`
 }
 
-// handleExecuteReplayRaw handles the tcp_replay action for Raw TCP session replay.
+// handleResendReplayRaw handles the tcp_replay action for Raw TCP session replay.
 // It retrieves all send messages from the original flow, establishes a TCP connection
 // to the target, sends the data, and reads back the response.
-func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, *executeReplayRawResult, error) {
+func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams) (*gomcp.CallToolResult, *resendReplayRawResult, error) {
 	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
@@ -197,7 +197,7 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 		messagesReceived = 1
 	}
 
-	result := &executeReplayRawResult{
+	result := &resendReplayRawResult{
 		NewFlowID:       newFl.ID,
 		MessagesSent:       len(sendMsgs),
 		MessagesReceived:   messagesReceived,
@@ -210,8 +210,8 @@ func (s *Server) handleExecuteReplayRaw(ctx context.Context, params executeParam
 	return nil, result, nil
 }
 
-// executeWebSocketResendResult is the structured output of a WebSocket resend action.
-type executeWebSocketResendResult struct {
+// resendWebSocketResult is the structured output of a WebSocket resend action.
+type resendWebSocketResult struct {
 	// NewFlowID is the flow ID of the new flow recording the resend.
 	NewFlowID string `json:"new_flow_id"`
 	// MessageSequence is the sequence number of the resent message.
@@ -229,7 +229,7 @@ type executeWebSocketResendResult struct {
 // handleWebSocketResend handles resend for WebSocket flows.
 // It sends a single message from the original flow to the target server
 // over a raw TCP connection, recording the exchange.
-func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, params executeParams) (*gomcp.CallToolResult, *executeWebSocketResendResult, error) {
+func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, params resendParams) (*gomcp.CallToolResult, *resendWebSocketResult, error) {
 	if params.MessageSequence == nil {
 		return nil, nil, fmt.Errorf("message_sequence is required for WebSocket resend")
 	}
@@ -400,7 +400,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		}
 	}
 
-	result := &executeWebSocketResendResult{
+	result := &resendWebSocketResult{
 		NewFlowID:    newFl.ID,
 		MessageSequence: *params.MessageSequence,
 		ResponseData:    base64.StdEncoding.EncodeToString(respData),

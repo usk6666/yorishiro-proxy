@@ -54,7 +54,7 @@ func callExecMultiProto(t *testing.T, cs *gomcp.ClientSession, args map[string]a
 	}
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name:      "execute",
+		Name:      "resend",
 		Arguments: rawArgs,
 	})
 	if err != nil {
@@ -224,7 +224,7 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 		t.Fatalf("expected success: %v", result.Content)
 	}
 
-	var out executeReplayRawResult
+	var out resendReplayRawResult
 	unmarshalExecMultiProtoResult(t, result, &out)
 
 	if out.NewFlowID == "" {

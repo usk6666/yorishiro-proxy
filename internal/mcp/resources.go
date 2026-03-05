@@ -44,11 +44,11 @@ var helpResources = []resourceDef{
 		filename:    "resources/help_query.md",
 	},
 	{
-		uri:         "yorishiro://help/execute",
-		name:        "help_execute",
-		description: "Action list, parameter syntax, and usage examples for the execute tool (resend, resend_raw, tcp_replay).",
+		uri:         "yorishiro://help/resend",
+		name:        "help_resend",
+		description: "Action list, parameter syntax, and usage examples for the resend tool (resend, resend_raw, tcp_replay).",
 		mimeType:    "text/markdown",
-		filename:    "resources/help_execute.md",
+		filename:    "resources/help_resend.md",
 	},
 	{
 		uri:         "yorishiro://help/manage",
@@ -118,11 +118,11 @@ var schemaResources = []resourceDef{
 		filename:    "resources/schema_query.json",
 	},
 	{
-		uri:         "yorishiro://schema/execute",
-		name:        "schema_execute",
-		description: "JSON Schema for the execute tool input.",
+		uri:         "yorishiro://schema/resend",
+		name:        "schema_resend",
+		description: "JSON Schema for the resend tool input.",
 		mimeType:    "application/json",
-		filename:    "resources/schema_execute.json",
+		filename:    "resources/schema_resend.json",
 	},
 	{
 		uri:         "yorishiro://schema/manage",

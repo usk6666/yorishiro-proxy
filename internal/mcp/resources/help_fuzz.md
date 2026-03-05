@@ -44,7 +44,7 @@ Start an asynchronous fuzz campaign against a recorded flow. Returns fuzz_id imm
   - **latency_baseline_multiplier** (number): Stop when current median exceeds baseline median times this multiplier.
   - **latency_window** (integer): Sliding window size for latency detection (default: `10`).
 - **tag** (string, optional): Tag to label the fuzz job.
-- **hooks** (object, optional): Pre/post hooks for macro integration (see execute tool help for hook syntax).
+- **hooks** (object, optional): Pre/post hooks for macro integration (see resend tool help for hook syntax).
 
 Returns: fuzz_id, status, total_requests, tag, message.
 

@@ -19,14 +19,14 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// executeInput is the typed input for the execute tool.
-type executeInput struct {
-	// Action specifies the action to execute.
+// resendInput is the typed input for the resend tool.
+type resendInput struct {
+	// Action specifies the action to perform.
 	// Available actions: resend, resend_raw, tcp_replay
 	// (replay is a deprecated alias for resend; replay_raw is a deprecated alias for resend_raw).
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
-	Params executeParams `json:"params"`
+	Params resendParams `json:"params"`
 }
 
 // HeaderEntry represents a single header key-value pair, allowing duplicate keys.
@@ -63,8 +63,8 @@ func (h *HeaderEntries) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// executeParams holds parameters for the execute tool actions (resend, resend_raw, tcp_replay).
-type executeParams struct {
+// resendParams holds parameters for the resend tool actions (resend, resend_raw, tcp_replay).
+type resendParams struct {
 	// FlowID identifies the flow to resend/replay.
 	FlowID string `json:"flow_id,omitempty"`
 
@@ -103,7 +103,7 @@ type executeParams struct {
 // parseRawHeaders parses the raw JSON header fields (OverrideHeadersRaw, AddHeadersRaw)
 // into their typed HeaderEntries fields. This must be called before accessing
 // OverrideHeaders or AddHeaders.
-func (p *executeParams) parseRawHeaders() error {
+func (p *resendParams) parseRawHeaders() error {
 	if p.OverrideHeadersRaw != nil {
 		entries, err := parseHeaderEntriesFromAny(p.OverrideHeadersRaw)
 		if err != nil {
@@ -157,13 +157,13 @@ func parseHeaderEntriesFromAny(v any) (HeaderEntries, error) {
 	}
 }
 
-// availableExecuteActions lists the valid action names for the execute tool.
-var availableExecuteActions = []string{"resend", "resend_raw", "tcp_replay"}
+// availableResendActions lists the valid action names for the resend tool.
+var availableResendActions = []string{"resend", "resend_raw", "tcp_replay"}
 
-// registerExecute registers the execute MCP tool.
-func (s *Server) registerExecute() {
+// registerResend registers the resend MCP tool.
+func (s *Server) registerResend() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
-		Name: "execute",
+		Name: "resend",
 		Description: "Resend and replay recorded proxy requests with optional mutations. " +
 			"Available actions: " +
 			"'resend' resends a recorded HTTP/HTTP2/WebSocket request with optional mutation (method/URL/header/body overrides, body patches, dry-run). " +
@@ -175,11 +175,11 @@ func (s *Server) registerExecute() {
 			"For fuzzing, use the 'fuzz' tool. " +
 			"For macro operations, use the 'macro' tool. " +
 			"For intercept queue actions, use the 'intercept' tool.",
-	}, s.handleExecute)
+	}, s.handleResend)
 }
 
-// handleExecute routes the execute tool invocation to the appropriate action handler.
-func (s *Server) handleExecute(ctx context.Context, _ *gomcp.CallToolRequest, input executeInput) (*gomcp.CallToolResult, any, error) {
+// handleResend routes the resend tool invocation to the appropriate action handler.
+func (s *Server) handleResend(ctx context.Context, _ *gomcp.CallToolRequest, input resendInput) (*gomcp.CallToolResult, any, error) {
 	// Parse raw header JSON fields into typed HeaderEntries.
 	if err := input.Params.parseRawHeaders(); err != nil {
 		return nil, nil, err
@@ -187,22 +187,22 @@ func (s *Server) handleExecute(ctx context.Context, _ *gomcp.CallToolRequest, in
 
 	switch input.Action {
 	case "":
-		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableExecuteActions, ", "))
+		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableResendActions, ", "))
 	case "resend", "replay": // "replay" is a deprecated alias
-		return s.handleExecuteResend(ctx, input.Params)
+		return s.handleResendAction(ctx, input.Params)
 	case "resend_raw", "replay_raw": // "replay_raw" is a deprecated alias
-		return s.handleExecuteResendRaw(ctx, input.Params)
+		return s.handleResendActionRaw(ctx, input.Params)
 	case "tcp_replay":
-		return s.handleExecuteReplayRaw(ctx, input.Params)
+		return s.handleResendReplayRaw(ctx, input.Params)
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableExecuteActions)
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableResendActions)
 	}
 }
 
 // --- Resend result types ---
 
-// executeResendResult is the structured output of the resend action.
-type executeResendResult struct {
+// resendActionResult is the structured output of the resend action.
+type resendActionResult struct {
 	NewFlowID         string              `json:"new_flow_id"`
 	StatusCode           int                 `json:"status_code"`
 	ResponseHeaders      map[string][]string `json:"response_headers"`
@@ -212,8 +212,8 @@ type executeResendResult struct {
 	Tag                  string              `json:"tag,omitempty"`
 }
 
-// executeDryRunResult is the structured output of a dry-run resend.
-type executeDryRunResult struct {
+// resendDryRunResult is the structured output of a dry-run resend.
+type resendDryRunResult struct {
 	DryRun         bool            `json:"dry_run"`
 	RequestPreview *requestPreview `json:"request_preview"`
 }
@@ -227,8 +227,8 @@ type requestPreview struct {
 	BodyEncoding string              `json:"body_encoding"`
 }
 
-// handleExecuteResend handles the resend action within the execute tool.
-func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
+// handleResendAction handles the resend action within the resend tool.
+func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*gomcp.CallToolResult, any, error) {
 	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
@@ -336,7 +336,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 				previewHeaders[k] = v
 			}
 		}
-		return nil, &executeDryRunResult{
+		return nil, &resendDryRunResult{
 			DryRun: true,
 			RequestPreview: &requestPreview{
 				Method:       method,
@@ -436,7 +436,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 	}
 
 	respBodyStr, respBodyEncoding := encodeBody(respBody)
-	return nil, &executeResendResult{
+	return nil, &resendActionResult{
 		NewFlowID: newFl.ID, StatusCode: resp.StatusCode,
 		ResponseHeaders: respHeaders, ResponseBody: respBodyStr,
 		ResponseBodyEncoding: respBodyEncoding, DurationMs: duration.Milliseconds(),
@@ -446,7 +446,7 @@ func (s *Server) handleExecuteResend(ctx context.Context, params executeParams) 
 
 // --- Resend helper functions ---
 
-func buildResendBody(originalBody []byte, params executeParams) ([]byte, error) {
+func buildResendBody(originalBody []byte, params resendParams) ([]byte, error) {
 	if params.OverrideBody != nil {
 		return []byte(*params.OverrideBody), nil
 	}
@@ -468,7 +468,7 @@ func buildResendBody(originalBody []byte, params executeParams) ([]byte, error) 
 	return body, nil
 }
 
-func validateResendHeaders(params executeParams) error {
+func validateResendHeaders(params resendParams) error {
 	if err := validateHeaderEntries(params.OverrideHeaders); err != nil {
 		return fmt.Errorf("override_headers: %w", err)
 	}
@@ -481,7 +481,7 @@ func validateResendHeaders(params executeParams) error {
 	return nil
 }
 
-func buildResendHeaders(originalHeaders map[string][]string, params executeParams) map[string][]string {
+func buildResendHeaders(originalHeaders map[string][]string, params resendParams) map[string][]string {
 	headers := make(map[string][]string)
 	for key, values := range originalHeaders {
 		cp := make([]string, len(values))
@@ -531,7 +531,7 @@ func validateOverrideHost(host string) error {
 	return nil
 }
 
-func (s *Server) resendHTTPClient(params executeParams) httpDoer {
+func (s *Server) resendHTTPClient(params resendParams) httpDoer {
 	if s.deps.replayDoer != nil {
 		return s.deps.replayDoer
 	}
@@ -559,7 +559,7 @@ func (s *Server) resendHTTPClient(params executeParams) httpDoer {
 
 // --- Resend raw ---
 
-type executeResendRawResult struct {
+type resendRawResult struct {
 	NewFlowID string `json:"new_flow_id,omitempty"`
 	ResponseData string `json:"response_data"`
 	ResponseSize int    `json:"response_size"`
@@ -567,7 +567,7 @@ type executeResendRawResult struct {
 	Tag          string `json:"tag,omitempty"`
 }
 
-type executeRawDryRunResult struct {
+type resendRawDryRunResult struct {
 	DryRun     bool        `json:"dry_run"`
 	RawPreview *rawPreview `json:"raw_preview"`
 }
@@ -578,7 +578,7 @@ type rawPreview struct {
 	PatchesApplied int    `json:"patches_applied"`
 }
 
-func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParams) (*gomcp.CallToolResult, any, error) {
+func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams) (*gomcp.CallToolResult, any, error) {
 	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
@@ -616,7 +616,7 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	}
 
 	if params.DryRun {
-		return nil, &executeRawDryRunResult{
+		return nil, &resendRawDryRunResult{
 			DryRun: true,
 			RawPreview: &rawPreview{
 				DataBase64: base64.StdEncoding.EncodeToString(rawBytes),
@@ -724,7 +724,7 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 		return nil, nil, fmt.Errorf("save resend_raw receive message: %w", err)
 	}
 
-	return nil, &executeResendRawResult{
+	return nil, &resendRawResult{
 		NewFlowID: newFl.ID,
 		ResponseData: base64.StdEncoding.EncodeToString(respData),
 		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
@@ -732,7 +732,7 @@ func (s *Server) handleExecuteResendRaw(ctx context.Context, params executeParam
 	}, nil
 }
 
-func buildResendRawBytes(originalRaw []byte, params executeParams) ([]byte, int, error) {
+func buildResendRawBytes(originalRaw []byte, params resendParams) ([]byte, int, error) {
 	if params.OverrideRawBase64 != "" {
 		decoded, err := base64.StdEncoding.DecodeString(params.OverrideRawBase64)
 		if err != nil {

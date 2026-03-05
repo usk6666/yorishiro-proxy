@@ -160,7 +160,7 @@ func (s *Server) rawDialerFunc() rawDialer {
 // If a custom replayDoer is set (for testing), it is returned directly.
 // Otherwise, a new HTTP client is built with the given timeout, override host,
 // and redirect/target-scope handling.
-func resendHTTPClientHelper(replayDoer httpDoer, ts *proxy.TargetScope, params executeParams) httpDoer {
+func resendHTTPClientHelper(replayDoer httpDoer, ts *proxy.TargetScope, params resendParams) httpDoer {
 	if replayDoer != nil {
 		return replayDoer
 	}

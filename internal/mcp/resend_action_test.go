@@ -57,7 +57,7 @@ func TestExecute_Resend_Success(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -177,7 +177,7 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -263,7 +263,7 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -321,7 +321,7 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -426,7 +426,7 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -485,7 +485,7 @@ func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -552,7 +552,7 @@ func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -612,7 +612,7 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -692,7 +692,7 @@ func TestExecute_Resend_Tag(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -779,7 +779,7 @@ func TestBuildResendHeaders(t *testing.T) {
 		"X-Multi":       {"val1"},
 	}
 
-	params := executeParams{
+	params := resendParams{
 		RemoveHeaders:   []string{"X-Remove-Me"},
 		OverrideHeaders: HeaderEntries{{Key: "Authorization", Value: "Bearer new-token"}},
 		AddHeaders:      HeaderEntries{{Key: "X-Multi", Value: "val2"}, {Key: "X-New", Value: "new-value"}},
@@ -821,7 +821,7 @@ func TestBuildResendHeaders_DuplicateKeys(t *testing.T) {
 	}
 
 	// Test duplicate header keys via override_headers.
-	params := executeParams{
+	params := resendParams{
 		OverrideHeaders: HeaderEntries{
 			{Key: "Host", Value: "evil.com"},
 			{Key: "Host", Value: "evil2.com"},
@@ -841,7 +841,7 @@ func TestBuildResendHeaders_DuplicateAddHeaders(t *testing.T) {
 		"Set-Cookie": {"cookie1=a"},
 	}
 
-	params := executeParams{
+	params := resendParams{
 		AddHeaders: HeaderEntries{
 			{Key: "Set-Cookie", Value: "cookie2=b"},
 			{Key: "Set-Cookie", Value: "cookie3=c"},
@@ -861,7 +861,7 @@ func TestBuildResendHeaders_CaseInsensitiveRemove(t *testing.T) {
 		"Content-Type": {"application/json"},
 	}
 
-	params := executeParams{
+	params := resendParams{
 		RemoveHeaders: []string{"content-type"},
 	}
 
@@ -881,7 +881,7 @@ func TestBuildResendBody(t *testing.T) {
 	originalBody := []byte(`{"original":"body"}`)
 
 	t.Run("no mutations returns original", func(t *testing.T) {
-		got, err := buildResendBody(originalBody, executeParams{})
+		got, err := buildResendBody(originalBody, resendParams{})
 		if err != nil {
 			t.Fatalf("error: %v", err)
 		}
@@ -892,7 +892,7 @@ func TestBuildResendBody(t *testing.T) {
 
 	t.Run("override_body replaces entirely", func(t *testing.T) {
 		body := "replaced"
-		got, err := buildResendBody(originalBody, executeParams{OverrideBody: &body})
+		got, err := buildResendBody(originalBody, resendParams{OverrideBody: &body})
 		if err != nil {
 			t.Fatalf("error: %v", err)
 		}
@@ -903,7 +903,7 @@ func TestBuildResendBody(t *testing.T) {
 
 	t.Run("override_body_base64 replaces entirely", func(t *testing.T) {
 		encoded := base64.StdEncoding.EncodeToString([]byte("binary-data"))
-		got, err := buildResendBody(originalBody, executeParams{OverrideBodyBase64: &encoded})
+		got, err := buildResendBody(originalBody, resendParams{OverrideBodyBase64: &encoded})
 		if err != nil {
 			t.Fatalf("error: %v", err)
 		}
@@ -914,7 +914,7 @@ func TestBuildResendBody(t *testing.T) {
 
 	t.Run("override_body takes priority over patches", func(t *testing.T) {
 		body := "override wins"
-		got, err := buildResendBody(originalBody, executeParams{
+		got, err := buildResendBody(originalBody, resendParams{
 			OverrideBody: &body,
 			BodyPatches:  []BodyPatch{{JSONPath: "$.original", Value: "patched"}},
 		})
@@ -927,7 +927,7 @@ func TestBuildResendBody(t *testing.T) {
 	})
 
 	t.Run("body_patches applied to original", func(t *testing.T) {
-		got, err := buildResendBody(originalBody, executeParams{
+		got, err := buildResendBody(originalBody, resendParams{
 			BodyPatches: []BodyPatch{{JSONPath: "$.original", Value: "patched"}},
 		})
 		if err != nil {
@@ -1015,7 +1015,7 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -1090,7 +1090,7 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -1167,7 +1167,7 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -1192,7 +1192,7 @@ func TestBuildResendHeaders_RemoveHeaders_EmptySlice(t *testing.T) {
 		"Content-Type": {"application/json"},
 	}
 
-	params := executeParams{
+	params := resendParams{
 		RemoveHeaders: []string{"User-Agent"},
 	}
 
@@ -1331,7 +1331,7 @@ func TestExecute_Resend_DuplicateHeaders_ArrayFormat(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -1396,7 +1396,7 @@ func TestExecute_Resend_LegacyMapFormat_BackwardCompat(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeDryRunResult
+	var out resendDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)

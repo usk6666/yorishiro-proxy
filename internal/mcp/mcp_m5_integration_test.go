@@ -197,7 +197,7 @@ func TestM5_HTTPTransport_BasicOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	expectedTools := []string{"proxy_start", "proxy_stop", "configure", "query", "execute", "manage", "fuzz", "macro", "intercept"}
+	expectedTools := []string{"proxy_start", "proxy_stop", "configure", "query", "resend", "manage", "fuzz", "macro", "intercept"}
 	toolSet := make(map[string]bool)
 	for _, tool := range toolsResult.Tools {
 		toolSet[tool.Name] = true

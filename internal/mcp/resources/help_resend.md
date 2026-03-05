@@ -1,13 +1,11 @@
-# execute
+# resend
 
 Resend and replay recorded proxy requests with optional mutations.
-
-> **Migration note:** Flow management actions (`delete_flows`, `export_flows`, `import_flows`, `regenerate_ca_cert`) have moved to the `manage` tool. Fuzzing actions (`fuzz`, `fuzz_pause`, `fuzz_resume`, `fuzz_cancel`) have moved to the `fuzz` tool. Macro actions (`define_macro`, `run_macro`, `delete_macro`) have moved to the `macro` tool. Intercept actions (`release`, `modify_and_forward`, `drop`) have moved to the `intercept` tool.
 
 ## Parameters
 
 ### action (string, required)
-The action to execute. One of: `resend`, `resend_raw`, `tcp_replay`.
+The action to perform. One of: `resend`, `resend_raw`, `tcp_replay`.
 
 > **Note:** `replay` is a deprecated alias for `resend`; `replay_raw` is a deprecated alias for `resend_raw`.
 
@@ -29,8 +27,8 @@ Resend a recorded HTTP/HTTP2/WebSocket request with optional mutations. Records 
 - **message_sequence** (integer, optional): Message sequence number for WebSocket/streaming resend. Required for WebSocket flows.
 - **override_method** (string, optional): Override the HTTP method (e.g. `"POST"`).
 - **override_url** (string, optional): Override the target URL. Must include scheme and host (e.g. `"https://other.target.com/api/v2"`).
-- **override_headers** (array or object, optional): Header overrides. Replaces matching headers. Array format `[{"key":"k","value":"v"}, ...]` supports duplicate keys (e.g. multiple Host headers for security testing). Legacy map format `{"key": "value"}` is also accepted.
-- **add_headers** (array or object, optional): Headers to add. Appended to existing values for the same key. Array format `[{"key":"k","value":"v"}, ...]` supports duplicate keys. Legacy map format `{"key": "value"}` is also accepted.
+- **override_headers** (object, optional): Header overrides as key-value pairs. Replaces matching headers.
+- **add_headers** (object, optional): Headers to add. Appended to existing values for the same key, enabling multi-value headers.
 - **remove_headers** (array of strings, optional): Header names to remove.
 - **override_body** (string, optional): Override the request body (text).
 - **override_body_base64** (string, optional): Override the request body (Base64-encoded binary). Mutually exclusive with `override_body`.
@@ -99,21 +97,7 @@ The `resend` action supports optional hooks that execute macros before sending t
   "params": {
     "flow_id": "abc-123",
     "override_method": "PUT",
-    "override_headers": [{"key": "Content-Type", "value": "application/json"}]
-  }
-}
-```
-
-### Resend with duplicate headers (security testing)
-```json
-{
-  "action": "resend",
-  "params": {
-    "flow_id": "abc-123",
-    "override_headers": [
-      {"key": "Host", "value": "target.com"},
-      {"key": "Host", "value": "evil.com"}
-    ]
+    "override_headers": {"Content-Type": "application/json"}
   }
 }
 ```

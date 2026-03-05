@@ -57,7 +57,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://help/proxy_start",
 		"yorishiro://help/proxy_stop",
 		"yorishiro://help/query",
-		"yorishiro://help/execute",
+		"yorishiro://help/resend",
 		"yorishiro://help/manage",
 		"yorishiro://help/fuzz",
 		"yorishiro://help/macro",
@@ -76,7 +76,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 	expectedSchemaURIs := []string{
 		"yorishiro://schema/proxy_start",
 		"yorishiro://schema/query",
-		"yorishiro://schema/execute",
+		"yorishiro://schema/resend",
 		"yorishiro://schema/manage",
 		"yorishiro://schema/fuzz",
 		"yorishiro://schema/macro",
@@ -125,8 +125,8 @@ func TestReadResource_HelpResources(t *testing.T) {
 			wantContains: "flows",
 		},
 		{
-			name:         "help/execute",
-			uri:          "yorishiro://help/execute",
+			name:         "help/resend",
+			uri:          "yorishiro://help/resend",
 			wantMIMEType: "text/markdown",
 			wantContains: "replay",
 		},
@@ -205,10 +205,10 @@ func TestReadResource_SchemaResources(t *testing.T) {
 			wantTitle:    "query input",
 		},
 		{
-			name:         "schema/execute",
-			uri:          "yorishiro://schema/execute",
+			name:         "schema/resend",
+			uri:          "yorishiro://schema/resend",
 			wantMIMEType: "application/json",
-			wantTitle:    "execute input",
+			wantTitle:    "resend input",
 		},
 		{
 			name:         "schema/configure",
@@ -287,18 +287,18 @@ func TestReadResource_ContentAccuracy(t *testing.T) {
 		}
 	}
 
-	// Verify help/execute mentions all available actions.
+	// Verify help/resend mentions all available actions.
 	result, err = cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "yorishiro://help/execute",
+		URI: "yorishiro://help/resend",
 	})
 	if err != nil {
 		t.Fatalf("ReadResource: %v", err)
 	}
 
 	text = result.Contents[0].Text
-	for _, action := range availableExecuteActions {
+	for _, action := range availableResendActions {
 		if !strings.Contains(text, action) {
-			t.Errorf("help/execute does not mention action %q", action)
+			t.Errorf("help/resend does not mention action %q", action)
 		}
 	}
 }
@@ -335,9 +335,9 @@ func TestReadResource_SchemaFieldConsistency(t *testing.T) {
 		}
 	}
 
-	// Verify schema/execute lists the correct action enum values.
+	// Verify schema/resend lists the correct action enum values.
 	result, err = cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "yorishiro://schema/execute",
+		URI: "yorishiro://schema/resend",
 	})
 	if err != nil {
 		t.Fatalf("ReadResource: %v", err)
@@ -358,9 +358,9 @@ func TestReadResource_SchemaFieldConsistency(t *testing.T) {
 	for _, a := range execSchema.Properties.Action.Enum {
 		gotActions[a] = true
 	}
-	for _, a := range availableExecuteActions {
+	for _, a := range availableResendActions {
 		if !gotActions[a] {
-			t.Errorf("schema/execute enum missing action %q", a)
+			t.Errorf("schema/resend enum missing action %q", a)
 		}
 	}
 }

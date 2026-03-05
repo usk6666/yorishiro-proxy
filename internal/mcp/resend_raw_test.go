@@ -70,7 +70,7 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -137,7 +137,7 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -201,7 +201,7 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -258,7 +258,7 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeRawDryRunResult
+	var out resendRawDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -350,7 +350,7 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeRawDryRunResult
+	var out resendRawDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -429,7 +429,7 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeRawDryRunResult
+	var out resendRawDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -505,7 +505,7 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -571,7 +571,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeRawDryRunResult
+	var out resendRawDryRunResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -637,7 +637,7 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -712,7 +712,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)

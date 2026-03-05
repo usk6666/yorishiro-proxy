@@ -334,7 +334,7 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	}
 
 	// Target scope enforcement: check each step's target URL before running.
-	// This mirrors the same check in handleExecuteRunMacro to prevent hooks
+	// This mirrors the same check in handleRunMacro to prevent hooks
 	// from bypassing target scope restrictions via macro execution.
 	if d.targetScope != nil && d.targetScope.HasRules() {
 		for _, step := range cfg.Steps {
@@ -540,7 +540,7 @@ func expandHeaderEntries(entries HeaderEntries, kvStore map[string]string) (Head
 
 // expandParamsWithKVStore applies template expansion to the resend/fuzz override
 // parameters using the KV Store values from a pre_send hook execution.
-func expandParamsWithKVStore(params *executeParams, kvStore map[string]string) error {
+func expandParamsWithKVStore(params *resendParams, kvStore map[string]string) error {
 	if len(kvStore) == 0 {
 		return nil
 	}
@@ -585,7 +585,7 @@ func expandParamsWithKVStore(params *executeParams, kvStore map[string]string) e
 }
 
 // parseHooksFromJSON parses hooks from a raw JSON map extracted from the params.
-// This is needed because the hooks field is not part of the typed executeParams struct
+// This is needed because the hooks field is not part of the typed resendParams struct
 // but is passed as a nested JSON object.
 func parseHooksFromJSON(raw json.RawMessage) (*hooksInput, error) {
 	if len(raw) == 0 {

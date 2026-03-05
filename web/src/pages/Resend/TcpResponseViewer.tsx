@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Tabs } from "../../components/ui/Tabs.js";
 import "./TcpResponseViewer.css";
 
-/** Result from resend_raw or tcp_replay execute actions. */
+/** Result from resend_raw or tcp_replay resend actions. */
 export interface TcpResendResult {
   new_flow_id?: string;
   response_data?: string;

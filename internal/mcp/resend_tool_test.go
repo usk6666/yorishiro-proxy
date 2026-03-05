@@ -80,7 +80,7 @@ func setupTestSessionWithExecuteRawDialer(t *testing.T, store flow.Store, dialer
 func executeCallTool(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
 	t.Helper()
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name:      "execute",
+		Name:      "resend",
 		Arguments: args,
 	})
 	if err != nil {
@@ -146,7 +146,7 @@ func TestExecute_Replay_Success(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -242,7 +242,7 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendResult
+	var out resendActionResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -447,7 +447,7 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -605,7 +605,7 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out executeResendRawResult
+	var out resendRawResult
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)

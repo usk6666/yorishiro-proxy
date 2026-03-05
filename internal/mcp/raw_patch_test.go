@@ -427,7 +427,7 @@ func TestBuildResendRawBytes(t *testing.T) {
 	originalRaw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 
 	t.Run("no mutations returns original", func(t *testing.T) {
-		got, count, err := buildResendRawBytes(originalRaw, executeParams{})
+		got, count, err := buildResendRawBytes(originalRaw, resendParams{})
 		if err != nil {
 			t.Fatalf("error: %v", err)
 		}
@@ -442,7 +442,7 @@ func TestBuildResendRawBytes(t *testing.T) {
 	t.Run("override_raw_base64 replaces entirely", func(t *testing.T) {
 		replacement := []byte("POST /new HTTP/1.1\r\nHost: new.com\r\n\r\n")
 		b64 := base64.StdEncoding.EncodeToString(replacement)
-		got, count, err := buildResendRawBytes(originalRaw, executeParams{OverrideRawBase64: b64})
+		got, count, err := buildResendRawBytes(originalRaw, resendParams{OverrideRawBase64: b64})
 		if err != nil {
 			t.Fatalf("error: %v", err)
 		}
@@ -457,7 +457,7 @@ func TestBuildResendRawBytes(t *testing.T) {
 	t.Run("override_raw_base64 takes priority over patches", func(t *testing.T) {
 		replacement := []byte("REPLACED")
 		b64 := base64.StdEncoding.EncodeToString(replacement)
-		got, count, err := buildResendRawBytes(originalRaw, executeParams{
+		got, count, err := buildResendRawBytes(originalRaw, resendParams{
 			OverrideRawBase64: b64,
 			Patches:           []RawPatch{{FindText: "example.com", ReplaceText: "target.com"}},
 		})
@@ -473,7 +473,7 @@ func TestBuildResendRawBytes(t *testing.T) {
 	})
 
 	t.Run("patches applied to original", func(t *testing.T) {
-		got, count, err := buildResendRawBytes(originalRaw, executeParams{
+		got, count, err := buildResendRawBytes(originalRaw, resendParams{
 			Patches: []RawPatch{{FindText: "example.com", ReplaceText: "target.com"}},
 		})
 		if err != nil {
@@ -489,7 +489,7 @@ func TestBuildResendRawBytes(t *testing.T) {
 	})
 
 	t.Run("invalid override_raw_base64", func(t *testing.T) {
-		_, _, err := buildResendRawBytes(originalRaw, executeParams{OverrideRawBase64: "not-valid!!!"})
+		_, _, err := buildResendRawBytes(originalRaw, resendParams{OverrideRawBase64: "not-valid!!!"})
 		if err == nil {
 			t.Error("expected error for invalid override_raw_base64")
 		}
@@ -498,7 +498,7 @@ func TestBuildResendRawBytes(t *testing.T) {
 	t.Run("empty override_raw_base64 treated as not set", func(t *testing.T) {
 		// base64("") == "", which is treated as "field not set" -> returns original bytes
 		b64 := base64.StdEncoding.EncodeToString([]byte{})
-		got, count, err := buildResendRawBytes(originalRaw, executeParams{OverrideRawBase64: b64})
+		got, count, err := buildResendRawBytes(originalRaw, resendParams{OverrideRawBase64: b64})
 		if err != nil {
 			t.Fatalf("error: %v", err)
 		}
