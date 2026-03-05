@@ -3,11 +3,12 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 )
 
 // fuzzInput is the typed input for the fuzz tool.
@@ -158,6 +159,15 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 	if params.Hooks != nil {
 		hooks := newFuzzHookCallbacks(s.deps, params.Hooks)
 		cfg.Hooks = hooks
+	}
+
+	// Inject target scope checker to validate URLs after position application
+	// and KV Store template expansion, preventing SSRF via payload injection.
+	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
+		ts := s.deps.targetScope
+		cfg.TargetScopeChecker = func(u *url.URL) error {
+			return checkTargetScopeURLHelper(ts, u)
+		}
 	}
 
 	result, err := s.deps.fuzzRunner.Start(s.deps.appCtx, cfg)
