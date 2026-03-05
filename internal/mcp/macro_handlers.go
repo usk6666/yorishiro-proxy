@@ -394,6 +394,13 @@ func validateMacroDefinition(m *macro.Macro) error {
 			}
 		}
 
+		// Validate override_headers for CRLF injection (CWE-113).
+		if len(step.OverrideHeaders) > 0 {
+			if err := validateHeaderValues(step.OverrideHeaders); err != nil {
+				return fmt.Errorf("step %q override_headers: %w", step.ID, err)
+			}
+		}
+
 		for j := range step.Extract {
 			rule := &step.Extract[j]
 			if rule.Name == "" {

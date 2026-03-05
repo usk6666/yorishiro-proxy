@@ -1190,6 +1190,87 @@ func TestCopyHeaders(t *testing.T) {
 	}
 }
 
+// --- CRLF validation in buildRequest after template expansion (CWE-113) ---
+
+func TestBuildRequest_OverrideHeaders_CRLFInExpandedValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		kvStore map[string]string
+	}{
+		{
+			name:    "CR in expanded value",
+			headers: map[string]string{"X-Custom": "{{token}}"},
+			kvStore: map[string]string{"token": "value\rInjected: evil"},
+		},
+		{
+			name:    "LF in expanded value",
+			headers: map[string]string{"X-Custom": "{{token}}"},
+			kvStore: map[string]string{"token": "value\nInjected: evil"},
+		},
+		{
+			name:    "CRLF in expanded value",
+			headers: map[string]string{"X-Custom": "{{token}}"},
+			kvStore: map[string]string{"token": "value\r\nInjected: evil"},
+		},
+		{
+			name:    "CRLF in static value (no template)",
+			headers: map[string]string{"X-Custom": "value\r\nInjected: evil"},
+			kvStore: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := &Step{
+				ID:              "step1",
+				FlowID:       "sess1",
+				OverrideHeaders: tt.headers,
+			}
+			base := &SendRequest{
+				Method:  "GET",
+				URL:     "https://example.com",
+				Headers: map[string][]string{},
+			}
+			_, err := buildRequest(step, base, tt.kvStore)
+			if err == nil {
+				t.Fatal("expected error for CRLF in expanded header value, got nil")
+			}
+		})
+	}
+}
+
+func TestBuildRequest_OverrideHeaders_CleanExpanded(t *testing.T) {
+	step := &Step{
+		ID:       "step1",
+		FlowID: "sess1",
+		OverrideHeaders: map[string]string{
+			"Authorization": "Bearer {{token}}",
+			"X-Request-ID":  "{{req_id}}",
+		},
+	}
+	base := &SendRequest{
+		Method:  "GET",
+		URL:     "https://example.com",
+		Headers: map[string][]string{},
+	}
+	kvStore := map[string]string{
+		"token":  "abc123",
+		"req_id": "request-456",
+	}
+
+	req, err := buildRequest(step, base, kvStore)
+	if err != nil {
+		t.Fatalf("expected no error for clean expanded headers, got: %v", err)
+	}
+	if got := req.Headers["Authorization"][0]; got != "Bearer abc123" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer abc123")
+	}
+	if got := req.Headers["X-Request-ID"][0]; got != "request-456" {
+		t.Errorf("X-Request-ID = %q, want %q", got, "request-456")
+	}
+}
+
 func TestCopyHeaders_Nil(t *testing.T) {
 	cp := copyHeaders(nil)
 	if cp == nil {

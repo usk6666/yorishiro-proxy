@@ -3,6 +3,8 @@ package mcp
 import (
 	"net/url"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
 
 // --- CRLF header injection validation tests (CWE-113) ---
@@ -148,6 +150,100 @@ func TestValidateResendHeaders_CRLFInRemoveKey(t *testing.T) {
 	err := validateResendHeaders(params)
 	if err == nil {
 		t.Fatal("expected error for CRLF in remove_headers key, got nil")
+	}
+}
+
+// --- Macro override_headers CRLF validation tests (CWE-113) ---
+
+func TestValidateMacroDefinition_OverrideHeaders_CRLFInValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{
+			name:    "CR in header value",
+			headers: map[string]string{"X-Custom": "value\rInjected: evil"},
+		},
+		{
+			name:    "LF in header value",
+			headers: map[string]string{"X-Custom": "value\nInjected: evil"},
+		},
+		{
+			name:    "CRLF in header value",
+			headers: map[string]string{"X-Custom": "value\r\nInjected: evil"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &macro.Macro{
+				Name: "test-macro",
+				Steps: []macro.Step{
+					{
+						ID:              "step1",
+						FlowID:       "flow-1",
+						OverrideHeaders: tt.headers,
+					},
+				},
+			}
+			err := validateMacroDefinition(m)
+			if err == nil {
+				t.Fatal("expected error for CRLF in override_headers value, got nil")
+			}
+		})
+	}
+}
+
+func TestValidateMacroDefinition_OverrideHeaders_CRLFInKey(t *testing.T) {
+	m := &macro.Macro{
+		Name: "test-macro",
+		Steps: []macro.Step{
+			{
+				ID:              "step1",
+				FlowID:       "flow-1",
+				OverrideHeaders: map[string]string{"X-Evil\r\nInjected": "value"},
+			},
+		},
+	}
+	err := validateMacroDefinition(m)
+	if err == nil {
+		t.Fatal("expected error for CRLF in override_headers key, got nil")
+	}
+}
+
+func TestValidateMacroDefinition_OverrideHeaders_Clean(t *testing.T) {
+	m := &macro.Macro{
+		Name: "test-macro",
+		Steps: []macro.Step{
+			{
+				ID:              "step1",
+				FlowID:       "flow-1",
+				OverrideHeaders: map[string]string{
+					"Content-Type":  "application/json",
+					"Authorization": "Bearer token123",
+				},
+			},
+		},
+	}
+	err := validateMacroDefinition(m)
+	if err != nil {
+		t.Fatalf("expected no error for clean override_headers, got: %v", err)
+	}
+}
+
+func TestValidateMacroDefinition_OverrideHeaders_Empty(t *testing.T) {
+	m := &macro.Macro{
+		Name: "test-macro",
+		Steps: []macro.Step{
+			{
+				ID:       "step1",
+				FlowID: "flow-1",
+			},
+		},
+	}
+	err := validateMacroDefinition(m)
+	if err != nil {
+		t.Fatalf("expected no error for step without override_headers, got: %v", err)
 	}
 }
 
