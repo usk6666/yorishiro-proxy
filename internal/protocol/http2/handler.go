@@ -319,6 +319,20 @@ func (h *Handler) handleStream(
 				w.WriteHeader(gohttp.StatusBadRequest)
 				return
 			}
+			// Re-check target scope after URL override to prevent SSRF (CWE-918, S-1).
+			if action.OverrideURL != "" && h.TargetScope != nil && h.TargetScope.HasRules() {
+				if allowed, reason := h.TargetScope.CheckURL(outReq.URL); !allowed {
+					body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`,
+						outReq.URL.Hostname(), reason)
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+					w.WriteHeader(gohttp.StatusForbidden)
+					w.Write([]byte(body))
+					logger.Warn("HTTP/2 intercept override_url blocked by target scope",
+						"url", outReq.URL.String(), "reason", reason)
+					return
+				}
+			}
 			// Update recordReqBody and srp for flow recording.
 			if action.OverrideBody != nil {
 				recordReqBody = []byte(*action.OverrideBody)
