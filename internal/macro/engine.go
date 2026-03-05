@@ -395,6 +395,11 @@ func validateMacro(m *Macro) error {
 			return fmt.Errorf("step %q has invalid on_error value %q", step.ID, step.OnError)
 		}
 
+		// Validate retry_count upper bound (CWE-770).
+		if step.RetryCount > MaxRetryCount {
+			return fmt.Errorf("step %q retry_count %d exceeds maximum (%d)", step.ID, step.RetryCount, MaxRetryCount)
+		}
+
 		// Validate guard references only previously defined steps.
 		if step.When != nil && step.When.Step != "" {
 			if !seenIDs[step.When.Step] {

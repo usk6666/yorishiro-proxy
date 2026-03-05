@@ -126,6 +126,29 @@ func TestValidateMacro(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "retry_count at maximum",
+			macro: &Macro{
+				Name:  "test",
+				Steps: []Step{{ID: "s1", FlowID: "sess1", RetryCount: MaxRetryCount}},
+			},
+		},
+		{
+			name: "retry_count exceeds maximum",
+			macro: &Macro{
+				Name:  "test",
+				Steps: []Step{{ID: "s1", FlowID: "sess1", RetryCount: MaxRetryCount + 1}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "retry_count far exceeds maximum",
+			macro: &Macro{
+				Name:  "test",
+				Steps: []Step{{ID: "s1", FlowID: "sess1", RetryCount: 999999}},
+			},
+			wantErr: true,
+		},
+		{
 			name: "forward guard reference",
 			macro: &Macro{
 				Name: "test",
