@@ -91,7 +91,7 @@ func (s *Server) registerQuery() {
 			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
 			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
 			"Results are paginated with limit/offset for flows, messages, fuzz_jobs, and fuzz_results resources. " +
-			"'intercept_queue' returns currently blocked requests waiting for release/modify_and_forward/drop actions.",
+			"'intercept_queue' returns currently blocked requests and responses (with phase field) waiting for release/modify_and_forward/drop actions.",
 	}, s.handleQuery)
 }
 
@@ -816,21 +816,25 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 
 // queryInterceptQueueEntry is a single entry in the intercept queue query response.
 type queryInterceptQueueEntry struct {
-	// ID is the unique identifier for the intercepted request.
+	// ID is the unique identifier for the intercepted item.
 	ID string `json:"id"`
+	// Phase indicates whether this is a "request" or "response" intercept.
+	Phase string `json:"phase"`
 	// Method is the HTTP method.
 	Method string `json:"method"`
 	// URL is the request URL.
 	URL string `json:"url"`
-	// Headers are the request headers.
+	// StatusCode is the HTTP status code (only set for response phase).
+	StatusCode int `json:"status_code,omitempty"`
+	// Headers are the request/response headers.
 	Headers map[string][]string `json:"headers"`
 	// BodyEncoding indicates the encoding of the body ("text" or "base64").
 	BodyEncoding string `json:"body_encoding"`
-	// Body is the request body as text or Base64-encoded string.
+	// Body is the request/response body as text or Base64-encoded string.
 	Body string `json:"body"`
-	// Timestamp is when the request was intercepted.
+	// Timestamp is when the item was intercepted.
 	Timestamp string `json:"timestamp"`
-	// MatchedRules lists the IDs of the rules that matched this request.
+	// MatchedRules lists the IDs of the rules that matched.
 	MatchedRules []string `json:"matched_rules"`
 }
 
@@ -882,8 +886,10 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 
 		entries = append(entries, queryInterceptQueueEntry{
 			ID:           item.ID,
+			Phase:        string(item.Phase),
 			Method:       item.Method,
 			URL:          urlStr,
+			StatusCode:   item.StatusCode,
 			Headers:      headers,
 			Body:         bodyStr,
 			BodyEncoding: bodyEncoding,

@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -149,12 +151,10 @@ func (h *Handler) forwardUpstream(ctx context.Context, conn net.Conn, req *gohtt
 	return &forwardResult{resp: resp, serverAddr: serverAddr}, nil
 }
 
-// readResponseBody reads the full response body (up to MaxBodySize), applies
-// response transforms if configured, and serializes the raw response for
-// wire-level recording.
-func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) (fullBody, rawResponse []byte) {
-	var err error
-	fullBody, err = io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
+// readResponseBody reads the full response body (up to MaxBodySize) and applies
+// response transforms if configured.
+func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) []byte {
+	fullBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
 	}
@@ -163,8 +163,7 @@ func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) (
 		resp.Header, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, fullBody)
 	}
 
-	rawResponse = serializeRawResponse(resp, fullBody)
-	return fullBody, rawResponse
+	return fullBody
 }
 
 // writeResponseToClient writes the HTTP response with body back to the client
@@ -174,6 +173,139 @@ func writeResponseToClient(conn net.Conn, resp *gohttp.Response, body []byte) er
 		return fmt.Errorf("write response: %w", err)
 	}
 	return nil
+}
+
+// interceptResponse checks if the response matches any intercept rules and,
+// if so, enqueues it for AI agent review. It blocks until the agent responds
+// or the timeout expires. Returns the action and true if intercepted, or a
+// zero-value action and false if not intercepted.
+func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
+		return intercept.InterceptAction{}, false
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	if len(matchedRules) == 0 {
+		return intercept.InterceptAction{}, false
+	}
+
+	logger.Info("response intercepted",
+		"method", req.Method,
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"matched_rules", matchedRules)
+
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		req.Method, req.URL, resp.StatusCode, resp.Header, body, matchedRules,
+	)
+	defer h.InterceptQueue.Remove(id)
+
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	select {
+	case action := <-actionCh:
+		return action, true
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			logger.Info("intercepted response cancelled (proxy shutdown)", "id", id)
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		}
+		logger.Info("intercepted response timed out", "id", id, "behavior", string(behavior))
+		switch behavior {
+		case intercept.TimeoutAutoDrop:
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		default:
+			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
+		}
+	}
+}
+
+// applyInterceptResponse checks response intercept rules and applies any modifications.
+// It returns the (possibly modified) response, updated body, and a boolean indicating
+// whether the response was dropped (caller should return early with an error response).
+func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (*gohttp.Response, []byte, bool) {
+	action, intercepted := h.interceptResponse(ctx, req, resp, body, logger)
+	if !intercepted {
+		return resp, body, false
+	}
+
+	switch action.Type {
+	case intercept.ActionDrop:
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		logger.Info("intercepted response dropped",
+			"method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
+		return resp, body, true
+	case intercept.ActionModifyAndForward:
+		var modErr error
+		resp, body, modErr = applyResponseModifications(resp, action, body)
+		if modErr != nil {
+			logger.Error("response intercept modification failed", "error", modErr)
+			httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+			return resp, body, true
+		}
+		return resp, body, false
+	case intercept.ActionRelease:
+		// Continue with the original response.
+	}
+
+	return resp, body, false
+}
+
+// applyResponseModifications applies the modifications from a modify_and_forward
+// action to the HTTP response. It returns the modified response, body, and an
+// error if validation fails (e.g., invalid status code, CRLF injection).
+func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
+	// Override status code with range validation (S-1: CWE-20).
+	if action.OverrideStatus > 0 {
+		if action.OverrideStatus < 100 || action.OverrideStatus > 999 {
+			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
+		}
+		resp.StatusCode = action.OverrideStatus
+		resp.Status = fmt.Sprintf("%d %s", action.OverrideStatus, gohttp.StatusText(action.OverrideStatus))
+	}
+
+	// Validate response header values for CRLF injection (S-2: CWE-113).
+	for key, val := range action.OverrideResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for key, val := range action.AddResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for _, key := range action.RemoveResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") {
+			return resp, body, fmt.Errorf("remove response header key %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+
+	// Remove response headers first.
+	for _, key := range action.RemoveResponseHeaders {
+		resp.Header.Del(key)
+	}
+
+	// Override response headers.
+	for key, val := range action.OverrideResponseHeaders {
+		resp.Header.Set(key, val)
+	}
+
+	// Add response headers.
+	for key, val := range action.AddResponseHeaders {
+		resp.Header.Add(key, val)
+	}
+
+	// Override response body and update Content-Length (F-1).
+	if action.OverrideResponseBody != nil {
+		body = []byte(*action.OverrideResponseBody)
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+
+	return resp, body, nil
 }
 
 // requestSnapshot holds a copy of the request headers and body taken before

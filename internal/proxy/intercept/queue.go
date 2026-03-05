@@ -40,11 +40,23 @@ const DefaultInterceptTimeout = 5 * time.Minute
 // memory exhaustion (CWE-770).
 const DefaultMaxQueueItems = 100
 
-// InterceptAction represents the action to take on an intercepted request,
+// InterceptPhase specifies whether an intercepted item is a request or response.
+type InterceptPhase string
+
+const (
+	// PhaseRequest indicates the intercepted item is a request (pre-send).
+	PhaseRequest InterceptPhase = "request"
+	// PhaseResponse indicates the intercepted item is a response (post-receive).
+	PhaseResponse InterceptPhase = "response"
+)
+
+// InterceptAction represents the action to take on an intercepted request or response,
 // including optional modification parameters for modify_and_forward.
 type InterceptAction struct {
 	// Type is the action type (release, modify_and_forward, or drop).
 	Type ActionType
+
+	// --- Request modification fields (modify_and_forward, phase=request) ---
 
 	// OverrideMethod overrides the HTTP method (modify_and_forward only).
 	OverrideMethod string
@@ -60,27 +72,44 @@ type InterceptAction struct {
 	OverrideBody *string
 	// OverrideBodyBase64 replaces the body with Base64-decoded content (modify_and_forward only).
 	OverrideBodyBase64 *string
+
+	// --- Response modification fields (modify_and_forward, phase=response) ---
+
+	// OverrideStatus overrides the HTTP status code (response modify_and_forward only).
+	OverrideStatus int
+	// OverrideResponseHeaders replaces specific response header values.
+	OverrideResponseHeaders map[string]string
+	// AddResponseHeaders appends response header values.
+	AddResponseHeaders map[string]string
+	// RemoveResponseHeaders removes specific response headers.
+	RemoveResponseHeaders []string
+	// OverrideResponseBody replaces the entire response body.
+	OverrideResponseBody *string
 }
 
-// InterceptedRequest represents a request that has been intercepted and is waiting
-// for an action from the AI agent.
+// InterceptedRequest represents a request or response that has been intercepted
+// and is waiting for an action from the AI agent.
 type InterceptedRequest struct {
-	// ID is the unique identifier for this intercepted request.
+	// ID is the unique identifier for this intercepted item.
 	ID string
+	// Phase indicates whether this is a request or response intercept.
+	Phase InterceptPhase
 	// Method is the HTTP method of the intercepted request.
 	Method string
 	// URL is the request URL.
 	URL *url.URL
-	// Headers are the request headers.
+	// Headers are the request headers (phase=request) or response headers (phase=response).
 	Headers http.Header
-	// Body is the request body.
+	// Body is the request body (phase=request) or response body (phase=response).
 	Body []byte
-	// Timestamp is when the request was intercepted.
+	// StatusCode is the HTTP status code (only set for phase=response).
+	StatusCode int
+	// Timestamp is when the item was intercepted.
 	Timestamp time.Time
-	// MatchedRules lists the IDs of the rules that matched this request.
+	// MatchedRules lists the IDs of the rules that matched.
 	MatchedRules []string
 
-	// actionCh receives the action to perform on this request.
+	// actionCh receives the action to perform on this intercepted item.
 	// It is buffered with capacity 1 to prevent goroutine leaks on timeout.
 	actionCh chan InterceptAction
 }
@@ -202,6 +231,7 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []b
 
 	item := &InterceptedRequest{
 		ID:           id,
+		Phase:        PhaseRequest,
 		Method:       method,
 		URL:          urlCopy,
 		Headers:      headersCopy,
@@ -214,6 +244,80 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []b
 	q.mu.Lock()
 	// Re-check under lock in case another goroutine filled the queue
 	// between our capacity check and now.
+	if q.maxItems > 0 && len(q.items) >= q.maxItems {
+		q.mu.Unlock()
+		actionCh <- InterceptAction{Type: ActionRelease}
+		return id, actionCh
+	}
+	q.items[id] = item
+	q.mu.Unlock()
+
+	return id, actionCh
+}
+
+// EnqueueResponse adds a new intercepted response to the queue and returns its ID
+// along with a channel that will receive the action to perform.
+// The method and reqURL parameters identify the original request that produced
+// this response. statusCode, headers, and body describe the response itself.
+//
+// If the queue has reached its maxItems limit, the response is immediately
+// auto-released.
+func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, headers http.Header, body []byte, matchedRules []string) (string, <-chan InterceptAction) {
+	id := uuid.New().String()
+	actionCh := make(chan InterceptAction, 1)
+
+	// Check queue capacity under lock.
+	q.mu.Lock()
+	if q.maxItems > 0 && len(q.items) >= q.maxItems {
+		q.mu.Unlock()
+		actionCh <- InterceptAction{Type: ActionRelease}
+		return id, actionCh
+	}
+	q.mu.Unlock()
+
+	// Deep-copy URL.
+	var urlCopy *url.URL
+	if reqURL != nil {
+		tmp := *reqURL
+		urlCopy = &tmp
+	}
+
+	// Deep-copy headers.
+	headersCopy := make(http.Header)
+	for k, vs := range headers {
+		cp := make([]string, len(vs))
+		copy(cp, vs)
+		headersCopy[k] = cp
+	}
+
+	// Copy body.
+	var bodyCopy []byte
+	if len(body) > 0 {
+		bodyCopy = make([]byte, len(body))
+		copy(bodyCopy, body)
+	}
+
+	// Copy matched rules.
+	var rulesCopy []string
+	if len(matchedRules) > 0 {
+		rulesCopy = make([]string, len(matchedRules))
+		copy(rulesCopy, matchedRules)
+	}
+
+	item := &InterceptedRequest{
+		ID:           id,
+		Phase:        PhaseResponse,
+		Method:       method,
+		URL:          urlCopy,
+		Headers:      headersCopy,
+		Body:         bodyCopy,
+		StatusCode:   statusCode,
+		Timestamp:    time.Now(),
+		MatchedRules: rulesCopy,
+		actionCh:     actionCh,
+	}
+
+	q.mu.Lock()
 	if q.maxItems > 0 && len(q.items) >= q.maxItems {
 		q.mu.Unlock()
 		actionCh <- InterceptAction{Type: ActionRelease}

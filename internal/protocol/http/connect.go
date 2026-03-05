@@ -408,7 +408,8 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	defer fwd.resp.Body.Close()
 
 	// Step 7: Read response, write to client, and record flow.
-	fullRespBody, rawResponse := h.readResponseBody(fwd.resp, logger)
+	fullRespBody := h.readResponseBody(fwd.resp, logger)
+	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
 
 	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
 		return err
