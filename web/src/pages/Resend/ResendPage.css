@@ -314,6 +314,57 @@
   border-radius: var(--radius-sm);
 }
 
+/* HTTP mode tabs override */
+.resend-http-mode-tabs {
+  margin-bottom: var(--space-sm);
+}
+
+/* Raw HTTP editor */
+.resend-raw-editor {
+  display: flex;
+  flex-direction: column;
+}
+
+.resend-raw-textarea {
+  width: 100%;
+  min-height: 280px;
+  max-height: 480px;
+  padding: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  resize: vertical;
+  transition: border-color var(--transition-fast);
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.resend-raw-textarea:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+}
+
+.resend-raw-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* HTTP/2 downgrade notice */
+.resend-raw-downgrade-notice {
+  font-size: var(--font-size-xs);
+  color: var(--accent-warning);
+  padding: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  background-color: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.2);
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
+}
+
 /* Resend page code styling */
 .resend-page code {
   padding: 2px var(--space-xs);
