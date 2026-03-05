@@ -3,13 +3,18 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
+	"net"
 	gohttp "net/http"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -239,4 +244,272 @@ func TestLogHTTPRequest(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
 	logHTTPRequest(logger, req, 200, 42)
+}
+
+func TestApplyIntercept_ModifyAndForward_OverrideURLBlockedByTargetScope(t *testing.T) {
+	// When modify_and_forward overrides the URL to a host outside the target
+	// scope, the request must be blocked (SSRF prevention, CWE-918).
+	logger := testutil.DiscardLogger()
+	handler := NewHandler(&mockStore{}, nil, logger)
+
+	// Configure target scope: only allow example.com.
+	ts := proxy.NewTargetScope()
+	ts.SetAgentRules([]proxy.TargetRule{
+		{Hostname: "example.com"},
+	}, nil)
+	handler.SetTargetScope(ts)
+
+	// Set up intercept engine with a catch-all rule.
+	engine := intercept.NewEngine()
+	if err := engine.AddRule(intercept.Rule{
+		ID:        "test-rule",
+		Enabled:   true,
+		Direction: intercept.DirectionRequest,
+	}); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+	handler.InterceptEngine = engine
+
+	queue := intercept.NewQueue()
+	handler.InterceptQueue = queue
+
+	// Create the request targeting an allowed host.
+	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	recordBody := []byte("test body")
+
+	// Use net.Pipe for the connection so we can read the blocked response.
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	ctx := context.Background()
+
+	// Start a goroutine to drain the client side of the pipe so that
+	// writeBlockedResponse does not block on net.Pipe's synchronous writes.
+	type clientResult struct {
+		resp *gohttp.Response
+		err  error
+	}
+	clientCh := make(chan clientResult, 1)
+	go func() {
+		reader := bufio.NewReader(clientConn)
+		resp, err := gohttp.ReadResponse(reader, nil)
+		clientCh <- clientResult{resp, err}
+	}()
+
+	// Run applyIntercept in a goroutine since interceptRequest blocks
+	// waiting for a response from the queue.
+	type result struct {
+		req     *gohttp.Request
+		body    []byte
+		dropped bool
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		r, b, d := handler.applyIntercept(ctx, serverConn, req, recordBody, logger)
+		resultCh <- result{r, b, d}
+	}()
+
+	// Wait for the request to appear in the queue.
+	var interceptedID string
+	for i := 0; i < 200; i++ {
+		items := queue.List()
+		if len(items) > 0 {
+			interceptedID = items[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if interceptedID == "" {
+		t.Fatal("intercepted request did not appear in queue")
+	}
+
+	// Respond with modify_and_forward that redirects to a blocked host.
+	err := queue.Respond(interceptedID, intercept.InterceptAction{
+		Type:        intercept.ActionModifyAndForward,
+		OverrideURL: "http://evil.internal:8080/admin",
+	})
+	if err != nil {
+		t.Fatalf("queue respond: %v", err)
+	}
+
+	// Get the result.
+	res := <-resultCh
+
+	if !res.dropped {
+		t.Fatal("expected request to be dropped after override_url to blocked host")
+	}
+
+	// Verify the blocked response written to the client connection.
+	cr := <-clientCh
+	if cr.err != nil {
+		t.Fatalf("read blocked response: %v", cr.err)
+	}
+	defer cr.resp.Body.Close()
+
+	if cr.resp.StatusCode != gohttp.StatusForbidden {
+		t.Errorf("status = %d, want %d", cr.resp.StatusCode, gohttp.StatusForbidden)
+	}
+}
+
+func TestApplyIntercept_ModifyAndForward_OverrideURLAllowedByTargetScope(t *testing.T) {
+	// When modify_and_forward overrides the URL to a host within the target
+	// scope, the request should proceed normally (not dropped).
+	logger := testutil.DiscardLogger()
+	handler := NewHandler(&mockStore{}, nil, logger)
+
+	// Configure target scope: allow both example.com and allowed.com.
+	ts := proxy.NewTargetScope()
+	ts.SetAgentRules([]proxy.TargetRule{
+		{Hostname: "example.com"},
+		{Hostname: "allowed.com"},
+	}, nil)
+	handler.SetTargetScope(ts)
+
+	// Set up intercept engine with a catch-all rule.
+	engine := intercept.NewEngine()
+	if err := engine.AddRule(intercept.Rule{
+		ID:        "test-rule",
+		Enabled:   true,
+		Direction: intercept.DirectionRequest,
+	}); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+	handler.InterceptEngine = engine
+
+	queue := intercept.NewQueue()
+	handler.InterceptQueue = queue
+
+	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	recordBody := []byte("test body")
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	ctx := context.Background()
+
+	type result struct {
+		req     *gohttp.Request
+		body    []byte
+		dropped bool
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		r, b, d := handler.applyIntercept(ctx, serverConn, req, recordBody, logger)
+		resultCh <- result{r, b, d}
+	}()
+
+	// Wait for the request to appear in the queue.
+	var interceptedID string
+	for i := 0; i < 200; i++ {
+		items := queue.List()
+		if len(items) > 0 {
+			interceptedID = items[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if interceptedID == "" {
+		t.Fatal("intercepted request did not appear in queue")
+	}
+
+	// Respond with modify_and_forward to an allowed host.
+	err := queue.Respond(interceptedID, intercept.InterceptAction{
+		Type:        intercept.ActionModifyAndForward,
+		OverrideURL: "http://allowed.com/new-path",
+	})
+	if err != nil {
+		t.Fatalf("queue respond: %v", err)
+	}
+
+	res := <-resultCh
+
+	if res.dropped {
+		t.Fatal("expected request NOT to be dropped for override_url to allowed host")
+	}
+	if res.req.URL.Host != "allowed.com" {
+		t.Errorf("URL host = %q, want %q", res.req.URL.Host, "allowed.com")
+	}
+	if res.req.URL.Path != "/new-path" {
+		t.Errorf("URL path = %q, want %q", res.req.URL.Path, "/new-path")
+	}
+}
+
+func TestApplyIntercept_ModifyAndForward_NoOverrideURL_SkipsRecheck(t *testing.T) {
+	// When modify_and_forward does not override the URL, the target scope
+	// re-check should be skipped (no performance penalty for header-only mods).
+	logger := testutil.DiscardLogger()
+	handler := NewHandler(&mockStore{}, nil, logger)
+
+	// Configure target scope: only allow example.com.
+	ts := proxy.NewTargetScope()
+	ts.SetAgentRules([]proxy.TargetRule{
+		{Hostname: "example.com"},
+	}, nil)
+	handler.SetTargetScope(ts)
+
+	engine := intercept.NewEngine()
+	if err := engine.AddRule(intercept.Rule{
+		ID:        "test-rule",
+		Enabled:   true,
+		Direction: intercept.DirectionRequest,
+	}); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+	handler.InterceptEngine = engine
+
+	queue := intercept.NewQueue()
+	handler.InterceptQueue = queue
+
+	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	recordBody := []byte("test body")
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	ctx := context.Background()
+
+	type result struct {
+		req     *gohttp.Request
+		body    []byte
+		dropped bool
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		r, b, d := handler.applyIntercept(ctx, serverConn, req, recordBody, logger)
+		resultCh <- result{r, b, d}
+	}()
+
+	var interceptedID string
+	for i := 0; i < 200; i++ {
+		items := queue.List()
+		if len(items) > 0 {
+			interceptedID = items[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if interceptedID == "" {
+		t.Fatal("intercepted request did not appear in queue")
+	}
+
+	// Respond with modify_and_forward without URL override (header-only change).
+	err := queue.Respond(interceptedID, intercept.InterceptAction{
+		Type:            intercept.ActionModifyAndForward,
+		OverrideHeaders: map[string]string{"X-Test": "value"},
+	})
+	if err != nil {
+		t.Fatalf("queue respond: %v", err)
+	}
+
+	res := <-resultCh
+
+	if res.dropped {
+		t.Fatal("expected request NOT to be dropped for modify_and_forward without URL override")
+	}
+	if res.req.URL.Host != "example.com" {
+		t.Errorf("URL host = %q, want %q", res.req.URL.Host, "example.com")
+	}
 }
