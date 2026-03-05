@@ -2,6 +2,7 @@
 .playwright/
 .playwright-cli/
 .claude/skills/playwright-cli
+.claude/settings.local.json
 .mcp.json
 
 # SQLite database files
