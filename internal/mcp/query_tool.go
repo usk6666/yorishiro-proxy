@@ -514,13 +514,15 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
 	}
 
-	// Verify the flow exists.
-	if _, err := s.deps.store.GetFlow(ctx, input.ID); err != nil {
+	// Verify the flow exists and resolve prefix IDs.
+	fl, err := s.deps.store.GetFlow(ctx, input.ID)
+	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
+	resolvedID := fl.ID
 
 	// Get total message count for pagination.
-	total, err := s.deps.store.CountMessages(ctx, input.ID)
+	total, err := s.deps.store.CountMessages(ctx, resolvedID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count messages: %w", err)
 	}
@@ -535,7 +537,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	// Fetch messages with optional direction filter.
-	allMsgs, err := s.deps.store.GetMessages(ctx, input.ID, msgOpts)
+	allMsgs, err := s.deps.store.GetMessages(ctx, resolvedID, msgOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
