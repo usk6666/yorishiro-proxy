@@ -265,6 +265,56 @@ func TestRunConfig_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "negative timeout_ms",
+			cfg: RunConfig{
+				Config: Config{
+					FlowID:     "sess-1",
+					AttackType:  "sequential",
+					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
+					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
+					TimeoutMs:   -1,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "timeout_ms exceeds max",
+			cfg: RunConfig{
+				Config: Config{
+					FlowID:     "sess-1",
+					AttackType:  "sequential",
+					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
+					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
+					TimeoutMs:   maxTimeoutMs + 1,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "timeout_ms at max",
+			cfg: RunConfig{
+				Config: Config{
+					FlowID:     "sess-1",
+					AttackType:  "sequential",
+					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
+					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
+					TimeoutMs:   maxTimeoutMs,
+				},
+			},
+		},
+		{
+			name: "timeout_ms zero is valid",
+			cfg: RunConfig{
+				Config: Config{
+					FlowID:     "sess-1",
+					AttackType:  "sequential",
+					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
+					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
+					TimeoutMs:   0,
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

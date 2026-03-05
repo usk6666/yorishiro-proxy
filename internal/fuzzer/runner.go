@@ -16,7 +16,12 @@ import (
 
 // maxConcurrency is the upper bound on concurrent workers per fuzz job.
 // This prevents resource exhaustion from excessive goroutine creation (CWE-770).
-const maxConcurrency = 100
+// maxTimeoutMs is the upper bound on per-request timeout in milliseconds (10 minutes).
+// This matches the proxy's maxTimeoutMs and prevents goroutine blocking (CWE-400).
+const (
+	maxConcurrency = 100
+	maxTimeoutMs   = 600000
+)
 
 // RunConfig extends Config with execution control and stop condition parameters.
 type RunConfig struct {
@@ -56,6 +61,12 @@ type RunConfig struct {
 func (rc *RunConfig) Validate() error {
 	if err := rc.Config.Validate(); err != nil {
 		return err
+	}
+	if rc.TimeoutMs < 0 {
+		return fmt.Errorf("timeout_ms must be >= 0, got %d", rc.TimeoutMs)
+	}
+	if rc.TimeoutMs > maxTimeoutMs {
+		return fmt.Errorf("timeout_ms %d exceeds maximum %d", rc.TimeoutMs, maxTimeoutMs)
 	}
 	if rc.Concurrency < 0 {
 		return fmt.Errorf("concurrency must be >= 0, got %d", rc.Concurrency)
