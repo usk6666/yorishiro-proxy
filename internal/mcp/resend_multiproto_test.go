@@ -407,6 +407,51 @@ func TestValidateTCPForwards(t *testing.T) {
 			forwards: map[string]string{"3306": "no-port"},
 			wantErr:  true,
 		},
+		{
+			name:     "non-numeric port key",
+			forwards: map[string]string{"abc": "db:3306"},
+			wantErr:  true,
+		},
+		{
+			name:     "port key zero allowed for listen",
+			forwards: map[string]string{"0": "db:3306"},
+			wantErr:  false,
+		},
+		{
+			name:     "port key exceeds 65535",
+			forwards: map[string]string{"99999": "db:3306"},
+			wantErr:  true,
+		},
+		{
+			name:     "port key negative",
+			forwards: map[string]string{"-1": "db:3306"},
+			wantErr:  true,
+		},
+		{
+			name:     "port key boundary 1",
+			forwards: map[string]string{"1": "db:3306"},
+			wantErr:  false,
+		},
+		{
+			name:     "port key boundary 65535",
+			forwards: map[string]string{"65535": "db:3306"},
+			wantErr:  false,
+		},
+		{
+			name:     "target port non-numeric",
+			forwards: map[string]string{"3306": "db:abc"},
+			wantErr:  true,
+		},
+		{
+			name:     "target port zero",
+			forwards: map[string]string{"3306": "db:0"},
+			wantErr:  true,
+		},
+		{
+			name:     "target port exceeds 65535",
+			forwards: map[string]string{"3306": "db:70000"},
+			wantErr:  true,
+		},
 	}
 
 	for _, tc := range tests {
