@@ -342,7 +342,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	defer fwd.resp.Body.Close()
 
-	fullRespBody, _ := h.readResponseBody(fwd.resp, logger)
+	fullRespBody := h.readResponseBody(fwd.resp, logger)
 
 	// Response intercept: check if the response matches any intercept rules
 	// and allow the AI agent to modify or drop it before sending to the client.

@@ -2,6 +2,7 @@ package http
 
 import (
 	gohttp "net/http"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -19,7 +20,10 @@ func TestApplyResponseModifications_OverrideStatus(t *testing.T) {
 	}
 	body := []byte("original")
 
-	resp, body = applyResponseModifications(resp, action, body)
+	resp, body, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if resp.StatusCode != 403 {
 		t.Errorf("expected status 403, got %d", resp.StatusCode)
@@ -48,7 +52,10 @@ func TestApplyResponseModifications_OverrideHeaders(t *testing.T) {
 	}
 	body := []byte("original")
 
-	resp, _ = applyResponseModifications(resp, action, body)
+	resp, _, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if resp.Header.Get("Content-Type") != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %q", resp.Header.Get("Content-Type"))
@@ -74,7 +81,10 @@ func TestApplyResponseModifications_AddHeaders(t *testing.T) {
 	}
 	body := []byte("body")
 
-	resp, _ = applyResponseModifications(resp, action, body)
+	resp, _, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	vals := resp.Header.Values("X-Existing")
 	if len(vals) != 2 {
@@ -102,7 +112,10 @@ func TestApplyResponseModifications_RemoveHeaders(t *testing.T) {
 	}
 	body := []byte("body")
 
-	resp, _ = applyResponseModifications(resp, action, body)
+	resp, _, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if resp.Header.Get("X-Remove") != "" {
 		t.Errorf("X-Remove should be removed, got %q", resp.Header.Get("X-Remove"))
@@ -124,10 +137,17 @@ func TestApplyResponseModifications_OverrideBody(t *testing.T) {
 	}
 	body := []byte("original")
 
-	_, body = applyResponseModifications(resp, action, body)
+	resp, body, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if string(body) != "new body content" {
 		t.Errorf("expected body %q, got %q", "new body content", string(body))
+	}
+	// F-1: Content-Length should be updated to match new body.
+	if resp.Header.Get("Content-Length") != "16" {
+		t.Errorf("expected Content-Length 16, got %q", resp.Header.Get("Content-Length"))
 	}
 }
 
@@ -155,7 +175,10 @@ func TestApplyResponseModifications_AllFields(t *testing.T) {
 	}
 	body := []byte("<html>original</html>")
 
-	resp, body = applyResponseModifications(resp, action, body)
+	resp, body, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if resp.StatusCode != 403 {
 		t.Errorf("expected status 403, got %d", resp.StatusCode)
@@ -186,7 +209,10 @@ func TestApplyResponseModifications_ZeroStatus(t *testing.T) {
 	}
 	body := []byte("body")
 
-	resp, _ = applyResponseModifications(resp, action, body)
+	resp, _, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if resp.StatusCode != 200 {
 		t.Errorf("status should be unchanged when OverrideStatus is 0, got %d", resp.StatusCode)
@@ -204,9 +230,103 @@ func TestApplyResponseModifications_NilBody(t *testing.T) {
 	}
 	body := []byte("original")
 
-	_, body = applyResponseModifications(resp, action, body)
+	_, body, err := applyResponseModifications(resp, action, body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if string(body) != "original" {
 		t.Errorf("body should be unchanged when OverrideResponseBody is nil, got %q", string(body))
+	}
+}
+
+func TestApplyResponseModifications_InvalidStatusCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+	}{
+		{"status below 100", 50},
+		{"status above 999", 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &gohttp.Response{
+				StatusCode: 200,
+				Status:     "200 OK",
+				Header:     gohttp.Header{},
+			}
+			action := intercept.InterceptAction{
+				Type:           intercept.ActionModifyAndForward,
+				OverrideStatus: tt.status,
+			}
+			_, _, err := applyResponseModifications(resp, action, []byte("body"))
+			if err == nil {
+				t.Error("expected error for invalid status code")
+			}
+		})
+	}
+}
+
+func TestApplyResponseModifications_CRLFValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		action intercept.InterceptAction
+		errMsg string
+	}{
+		{
+			name: "override header key with CRLF",
+			action: intercept.InterceptAction{
+				Type:                    intercept.ActionModifyAndForward,
+				OverrideResponseHeaders: map[string]string{"X-Bad\r\n": "value"},
+			},
+			errMsg: "CR/LF",
+		},
+		{
+			name: "override header value with CRLF",
+			action: intercept.InterceptAction{
+				Type:                    intercept.ActionModifyAndForward,
+				OverrideResponseHeaders: map[string]string{"X-Bad": "val\r\nue"},
+			},
+			errMsg: "CR/LF",
+		},
+		{
+			name: "add header key with CRLF",
+			action: intercept.InterceptAction{
+				Type:               intercept.ActionModifyAndForward,
+				AddResponseHeaders: map[string]string{"X-Add\n": "value"},
+			},
+			errMsg: "CR/LF",
+		},
+		{
+			name: "add header value with CRLF",
+			action: intercept.InterceptAction{
+				Type:               intercept.ActionModifyAndForward,
+				AddResponseHeaders: map[string]string{"X-Add": "val\rue"},
+			},
+			errMsg: "CR/LF",
+		},
+		{
+			name: "remove header key with CRLF",
+			action: intercept.InterceptAction{
+				Type:                  intercept.ActionModifyAndForward,
+				RemoveResponseHeaders: []string{"X-Remove\r\n"},
+			},
+			errMsg: "CR/LF",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &gohttp.Response{
+				StatusCode: 200,
+				Header:     gohttp.Header{},
+			}
+			_, _, err := applyResponseModifications(resp, tt.action, []byte("body"))
+			if err == nil {
+				t.Error("expected error for CRLF injection")
+			}
+			if err != nil && !strings.Contains(err.Error(), tt.errMsg) {
+				t.Errorf("expected error containing %q, got %q", tt.errMsg, err.Error())
+			}
+		})
 	}
 }

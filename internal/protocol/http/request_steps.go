@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -149,12 +151,10 @@ func (h *Handler) forwardUpstream(ctx context.Context, conn net.Conn, req *gohtt
 	return &forwardResult{resp: resp, serverAddr: serverAddr}, nil
 }
 
-// readResponseBody reads the full response body (up to MaxBodySize), applies
-// response transforms if configured, and serializes the raw response for
-// wire-level recording.
-func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) (fullBody, rawResponse []byte) {
-	var err error
-	fullBody, err = io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
+// readResponseBody reads the full response body (up to MaxBodySize) and applies
+// response transforms if configured.
+func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) []byte {
+	fullBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
 	}
@@ -163,8 +163,7 @@ func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) (
 		resp.Header, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, fullBody)
 	}
 
-	rawResponse = serializeRawResponse(resp, fullBody)
-	return fullBody, rawResponse
+	return fullBody
 }
 
 // writeResponseToClient writes the HTTP response with body back to the client
@@ -240,7 +239,13 @@ func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req
 			"method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
 		return resp, body, true
 	case intercept.ActionModifyAndForward:
-		resp, body = applyResponseModifications(resp, action, body)
+		var modErr error
+		resp, body, modErr = applyResponseModifications(resp, action, body)
+		if modErr != nil {
+			logger.Error("response intercept modification failed", "error", modErr)
+			httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+			return resp, body, true
+		}
 		return resp, body, false
 	case intercept.ActionRelease:
 		// Continue with the original response.
@@ -250,12 +255,33 @@ func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req
 }
 
 // applyResponseModifications applies the modifications from a modify_and_forward
-// action to the HTTP response. It returns the modified response and body.
-func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte) {
-	// Override status code.
+// action to the HTTP response. It returns the modified response, body, and an
+// error if validation fails (e.g., invalid status code, CRLF injection).
+func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
+	// Override status code with range validation (S-1: CWE-20).
 	if action.OverrideStatus > 0 {
+		if action.OverrideStatus < 100 || action.OverrideStatus > 999 {
+			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
+		}
 		resp.StatusCode = action.OverrideStatus
 		resp.Status = fmt.Sprintf("%d %s", action.OverrideStatus, gohttp.StatusText(action.OverrideStatus))
+	}
+
+	// Validate response header values for CRLF injection (S-2: CWE-113).
+	for key, val := range action.OverrideResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for key, val := range action.AddResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
+		}
+	}
+	for _, key := range action.RemoveResponseHeaders {
+		if strings.ContainsAny(key, "\r\n") {
+			return resp, body, fmt.Errorf("remove response header key %q contains CR/LF characters (header injection attempt)", key)
+		}
 	}
 
 	// Remove response headers first.
@@ -273,12 +299,13 @@ func applyResponseModifications(resp *gohttp.Response, action intercept.Intercep
 		resp.Header.Add(key, val)
 	}
 
-	// Override response body.
+	// Override response body and update Content-Length (F-1).
 	if action.OverrideResponseBody != nil {
 		body = []byte(*action.OverrideResponseBody)
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	}
 
-	return resp, body
+	return resp, body, nil
 }
 
 // requestSnapshot holds a copy of the request headers and body taken before
