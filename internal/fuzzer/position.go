@@ -428,7 +428,7 @@ func replaceWithCapture(re *regexp.Regexp, input, payload string) string {
 	// Has capture groups: replace only the first capture group.
 	return re.ReplaceAllStringFunc(input, func(match string) string {
 		loc := re.FindStringSubmatchIndex(match)
-		if loc == nil || len(loc) < 4 {
+		if len(loc) < 4 {
 			return match
 		}
 		// loc[2], loc[3] are the start/end of the first capture group.

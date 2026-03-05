@@ -219,9 +219,7 @@ func evaluateJSONPath(data []byte, path string) (string, error) {
 
 	// Remove leading "$" and optional "." after it.
 	remainder := path[1:]
-	if strings.HasPrefix(remainder, ".") {
-		remainder = remainder[1:]
-	}
+	remainder = strings.TrimPrefix(remainder, ".")
 
 	if remainder == "" {
 		return jsonValueToString(root)

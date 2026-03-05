@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -120,29 +119,6 @@ func NewDefaultHTTPClient() *http.Client {
 	}
 }
 
-// httpClient returns the HTTP client to use for replay requests.
-// If a custom doer is set (for testing), it wraps it; otherwise,
-// it returns a client with the default replay timeout.
-// Access control is handled by the target scope enforcement layer.
-func (s *Server) httpClient() httpDoer {
-	if s.deps.replayDoer != nil {
-		return s.deps.replayDoer
-	}
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: defaultReplayTimeout,
-		}).DialContext,
-	}
-	return &http.Client{
-		Timeout:   defaultReplayTimeout,
-		Transport: transport,
-		// Do not follow redirects automatically; record the raw redirect response.
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
 // rawDialerFunc returns the raw dialer to use for replay_raw connections.
 // If a custom dialer is set (for testing), it is returned; otherwise,
 // a default dialer with the replay timeout is returned.
@@ -154,52 +130,6 @@ func (s *Server) rawDialerFunc() rawDialer {
 	return &net.Dialer{
 		Timeout: defaultReplayTimeout,
 	}
-}
-
-// resendHTTPClientHelper builds an httpDoer for resend requests.
-// If a custom replayDoer is set (for testing), it is returned directly.
-// Otherwise, a new HTTP client is built with the given timeout, override host,
-// and redirect/target-scope handling.
-func resendHTTPClientHelper(replayDoer httpDoer, ts *proxy.TargetScope, params resendParams) httpDoer {
-	if replayDoer != nil {
-		return replayDoer
-	}
-	timeout := defaultReplayTimeout
-	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
-		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
-	}
-	dialer := &net.Dialer{Timeout: timeout}
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if params.OverrideHost != "" {
-				addr = params.OverrideHost
-			}
-			return dialer.DialContext(ctx, network, addr)
-		},
-	}
-	checkRedirect := func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	if params.FollowRedirects != nil && *params.FollowRedirects {
-		checkRedirect = targetScopeCheckRedirect(ts)
-	}
-	return &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: checkRedirect}
-}
-
-// rawDialerFuncHelper returns a rawDialer, preferring the custom dialer if set.
-// This is a standalone version of Server.rawDialerFunc for use by handler structs.
-func rawDialerFuncHelper(customDialer rawDialer) rawDialer {
-	if customDialer != nil {
-		return customDialer
-	}
-	return &net.Dialer{
-		Timeout: defaultReplayTimeout,
-	}
-}
-
-// sortStrings sorts a string slice in-place. It is a thin wrapper around sort.Strings.
-func sortStrings(s []string) {
-	sort.Strings(s)
 }
 
 // encodeBody returns the body as a string with its encoding type.
