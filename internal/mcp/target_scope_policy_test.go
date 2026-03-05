@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	gohttp "net/http"
@@ -1455,23 +1454,3 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 	}
 }
 
-// executeCallToolRaw is a convenience wrapper for calling the execute tool.
-func executeCallToolRaw(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
-	t.Helper()
-	data, err := json.Marshal(args)
-	if err != nil {
-		t.Fatalf("marshal execute args: %v", err)
-	}
-	var argMap map[string]json.RawMessage
-	if err := json.Unmarshal(data, &argMap); err != nil {
-		t.Fatalf("unmarshal execute args: %v", err)
-	}
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name:      "resend",
-		Arguments: argMap,
-	})
-	if err != nil {
-		t.Fatalf("CallTool(execute): %v", err)
-	}
-	return result
-}

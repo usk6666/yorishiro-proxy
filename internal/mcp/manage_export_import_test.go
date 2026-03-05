@@ -358,38 +358,6 @@ func TestImportFlowsAction_ValidUUIDRequired(t *testing.T) {
 	}
 }
 
-// makeExportTestSessionUUID creates a test flow with valid UUID IDs for MCP handler tests.
-func makeExportTestSessionUUID(t *testing.T, store flow.Store, sessID, msgID string) {
-	t.Helper()
-	ctx := context.Background()
-	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
-
-	fl := &flow.Flow{
-		ID:        sessID,
-		ConnID:    "conn-" + sessID,
-		Protocol:  "HTTPS",
-		FlowType:  "unary",
-		State:     "complete",
-		Timestamp: ts,
-		Duration:  100 * time.Millisecond,
-	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
-		t.Fatalf("SaveFlow: %v", err)
-	}
-
-	msg := &flow.Message{
-		ID:        msgID,
-		FlowID:    sessID,
-		Sequence:  0,
-		Direction: "send",
-		Timestamp: ts,
-		Method:    "GET",
-	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-}
-
 // makeRealisticTestSession creates a test session that mimics real proxy data
 // with all fields populated, including ConnInfo and message bodies.
 func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID, recvMsgID, protocol string, withConnInfo bool) {
