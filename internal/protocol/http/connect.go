@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
@@ -93,6 +94,9 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 
 	// Extract TLS metadata from the client-side handshake.
 	tlsMeta := extractTLSMetadata(tlsConn)
+
+	// Dispatch on_tls_handshake lifecycle hook (fail-open).
+	h.dispatchOnTLSHandshake(ctx, hostname, tlsMeta)
 
 	logger.Info("CONNECT tunnel established", "host", connectAuthority,
 		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite,
@@ -542,6 +546,34 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("blocked CONNECT send message save failed", "error", err)
+	}
+}
+
+// dispatchOnTLSHandshake dispatches the on_tls_handshake lifecycle hook after
+// a successful TLS handshake. Errors are logged but do not block processing (fail-open).
+func (h *Handler) dispatchOnTLSHandshake(ctx context.Context, serverName string, tlsMeta tlsMetadata) {
+	if h.pluginEngine == nil {
+		return
+	}
+
+	logger := h.connLogger(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+
+	connInfo := &plugin.ConnInfo{
+		ClientAddr: clientAddr,
+		TLSVersion: tlsMeta.Version,
+		TLSCipher:  tlsMeta.CipherSuite,
+		TLSALPN:    tlsMeta.ALPN,
+	}
+	data := map[string]any{
+		"event":       "tls_handshake",
+		"conn_info":   connInfo.ToMap(),
+		"server_name": serverName,
+	}
+
+	_, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnTLSHandshake, data)
+	if err != nil {
+		logger.Warn("plugin on_tls_handshake hook error", "error", err)
 	}
 }
 
