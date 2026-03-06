@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"go.starlark.net/starlark"
@@ -26,6 +28,21 @@ type Engine struct {
 type loadedPlugin struct {
 	config  PluginConfig
 	globals starlark.StringDict
+	enabled bool
+}
+
+// PluginInfo describes a loaded plugin for external consumers (e.g. MCP tools).
+type PluginInfo struct {
+	// Name is a human-readable name derived from the script path.
+	Name string `json:"name"`
+	// Path is the filesystem path to the Starlark script.
+	Path string `json:"path"`
+	// Protocol is the protocol this plugin applies to.
+	Protocol string `json:"protocol"`
+	// Hooks lists the hook names this plugin subscribes to.
+	Hooks []string `json:"hooks"`
+	// Enabled indicates whether the plugin is currently active.
+	Enabled bool `json:"enabled"`
 }
 
 // NewEngine creates a new plugin Engine with the given logger.
@@ -115,6 +132,7 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 	lp := &loadedPlugin{
 		config:  cfg,
 		globals: globals,
+		enabled: true,
 	}
 	e.plugins = append(e.plugins, lp)
 
@@ -273,6 +291,117 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, data map[string]any) (
 	return e.registry.Dispatch(ctx, hook, data)
 }
 
+// Plugins returns information about all loaded plugins.
+func (e *Engine) Plugins() []PluginInfo {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	infos := make([]PluginInfo, 0, len(e.plugins))
+	for _, lp := range e.plugins {
+		infos = append(infos, PluginInfo{
+			Name:     pluginName(lp.config.Path),
+			Path:     lp.config.Path,
+			Protocol: lp.config.Protocol,
+			Hooks:    lp.config.Hooks,
+			Enabled:  lp.enabled,
+		})
+	}
+	return infos
+}
+
+// SetPluginEnabled sets the enabled state for the named plugin.
+// The name is matched against the human-readable name derived from the script path.
+// Returns an error if the plugin is not found.
+func (e *Engine) SetPluginEnabled(name string, enabled bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, lp := range e.plugins {
+		if pluginName(lp.config.Path) == name {
+			lp.enabled = enabled
+			e.registry.SetEnabled(lp.config.Path, enabled)
+			return nil
+		}
+	}
+	return fmt.Errorf("plugin %q not found", name)
+}
+
+// ReloadPlugin reloads a single plugin by name.
+// The plugin is unregistered from the registry, re-loaded from disk,
+// and re-registered. The enabled state is preserved.
+func (e *Engine) ReloadPlugin(ctx context.Context, name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for i, lp := range e.plugins {
+		if pluginName(lp.config.Path) != name {
+			continue
+		}
+		wasEnabled := lp.enabled
+		e.registry.RemoveByPlugin(lp.config.Path)
+
+		if err := e.loadPlugin(ctx, lp.config); err != nil {
+			// Remove the stale entry from plugins slice.
+			e.plugins = append(e.plugins[:i], e.plugins[i+1:]...)
+			return fmt.Errorf("reload plugin %q: %w", name, err)
+		}
+
+		// The new plugin was appended at the end by loadPlugin.
+		newPlugin := e.plugins[len(e.plugins)-1]
+		newPlugin.enabled = wasEnabled
+		if !wasEnabled {
+			e.registry.SetEnabled(newPlugin.config.Path, false)
+		}
+
+		// Remove the old entry at index i.
+		e.plugins = append(e.plugins[:i], e.plugins[i+1:]...)
+		return nil
+	}
+	return fmt.Errorf("plugin %q not found", name)
+}
+
+// ReloadAll reloads all loaded plugins from disk.
+// Each plugin's enabled state is preserved.
+func (e *Engine) ReloadAll(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Snapshot the current configs and enabled states.
+	type snapshot struct {
+		config  PluginConfig
+		enabled bool
+	}
+	snapshots := make([]snapshot, 0, len(e.plugins))
+	for _, lp := range e.plugins {
+		snapshots = append(snapshots, snapshot{config: lp.config, enabled: lp.enabled})
+	}
+
+	// Clear everything.
+	e.registry.Clear()
+	e.plugins = nil
+
+	// Reload all plugins.
+	var firstErr error
+	for _, s := range snapshots {
+		if err := e.loadPlugin(ctx, s.config); err != nil {
+			e.logger.WarnContext(ctx, "failed to reload plugin",
+				slog.String("plugin", s.config.Path),
+				slog.String("error", err.Error()),
+			)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("reload plugin %q: %w", s.config.Path, err)
+			}
+			continue
+		}
+		newPlugin := e.plugins[len(e.plugins)-1]
+		newPlugin.enabled = s.enabled
+		if !s.enabled {
+			e.registry.SetEnabled(newPlugin.config.Path, false)
+		}
+	}
+	return firstErr
+}
+
 // Close releases all resources held by the engine.
 func (e *Engine) Close() error {
 	e.mu.Lock()
@@ -288,6 +417,15 @@ func (e *Engine) PluginCount() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return len(e.plugins)
+}
+
+// pluginName derives a human-readable name from a script path.
+// It returns the base filename without the extension (e.g., "add_auth_header"
+// from "/path/to/add_auth_header.star").
+func pluginName(path string) string {
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext)
 }
 
 // newActionModule creates the predeclared "action" module available to scripts.
