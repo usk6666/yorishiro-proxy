@@ -526,7 +526,7 @@ def on_before_send_to_server(data):
     # Create a string larger than the limit.
     big = "x" * %d
     return {"action": action.CONTINUE, "data": {"data": big}}
-`, 300*1024*1024)) // 300 MB > 254 MB limit
+`, 2*1024*1024)) // 2 MB > 1 MB limit
 	engine := setupPluginEngine(t, scriptPath, "tcp", []string{
 		"on_before_send_to_server",
 	})

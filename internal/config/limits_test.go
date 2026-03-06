@@ -39,7 +39,7 @@ func TestLimits_MaxReplayResponseSize(t *testing.T) {
 }
 
 func TestLimits_MaxTCPPluginChunkSize(t *testing.T) {
-	const expected int64 = 254 << 20
+	const expected int64 = 1 << 20 // 1 MB
 	if MaxTCPPluginChunkSize != expected {
 		t.Errorf("MaxTCPPluginChunkSize = %d, want %d", MaxTCPPluginChunkSize, expected)
 	}
