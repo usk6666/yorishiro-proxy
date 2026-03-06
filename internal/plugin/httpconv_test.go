@@ -154,6 +154,45 @@ func TestApplyHTTPRequestChanges(t *testing.T) {
 	}
 }
 
+func TestApplyHTTPRequestChanges_URLSchemeValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		url         string
+		wantApplied bool // true if URL should be updated
+	}{
+		{"http scheme allowed", "http://example.com/new", true},
+		{"https scheme allowed", "https://example.com/new", true},
+		{"empty scheme allowed (relative)", "/relative/path", true},
+		{"file scheme rejected", "file:///etc/passwd", false},
+		{"gopher scheme rejected", "gopher://evil.com/", false},
+		{"ftp scheme rejected", "ftp://evil.com/file", false},
+		{"javascript scheme rejected", "javascript:alert(1)", false},
+		{"data scheme rejected", "data:text/html,<h1>evil</h1>", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalURL := "http://example.com/original"
+			req, _ := gohttp.NewRequest("GET", originalURL, nil)
+			data := map[string]any{
+				"url": tt.url,
+			}
+			req, _, err := ApplyHTTPRequestChanges(req, data)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantApplied {
+				if req.URL.String() == originalURL {
+					t.Errorf("URL should have been updated to %q but was not", tt.url)
+				}
+			} else {
+				if req.URL.String() != originalURL {
+					t.Errorf("URL should remain %q for disallowed scheme, got %q", originalURL, req.URL.String())
+				}
+			}
+		})
+	}
+}
+
 func TestApplyHTTPRequestChanges_InvalidURL(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://example.com/", nil)
 	data := map[string]any{
