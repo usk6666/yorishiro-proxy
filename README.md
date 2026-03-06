@@ -21,7 +21,7 @@
 
 ---
 
-Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, giving AI agents full control over proxy operations through ten MCP tools. Designed for use with Claude Code and other MCP-compatible agents, it enables automated security testing workflows without manual UI interaction. An embedded Web UI is also available for visual inspection and interactive use.
+Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, giving AI agents full control over proxy operations through eleven MCP tools. Designed for use with Claude Code and other MCP-compatible agents, it enables automated security testing workflows without manual UI interaction. An embedded Web UI is also available for visual inspection and interactive use.
 
 <p align="center">
   <img src="docs/images/yorishiro-proxy_webui_flows.png" alt="Web UI - Flows" width="800">
@@ -41,6 +41,7 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 - **Flow Export/Import** -- JSONL, HAR 1.2, and cURL export formats
 - **Upstream Proxy** -- Chain through HTTP or SOCKS5 proxies
 - **Streamable HTTP MCP** -- Multi-agent shared access with Bearer token authentication
+- **Plugin System** -- Extend proxy behavior with [Starlark](https://github.com/google/starlark-go) scripts that hook into the request/response pipeline
 - **Web UI** -- Embedded React/Vite dashboard for visual inspection and interactive testing
 
 ## Quick Start
@@ -107,7 +108,7 @@ Once the MCP server is running, the AI agent can start capturing traffic:
 
 ## MCP Tools
 
-All proxy operations are exposed through ten MCP tools:
+All proxy operations are exposed through eleven MCP tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -121,6 +122,7 @@ All proxy operations are exposed through ten MCP tools:
 | `intercept` | Act on intercepted requests: release, modify and forward, or drop |
 | `manage` | Manage flow data (delete/export/import) and CA certificate regeneration |
 | `security` | Configure target scope rules (Policy Layer + Agent Layer) to restrict proxy reach |
+| `plugin` | List, reload, enable, and disable Starlark plugins at runtime |
 
 ## Web UI
 
@@ -187,6 +189,7 @@ Layer 4 TCP Listener
 ## Documentation
 
 - [Getting Started Guide](docs/getting-started.md) -- Detailed setup and usage walkthrough
+- [Plugin Development Guide](docs/plugins.md) -- Writing Starlark plugins to extend proxy behavior
 
 ## Contributing
 
