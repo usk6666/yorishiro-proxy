@@ -549,12 +549,18 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 	}
 }
 
+// hookTimeout is the maximum time allowed for lifecycle hook dispatches.
+const hookTimeout = 5 * time.Second
+
 // dispatchOnTLSHandshake dispatches the on_tls_handshake lifecycle hook after
 // a successful TLS handshake. Errors are logged but do not block processing (fail-open).
 func (h *Handler) dispatchOnTLSHandshake(ctx context.Context, serverName string, tlsMeta tlsMetadata) {
 	if h.pluginEngine == nil {
 		return
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
 
 	logger := h.connLogger(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)

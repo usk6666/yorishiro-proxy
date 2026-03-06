@@ -200,12 +200,20 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// hookTimeout is the maximum time allowed for lifecycle hook dispatches.
+// Lifecycle hooks are observe-only, so a short timeout prevents slow plugins
+// from blocking connection acceptance.
+const hookTimeout = 5 * time.Second
+
 // dispatchOnConnect dispatches the on_connect lifecycle hook.
 // Errors are logged but do not block connection processing (fail-open).
 func (l *Listener) dispatchOnConnect(ctx context.Context, clientAddr string, logger *slog.Logger) {
 	if l.pluginEngine == nil {
 		return
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
 
 	connInfo := &plugin.ConnInfo{
 		ClientAddr: clientAddr,
@@ -222,11 +230,17 @@ func (l *Listener) dispatchOnConnect(ctx context.Context, clientAddr string, log
 }
 
 // dispatchOnDisconnect dispatches the on_disconnect lifecycle hook.
+// It uses context.Background() so that disconnect hooks run even when the
+// parent context has been cancelled during graceful shutdown.
 // Errors are logged but do not affect connection cleanup (fail-open).
-func (l *Listener) dispatchOnDisconnect(ctx context.Context, clientAddr string, connStart time.Time, logger *slog.Logger) {
+func (l *Listener) dispatchOnDisconnect(_ context.Context, clientAddr string, connStart time.Time, logger *slog.Logger) {
 	if l.pluginEngine == nil {
 		return
 	}
+
+	// Use a fresh context with timeout so that disconnect hooks run even during shutdown.
+	dispatchCtx, cancel := context.WithTimeout(context.Background(), hookTimeout)
+	defer cancel()
 
 	durationMs := time.Since(connStart).Milliseconds()
 	connInfo := &plugin.ConnInfo{
@@ -238,7 +252,7 @@ func (l *Listener) dispatchOnDisconnect(ctx context.Context, clientAddr string, 
 		"duration_ms": durationMs,
 	}
 
-	_, err := l.pluginEngine.Dispatch(ctx, plugin.HookOnDisconnect, data)
+	_, err := l.pluginEngine.Dispatch(dispatchCtx, plugin.HookOnDisconnect, data)
 	if err != nil {
 		logger.Warn("plugin on_disconnect hook error", "error", err)
 	}
