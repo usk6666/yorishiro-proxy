@@ -15,14 +15,16 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // Handler manages a WebSocket connection relay between client and upstream.
 // It is not a ProtocolHandler — it is invoked from the HTTP handler when
 // an Upgrade: websocket request is detected.
 type Handler struct {
-	store  flow.FlowWriter
-	logger *slog.Logger
+	store        flow.FlowWriter
+	logger       *slog.Logger
+	pluginEngine *plugin.Engine
 }
 
 // NewHandler creates a new WebSocket relay handler.
@@ -31,6 +33,12 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 		store:  store,
 		logger: logger,
 	}
+}
+
+// SetPluginEngine sets the plugin engine for dispatching hooks during
+// WebSocket frame relay. If engine is nil, plugin hooks are skipped.
+func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
+	h.pluginEngine = engine
 }
 
 // HandleUpgrade processes a WebSocket upgrade request. It forwards the upgrade
@@ -75,7 +83,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	)
 
 	// Run bidirectional frame relay.
-	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start)
+	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq, connInfo)
 
 	// Update flow state to complete.
 	duration := time.Since(start)
@@ -104,7 +112,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 // between the client and upstream server. Each frame is recorded to the
 // flow store. The relay stops when a Close frame is received, a connection
 // error occurs, or the context is cancelled.
-func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time) error {
+func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -131,7 +139,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start)
+		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start, upgradeReq, connInfo)
 		errCh <- err
 		cancel()
 	}()
@@ -140,7 +148,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start)
+		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start, upgradeReq, connInfo)
 		errCh <- err
 		cancel()
 	}()
@@ -161,7 +169,27 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 // relayDirection reads frames from src, records them, and writes them to dst.
 // It handles fragmentation by assembling continuation frames into complete messages.
 // Fragment accumulation is capped at config.MaxWebSocketMessageSize to prevent OOM (CWE-400).
-func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time) error {
+//
+// Plugin hooks are dispatched per-frame (not per-message):
+//   - "send" direction: on_receive_from_client → on_before_send_to_server
+//   - "receive" direction: on_receive_from_server → on_before_send_to_client
+//
+// If a plugin returns ActionDrop, the frame is silently skipped.
+// If a plugin modifies the payload via result Data, the modified payload is used.
+func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
+	// Determine hook pair based on direction.
+	var receiveHook, sendHook plugin.Hook
+	var pluginDirection string
+	if direction == "send" {
+		receiveHook = plugin.HookOnReceiveFromClient
+		sendHook = plugin.HookOnBeforeSendToServer
+		pluginDirection = "client_to_server"
+	} else {
+		receiveHook = plugin.HookOnReceiveFromServer
+		sendHook = plugin.HookOnBeforeSendToClient
+		pluginDirection = "server_to_client"
+	}
+
 	// Fragment assembly state.
 	var fragmentBuf []byte
 	var fragmentOpcode byte
@@ -180,6 +208,21 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 				return ctx.Err()
 			}
 			return fmt.Errorf("read %s frame: %w", direction, err)
+		}
+
+		// Skip plugin dispatch for control frames (Close, Ping, Pong) to prevent
+		// plugins from dropping Close frames, which would cause the relay to hang
+		// until context timeout (CWE-400).
+		if !frame.IsControl() {
+			// Dispatch receive hook (on_receive_from_client / on_receive_from_server).
+			if dropped := h.dispatchFrameHook(ctx, receiveHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
+				continue
+			}
+
+			// Dispatch send hook (on_before_send_to_server / on_before_send_to_client).
+			if dropped := h.dispatchFrameHook(ctx, sendHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
+				continue
+			}
 		}
 
 		// Forward the frame to the destination.
@@ -266,6 +309,104 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			}
 		}
 	}
+}
+
+// buildFrameData constructs the plugin hook data map for a WebSocket frame.
+func (h *Handler) buildFrameData(frame *Frame, direction string, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) map[string]any {
+	data := map[string]any{
+		"opcode":      int(frame.Opcode),
+		"opcode_name": OpcodeString(frame.Opcode),
+		"payload":     frame.Payload,
+		"fin":         frame.Fin,
+		"direction":   direction,
+	}
+
+	if upgradeReq != nil && upgradeReq.URL != nil {
+		data["upgrade_url"] = upgradeReq.URL.String()
+	} else {
+		data["upgrade_url"] = ""
+	}
+
+	connInfoMap := map[string]any{}
+	if connInfo != nil {
+		connInfoMap["client_addr"] = connInfo.ClientAddr
+		connInfoMap["server_addr"] = connInfo.ServerAddr
+		connInfoMap["tls_version"] = connInfo.TLSVersion
+		connInfoMap["tls_cipher"] = connInfo.TLSCipher
+	}
+	data["conn_info"] = connInfoMap
+
+	return data
+}
+
+// dispatchFrameHook dispatches a plugin hook for a WebSocket frame.
+// It returns true if the frame should be dropped (ActionDrop).
+// If the plugin modifies the payload, the frame's Payload is updated in place.
+//
+// Note: ActionDrop is semantically valid only for on_receive_from_client hooks
+// (i.e., the "send" direction). In the "receive" direction, the plugin engine
+// does not register DROP as a valid action, so ActionDrop will not be returned
+// for on_receive_from_server / on_before_send_to_client hooks.
+//
+// After a plugin modifies the payload, the new size is checked against
+// config.MaxWebSocketMessageSize. If exceeded, the modification is discarded
+// and the original payload is preserved (CWE-400 mitigation).
+func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame *Frame, direction string, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, flowID string) bool {
+	if h.pluginEngine == nil {
+		return false
+	}
+
+	data := h.buildFrameData(frame, direction, upgradeReq, connInfo)
+
+	result, err := h.pluginEngine.Dispatch(ctx, hook, data)
+	if err != nil {
+		h.logger.Warn("websocket plugin hook error",
+			"flow_id", flowID,
+			"hook", string(hook),
+			"error", err,
+		)
+		return false
+	}
+
+	if result == nil {
+		return false
+	}
+
+	if result.Action == plugin.ActionDrop {
+		h.logger.Debug("websocket frame dropped by plugin",
+			"flow_id", flowID,
+			"hook", string(hook),
+			"direction", direction,
+		)
+		return true
+	}
+
+	// Apply payload modifications from plugin result.
+	if result.Data != nil {
+		if newPayload, ok := result.Data["payload"]; ok {
+			var modified []byte
+			switch p := newPayload.(type) {
+			case []byte:
+				modified = p
+			case string:
+				modified = []byte(p)
+			}
+			if modified != nil {
+				if int64(len(modified)) > config.MaxWebSocketMessageSize {
+					h.logger.Warn("plugin modified payload exceeds size limit, keeping original",
+						"flow_id", flowID,
+						"hook", string(hook),
+						"modified_size", len(modified),
+						"limit", config.MaxWebSocketMessageSize,
+					)
+				} else {
+					frame.Payload = modified
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 // recordDataMessage records a complete WebSocket data message (text or binary)
