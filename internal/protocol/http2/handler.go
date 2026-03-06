@@ -24,6 +24,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -47,6 +48,10 @@ type Handler struct {
 	// grpcHandler processes gRPC flow recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
 	grpcHandler *protogrpc.Handler
+
+	// pluginEngine dispatches Starlark plugin hooks during HTTP/2 stream processing.
+	// If nil, no plugin hooks are invoked.
+	pluginEngine *plugin.Engine
 }
 
 // NewHandler creates a new HTTP/2 handler with flow recording.
@@ -67,6 +72,17 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 // sessions with parsed service/method metadata instead of plain HTTP/2.
 func (h *Handler) SetGRPCHandler(gh *protogrpc.Handler) {
 	h.grpcHandler = gh
+}
+
+// SetPluginEngine sets the plugin engine used to dispatch hook events
+// during HTTP/2 stream processing.
+func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
+	h.pluginEngine = engine
+}
+
+// PluginEngine returns the handler's current plugin engine, or nil.
+func (h *Handler) PluginEngine() *plugin.Engine {
+	return h.pluginEngine
 }
 
 // Name returns the protocol name for h2c (cleartext HTTP/2).
@@ -271,9 +287,45 @@ func (h *Handler) handleStream(
 		}
 	}
 
+	// Build plugin ConnInfo for hook dispatch.
+	pluginConnInfo := &plugin.ConnInfo{
+		ClientAddr: clientAddr,
+		TLSVersion: tlsMeta.Version,
+		TLSCipher:  tlsMeta.CipherSuite,
+		TLSALPN:    tlsMeta.ALPN,
+	}
+
+	// Plugin hook: on_receive_from_client — allows plugins to inspect,
+	// modify, drop, or respond to the request before forwarding.
+	var terminated bool
+	req, reqBody, terminated = h.dispatchOnReceiveFromClient(ctx, w, req, reqBody, pluginConnInfo, logger)
+	if terminated {
+		return
+	}
+
+	// Re-compute recordReqBody after potential plugin modification.
+	recordReqBody = reqBody
+	if len(reqBody) > int(config.MaxBodySize) {
+		recordReqBody = reqBody[:int(config.MaxBodySize)]
+		reqTruncated = true
+	}
+
+	// Update reqURL and srp with potentially modified request and body.
+	reqURL = &url.URL{
+		Scheme:   req.URL.Scheme,
+		Host:     req.URL.Host,
+		Path:     req.URL.Path,
+		RawQuery: req.URL.RawQuery,
+		Fragment: req.URL.Fragment,
+	}
+	srp.req = req
+	srp.reqURL = reqURL
+	srp.reqBody = recordReqBody
+	srp.reqTruncated = reqTruncated
+
 	// Build the outbound request for the upstream server.
 	outURL := &url.URL{
-		Scheme:   scheme,
+		Scheme:   req.URL.Scheme,
 		Host:     req.URL.Host,
 		Path:     req.URL.Path,
 		RawQuery: req.URL.RawQuery,
@@ -346,6 +398,14 @@ func (h *Handler) handleStream(
 		}
 	}
 
+	// Plugin hook: on_before_send_to_server — allows plugins to modify
+	// the outbound request before it is sent to the upstream server.
+	outReq, reqBody = h.dispatchOnBeforeSendToServer(ctx, outReq, reqBody, pluginConnInfo, logger)
+	if reqBody != nil {
+		outReq.Body = io.NopCloser(bytes.NewReader(reqBody))
+		outReq.ContentLength = int64(len(reqBody))
+	}
+
 	// Determine if this is a gRPC request. gRPC sessions are recorded by the
 	// gRPC handler using its own recording logic (not progressive recording).
 	isGRPC := h.grpcHandler != nil && isGRPCContentType(req.Header.Get("Content-Type"))
@@ -398,6 +458,14 @@ func (h *Handler) handleStream(
 			// Continue with the original response.
 		}
 	}
+
+	// Plugin hook: on_receive_from_server — allows plugins to inspect or
+	// modify the response received from the upstream server.
+	resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, resp, fullRespBody, req, pluginConnInfo, logger)
+
+	// Plugin hook: on_before_send_to_client — allows plugins to make
+	// final modifications to the response before it is sent to the client.
+	resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, resp, fullRespBody, req, pluginConnInfo, logger)
 
 	// Write response headers back to the client.
 	for key, vals := range resp.Header {
