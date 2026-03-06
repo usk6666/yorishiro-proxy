@@ -556,6 +556,7 @@ func TestIntegration_ListTools(t *testing.T) {
 		"fuzz":        false,
 		"macro":       false,
 		"intercept":   false,
+		"plugin":      false,
 	}
 
 	for _, tool := range toolsResult.Tools {

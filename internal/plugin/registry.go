@@ -15,6 +15,10 @@ type hookEntry struct {
 
 	// onError controls what to do when this handler returns an error.
 	onError OnErrorBehavior
+
+	// enabled indicates whether this entry should be dispatched.
+	// When false, the handler is skipped during dispatch.
+	enabled bool
 }
 
 // HookHandler is a function that handles a hook invocation.
@@ -46,6 +50,7 @@ func (r *Registry) Register(pluginName string, hook Hook, handler HookHandler, o
 		pluginName: pluginName,
 		handler:    handler,
 		onError:    onError,
+		enabled:    true,
 	})
 }
 
@@ -81,6 +86,9 @@ func (r *Registry) Dispatch(ctx context.Context, hook Hook, data map[string]any)
 	r.mu.RUnlock()
 
 	for _, entry := range snapshot {
+		if !entry.enabled {
+			continue
+		}
 		result, err := entry.handler(ctx, data)
 		if err != nil {
 			switch entry.onError {
@@ -123,6 +131,41 @@ func (r *Registry) HasHandlers(hook Hook) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.hooks[hook]) > 0
+}
+
+// SetEnabled sets the enabled state for all hook entries belonging to the
+// named plugin. It returns the number of entries updated.
+func (r *Registry) SetEnabled(pluginName string, enabled bool) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	count := 0
+	for hook, entries := range r.hooks {
+		for i := range entries {
+			if entries[i].pluginName == pluginName {
+				entries[i].enabled = enabled
+				count++
+			}
+		}
+		r.hooks[hook] = entries
+	}
+	return count
+}
+
+// RemoveByPlugin removes all hook entries belonging to the named plugin.
+func (r *Registry) RemoveByPlugin(pluginName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for hook, entries := range r.hooks {
+		filtered := entries[:0]
+		for _, e := range entries {
+			if e.pluginName != pluginName {
+				filtered = append(filtered, e)
+			}
+		}
+		r.hooks[hook] = filtered
+	}
 }
 
 // Clear removes all registered handlers.

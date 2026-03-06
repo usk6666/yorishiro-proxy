@@ -15,6 +15,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
@@ -48,6 +49,7 @@ type deps struct {
 	requestTimeoutSetters []requestTimeoutSetter
 	targetScopeSetters    []targetScopeSetter
 	targetScope           *proxy.TargetScope
+	pluginEngine          *plugin.Engine
 }
 
 // Server wraps the MCP server and registers proxy-related tools.
@@ -237,6 +239,14 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 	}
 }
 
+// WithPluginEngine sets the plugin engine for the MCP server,
+// enabling plugin management via the plugin tool (list, reload, enable, disable).
+func WithPluginEngine(engine *plugin.Engine) ServerOption {
+	return func(s *Server) {
+		s.deps.pluginEngine = engine
+	}
+}
+
 // NewServer creates a new MCP server with proxy tools registered.
 // The ctx parameter is the application-level context that controls the proxy lifecycle;
 // when ctx is cancelled, the proxy started via proxy_start will shut down.
@@ -389,4 +399,5 @@ func (s *Server) registerTools() {
 	s.registerMacro()
 	s.registerIntercept()
 	s.registerSecurity()
+	s.registerPlugin()
 }
