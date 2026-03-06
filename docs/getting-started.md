@@ -79,7 +79,7 @@ All flags also accept environment variables with the `YP_` prefix (e.g., `YP_INS
 
 ### Verify the connection
 
-After creating `.mcp.json`, restart Claude Code. You should see ten MCP tools become available:
+After creating `.mcp.json`, restart Claude Code. You should see eleven MCP tools become available:
 
 - `proxy_start` -- start the proxy listener
 - `proxy_stop` -- stop the proxy listener
@@ -91,6 +91,7 @@ After creating `.mcp.json`, restart Claude Code. You should see ten MCP tools be
 - `intercept` -- release, modify, or drop intercepted requests
 - `manage` -- delete, export, and import flows
 - `security` -- configure target scope rules
+- `plugin` -- list, reload, enable, and disable Starlark plugins
 
 ## CA Certificate Installation
 
