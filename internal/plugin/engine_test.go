@@ -480,3 +480,235 @@ def on_connect(data):
 		t.Fatalf("Dispatch() error = %v", err)
 	}
 }
+
+func TestEngine_Plugins(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "info_plugin.star", `
+def on_connect(data):
+    return {"action": action.CONTINUE}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{Path: scriptPath, Protocol: "http", Hooks: []string{"on_connect"}},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	infos := e.Plugins()
+	if len(infos) != 1 {
+		t.Fatalf("Plugins() len = %d, want 1", len(infos))
+	}
+	if infos[0].Name != "info_plugin" {
+		t.Errorf("Name = %q, want 'info_plugin'", infos[0].Name)
+	}
+	if infos[0].Protocol != "http" {
+		t.Errorf("Protocol = %q, want 'http'", infos[0].Protocol)
+	}
+	if !infos[0].Enabled {
+		t.Error("expected Enabled=true")
+	}
+}
+
+func TestEngine_SetPluginEnabled(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "toggle.star", `
+def on_receive_from_client(data):
+    data["toggled"] = True
+    return {"action": action.CONTINUE, "data": data}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{Path: scriptPath, Protocol: "http", Hooks: []string{"on_receive_from_client"}},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	// Disable the plugin.
+	if err := e.SetPluginEnabled("toggle", false); err != nil {
+		t.Fatalf("SetPluginEnabled(false) error = %v", err)
+	}
+
+	infos := e.Plugins()
+	if infos[0].Enabled {
+		t.Error("expected Enabled=false after disable")
+	}
+
+	// Dispatch should skip the disabled plugin.
+	data := map[string]any{}
+	result, err := e.Dispatch(context.Background(), HookOnReceiveFromClient, data)
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	// With no active handlers, dispatch returns the CONTINUE result but without the toggled key.
+	if result != nil && result.Data != nil {
+		if _, ok := result.Data["toggled"]; ok {
+			t.Error("disabled plugin should not have run")
+		}
+	}
+
+	// Re-enable.
+	if err := e.SetPluginEnabled("toggle", true); err != nil {
+		t.Fatalf("SetPluginEnabled(true) error = %v", err)
+	}
+
+	data = map[string]any{}
+	result, err = e.Dispatch(context.Background(), HookOnReceiveFromClient, data)
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if result == nil || result.Data == nil {
+		t.Fatal("expected result with data after re-enable")
+	}
+}
+
+func TestEngine_SetPluginEnabled_NotFound(t *testing.T) {
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.SetPluginEnabled("nonexistent", true)
+	if err == nil {
+		t.Fatal("expected error for nonexistent plugin")
+	}
+}
+
+func TestEngine_ReloadPlugin(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "reloadable.star", `
+def on_receive_from_client(data):
+    data["version"] = "v1"
+    return {"action": action.CONTINUE, "data": data}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{Path: scriptPath, Protocol: "http", Hooks: []string{"on_receive_from_client"}},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	// Update the script.
+	writeScript(t, dir, "reloadable.star", `
+def on_receive_from_client(data):
+    data["version"] = "v2"
+    return {"action": action.CONTINUE, "data": data}
+`)
+
+	// Reload.
+	if err := e.ReloadPlugin(context.Background(), "reloadable"); err != nil {
+		t.Fatalf("ReloadPlugin() error = %v", err)
+	}
+
+	data := map[string]any{}
+	result, err := e.Dispatch(context.Background(), HookOnReceiveFromClient, data)
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if result == nil || result.Data == nil {
+		t.Fatal("expected result with data")
+	}
+	if v, ok := result.Data["version"]; !ok || v != "v2" {
+		t.Errorf("version = %v, want 'v2'", v)
+	}
+}
+
+func TestEngine_ReloadPlugin_NotFound(t *testing.T) {
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.ReloadPlugin(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent plugin")
+	}
+}
+
+func TestEngine_ReloadAll(t *testing.T) {
+	dir := t.TempDir()
+	path1 := writeScript(t, dir, "plugin_a.star", `
+def on_connect(data):
+    return {"action": action.CONTINUE}
+`)
+	path2 := writeScript(t, dir, "plugin_b.star", `
+def on_connect(data):
+    return {"action": action.CONTINUE}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{Path: path1, Protocol: "http", Hooks: []string{"on_connect"}},
+		{Path: path2, Protocol: "http", Hooks: []string{"on_connect"}},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	if err := e.ReloadAll(context.Background()); err != nil {
+		t.Fatalf("ReloadAll() error = %v", err)
+	}
+
+	if e.PluginCount() != 2 {
+		t.Errorf("PluginCount() after reload = %d, want 2", e.PluginCount())
+	}
+}
+
+func TestEngine_ReloadPlugin_PreservesEnabledState(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "preserve.star", `
+def on_connect(data):
+    return {"action": action.CONTINUE}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{Path: scriptPath, Protocol: "http", Hooks: []string{"on_connect"}},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	// Disable then reload.
+	e.SetPluginEnabled("preserve", false)
+	if err := e.ReloadPlugin(context.Background(), "preserve"); err != nil {
+		t.Fatalf("ReloadPlugin() error = %v", err)
+	}
+
+	infos := e.Plugins()
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 plugin after reload, got %d", len(infos))
+	}
+	if infos[0].Enabled {
+		t.Error("expected Enabled=false to be preserved after reload")
+	}
+}
+
+func TestPluginName(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/path/to/add_auth_header.star", "add_auth_header"},
+		{"script.star", "script"},
+		{"/a/b/c/plugin.py", "plugin"},
+		{"noext", "noext"},
+	}
+	for _, tt := range tests {
+		got := pluginName(tt.path)
+		if got != tt.want {
+			t.Errorf("pluginName(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
