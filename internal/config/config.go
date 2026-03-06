@@ -326,6 +326,16 @@ type ProxyConfig struct {
 	// []plugin.PluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
 	Plugins json.RawMessage `json:"plugins,omitempty"`
 
+	// SOCKS5Auth specifies the SOCKS5 authentication method.
+	// Valid values: "none" (default), "password".
+	SOCKS5Auth string `json:"socks5_auth,omitempty"`
+
+	// SOCKS5Username is the username for SOCKS5 password authentication.
+	SOCKS5Username string `json:"socks5_username,omitempty"`
+
+	// SOCKS5Password is the password for SOCKS5 password authentication.
+	SOCKS5Password string `json:"socks5_password,omitempty"`
+
 	// TargetScopePolicy defines the immutable target scope policy rules.
 	// These rules control which network targets the proxy is allowed to access.
 	// When loaded from a config file, this section is ignored if a dedicated

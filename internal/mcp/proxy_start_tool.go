@@ -79,9 +79,22 @@ type proxyStartInput struct {
 	TCPForwards map[string]string `json:"tcp_forwards,omitempty" jsonschema:"Raw TCP forwarding map: local port -> upstream host:port"`
 
 	// Protocols specifies which protocols are enabled for detection.
-	// Valid values: "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP".
+	// Valid values: "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "SOCKS5", "TCP".
 	// If omitted, all protocols are enabled (default behavior).
 	Protocols []string `json:"protocols,omitempty" jsonschema:"enabled protocol list (default: all protocols enabled)"`
+
+	// SOCKS5Auth specifies the SOCKS5 authentication method.
+	// Valid values: "none" (default), "password".
+	// If omitted or "none", SOCKS5 clients connect without authentication.
+	SOCKS5Auth string `json:"socks5_auth,omitempty" jsonschema:"SOCKS5 authentication method: none (default) or password"`
+
+	// SOCKS5Username is the username for SOCKS5 password authentication.
+	// Required when socks5_auth is "password".
+	SOCKS5Username string `json:"socks5_username,omitempty" jsonschema:"username for SOCKS5 password authentication"`
+
+	// SOCKS5Password is the password for SOCKS5 password authentication.
+	// Required when socks5_auth is "password".
+	SOCKS5Password string `json:"socks5_password,omitempty" jsonschema:"password for SOCKS5 password authentication"`
 
 	// MaxConnections is the maximum number of concurrent proxy connections.
 	// Defaults to 128 if omitted or zero.
@@ -116,7 +129,7 @@ func (s *Server) registerProxyStart() {
 		Name: "proxy_start",
 		Description: "Start a proxy listener with optional configuration. " +
 			"Supports multiple simultaneous listeners with different names (use 'name' parameter). " +
-			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS traffic. " +
+			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS/SOCKS5 traffic. " +
 			"Accepts optional name to identify this listener (default: 'default'), " +
 			"upstream_proxy to route all traffic through an upstream proxy (http://host:port or socks5://[user:pass@]host:port), " +
 			"capture_scope to control which requests are recorded, " +
@@ -124,11 +137,13 @@ func (s *Server) registerProxyStart() {
 			"intercept_rules to define conditions for intercepting requests/responses, " +
 			"auto_transform to configure automatic request/response modification rules, " +
 			"tcp_forwards to map local ports to upstream TCP addresses for Raw TCP forwarding, " +
-			"protocols to specify which protocols are enabled for detection, " +
+			"protocols to specify which protocols are enabled for detection (including SOCKS5), " +
+			"socks5_auth to set SOCKS5 authentication method ('none' or 'password'), " +
+			"socks5_username and socks5_password for SOCKS5 password authentication, " +
 			"max_connections to set the concurrent connection limit (default: 128), " +
 			"peek_timeout_ms for protocol detection timeout (default: 30000ms), " +
 			"and request_timeout_ms for HTTP request header read timeout (default: 60000ms). " +
-			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
+			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, socks5_auth=none, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
 	}, s.handleProxyStart)
 }
 
@@ -200,6 +215,13 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 			return nil, nil, fmt.Errorf("protocols: %w", err)
 		}
 		s.deps.enabledProtocols = input.Protocols
+	}
+
+	// Apply SOCKS5 authentication configuration if provided.
+	if input.SOCKS5Auth != "" {
+		if err := s.applySOCKS5Auth(input.SOCKS5Auth, input.SOCKS5Username, input.SOCKS5Password); err != nil {
+			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
+		}
 	}
 
 	// Apply connection limits and timeouts if provided.
@@ -322,6 +344,7 @@ var validProtocols = map[string]bool{
 	"WebSocket": true,
 	"HTTP/2":    true,
 	"gRPC":      true,
+	"SOCKS5":    true,
 	"TCP":       true,
 }
 
@@ -434,6 +457,41 @@ func (s *Server) applyProxyDefaults(input *proxyStartInput) {
 
 	if input.UpstreamProxy == "" && d.UpstreamProxy != "" {
 		input.UpstreamProxy = d.UpstreamProxy
+	}
+
+	if input.SOCKS5Auth == "" && d.SOCKS5Auth != "" {
+		input.SOCKS5Auth = d.SOCKS5Auth
+	}
+	if input.SOCKS5Username == "" && d.SOCKS5Username != "" {
+		input.SOCKS5Username = d.SOCKS5Username
+	}
+	if input.SOCKS5Password == "" && d.SOCKS5Password != "" {
+		input.SOCKS5Password = d.SOCKS5Password
+	}
+}
+
+// applySOCKS5Auth validates and applies SOCKS5 authentication configuration.
+func (s *Server) applySOCKS5Auth(authMethod, username, password string) error {
+	switch authMethod {
+	case "none":
+		if s.deps.socks5AuthSetter != nil {
+			s.deps.socks5AuthSetter.ClearAuth()
+		}
+		return nil
+	case "password":
+		if username == "" {
+			return fmt.Errorf("socks5_username is required when socks5_auth is \"password\"")
+		}
+		if password == "" {
+			return fmt.Errorf("socks5_password is required when socks5_auth is \"password\"")
+		}
+		if s.deps.socks5AuthSetter == nil {
+			return fmt.Errorf("SOCKS5 handler is not initialized")
+		}
+		s.deps.socks5AuthSetter.SetPasswordAuth(username, password)
+		return nil
+	default:
+		return fmt.Errorf("invalid socks5_auth %q: must be \"none\" or \"password\"", authMethod)
 	}
 }
 
