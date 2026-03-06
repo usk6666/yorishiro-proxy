@@ -342,6 +342,15 @@ func (h *Handler) buildFrameData(frame *Frame, direction string, upgradeReq *goh
 // dispatchFrameHook dispatches a plugin hook for a WebSocket frame.
 // It returns true if the frame should be dropped (ActionDrop).
 // If the plugin modifies the payload, the frame's Payload is updated in place.
+//
+// Note: ActionDrop is semantically valid only for on_receive_from_client hooks
+// (i.e., the "send" direction). In the "receive" direction, the plugin engine
+// does not register DROP as a valid action, so ActionDrop will not be returned
+// for on_receive_from_server / on_before_send_to_client hooks.
+//
+// After a plugin modifies the payload, the new size is checked against
+// config.MaxWebSocketMessageSize. If exceeded, the modification is discarded
+// and the original payload is preserved (CWE-400 mitigation).
 func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame *Frame, direction string, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, flowID string) bool {
 	if h.pluginEngine == nil {
 		return false
@@ -375,11 +384,24 @@ func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame
 	// Apply payload modifications from plugin result.
 	if result.Data != nil {
 		if newPayload, ok := result.Data["payload"]; ok {
+			var modified []byte
 			switch p := newPayload.(type) {
 			case []byte:
-				frame.Payload = p
+				modified = p
 			case string:
-				frame.Payload = []byte(p)
+				modified = []byte(p)
+			}
+			if modified != nil {
+				if int64(len(modified)) > config.MaxWebSocketMessageSize {
+					h.logger.Warn("plugin modified payload exceeds size limit, keeping original",
+						"flow_id", flowID,
+						"hook", string(hook),
+						"modified_size", len(modified),
+						"limit", config.MaxWebSocketMessageSize,
+					)
+				} else {
+					frame.Payload = modified
+				}
 			}
 		}
 	}

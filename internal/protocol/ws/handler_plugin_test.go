@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -592,6 +593,100 @@ func TestBuildFrameData(t *testing.T) {
 	}
 	if ci["tls_version"] != "TLS 1.3" {
 		t.Errorf("conn_info.tls_version = %v, want %q", ci["tls_version"], "TLS 1.3")
+	}
+}
+
+func TestDispatchFrameHook_PayloadSizeLimit(t *testing.T) {
+	// Register a plugin handler that returns an oversized payload via the registry.
+	engine := plugin.NewEngine(nil)
+	registry := engine.Registry()
+
+	// Create a payload that exceeds config.MaxWebSocketMessageSize.
+	oversized := make([]byte, int(config.MaxWebSocketMessageSize)+1)
+	for i := range oversized {
+		oversized[i] = 'X'
+	}
+
+	registry.Register("oversized-plugin", plugin.HookOnReceiveFromClient, func(ctx context.Context, data map[string]any) (*plugin.HookResult, error) {
+		return &plugin.HookResult{
+			Action: plugin.ActionContinue,
+			Data:   map[string]any{"payload": oversized},
+		}, nil
+	}, plugin.OnErrorSkip)
+
+	handler := NewHandler(nil, testutil.DiscardLogger())
+	handler.SetPluginEngine(engine)
+
+	originalPayload := []byte("original")
+	frame := &Frame{
+		Fin:     true,
+		Opcode:  OpcodeText,
+		Payload: originalPayload,
+	}
+
+	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
+
+	dropped := handler.dispatchFrameHook(
+		context.Background(),
+		plugin.HookOnReceiveFromClient,
+		frame,
+		"client_to_server",
+		req,
+		nil,
+		"test-flow",
+	)
+
+	if dropped {
+		t.Fatal("frame should not be dropped")
+	}
+
+	// The payload should remain the original because the oversized modification
+	// must be rejected.
+	if string(frame.Payload) != "original" {
+		t.Errorf("payload = %q (len=%d), want %q; oversized plugin payload should be rejected",
+			frame.Payload, len(frame.Payload), "original")
+	}
+}
+
+func TestDispatchFrameHook_PayloadWithinLimit(t *testing.T) {
+	// Register a plugin handler that returns a payload within the limit.
+	engine := plugin.NewEngine(nil)
+	registry := engine.Registry()
+
+	registry.Register("ok-plugin", plugin.HookOnReceiveFromClient, func(ctx context.Context, data map[string]any) (*plugin.HookResult, error) {
+		return &plugin.HookResult{
+			Action: plugin.ActionContinue,
+			Data:   map[string]any{"payload": "modified-ok"},
+		}, nil
+	}, plugin.OnErrorSkip)
+
+	handler := NewHandler(nil, testutil.DiscardLogger())
+	handler.SetPluginEngine(engine)
+
+	frame := &Frame{
+		Fin:     true,
+		Opcode:  OpcodeText,
+		Payload: []byte("original"),
+	}
+
+	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
+
+	dropped := handler.dispatchFrameHook(
+		context.Background(),
+		plugin.HookOnReceiveFromClient,
+		frame,
+		"client_to_server",
+		req,
+		nil,
+		"test-flow",
+	)
+
+	if dropped {
+		t.Fatal("frame should not be dropped")
+	}
+
+	if string(frame.Payload) != "modified-ok" {
+		t.Errorf("payload = %q, want %q", frame.Payload, "modified-ok")
 	}
 }
 
