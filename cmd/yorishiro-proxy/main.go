@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
@@ -289,6 +291,25 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// Raw TCP fallback handler: must be last since Detect() always returns true.
 	tcpHandler := prototcp.NewHandler(store, nil, logger)
 
+	// Initialize plugin engine from config if plugins are configured.
+	var pluginEngine *plugin.Engine
+	if proxyCfg != nil && len(proxyCfg.Plugins) > 0 {
+		var pluginConfigs []plugin.PluginConfig
+		if err := json.Unmarshal(proxyCfg.Plugins, &pluginConfigs); err != nil {
+			return fmt.Errorf("parse plugin configs: %w", err)
+		}
+		pluginEngine = plugin.NewEngine(logger)
+		if err := pluginEngine.LoadPlugins(ctx, pluginConfigs); err != nil {
+			return fmt.Errorf("load plugins: %w", err)
+		}
+		defer pluginEngine.Close()
+		httpHandler.SetPluginEngine(pluginEngine)
+		http2Handler.SetPluginEngine(pluginEngine)
+		grpcHandler.SetPluginEngine(pluginEngine)
+		tcpHandler.SetPluginEngine(pluginEngine)
+		logger.Info("plugins loaded", "count", pluginEngine.PluginCount())
+	}
+
 	// Register handlers in priority order: h2c -> HTTP/1.x -> raw TCP fallback.
 	detector := protocol.NewDetector(http2Handler, httpHandler, tcpHandler)
 
@@ -329,6 +350,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	if proxyCfg != nil {
 		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
 		logger.Info("loaded proxy config file defaults")
+	}
+
+	// Pass plugin engine to the MCP server for runtime management.
+	if pluginEngine != nil {
+		opts = append(opts, mcp.WithPluginEngine(pluginEngine))
 	}
 
 	// Pass target scope policy to the MCP server.
