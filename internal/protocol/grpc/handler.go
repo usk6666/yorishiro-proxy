@@ -11,14 +11,16 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // Handler processes gRPC sessions recorded from HTTP/2 streams.
 // It is not a standalone ProtocolHandler — it is invoked by the HTTP/2 handler
 // when Content-Type: application/grpc is detected on a stream.
 type Handler struct {
-	store  flow.FlowWriter
-	logger *slog.Logger
+	store        flow.FlowWriter
+	logger       *slog.Logger
+	pluginEngine *plugin.Engine
 }
 
 // NewHandler creates a new gRPC handler with flow recording.
@@ -27,6 +29,13 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 		store:  store,
 		logger: logger,
 	}
+}
+
+// SetPluginEngine sets the plugin engine for hook dispatch.
+// When set, the handler dispatches plugin hooks for each gRPC frame
+// during session recording.
+func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
+	h.pluginEngine = engine
 }
 
 // IsGRPC reports whether the given Content-Type indicates a gRPC request.
@@ -155,6 +164,12 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	}
 
 	logger := h.logger.With("flow_id", fl.ID, "service", service, "method", method)
+
+	// Dispatch plugin hooks for request frames (on_receive_from_client).
+	h.dispatchRequestHooks(ctx, logger, info, service, method, grpcEncoding, reqFrames)
+
+	// Dispatch plugin hooks for response frames (on_receive_from_server).
+	h.dispatchResponseHooks(ctx, logger, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames)
 
 	// Record messages based on session type.
 	seq := 0
@@ -313,6 +328,180 @@ func (h *Handler) recordReceiveMessages(
 		}
 		seq++
 	}
+}
+
+// dispatchRequestHooks dispatches on_receive_from_client hooks for each gRPC request frame.
+// Plugin results are logged but do not modify the request data, as gRPC frames
+// are recorded after being received from the upstream connection.
+func (h *Handler) dispatchRequestHooks(
+	ctx context.Context,
+	logger *slog.Logger,
+	info *StreamInfo,
+	service, method, grpcEncoding string,
+	frames []*Frame,
+) {
+	if h.pluginEngine == nil {
+		return
+	}
+
+	connInfo := buildConnInfo(info)
+
+	if len(frames) == 0 {
+		data := buildGRPCRequestData(info, service, method, grpcEncoding, nil, false, connInfo)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data)
+		return
+	}
+
+	for _, frame := range frames {
+		data := buildGRPCRequestData(info, service, method, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data)
+	}
+}
+
+// dispatchResponseHooks dispatches on_receive_from_server hooks for each gRPC response frame.
+func (h *Handler) dispatchResponseHooks(
+	ctx context.Context,
+	logger *slog.Logger,
+	info *StreamInfo,
+	service, method, grpcStatus, grpcMessage, grpcEncoding string,
+	frames []*Frame,
+) {
+	if h.pluginEngine == nil {
+		return
+	}
+
+	connInfo := buildConnInfo(info)
+
+	if len(frames) == 0 {
+		data := buildGRPCResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, nil, false, connInfo)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data)
+		return
+	}
+
+	for _, frame := range frames {
+		data := buildGRPCResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data)
+	}
+}
+
+// dispatchHook dispatches a single plugin hook and logs any errors.
+func (h *Handler) dispatchHook(ctx context.Context, logger *slog.Logger, hook plugin.Hook, data map[string]any) {
+	result, err := h.pluginEngine.Dispatch(ctx, hook, data)
+	if err != nil {
+		logger.Warn("gRPC plugin hook error",
+			slog.String("hook", string(hook)),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if result != nil && result.Action != plugin.ActionContinue {
+		logger.Info("gRPC plugin hook returned non-continue action (ignored for gRPC)",
+			slog.String("hook", string(hook)),
+			slog.String("action", result.Action.String()),
+		)
+	}
+}
+
+// buildGRPCRequestData constructs the plugin data map for a gRPC request frame.
+func buildGRPCRequestData(
+	info *StreamInfo,
+	service, method, encoding string,
+	body []byte,
+	compressed bool,
+	connInfo map[string]any,
+) map[string]any {
+	headers := flattenHeaders(info.RequestHeaders)
+
+	data := map[string]any{
+		"protocol":   "grpc",
+		"service":    service,
+		"method":     method,
+		"url":        info.URL.String(),
+		"headers":    headers,
+		"compressed": compressed,
+		"conn_info":  connInfo,
+	}
+	if encoding != "" {
+		data["encoding"] = encoding
+	}
+	if body != nil {
+		data["body"] = body
+	}
+	return data
+}
+
+// buildGRPCResponseData constructs the plugin data map for a gRPC response frame.
+func buildGRPCResponseData(
+	info *StreamInfo,
+	service, method, grpcStatus, grpcMessage, encoding string,
+	body []byte,
+	compressed bool,
+	connInfo map[string]any,
+) map[string]any {
+	headers := flattenHeaders(info.ResponseHeaders)
+	trailers := flattenHeaders(info.Trailers)
+
+	data := map[string]any{
+		"protocol":    "grpc",
+		"service":     service,
+		"method":      method,
+		"status_code": info.StatusCode,
+		"headers":     headers,
+		"trailers":    trailers,
+		"compressed":  compressed,
+		"conn_info":   connInfo,
+	}
+	if grpcStatus != "" {
+		data["grpc_status"] = grpcStatus
+	}
+	if grpcMessage != "" {
+		data["grpc_message"] = grpcMessage
+	}
+	if encoding != "" {
+		data["encoding"] = encoding
+	}
+	if body != nil {
+		data["body"] = body
+	}
+	return data
+}
+
+// buildConnInfo constructs a connection info map from StreamInfo.
+func buildConnInfo(info *StreamInfo) map[string]any {
+	ci := map[string]any{
+		"client_addr": info.ClientAddr,
+		"server_addr": info.ServerAddr,
+	}
+	if info.TLSVersion != "" {
+		ci["tls_version"] = info.TLSVersion
+	}
+	if info.TLSCipher != "" {
+		ci["tls_cipher"] = info.TLSCipher
+	}
+	if info.TLSALPN != "" {
+		ci["tls_alpn"] = info.TLSALPN
+	}
+	if info.TLSServerCertSubject != "" {
+		ci["tls_server_cert_subject"] = info.TLSServerCertSubject
+	}
+	return ci
+}
+
+// flattenHeaders converts multi-value headers to single-value strings
+// for use in plugin data maps. Multiple values are joined with ", ".
+func flattenHeaders(headers map[string][]string) map[string]any {
+	if headers == nil {
+		return map[string]any{}
+	}
+	result := make(map[string]any, len(headers))
+	for k, vals := range headers {
+		if len(vals) == 1 {
+			result[k] = vals[0]
+		} else {
+			result[k] = strings.Join(vals, ", ")
+		}
+	}
+	return result
 }
 
 // classifyFlowType determines the gRPC session type based on frame counts.
