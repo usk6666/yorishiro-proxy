@@ -210,14 +210,19 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			return fmt.Errorf("read %s frame: %w", direction, err)
 		}
 
-		// Dispatch receive hook (on_receive_from_client / on_receive_from_server).
-		if dropped := h.dispatchFrameHook(ctx, receiveHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
-			continue
-		}
+		// Skip plugin dispatch for control frames (Close, Ping, Pong) to prevent
+		// plugins from dropping Close frames, which would cause the relay to hang
+		// until context timeout (CWE-400).
+		if !frame.IsControl() {
+			// Dispatch receive hook (on_receive_from_client / on_receive_from_server).
+			if dropped := h.dispatchFrameHook(ctx, receiveHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
+				continue
+			}
 
-		// Dispatch send hook (on_before_send_to_server / on_before_send_to_client).
-		if dropped := h.dispatchFrameHook(ctx, sendHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
-			continue
+			// Dispatch send hook (on_before_send_to_server / on_before_send_to_client).
+			if dropped := h.dispatchFrameHook(ctx, sendHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
+				continue
+			}
 		}
 
 		// Forward the frame to the destination.
