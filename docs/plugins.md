@@ -104,6 +104,29 @@ Starlark is a subset of Python. Key differences from Python:
 - `print()` outputs to the proxy log
 - No file I/O, network access, or system calls
 
+### Module-Level Freeze Constraint
+
+**Important:** All module-level variables are **frozen** (immutable) after the script is loaded. Attempting to mutate a frozen value inside a hook function causes a runtime error.
+
+```python
+# BAD: _counter is frozen after load — mutating it raises an error.
+_counter = [0]
+
+def on_before_send_to_server(data):
+    _counter[0] = _counter[0] + 1  # Runtime error: frozen list
+    return {"action": action.CONTINUE}
+```
+
+With `on_error: "skip"` (the default), frozen-mutation errors are silently skipped, making them hard to diagnose. Use `on_error: "abort"` during development to surface these errors immediately.
+
+Module-level **constants** (strings, ints, tuples) are safe because they are inherently immutable:
+
+```python
+# OK: immutable constants.
+AUTH_TOKEN = "Bearer ..."
+BLOCKED_PATHS = ("/admin", "/internal")
+```
+
 ## Hook Reference
 
 ### Data Hooks
