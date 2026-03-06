@@ -317,6 +317,11 @@ type ProxyConfig struct {
 	// UpstreamProxy is the upstream proxy URL for proxy chaining.
 	UpstreamProxy string `json:"upstream_proxy,omitempty"`
 
+	// Plugins configures Starlark-based plugins for the proxy pipeline.
+	// Each entry specifies a script path, target protocol, subscribed hooks,
+	// and error handling behavior. Plugins are executed in order.
+	Plugins json.RawMessage `json:"plugins,omitempty"`
+
 	// TargetScopePolicy defines the immutable target scope policy rules.
 	// These rules control which network targets the proxy is allowed to access.
 	// When loaded from a config file, this section is ignored if a dedicated
