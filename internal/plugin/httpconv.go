@@ -123,9 +123,16 @@ func ApplyHTTPRequestChanges(req *gohttp.Request, data map[string]any) (*gohttp.
 		if err != nil {
 			return req, nil, fmt.Errorf("plugin returned invalid URL: %w", err)
 		}
-		req.URL = parsed
-		if parsed.Host != "" {
-			req.Host = parsed.Host
+		// Only allow http and https schemes to prevent SSRF via plugin URL rewrite.
+		// Empty scheme is permitted for relative URLs.
+		switch parsed.Scheme {
+		case "http", "https", "":
+			req.URL = parsed
+			if parsed.Host != "" {
+				req.Host = parsed.Host
+			}
+		default:
+			// Ignore URL change with disallowed scheme — keep original URL.
 		}
 	}
 
