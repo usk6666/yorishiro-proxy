@@ -302,8 +302,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		if err := pluginEngine.LoadPlugins(ctx, pluginConfigs); err != nil {
 			return fmt.Errorf("load plugins: %w", err)
 		}
+		defer pluginEngine.Close()
 		httpHandler.SetPluginEngine(pluginEngine)
 		http2Handler.SetPluginEngine(pluginEngine)
+		grpcHandler.SetPluginEngine(pluginEngine)
 		tcpHandler.SetPluginEngine(pluginEngine)
 		logger.Info("plugins loaded", "count", pluginEngine.PluginCount())
 	}
