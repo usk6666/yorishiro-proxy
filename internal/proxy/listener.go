@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 const peekSize = 16
@@ -43,6 +45,8 @@ type Listener struct {
 	maxConnections int
 	activeConns    atomic.Int64 // current number of active connections
 
+	pluginEngine *plugin.Engine // optional plugin engine for lifecycle hooks
+
 	mu       sync.Mutex
 	listener net.Listener
 	ready    chan struct{}
@@ -69,6 +73,17 @@ func NewListener(cfg ListenerConfig) *Listener {
 	}
 	l.peekTimeoutNs.Store(int64(peekTimeout))
 	return l
+}
+
+// SetPluginEngine sets the plugin engine used to dispatch lifecycle hook events
+// (on_connect, on_disconnect). If engine is nil, hooks are silently skipped.
+func (l *Listener) SetPluginEngine(engine *plugin.Engine) {
+	l.pluginEngine = engine
+}
+
+// PluginEngine returns the listener's current plugin engine, or nil.
+func (l *Listener) PluginEngine() *plugin.Engine {
+	return l.pluginEngine
 }
 
 // Start begins accepting connections. It blocks until the context is cancelled.
@@ -140,6 +155,7 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 
 	pc := NewPeekConn(conn)
 	remoteAddr := conn.RemoteAddr().String()
+	connStart := time.Now()
 
 	// Generate a unique connection ID for log correlation.
 	connID := GenerateConnID()
@@ -149,6 +165,12 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	ctx = ContextWithConnID(ctx, connID)
 	ctx = ContextWithClientAddr(ctx, remoteAddr)
 	ctx = ContextWithLogger(ctx, connLogger)
+
+	// Dispatch on_connect lifecycle hook (fail-open: errors do not block the connection).
+	l.dispatchOnConnect(ctx, remoteAddr, connLogger)
+
+	// Dispatch on_disconnect lifecycle hook when this connection closes.
+	defer l.dispatchOnDisconnect(ctx, remoteAddr, connStart, connLogger)
 
 	// Set read deadline for protocol detection (Slowloris protection).
 	peekTimeout := time.Duration(l.peekTimeoutNs.Load())
@@ -175,6 +197,64 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 
 	if err := handler.Handle(ctx, pc); err != nil {
 		connLogger.Error("handler error", "protocol", handler.Name(), "error", err)
+	}
+}
+
+// hookTimeout is the maximum time allowed for lifecycle hook dispatches.
+// Lifecycle hooks are observe-only, so a short timeout prevents slow plugins
+// from blocking connection acceptance.
+const hookTimeout = 5 * time.Second
+
+// dispatchOnConnect dispatches the on_connect lifecycle hook.
+// Errors are logged but do not block connection processing (fail-open).
+func (l *Listener) dispatchOnConnect(ctx context.Context, clientAddr string, logger *slog.Logger) {
+	if l.pluginEngine == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
+
+	connInfo := &plugin.ConnInfo{
+		ClientAddr: clientAddr,
+	}
+	data := map[string]any{
+		"event":     "connect",
+		"conn_info": connInfo.ToMap(),
+	}
+
+	_, err := l.pluginEngine.Dispatch(ctx, plugin.HookOnConnect, data)
+	if err != nil {
+		logger.Warn("plugin on_connect hook error", "error", err)
+	}
+}
+
+// dispatchOnDisconnect dispatches the on_disconnect lifecycle hook.
+// It uses context.Background() so that disconnect hooks run even when the
+// parent context has been cancelled during graceful shutdown.
+// Errors are logged but do not affect connection cleanup (fail-open).
+func (l *Listener) dispatchOnDisconnect(_ context.Context, clientAddr string, connStart time.Time, logger *slog.Logger) {
+	if l.pluginEngine == nil {
+		return
+	}
+
+	// Use a fresh context with timeout so that disconnect hooks run even during shutdown.
+	dispatchCtx, cancel := context.WithTimeout(context.Background(), hookTimeout)
+	defer cancel()
+
+	durationMs := time.Since(connStart).Milliseconds()
+	connInfo := &plugin.ConnInfo{
+		ClientAddr: clientAddr,
+	}
+	data := map[string]any{
+		"event":       "disconnect",
+		"conn_info":   connInfo.ToMap(),
+		"duration_ms": durationMs,
+	}
+
+	_, err := l.pluginEngine.Dispatch(dispatchCtx, plugin.HookOnDisconnect, data)
+	if err != nil {
+		logger.Warn("plugin on_disconnect hook error", "error", err)
 	}
 }
 
