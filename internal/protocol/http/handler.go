@@ -182,6 +182,17 @@ func (h *Handler) PluginEngine() *plugin.Engine {
 	return h.pluginEngine
 }
 
+// Issuer returns the handler's TLS certificate issuer, or nil if not configured.
+func (h *Handler) Issuer() *cert.Issuer {
+	return h.issuer
+}
+
+// IsPassthrough checks if the given hostname is in the TLS passthrough list.
+// Returns false if no passthrough list is configured.
+func (h *Handler) IsPassthrough(hostname string) bool {
+	return h.passthrough != nil && h.passthrough.Contains(hostname)
+}
+
 // UpstreamProxy returns the current upstream proxy URL, or nil if not set.
 // This is a convenience alias for GetUpstreamProxy from HandlerBase.
 func (h *Handler) UpstreamProxy() *url.URL {

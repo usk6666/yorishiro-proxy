@@ -84,6 +84,36 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 		return fmt.Errorf("write CONNECT 200: %w", err)
 	}
 
+	// Delegate to the shared TLS MITM path.
+	return h.HandleTunnelMITM(ctx, conn, connectAuthority)
+}
+
+// HandleTunnelMITM performs TLS MITM on a tunneled connection. It performs a
+// TLS handshake with the client using a dynamically issued certificate for the
+// target hostname, then dispatches to the appropriate protocol handler based on
+// ALPN negotiation (HTTP/2 via h2, or HTTP/1.x via httpsLoop).
+//
+// This method is the shared MITM path used by both HTTP CONNECT tunnels and
+// SOCKS5 post-handshake dispatch. The caller must have already established the
+// tunnel (e.g., sent "200 Connection Established" for CONNECT, or completed
+// the SOCKS5 handshake) before calling this method.
+//
+// The authority parameter is the target "host:port" used for certificate
+// generation and upstream forwarding.
+func (h *Handler) HandleTunnelMITM(ctx context.Context, conn net.Conn, authority string) error {
+	logger := h.connLogger(ctx)
+
+	hostname, err := parseConnectHost(authority)
+	if err != nil {
+		logger.Warn("invalid tunnel authority", "authority", authority, "error", err)
+		return fmt.Errorf("invalid tunnel authority %q: %w", authority, err)
+	}
+
+	if h.issuer == nil {
+		logger.Warn("TLS MITM requested but issuer not configured", "host", authority)
+		return fmt.Errorf("TLS issuer not configured")
+	}
+
 	// Perform TLS handshake with the client.
 	tlsConn, err := h.tlsHandshake(ctx, conn, hostname)
 	if err != nil {
@@ -98,20 +128,19 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Dispatch on_tls_handshake lifecycle hook (fail-open).
 	h.dispatchOnTLSHandshake(ctx, hostname, tlsMeta)
 
-	logger.Info("CONNECT tunnel established", "host", connectAuthority,
+	logger.Info("TLS tunnel established", "host", authority,
 		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite,
 		"alpn", tlsMeta.ALPN)
 
 	// If the client negotiated HTTP/2 via ALPN and we have an h2 handler,
 	// delegate to it instead of the HTTP/1.x loop.
 	if tlsMeta.ALPN == "h2" && h.h2Handler != nil {
-		return h.h2Handler.HandleH2(ctx, tlsConn, connectAuthority,
+		return h.h2Handler.HandleH2(ctx, tlsConn, authority,
 			tlsMeta.Version, tlsMeta.CipherSuite, tlsMeta.ALPN)
 	}
 
 	// Process HTTPS requests over the decrypted TLS connection.
-	// Pass the full authority (host:port) for URL reconstruction.
-	return h.httpsLoop(ctx, tlsConn, connectAuthority, tlsMeta)
+	return h.httpsLoop(ctx, tlsConn, authority, tlsMeta)
 }
 
 // handlePassthrough relays encrypted bytes between the client and the upstream
