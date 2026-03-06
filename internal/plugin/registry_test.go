@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -9,7 +10,7 @@ func TestRegistry_Register_And_Dispatch(t *testing.T) {
 	r := NewRegistry()
 
 	callCount := 0
-	handler := func(data map[string]any) (*HookResult, error) {
+	handler := func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		callCount++
 		data["modified"] = true
 		return &HookResult{Action: ActionContinue, Data: data}, nil
@@ -25,7 +26,7 @@ func TestRegistry_Register_And_Dispatch(t *testing.T) {
 	}
 
 	data := map[string]any{"key": "value"}
-	result, err := r.Dispatch(HookOnReceiveFromClient, data)
+	result, err := r.Dispatch(context.Background(), HookOnReceiveFromClient, data)
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -46,7 +47,7 @@ func TestRegistry_Register_And_Dispatch(t *testing.T) {
 func TestRegistry_Dispatch_NoHandlers(t *testing.T) {
 	r := NewRegistry()
 
-	result, err := r.Dispatch(HookOnConnect, map[string]any{})
+	result, err := r.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -60,7 +61,7 @@ func TestRegistry_Dispatch_MultipleHandlers_Order(t *testing.T) {
 
 	var order []string
 	makeHandler := func(name string) HookHandler {
-		return func(data map[string]any) (*HookResult, error) {
+		return func(ctx context.Context, data map[string]any) (*HookResult, error) {
 			order = append(order, name)
 			return &HookResult{Action: ActionContinue}, nil
 		}
@@ -70,7 +71,7 @@ func TestRegistry_Dispatch_MultipleHandlers_Order(t *testing.T) {
 	r.Register("plugin-b", HookOnConnect, makeHandler("b"), OnErrorSkip)
 	r.Register("plugin-c", HookOnConnect, makeHandler("c"), OnErrorSkip)
 
-	_, err := r.Dispatch(HookOnConnect, map[string]any{})
+	_, err := r.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -83,16 +84,16 @@ func TestRegistry_Dispatch_Drop_StopsChain(t *testing.T) {
 	r := NewRegistry()
 
 	var order []string
-	r.Register("plugin-a", HookOnReceiveFromClient, func(data map[string]any) (*HookResult, error) {
+	r.Register("plugin-a", HookOnReceiveFromClient, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		order = append(order, "a")
 		return &HookResult{Action: ActionDrop}, nil
 	}, OnErrorSkip)
-	r.Register("plugin-b", HookOnReceiveFromClient, func(data map[string]any) (*HookResult, error) {
+	r.Register("plugin-b", HookOnReceiveFromClient, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		order = append(order, "b")
 		return &HookResult{Action: ActionContinue}, nil
 	}, OnErrorSkip)
 
-	result, err := r.Dispatch(HookOnReceiveFromClient, map[string]any{})
+	result, err := r.Dispatch(context.Background(), HookOnReceiveFromClient, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -108,15 +109,15 @@ func TestRegistry_Dispatch_Respond_StopsChain(t *testing.T) {
 	r := NewRegistry()
 
 	respData := map[string]any{"status": int64(403)}
-	r.Register("plugin-a", HookOnReceiveFromClient, func(data map[string]any) (*HookResult, error) {
+	r.Register("plugin-a", HookOnReceiveFromClient, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		return &HookResult{Action: ActionRespond, ResponseData: respData}, nil
 	}, OnErrorSkip)
-	r.Register("plugin-b", HookOnReceiveFromClient, func(data map[string]any) (*HookResult, error) {
+	r.Register("plugin-b", HookOnReceiveFromClient, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		t.Error("second handler should not be called after RESPOND")
 		return &HookResult{Action: ActionContinue}, nil
 	}, OnErrorSkip)
 
-	result, err := r.Dispatch(HookOnReceiveFromClient, map[string]any{})
+	result, err := r.Dispatch(context.Background(), HookOnReceiveFromClient, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -129,15 +130,15 @@ func TestRegistry_Dispatch_Error_Skip(t *testing.T) {
 	r := NewRegistry()
 
 	callCount := 0
-	r.Register("bad-plugin", HookOnConnect, func(data map[string]any) (*HookResult, error) {
+	r.Register("bad-plugin", HookOnConnect, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		return nil, errors.New("plugin error")
 	}, OnErrorSkip)
-	r.Register("good-plugin", HookOnConnect, func(data map[string]any) (*HookResult, error) {
+	r.Register("good-plugin", HookOnConnect, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		callCount++
 		return &HookResult{Action: ActionContinue}, nil
 	}, OnErrorSkip)
 
-	result, err := r.Dispatch(HookOnConnect, map[string]any{})
+	result, err := r.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() should not return error with skip, got %v", err)
 	}
@@ -152,15 +153,15 @@ func TestRegistry_Dispatch_Error_Skip(t *testing.T) {
 func TestRegistry_Dispatch_Error_Abort(t *testing.T) {
 	r := NewRegistry()
 
-	r.Register("bad-plugin", HookOnConnect, func(data map[string]any) (*HookResult, error) {
+	r.Register("bad-plugin", HookOnConnect, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		return nil, errors.New("plugin error")
 	}, OnErrorAbort)
-	r.Register("good-plugin", HookOnConnect, func(data map[string]any) (*HookResult, error) {
+	r.Register("good-plugin", HookOnConnect, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		t.Error("second handler should not be called after abort")
 		return &HookResult{Action: ActionContinue}, nil
 	}, OnErrorSkip)
 
-	_, err := r.Dispatch(HookOnConnect, map[string]any{})
+	_, err := r.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err == nil {
 		t.Fatal("Dispatch() should return error with abort")
 	}
@@ -180,7 +181,7 @@ func TestRegistry_Dispatch_Error_Abort(t *testing.T) {
 func TestRegistry_Clear(t *testing.T) {
 	r := NewRegistry()
 
-	r.Register("p", HookOnConnect, func(data map[string]any) (*HookResult, error) {
+	r.Register("p", HookOnConnect, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		return &HookResult{Action: ActionContinue}, nil
 	}, OnErrorSkip)
 
@@ -198,18 +199,18 @@ func TestRegistry_Clear(t *testing.T) {
 func TestRegistry_Dispatch_DataPassedBetweenHandlers(t *testing.T) {
 	r := NewRegistry()
 
-	r.Register("plugin-a", HookOnConnect, func(data map[string]any) (*HookResult, error) {
+	r.Register("plugin-a", HookOnConnect, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		data["from_a"] = "hello"
 		return &HookResult{Action: ActionContinue, Data: data}, nil
 	}, OnErrorSkip)
-	r.Register("plugin-b", HookOnConnect, func(data map[string]any) (*HookResult, error) {
+	r.Register("plugin-b", HookOnConnect, func(ctx context.Context, data map[string]any) (*HookResult, error) {
 		if data["from_a"] != "hello" {
 			t.Errorf("plugin-b did not receive data from plugin-a: %v", data)
 		}
 		return &HookResult{Action: ActionContinue}, nil
 	}, OnErrorSkip)
 
-	_, err := r.Dispatch(HookOnConnect, map[string]any{})
+	_, err := r.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}

@@ -1,6 +1,9 @@
 package plugin
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // hookEntry represents a single plugin's handler for a specific hook.
 type hookEntry struct {
@@ -15,8 +18,9 @@ type hookEntry struct {
 }
 
 // HookHandler is a function that handles a hook invocation.
-// It receives hook data as a map and returns a HookResult.
-type HookHandler func(data map[string]any) (*HookResult, error)
+// It receives a context for cancellation and hook data as a map,
+// and returns a HookResult.
+type HookHandler func(ctx context.Context, data map[string]any) (*HookResult, error)
 
 // Registry manages hook registrations for all loaded plugins.
 // It dispatches hooks in registration order and is safe for concurrent use.
@@ -46,8 +50,16 @@ func (r *Registry) Register(pluginName string, hook Hook, handler HookHandler, o
 }
 
 // Dispatch calls all registered handlers for the given hook in registration
-// order. The data map is passed to each handler and may be modified by handlers
-// (modifications are visible to subsequent handlers in the chain).
+// order. The ctx is passed to each handler for cancellation support.
+//
+// Data mutation contract:
+//   - Handlers MAY directly mutate the data map; mutations are visible to
+//     subsequent handlers in the chain.
+//   - If a handler returns a non-nil HookResult.Data, those key-value pairs
+//     are merged (added or overwritten) into the data map before calling
+//     the next handler. HookResult.Data should contain only the keys that
+//     the handler wants to add or override.
+//   - The final result's Data field contains the accumulated data map.
 //
 // If a handler returns ActionDrop or ActionRespond, dispatch stops immediately
 // and returns that result. If a handler returns an error, the behavior depends
@@ -56,7 +68,7 @@ func (r *Registry) Register(pluginName string, hook Hook, handler HookHandler, o
 //   - OnErrorAbort: dispatch stops and the error is returned.
 //
 // Returns nil HookResult and nil error if no handlers are registered for the hook.
-func (r *Registry) Dispatch(hook Hook, data map[string]any) (*HookResult, error) {
+func (r *Registry) Dispatch(ctx context.Context, hook Hook, data map[string]any) (*HookResult, error) {
 	r.mu.RLock()
 	entries := r.hooks[hook]
 	// Copy the slice under lock to allow concurrent modifications.
@@ -69,7 +81,7 @@ func (r *Registry) Dispatch(hook Hook, data map[string]any) (*HookResult, error)
 	r.mu.RUnlock()
 
 	for _, entry := range snapshot {
-		result, err := entry.handler(data)
+		result, err := entry.handler(ctx, data)
 		if err != nil {
 			switch entry.onError {
 			case OnErrorAbort:

@@ -44,7 +44,7 @@ def on_receive_from_client(data):
 	}
 
 	data := map[string]any{"method": "GET", "url": "http://example.com"}
-	result, err := e.Dispatch(HookOnReceiveFromClient, data)
+	result, err := e.Dispatch(context.Background(), HookOnReceiveFromClient, data)
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -81,7 +81,7 @@ def on_receive_from_client(data):
 
 	// Test blocked URL.
 	data := map[string]any{"url": "http://example.com/blocked"}
-	result, err := e.Dispatch(HookOnReceiveFromClient, data)
+	result, err := e.Dispatch(context.Background(), HookOnReceiveFromClient, data)
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -91,7 +91,7 @@ def on_receive_from_client(data):
 
 	// Test allowed URL.
 	data = map[string]any{"url": "http://example.com/ok"}
-	result, err = e.Dispatch(HookOnReceiveFromClient, data)
+	result, err = e.Dispatch(context.Background(), HookOnReceiveFromClient, data)
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -128,7 +128,7 @@ def on_receive_from_client(data):
 	}
 
 	data := map[string]any{"url": "http://example.com"}
-	result, err := e.Dispatch(HookOnReceiveFromClient, data)
+	result, err := e.Dispatch(context.Background(), HookOnReceiveFromClient, data)
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -164,7 +164,7 @@ def on_connect(data):
 		t.Fatalf("LoadPlugins() error = %v", err)
 	}
 
-	result, err := e.Dispatch(HookOnConnect, map[string]any{})
+	result, err := e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -211,7 +211,7 @@ def on_connect(data):
 	}
 
 	data := map[string]any{}
-	result, err := e.Dispatch(HookOnConnect, data)
+	result, err := e.Dispatch(context.Background(), HookOnConnect, data)
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -300,7 +300,7 @@ x = 42
 	}
 
 	// Dispatch should return nil since no handlers registered.
-	result, err := e.Dispatch(HookOnConnect, map[string]any{})
+	result, err := e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -327,7 +327,7 @@ def on_connect(data):
 	}
 
 	// Dispatch should skip the error.
-	result, err := e.Dispatch(HookOnConnect, map[string]any{})
+	result, err := e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() should skip runtime error, got %v", err)
 	}
@@ -353,7 +353,7 @@ def on_connect(data):
 		t.Fatalf("LoadPlugins() error = %v", err)
 	}
 
-	_, err = e.Dispatch(HookOnConnect, map[string]any{})
+	_, err = e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err == nil {
 		t.Fatal("Dispatch() should return error with abort on runtime error")
 	}
@@ -381,7 +381,7 @@ def on_connect(data):
 	}
 
 	data := map[string]any{}
-	result, err := e.Dispatch(HookOnConnect, data)
+	result, err := e.Dispatch(context.Background(), HookOnConnect, data)
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
@@ -433,7 +433,7 @@ def on_connect(data):
 	}
 
 	// Should error because DROP is not valid in on_connect.
-	_, err = e.Dispatch(HookOnConnect, map[string]any{})
+	_, err = e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for DROP action in on_connect hook")
 	}
@@ -475,7 +475,7 @@ def on_connect(data):
 		t.Fatalf("LoadPlugins() error = %v", err)
 	}
 
-	_, err = e.Dispatch(HookOnConnect, map[string]any{})
+	_, err = e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
 	if err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
 	}

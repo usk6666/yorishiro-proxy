@@ -13,6 +13,10 @@ const (
 	OnErrorAbort OnErrorBehavior = "abort"
 )
 
+// DefaultMaxSteps is the default maximum number of Starlark execution steps
+// per hook invocation. This prevents infinite loops from causing DoS.
+const DefaultMaxSteps uint64 = 1_000_000
+
 // PluginConfig defines the configuration for a single plugin.
 type PluginConfig struct {
 	// Path is the filesystem path to the Starlark script file.
@@ -28,6 +32,10 @@ type PluginConfig struct {
 	// OnError controls the behavior when the plugin's hook returns an error.
 	// Valid values: "skip" (default), "abort".
 	OnError string `json:"on_error"`
+
+	// MaxSteps limits the number of Starlark execution steps per hook call.
+	// 0 means use DefaultMaxSteps. Set to a positive value to override.
+	MaxSteps uint64 `json:"max_steps,omitempty"`
 }
 
 // Validate checks the PluginConfig for invalid values.
@@ -59,4 +67,12 @@ func (c *PluginConfig) onErrorBehavior() OnErrorBehavior {
 		return OnErrorSkip
 	}
 	return OnErrorBehavior(c.OnError)
+}
+
+// maxSteps returns the configured max execution steps, or DefaultMaxSteps if not set.
+func (c *PluginConfig) maxSteps() uint64 {
+	if c.MaxSteps == 0 {
+		return DefaultMaxSteps
+	}
+	return c.MaxSteps
 }

@@ -26,7 +26,6 @@ type Engine struct {
 type loadedPlugin struct {
 	config  PluginConfig
 	globals starlark.StringDict
-	thread  *starlark.Thread
 }
 
 // NewEngine creates a new plugin Engine with the given logger.
@@ -116,7 +115,6 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 	lp := &loadedPlugin{
 		config:  cfg,
 		globals: globals,
-		thread:  thread,
 	}
 	e.plugins = append(e.plugins, lp)
 
@@ -141,7 +139,7 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 			continue
 		}
 
-		handler := e.makeHandler(cfg.Path, hook, callable, thread)
+		handler := e.makeHandler(cfg.Path, hook, callable, cfg.maxSteps())
 		e.registry.Register(cfg.Path, hook, handler, onError)
 	}
 
@@ -149,8 +147,31 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 }
 
 // makeHandler creates a HookHandler that calls a Starlark function.
-func (e *Engine) makeHandler(pluginName string, hook Hook, fn starlark.Callable, thread *starlark.Thread) HookHandler {
-	return func(data map[string]any) (*HookResult, error) {
+// A new starlark.Thread is created for each invocation to ensure thread safety,
+// since starlark.Thread is not safe for concurrent use.
+func (e *Engine) makeHandler(pluginName string, hook Hook, fn starlark.Callable, maxSteps uint64) HookHandler {
+	return func(ctx context.Context, data map[string]any) (*HookResult, error) {
+		// Create a new Thread per call to avoid data races.
+		thread := &starlark.Thread{
+			Name: pluginName,
+			Print: func(_ *starlark.Thread, msg string) {
+				e.logger.Info("plugin print", slog.String("plugin", pluginName), slog.String("message", msg))
+			},
+		}
+
+		// Set execution step limit to prevent infinite loops (DoS).
+		if maxSteps > 0 {
+			thread.SetMaxExecutionSteps(maxSteps)
+		}
+
+		// Connect context cancellation to thread cancellation.
+		if ctx.Done() != nil {
+			go func() {
+				<-ctx.Done()
+				thread.Cancel(ctx.Err().Error())
+			}()
+		}
+
 		// Convert Go map to Starlark dict.
 		starlarkData, err := goToStarlark(data)
 		if err != nil {
@@ -248,8 +269,8 @@ func parseHookResult(hook Hook, val starlark.Value) (*HookResult, error) {
 
 // Dispatch dispatches a hook through the registry.
 // This is a convenience method that delegates to the underlying Registry.
-func (e *Engine) Dispatch(hook Hook, data map[string]any) (*HookResult, error) {
-	return e.registry.Dispatch(hook, data)
+func (e *Engine) Dispatch(ctx context.Context, hook Hook, data map[string]any) (*HookResult, error) {
+	return e.registry.Dispatch(ctx, hook, data)
 }
 
 // Close releases all resources held by the engine.
