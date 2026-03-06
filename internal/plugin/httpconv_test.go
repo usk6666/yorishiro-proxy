@@ -268,3 +268,138 @@ func TestHeadersToMap_RoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeHeaderToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"clean value", "application/json", "application/json"},
+		{"with CR", "value\rinjected", "valueinjected"},
+		{"with LF", "value\ninjected", "valueinjected"},
+		{"with CRLF", "value\r\ninjected: evil", "valueinjected: evil"},
+		{"empty", "", ""},
+		{"only CRLF", "\r\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeHeaderToken(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeHeaderToken(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapToHeaders_SanitizesCRLF(t *testing.T) {
+	m := map[string]any{
+		"X-Safe":             []any{"clean"},
+		"X-Evil\r\nInjected": []any{"value"},
+		"X-Evil-Value":       []any{"val\r\nInjected: yes"},
+		"X-String-Val":       "single\r\nvalue",
+		"X-String-Slice":     []string{"slice\r\nvalue"},
+	}
+	h := mapToHeaders(m)
+
+	if v := h.Get("X-Safe"); v != "clean" {
+		t.Errorf("X-Safe = %q, want %q", v, "clean")
+	}
+	// Key should have CRLF stripped.
+	if v := h.Get("X-EvilInjected"); v != "value" {
+		t.Errorf("X-EvilInjected = %q, want %q", v, "value")
+	}
+	// Value should have CRLF stripped.
+	if v := h.Get("X-Evil-Value"); v != "valInjected: yes" {
+		t.Errorf("X-Evil-Value = %q, want %q", v, "valInjected: yes")
+	}
+	if v := h.Get("X-String-Val"); v != "singlevalue" {
+		t.Errorf("X-String-Val = %q, want %q", v, "singlevalue")
+	}
+	if v := h.Get("X-String-Slice"); v != "slicevalue" {
+		t.Errorf("X-String-Slice = %q, want %q", v, "slicevalue")
+	}
+}
+
+func TestValidStatusCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     int
+		fallback int
+		want     int
+	}{
+		{"valid 200", 200, 200, 200},
+		{"valid 100", 100, 200, 100},
+		{"valid 599", 599, 200, 599},
+		{"zero", 0, 200, 200},
+		{"negative", -1, 200, 200},
+		{"too large", 1000, 200, 200},
+		{"600", 600, 200, 200},
+		{"99", 99, 200, 200},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validStatusCode(tt.code, tt.fallback)
+			if got != tt.want {
+				t.Errorf("validStatusCode(%d, %d) = %d, want %d", tt.code, tt.fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyHTTPResponseChanges_InvalidStatusCode(t *testing.T) {
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{},
+	}
+	data := map[string]any{
+		"status_code": 0,
+	}
+	resp, _, err := ApplyHTTPResponseChanges(resp, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Invalid status code 0 should preserve original 200.
+	if resp.StatusCode != 200 {
+		t.Errorf("status_code = %d, want 200 (fallback)", resp.StatusCode)
+	}
+}
+
+func TestApplyHTTPResponseChanges_NegativeStatusCode(t *testing.T) {
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{},
+	}
+	data := map[string]any{
+		"status_code": -1,
+	}
+	resp, _, err := ApplyHTTPResponseChanges(resp, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status_code = %d, want 200 (fallback)", resp.StatusCode)
+	}
+}
+
+func TestBuildRespondResponse_InvalidStatusCode(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode any
+		want       int
+	}{
+		{"zero int", int(0), 200},
+		{"negative int64", int64(-1), 200},
+		{"too large float64", float64(1000), 200},
+		{"valid int", int(403), 403},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := map[string]any{"status_code": tt.statusCode}
+			code, _, _ := BuildRespondResponse(data)
+			if code != tt.want {
+				t.Errorf("BuildRespondResponse status = %d, want %d", code, tt.want)
+			}
+		})
+	}
+}

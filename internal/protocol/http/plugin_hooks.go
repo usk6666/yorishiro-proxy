@@ -123,6 +123,9 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 	if applyErr != nil {
 		logger.Warn("plugin on_receive_from_server apply changes failed", "error", applyErr)
 	}
+	if body != nil {
+		resp.ContentLength = int64(len(body))
+	}
 
 	return resp, body
 }
@@ -149,6 +152,9 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 	resp, body, applyErr = plugin.ApplyHTTPResponseChanges(resp, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_client apply changes failed", "error", applyErr)
+	}
+	if body != nil {
+		resp.ContentLength = int64(len(body))
 	}
 
 	return resp, body

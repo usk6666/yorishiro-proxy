@@ -4,6 +4,7 @@ import (
 	"fmt"
 	gohttp "net/http"
 	"net/url"
+	"strings"
 )
 
 // HTTPRequestToMap converts an HTTP request and its associated metadata into
@@ -167,11 +168,11 @@ func ApplyHTTPResponseChanges(resp *gohttp.Response, data map[string]any) (*goht
 	if v, ok := data["status_code"]; ok {
 		switch sc := v.(type) {
 		case int:
-			resp.StatusCode = sc
+			resp.StatusCode = validStatusCode(sc, resp.StatusCode)
 		case int64:
-			resp.StatusCode = int(sc)
+			resp.StatusCode = validStatusCode(int(sc), resp.StatusCode)
 		case float64:
-			resp.StatusCode = int(sc)
+			resp.StatusCode = validStatusCode(int(sc), resp.StatusCode)
 		}
 	}
 
@@ -220,19 +221,20 @@ func mapToHeaders(v any) gohttp.Header {
 	}
 	h := make(gohttp.Header, len(m))
 	for k, val := range m {
+		safeKey := sanitizeHeaderToken(k)
 		switch vals := val.(type) {
 		case []any:
 			for _, item := range vals {
 				if s, ok := item.(string); ok {
-					h.Add(k, s)
+					h.Add(safeKey, sanitizeHeaderToken(s))
 				}
 			}
 		case []string:
 			for _, s := range vals {
-				h.Add(k, s)
+				h.Add(safeKey, sanitizeHeaderToken(s))
 			}
 		case string:
-			h.Set(k, vals)
+			h.Set(safeKey, sanitizeHeaderToken(vals))
 		}
 	}
 	return h
@@ -270,5 +272,26 @@ func BuildRespondResponse(responseData map[string]any) (statusCode int, headers 
 		}
 	}
 
+	statusCode = validStatusCode(statusCode, gohttp.StatusOK)
+
 	return statusCode, headers, body
+}
+
+// sanitizeHeaderToken removes \r and \n from a string to prevent
+// HTTP header injection (CRLF response splitting).
+func sanitizeHeaderToken(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return s
+	}
+	r := strings.NewReplacer("\r", "", "\n", "")
+	return r.Replace(s)
+}
+
+// validStatusCode returns code if it is within the valid HTTP range
+// (100-599), otherwise returns the provided fallback.
+func validStatusCode(code, fallback int) int {
+	if code >= 100 && code <= 599 {
+		return code
+	}
+	return fallback
 }
