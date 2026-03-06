@@ -38,6 +38,13 @@ func TestLimits_MaxReplayResponseSize(t *testing.T) {
 	}
 }
 
+func TestLimits_MaxTCPPluginChunkSize(t *testing.T) {
+	const expected int64 = 1 << 20 // 1 MB
+	if MaxTCPPluginChunkSize != expected {
+		t.Errorf("MaxTCPPluginChunkSize = %d, want %d", MaxTCPPluginChunkSize, expected)
+	}
+}
+
 func TestLimits_MaxImportScannerBuffer(t *testing.T) {
 	// 350 MB — enough headroom for base64-encoded 254 MB bodies (~339 MB).
 	const expected = 350 * 1024 * 1024

@@ -48,6 +48,11 @@ const (
 	// (resend / resend_raw / tcp_replay) operations.
 	MaxReplayResponseSize int64 = 254 << 20 // 254 MB
 
+	// MaxTCPPluginChunkSize limits the size of a TCP chunk after plugin
+	// modification. The relay buffer is 32 KB, so this allows a maximum
+	// 32× expansion by plugins (CWE-400 mitigation).
+	MaxTCPPluginChunkSize int64 = 1 << 20 // 1 MB
+
 	// MaxImportScannerBuffer is the maximum per-line buffer size for the
 	// JSONL import scanner. A 254 MB body base64-encodes to ~339 MB, so
 	// 350 MB provides adequate headroom for a full JSONL line.
