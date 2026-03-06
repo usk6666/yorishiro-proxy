@@ -568,6 +568,67 @@ Monitor fuzz job progress:
 {"resource": "fuzz_results", "fuzz_id": "<fuzz-id>", "limit": 100}
 ```
 
+### Plugins
+
+Extend proxy behavior with Starlark scripts that hook into the request/response pipeline. Plugins can inspect, modify, or block traffic at various stages.
+
+#### Load plugins via config file
+
+Create a JSON config file with plugin definitions and pass it with `-config`:
+
+```json
+{
+  "plugins": [
+    {
+      "path": "examples/plugins/add_auth_header.star",
+      "protocol": "http",
+      "hooks": ["on_before_send_to_server"],
+      "on_error": "skip"
+    }
+  ]
+}
+```
+
+```json
+// .mcp.json
+{
+  "mcpServers": {
+    "yorishiro-proxy": {
+      "command": "/path/to/bin/yorishiro-proxy",
+      "args": ["-config", "config.json"]
+    }
+  }
+}
+```
+
+#### Manage plugins at runtime
+
+List loaded plugins:
+
+```json
+// plugin
+{"action": "list"}
+```
+
+Disable or enable a plugin:
+
+```json
+// plugin
+{"action": "disable", "params": {"name": "add_auth_header"}}
+
+// plugin
+{"action": "enable", "params": {"name": "add_auth_header"}}
+```
+
+Reload a plugin after editing the script:
+
+```json
+// plugin
+{"action": "reload", "params": {"name": "add_auth_header"}}
+```
+
+For details on writing plugins, hook reference, and protocol data maps, see the [Plugin Development Guide](plugins.md).
+
 ### Flow export and import
 
 Export captured flows for sharing or archival:

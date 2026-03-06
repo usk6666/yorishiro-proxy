@@ -12,6 +12,12 @@
       "protocol": "https",
       "hooks": ["on_receive_from_client", "on_before_send_to_server"],
       "on_error": "skip"
+    },
+    {
+      "path": "examples/plugins/mock_api.star",
+      "protocol": "http",
+      "hooks": ["on_receive_from_client"],
+      "on_error": "skip"
     }
   ]
 }
