@@ -34,6 +34,7 @@ internal/
     http/                  # HTTP/1.x, HTTPS MITM 実装
       handler.go           # HTTP forward proxy ハンドラ
       connect.go           # CONNECT トンネル・HTTPS MITM
+  plugin/                  # Starlark プラグインエンジン・レジストリ
   flow/                    # リクエスト/レスポンス記録・フロー管理
   cert/                    # TLS 証明書生成・CA 管理
     ca.go                  # ルート CA 生成・読み込み
@@ -86,6 +87,7 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 - `modernc.org/sqlite` — Pure Go SQLite ドライバ (BSD-3-Clause)
 - `github.com/google/uuid` — UUID 生成 (Apache-2.0)
 - `golang.org/x/sync` — singleflight 等の並行制御 (BSD-3-Clause)
+- `go.starlark.net` — Starlark スクリプトエンジン (BSD-3-Clause)
 
 新しい外部依存を追加する場合は `/license-check` スキルでライセンスを確認すること。
 
