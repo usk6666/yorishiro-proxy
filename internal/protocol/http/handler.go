@@ -18,6 +18,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
@@ -108,6 +109,7 @@ type Handler struct {
 	passthrough       *proxy.PassthroughList
 	transformPipeline *rules.Pipeline
 	h2Handler         H2Handler
+	pluginEngine      *plugin.Engine
 }
 
 // NewHandler creates a new HTTP handler with flow recording.
@@ -167,6 +169,17 @@ func (h *Handler) TransformPipeline() *rules.Pipeline {
 // negotiates "h2" during the TLS handshake in a CONNECT tunnel.
 func (h *Handler) SetH2Handler(handler H2Handler) {
 	h.h2Handler = handler
+}
+
+// SetPluginEngine sets the plugin engine used to dispatch hook events
+// during HTTP request/response processing.
+func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
+	h.pluginEngine = engine
+}
+
+// PluginEngine returns the handler's current plugin engine, or nil.
+func (h *Handler) PluginEngine() *plugin.Engine {
+	return h.pluginEngine
 }
 
 // UpstreamProxy returns the current upstream proxy URL, or nil if not set.
@@ -300,6 +313,17 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	rawRequest := extractRawRequest(capture, captureStart, reader)
 	removeHopByHopHeaders(req.Header)
 
+	// Build plugin ConnInfo for hook data.
+	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
+
+	// Plugin hook: on_receive_from_client — after TargetScope, before Intercept.
+	// Supports DROP (close connection) and RESPOND (custom response) actions.
+	var pluginDropped bool
+	req, bodyResult.recordBody, pluginDropped = h.dispatchOnReceiveFromClient(ctx, conn, req, bodyResult.recordBody, pluginConnInfo, logger)
+	if pluginDropped {
+		return nil
+	}
+
 	// Build send record params for progressive recording.
 	sp := sendRecordParams{
 		connID:       connID,
@@ -327,6 +351,10 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		return nil
 	}
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+
+	// Plugin hook: on_before_send_to_server — after Transform, before Recording.
+	req, bodyResult.recordBody = h.dispatchOnBeforeSendToServer(ctx, req, bodyResult.recordBody, pluginConnInfo, logger)
+
 	sp.reqBody = bodyResult.recordBody
 
 	// Progressive recording: record send (session + request) before forwarding.
@@ -344,6 +372,9 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
 
+	// Plugin hook: on_receive_from_server — after response received, before Transform.
+	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, logger)
+
 	// Response intercept: check if the response matches any intercept rules
 	// and allow the AI agent to modify or drop it before sending to the client.
 	var respDropped bool
@@ -351,7 +382,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	if respDropped {
 		return nil
 	}
-	// Serialize raw response for recording. This is done after response intercept
+
+	// Plugin hook: on_before_send_to_client — after intercept, before Recording/write.
+	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, logger)
+
+	// Serialize raw response for recording. This is done after plugin/intercept
 	// so that any modifications are reflected in the recorded bytes.
 	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
 
