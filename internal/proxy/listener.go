@@ -36,6 +36,7 @@ type ProtocolDetector interface {
 
 // ListenerConfig holds configuration for creating a Listener.
 type ListenerConfig struct {
+	Name           string // listener name for context propagation (e.g. "default")
 	Addr           string
 	Detector       ProtocolDetector
 	Logger         *slog.Logger
@@ -45,6 +46,7 @@ type ListenerConfig struct {
 
 // Listener accepts TCP connections and dispatches them to protocol handlers.
 type Listener struct {
+	name           string // listener name propagated to connection context
 	addr           string
 	detector       ProtocolDetector
 	logger         *slog.Logger
@@ -72,6 +74,7 @@ func NewListener(cfg ListenerConfig) *Listener {
 		maxConns = defaultMaxConnections
 	}
 	l := &Listener{
+		name:           cfg.Name,
 		addr:           cfg.Addr,
 		detector:       cfg.Detector,
 		logger:         cfg.Logger,
@@ -168,9 +171,12 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	connID := GenerateConnID()
 	connLogger := l.logger.With("conn_id", connID, "remote_addr", remoteAddr)
 
-	// Store connection ID, client address, and logger in context for downstream handlers.
+	// Store connection ID, client address, listener name, and logger in context for downstream handlers.
 	ctx = ContextWithConnID(ctx, connID)
 	ctx = ContextWithClientAddr(ctx, remoteAddr)
+	if l.name != "" {
+		ctx = ContextWithListenerName(ctx, l.name)
+	}
 	ctx = ContextWithLogger(ctx, connLogger)
 
 	// Dispatch on_connect lifecycle hook (fail-open: errors do not block the connection).

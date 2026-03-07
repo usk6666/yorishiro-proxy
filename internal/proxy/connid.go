@@ -17,6 +17,7 @@ const (
 	ctxKeyConnID contextKey = iota
 	ctxKeyLogger
 	ctxKeyClientAddr
+	ctxKeyListenerName
 )
 
 // GenerateConnID returns a random 8-character hex string for connection identification.
@@ -50,6 +51,19 @@ func ContextWithClientAddr(ctx context.Context, addr string) context.Context {
 // ClientAddrFromContext returns the client address stored in the context, or empty string.
 func ClientAddrFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxKeyClientAddr).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ContextWithListenerName returns a new context with the given listener name.
+func ContextWithListenerName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, ctxKeyListenerName, name)
+}
+
+// ListenerNameFromContext returns the listener name stored in the context, or empty string.
+func ListenerNameFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyListenerName).(string); ok {
 		return v
 	}
 	return ""
