@@ -106,6 +106,26 @@ func TestClientAddrFromContext_EmptyContext(t *testing.T) {
 	}
 }
 
+func TestContextWithListenerName_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	name := "my-listener"
+
+	ctx = proxy.ContextWithListenerName(ctx, name)
+	got := proxy.ListenerNameFromContext(ctx)
+
+	if got != name {
+		t.Errorf("ListenerNameFromContext() = %q, want %q", got, name)
+	}
+}
+
+func TestListenerNameFromContext_EmptyContext(t *testing.T) {
+	ctx := context.Background()
+	got := proxy.ListenerNameFromContext(ctx)
+	if got != "" {
+		t.Errorf("ListenerNameFromContext(empty) = %q, want empty string", got)
+	}
+}
+
 func TestContextWithClientAddr_CoexistsWithConnID(t *testing.T) {
 	ctx := context.Background()
 	connID := "abcd1234"

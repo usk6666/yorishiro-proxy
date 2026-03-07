@@ -14,10 +14,15 @@ import (
 
 // mockSOCKS5AuthSetter is a test double for the socks5AuthSetter interface.
 type mockSOCKS5AuthSetter struct {
-	passwordAuthCalled bool
-	clearAuthCalled    bool
-	lastUsername       string
-	lastPassword       string
+	passwordAuthCalled         bool
+	clearAuthCalled            bool
+	lastUsername               string
+	lastPassword               string
+	listenerPasswordAuthCalled bool
+	listenerClearAuthCalled    bool
+	lastListenerName           string
+	lastListenerUsername       string
+	lastListenerPassword       string
 }
 
 func (m *mockSOCKS5AuthSetter) SetPasswordAuth(username, password string) {
@@ -28,6 +33,18 @@ func (m *mockSOCKS5AuthSetter) SetPasswordAuth(username, password string) {
 
 func (m *mockSOCKS5AuthSetter) ClearAuth() {
 	m.clearAuthCalled = true
+}
+
+func (m *mockSOCKS5AuthSetter) SetPasswordAuthForListener(listenerName, username, password string) {
+	m.listenerPasswordAuthCalled = true
+	m.lastListenerName = listenerName
+	m.lastListenerUsername = username
+	m.lastListenerPassword = password
+}
+
+func (m *mockSOCKS5AuthSetter) ClearAuthForListener(listenerName string) {
+	m.listenerClearAuthCalled = true
+	m.lastListenerName = listenerName
 }
 
 // setupSOCKS5TestSession creates an MCP client session with a SOCKS5 auth setter.
@@ -101,14 +118,17 @@ func TestProxyStart_WithSOCKS5AuthPassword(t *testing.T) {
 		t.Fatalf("unexpected error: %v", result.Content)
 	}
 
-	if !mock.passwordAuthCalled {
-		t.Error("expected SetPasswordAuth to be called")
+	if !mock.listenerPasswordAuthCalled {
+		t.Error("expected SetPasswordAuthForListener to be called")
 	}
-	if mock.lastUsername != "testuser" {
-		t.Errorf("username = %q, want %q", mock.lastUsername, "testuser")
+	if mock.lastListenerName != "default" {
+		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "default")
 	}
-	if mock.lastPassword != "testpass" {
-		t.Errorf("password = %q, want %q", mock.lastPassword, "testpass")
+	if mock.lastListenerUsername != "testuser" {
+		t.Errorf("username = %q, want %q", mock.lastListenerUsername, "testuser")
+	}
+	if mock.lastListenerPassword != "testpass" {
+		t.Errorf("password = %q, want %q", mock.lastListenerPassword, "testpass")
 	}
 }
 
@@ -130,8 +150,11 @@ func TestProxyStart_WithSOCKS5AuthNone(t *testing.T) {
 		t.Fatalf("unexpected error: %v", result.Content)
 	}
 
-	if !mock.clearAuthCalled {
-		t.Error("expected ClearAuth to be called for 'none' auth")
+	if !mock.listenerClearAuthCalled {
+		t.Error("expected ClearAuthForListener to be called for 'none' auth")
+	}
+	if mock.lastListenerName != "default" {
+		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "default")
 	}
 }
 
@@ -500,7 +523,7 @@ func TestApplySOCKS5Auth_None(t *testing.T) {
 	mock := &mockSOCKS5AuthSetter{}
 	s := &Server{deps: &deps{socks5AuthSetter: mock}}
 
-	if err := s.applySOCKS5Auth("none", "", ""); err != nil {
+	if err := s.applySOCKS5Auth("none", "", "", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !mock.clearAuthCalled {
@@ -508,11 +531,26 @@ func TestApplySOCKS5Auth_None(t *testing.T) {
 	}
 }
 
+func TestApplySOCKS5Auth_NoneForListener(t *testing.T) {
+	mock := &mockSOCKS5AuthSetter{}
+	s := &Server{deps: &deps{socks5AuthSetter: mock}}
+
+	if err := s.applySOCKS5Auth("none", "", "", "listener1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.listenerClearAuthCalled {
+		t.Error("expected ClearAuthForListener to be called")
+	}
+	if mock.lastListenerName != "listener1" {
+		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "listener1")
+	}
+}
+
 func TestApplySOCKS5Auth_Password(t *testing.T) {
 	mock := &mockSOCKS5AuthSetter{}
 	s := &Server{deps: &deps{socks5AuthSetter: mock}}
 
-	if err := s.applySOCKS5Auth("password", "u", "p"); err != nil {
+	if err := s.applySOCKS5Auth("password", "u", "p", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !mock.passwordAuthCalled {
@@ -520,11 +558,32 @@ func TestApplySOCKS5Auth_Password(t *testing.T) {
 	}
 }
 
+func TestApplySOCKS5Auth_PasswordForListener(t *testing.T) {
+	mock := &mockSOCKS5AuthSetter{}
+	s := &Server{deps: &deps{socks5AuthSetter: mock}}
+
+	if err := s.applySOCKS5Auth("password", "u", "p", "listener2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.listenerPasswordAuthCalled {
+		t.Error("expected SetPasswordAuthForListener to be called")
+	}
+	if mock.lastListenerName != "listener2" {
+		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "listener2")
+	}
+	if mock.lastListenerUsername != "u" {
+		t.Errorf("username = %q, want %q", mock.lastListenerUsername, "u")
+	}
+	if mock.lastListenerPassword != "p" {
+		t.Errorf("password = %q, want %q", mock.lastListenerPassword, "p")
+	}
+}
+
 func TestApplySOCKS5Auth_PasswordMissingUsername(t *testing.T) {
 	mock := &mockSOCKS5AuthSetter{}
 	s := &Server{deps: &deps{socks5AuthSetter: mock}}
 
-	err := s.applySOCKS5Auth("password", "", "p")
+	err := s.applySOCKS5Auth("password", "", "p", "")
 	if err == nil {
 		t.Fatal("expected error for missing username")
 	}
@@ -534,7 +593,7 @@ func TestApplySOCKS5Auth_PasswordMissingPassword(t *testing.T) {
 	mock := &mockSOCKS5AuthSetter{}
 	s := &Server{deps: &deps{socks5AuthSetter: mock}}
 
-	err := s.applySOCKS5Auth("password", "u", "")
+	err := s.applySOCKS5Auth("password", "u", "", "")
 	if err == nil {
 		t.Fatal("expected error for missing password")
 	}
@@ -543,7 +602,7 @@ func TestApplySOCKS5Auth_PasswordMissingPassword(t *testing.T) {
 func TestApplySOCKS5Auth_PasswordNoHandler(t *testing.T) {
 	s := &Server{deps: &deps{}}
 
-	err := s.applySOCKS5Auth("password", "u", "p")
+	err := s.applySOCKS5Auth("password", "u", "p", "")
 	if err == nil {
 		t.Fatal("expected error when handler is nil")
 	}
@@ -553,7 +612,7 @@ func TestApplySOCKS5Auth_InvalidMethod(t *testing.T) {
 	mock := &mockSOCKS5AuthSetter{}
 	s := &Server{deps: &deps{socks5AuthSetter: mock}}
 
-	err := s.applySOCKS5Auth("gssapi", "", "")
+	err := s.applySOCKS5Auth("gssapi", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for invalid method")
 	}
