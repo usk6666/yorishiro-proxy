@@ -10,6 +10,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // requestHeaders returns a clone of the request headers with the Host header
@@ -442,4 +443,40 @@ func (h *Handler) recordHTTPSession(ctx context.Context, p sessionRecordParams, 
 			respBody:             p.respBody,
 		}, logger)
 	}
+}
+
+// socks5Protocol returns the protocol string with a "SOCKS5+" prefix if the
+// request arrived through a SOCKS5 tunnel (detected via context metadata).
+// For example, "HTTPS" becomes "SOCKS5+HTTPS" and "HTTP/1.x" becomes "SOCKS5+HTTP".
+func socks5Protocol(ctx context.Context, base string) string {
+	if proxy.SOCKS5TargetFromContext(ctx) != "" {
+		switch base {
+		case "HTTP/1.x":
+			return "SOCKS5+HTTP"
+		default:
+			return "SOCKS5+" + base
+		}
+	}
+	return base
+}
+
+// mergeSOCKS5Tags adds SOCKS5 metadata tags to the given tags map if the
+// request arrived through a SOCKS5 tunnel. If tags is nil, a new map is
+// created. Returns the (possibly new) tags map.
+func mergeSOCKS5Tags(ctx context.Context, tags map[string]string) map[string]string {
+	target := proxy.SOCKS5TargetFromContext(ctx)
+	if target == "" {
+		return tags
+	}
+	if tags == nil {
+		tags = make(map[string]string)
+	}
+	tags["socks5_target"] = target
+	if authMethod := proxy.SOCKS5AuthMethodFromContext(ctx); authMethod != "" {
+		tags["socks5_auth_method"] = authMethod
+	}
+	if authUser := proxy.SOCKS5AuthUserFromContext(ctx); authUser != "" {
+		tags["socks5_auth_user"] = authUser
+	}
+	return tags
 }
