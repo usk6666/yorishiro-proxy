@@ -1,7 +1,8 @@
 # Local playwright-cli files
 .playwright/
 .playwright-cli/
-.claude/skills/playwright-cli
+.claude/skills/playwright-cli/
+.claude/skills/yorishiro/
 .claude/settings.local.json
 .mcp.json
 
