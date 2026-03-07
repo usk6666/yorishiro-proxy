@@ -14,6 +14,13 @@ import (
 
 const peekSize = 16
 
+// quickPeekSize is the number of bytes used for the first stage of protocol
+// detection. Some protocols (e.g., SOCKS5) can be identified from a single
+// byte, and their client greeting may be shorter than peekSize. Peeking the
+// full peekSize would block until timeout because bufio.Reader.Peek(n) waits
+// for n bytes to arrive. A two-stage peek avoids this latency.
+const quickPeekSize = 1
+
 const defaultPeekTimeout = 30 * time.Second
 
 // defaultMaxConnections limits concurrent connections to bound worst-case memory.
@@ -178,16 +185,32 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 		conn.SetReadDeadline(time.Now().Add(peekTimeout))
 	}
 
-	peek, err := pc.Peek(peekSize)
+	// Two-stage peek: first try a quick peek (1 byte) for protocols that can
+	// be identified from very few bytes (e.g., SOCKS5 needs only 1 byte).
+	// This avoids blocking until peekTimeout when the client greeting is
+	// shorter than peekSize, as bufio.Reader.Peek(n) waits for n bytes.
+	peek, err := pc.Peek(quickPeekSize)
 	if err != nil && len(peek) == 0 {
 		connLogger.Debug("peek failed", "error", err)
 		return
 	}
 
+	handler := l.detector.Detect(peek)
+
+	// If the quick peek did not match, try the full peek for protocols that
+	// need more bytes (e.g., HTTP method detection requires multiple bytes).
+	if handler == nil {
+		peek, err = pc.Peek(peekSize)
+		if err != nil && len(peek) == 0 {
+			connLogger.Debug("peek failed", "error", err)
+			return
+		}
+		handler = l.detector.Detect(peek)
+	}
+
 	// Reset deadline before passing to handler.
 	conn.SetReadDeadline(time.Time{})
 
-	handler := l.detector.Detect(peek)
 	if handler == nil {
 		connLogger.Warn("no protocol handler matched", "peek_bytes", fmt.Sprintf("%x", peek))
 		return
