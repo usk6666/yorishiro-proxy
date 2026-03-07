@@ -41,6 +41,7 @@ type PostHandshakeFunc func(ctx context.Context, clientConn, upstreamConn net.Co
 // Handler implements proxy.ProtocolHandler for SOCKS5 connections.
 type Handler struct {
 	logger        *slog.Logger
+	authMu        sync.RWMutex
 	auth          Authenticator
 	targetScope   *proxy.TargetScope
 	postHandshake PostHandshakeFunc
@@ -57,7 +58,16 @@ func NewHandler(logger *slog.Logger) *Handler {
 // SetAuthenticator sets the authenticator for USERNAME/PASSWORD authentication.
 // If nil, only NO AUTH is offered to clients.
 func (h *Handler) SetAuthenticator(auth Authenticator) {
+	h.authMu.Lock()
 	h.auth = auth
+	h.authMu.Unlock()
+}
+
+// getAuth returns the current authenticator under read lock.
+func (h *Handler) getAuth() Authenticator {
+	h.authMu.RLock()
+	defer h.authMu.RUnlock()
+	return h.auth
 }
 
 // SetTargetScope sets the target scope used to enforce which destinations are

@@ -46,6 +46,10 @@ type configureInput struct {
 	// For replace: use rules to replace all rules entirely.
 	AutoTransform *configureAutoTransform `json:"auto_transform,omitempty" jsonschema:"auto-transform rules configuration"`
 
+	// SOCKS5Auth configures the SOCKS5 authentication method at runtime.
+	// If omitted, the current setting is not changed.
+	SOCKS5Auth *configureSOCKS5Auth `json:"socks5_auth,omitempty" jsonschema:"SOCKS5 authentication configuration"`
+
 	// MaxConnections dynamically changes the maximum number of concurrent proxy connections.
 	// Existing connections exceeding the new limit are not interrupted.
 	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (1-100000)"`
@@ -57,6 +61,23 @@ type configureInput struct {
 	// RequestTimeoutMs dynamically changes the HTTP request header read timeout in milliseconds.
 	// Takes effect for the next incoming request.
 	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (100-600000)"`
+}
+
+// configureSOCKS5Auth holds SOCKS5 authentication configuration.
+type configureSOCKS5Auth struct {
+	// Method is the authentication method: "none" or "password".
+	Method string `json:"method" jsonschema:"authentication method: none or password"`
+
+	// Username is the username for password authentication.
+	Username string `json:"username,omitempty" jsonschema:"username for password authentication"`
+
+	// Password is the password for password authentication.
+	Password string `json:"password,omitempty" jsonschema:"password for password authentication"`
+}
+
+// configureSOCKS5AuthResult summarizes SOCKS5 auth state in the configure response.
+type configureSOCKS5AuthResult struct {
+	Method string `json:"method"`
 }
 
 // configureInterceptQueue holds intercept queue configuration.
@@ -140,6 +161,9 @@ type configureResult struct {
 	// AutoTransform summarizes the current auto-transform rules state.
 	AutoTransform *configureAutoTransformResult `json:"auto_transform,omitempty"`
 
+	// SOCKS5Auth summarizes the current SOCKS5 authentication state.
+	SOCKS5Auth *configureSOCKS5AuthResult `json:"socks5_auth,omitempty"`
+
 	// MaxConnections is the current max connections value (set when changed).
 	MaxConnections *int `json:"max_connections,omitempty"`
 
@@ -184,7 +208,7 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, auto-transform rules, and connection limits/timeouts. " +
+		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, auto-transform rules, SOCKS5 authentication, and connection limits/timeouts. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
 			"Upstream proxy routes all outgoing traffic through an HTTP CONNECT or SOCKS5 proxy; set to empty string to disable. " +
@@ -285,6 +309,13 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 		result.AutoTransform = s.autoTransformResult()
 	}
 
+	if input.SOCKS5Auth != nil {
+		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password); err != nil {
+			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
+		}
+		result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}
+	}
+
 	if err := s.applyConnectionLimits(input, result); err != nil {
 		return nil, nil, err
 	}
@@ -365,6 +396,13 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 			return nil, nil, fmt.Errorf("auto_transform replace: %w", err)
 		}
 		result.AutoTransform = s.autoTransformResult()
+	}
+
+	if input.SOCKS5Auth != nil {
+		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password); err != nil {
+			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
+		}
+		result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}
 	}
 
 	if err := s.applyConnectionLimits(input, result); err != nil {

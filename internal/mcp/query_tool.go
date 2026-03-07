@@ -627,6 +627,8 @@ type queryStatusResult struct {
 	DBSizeBytes       int64                      `json:"db_size_bytes"`
 	UptimeSeconds     int64                      `json:"uptime_seconds"`
 	CAInitialized     bool                       `json:"ca_initialized"`
+	SOCKS5Enabled     bool                       `json:"socks5_enabled"`
+	SOCKS5Auth        string                     `json:"socks5_auth,omitempty"`
 }
 
 // handleQueryStatus returns the current proxy status and health metrics.
@@ -692,6 +694,11 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.CAInitialized = true
 	}
 
+	// SOCKS5 availability: enabled if the handler is registered.
+	if s.deps.socks5AuthSetter != nil {
+		result.SOCKS5Enabled = true
+	}
+
 	return nil, result, nil
 }
 
@@ -704,6 +711,7 @@ type queryConfigResult struct {
 	TLSPassthrough   *queryPassthroughResult `json:"tls_passthrough"`
 	TCPForwards      map[string]string       `json:"tcp_forwards,omitempty"`
 	EnabledProtocols []string                `json:"enabled_protocols,omitempty"`
+	SOCKS5Enabled    bool                    `json:"socks5_enabled"`
 }
 
 // queryScopeResult holds capture scope rules in the config response.
@@ -758,6 +766,10 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 	}
 	if len(s.deps.enabledProtocols) > 0 {
 		result.EnabledProtocols = s.deps.enabledProtocols
+	}
+
+	if s.deps.socks5AuthSetter != nil {
+		result.SOCKS5Enabled = true
 	}
 
 	return nil, result, nil
