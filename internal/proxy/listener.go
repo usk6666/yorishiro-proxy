@@ -14,6 +14,13 @@ import (
 
 const peekSize = 16
 
+// quickPeekSize is the number of bytes used for the first stage of protocol
+// detection. Some protocols (e.g., SOCKS5) can be identified from a single
+// byte, and their client greeting may be shorter than peekSize. Peeking the
+// full peekSize would block until timeout because bufio.Reader.Peek(n) waits
+// for n bytes to arrive. A two-stage peek avoids this latency.
+const quickPeekSize = 1
+
 const defaultPeekTimeout = 30 * time.Second
 
 // defaultMaxConnections limits concurrent connections to bound worst-case memory.
@@ -178,16 +185,66 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 		conn.SetReadDeadline(time.Now().Add(peekTimeout))
 	}
 
-	peek, err := pc.Peek(peekSize)
+	// Two-stage peek: first try a quick peek (1 byte) for protocols that can
+	// be identified from very few bytes (e.g., SOCKS5 needs only 1 byte).
+	// This avoids blocking until peekTimeout when the client greeting is
+	// shorter than peekSize, as bufio.Reader.Peek(n) waits for n bytes.
+	peek, err := pc.Peek(quickPeekSize)
 	if err != nil && len(peek) == 0 {
 		connLogger.Debug("peek failed", "error", err)
 		return
 	}
 
+	quickHandler := l.detector.Detect(peek)
+
+	// Stage 2: refine detection when more bytes are available or when
+	// stage 1 found no match.
+	//
+	// If stage 1 matched a handler but the buffer only contains
+	// quickPeekSize bytes, we trust the stage-1 result and skip the full
+	// peek — this keeps SOCKS5 (detectable from 1 byte) fast by not
+	// blocking until peekTimeout waiting for peekSize bytes.
+	//
+	// If the buffer already holds more bytes than quickPeekSize (typical
+	// when a client sends a complete greeting/request in one write), we
+	// re-detect using the buffered bytes. This prevents a catch-all
+	// handler (e.g., raw TCP whose Detect unconditionally returns true)
+	// from short-circuiting detection of protocols that need more bytes
+	// (HTTP, HTTP/2, gRPC, WebSocket).
+	//
+	// If stage 1 found no match, we fall through to the blocking full
+	// peek as before.
+	handler := quickHandler
+	buffered := pc.Buffered()
+	switch {
+	case quickHandler != nil && buffered > quickPeekSize:
+		// More bytes already buffered — re-detect without blocking.
+		n := buffered
+		if n > peekSize {
+			n = peekSize
+		}
+		if fullPeek, err := pc.Peek(n); err == nil || len(fullPeek) > 0 {
+			if fullHandler := l.detector.Detect(fullPeek); fullHandler != nil {
+				handler = fullHandler
+				peek = fullPeek
+			}
+		}
+	case quickHandler == nil:
+		// No match on quick peek — block for full peek.
+		fullPeek, fullErr := pc.Peek(peekSize)
+		if fullErr != nil && len(fullPeek) == 0 {
+			connLogger.Debug("peek failed", "error", fullErr)
+			return
+		}
+		if fullHandler := l.detector.Detect(fullPeek); fullHandler != nil {
+			handler = fullHandler
+			peek = fullPeek
+		}
+	}
+
 	// Reset deadline before passing to handler.
 	conn.SetReadDeadline(time.Time{})
 
-	handler := l.detector.Detect(peek)
 	if handler == nil {
 		connLogger.Warn("no protocol handler matched", "peek_bytes", fmt.Sprintf("%x", peek))
 		return

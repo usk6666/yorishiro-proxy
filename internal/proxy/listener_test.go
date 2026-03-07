@@ -490,3 +490,384 @@ func TestListener_PeekTimeout_DisconnectsSlowClient(t *testing.T) {
 		t.Errorf("handler entered = %d, want 0", handler.entered.Load())
 	}
 }
+
+// socks5Handler is a ProtocolHandler that detects SOCKS5 from the first byte.
+type socks5Handler struct {
+	entered atomic.Int32
+}
+
+func (h *socks5Handler) Name() string { return "SOCKS5" }
+func (h *socks5Handler) Detect(peek []byte) bool {
+	return len(peek) >= 1 && peek[0] == 0x05
+}
+func (h *socks5Handler) Handle(_ context.Context, conn net.Conn) error {
+	h.entered.Add(1)
+	defer conn.Close()
+	return nil
+}
+
+// httpHandler is a ProtocolHandler that detects HTTP from a method prefix.
+type httpHandler struct {
+	entered atomic.Int32
+}
+
+func (h *httpHandler) Name() string { return "HTTP" }
+func (h *httpHandler) Detect(peek []byte) bool {
+	return len(peek) >= 4 && string(peek[:4]) == "GET "
+}
+func (h *httpHandler) Handle(_ context.Context, conn net.Conn) error {
+	h.entered.Add(1)
+	defer conn.Close()
+	return nil
+}
+
+// catchAllHandler is a ProtocolHandler whose Detect always returns true,
+// simulating the raw TCP fallback handler.
+type catchAllHandler struct {
+	entered atomic.Int32
+}
+
+func (h *catchAllHandler) Name() string { return "TCP" }
+func (h *catchAllHandler) Detect(_ []byte) bool {
+	return true
+}
+func (h *catchAllHandler) Handle(_ context.Context, conn net.Conn) error {
+	h.entered.Add(1)
+	defer conn.Close()
+	return nil
+}
+
+// multiDetector returns the first handler whose Detect returns true.
+type multiDetector struct {
+	handlers []proxy.ProtocolHandler
+}
+
+func (d *multiDetector) Detect(peek []byte) proxy.ProtocolHandler {
+	for _, h := range d.handlers {
+		if h.Detect(peek) {
+			return h
+		}
+	}
+	return nil
+}
+
+func TestListener_TwoStagePeek_SOCKS5DetectedQuickly(t *testing.T) {
+	socks := &socks5Handler{}
+	http := &httpHandler{}
+	detector := &multiDetector{handlers: []proxy.ProtocolHandler{socks, http}}
+
+	// Use a long peek timeout to verify that SOCKS5 does NOT wait for it.
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      testutil.DiscardLogger(),
+		PeekTimeout: 10 * time.Second,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Send a SOCKS5 client greeting (3 bytes, fewer than peekSize=16).
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// SOCKS5 greeting: version=0x05, nmethods=1, method=0x00 (NO AUTH)
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatalf("write socks5 greeting: %v", err)
+	}
+
+	// The handler should be entered quickly (well under peek timeout).
+	start := time.Now()
+	deadline := time.Now().Add(2 * time.Second)
+	for socks.entered.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	elapsed := time.Since(start)
+
+	if socks.entered.Load() != 1 {
+		t.Fatal("SOCKS5 handler was never entered")
+	}
+
+	// Must complete in well under 1 second (the peek timeout is 10s).
+	if elapsed > 1*time.Second {
+		t.Errorf("SOCKS5 detection took %v, expected < 1s (peek_timeout=10s)", elapsed)
+	}
+}
+
+func TestListener_TwoStagePeek_HTTPStillWorks(t *testing.T) {
+	socks := &socks5Handler{}
+	http := &httpHandler{}
+	detector := &multiDetector{handlers: []proxy.ProtocolHandler{socks, http}}
+
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      testutil.DiscardLogger(),
+		PeekTimeout: 5 * time.Second,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Send a full HTTP request (more than peekSize bytes).
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for http.entered.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if http.entered.Load() != 1 {
+		t.Fatal("HTTP handler was never entered")
+	}
+	if socks.entered.Load() != 0 {
+		t.Errorf("SOCKS5 handler entered = %d, want 0", socks.entered.Load())
+	}
+}
+
+func TestListener_TwoStagePeek_NoMatch(t *testing.T) {
+	socks := &socks5Handler{}
+	http := &httpHandler{}
+	detector := &multiDetector{handlers: []proxy.ProtocolHandler{socks, http}}
+
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      testutil.DiscardLogger(),
+		PeekTimeout: 500 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Send unrecognized data (not SOCKS5, not HTTP).
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte{0xFF, 0xFE, 0xFD, 0xFC}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Connection should be closed (no handler matched).
+	buf := make([]byte, 1)
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected error reading from connection with no matching handler")
+	}
+
+	if socks.entered.Load() != 0 {
+		t.Errorf("SOCKS5 handler entered = %d, want 0", socks.entered.Load())
+	}
+	if http.entered.Load() != 0 {
+		t.Errorf("HTTP handler entered = %d, want 0", http.entered.Load())
+	}
+}
+
+func TestListener_TwoStagePeek_QuickMatchSkipsFullPeek(t *testing.T) {
+	// Verify that when the first-stage peek matches, the handler is dispatched
+	// without waiting for more bytes. We do this by sending only 1 byte
+	// (SOCKS5 version) and verifying the handler is entered promptly.
+	socks := &socks5Handler{}
+	detector := &multiDetector{handlers: []proxy.ProtocolHandler{socks}}
+
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      testutil.DiscardLogger(),
+		PeekTimeout: 10 * time.Second,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Send only 1 byte: SOCKS5 version.
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte{0x05}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	start := time.Now()
+	deadline := time.Now().Add(2 * time.Second)
+	for socks.entered.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	elapsed := time.Since(start)
+
+	if socks.entered.Load() != 1 {
+		t.Fatal("SOCKS5 handler was never entered with single byte")
+	}
+
+	if elapsed > 1*time.Second {
+		t.Errorf("single-byte SOCKS5 detection took %v, expected < 1s", elapsed)
+	}
+}
+
+func TestListener_TwoStagePeek_PartialHTTPFallsThrough(t *testing.T) {
+	// Send just "G" (1 byte) which doesn't match SOCKS5 (0x05) or HTTP ("GET ").
+	// After full peek timeout with only 1 byte available beyond the quick peek,
+	// the handler should not match.
+	http := &httpHandler{}
+	detector := &multiDetector{handlers: []proxy.ProtocolHandler{http}}
+
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      testutil.DiscardLogger(),
+		PeekTimeout: 500 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Send only "G" — not enough for HTTP detection ("GET " needs 4 bytes).
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("G")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Connection should be closed after peek timeout (no handler matched).
+	buf := make([]byte, 1)
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected error reading from connection with partial HTTP data")
+	}
+
+	if http.entered.Load() != 0 {
+		t.Errorf("HTTP handler entered = %d, want 0 (only 1 byte sent)", http.entered.Load())
+	}
+}
+
+func TestListener_TwoStagePeek_CatchAllDoesNotShortCircuitHTTP(t *testing.T) {
+	// Regression test for S-1: a catch-all handler (raw TCP) whose Detect
+	// always returns true must not prevent HTTP detection on stage 2.
+	// Production handler order: http, socks5, tcp (catch-all last).
+	httpH := &httpHandler{}
+	socks := &socks5Handler{}
+	catchAll := &catchAllHandler{}
+	detector := &multiDetector{handlers: []proxy.ProtocolHandler{httpH, socks, catchAll}}
+
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      testutil.DiscardLogger(),
+		PeekTimeout: 5 * time.Second,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Send a full HTTP request — more than peekSize bytes arrive in one write.
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for httpH.entered.Load() < 1 && catchAll.entered.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if httpH.entered.Load() != 1 {
+		t.Errorf("HTTP handler entered = %d, want 1", httpH.entered.Load())
+	}
+	if catchAll.entered.Load() != 0 {
+		t.Errorf("catch-all handler entered = %d, want 0 (HTTP should take priority)", catchAll.entered.Load())
+	}
+}
