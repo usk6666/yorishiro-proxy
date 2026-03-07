@@ -160,6 +160,58 @@ Confirm the fingerprint has changed and `persisted` is true.
 }
 ```
 
+## SOCKS5 / proxychains Workflow
+
+### 1. Start proxy with SOCKS5 support
+```json
+// proxy_start
+{
+  "listen_addr": "127.0.0.1:1080",
+  "capture_scope": {
+    "includes": [{"hostname": "target.example.com"}]
+  }
+}
+```
+
+### 2. Configure proxychains
+Add the following to `/etc/proxychains.conf` (or `~/.proxychains/proxychains.conf`):
+```
+socks5 127.0.0.1 1080
+```
+
+### 3. Route tools through the proxy
+Run any TCP-based tool through the proxy using proxychains:
+```bash
+proxychains nmap -sT -Pn target.example.com
+proxychains curl https://target.example.com/api/
+```
+
+### 4. Enable SOCKS5 authentication (optional)
+```json
+// configure
+{
+  "socks5_auth": {
+    "method": "password",
+    "username": "proxyuser",
+    "password": "proxypass"
+  }
+}
+```
+Update proxychains configuration to include credentials:
+```
+socks5 127.0.0.1 1080 proxyuser proxypass
+```
+
+### 5. Disable SOCKS5 authentication
+```json
+// configure
+{
+  "socks5_auth": {
+    "method": "none"
+  }
+}
+```
+
 ## Flow Cleanup
 
 ### Delete old flows
