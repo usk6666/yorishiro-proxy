@@ -112,41 +112,48 @@ func (h *Handler) selectMethod(methods []byte) byte {
 //	| 1  |  1   | 1 to 255 |  1   | 1 to 255 |
 //	+----+------+----------+------+----------+
 func (h *Handler) authenticateUserPass(conn net.Conn) error {
+	_, err := h.authenticateUserPassReturn(conn)
+	return err
+}
+
+// authenticateUserPassReturn performs USERNAME/PASSWORD sub-negotiation (RFC 1929)
+// and returns the authenticated username on success.
+func (h *Handler) authenticateUserPassReturn(conn net.Conn) (string, error) {
 	// Read auth version.
 	verBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, verBuf); err != nil {
-		return fmt.Errorf("read auth version: %w", err)
+		return "", fmt.Errorf("read auth version: %w", err)
 	}
 	if verBuf[0] != authVersion {
 		_, _ = conn.Write([]byte{authVersion, authFailure})
-		return fmt.Errorf("unsupported auth version: %d", verBuf[0])
+		return "", fmt.Errorf("unsupported auth version: %d", verBuf[0])
 	}
 
 	// Read username.
 	ulenBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, ulenBuf); err != nil {
-		return fmt.Errorf("read username length: %w", err)
+		return "", fmt.Errorf("read username length: %w", err)
 	}
 	ulen := int(ulenBuf[0])
 	if ulen == 0 {
 		_, _ = conn.Write([]byte{authVersion, authFailure})
-		return fmt.Errorf("empty username")
+		return "", fmt.Errorf("empty username")
 	}
 	username := make([]byte, ulen)
 	if _, err := io.ReadFull(conn, username); err != nil {
-		return fmt.Errorf("read username: %w", err)
+		return "", fmt.Errorf("read username: %w", err)
 	}
 
 	// Read password.
 	plenBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, plenBuf); err != nil {
-		return fmt.Errorf("read password length: %w", err)
+		return "", fmt.Errorf("read password length: %w", err)
 	}
 	plen := int(plenBuf[0])
 	password := make([]byte, plen)
 	if plen > 0 {
 		if _, err := io.ReadFull(conn, password); err != nil {
-			return fmt.Errorf("read password: %w", err)
+			return "", fmt.Errorf("read password: %w", err)
 		}
 	}
 
@@ -154,13 +161,13 @@ func (h *Handler) authenticateUserPass(conn net.Conn) error {
 	auth := h.getAuth()
 	if auth == nil || !auth.Authenticate(string(username), string(password)) {
 		_, _ = conn.Write([]byte{authVersion, authFailure})
-		return fmt.Errorf("authentication failed for user %q", string(username))
+		return "", fmt.Errorf("authentication failed for user %q", string(username))
 	}
 
 	// Send success response.
 	if _, err := conn.Write([]byte{authVersion, authSuccess}); err != nil {
-		return fmt.Errorf("write auth success: %w", err)
+		return "", fmt.Errorf("write auth success: %w", err)
 	}
 
-	return nil
+	return string(username), nil
 }

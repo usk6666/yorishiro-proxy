@@ -339,9 +339,9 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	sp := sendRecordParams{
 		connID:       connID,
 		clientAddr:   clientAddr,
-		protocol:     "HTTP/1.x",
+		protocol:     socks5Protocol(ctx, "HTTP/1.x"),
 		start:        start,
-		tags:         smugglingTags(smuggling),
+		tags:         mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},
 		req:          req,
 		reqBody:      bodyResult.recordBody,

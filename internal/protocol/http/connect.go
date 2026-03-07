@@ -394,9 +394,9 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	sp := sendRecordParams{
 		connID:     connID,
 		clientAddr: clientAddr,
-		protocol:   "HTTPS",
+		protocol:   socks5Protocol(ctx, "HTTPS"),
 		start:      start,
-		tags:       smugglingTags(smuggling),
+		tags:       mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 			TLSVersion: tlsMeta.Version,
