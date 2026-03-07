@@ -337,6 +337,33 @@ Each auto-transform rule has:
 }
 ```
 
+### socks5_auth (object, optional)
+Configures SOCKS5 authentication at runtime.
+
+- **method** (string, required): `"none"` or `"password"`.
+- **username** (string): Username for password authentication. Required when method is `"password"`.
+- **password** (string): Password for password authentication. Required when method is `"password"`.
+
+### Enable SOCKS5 password authentication
+```json
+{
+  "socks5_auth": {
+    "method": "password",
+    "username": "proxyuser",
+    "password": "proxypass"
+  }
+}
+```
+
+### Disable SOCKS5 authentication
+```json
+{
+  "socks5_auth": {
+    "method": "none"
+  }
+}
+```
+
 ### Combined update
 ```json
 {

@@ -49,8 +49,22 @@
       "description": "Protocols to enable for detection. If omitted, all protocols are enabled.",
       "items": {
         "type": "string",
-        "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP"]
+        "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "SOCKS5", "TCP"]
       }
+    },
+    "socks5_auth": {
+      "type": "string",
+      "description": "SOCKS5 authentication method. Defaults to none.",
+      "enum": ["none", "password"],
+      "default": "none"
+    },
+    "socks5_username": {
+      "type": "string",
+      "description": "Username for SOCKS5 password authentication. Required when socks5_auth is password."
+    },
+    "socks5_password": {
+      "type": "string",
+      "description": "Password for SOCKS5 password authentication. Required when socks5_auth is password."
     }
   },
   "additionalProperties": false,

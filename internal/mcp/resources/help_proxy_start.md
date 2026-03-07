@@ -1,6 +1,6 @@
 # proxy_start
 
-Start the proxy server with optional configuration. The proxy listens on the specified address and begins intercepting HTTP/HTTPS traffic.
+Start the proxy server with optional configuration. The proxy listens on the specified address and begins intercepting HTTP/HTTPS/SOCKS5 traffic.
 
 ## Parameters
 
@@ -51,9 +51,25 @@ Maps local listen ports to upstream TCP addresses for Raw TCP forwarding.
 
 ### protocols (array of strings, optional)
 Specifies which protocols are enabled for detection.
-- Valid values: `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`
+- Valid values: `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"SOCKS5"`, `"TCP"`
 - If omitted, all protocols are enabled (default behavior)
 - Restricting protocols can improve performance and reduce noise
+
+### socks5_auth (string, optional)
+SOCKS5 authentication method.
+- `"none"` (default): SOCKS5 clients connect without authentication.
+- `"password"`: Require username/password authentication (RFC 1929).
+- When set to `"password"`, `socks5_username` and `socks5_password` are required.
+
+### socks5_username (string, optional)
+Username for SOCKS5 password authentication.
+- Required when `socks5_auth` is `"password"`.
+- Ignored when `socks5_auth` is `"none"`.
+
+### socks5_password (string, optional)
+Password for SOCKS5 password authentication.
+- Required when `socks5_auth` is `"password"`.
+- Ignored when `socks5_auth` is `"none"`.
 
 ## Usage Examples
 
@@ -103,6 +119,28 @@ Specifies which protocols are enabled for detection.
   "listen_addr": "127.0.0.1:8080",
   "protocols": ["HTTP/1.x", "HTTPS", "gRPC"]
 }
+```
+
+### Start with SOCKS5 password authentication
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "socks5_auth": "password",
+  "socks5_username": "proxyuser",
+  "socks5_password": "proxypass"
+}
+```
+
+### Start with SOCKS5 via proxychains
+```json
+{
+  "listen_addr": "127.0.0.1:1080",
+  "protocols": ["SOCKS5"]
+}
+```
+Then configure proxychains (`/etc/proxychains.conf`):
+```
+socks5 127.0.0.1 1080
 ```
 
 ### Start with intercept rules
