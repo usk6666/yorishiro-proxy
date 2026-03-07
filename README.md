@@ -36,9 +36,10 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 - **Intercept** -- Hold and inspect requests/responses in real time, then release, modify, or drop
 - **Auto-Transform** -- Automatic request/response modification rules for matching traffic
 - **Target Scope** -- Two-layer security boundary (Policy + Agent) to restrict reachable hosts
-- **Multi-Protocol** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, WebSocket, Raw TCP
+- **Multi-Protocol** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, WebSocket, Raw TCP, SOCKS5
 - **Multi-Listener** -- Multiple proxy listeners on different ports simultaneously
 - **Flow Export/Import** -- JSONL, HAR 1.2, and cURL export formats
+- **SOCKS5 Listener** -- SOCKS5 proxy with optional username/password authentication for proxychains integration
 - **Upstream Proxy** -- Chain through HTTP or SOCKS5 proxies
 - **Streamable HTTP MCP** -- Multi-agent shared access with Bearer token authentication
 - **Plugin System** -- Extend proxy behavior with [Starlark](https://github.com/google/starlark-go) scripts that hook into the request/response pipeline

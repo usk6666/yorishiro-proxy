@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -46,6 +47,7 @@ type Handler struct {
 	targetScope   *proxy.TargetScope
 	postHandshake PostHandshakeFunc
 	dialer        func(ctx context.Context, network, addr string) (net.Conn, error)
+	pluginEngine  *plugin.Engine
 }
 
 // NewHandler creates a new SOCKS5 handler.
@@ -90,6 +92,17 @@ func (h *Handler) SetDialer(dialer func(ctx context.Context, network, addr strin
 	h.dialer = dialer
 }
 
+// SetPluginEngine sets the plugin engine used to dispatch hook events
+// during SOCKS5 connection processing.
+func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
+	h.pluginEngine = engine
+}
+
+// PluginEngine returns the handler's current plugin engine, or nil.
+func (h *Handler) PluginEngine() *plugin.Engine {
+	return h.pluginEngine
+}
+
 // Name returns the protocol name.
 func (h *Handler) Name() string {
 	return "SOCKS5"
@@ -115,11 +128,20 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("socks5 method negotiation: %w", err)
 	}
 
+	// Track the authentication method and username for context metadata.
+	var authMethodName string
+	var authUsername string
+
 	// 2. Authentication (if required).
 	if method == methodUsernamePassword {
-		if err := h.authenticateUserPass(conn); err != nil {
-			return fmt.Errorf("socks5 auth: %w", err)
+		username, authErr := h.authenticateUserPassReturn(conn)
+		if authErr != nil {
+			return fmt.Errorf("socks5 auth: %w", authErr)
 		}
+		authMethodName = "username_password"
+		authUsername = username
+	} else {
+		authMethodName = "none"
 	}
 
 	// 3. Read request.
@@ -151,12 +173,56 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 
 	logger.Info("socks5 tunnel established", "target", target)
 
-	// 7. Post-handshake delegation or direct relay.
+	// 7. Dispatch on_socks5_connect plugin hook.
+	h.dispatchOnSOCKS5Connect(ctx, target, authMethodName, authUsername, conn)
+
+	// 8. Store SOCKS5 metadata in context for downstream handlers.
+	ctx = proxy.ContextWithSOCKS5AuthMethod(ctx, authMethodName)
+	ctx = proxy.ContextWithSOCKS5Target(ctx, target)
+	if authUsername != "" {
+		ctx = proxy.ContextWithSOCKS5AuthUser(ctx, authUsername)
+	}
+
+	// 9. Post-handshake delegation or direct relay.
 	if h.postHandshake != nil {
 		return h.postHandshake(ctx, conn, upstream, target)
 	}
 
 	return h.relay(ctx, conn, upstream)
+}
+
+// hookTimeout is the maximum time allowed for lifecycle hook dispatches.
+const hookTimeout = 5 * time.Second
+
+// dispatchOnSOCKS5Connect dispatches the on_socks5_connect lifecycle hook after
+// a successful SOCKS5 CONNECT. Errors are logged but do not block processing (fail-open).
+func (h *Handler) dispatchOnSOCKS5Connect(ctx context.Context, target, authMethod, authUser string, conn net.Conn) {
+	if h.pluginEngine == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
+
+	logger := proxy.LoggerFromContext(ctx, h.logger)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+
+	host, port, _ := parseHostPort(target)
+
+	data := map[string]any{
+		"event":       "socks5_connect",
+		"target_host": host,
+		"target_port": port,
+		"target":      target,
+		"auth_method": authMethod,
+		"auth_user":   authUser,
+		"client_addr": clientAddr,
+	}
+
+	_, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnSOCKS5Connect, data)
+	if err != nil {
+		logger.Warn("plugin on_socks5_connect hook error", "error", err)
+	}
 }
 
 // dialUpstream connects to the target address.

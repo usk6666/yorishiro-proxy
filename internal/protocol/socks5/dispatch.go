@@ -182,19 +182,14 @@ func standaloneRelay(ctx context.Context, a, b net.Conn) error {
 	return err
 }
 
-// socks5TargetKey is the context key for the SOCKS5 target address.
-type socks5TargetKey struct{}
-
 // withSOCKS5Target stores the SOCKS5 target address in the context.
+// This is a convenience wrapper around proxy.ContextWithSOCKS5Target.
 func withSOCKS5Target(ctx context.Context, target string) context.Context {
-	return context.WithValue(ctx, socks5TargetKey{}, target)
+	return proxy.ContextWithSOCKS5Target(ctx, target)
 }
 
 // SOCKS5TargetFromContext retrieves the SOCKS5 target address from the context.
 // Returns empty string if not present.
 func SOCKS5TargetFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(socks5TargetKey{}).(string); ok {
-		return v
-	}
-	return ""
+	return proxy.SOCKS5TargetFromContext(ctx)
 }

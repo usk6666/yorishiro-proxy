@@ -34,6 +34,11 @@ const (
 
 	// HookOnDisconnect is called when a connection is closed.
 	HookOnDisconnect Hook = "on_disconnect"
+
+	// HookOnSOCKS5Connect is called when a SOCKS5 CONNECT tunnel is
+	// successfully established. Data includes target host, port,
+	// authentication user (if any), and client address.
+	HookOnSOCKS5Connect Hook = "on_socks5_connect"
 )
 
 // allHooks lists all valid hook names for validation.
@@ -45,6 +50,7 @@ var allHooks = map[Hook]bool{
 	HookOnConnect:            true,
 	HookOnTLSHandshake:       true,
 	HookOnDisconnect:         true,
+	HookOnSOCKS5Connect:      true,
 }
 
 // droppableHooks lists hooks that support ActionDrop and ActionRespond.

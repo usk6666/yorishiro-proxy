@@ -149,6 +149,7 @@ These hooks are called during connection lifecycle events:
 | `on_connect` | When a new TCP connection is accepted | No (CONTINUE only) |
 | `on_tls_handshake` | After a TLS handshake completes | No (CONTINUE only) |
 | `on_disconnect` | When a connection is closed | No (CONTINUE only) |
+| `on_socks5_connect` | After a SOCKS5 CONNECT tunnel is established | No (CONTINUE only) |
 
 ## Protocol Data Map Reference
 
@@ -209,6 +210,24 @@ gRPC plugins operate in **observe-only** mode. Only `action.CONTINUE` is allowed
 | `direction` | string | Both | `"client_to_server"` or `"server_to_client"` |
 | `conn_info` | dict | Both | Connection metadata |
 | `forward_target` | string | Both | Target address for TCP forwarding |
+
+### SOCKS5
+
+The `on_socks5_connect` hook is called when a SOCKS5 CONNECT tunnel is successfully established. It receives the following data:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `event` | string | Always `"socks5_connect"` |
+| `target_host` | string | Destination hostname (e.g., `"example.com"`) |
+| `target_port` | int | Destination port (e.g., `443`) |
+| `target` | string | Full destination address (e.g., `"example.com:443"`) |
+| `auth_method` | string | Authentication method used: `"none"` or `"username_password"` |
+| `auth_user` | string | Authenticated username (empty if `auth_method` is `"none"`) |
+| `client_addr` | string | Remote address of the client |
+
+Only `action.CONTINUE` is allowed; DROP and RESPOND are not supported.
+
+Flows that pass through a SOCKS5 tunnel are recorded with protocol identifiers like `SOCKS5+HTTPS` or `SOCKS5+HTTP`, and include `socks5_target` and `socks5_auth_method` in their tags.
 
 ### Connection Info (`conn_info`)
 
@@ -324,6 +343,29 @@ def on_receive_from_client(data):
 ```
 
 **Config**: `protocol: "http"`, `hooks: ["on_receive_from_client"]`
+
+### socks5_logger.star
+
+Logs SOCKS5 tunnel establishment details:
+
+```python
+def on_socks5_connect(data):
+    target = data.get("target", "unknown")
+    auth_method = data.get("auth_method", "unknown")
+    auth_user = data.get("auth_user", "")
+    client_addr = data.get("client_addr", "unknown")
+
+    if auth_user:
+        print("SOCKS5 CONNECT: target=%s auth=%s user=%s client=%s" % (
+            target, auth_method, auth_user, client_addr))
+    else:
+        print("SOCKS5 CONNECT: target=%s auth=%s client=%s" % (
+            target, auth_method, client_addr))
+
+    return {"action": action.CONTINUE}
+```
+
+**Config**: `protocol: "socks5"`, `hooks: ["on_socks5_connect"]`
 
 ## MCP Plugin Tool
 

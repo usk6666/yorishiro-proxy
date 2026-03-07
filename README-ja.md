@@ -36,9 +36,10 @@ Yorishiro Proxy は [MCP (Model Context Protocol)](https://modelcontextprotocol.
 - **Intercept** -- リクエスト/レスポンスをリアルタイムで保持・検査し、リリース・変更・ドロップ
 - **Auto-Transform** -- マッチするトラフィックへの自動リクエスト/レスポンス変更ルール
 - **Target Scope** -- 到達可能なホストを制限する 2 層セキュリティ境界（Policy + Agent）
-- **マルチプロトコル** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, WebSocket, Raw TCP
+- **マルチプロトコル** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, WebSocket, Raw TCP, SOCKS5
 - **マルチリスナ** -- 異なるポートで複数のプロキシリスナを同時実行
 - **フローエクスポート/インポート** -- JSONL、HAR 1.2、cURL エクスポート形式
+- **SOCKS5 リスナ** -- proxychains 連携のための SOCKS5 プロキシ（オプションのユーザ名/パスワード認証付き）
 - **上流プロキシ** -- HTTP または SOCKS5 プロキシ経由のチェーン接続
 - **Streamable HTTP MCP** -- Bearer トークン認証によるマルチエージェント共有アクセス
 - **プラグインシステム** -- [Starlark](https://github.com/google/starlark-go) スクリプトでプロキシのリクエスト/レスポンスパイプラインを拡張

@@ -442,6 +442,70 @@ The **Intercept** page lets you hold requests for manual inspection and modifica
 
 The **Macros** page lets you view and run multi-step workflows defined via the `macro` MCP tool. Each macro shows its steps, extraction rules, and execution history. Click **Run** to execute a macro and view the results of each step.
 
+## SOCKS5 Proxy with proxychains
+
+yorishiro-proxy includes a built-in SOCKS5 listener, making it compatible with tools like `proxychains` and `proxychains-ng` that route arbitrary TCP traffic through a SOCKS5 proxy.
+
+### Step 1: Start the SOCKS5 listener
+
+```json
+// proxy_start
+{
+  "listen_addr": "127.0.0.1:1080",
+  "protocol": "socks5"
+}
+```
+
+To require authentication:
+
+```json
+// configure
+{
+  "socks5_auth": {
+    "method": "password",
+    "username": "user",
+    "password": "pass"
+  }
+}
+```
+
+### Step 2: Configure proxychains
+
+Edit `/etc/proxychains.conf` (or `~/.proxychains/proxychains.conf`):
+
+```ini
+[ProxyList]
+socks5 127.0.0.1 1080
+```
+
+If authentication is enabled:
+
+```ini
+[ProxyList]
+socks5 127.0.0.1 1080 user pass
+```
+
+### Step 3: Route traffic through proxychains
+
+```bash
+proxychains curl https://httpbin.org/get
+proxychains nmap -sT -p 80,443 target.example.com
+```
+
+All TCP traffic from the proxied command flows through yorishiro-proxy. HTTPS traffic is intercepted (MITM) and recorded as flows with the `SOCKS5+HTTPS` protocol identifier. Plaintext HTTP traffic is recorded as `SOCKS5+HTTP`.
+
+### Step 4: Query SOCKS5 flows
+
+```json
+// query
+{
+  "resource": "flows",
+  "filter": {"protocol": "SOCKS5+HTTPS"}
+}
+```
+
+You can also filter by SOCKS5 metadata in flow tags (`socks5_target`, `socks5_auth_method`).
+
 ## Next Steps
 
 With the basic setup complete, explore these advanced features:

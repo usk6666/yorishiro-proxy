@@ -331,6 +331,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		http2Handler.SetPluginEngine(pluginEngine)
 		grpcHandler.SetPluginEngine(pluginEngine)
 		tcpHandler.SetPluginEngine(pluginEngine)
+		socks5Handler.SetPluginEngine(pluginEngine)
 		logger.Info("plugins loaded", "count", pluginEngine.PluginCount())
 	}
 
