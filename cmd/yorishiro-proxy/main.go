@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -713,6 +714,9 @@ type staticSOCKS5Auth struct {
 }
 
 // Authenticate returns true if the credentials match.
+// Uses constant-time comparison to prevent timing side-channel attacks.
 func (a *staticSOCKS5Auth) Authenticate(username, password string) bool {
-	return username == a.username && password == a.password
+	usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.username))
+	passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.password))
+	return usernameMatch == 1 && passwordMatch == 1
 }
