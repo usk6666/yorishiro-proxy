@@ -50,6 +50,7 @@ type deps struct {
 	targetScopeSetters    []targetScopeSetter
 	targetScope           *proxy.TargetScope
 	pluginEngine          *plugin.Engine
+	socks5AuthSetter      socks5AuthSetter
 }
 
 // Server wraps the MCP server and registers proxy-related tools.
@@ -87,6 +88,15 @@ type requestTimeoutSetter interface {
 // target scope enforcement (HTTP/1.x and HTTP/2 handlers).
 type targetScopeSetter interface {
 	SetTargetScope(scope *proxy.TargetScope)
+}
+
+// socks5AuthSetter is implemented by a wrapper around the SOCKS5 handler
+// to configure authentication at runtime. The SetPasswordAuth method enables
+// username/password authentication with the given credentials. ClearAuth
+// resets to no-authentication mode.
+type socks5AuthSetter interface {
+	SetPasswordAuth(username, password string)
+	ClearAuth()
 }
 
 // ServerOption configures a Server.
@@ -244,6 +254,14 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 func WithPluginEngine(engine *plugin.Engine) ServerOption {
 	return func(s *Server) {
 		s.deps.pluginEngine = engine
+	}
+}
+
+// WithSOCKS5Handler sets the SOCKS5 handler for the MCP server,
+// enabling SOCKS5 authentication configuration via proxy_start and configure tools.
+func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
+	return func(s *Server) {
+		s.deps.socks5AuthSetter = setter
 	}
 }
 

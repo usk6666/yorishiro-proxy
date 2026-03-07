@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	protohttp2 "github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
+	protosocks5 "github.com/usk6666/yorishiro-proxy/internal/protocol/socks5"
 	prototcp "github.com/usk6666/yorishiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -291,6 +293,28 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// Raw TCP fallback handler: must be last since Detect() always returns true.
 	tcpHandler := prototcp.NewHandler(store, nil, logger)
 
+	// Build SOCKS5 handler with post-handshake dispatch for TLS MITM / HTTP / TCP.
+	socks5Handler := protosocks5.NewHandler(logger)
+	socks5Dispatch := protosocks5.NewPostHandshakeDispatch(protosocks5.DispatchConfig{
+		TunnelHandler: httpHandler,
+		HTTPDetector:  httpHandler,
+		Logger:        logger,
+	})
+	socks5Handler.SetPostHandshake(socks5Dispatch)
+
+	// Build SOCKS5 auth adapter for MCP tool control.
+	socks5AuthAdapter := newSOCKS5AuthAdapter(socks5Handler)
+
+	// Apply SOCKS5 auth from config file if specified.
+	if proxyCfg != nil && proxyCfg.SOCKS5Auth == "password" {
+		if proxyCfg.SOCKS5Username != "" && proxyCfg.SOCKS5Password != "" {
+			socks5AuthAdapter.SetPasswordAuth(proxyCfg.SOCKS5Username, proxyCfg.SOCKS5Password)
+			logger.Info("SOCKS5 password authentication configured from config file")
+		} else {
+			logger.Warn("SOCKS5 password auth requested but username/password missing in config file")
+		}
+	}
+
 	// Initialize plugin engine from config if plugins are configured.
 	var pluginEngine *plugin.Engine
 	if proxyCfg != nil && len(proxyCfg.Plugins) > 0 {
@@ -310,8 +334,9 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		logger.Info("plugins loaded", "count", pluginEngine.PluginCount())
 	}
 
-	// Register handlers in priority order: h2c -> HTTP/1.x -> raw TCP fallback.
-	detector := protocol.NewDetector(http2Handler, httpHandler, tcpHandler)
+	// Register handlers in priority order: h2c -> HTTP/1.x -> SOCKS5 -> raw TCP fallback.
+	// SOCKS5 is after HTTP because 0x05 does not conflict with HTTP method bytes.
+	detector := protocol.NewDetector(http2Handler, httpHandler, socks5Handler, tcpHandler)
 
 	// Create proxy manager for MCP tool control.
 	manager := proxy.NewManager(detector, logger)
@@ -325,6 +350,8 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		allows := convertTargetRules(targetScopePolicy.Allows)
 		denies := convertTargetRules(targetScopePolicy.Denies)
 		targetScope.SetPolicyRules(allows, denies)
+		// Apply to SOCKS5 handler for target scope enforcement.
+		socks5Handler.SetTargetScope(targetScope)
 	}
 
 	// Build MCP server options.
@@ -344,6 +371,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		mcp.WithUpstreamProxySetter(http2Handler),
 		mcp.WithTargetScopeSetter(httpHandler),
 		mcp.WithTargetScopeSetter(http2Handler),
+		mcp.WithSOCKS5Handler(socks5AuthAdapter),
 	}
 
 	// Pass proxy config file defaults to the MCP server.
@@ -651,4 +679,44 @@ func initCAAutoPersist(cfg *config.Config, logger *slog.Logger) (*cert.CA, error
 		"cert_path", certPath,
 		"install_hint", "Install the CA certificate from the path above into your OS/browser trust store for HTTPS interception")
 	return ca, nil
+}
+
+// socks5AuthAdapter bridges the MCP server's socks5AuthSetter interface to the
+// SOCKS5 handler's SetAuthenticator method. It avoids importing the socks5
+// package from the mcp package by keeping the adapter in main.
+type socks5AuthAdapter struct {
+	handler *protosocks5.Handler
+}
+
+// newSOCKS5AuthAdapter creates a new adapter around a SOCKS5 handler.
+func newSOCKS5AuthAdapter(h *protosocks5.Handler) *socks5AuthAdapter {
+	return &socks5AuthAdapter{handler: h}
+}
+
+// SetPasswordAuth enables username/password authentication on the SOCKS5 handler.
+func (a *socks5AuthAdapter) SetPasswordAuth(username, password string) {
+	a.handler.SetAuthenticator(&staticSOCKS5Auth{
+		username: username,
+		password: password,
+	})
+}
+
+// ClearAuth resets the SOCKS5 handler to no-authentication mode.
+func (a *socks5AuthAdapter) ClearAuth() {
+	a.handler.SetAuthenticator(nil)
+}
+
+// staticSOCKS5Auth is a simple authenticator that validates against a single
+// username/password pair.
+type staticSOCKS5Auth struct {
+	username string
+	password string
+}
+
+// Authenticate returns true if the credentials match.
+// Uses constant-time comparison to prevent timing side-channel attacks.
+func (a *staticSOCKS5Auth) Authenticate(username, password string) bool {
+	usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.username))
+	passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.password))
+	return usernameMatch == 1 && passwordMatch == 1
 }

@@ -86,7 +86,7 @@ func (h *Handler) selectMethod(methods []byte) byte {
 	}
 
 	// If auth is required, prefer USERNAME/PASSWORD.
-	if h.auth != nil {
+	if h.getAuth() != nil {
 		if hasUserPass {
 			return methodUsernamePassword
 		}
@@ -151,7 +151,8 @@ func (h *Handler) authenticateUserPass(conn net.Conn) error {
 	}
 
 	// Validate credentials.
-	if h.auth == nil || !h.auth.Authenticate(string(username), string(password)) {
+	auth := h.getAuth()
+	if auth == nil || !auth.Authenticate(string(username), string(password)) {
 		_, _ = conn.Write([]byte{authVersion, authFailure})
 		return fmt.Errorf("authentication failed for user %q", string(username))
 	}
