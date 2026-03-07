@@ -1061,3 +1061,47 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
 	}
 }
+
+// TestExportDeleteAllImportRoundTrip is a regression test for BUG-001:
+// after DeleteAllFlows, orphan messages could remain if foreign_keys was OFF
+// on the connection that executed the DELETE, causing UNIQUE constraint errors
+// on re-import.
+func TestExportDeleteAllImportRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+
+	makeTestSession(t, store, "fl-1", "HTTPS", "https://example.com/api", ts, []byte("body1"))
+	makeTestSession(t, store, "fl-2", "HTTP/1.x", "http://example.com/", ts.Add(time.Hour), []byte("body2"))
+
+	var buf bytes.Buffer
+	n, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	if err != nil {
+		t.Fatalf("ExportFlows: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 exported, got %d", n)
+	}
+
+	deleted, err := store.DeleteAllFlows(ctx)
+	if err != nil {
+		t.Fatalf("DeleteAllFlows: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("expected 2 deleted, got %d", deleted)
+	}
+
+	result, err := ImportFlows(ctx, store, bytes.NewReader(buf.Bytes()), ImportOptions{OnConflict: ConflictSkip})
+	if err != nil {
+		t.Fatalf("ImportFlows: %v", err)
+	}
+	if result.Errors != 0 {
+		for _, e := range result.ErrorDetails {
+			t.Errorf("import error line %d (flow %s): %s", e.Line, e.FlowID, e.Reason)
+		}
+		t.Fatalf("expected 0 errors, got %d", result.Errors)
+	}
+	if result.Imported != 2 {
+		t.Errorf("expected 2 imported, got %d", result.Imported)
+	}
+}
