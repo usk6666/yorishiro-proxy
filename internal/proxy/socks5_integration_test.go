@@ -388,4 +388,3 @@ type staticAuth struct {
 func (a staticAuth) Authenticate(username, password string) bool {
 	return username == a.username && password == a.password
 }
-
