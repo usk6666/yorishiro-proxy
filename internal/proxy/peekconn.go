@@ -26,6 +26,12 @@ func (pc *PeekConn) Peek(n int) ([]byte, error) {
 	return pc.reader.Peek(n)
 }
 
+// Buffered returns the number of bytes currently available in the buffer
+// without requiring a read from the underlying connection.
+func (pc *PeekConn) Buffered() int {
+	return pc.reader.Buffered()
+}
+
 // Read reads data from the buffered reader, returning any previously peeked
 // bytes before reading new data from the underlying connection.
 func (pc *PeekConn) Read(b []byte) (int, error) {

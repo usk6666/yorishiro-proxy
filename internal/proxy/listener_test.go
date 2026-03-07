@@ -521,6 +521,22 @@ func (h *httpHandler) Handle(_ context.Context, conn net.Conn) error {
 	return nil
 }
 
+// catchAllHandler is a ProtocolHandler whose Detect always returns true,
+// simulating the raw TCP fallback handler.
+type catchAllHandler struct {
+	entered atomic.Int32
+}
+
+func (h *catchAllHandler) Name() string { return "TCP" }
+func (h *catchAllHandler) Detect(_ []byte) bool {
+	return true
+}
+func (h *catchAllHandler) Handle(_ context.Context, conn net.Conn) error {
+	h.entered.Add(1)
+	defer conn.Close()
+	return nil
+}
+
 // multiDetector returns the first handler whose Detect returns true.
 type multiDetector struct {
 	handlers []proxy.ProtocolHandler
@@ -799,5 +815,59 @@ func TestListener_TwoStagePeek_PartialHTTPFallsThrough(t *testing.T) {
 
 	if http.entered.Load() != 0 {
 		t.Errorf("HTTP handler entered = %d, want 0 (only 1 byte sent)", http.entered.Load())
+	}
+}
+
+func TestListener_TwoStagePeek_CatchAllDoesNotShortCircuitHTTP(t *testing.T) {
+	// Regression test for S-1: a catch-all handler (raw TCP) whose Detect
+	// always returns true must not prevent HTTP detection on stage 2.
+	// Production handler order: http, socks5, tcp (catch-all last).
+	httpH := &httpHandler{}
+	socks := &socks5Handler{}
+	catchAll := &catchAllHandler{}
+	detector := &multiDetector{handlers: []proxy.ProtocolHandler{httpH, socks, catchAll}}
+
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Detector:    detector,
+		Logger:      testutil.DiscardLogger(),
+		PeekTimeout: 5 * time.Second,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- listener.Start(ctx)
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener not ready")
+	}
+
+	// Send a full HTTP request — more than peekSize bytes arrive in one write.
+	conn, err := net.DialTimeout("tcp", listener.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for httpH.entered.Load() < 1 && catchAll.entered.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if httpH.entered.Load() != 1 {
+		t.Errorf("HTTP handler entered = %d, want 1", httpH.entered.Load())
+	}
+	if catchAll.entered.Load() != 0 {
+		t.Errorf("catch-all handler entered = %d, want 0 (HTTP should take priority)", catchAll.entered.Load())
 	}
 }
