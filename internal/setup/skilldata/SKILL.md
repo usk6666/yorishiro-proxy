@@ -20,20 +20,21 @@ yorishiro-proxy (MCP プロキシ) を使った脆弱性検証を支援するス
 
 ## MCP ツール概要
 
-yorishiro-proxy は 10 の MCP ツールを提供する:
+yorishiro-proxy は 11 の MCP ツールを提供する:
 
 | ツール | 用途 |
 |--------|------|
-| `proxy_start` | プロキシ起動・キャプチャスコープ設定 |
-| `proxy_stop` | プロキシ停止 |
-| `configure` | 実行中のプロキシ設定変更 (スコープ・TLS パススルー・インターセプトルール・自動変換等) |
+| `proxy_start` | プロキシ起動・キャプチャスコープ設定。マルチリスナー・SOCKS5 対応 |
+| `proxy_stop` | プロキシ停止。名前指定で個別停止、省略で全停止 |
+| `configure` | 実行中のプロキシ設定変更 (スコープ・TLS パススルー・インターセプトルール・自動変換・upstream proxy・接続制限・SOCKS5 認証等) |
 | `query` | 統一情報検索 (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results) |
 | `resend` | リクエスト再送・リプレイ (action: resend, resend_raw, tcp_replay) |
 | `manage` | フローデータ管理・CA 証明書 (action: delete_flows, export_flows, import_flows, regenerate_ca_cert) |
 | `fuzz` | ファジング (action: fuzz, fuzz_pause, fuzz_resume, fuzz_cancel) |
 | `macro` | マクロワークフロー (action: define_macro, run_macro, delete_macro) |
-| `intercept` | インターセプト操作 (action: release, modify_and_forward, drop) |
-| `security` | ターゲットスコープ制御 (action: set_target_scope, update_target_scope, get_target_scope, test_target) |
+| `intercept` | インターセプト操作。リクエスト/レスポンス両 phase 対応 (action: release, modify_and_forward, drop) |
+| `security` | ターゲットスコープ制御。Policy/Agent 2 層構造 (action: set_target_scope, update_target_scope, get_target_scope, test_target) |
+| `plugin` | Starlark プラグイン管理 (action: list, reload, enable, disable) |
 
 ### MCP Resources
 
@@ -58,6 +59,7 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
 ### proxy_start -- プロキシ起動
 
 ```json
+// 基本起動
 {
   "listen_addr": "127.0.0.1:8080",
   "capture_scope": {
@@ -66,6 +68,47 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
   },
   "tls_passthrough": ["*.googleapis.com"]
 }
+
+// マルチリスナー・追加オプション付き起動
+{
+  "name": "socks-listener",
+  "listen_addr": "127.0.0.1:1080",
+  "protocols": ["SOCKS5", "HTTPS", "HTTP/1.x"],
+  "upstream_proxy": "http://corporate-proxy:3128",
+  "max_connections": 256,
+  "peek_timeout_ms": 5000,
+  "request_timeout_ms": 30000
+}
+```
+
+#### proxy_start パラメータ
+
+| パラメータ | 型 | 説明 |
+|-----------|------|------|
+| `name` | string | リスナー名（デフォルト: "default"）。マルチリスナー時に識別用 |
+| `listen_addr` | string | リッスンアドレス（デフォルト: "127.0.0.1:8080"） |
+| `upstream_proxy` | string | 上流プロキシ URL（http:// または socks5://[user:pass@]host:port） |
+| `capture_scope` | object | キャプチャスコープ（includes/excludes） |
+| `tls_passthrough` | string[] | TLS パススルー対象パターン |
+| `intercept_rules` | object[] | インターセプトルール（id, enabled, direction, conditions） |
+| `auto_transform` | object[] | 自動変換ルール（id, enabled, priority, direction, conditions, action） |
+| `tcp_forwards` | map | TCP ポートフォワード（port -> upstream_host:port） |
+| `protocols` | string[] | 有効プロトコル（HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, SOCKS5, TCP） |
+| `socks5_auth` | string | SOCKS5 認証方法（"none" or "password"） |
+| `socks5_username` | string | SOCKS5 ユーザー名 |
+| `socks5_password` | string | SOCKS5 パスワード |
+| `max_connections` | int | 最大同時接続数（デフォルト: 128、範囲: 1-100000） |
+| `peek_timeout_ms` | int | プロトコル検出タイムアウト（デフォルト: 30000） |
+| `request_timeout_ms` | int | HTTP リクエストヘッダ読み込みタイムアウト（デフォルト: 60000） |
+
+### proxy_stop -- プロキシ停止
+
+```json
+// 特定リスナーを停止
+{"name": "socks-listener"}
+
+// 全リスナーを停止
+{}
 ```
 
 ### query -- 情報取得
@@ -77,24 +120,99 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
 // フロー詳細
 {"resource": "flow", "id": "<flow-id>"}
 
+// 状態フィルタ（active/complete/error）
+{"resource": "flows", "filter": {"state": "complete", "tag": "idor-test"}}
+
+// プロトコルフィルタ
+{"resource": "flows", "filter": {"protocol": "SOCKS5+HTTPS"}}
+
+// ブロックされたフロー
+{"resource": "flows", "filter": {"blocked_by": "target_scope"}}
+
+// WebSocket/gRPC メッセージ（direction フィルタ）
+{"resource": "messages", "id": "<flow-id>", "filter": {"direction": "send"}}
+
+// ファズジョブ一覧（status/tag フィルタ）
+{"resource": "fuzz_jobs", "filter": {"status": "running", "tag": "sqli-fuzz"}}
+
 // ファズ結果
 {"resource": "fuzz_results", "fuzz_id": "<fuzz-id>", "sort_by": "status_code"}
 ```
 
+#### query フィルタパラメータ
+
+| パラメータ | 対象リソース | 説明 |
+|-----------|-------------|------|
+| `protocol` | flows | プロトコル名（HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS 等） |
+| `method` | flows | HTTP メソッド |
+| `url_pattern` | flows | URL サブストリング検索 |
+| `status_code` | flows, fuzz_results | HTTP レスポンスコード |
+| `state` | flows | フロー状態（"active", "complete", "error"） |
+| `blocked_by` | flows | ブロック理由（"target_scope", "intercept_drop"） |
+| `tag` | flows, fuzz_jobs | タグ完全一致 |
+| `direction` | messages | メッセージ方向（"send", "receive"） |
+| `status` | fuzz_jobs | ジョブ状態 |
+| `body_contains` | fuzz_results | レスポンスボディサブストリング |
+
+フロー詳細には `protocol_summary`（プロトコル固有情報）、ストリーミング系フローには `message_preview`（最初 10 メッセージ）が含まれる。resend で生成されたフローは `variant: "modified"` となる。
+
 ### resend -- リクエスト再送
 
 ```json
-// リクエスト再送
+// HTTP リクエスト再送（ヘッダ追加・削除）
 {
   "action": "resend",
   "params": {
     "flow_id": "<flow-id>",
     "override_headers": {"Authorization": "Bearer <token>"},
+    "add_headers": {"X-Forwarded-For": "127.0.0.1"},
+    "remove_headers": ["Cookie"],
     "body_patches": [{"json_path": "$.user_id", "value": 999}],
+    "follow_redirects": false,
     "tag": "idor-test"
   }
 }
+
+// 生リクエスト再送（HTTP パースをバイパス）
+{
+  "action": "resend_raw",
+  "params": {
+    "flow_id": "<flow-id>",
+    "override_raw_base64": "<base64-encoded-raw-request>",
+    "target_addr": "api.target.com:443",
+    "use_tls": true,
+    "tag": "smuggling-test"
+  }
+}
+
+// TCP リプレイ（WebSocket/TCP フローのメッセージを再送）
+{
+  "action": "tcp_replay",
+  "params": {
+    "flow_id": "<websocket-flow-id>",
+    "message_sequence": 3,
+    "timeout_ms": 10000,
+    "tag": "ws-replay"
+  }
+}
 ```
+
+#### resend 追加パラメータ
+
+| パラメータ | アクション | 説明 |
+|-----------|-----------|------|
+| `override_method` | resend | HTTP メソッド上書き |
+| `override_url` | resend | URL 上書き |
+| `add_headers` | resend | ヘッダ追加 |
+| `remove_headers` | resend | ヘッダ削除 |
+| `override_host` | resend | ホスト上書き（host:port 形式） |
+| `follow_redirects` | resend | リダイレクト追従（デフォルト: false） |
+| `message_sequence` | resend, tcp_replay | WebSocket メッセージシーケンス番号 |
+| `timeout_ms` | resend, resend_raw, tcp_replay | タイムアウト（ミリ秒） |
+| `override_raw_base64` | resend_raw | Base64 エンコード済み生リクエストデータ |
+| `target_addr` | resend_raw | ターゲットアドレス（host:port） |
+| `use_tls` | resend_raw | TLS 使用フラグ |
+| `patches` | resend_raw | バイトレベルパッチ |
 
 ### fuzz -- ファジング
 
@@ -113,25 +231,54 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
       }
     ],
     "payload_sets": {
-      "user-ids": {"type": "range", "start": 1, "end": 20}
+      "user-ids": {"type": "range", "start": 1, "end": 20, "step": 2}
     },
+    "rate_limit_rps": 10,
+    "delay_ms": 100,
+    "timeout_ms": 15000,
+    "max_retries": 2,
+    "concurrency": 1,
     "tag": "idor-fuzz"
   }
 }
 ```
 
+#### fuzz 追加パラメータ
+
+| パラメータ | 説明 |
+|-----------|------|
+| `rate_limit_rps` | RPS リミット（0 = 無制限） |
+| `delay_ms` | リクエスト間の固定遅延（ミリ秒） |
+| `timeout_ms` | リクエストタイムアウト（デフォルト: 30000） |
+| `max_retries` | リトライ回数 |
+| `stop_on` | 自動停止条件 |
+
+#### PayloadSet の type
+
+| type | フィールド | 説明 |
+|------|-----------|------|
+| `wordlist` | `values` | 文字列リスト |
+| `file` | `path` | ファイルパス（1 行 1 ペイロード） |
+| `range` | `start`, `end`, `step` | 整数範囲（step デフォルト: 1） |
+| `sequence` | `start`, `end`, `format` | フォーマット付き連番（例: "user%04d"） |
+
 ### macro -- マクロ定義・実行
 
 ```json
-// マクロ定義
+// マクロ定義（条件付きステップ・リトライ・初期変数）
 {
   "action": "define_macro",
   "params": {
     "name": "auth-flow",
+    "initial_vars": {"base_url": "https://api.target.com"},
+    "macro_timeout_ms": 30000,
     "steps": [
       {
         "id": "login",
         "flow_id": "<login-flow-id>",
+        "retry_count": 2,
+        "retry_delay_ms": 1000,
+        "timeout_ms": 10000,
         "extract": [
           {
             "name": "session_cookie",
@@ -139,9 +286,25 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
             "source": "header",
             "header_name": "Set-Cookie",
             "regex": "PHPSESSID=([^;]+)",
-            "group": 1
+            "group": 1,
+            "required": true
+          },
+          {
+            "name": "user_data",
+            "from": "response",
+            "source": "body_json",
+            "json_path": "$.data.id",
+            "default": "unknown"
           }
         ]
+      },
+      {
+        "id": "fetch-profile",
+        "flow_id": "<profile-flow-id>",
+        "when": {
+          "step": "login",
+          "status_code": 200
+        }
       }
     ]
   }
@@ -154,31 +317,88 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
 }
 ```
 
+#### extract ルール追加フィールド
+
+| フィールド | 説明 |
+|-----------|------|
+| `json_path` | JSON パスによる値抽出（source: body_json 時） |
+| `required` | true の場合、抽出失敗でステップをエラーにする |
+| `default` | 抽出失敗時のデフォルト値 |
+
+#### when (条件付きステップ)
+
+| フィールド | 説明 |
+|-----------|------|
+| `step` | 参照する先行ステップ ID |
+| `status_code` | 期待するステータスコード |
+| `status_code_range` | ステータスコード範囲（例: [200, 299]） |
+| `header_match` | ヘッダ値マッチ（map） |
+| `body_match` | ボディ正規表現マッチ |
+| `extracted_var` | 抽出変数の存在チェック |
+| `negate` | 条件を反転 |
+
 ### manage -- フローデータ管理
 
 ```json
-// フロー削除
-{"action": "delete_flows", "params": {"flow_id": "<flow-id>"}}
+// フロー削除（プロトコルフィルタ付き）
+{"action": "delete_flows", "params": {"protocol": "TCP", "older_than_days": 7, "confirm": true}}
 
-// 古いフロー一括削除
-{"action": "delete_flows", "params": {"older_than_days": 30, "confirm": true}}
+// フローエクスポート（フィルタ・ボディ制御）
+{
+  "action": "export_flows",
+  "params": {
+    "format": "jsonl",
+    "output_path": "/tmp/export.jsonl",
+    "include_bodies": false,
+    "filter": {"protocol": "HTTPS", "url_pattern": "/api/"}
+  }
+}
 
-// フローエクスポート
-{"action": "export_flows", "params": {"format": "jsonl", "output_path": "/tmp/export.jsonl"}}
-
-// フローインポート
-{"action": "import_flows", "params": {"input_path": "/tmp/export.jsonl"}}
+// フローインポート（競合時の動作指定）
+{
+  "action": "import_flows",
+  "params": {
+    "input_path": "/tmp/export.jsonl",
+    "on_conflict": "replace"
+  }
+}
 ```
+
+#### manage 追加パラメータ
+
+| パラメータ | アクション | 説明 |
+|-----------|-----------|------|
+| `protocol` | delete_flows | プロトコルフィルタ |
+| `include_bodies` | export_flows | メッセージボディを含めるか（デフォルト: true） |
+| `filter` | export_flows | エクスポートフィルタ（protocol, url_pattern, 時間範囲等） |
+| `on_conflict` | import_flows | 競合時の動作（"skip" or "replace"、デフォルト: skip） |
 
 ### intercept -- インターセプト操作
 
 ```json
-// リクエストを改変して転送
+// リクエスト phase: 改変して転送
 {
   "action": "modify_and_forward",
   "params": {
     "intercept_id": "<intercept-id>",
-    "override_headers": {"Authorization": "Bearer injected-token"}
+    "override_method": "PUT",
+    "override_url": "/api/v2/users/1",
+    "override_headers": {"Authorization": "Bearer injected-token"},
+    "add_headers": {"X-Debug": "true"},
+    "remove_headers": ["X-Request-Id"]
+  }
+}
+
+// レスポンス phase: ステータス・ヘッダ・ボディを改変
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "<intercept-id>",
+    "override_status": 200,
+    "override_response_headers": {"Content-Type": "application/json"},
+    "add_response_headers": {"X-Injected": "true"},
+    "remove_response_headers": ["X-Frame-Options"],
+    "override_response_body": "{\"admin\": true}"
   }
 }
 
@@ -189,23 +409,131 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
 {"action": "drop", "params": {"intercept_id": "<intercept-id>"}}
 ```
 
+#### intercept パラメータ
+
+| パラメータ | phase | 説明 |
+|-----------|-------|------|
+| `override_method` | request | HTTP メソッド上書き |
+| `override_url` | request | URL 上書き |
+| `override_headers` | request | リクエストヘッダ上書き |
+| `add_headers` | request | リクエストヘッダ追加 |
+| `remove_headers` | request | リクエストヘッダ削除 |
+| `override_body` | request | リクエストボディ上書き |
+| `override_status` | response | ステータスコード上書き |
+| `override_response_headers` | response | レスポンスヘッダ上書き |
+| `add_response_headers` | response | レスポンスヘッダ追加 |
+| `remove_response_headers` | response | レスポンスヘッダ削除 |
+| `override_response_body` | response | レスポンスボディ上書き |
+
 ### security -- ターゲットスコープ制御
+
+yorishiro-proxy のスコープ制御は 2 層構造:
+
+- **Policy Layer**: 設定ファイルで定義される不変のスコープ。エージェントからは変更不可
+- **Agent Layer**: MCP ツールで動的に変更可能。Policy Layer の制約内でのみ有効
 
 ```json
 // ターゲットスコープ設定
 {
   "action": "set_target_scope",
   "params": {
-    "allows": [{"hostname": "api.target.com", "ports": [443], "schemes": ["https"]}],
+    "allows": [{"hostname": "api.target.com", "ports": [443], "schemes": ["https"], "path_prefix": "/api/v1"}],
     "denies": [{"hostname": "admin.target.com"}]
   }
 }
+
+// ターゲットスコープ更新（既存に追加）
+{
+  "action": "update_target_scope",
+  "params": {
+    "add_allows": [{"hostname": "staging.target.com", "ports": [443]}],
+    "add_denies": [{"hostname": "internal.target.com"}]
+  }
+}
+
+// 現在のスコープ取得
+{"action": "get_target_scope"}
 
 // URL のスコープ判定テスト
 {
   "action": "test_target",
   "params": {"url": "https://api.target.com/v1/users"}
 }
+```
+
+#### ターゲットルール パラメータ
+
+| パラメータ | 説明 |
+|-----------|------|
+| `hostname` | ホスト名 |
+| `ports` | ポートリスト（省略時は全ポート） |
+| `schemes` | スキーム（http, https 等。省略時は全スキーム） |
+| `path_prefix` | パスプレフィックス（省略時は全パス） |
+
+### configure -- プロキシ設定変更
+
+実行中のプロキシ設定を動的に変更する。
+
+```json
+// upstream proxy と接続制限を変更（merge モード）
+{
+  "operation": "merge",
+  "upstream_proxy": "socks5://proxy.internal:1080",
+  "max_connections": 256,
+  "peek_timeout_ms": 5000
+}
+
+// インターセプトキューの設定
+{
+  "intercept_queue": {
+    "timeout_ms": 120000,
+    "timeout_behavior": "auto_release"
+  }
+}
+
+// SOCKS5 認証の設定
+{
+  "socks5_auth": {
+    "method": "password",
+    "username": "user",
+    "password": "pass"
+  }
+}
+```
+
+#### configure パラメータ
+
+| パラメータ | 説明 |
+|-----------|------|
+| `operation` | "merge"（デフォルト）または "replace" |
+| `upstream_proxy` | 上流プロキシ URL |
+| `capture_scope` | キャプチャスコープ |
+| `tls_passthrough` | TLS パススルー設定 |
+| `intercept_rules` | インターセプトルール |
+| `intercept_queue` | インターセプトキュー（timeout_ms, timeout_behavior） |
+| `auto_transform` | 自動変換ルール |
+| `socks5_auth` | SOCKS5 認証（method, username, password） |
+| `max_connections` | 最大同時接続数（1-100000） |
+| `peek_timeout_ms` | プロトコル検出タイムアウト（100-600000） |
+| `request_timeout_ms` | HTTP リクエストタイムアウト（100-600000） |
+
+### plugin -- プラグイン管理
+
+```json
+// プラグイン一覧
+{"action": "list"}
+
+// 特定プラグインのリロード
+{"action": "reload", "params": {"name": "<plugin-name>"}}
+
+// 全プラグインのリロード
+{"action": "reload"}
+
+// プラグイン無効化
+{"action": "disable", "params": {"name": "<plugin-name>"}}
+
+// プラグイン有効化
+{"action": "enable", "params": {"name": "<plugin-name>"}}
 ```
 
 ## ワークフロー選択ディシジョンツリー
@@ -229,9 +557,16 @@ yorishiro-proxy は 10 の MCP ツールを提供する:
   |     +-- NO --> 次へ
   |
   +-- 単発テスト or 網羅テスト?
+  |     |
+  |     +-- 単発確認 --> resend ツール
+  |     +-- 網羅テスト --> fuzz ツール
+  |     +-- HTTP パースをバイパスしたい --> resend_raw (HTTP Request Smuggling 等)
+  |     +-- WebSocket/TCP メッセージ再送 --> tcp_replay
+  |
+  +-- プロトコル固有の操作?
         |
-        +-- 単発確認 --> resend ツール
-        +-- 網羅テスト --> fuzz ツール
+        +-- SOCKS5 トラフィック監視 --> protocols に "SOCKS5" を指定して proxy_start
+        +-- TCP 生データ --> tcp_forwards で TCP フォワード設定
 ```
 
 検証の全体フローは `references/verify-vulnerability.md` を参照。
