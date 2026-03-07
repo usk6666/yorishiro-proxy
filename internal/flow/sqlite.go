@@ -36,28 +36,14 @@ type writeOp struct {
 
 // NewSQLiteStore opens (or creates) a SQLite database at path and initializes the schema.
 func NewSQLiteStore(ctx context.Context, path string, logger *slog.Logger) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", path)
+	// Apply PRAGMAs via DSN so they are set on every connection in the pool,
+	// not just the first one. Without this, Go's sql.DB may open new pooled
+	// connections that lack foreign_keys=ON, causing ON DELETE CASCADE to
+	// silently not fire (see BUG-001).
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
-	}
-
-	// Enable WAL mode for concurrent read/write.
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enable WAL mode: %w", err)
-	}
-
-	// Set busy timeout to 5 seconds to avoid immediate SQLITE_BUSY errors
-	// when multiple processes access the same database file.
-	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set busy_timeout: %w", err)
-	}
-
-	// Enable foreign keys for cascade delete.
-	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	// Run schema migrations.
