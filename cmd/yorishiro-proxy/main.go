@@ -702,9 +702,23 @@ func (a *socks5AuthAdapter) SetPasswordAuth(username, password string) {
 	})
 }
 
-// ClearAuth resets the SOCKS5 handler to no-authentication mode.
+// ClearAuth resets the SOCKS5 handler to no-authentication mode (default/global).
 func (a *socks5AuthAdapter) ClearAuth() {
 	a.handler.SetAuthenticator(nil)
+}
+
+// SetPasswordAuthForListener enables username/password authentication for a specific listener.
+func (a *socks5AuthAdapter) SetPasswordAuthForListener(listenerName, username, password string) {
+	a.handler.SetListenerAuthenticator(listenerName, &staticSOCKS5Auth{
+		username: username,
+		password: password,
+	})
+}
+
+// ClearAuthForListener resets a specific listener to no-authentication mode,
+// falling back to the default authenticator.
+func (a *socks5AuthAdapter) ClearAuthForListener(listenerName string) {
+	a.handler.SetListenerAuthenticator(listenerName, nil)
 }
 
 // staticSOCKS5Auth is a simple authenticator that validates against a single

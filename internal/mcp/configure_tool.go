@@ -73,6 +73,10 @@ type configureSOCKS5Auth struct {
 
 	// Password is the password for password authentication.
 	Password string `json:"password,omitempty" jsonschema:"password for password authentication"`
+
+	// ListenerName is the name of the listener to configure.
+	// If empty, the default listener is configured.
+	ListenerName string `json:"listener_name,omitempty" jsonschema:"listener name to configure (default: 'default')"`
 }
 
 // configureSOCKS5AuthResult summarizes SOCKS5 auth state in the configure response.
@@ -310,7 +314,7 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	}
 
 	if input.SOCKS5Auth != nil {
-		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password); err != nil {
+		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password, input.SOCKS5Auth.ListenerName); err != nil {
 			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
 		}
 		result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}
@@ -399,7 +403,7 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	}
 
 	if input.SOCKS5Auth != nil {
-		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password); err != nil {
+		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password, input.SOCKS5Auth.ListenerName); err != nil {
 			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
 		}
 		result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}

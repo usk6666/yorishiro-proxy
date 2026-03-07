@@ -23,7 +23,7 @@ const (
 )
 
 // negotiateMethod reads the client's method selection message and responds
-// with the chosen authentication method.
+// with the chosen authentication method using the default authenticator.
 //
 // Client greeting format (RFC 1928, Section 3):
 //
@@ -33,6 +33,12 @@ const (
 //	| 1  |    1     | 1 to 255 |
 //	+----+----------+----------+
 func (h *Handler) negotiateMethod(conn net.Conn) (byte, error) {
+	return h.negotiateMethodForListener(conn, "")
+}
+
+// negotiateMethodForListener reads the client's method selection message and responds
+// with the chosen authentication method, using the per-listener authenticator if available.
+func (h *Handler) negotiateMethodForListener(conn net.Conn, listenerName string) (byte, error) {
 	// Read version and number of methods.
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(conn, header); err != nil {
@@ -54,8 +60,8 @@ func (h *Handler) negotiateMethod(conn net.Conn) (byte, error) {
 		return 0, fmt.Errorf("read methods: %w", err)
 	}
 
-	// Select method based on handler configuration.
-	selected := h.selectMethod(methods)
+	// Select method based on handler configuration for this listener.
+	selected := h.selectMethodForListener(methods, listenerName)
 
 	// Send method selection response.
 	if _, err := conn.Write([]byte{socks5Version, selected}); err != nil {
@@ -69,10 +75,10 @@ func (h *Handler) negotiateMethod(conn net.Conn) (byte, error) {
 	return selected, nil
 }
 
-// selectMethod chooses the best authentication method from the client's offering.
-// If an authenticator is configured, USERNAME/PASSWORD is preferred.
+// selectMethodForListener chooses the best authentication method from the client's offering.
+// If an authenticator is configured (per-listener or default), USERNAME/PASSWORD is preferred.
 // Otherwise, NO AUTH is selected if offered.
-func (h *Handler) selectMethod(methods []byte) byte {
+func (h *Handler) selectMethodForListener(methods []byte, listenerName string) byte {
 	hasNoAuth := false
 	hasUserPass := false
 
@@ -86,7 +92,7 @@ func (h *Handler) selectMethod(methods []byte) byte {
 	}
 
 	// If auth is required, prefer USERNAME/PASSWORD.
-	if h.getAuth() != nil {
+	if h.getAuthForListener(listenerName) != nil {
 		if hasUserPass {
 			return methodUsernamePassword
 		}
@@ -119,6 +125,12 @@ func (h *Handler) authenticateUserPass(conn net.Conn) error {
 // authenticateUserPassReturn performs USERNAME/PASSWORD sub-negotiation (RFC 1929)
 // and returns the authenticated username on success.
 func (h *Handler) authenticateUserPassReturn(conn net.Conn) (string, error) {
+	return h.authenticateUserPassForListener(conn, "")
+}
+
+// authenticateUserPassForListener performs USERNAME/PASSWORD sub-negotiation (RFC 1929)
+// using the per-listener authenticator if available, and returns the authenticated username on success.
+func (h *Handler) authenticateUserPassForListener(conn net.Conn, listenerName string) (string, error) {
 	// Read auth version.
 	verBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, verBuf); err != nil {
@@ -157,8 +169,8 @@ func (h *Handler) authenticateUserPassReturn(conn net.Conn) (string, error) {
 		}
 	}
 
-	// Validate credentials.
-	auth := h.getAuth()
+	// Validate credentials using per-listener or default authenticator.
+	auth := h.getAuthForListener(listenerName)
 	if auth == nil || !auth.Authenticate(string(username), string(password)) {
 		_, _ = conn.Write([]byte{authVersion, authFailure})
 		return "", fmt.Errorf("authentication failed for user %q", string(username))

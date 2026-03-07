@@ -43,7 +43,8 @@ type PostHandshakeFunc func(ctx context.Context, clientConn, upstreamConn net.Co
 type Handler struct {
 	logger        *slog.Logger
 	authMu        sync.RWMutex
-	auth          Authenticator
+	auth          Authenticator            // default authenticator (used when no per-listener override exists)
+	listenerAuth  map[string]Authenticator // per-listener authenticator overrides keyed by listener name
 	targetScope   *proxy.TargetScope
 	postHandshake PostHandshakeFunc
 	dialer        func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -65,10 +66,32 @@ func (h *Handler) SetAuthenticator(auth Authenticator) {
 	h.authMu.Unlock()
 }
 
-// getAuth returns the current authenticator under read lock.
-func (h *Handler) getAuth() Authenticator {
+// SetListenerAuthenticator sets the authenticator for a specific listener name.
+// This allows per-listener authentication configuration in multi-listener setups.
+// If auth is nil, the per-listener override is removed and the default authenticator is used.
+func (h *Handler) SetListenerAuthenticator(listenerName string, auth Authenticator) {
+	h.authMu.Lock()
+	defer h.authMu.Unlock()
+	if auth == nil {
+		delete(h.listenerAuth, listenerName)
+		return
+	}
+	if h.listenerAuth == nil {
+		h.listenerAuth = make(map[string]Authenticator)
+	}
+	h.listenerAuth[listenerName] = auth
+}
+
+// getAuthForListener returns the authenticator for a specific listener.
+// If a per-listener authenticator is set, it takes precedence over the default.
+func (h *Handler) getAuthForListener(listenerName string) Authenticator {
 	h.authMu.RLock()
 	defer h.authMu.RUnlock()
+	if listenerName != "" && h.listenerAuth != nil {
+		if auth, ok := h.listenerAuth[listenerName]; ok {
+			return auth
+		}
+	}
 	return h.auth
 }
 
@@ -121,9 +144,10 @@ func (h *Handler) Detect(peek []byte) bool {
 // then bidirectional relay (or delegation to PostHandshakeFunc).
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	logger := proxy.LoggerFromContext(ctx, h.logger)
+	listenerName := proxy.ListenerNameFromContext(ctx)
 
-	// 1. Method negotiation.
-	method, err := h.negotiateMethod(conn)
+	// 1. Method negotiation (uses per-listener auth if available).
+	method, err := h.negotiateMethodForListener(conn, listenerName)
 	if err != nil {
 		return fmt.Errorf("socks5 method negotiation: %w", err)
 	}
@@ -134,7 +158,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 
 	// 2. Authentication (if required).
 	if method == methodUsernamePassword {
-		username, authErr := h.authenticateUserPassReturn(conn)
+		username, authErr := h.authenticateUserPassForListener(conn, listenerName)
 		if authErr != nil {
 			return fmt.Errorf("socks5 auth: %w", authErr)
 		}

@@ -218,8 +218,13 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	}
 
 	// Apply SOCKS5 authentication configuration if provided.
+	// Use the listener name so each listener gets independent auth settings.
 	if input.SOCKS5Auth != "" {
-		if err := s.applySOCKS5Auth(input.SOCKS5Auth, input.SOCKS5Username, input.SOCKS5Password); err != nil {
+		socks5ListenerName := input.Name
+		if socks5ListenerName == "" {
+			socks5ListenerName = proxy.DefaultListenerName
+		}
+		if err := s.applySOCKS5Auth(input.SOCKS5Auth, input.SOCKS5Username, input.SOCKS5Password, socks5ListenerName); err != nil {
 			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
 		}
 	}
@@ -470,12 +475,17 @@ func (s *Server) applyProxyDefaults(input *proxyStartInput) {
 	}
 }
 
-// applySOCKS5Auth validates and applies SOCKS5 authentication configuration.
-func (s *Server) applySOCKS5Auth(authMethod, username, password string) error {
+// applySOCKS5Auth validates and applies SOCKS5 authentication configuration
+// for a specific listener. If listenerName is empty, the default (global) auth is set.
+func (s *Server) applySOCKS5Auth(authMethod, username, password, listenerName string) error {
 	switch authMethod {
 	case "none":
 		if s.deps.socks5AuthSetter != nil {
-			s.deps.socks5AuthSetter.ClearAuth()
+			if listenerName != "" {
+				s.deps.socks5AuthSetter.ClearAuthForListener(listenerName)
+			} else {
+				s.deps.socks5AuthSetter.ClearAuth()
+			}
 		}
 		return nil
 	case "password":
@@ -488,7 +498,11 @@ func (s *Server) applySOCKS5Auth(authMethod, username, password string) error {
 		if s.deps.socks5AuthSetter == nil {
 			return fmt.Errorf("SOCKS5 handler is not initialized")
 		}
-		s.deps.socks5AuthSetter.SetPasswordAuth(username, password)
+		if listenerName != "" {
+			s.deps.socks5AuthSetter.SetPasswordAuthForListener(listenerName, username, password)
+		} else {
+			s.deps.socks5AuthSetter.SetPasswordAuth(username, password)
+		}
 		return nil
 	default:
 		return fmt.Errorf("invalid socks5_auth %q: must be \"none\" or \"password\"", authMethod)

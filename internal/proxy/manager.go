@@ -102,6 +102,7 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 	}
 
 	listener := NewListener(ListenerConfig{
+		Name:           name,
 		Addr:           listenAddr,
 		Detector:       m.detector,
 		Logger:         m.logger,

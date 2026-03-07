@@ -94,9 +94,13 @@ type targetScopeSetter interface {
 // to configure authentication at runtime. The SetPasswordAuth method enables
 // username/password authentication with the given credentials. ClearAuth
 // resets to no-authentication mode.
+// The ForListener variants configure authentication for a specific named listener,
+// allowing independent auth settings per listener in multi-listener setups.
 type socks5AuthSetter interface {
 	SetPasswordAuth(username, password string)
 	ClearAuth()
+	SetPasswordAuthForListener(listenerName, username, password string)
+	ClearAuthForListener(listenerName string)
 }
 
 // ServerOption configures a Server.
