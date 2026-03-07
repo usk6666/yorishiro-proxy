@@ -244,7 +244,9 @@ func TestIntegration_WebSocket_EchoRelay(t *testing.T) {
 	}
 
 	// Send close frame.
-	writeWSFrame(conn, true, 0x8, []byte{0x03, 0xE8}, true)
+	if err := writeWSFrame(conn, true, 0x8, []byte{0x03, 0xE8}, true); err != nil {
+		t.Logf("write close frame: %v", err)
+	}
 
 	// Verify flow recording.
 	var flows []*flow.Flow
@@ -417,5 +419,23 @@ func TestIntegration_WebSocket_WSS_EchoRelay(t *testing.T) {
 	}
 
 	// Close.
-	writeWSFrame(tlsConn, true, 0x8, []byte{0x03, 0xE8}, true)
+	if err := writeWSFrame(tlsConn, true, 0x8, []byte{0x03, 0xE8}, true); err != nil {
+		t.Logf("write close frame: %v", err)
+	}
+
+	// Verify flow recording.
+	var flows []*flow.Flow
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("ListFlows: %v", err)
+		}
+		if len(flows) > 0 {
+			break
+		}
+	}
+	if len(flows) == 0 {
+		t.Fatal("no flows recorded for WSS session")
+	}
 }

@@ -216,6 +216,22 @@ func TestIntegration_H2C_POST(t *testing.T) {
 	if string(body) != "echo: h2c body" {
 		t.Errorf("body = %q, want %q", body, "echo: h2c body")
 	}
+
+	// Verify flow recording.
+	var flows []*flow.Flow
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("ListFlows: %v", err)
+		}
+		if len(flows) > 0 {
+			break
+		}
+	}
+	if len(flows) == 0 {
+		t.Fatal("no flows recorded for h2c POST request")
+	}
 }
 
 func TestIntegration_H2C_ConcurrentStreams(t *testing.T) {

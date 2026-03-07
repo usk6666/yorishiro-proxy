@@ -9,6 +9,7 @@ import (
 	"net"
 	gohttp "net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +24,9 @@ import (
 // socks5Connect performs a SOCKS5 CONNECT handshake without authentication.
 func socks5Connect(conn net.Conn, targetAddr string) error {
 	// 1. Greeting: version=5, 1 method, method=0 (no auth).
-	conn.Write([]byte{0x05, 0x01, 0x00})
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return fmt.Errorf("write greeting: %w", err)
+	}
 
 	// 2. Read server method selection.
 	buf := make([]byte, 2)
@@ -58,7 +61,9 @@ func socks5Connect(conn net.Conn, targetAddr string) error {
 		req = append(req, []byte(host)...)
 	}
 	req = append(req, byte(portNum>>8), byte(portNum))
-	conn.Write(req)
+	if _, err := conn.Write(req); err != nil {
+		return fmt.Errorf("write connect request: %w", err)
+	}
 
 	// 4. Read reply.
 	reply := make([]byte, 4)
@@ -90,7 +95,9 @@ func socks5Connect(conn net.Conn, targetAddr string) error {
 // socks5ConnectWithAuth performs a SOCKS5 CONNECT handshake with username/password.
 func socks5ConnectWithAuth(conn net.Conn, targetAddr, username, password string) error {
 	// 1. Greeting: version=5, 1 method, method=2 (username/password).
-	conn.Write([]byte{0x05, 0x01, 0x02})
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
+		return fmt.Errorf("write greeting: %w", err)
+	}
 
 	// 2. Read server method selection.
 	buf := make([]byte, 2)
@@ -106,7 +113,9 @@ func socks5ConnectWithAuth(conn net.Conn, targetAddr, username, password string)
 	authReq = append(authReq, []byte(username)...)
 	authReq = append(authReq, byte(len(password)))
 	authReq = append(authReq, []byte(password)...)
-	conn.Write(authReq)
+	if _, err := conn.Write(authReq); err != nil {
+		return fmt.Errorf("write auth request: %w", err)
+	}
 
 	// 4. Read auth reply.
 	authReply := make([]byte, 2)
@@ -138,7 +147,9 @@ func socks5ConnectWithAuth(conn net.Conn, targetAddr, username, password string)
 		req = append(req, []byte(host)...)
 	}
 	req = append(req, byte(portNum>>8), byte(portNum))
-	conn.Write(req)
+	if _, err := conn.Write(req); err != nil {
+		return fmt.Errorf("write connect request: %w", err)
+	}
 
 	// 6. Read reply.
 	reply := make([]byte, 4)
@@ -228,7 +239,9 @@ func TestIntegration_SOCKS5_HTTPThroughProxy(t *testing.T) {
 	// Send HTTP request through the SOCKS5 tunnel.
 	httpReq := fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
 		upstreamLn.Addr().String())
-	conn.Write([]byte(httpReq))
+	if _, err := conn.Write([]byte(httpReq)); err != nil {
+		t.Fatalf("write HTTP request: %v", err)
+	}
 
 	// Read HTTP response.
 	respBytes, err := io.ReadAll(conn)
@@ -240,12 +253,31 @@ func TestIntegration_SOCKS5_HTTPThroughProxy(t *testing.T) {
 	if len(respStr) == 0 {
 		t.Fatal("empty response")
 	}
-	if !contains(respStr, "200 OK") {
+	if !strings.Contains(respStr, "200 OK") {
 		t.Errorf("expected 200 OK in response, got: %s", respStr[:min(len(respStr), 100)])
 	}
-	if !contains(respStr, "hello from socks5 upstream") {
+	if !strings.Contains(respStr, "hello from socks5 upstream") {
 		t.Errorf("expected body in response, got: %s", respStr)
 	}
+
+	// Verify flow recording — SOCKS5 handler doesn't record flows directly,
+	// but the post-handshake or relay should. Check for any recorded flow.
+	conn.Close()
+	var flows []*flow.Flow
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("ListFlows: %v", err)
+		}
+		if len(flows) > 0 {
+			break
+		}
+	}
+	// Note: SOCKS5 handler with PostHandshake=nil does a simple TCP relay
+	// without flow recording. This assertion documents the current behavior.
+	// When SOCKS5 flow recording is implemented, update this to require flows.
+	t.Logf("flows recorded after SOCKS5 session: %d", len(flows))
 }
 
 func TestIntegration_SOCKS5_WithAuth(t *testing.T) {
@@ -341,7 +373,7 @@ func TestIntegration_SOCKS5_WithAuth(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected auth failure, got nil")
 		}
-		if !contains(err.Error(), "auth failed") {
+		if !strings.Contains(err.Error(), "auth failed") {
 			t.Errorf("error = %v, want auth failure", err)
 		}
 	})
@@ -357,22 +389,3 @@ func (a staticAuth) Authenticate(username, password string) bool {
 	return username == a.username && password == a.password
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

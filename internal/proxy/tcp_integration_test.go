@@ -29,17 +29,12 @@ func startTCPEchoServer(t *testing.T) (string, func()) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					return
-				}
+				return
 			}
 			go func(c net.Conn) {
 				defer c.Close()
