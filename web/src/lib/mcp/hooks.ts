@@ -18,6 +18,7 @@ import type {
   InterceptActionParams,
   MacroToolParams,
   ManageParams,
+  PluginToolParams,
   ProxyStartParams,
   ProxyStartResult,
   ProxyStopParams,
@@ -660,4 +661,58 @@ export function useProxyControl(): UseProxyControlResult {
   );
 
   return { start, stop, loading, error };
+}
+
+// ---------------------------------------------------------------------------
+// usePlugin — plugin tool (list, reload, enable, disable)
+// ---------------------------------------------------------------------------
+
+/** Return type for usePlugin. */
+export interface UsePluginResult {
+  /** Execute a plugin action. Returns the tool result. */
+  plugin: <T = unknown>(params: PluginToolParams) => Promise<T>;
+  /** Whether a plugin operation is in progress. */
+  loading: boolean;
+  /** Last plugin error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Hook to call the MCP plugin tool (list, reload, enable, disable).
+ *
+ * @example
+ * ```tsx
+ * const { plugin, loading, error } = usePlugin();
+ * const result = await plugin({ action: "list" });
+ * ```
+ */
+export function usePlugin(): UsePluginResult {
+  const { client, status } = useMcpContext();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const plugin = useCallback(
+    async <T = unknown>(params: PluginToolParams): Promise<T> => {
+      if (!client || status !== "connected") {
+        throw new Error("MCP client is not connected");
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await client.plugin<T>(params);
+        return result;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        throw e;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client, status],
+  );
+
+  return { plugin, loading, error };
 }
