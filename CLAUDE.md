@@ -49,7 +49,8 @@ internal/
 make build          # build-ui → vet → go build（常に UI を再ビルド）
 make build-ui       # web/ の React/Vite アプリをビルドし dist/ を生成
 make ensure-ui      # dist/ が存在しない場合のみ build-ui を実行（軽量）
-make test           # ensure-ui → go test -race -v ./...
+make test           # ensure-ui → go test -race -v ./...（ユニットテストのみ）
+make test-e2e       # ensure-ui → go test -race -v -tags e2e ./...（e2e 含む全テスト）
 make test-cover     # ensure-ui → カバレッジレポート付きテスト
 make vet            # ensure-ui → go vet ./...
 make fmt            # gofmt -w . で全ファイルをフォーマット
@@ -57,6 +58,10 @@ make lint           # gofmt check + go vet + staticcheck + ineffassign
 make bench          # ensure-ui → ベンチマーク実行
 make clean          # 成果物削除
 ```
+
+> **e2e テスト**: `*_integration_test.go` ファイルには `//go:build e2e` タグが付与されている。
+> `make test` ではスキップされ、`make test-e2e` で実行される。
+> 新規 integration テストを追加する際は必ずこのタグを付けること。
 
 > **重要**: `go test` / `go vet` / `go build` を直接実行しないこと。
 > `internal/mcp/webui/embed.go` が `//go:embed dist/*` で Web UI を埋め込むため、
