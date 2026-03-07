@@ -468,8 +468,8 @@ func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
-	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/2", 200, nil, nil)
+	fl1 := saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
+	fl2 := saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/2", 200, nil, nil)
 
 	n, err := store.DeleteAllFlows(ctx)
 	if err != nil {
@@ -482,6 +482,14 @@ func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
 	remaining, _ := store.ListFlows(ctx, ListOptions{})
 	if len(remaining) != 0 {
 		t.Errorf("expected 0 remaining, got %d", len(remaining))
+	}
+
+	// Verify messages are cascade-deleted (regression test for BUG-001).
+	for _, id := range []string{fl1.ID, fl2.ID} {
+		count, _ := store.CountMessages(ctx, id)
+		if count != 0 {
+			t.Errorf("expected 0 messages for flow %s after cascade delete, got %d", id, count)
+		}
 	}
 }
 
