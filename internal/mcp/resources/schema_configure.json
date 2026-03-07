@@ -101,6 +101,27 @@
       },
       "additionalProperties": false
     },
+    "socks5_auth": {
+      "type": "object",
+      "description": "SOCKS5 authentication configuration.",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["none", "password"],
+          "description": "Authentication method: none or password."
+        },
+        "username": {
+          "type": "string",
+          "description": "Username for password authentication."
+        },
+        "password": {
+          "type": "string",
+          "description": "Password for password authentication."
+        }
+      },
+      "required": ["method"],
+      "additionalProperties": false
+    },
     "auto_transform": {
       "type": "object",
       "description": "Auto-transform rules configuration.",
