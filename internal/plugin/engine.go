@@ -21,6 +21,7 @@ type Engine struct {
 	mu       sync.RWMutex
 	registry *Registry
 	plugins  []*loadedPlugin
+	states   map[string]*PluginState
 	logger   *slog.Logger
 }
 
@@ -53,6 +54,7 @@ func NewEngine(logger *slog.Logger) *Engine {
 	}
 	return &Engine{
 		registry: NewRegistry(),
+		states:   make(map[string]*PluginState),
 		logger:   logger,
 	}
 }
@@ -114,10 +116,19 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 		},
 	}
 
+	// Ensure a PluginState exists for this plugin. State survives reloads.
+	name := pluginName(cfg.Path)
+	ps, ok := e.states[name]
+	if !ok {
+		ps = NewPluginState()
+		e.states[name] = ps
+	}
+
 	predeclared := starlark.StringDict{
 		"action": newActionModule(),
 		"crypto": newCryptoModule(),
 		"config": newConfigDict(cfg.Vars),
+		"state":  newStateModule(ps),
 	}
 
 	globals, err := starlark.ExecFileOptions(
@@ -440,12 +451,22 @@ func (e *Engine) ReloadAll(ctx context.Context) error {
 }
 
 // Close releases all resources held by the engine.
+// All plugin state is cleared to ensure sensitive data does not persist in memory.
 func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.registry.Clear()
 	e.plugins = nil
+
+	// Clear each PluginState to release stored values, then nil the map.
+	for _, ps := range e.states {
+		ps.mu.Lock()
+		ps.data = nil
+		ps.mu.Unlock()
+	}
+	e.states = nil
+
 	return nil
 }
 
