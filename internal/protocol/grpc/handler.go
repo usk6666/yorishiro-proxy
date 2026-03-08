@@ -165,11 +165,14 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 
 	logger := h.logger.With("flow_id", fl.ID, "service", service, "method", method)
 
+	// Create transaction context shared across all plugin hooks for this gRPC session.
+	txCtx := plugin.NewTxCtx()
+
 	// Dispatch plugin hooks for request frames (on_receive_from_client).
-	h.dispatchRequestHooks(ctx, logger, info, service, method, grpcEncoding, reqFrames)
+	h.dispatchRequestHooks(ctx, logger, info, service, method, grpcEncoding, reqFrames, txCtx)
 
 	// Dispatch plugin hooks for response frames (on_receive_from_server).
-	h.dispatchResponseHooks(ctx, logger, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames)
+	h.dispatchResponseHooks(ctx, logger, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, txCtx)
 
 	// Record messages based on session type.
 	seq := 0
@@ -333,12 +336,14 @@ func (h *Handler) recordReceiveMessages(
 // dispatchRequestHooks dispatches on_receive_from_client hooks for each gRPC request frame.
 // Plugin results are logged but do not modify the request data, as gRPC frames
 // are recorded after being received from the upstream connection.
+// The txCtx is a mutable dict shared across all hooks within the same gRPC session.
 func (h *Handler) dispatchRequestHooks(
 	ctx context.Context,
 	logger *slog.Logger,
 	info *StreamInfo,
 	service, method, grpcEncoding string,
 	frames []*Frame,
+	txCtx map[string]any,
 ) {
 	if h.pluginEngine == nil {
 		return
@@ -348,23 +353,27 @@ func (h *Handler) dispatchRequestHooks(
 
 	if len(frames) == 0 {
 		data := buildGRPCRequestData(info, service, method, grpcEncoding, nil, false, connInfo)
+		plugin.InjectTxCtx(data, txCtx)
 		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data)
 		return
 	}
 
 	for _, frame := range frames {
 		data := buildGRPCRequestData(info, service, method, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
+		plugin.InjectTxCtx(data, txCtx)
 		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data)
 	}
 }
 
 // dispatchResponseHooks dispatches on_receive_from_server hooks for each gRPC response frame.
+// The txCtx is a mutable dict shared across all hooks within the same gRPC session.
 func (h *Handler) dispatchResponseHooks(
 	ctx context.Context,
 	logger *slog.Logger,
 	info *StreamInfo,
 	service, method, grpcStatus, grpcMessage, grpcEncoding string,
 	frames []*Frame,
+	txCtx map[string]any,
 ) {
 	if h.pluginEngine == nil {
 		return
@@ -374,12 +383,14 @@ func (h *Handler) dispatchResponseHooks(
 
 	if len(frames) == 0 {
 		data := buildGRPCResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, nil, false, connInfo)
+		plugin.InjectTxCtx(data, txCtx)
 		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data)
 		return
 	}
 
 	for _, frame := range frames {
 		data := buildGRPCResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
+		plugin.InjectTxCtx(data, txCtx)
 		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data)
 	}
 }

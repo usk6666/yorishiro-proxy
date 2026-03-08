@@ -15,12 +15,14 @@ import (
 // It may return ActionDrop (return 502) or ActionRespond (send custom response).
 // Returns the (possibly modified) request, body, and a boolean indicating the
 // request was terminated (caller should return early).
-func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
+// The txCtx is a mutable dict shared across all hooks within the same transaction.
+func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
 	if h.pluginEngine == nil {
 		return req, body, false
 	}
 
 	data := plugin.HTTPRequestToMap(req, body, connInfo, "h2")
+	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromClient, data)
 	if err != nil {
@@ -75,12 +77,14 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.Resp
 
 // dispatchOnBeforeSendToServer dispatches the on_before_send_to_server hook.
 // Returns the (possibly modified) request and body.
-func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, logger *slog.Logger) (*gohttp.Request, []byte) {
+// The txCtx is a mutable dict shared across all hooks within the same transaction.
+func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Request, []byte) {
 	if h.pluginEngine == nil {
 		return req, body
 	}
 
 	data := plugin.HTTPRequestToMap(req, body, connInfo, "h2")
+	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToServer, data)
 	if err != nil {
@@ -107,12 +111,14 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *gohttp.
 
 // dispatchOnReceiveFromServer dispatches the on_receive_from_server hook.
 // Returns the (possibly modified) response and body.
-func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.Response, body []byte, req *gohttp.Request, connInfo *plugin.ConnInfo, logger *slog.Logger) (*gohttp.Response, []byte) {
+// The txCtx is a mutable dict shared across all hooks within the same transaction.
+func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.Response, body []byte, req *gohttp.Request, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Response, []byte) {
 	if h.pluginEngine == nil {
 		return resp, body
 	}
 
 	data := plugin.HTTPResponseToMap(resp, body, req, connInfo, "h2")
+	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromServer, data)
 	if err != nil {
@@ -137,12 +143,14 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 
 // dispatchOnBeforeSendToClient dispatches the on_before_send_to_client hook.
 // Returns the (possibly modified) response and body.
-func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp.Response, body []byte, req *gohttp.Request, connInfo *plugin.ConnInfo, logger *slog.Logger) (*gohttp.Response, []byte) {
+// The txCtx is a mutable dict shared across all hooks within the same transaction.
+func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp.Response, body []byte, req *gohttp.Request, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Response, []byte) {
 	if h.pluginEngine == nil {
 		return resp, body
 	}
 
 	data := plugin.HTTPResponseToMap(resp, body, req, connInfo, "h2")
+	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToClient, data)
 	if err != nil {
