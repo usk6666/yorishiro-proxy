@@ -600,7 +600,7 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 	}
 	sendMsg := sendMsgs[0]
 
-	if len(sendMsg.RawBytes) == 0 {
+	if len(sendMsg.RawBytes) == 0 && params.OverrideRawBase64 == "" {
 		return nil, nil, fmt.Errorf("flow %s has no raw request bytes", params.FlowID)
 	}
 

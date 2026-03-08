@@ -456,6 +456,184 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 
 // --- override_raw_base64 tests ---
 
+func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
+	store := newTestStore(t)
+	addr, cleanup := newRawEchoServer(t)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	u, _ := url.Parse("http://" + host + ":" + port + "/test")
+
+	// Create a flow with NO RawBytes (e.g. HTTP/2 or gRPC flow).
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/2",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+			RawBytes:  nil, // No raw bytes stored for HTTP/2
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
+
+	// Should succeed because override_raw_base64 provides the raw bytes.
+	replacement := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":             entry.Session.ID,
+			"target_addr":         addr,
+			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success with override_raw_base64, got error: %v", result.Content)
+	}
+
+	var out resendRawResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if out.ResponseSize == 0 {
+		t.Error("expected non-zero response_size")
+	}
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
+	}
+}
+
+func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes_DryRun(t *testing.T) {
+	store := newTestStore(t)
+
+	u, _ := url.Parse("http://example.com/test")
+
+	// Create a flow with NO RawBytes.
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/2",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+			RawBytes:  nil,
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
+
+	replacement := []byte("POST /replaced HTTP/1.1\r\n\r\n")
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":             entry.Session.ID,
+			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
+			"dry_run":             true,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success with override_raw_base64 dry_run, got error: %v", result.Content)
+	}
+
+	var out resendRawDryRunResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if !out.DryRun {
+		t.Error("expected dry_run=true")
+	}
+	if out.RawPreview.DataSize != len(replacement) {
+		t.Errorf("data_size = %d, want %d", out.RawPreview.DataSize, len(replacement))
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(out.RawPreview.DataBase64)
+	if err != nil {
+		t.Fatalf("decode data_base64: %v", err)
+	}
+	if string(decoded) != string(replacement) {
+		t.Errorf("data = %q, want %q", string(decoded), string(replacement))
+	}
+}
+
+func TestExecute_ResendRaw_NoRawBytesNoOverride_Error(t *testing.T) {
+	store := newTestStore(t)
+
+	u, _ := url.Parse("http://example.com/test")
+
+	// Create a flow with NO RawBytes and no override.
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/2",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+			RawBytes:  nil,
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
+
+	// Without override_raw_base64, should still fail with no raw bytes error.
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+			"dry_run": true,
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error when no raw bytes and no override_raw_base64")
+	}
+}
+
 func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
