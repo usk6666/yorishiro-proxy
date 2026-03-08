@@ -120,18 +120,7 @@ func dialViaHTTPProxy(ctx context.Context, proxyURL *url.URL, targetAddr string,
 		return nil, fmt.Errorf("dial HTTP proxy %s: %w", proxyURL.Host, err)
 	}
 
-	// Build the CONNECT request.
-	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", targetAddr, targetAddr)
-
-	// Add proxy authentication if credentials are present.
-	if proxyURL.User != nil {
-		username := proxyURL.User.Username()
-		password, _ := proxyURL.User.Password()
-		auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-		connectReq += fmt.Sprintf("Proxy-Authorization: Basic %s\r\n", auth)
-	}
-
-	connectReq += "\r\n"
+	connectReq := buildCONNECTRequest(targetAddr, proxyURL)
 
 	// Set a deadline for the CONNECT handshake to prevent indefinite blocking
 	// if the proxy accepts the TCP connection but hangs during the HTTP exchange.
@@ -145,14 +134,46 @@ func dialViaHTTPProxy(ctx context.Context, proxyURL *url.URL, targetAddr string,
 		return nil, fmt.Errorf("write CONNECT to proxy %s: %w", proxyURL.Host, err)
 	}
 
-	// Read the response byte by byte until we find the end of HTTP headers (\r\n\r\n).
+	if err := readAndValidateCONNECTResponse(conn, targetAddr, proxyURL.Host); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	// Clear the deadline so subsequent I/O on the tunneled connection is not
+	// constrained by the CONNECT handshake timeout.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("reset deadline after CONNECT to proxy %s: %w", proxyURL.Host, err)
+	}
+
+	return conn, nil
+}
+
+// buildCONNECTRequest constructs an HTTP CONNECT request string for the given
+// target address, including proxy authentication if credentials are present.
+func buildCONNECTRequest(targetAddr string, proxyURL *url.URL) string {
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", targetAddr, targetAddr)
+
+	if proxyURL.User != nil {
+		username := proxyURL.User.Username()
+		password, _ := proxyURL.User.Password()
+		auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		req += fmt.Sprintf("Proxy-Authorization: Basic %s\r\n", auth)
+	}
+
+	req += "\r\n"
+	return req
+}
+
+// readAndValidateCONNECTResponse reads the HTTP CONNECT response from the proxy
+// connection byte by byte and validates that it indicates success (200 status).
+func readAndValidateCONNECTResponse(conn net.Conn, targetAddr, proxyHost string) error {
 	var respBuf [4096]byte
 	total := 0
 	for total < len(respBuf) {
 		n, err := conn.Read(respBuf[total : total+1])
 		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("read CONNECT response from proxy %s: %w", proxyURL.Host, err)
+			return fmt.Errorf("read CONNECT response from proxy %s: %w", proxyHost, err)
 		}
 		total += n
 
@@ -166,33 +187,22 @@ func dialViaHTTPProxy(ctx context.Context, proxyURL *url.URL, targetAddr string,
 		}
 	}
 
-	// Parse the status line to check for 200 OK.
 	respStr := string(respBuf[:total])
 	if len(respStr) < 12 {
-		conn.Close()
-		return nil, fmt.Errorf("incomplete CONNECT response from proxy %s", proxyURL.Host)
+		return fmt.Errorf("incomplete CONNECT response from proxy %s", proxyHost)
 	}
 
 	// Status line format: HTTP/1.x SSS reason
 	statusCode := respStr[9:12]
 	if statusCode != "200" {
-		conn.Close()
-		// Truncate response for error message readability.
 		truncated := respStr
 		if len(truncated) > 64 {
 			truncated = truncated[:64]
 		}
-		return nil, fmt.Errorf("CONNECT to %s via proxy %s failed: %s", targetAddr, proxyURL.Host, truncated)
+		return fmt.Errorf("CONNECT to %s via proxy %s failed: %s", targetAddr, proxyHost, truncated)
 	}
 
-	// Clear the deadline so subsequent I/O on the tunneled connection is not
-	// constrained by the CONNECT handshake timeout.
-	if err := conn.SetDeadline(time.Time{}); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("reset deadline after CONNECT to proxy %s: %w", proxyURL.Host, err)
-	}
-
-	return conn, nil
+	return nil
 }
 
 // dialViaSOCKS5Proxy dials the target through a SOCKS5 proxy.
