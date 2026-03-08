@@ -124,7 +124,7 @@ func (s *Server) replayAllMessages(ctx context.Context, targetAddr string, useTL
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr, "tcp_replay")
+		conn, err = upgradeTLS(ctx, conn, targetAddr)
 		if err != nil {
 			return 0, nil, start, 0, err
 		}
@@ -339,7 +339,7 @@ func (s *Server) establishAndSend(ctx context.Context, targetAddr string, useTLS
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr, "WebSocket resend")
+		conn, err = upgradeTLS(ctx, conn, targetAddr)
 		if err != nil {
 			return nil, start, 0, err
 		}
@@ -365,7 +365,7 @@ func (s *Server) establishAndSend(ctx context.Context, targetAddr string, useTLS
 }
 
 // upgradeTLS wraps a connection with TLS, performing the handshake.
-func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string, purpose string) (net.Conn, error) {
+func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string) (net.Conn, error) {
 	host, _, _ := net.SplitHostPort(targetAddr)
 	tlsConn := tls.Client(conn, &tls.Config{
 		ServerName:         host,

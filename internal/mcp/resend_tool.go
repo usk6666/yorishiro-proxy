@@ -474,6 +474,8 @@ func (s *Server) buildHTTPRequest(ctx context.Context, prep *resendPrepared) (*h
 }
 
 // applyHeaders sets the headers on the HTTP request, preserving multi-value headers.
+// When the Host header is set, it also updates req.Host because Go's net/http
+// ignores the Host key in req.Header and uses req.Host exclusively.
 func applyHeaders(req *http.Request, headers map[string][]string) {
 	for key, values := range headers {
 		if len(values) == 0 {
@@ -486,6 +488,9 @@ func applyHeaders(req *http.Request, headers map[string][]string) {
 			} else {
 				req.Header.Add(key, v)
 			}
+		}
+		if http.CanonicalHeaderKey(key) == "Host" && len(values) > 0 {
+			req.Host = values[0]
 		}
 	}
 }
@@ -818,7 +823,7 @@ func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Flow, params rese
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr, "resend_raw")
+		conn, err = upgradeTLS(ctx, conn, targetAddr)
 		if err != nil {
 			return nil, start, 0, err
 		}
