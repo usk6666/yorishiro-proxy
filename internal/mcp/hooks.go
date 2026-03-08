@@ -318,49 +318,16 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
 
-	// Load macro from DB.
-	rec, err := d.store.GetMacro(ctx, macroName)
+	m, cfg, err := loadAndBuildMacroDeps(ctx, d, macroName)
 	if err != nil {
-		return nil, fmt.Errorf("load macro %q: %w", macroName, err)
-	}
-
-	// Parse config JSON.
-	var cfg macroConfig
-	if err := json.Unmarshal([]byte(rec.ConfigJSON), &cfg); err != nil {
-		return nil, fmt.Errorf("parse macro config: %w", err)
-	}
-
-	// Build macro.Macro from stored config.
-	m, err := configToMacro(rec.Name, rec.Description, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("build macro from config: %w", err)
+		return nil, err
 	}
 
 	// Target scope enforcement: check each step's target URL before running.
 	// This mirrors the same check in handleRunMacro to prevent hooks
 	// from bypassing target scope restrictions via macro execution.
-	if d.targetScope != nil && d.targetScope.HasRules() {
-		for _, step := range cfg.Steps {
-			// Check override_url if specified.
-			if step.OverrideURL != "" {
-				u, parseErr := url.Parse(step.OverrideURL)
-				if parseErr == nil && u.Host != "" {
-					if scopeErr := checkTargetScopeURLHelper(d.targetScope, u); scopeErr != nil {
-						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
-					}
-				}
-			}
-			// Check the flow's URL for this step.
-			sendMsgs, msgErr := d.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
-			if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
-				// Only check session URL if no override_url (override takes precedence).
-				if step.OverrideURL == "" {
-					if scopeErr := checkTargetScopeURLHelper(d.targetScope, sendMsgs[0].URL); scopeErr != nil {
-						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
-					}
-				}
-			}
-		}
+	if err := checkMacroStepsTargetScopeDeps(ctx, d, cfg.Steps); err != nil {
+		return nil, err
 	}
 
 	// Create engine with HTTP client and session fetcher.
@@ -378,6 +345,54 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	}
 
 	return result, nil
+}
+
+// loadAndBuildMacroDeps loads a macro record from DB using deps directly.
+func loadAndBuildMacroDeps(ctx context.Context, d *deps, macroName string) (*macro.Macro, macroConfig, error) {
+	rec, err := d.store.GetMacro(ctx, macroName)
+	if err != nil {
+		return nil, macroConfig{}, fmt.Errorf("load macro %q: %w", macroName, err)
+	}
+
+	var cfg macroConfig
+	if err := json.Unmarshal([]byte(rec.ConfigJSON), &cfg); err != nil {
+		return nil, macroConfig{}, fmt.Errorf("parse macro config: %w", err)
+	}
+
+	m, err := configToMacro(rec.Name, rec.Description, cfg)
+	if err != nil {
+		return nil, macroConfig{}, fmt.Errorf("build macro from config: %w", err)
+	}
+
+	return m, cfg, nil
+}
+
+// checkMacroStepsTargetScopeDeps checks each macro step's target URL against
+// the target scope rules using deps directly. This is the deps-based variant
+// of Server.checkMacroStepsTargetScope.
+func checkMacroStepsTargetScopeDeps(ctx context.Context, d *deps, steps []macroStepInput) error {
+	if d.targetScope == nil || !d.targetScope.HasRules() {
+		return nil
+	}
+	for _, step := range steps {
+		if step.OverrideURL != "" {
+			u, parseErr := url.Parse(step.OverrideURL)
+			if parseErr == nil && u.Host != "" {
+				if scopeErr := checkTargetScopeURLHelper(d.targetScope, u); scopeErr != nil {
+					return fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
+				}
+			}
+		}
+		sendMsgs, msgErr := d.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
+		if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
+			if step.OverrideURL == "" {
+				if scopeErr := checkTargetScopeURLHelper(d.targetScope, sendMsgs[0].URL); scopeErr != nil {
+					return fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // hookMacroSendFunc creates a macro.SendFunc that uses deps directly.

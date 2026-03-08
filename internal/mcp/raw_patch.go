@@ -32,6 +32,23 @@ func validateRawPatch(rp RawPatch) error {
 	hasBinaryFind := rp.FindBase64 != "" || rp.ReplaceBase64 != ""
 	hasTextFind := rp.FindText != "" || rp.ReplaceText != ""
 
+	if err := validatePatchModeCount(hasOffset, hasBinaryFind, hasTextFind); err != nil {
+		return err
+	}
+
+	switch {
+	case hasOffset:
+		return validateOffsetPatchFields(rp)
+	case hasBinaryFind:
+		return validateBinaryFindPatchFields(rp)
+	case hasTextFind:
+		return validateTextFindPatchFields(rp)
+	}
+	return nil
+}
+
+// validatePatchModeCount ensures exactly one patch mode is specified.
+func validatePatchModeCount(hasOffset, hasBinaryFind, hasTextFind bool) error {
 	modes := 0
 	if hasOffset {
 		modes++
@@ -49,32 +66,38 @@ func validateRawPatch(rp RawPatch) error {
 	if modes > 1 {
 		return fmt.Errorf("patch must specify exactly one mode: offset+data_base64, find_base64+replace_base64, or find_text+replace_text")
 	}
+	return nil
+}
 
-	// Validate mode-specific required fields.
-	if hasOffset {
-		if rp.Offset == nil {
-			return fmt.Errorf("offset is required when data_base64 is specified")
-		}
-		if rp.DataBase64 == "" {
-			return fmt.Errorf("data_base64 is required when offset is specified")
-		}
-		if *rp.Offset < 0 {
-			return fmt.Errorf("offset must be >= 0, got %d", *rp.Offset)
-		}
+// validateOffsetPatchFields validates fields for offset-based patch mode.
+func validateOffsetPatchFields(rp RawPatch) error {
+	if rp.Offset == nil {
+		return fmt.Errorf("offset is required when data_base64 is specified")
 	}
-	if hasBinaryFind {
-		if rp.FindBase64 == "" {
-			return fmt.Errorf("find_base64 is required for binary search/replace")
-		}
-		// replace_base64 can be empty (replace with nothing = delete).
+	if rp.DataBase64 == "" {
+		return fmt.Errorf("data_base64 is required when offset is specified")
 	}
-	if hasTextFind {
-		if rp.FindText == "" {
-			return fmt.Errorf("find_text is required for text search/replace")
-		}
-		// replace_text can be empty (replace with nothing = delete).
+	if *rp.Offset < 0 {
+		return fmt.Errorf("offset must be >= 0, got %d", *rp.Offset)
 	}
+	return nil
+}
 
+// validateBinaryFindPatchFields validates fields for binary find/replace patch mode.
+func validateBinaryFindPatchFields(rp RawPatch) error {
+	if rp.FindBase64 == "" {
+		return fmt.Errorf("find_base64 is required for binary search/replace")
+	}
+	// replace_base64 can be empty (replace with nothing = delete).
+	return nil
+}
+
+// validateTextFindPatchFields validates fields for text find/replace patch mode.
+func validateTextFindPatchFields(rp RawPatch) error {
+	if rp.FindText == "" {
+		return fmt.Errorf("find_text is required for text search/replace")
+	}
+	// replace_text can be empty (replace with nothing = delete).
 	return nil
 }
 

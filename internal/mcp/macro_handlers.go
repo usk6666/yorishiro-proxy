@@ -183,47 +183,15 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 		return nil, fmt.Errorf("name is required for run_macro action")
 	}
 
-	// Load macro from DB.
-	rec, err := s.deps.store.GetMacro(ctx, params.Name)
+	// Load and build macro from DB.
+	m, cfg, err := s.loadAndBuildMacro(ctx, params.Name)
 	if err != nil {
-		return nil, fmt.Errorf("load macro: %w", err)
-	}
-
-	// Parse config JSON.
-	var cfg macroConfig
-	if err := json.Unmarshal([]byte(rec.ConfigJSON), &cfg); err != nil {
-		return nil, fmt.Errorf("parse macro config: %w", err)
-	}
-
-	// Build macro.Macro from stored config.
-	m, err := configToMacro(rec.Name, rec.Description, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("build macro from config: %w", err)
+		return nil, err
 	}
 
 	// Target scope enforcement: check each step's target URL before running.
-	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
-		for _, step := range cfg.Steps {
-			// Check override_url if specified.
-			if step.OverrideURL != "" {
-				u, parseErr := url.Parse(step.OverrideURL)
-				if parseErr == nil && u.Host != "" {
-					if scopeErr := s.checkTargetScopeURL(u); scopeErr != nil {
-						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
-					}
-				}
-			}
-			// Check the flow's URL for this step.
-			sendMsgs, msgErr := s.deps.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
-			if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
-				// Only check session URL if no override_url (override takes precedence).
-				if step.OverrideURL == "" {
-					if scopeErr := s.checkTargetScopeURL(sendMsgs[0].URL); scopeErr != nil {
-						return nil, fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
-					}
-				}
-			}
-		}
+	if err := s.checkMacroStepsTargetScope(ctx, cfg.Steps); err != nil {
+		return nil, err
 	}
 
 	// Create engine with HTTP client and session fetcher.
@@ -240,7 +208,58 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 		return nil, fmt.Errorf("run macro: %w", err)
 	}
 
-	// Convert result to MCP response.
+	return buildRunMacroResult(result), nil
+}
+
+// loadAndBuildMacro loads a macro record from DB, parses its config, and builds a macro.Macro.
+func (s *Server) loadAndBuildMacro(ctx context.Context, name string) (*macro.Macro, macroConfig, error) {
+	rec, err := s.deps.store.GetMacro(ctx, name)
+	if err != nil {
+		return nil, macroConfig{}, fmt.Errorf("load macro: %w", err)
+	}
+
+	var cfg macroConfig
+	if err := json.Unmarshal([]byte(rec.ConfigJSON), &cfg); err != nil {
+		return nil, macroConfig{}, fmt.Errorf("parse macro config: %w", err)
+	}
+
+	m, err := configToMacro(rec.Name, rec.Description, cfg)
+	if err != nil {
+		return nil, macroConfig{}, fmt.Errorf("build macro from config: %w", err)
+	}
+
+	return m, cfg, nil
+}
+
+// checkMacroStepsTargetScope checks each macro step's target URL against the target scope rules.
+// It checks both override_url and the flow's original URL for each step.
+func (s *Server) checkMacroStepsTargetScope(ctx context.Context, steps []macroStepInput) error {
+	if s.deps.targetScope == nil || !s.deps.targetScope.HasRules() {
+		return nil
+	}
+	for _, step := range steps {
+		if step.OverrideURL != "" {
+			u, parseErr := url.Parse(step.OverrideURL)
+			if parseErr == nil && u.Host != "" {
+				if scopeErr := s.checkTargetScopeURL(u); scopeErr != nil {
+					return fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
+				}
+			}
+		}
+		sendMsgs, msgErr := s.deps.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
+		if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
+			if step.OverrideURL == "" {
+				if scopeErr := s.checkTargetScopeURL(sendMsgs[0].URL); scopeErr != nil {
+					return fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// buildRunMacroResult converts a macro.Result to the MCP response format.
+func buildRunMacroResult(result *macro.Result) *macroRunMacroResult {
 	stepResults := make([]macroStepResultEntry, len(result.StepResults))
 	for i, sr := range result.StepResults {
 		stepResults[i] = macroStepResultEntry{
@@ -259,7 +278,7 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 		KVStore:       result.KVStore,
 		StepResults:   stepResults,
 		Error:         result.Error,
-	}, nil
+	}
 }
 
 // handleDeleteMacro handles the delete_macro action.
@@ -372,49 +391,61 @@ func validateMacroDefinition(m *macro.Macro) error {
 	seenIDs := make(map[string]bool, len(m.Steps))
 	for i := range m.Steps {
 		step := &m.Steps[i]
-		if step.ID == "" {
-			return fmt.Errorf("step at index %d has no ID", i)
-		}
-		if seenIDs[step.ID] {
-			return fmt.Errorf("duplicate step ID %q", step.ID)
-		}
-		seenIDs[step.ID] = true
-
-		if step.FlowID == "" {
-			return fmt.Errorf("step %q has no flow_id", step.ID)
-		}
-
-		if step.OnError != "" && step.OnError != macro.OnErrorAbort && step.OnError != macro.OnErrorSkip && step.OnError != macro.OnErrorRetry {
-			return fmt.Errorf("step %q has invalid on_error value %q", step.ID, step.OnError)
-		}
-
-		if step.When != nil && step.When.Step != "" {
-			if !seenIDs[step.When.Step] {
-				return fmt.Errorf("step %q guard references unknown or forward step %q", step.ID, step.When.Step)
-			}
-		}
-
-		// Validate override_headers for CRLF injection (CWE-113).
-		if len(step.OverrideHeaders) > 0 {
-			if err := validateHeaderValues(step.OverrideHeaders); err != nil {
-				return fmt.Errorf("step %q override_headers: %w", step.ID, err)
-			}
-		}
-
-		for j := range step.Extract {
-			rule := &step.Extract[j]
-			if rule.Name == "" {
-				return fmt.Errorf("step %q extraction rule at index %d has no name", step.ID, j)
-			}
-			if rule.Source == "" {
-				return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
-			}
-			if rule.From == "" {
-				return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
-			}
+		if err := validateMacroStep(step, i, seenIDs); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// validateMacroStep validates a single macro step and updates the seenIDs map.
+func validateMacroStep(step *macro.Step, index int, seenIDs map[string]bool) error {
+	if step.ID == "" {
+		return fmt.Errorf("step at index %d has no ID", index)
+	}
+	if seenIDs[step.ID] {
+		return fmt.Errorf("duplicate step ID %q", step.ID)
+	}
+	seenIDs[step.ID] = true
+
+	if step.FlowID == "" {
+		return fmt.Errorf("step %q has no flow_id", step.ID)
+	}
+
+	if step.OnError != "" && step.OnError != macro.OnErrorAbort && step.OnError != macro.OnErrorSkip && step.OnError != macro.OnErrorRetry {
+		return fmt.Errorf("step %q has invalid on_error value %q", step.ID, step.OnError)
+	}
+
+	if step.When != nil && step.When.Step != "" {
+		if !seenIDs[step.When.Step] {
+			return fmt.Errorf("step %q guard references unknown or forward step %q", step.ID, step.When.Step)
+		}
+	}
+
+	if len(step.OverrideHeaders) > 0 {
+		if err := validateHeaderValues(step.OverrideHeaders); err != nil {
+			return fmt.Errorf("step %q override_headers: %w", step.ID, err)
+		}
+	}
+
+	return validateStepExtractionRules(step)
+}
+
+// validateStepExtractionRules validates all extraction rules in a macro step.
+func validateStepExtractionRules(step *macro.Step) error {
+	for j := range step.Extract {
+		rule := &step.Extract[j]
+		if rule.Name == "" {
+			return fmt.Errorf("step %q extraction rule at index %d has no name", step.ID, j)
+		}
+		if rule.Source == "" {
+			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
+		}
+		if rule.From == "" {
+			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
+		}
+	}
 	return nil
 }
 
