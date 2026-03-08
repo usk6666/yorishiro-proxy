@@ -8,10 +8,21 @@ import (
 	"go.starlark.net/starlarkstruct"
 )
 
+const (
+	// maxStateKeys is the maximum number of keys allowed per plugin state.
+	maxStateKeys = 10_000
+	// maxStateValueSize is the maximum size in bytes for a single string or bytes value.
+	maxStateValueSize = 1 << 20 // 1 MB
+)
+
 // PluginState provides a per-plugin in-memory key-value store.
 // It is safe for concurrent use from multiple goroutines.
 // Values are limited to primitive types: string, bytes, int, float, bool.
 // The state is volatile (lost on process restart) but survives plugin reloads.
+//
+// Resource limits are enforced to prevent unbounded memory growth:
+//   - Maximum of 10,000 keys per plugin
+//   - Maximum of 1 MB per string/bytes value
 type PluginState struct {
 	mu   sync.RWMutex
 	data map[string]starlark.Value
@@ -70,10 +81,28 @@ func (ps *PluginState) stateSet(_ *starlark.Thread, fn *starlark.Builtin, args s
 		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
 	}
 
+	// Check value size for string and bytes types.
+	switch v := value.(type) {
+	case starlark.String:
+		if len(v) > maxStateValueSize {
+			return nil, fmt.Errorf("%s: value size %d exceeds limit %d", fn.Name(), len(v), maxStateValueSize)
+		}
+	case starlark.Bytes:
+		if len(v) > maxStateValueSize {
+			return nil, fmt.Errorf("%s: value size %d exceeds limit %d", fn.Name(), len(v), maxStateValueSize)
+		}
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	ps.data[string(key)] = value
+	// Check key count limit (only when adding a new key).
+	k := string(key)
+	if _, exists := ps.data[k]; !exists && len(ps.data) >= maxStateKeys {
+		return nil, fmt.Errorf("%s: key count %d exceeds limit %d", fn.Name(), len(ps.data), maxStateKeys)
+	}
+
+	ps.data[k] = value
 	return starlark.None, nil
 }
 

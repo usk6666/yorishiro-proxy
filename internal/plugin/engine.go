@@ -451,12 +451,22 @@ func (e *Engine) ReloadAll(ctx context.Context) error {
 }
 
 // Close releases all resources held by the engine.
+// All plugin state is cleared to ensure sensitive data does not persist in memory.
 func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.registry.Clear()
 	e.plugins = nil
+
+	// Clear each PluginState to release stored values, then nil the map.
+	for _, ps := range e.states {
+		ps.mu.Lock()
+		ps.data = nil
+		ps.mu.Unlock()
+	}
+	e.states = nil
+
 	return nil
 }
 

@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -466,6 +468,105 @@ def on_receive_from_client(data):
 	_, err = e.Dispatch(context.Background(), HookOnReceiveFromClient, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error when storing dict in state")
+	}
+}
+
+func TestPluginState_MaxKeysLimit(t *testing.T) {
+	ps := NewPluginState()
+	thread := &starlark.Thread{Name: "test"}
+
+	// Fill to the limit.
+	for i := 0; i < maxStateKeys; i++ {
+		key := starlark.String(fmt.Sprintf("key_%d", i))
+		_, err := ps.stateSet(thread, starlark.NewBuiltin("state.set", nil),
+			starlark.Tuple{key, starlark.MakeInt(i)}, nil)
+		if err != nil {
+			t.Fatalf("stateSet() at key %d: unexpected error = %v", i, err)
+		}
+	}
+
+	// One more should fail.
+	_, err := ps.stateSet(thread, starlark.NewBuiltin("state.set", nil),
+		starlark.Tuple{starlark.String("overflow"), starlark.MakeInt(0)}, nil)
+	if err == nil {
+		t.Fatal("expected error when exceeding max keys limit")
+	}
+
+	// Updating an existing key should still succeed.
+	_, err = ps.stateSet(thread, starlark.NewBuiltin("state.set", nil),
+		starlark.Tuple{starlark.String("key_0"), starlark.MakeInt(999)}, nil)
+	if err != nil {
+		t.Fatalf("stateSet() update existing key: unexpected error = %v", err)
+	}
+}
+
+func TestPluginState_MaxValueSizeLimit(t *testing.T) {
+	ps := NewPluginState()
+	thread := &starlark.Thread{Name: "test"}
+
+	// String at exactly the limit should succeed.
+	exactStr := starlark.String(strings.Repeat("x", maxStateValueSize))
+	_, err := ps.stateSet(thread, starlark.NewBuiltin("state.set", nil),
+		starlark.Tuple{starlark.String("exact"), exactStr}, nil)
+	if err != nil {
+		t.Fatalf("stateSet() at limit: unexpected error = %v", err)
+	}
+
+	// String exceeding the limit should fail.
+	overStr := starlark.String(strings.Repeat("x", maxStateValueSize+1))
+	_, err = ps.stateSet(thread, starlark.NewBuiltin("state.set", nil),
+		starlark.Tuple{starlark.String("over"), overStr}, nil)
+	if err == nil {
+		t.Fatal("expected error when exceeding max value size for string")
+	}
+
+	// Bytes exceeding the limit should fail.
+	overBytes := starlark.Bytes(strings.Repeat("x", maxStateValueSize+1))
+	_, err = ps.stateSet(thread, starlark.NewBuiltin("state.set", nil),
+		starlark.Tuple{starlark.String("over_bytes"), overBytes}, nil)
+	if err == nil {
+		t.Fatal("expected error when exceeding max value size for bytes")
+	}
+
+	// Int values should not be affected by size limit.
+	_, err = ps.stateSet(thread, starlark.NewBuiltin("state.set", nil),
+		starlark.Tuple{starlark.String("int_key"), starlark.MakeInt(999999)}, nil)
+	if err != nil {
+		t.Fatalf("stateSet() int: unexpected error = %v", err)
+	}
+}
+
+func TestEngine_Close_ClearsState(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "state_close.star", `
+def on_receive_from_client(data):
+    state.set("secret", "sensitive_data")
+    data["value"] = state.get("secret")
+    return {"action": action.CONTINUE, "data": data}
+`)
+
+	e := NewEngine(nil)
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{Path: scriptPath, Protocol: "http", Hooks: []string{"on_receive_from_client"}},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	// Populate state.
+	_, err = e.Dispatch(context.Background(), HookOnReceiveFromClient, map[string]any{})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+
+	// Close should clear states.
+	e.Close()
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.states != nil {
+		t.Error("expected e.states to be nil after Close()")
 	}
 }
 
