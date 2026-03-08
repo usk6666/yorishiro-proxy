@@ -29,6 +29,7 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.Resp
 		logger.Warn("plugin on_receive_from_client error", "error", err)
 		return req, body, false
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 	if result == nil {
 		return req, body, false
 	}
@@ -91,6 +92,7 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *gohttp.
 		logger.Warn("plugin on_before_send_to_server error", "error", err)
 		return req, body
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 	if result == nil || result.Data == nil {
 		return req, body
 	}
@@ -125,6 +127,7 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 		logger.Warn("plugin on_receive_from_server error", "error", err)
 		return resp, body
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 	if result == nil || result.Data == nil {
 		return resp, body
 	}
@@ -157,6 +160,7 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 		logger.Warn("plugin on_before_send_to_client error", "error", err)
 		return resp, body
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 	if result == nil || result.Data == nil {
 		return resp, body
 	}

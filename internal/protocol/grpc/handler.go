@@ -354,14 +354,14 @@ func (h *Handler) dispatchRequestHooks(
 	if len(frames) == 0 {
 		data := buildGRPCRequestData(info, service, method, grpcEncoding, nil, false, connInfo)
 		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data, txCtx)
 		return
 	}
 
 	for _, frame := range frames {
 		data := buildGRPCRequestData(info, service, method, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
 		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data, txCtx)
 	}
 }
 
@@ -384,19 +384,21 @@ func (h *Handler) dispatchResponseHooks(
 	if len(frames) == 0 {
 		data := buildGRPCResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, nil, false, connInfo)
 		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data, txCtx)
 		return
 	}
 
 	for _, frame := range frames {
 		data := buildGRPCResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
 		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data)
+		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data, txCtx)
 	}
 }
 
 // dispatchHook dispatches a single plugin hook and logs any errors.
-func (h *Handler) dispatchHook(ctx context.Context, logger *slog.Logger, hook plugin.Hook, data map[string]any) {
+// The txCtx is a mutable dict shared across all hooks within the same gRPC session;
+// it is updated in place with any changes made by the plugin.
+func (h *Handler) dispatchHook(ctx context.Context, logger *slog.Logger, hook plugin.Hook, data map[string]any, txCtx map[string]any) {
 	result, err := h.pluginEngine.Dispatch(ctx, hook, data)
 	if err != nil {
 		logger.Warn("gRPC plugin hook error",
@@ -405,6 +407,7 @@ func (h *Handler) dispatchHook(ctx context.Context, logger *slog.Logger, hook pl
 		)
 		return
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 	if result != nil && result.Action != plugin.ActionContinue {
 		logger.Info("gRPC plugin hook returned non-continue action (ignored for gRPC)",
 			slog.String("hook", string(hook)),

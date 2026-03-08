@@ -184,6 +184,7 @@ func (r *relay) dispatchSingleHook(ctx context.Context, hook plugin.Hook, data [
 		)
 		return data, false // fail-open
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 
 	if result == nil {
 		return data, false

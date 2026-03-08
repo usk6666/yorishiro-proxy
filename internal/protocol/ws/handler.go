@@ -371,6 +371,7 @@ func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame
 		)
 		return false
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 
 	if result == nil {
 		return false
