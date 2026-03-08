@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
@@ -267,60 +266,7 @@ type receiveRecordParams struct {
 //
 // If sendResult is nil (recording was skipped in recordSend), this is a no-op.
 func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResult, p receiveRecordParams, logger *slog.Logger) {
-	if sendResult == nil || h.Store == nil {
-		return
-	}
-
-	if p.resp == nil {
-		return
-	}
-
-	// Decompress response body for recording. The raw (potentially compressed)
-	// bytes are preserved for wire-level analysis.
-	recordRespBody := p.respBody
-	var respTruncated bool
-	decompressed := false
-	if ce := p.resp.Header.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(p.respBody, ce, config.MaxBodySize)
-		if err != nil {
-			logger.Debug("HTTP/2 response body decompression failed, storing as-is",
-				"encoding", ce, "error", err)
-		} else {
-			recordRespBody = decoded
-			decompressed = true
-		}
-	}
-	if len(recordRespBody) > int(config.MaxBodySize) {
-		recordRespBody = recordRespBody[:int(config.MaxBodySize)]
-		respTruncated = true
-	}
-
-	recvMsg := &flow.Message{
-		FlowID:        sendResult.flowID,
-		Sequence:      sendResult.recvSequence,
-		Direction:     "receive",
-		Timestamp:     p.start.Add(p.duration),
-		StatusCode:    p.resp.StatusCode,
-		Headers:       httputil.RecordingHeaders(p.resp.Header, decompressed, len(recordRespBody)),
-		Body:          recordRespBody,
-		BodyTruncated: respTruncated,
-	}
-	if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
-		logger.Error("HTTP/2 receive message save failed", "error", err)
-	}
-
-	// Update the flow to complete with the final duration and server address.
-	update := flow.FlowUpdate{
-		State:      "complete",
-		Duration:   p.duration,
-		ServerAddr: p.serverAddr,
-	}
-	if p.tlsServerCertSubject != "" {
-		update.TLSServerCertSubject = p.tlsServerCertSubject
-	}
-	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
-		logger.Error("HTTP/2 session update failed", "error", err)
-	}
+	h.recordReceiveWithVariant(ctx, sendResult, p, nil, logger)
 }
 
 // responseSnapshot holds a copy of the response status code, headers, and body
@@ -347,18 +293,6 @@ func snapshotResponse(statusCode int, headers gohttp.Header, body []byte) respon
 	return snap
 }
 
-// responseModified reports whether the response status code, headers, or body
-// have been changed relative to the snapshot.
-func responseModified(snap responseSnapshot, currentStatusCode int, currentHeaders gohttp.Header, currentBody []byte) bool {
-	if snap.statusCode != currentStatusCode {
-		return true
-	}
-	if !bytes.Equal(snap.body, currentBody) {
-		return true
-	}
-	return headersModified(snap.headers, currentHeaders)
-}
-
 // recordReceiveWithVariant records the receive phase with variant support. If
 // the response was modified by intercept (detected by comparing snap against
 // the current response), it records two receive messages:
@@ -376,94 +310,26 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		return
 	}
 
-	// Detect whether modification occurred.
-	modified := snap != nil && responseModified(*snap, p.resp.StatusCode, p.resp.Header, p.respBody)
-
-	if !modified {
-		h.recordReceive(ctx, sendResult, p, logger)
-		return
-	}
-
-	// Decompress the original snapshot body for recording.
-	origRecordBody := snap.body
-	var origTruncated bool
-	origDecompressed := false
-	if ce := snap.headers.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(snap.body, ce, config.MaxBodySize)
-		if err != nil {
-			logger.Debug("HTTP/2 original response body decompression failed, storing as-is", "encoding", ce, "error", err)
-		} else {
-			origRecordBody = decoded
-			origDecompressed = true
+	var sharedSnap *httputil.ResponseSnapshot
+	if snap != nil {
+		s := httputil.ResponseSnapshot{
+			StatusCode: snap.statusCode,
+			Headers:    snap.headers,
+			Body:       snap.body,
 		}
-	}
-	if len(origRecordBody) > int(config.MaxBodySize) {
-		origRecordBody = origRecordBody[:int(config.MaxBodySize)]
-		origTruncated = true
+		sharedSnap = &s
 	}
 
-	// Record original (unmodified) response.
-	origMsg := &flow.Message{
-		FlowID:        sendResult.flowID,
-		Sequence:      sendResult.recvSequence,
-		Direction:     "receive",
-		Timestamp:     p.start.Add(p.duration),
-		StatusCode:    snap.statusCode,
-		Headers:       httputil.RecordingHeaders(snap.headers, origDecompressed, len(origRecordBody)),
-		Body:          origRecordBody,
-		BodyTruncated: origTruncated,
-		Metadata:      map[string]string{"variant": "original"},
-	}
-	if err := h.Store.AppendMessage(ctx, origMsg); err != nil {
-		logger.Error("HTTP/2 original receive message save failed", "error", err)
-	}
-
-	// Decompress the modified body for recording.
-	modRecordBody := p.respBody
-	var modTruncated bool
-	modDecompressed := false
-	if ce := p.resp.Header.Get("Content-Encoding"); ce != "" {
-		decoded, err := httputil.DecompressBody(p.respBody, ce, config.MaxBodySize)
-		if err != nil {
-			logger.Debug("HTTP/2 modified response body decompression failed, storing as-is", "encoding", ce, "error", err)
-		} else {
-			modRecordBody = decoded
-			modDecompressed = true
-		}
-	}
-	if len(modRecordBody) > int(config.MaxBodySize) {
-		modRecordBody = modRecordBody[:int(config.MaxBodySize)]
-		modTruncated = true
-	}
-
-	// Record modified response.
-	modMsg := &flow.Message{
-		FlowID:        sendResult.flowID,
-		Sequence:      sendResult.recvSequence + 1,
-		Direction:     "receive",
-		Timestamp:     p.start.Add(p.duration),
-		StatusCode:    p.resp.StatusCode,
-		Headers:       httputil.RecordingHeaders(p.resp.Header, modDecompressed, len(modRecordBody)),
-		Body:          modRecordBody,
-		BodyTruncated: modTruncated,
-		Metadata:      map[string]string{"variant": "modified"},
-	}
-	if err := h.Store.AppendMessage(ctx, modMsg); err != nil {
-		logger.Error("HTTP/2 modified receive message save failed", "error", err)
-	}
-
-	// Update the flow to complete.
-	update := flow.FlowUpdate{
-		State:      "complete",
-		Duration:   p.duration,
-		ServerAddr: p.serverAddr,
-	}
-	if p.tlsServerCertSubject != "" {
-		update.TLSServerCertSubject = p.tlsServerCertSubject
-	}
-	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
-		logger.Error("HTTP/2 session update failed", "error", err)
-	}
+	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
+		FlowID:               sendResult.flowID,
+		RecvSequence:         sendResult.recvSequence,
+		Start:                p.start,
+		Duration:             p.duration,
+		ServerAddr:           p.serverAddr,
+		TLSServerCertSubject: p.tlsServerCertSubject,
+		Resp:                 p.resp,
+		RespBody:             p.respBody,
+	}, sharedSnap, logger)
 }
 
 // recordSendError updates an HTTP/2 session to State="error" after an upstream
