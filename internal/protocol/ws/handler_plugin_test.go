@@ -626,6 +626,7 @@ func TestDispatchFrameHook_PayloadSizeLimit(t *testing.T) {
 
 	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
 
+	txCtx := plugin.NewTxCtx()
 	dropped := handler.dispatchFrameHook(
 		context.Background(),
 		plugin.HookOnReceiveFromClient,
@@ -634,6 +635,7 @@ func TestDispatchFrameHook_PayloadSizeLimit(t *testing.T) {
 		req,
 		nil,
 		"test-flow",
+		txCtx,
 	)
 
 	if dropped {
@@ -671,6 +673,7 @@ func TestDispatchFrameHook_PayloadWithinLimit(t *testing.T) {
 
 	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
 
+	txCtx := plugin.NewTxCtx()
 	dropped := handler.dispatchFrameHook(
 		context.Background(),
 		plugin.HookOnReceiveFromClient,
@@ -679,6 +682,7 @@ func TestDispatchFrameHook_PayloadWithinLimit(t *testing.T) {
 		req,
 		nil,
 		"test-flow",
+		txCtx,
 	)
 
 	if dropped {

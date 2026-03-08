@@ -142,19 +142,25 @@ func (r *relay) copyAndRecord(ctx context.Context, dst, src net.Conn, direction 
 // dispatchChunkHooks dispatches the receive and send plugin hooks for a TCP chunk.
 // It returns the (potentially modified) chunk data and whether the chunk should be dropped.
 // Plugin errors are logged but do not interrupt relay (fail-open).
+//
+// A per-chunk transaction context is created so that plugins can pass data
+// between the receive and send hooks for the same chunk.
 func (r *relay) dispatchChunkHooks(ctx context.Context, chunk []byte, receiveHook, sendHook plugin.Hook, pluginDirection string) ([]byte, bool) {
 	if r.pluginEngine == nil {
 		return chunk, false
 	}
 
+	// Create a transaction context scoped to this chunk's hook pair.
+	txCtx := plugin.NewTxCtx()
+
 	// Dispatch receive hook.
-	chunk, dropped := r.dispatchSingleHook(ctx, receiveHook, chunk, pluginDirection)
+	chunk, dropped := r.dispatchSingleHook(ctx, receiveHook, chunk, pluginDirection, txCtx)
 	if dropped {
 		return nil, true
 	}
 
 	// Dispatch send hook.
-	chunk, dropped = r.dispatchSingleHook(ctx, sendHook, chunk, pluginDirection)
+	chunk, dropped = r.dispatchSingleHook(ctx, sendHook, chunk, pluginDirection, txCtx)
 	if dropped {
 		return nil, true
 	}
@@ -164,8 +170,10 @@ func (r *relay) dispatchChunkHooks(ctx context.Context, chunk []byte, receiveHoo
 
 // dispatchSingleHook dispatches one plugin hook for a TCP chunk.
 // It returns the (potentially modified) data and whether the chunk should be dropped.
-func (r *relay) dispatchSingleHook(ctx context.Context, hook plugin.Hook, data []byte, pluginDirection string) ([]byte, bool) {
+// The txCtx is a mutable dict shared across the receive and send hooks for the same chunk.
+func (r *relay) dispatchSingleHook(ctx context.Context, hook plugin.Hook, data []byte, pluginDirection string, txCtx map[string]any) ([]byte, bool) {
 	hookData := r.buildChunkData(data, pluginDirection)
+	plugin.InjectTxCtx(hookData, txCtx)
 
 	result, err := r.pluginEngine.Dispatch(ctx, hook, hookData)
 	if err != nil {
@@ -176,6 +184,7 @@ func (r *relay) dispatchSingleHook(ctx context.Context, hook plugin.Hook, data [
 		)
 		return data, false // fail-open
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 
 	if result == nil {
 		return data, false
