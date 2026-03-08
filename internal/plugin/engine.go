@@ -204,8 +204,43 @@ func (e *Engine) makeHandler(pluginName string, hook Hook, fn starlark.Callable,
 		}
 
 		// Parse the result into a HookResult.
-		return parseHookResult(hook, result)
+		hookResult, err := parseHookResult(hook, result)
+		if err != nil {
+			return nil, err
+		}
+
+		// Always extract the transaction context from the Starlark data dict
+		// after the call, so that in-place modifications to data["ctx"] are
+		// captured even when the plugin does not explicitly return data.
+		extractTxCtxFromStarlark(starlarkData, hookResult)
+
+		return hookResult, nil
 	}
+}
+
+// extractTxCtxFromStarlark reads the "ctx" key from the Starlark input dict
+// and ensures it is included in the hook result's Data map. This guarantees
+// that transaction context mutations are always propagated back to Go,
+// regardless of whether the plugin returns data in its result.
+func extractTxCtxFromStarlark(starlarkData *starlark.Dict, result *HookResult) {
+	ctxVal, found, err := starlarkData.Get(starlark.String(txCtxKey))
+	if err != nil || !found || ctxVal == starlark.None {
+		return
+	}
+
+	goCtx, err := starlarkToGo(ctxVal)
+	if err != nil {
+		return
+	}
+	ctxMap, ok := goCtx.(map[string]any)
+	if !ok {
+		return
+	}
+
+	if result.Data == nil {
+		result.Data = make(map[string]any)
+	}
+	result.Data[txCtxKey] = ctxMap
 }
 
 // parseHookResult converts a Starlark return value into a HookResult.

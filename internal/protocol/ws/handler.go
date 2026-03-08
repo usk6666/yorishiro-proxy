@@ -214,13 +214,16 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 		// plugins from dropping Close frames, which would cause the relay to hang
 		// until context timeout (CWE-400).
 		if !frame.IsControl() {
+			// Create a transaction context scoped to this frame's hook pair.
+			frameTxCtx := plugin.NewTxCtx()
+
 			// Dispatch receive hook (on_receive_from_client / on_receive_from_server).
-			if dropped := h.dispatchFrameHook(ctx, receiveHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
+			if dropped := h.dispatchFrameHook(ctx, receiveHook, frame, pluginDirection, upgradeReq, connInfo, flowID, frameTxCtx); dropped {
 				continue
 			}
 
 			// Dispatch send hook (on_before_send_to_server / on_before_send_to_client).
-			if dropped := h.dispatchFrameHook(ctx, sendHook, frame, pluginDirection, upgradeReq, connInfo, flowID); dropped {
+			if dropped := h.dispatchFrameHook(ctx, sendHook, frame, pluginDirection, upgradeReq, connInfo, flowID, frameTxCtx); dropped {
 				continue
 			}
 		}
@@ -351,12 +354,13 @@ func (h *Handler) buildFrameData(frame *Frame, direction string, upgradeReq *goh
 // After a plugin modifies the payload, the new size is checked against
 // config.MaxWebSocketMessageSize. If exceeded, the modification is discarded
 // and the original payload is preserved (CWE-400 mitigation).
-func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame *Frame, direction string, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, flowID string) bool {
+func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame *Frame, direction string, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, flowID string, txCtx map[string]any) bool {
 	if h.pluginEngine == nil {
 		return false
 	}
 
 	data := h.buildFrameData(frame, direction, upgradeReq, connInfo)
+	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, hook, data)
 	if err != nil {
@@ -367,6 +371,7 @@ func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame
 		)
 		return false
 	}
+	plugin.ExtractTxCtx(result, txCtx)
 
 	if result == nil {
 		return false

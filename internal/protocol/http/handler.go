@@ -327,10 +327,15 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Build plugin ConnInfo for hook data.
 	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
 
+	// Create transaction context shared across all plugin hooks for this
+	// request-response pair. Plugins can store and retrieve values via
+	// data["ctx"] to pass data between hooks.
+	txCtx := plugin.NewTxCtx()
+
 	// Plugin hook: on_receive_from_client — after TargetScope, before Intercept.
 	// Supports DROP (close connection) and RESPOND (custom response) actions.
 	var pluginDropped bool
-	req, bodyResult.recordBody, pluginDropped = h.dispatchOnReceiveFromClient(ctx, conn, req, bodyResult.recordBody, pluginConnInfo, logger)
+	req, bodyResult.recordBody, pluginDropped = h.dispatchOnReceiveFromClient(ctx, conn, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
 	if pluginDropped {
 		return nil
 	}
@@ -364,7 +369,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
 
 	// Plugin hook: on_before_send_to_server — after Transform, before Recording.
-	req, bodyResult.recordBody = h.dispatchOnBeforeSendToServer(ctx, req, bodyResult.recordBody, pluginConnInfo, logger)
+	req, bodyResult.recordBody = h.dispatchOnBeforeSendToServer(ctx, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
 
 	sp.reqBody = bodyResult.recordBody
 
@@ -384,7 +389,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
 
 	// Plugin hook: on_receive_from_server — after response received, before Transform.
-	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, logger)
+	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	// Snapshot response before intercept for variant recording.
 	// If intercept modifies the response, both the original and modified
@@ -400,7 +405,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 
 	// Plugin hook: on_before_send_to_client — after intercept, before Recording/write.
-	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, logger)
+	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	// Serialize raw response for recording. This is done after plugin/intercept
 	// so that any modifications are reflected in the recorded bytes.

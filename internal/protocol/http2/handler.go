@@ -295,10 +295,15 @@ func (h *Handler) handleStream(
 		TLSALPN:    tlsMeta.ALPN,
 	}
 
+	// Create transaction context shared across all plugin hooks for this
+	// HTTP/2 stream (request-response pair). Plugins can store and retrieve
+	// values via data["ctx"] to pass data between hooks.
+	txCtx := plugin.NewTxCtx()
+
 	// Plugin hook: on_receive_from_client — allows plugins to inspect,
 	// modify, drop, or respond to the request before forwarding.
 	var terminated bool
-	req, reqBody, terminated = h.dispatchOnReceiveFromClient(ctx, w, req, reqBody, pluginConnInfo, logger)
+	req, reqBody, terminated = h.dispatchOnReceiveFromClient(ctx, w, req, reqBody, pluginConnInfo, txCtx, logger)
 	if terminated {
 		return
 	}
@@ -400,7 +405,7 @@ func (h *Handler) handleStream(
 
 	// Plugin hook: on_before_send_to_server — allows plugins to modify
 	// the outbound request before it is sent to the upstream server.
-	outReq, reqBody = h.dispatchOnBeforeSendToServer(ctx, outReq, reqBody, pluginConnInfo, logger)
+	outReq, reqBody = h.dispatchOnBeforeSendToServer(ctx, outReq, reqBody, pluginConnInfo, txCtx, logger)
 	if reqBody != nil {
 		outReq.Body = io.NopCloser(bytes.NewReader(reqBody))
 		outReq.ContentLength = int64(len(reqBody))
@@ -464,11 +469,11 @@ func (h *Handler) handleStream(
 
 	// Plugin hook: on_receive_from_server — allows plugins to inspect or
 	// modify the response received from the upstream server.
-	resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, resp, fullRespBody, req, pluginConnInfo, logger)
+	resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	// Plugin hook: on_before_send_to_client — allows plugins to make
 	// final modifications to the response before it is sent to the client.
-	resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, resp, fullRespBody, req, pluginConnInfo, logger)
+	resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	// Write response headers back to the client.
 	for key, vals := range resp.Header {

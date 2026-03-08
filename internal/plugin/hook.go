@@ -58,6 +58,22 @@ var droppableHooks = map[Hook]bool{
 	HookOnReceiveFromClient: true,
 }
 
+// dataHooks lists hooks that participate in transaction context sharing.
+// Lifecycle hooks (on_connect, on_disconnect, etc.) do not receive ctx.
+var dataHooks = map[Hook]bool{
+	HookOnReceiveFromClient:  true,
+	HookOnBeforeSendToServer: true,
+	HookOnReceiveFromServer:  true,
+	HookOnBeforeSendToClient: true,
+}
+
+// IsDataHook reports whether the hook is a data hook (request/response
+// processing) that participates in transaction context sharing.
+// Lifecycle hooks such as on_connect and on_disconnect return false.
+func IsDataHook(h Hook) bool {
+	return dataHooks[h]
+}
+
 // ValidateHook checks whether a hook name is valid.
 func ValidateHook(h Hook) error {
 	if !allHooks[h] {
