@@ -9,8 +9,6 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -255,57 +253,10 @@ func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req
 }
 
 // applyResponseModifications applies the modifications from a modify_and_forward
-// action to the HTTP response. It returns the modified response, body, and an
-// error if validation fails (e.g., invalid status code, CRLF injection).
+// action to the HTTP response. It delegates to the shared httputil package for
+// status code validation, CRLF injection checks, and header/body modifications.
 func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
-	// Override status code with range validation (S-1: CWE-20).
-	if action.OverrideStatus > 0 {
-		if action.OverrideStatus < 100 || action.OverrideStatus > 999 {
-			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
-		}
-		resp.StatusCode = action.OverrideStatus
-		resp.Status = fmt.Sprintf("%d %s", action.OverrideStatus, gohttp.StatusText(action.OverrideStatus))
-	}
-
-	// Validate response header values for CRLF injection (S-2: CWE-113).
-	for key, val := range action.OverrideResponseHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-	for key, val := range action.AddResponseHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-	for _, key := range action.RemoveResponseHeaders {
-		if strings.ContainsAny(key, "\r\n") {
-			return resp, body, fmt.Errorf("remove response header key %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-
-	// Remove response headers first.
-	for _, key := range action.RemoveResponseHeaders {
-		resp.Header.Del(key)
-	}
-
-	// Override response headers.
-	for key, val := range action.OverrideResponseHeaders {
-		resp.Header.Set(key, val)
-	}
-
-	// Add response headers.
-	for key, val := range action.AddResponseHeaders {
-		resp.Header.Add(key, val)
-	}
-
-	// Override response body and update Content-Length (F-1).
-	if action.OverrideResponseBody != nil {
-		body = []byte(*action.OverrideResponseBody)
-		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	}
-
-	return resp, body, nil
+	return httputil.ApplyResponseModifications(resp, action, body)
 }
 
 // requestSnapshot holds a copy of the request headers and body taken before

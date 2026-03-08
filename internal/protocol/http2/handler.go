@@ -14,7 +14,6 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +25,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
@@ -635,67 +635,10 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 }
 
 // applyInterceptModifications applies the modifications from a modify_and_forward
-// action to the HTTP/2 request. It returns the modified request and an error if
-// validation fails (e.g., invalid URL scheme).
+// action to the HTTP/2 request. It delegates to the shared httputil package for
+// CRLF validation, URL scheme enforcement, and header/body modifications.
 func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
-	// Override method.
-	if action.OverrideMethod != "" {
-		req.Method = action.OverrideMethod
-	}
-
-	// Override URL with scheme validation to prevent SSRF (CWE-918).
-	if action.OverrideURL != "" {
-		parsed, err := url.Parse(action.OverrideURL)
-		if err != nil {
-			return req, fmt.Errorf("invalid override URL: %w", err)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return req, fmt.Errorf("unsupported override URL scheme %q: only http and https are allowed", parsed.Scheme)
-		}
-		req.URL = parsed
-		req.Host = parsed.Host
-	}
-
-	// Validate header values for CRLF injection (CWE-113).
-	for key, val := range action.OverrideHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-	for key, val := range action.AddHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-	for _, key := range action.RemoveHeaders {
-		if strings.ContainsAny(key, "\r\n") {
-			return req, fmt.Errorf("remove header key %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-
-	// Remove headers first.
-	for _, key := range action.RemoveHeaders {
-		req.Header.Del(key)
-	}
-
-	// Override headers.
-	for key, val := range action.OverrideHeaders {
-		req.Header.Set(key, val)
-	}
-
-	// Add headers.
-	for key, val := range action.AddHeaders {
-		req.Header.Add(key, val)
-	}
-
-	// Override body.
-	if action.OverrideBody != nil {
-		bodyBytes := []byte(*action.OverrideBody)
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		req.ContentLength = int64(len(bodyBytes))
-	}
-
-	return req, nil
+	return httputil.ApplyRequestModifications(req, action)
 }
 
 // interceptResponse checks if the response matches any intercept rules and,
@@ -747,57 +690,10 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 }
 
 // applyResponseModifications applies the modifications from a modify_and_forward
-// action to the HTTP/2 response. It returns the modified response, body, and an
-// error if validation fails (e.g., invalid status code, CRLF injection).
+// action to the HTTP/2 response. It delegates to the shared httputil package for
+// status code validation, CRLF injection checks, and header/body modifications.
 func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
-	// Override status code with range validation (S-1: CWE-20).
-	if action.OverrideStatus > 0 {
-		if action.OverrideStatus < 100 || action.OverrideStatus > 999 {
-			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
-		}
-		resp.StatusCode = action.OverrideStatus
-		resp.Status = fmt.Sprintf("%d %s", action.OverrideStatus, gohttp.StatusText(action.OverrideStatus))
-	}
-
-	// Validate response header values for CRLF injection (S-2: CWE-113).
-	for key, val := range action.OverrideResponseHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-	for key, val := range action.AddResponseHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return resp, body, fmt.Errorf("response header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-	for _, key := range action.RemoveResponseHeaders {
-		if strings.ContainsAny(key, "\r\n") {
-			return resp, body, fmt.Errorf("remove response header key %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-
-	// Remove response headers first.
-	for _, key := range action.RemoveResponseHeaders {
-		resp.Header.Del(key)
-	}
-
-	// Override response headers.
-	for key, val := range action.OverrideResponseHeaders {
-		resp.Header.Set(key, val)
-	}
-
-	// Add response headers.
-	for key, val := range action.AddResponseHeaders {
-		resp.Header.Add(key, val)
-	}
-
-	// Override response body and update Content-Length (F-1).
-	if action.OverrideResponseBody != nil {
-		body = []byte(*action.OverrideResponseBody)
-		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	}
-
-	return resp, body, nil
+	return httputil.ApplyResponseModifications(resp, action, body)
 }
 
 // isGRPCContentType reports whether the Content-Type indicates a gRPC request.

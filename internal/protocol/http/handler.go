@@ -12,13 +12,13 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
@@ -554,69 +554,10 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 }
 
 // applyInterceptModifications applies the modifications from a modify_and_forward
-// action to the HTTP request. It returns the modified request and an error if
-// validation fails (e.g., invalid URL scheme, CRLF injection).
+// action to the HTTP request. It delegates to the shared httputil package for
+// CRLF validation, URL scheme enforcement, and header/body modifications.
 func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
-	// Override method.
-	if action.OverrideMethod != "" {
-		req.Method = action.OverrideMethod
-	}
-
-	// Override URL with scheme validation to prevent SSRF (CWE-918).
-	if action.OverrideURL != "" {
-		parsed, err := url.Parse(action.OverrideURL)
-		if err != nil {
-			return req, fmt.Errorf("invalid override URL: %w", err)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return req, fmt.Errorf("unsupported override URL scheme %q: only http and https are allowed", parsed.Scheme)
-		}
-		req.URL = parsed
-		req.Host = parsed.Host
-	}
-
-	// Validate header values for CRLF injection (CWE-113).
-	for key, val := range action.OverrideHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-	for key, val := range action.AddHeaders {
-		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
-			return req, fmt.Errorf("header %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-
-	// Validate RemoveHeaders keys for CRLF injection (CWE-113).
-	for _, key := range action.RemoveHeaders {
-		if strings.ContainsAny(key, "\r\n") {
-			return req, fmt.Errorf("remove header key %q contains CR/LF characters (header injection attempt)", key)
-		}
-	}
-
-	// Remove headers first.
-	for _, key := range action.RemoveHeaders {
-		req.Header.Del(key)
-	}
-
-	// Override headers.
-	for key, val := range action.OverrideHeaders {
-		req.Header.Set(key, val)
-	}
-
-	// Add headers.
-	for key, val := range action.AddHeaders {
-		req.Header.Add(key, val)
-	}
-
-	// Override body.
-	if action.OverrideBody != nil {
-		bodyBytes := []byte(*action.OverrideBody)
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		req.ContentLength = int64(len(bodyBytes))
-	}
-
-	return req, nil
+	return httputil.ApplyRequestModifications(req, action)
 }
 
 // checkTargetScope checks if the request URL is allowed by the target scope.
