@@ -553,7 +553,7 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   |
   +-- 攻撃ペイロードの選定が必要?
   |     |
-  |     +-- YES --> references/payload-patterns.md を参照
+  |     +-- YES --> references/payload-patterns.md を参照 (必ず「安全なペイロード選定の原則」を確認)
   |     +-- NO --> 次へ
   |
   +-- 単発テスト or 網羅テスト?
