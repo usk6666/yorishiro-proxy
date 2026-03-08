@@ -274,6 +274,20 @@ func (s *Server) handleManageExportFlows(ctx context.Context, params manageParam
 		return nil, fmt.Errorf("unsupported export format %q: only \"jsonl\" is supported", format)
 	}
 
+	opts, err := buildExportOptions(params)
+	if err != nil {
+		return nil, err
+	}
+
+	if params.OutputPath != "" {
+		return s.exportFlowsToFile(ctx, params.OutputPath, format, opts)
+	}
+
+	return s.exportFlowsInline(ctx, format, opts)
+}
+
+// buildExportOptions constructs flow.ExportOptions from the manage params.
+func buildExportOptions(params manageParams) (flow.ExportOptions, error) {
 	includeBodies := true
 	if params.IncludeBodies != nil {
 		includeBodies = *params.IncludeBodies
@@ -290,70 +304,76 @@ func (s *Server) handleManageExportFlows(ctx context.Context, params manageParam
 		if params.Filter.TimeAfter != "" {
 			t, err := time.Parse(time.RFC3339, params.Filter.TimeAfter)
 			if err != nil {
-				return nil, fmt.Errorf("invalid time_after format (expected RFC3339): %w", err)
+				return flow.ExportOptions{}, fmt.Errorf("invalid time_after format (expected RFC3339): %w", err)
 			}
 			opts.Filter.TimeAfter = &t
 		}
 		if params.Filter.TimeBefore != "" {
 			t, err := time.Parse(time.RFC3339, params.Filter.TimeBefore)
 			if err != nil {
-				return nil, fmt.Errorf("invalid time_before format (expected RFC3339): %w", err)
+				return flow.ExportOptions{}, fmt.Errorf("invalid time_before format (expected RFC3339): %w", err)
 			}
 			opts.Filter.TimeBefore = &t
 		}
 	}
 
-	if params.OutputPath != "" {
-		cleanPath, err := validateFilePath(params.OutputPath)
-		if err != nil {
-			return nil, fmt.Errorf("invalid output_path: %w", err)
-		}
+	return opts, nil
+}
 
-		dir := filepath.Dir(cleanPath)
-		tmpFile, err := os.CreateTemp(dir, ".yorishiro-export-*.tmp")
-		if err != nil {
-			return nil, fmt.Errorf("create temp file for export: %w", err)
-		}
-		tmpPath := tmpFile.Name()
-		success := false
-		defer func() {
-			tmpFile.Close()
-			if !success {
-				os.Remove(tmpPath)
-			}
-		}()
-
-		if err := tmpFile.Chmod(0600); err != nil {
-			return nil, fmt.Errorf("set file permissions: %w", err)
-		}
-
-		n, err := flow.ExportFlows(ctx, s.deps.store, tmpFile, opts)
-		if err != nil {
-			return nil, fmt.Errorf("export flows: %w", err)
-		}
-
-		if err := tmpFile.Close(); err != nil {
-			return nil, fmt.Errorf("close temp file: %w", err)
-		}
-
-		if info, statErr := os.Lstat(cleanPath); statErr == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				return nil, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
-			}
-		}
-
-		if err := os.Rename(tmpPath, cleanPath); err != nil {
-			return nil, fmt.Errorf("rename temp file to output: %w", err)
-		}
-		success = true
-
-		return &executeExportFlowsResult{
-			ExportedCount: n,
-			Format:        format,
-			OutputPath:    cleanPath,
-		}, nil
+// exportFlowsToFile exports flows to a file at the given output path.
+func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
+	cleanPath, err := validateFilePath(outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid output_path: %w", err)
 	}
 
+	dir := filepath.Dir(cleanPath)
+	tmpFile, err := os.CreateTemp(dir, ".yorishiro-export-*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("create temp file for export: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	success := false
+	defer func() {
+		tmpFile.Close()
+		if !success {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0600); err != nil {
+		return nil, fmt.Errorf("set file permissions: %w", err)
+	}
+
+	n, err := flow.ExportFlows(ctx, s.deps.store, tmpFile, opts)
+	if err != nil {
+		return nil, fmt.Errorf("export flows: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("close temp file: %w", err)
+	}
+
+	if info, statErr := os.Lstat(cleanPath); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
+		}
+	}
+
+	if err := os.Rename(tmpPath, cleanPath); err != nil {
+		return nil, fmt.Errorf("rename temp file to output: %w", err)
+	}
+	success = true
+
+	return &executeExportFlowsResult{
+		ExportedCount: n,
+		Format:        format,
+		OutputPath:    cleanPath,
+	}, nil
+}
+
+// exportFlowsInline exports flows and returns them inline in the result.
+func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
 	opts.MaxFlows = maxInlineExportFlows
 	var buf bytes.Buffer
 	n, err := flow.ExportFlows(ctx, s.deps.store, &buf, opts)
