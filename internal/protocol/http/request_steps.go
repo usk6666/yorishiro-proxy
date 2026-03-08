@@ -341,6 +341,43 @@ func requestModified(snap requestSnapshot, currentHeaders gohttp.Header, current
 	return headersModified(snap.headers, currentHeaders)
 }
 
+// responseSnapshot holds a copy of the response status code, headers, and body
+// taken before intercept processing. It is used to detect whether modifications
+// occurred and, if so, to record the original (unmodified) version as a
+// separate receive message.
+type responseSnapshot struct {
+	statusCode int
+	headers    gohttp.Header
+	body       []byte
+}
+
+// snapshotResponse creates a deep copy of the response status code, headers,
+// and body for later comparison. The snapshot captures the state before
+// intercept processing so that we can detect changes and record both versions.
+func snapshotResponse(statusCode int, headers gohttp.Header, body []byte) responseSnapshot {
+	snap := responseSnapshot{statusCode: statusCode}
+	if headers != nil {
+		snap.headers = headers.Clone()
+	}
+	if body != nil {
+		snap.body = make([]byte, len(body))
+		copy(snap.body, body)
+	}
+	return snap
+}
+
+// responseModified reports whether the response status code, headers, or body
+// have been changed relative to the snapshot taken before intercept processing.
+func responseModified(snap responseSnapshot, currentStatusCode int, currentHeaders gohttp.Header, currentBody []byte) bool {
+	if snap.statusCode != currentStatusCode {
+		return true
+	}
+	if !bytes.Equal(snap.body, currentBody) {
+		return true
+	}
+	return headersModified(snap.headers, currentHeaders)
+}
+
 // headersModified reports whether two header maps differ.
 func headersModified(a, b gohttp.Header) bool {
 	if len(a) != len(b) {
