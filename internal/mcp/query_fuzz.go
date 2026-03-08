@@ -261,61 +261,60 @@ func filterFields(result any, fields []string) any {
 		requested[f] = true
 	}
 
-	// Metadata fields that are always preserved.
-	metadataFields := map[string]bool{
-		"summary": true,
-		"count":   true,
-		"total":   true,
-	}
-
 	// For collections (jobs, results), filter the array items' fields.
-	// Identify the collection key (jobs or results).
-	collectionKeys := []string{"jobs", "results"}
-	for _, key := range collectionKeys {
-		raw, ok := m[key]
-		if !ok {
-			continue
-		}
-
-		var items []map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &items); err != nil {
-			continue
-		}
-
-		filtered := make([]map[string]json.RawMessage, 0, len(items))
-		for _, item := range items {
-			newItem := make(map[string]json.RawMessage)
-			for k, v := range item {
-				if requested[k] {
-					newItem[k] = v
-				}
-			}
-			filtered = append(filtered, newItem)
-		}
-
-		filteredData, err := json.Marshal(filtered)
-		if err != nil {
-			continue
-		}
-		m[key] = filteredData
+	collectionKeys := map[string]bool{"jobs": true, "results": true}
+	for key := range collectionKeys {
+		filterCollectionFields(m, key, requested)
 	}
 
 	// Remove top-level keys that are not metadata and not in the collection.
-	for k := range m {
-		if metadataFields[k] {
-			continue
-		}
-		isCollection := false
-		for _, ck := range collectionKeys {
-			if k == ck {
-				isCollection = true
-				break
+	removeNonMetadataKeys(m, collectionKeys)
+
+	return m
+}
+
+// filterCollectionFields filters the fields of array items within a collection key.
+func filterCollectionFields(m map[string]json.RawMessage, key string, requested map[string]bool) {
+	raw, ok := m[key]
+	if !ok {
+		return
+	}
+
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return
+	}
+
+	filtered := make([]map[string]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		newItem := make(map[string]json.RawMessage)
+		for k, v := range item {
+			if requested[k] {
+				newItem[k] = v
 			}
 		}
-		if !isCollection {
+		filtered = append(filtered, newItem)
+	}
+
+	filteredData, err := json.Marshal(filtered)
+	if err != nil {
+		return
+	}
+	m[key] = filteredData
+}
+
+// metadataFields are top-level fields that are always preserved by filterFields.
+var metadataFields = map[string]bool{
+	"summary": true,
+	"count":   true,
+	"total":   true,
+}
+
+// removeNonMetadataKeys removes top-level keys that are not metadata and not collection keys.
+func removeNonMetadataKeys(m map[string]json.RawMessage, collectionKeys map[string]bool) {
+	for k := range m {
+		if !metadataFields[k] && !collectionKeys[k] {
 			delete(m, k)
 		}
 	}
-
-	return m
 }
