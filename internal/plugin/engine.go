@@ -116,6 +116,7 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 
 	predeclared := starlark.StringDict{
 		"action": newActionModule(),
+		"config": newConfigDict(cfg.Vars),
 	}
 
 	globals, err := starlark.ExecFileOptions(
@@ -426,6 +427,18 @@ func pluginName(path string) string {
 	base := filepath.Base(path)
 	ext := filepath.Ext(base)
 	return strings.TrimSuffix(base, ext)
+}
+
+// newConfigDict creates a frozen Starlark dict from the plugin's Vars map.
+// The dict is read-only; any attempt to modify it from Starlark will fail.
+// If vars is nil or empty, an empty frozen dict is returned.
+func newConfigDict(vars map[string]string) *starlark.Dict {
+	d := starlark.NewDict(len(vars))
+	for k, v := range vars {
+		_ = d.SetKey(starlark.String(k), starlark.String(v)) // string keys never error
+	}
+	d.Freeze()
+	return d
 }
 
 // newActionModule creates the predeclared "action" module available to scripts.

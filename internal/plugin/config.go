@@ -36,6 +36,11 @@ type PluginConfig struct {
 	// MaxSteps limits the number of Starlark execution steps per hook call.
 	// 0 means use DefaultMaxSteps. Set to a positive value to override.
 	MaxSteps uint64 `json:"max_steps,omitempty"`
+
+	// Vars is a map of string key-value pairs injected into the Starlark
+	// runtime as a frozen "config" dict. Plugins can read these values
+	// to access externally provided configuration (e.g. API keys, regions).
+	Vars map[string]string `json:"vars,omitempty"`
 }
 
 // Validate checks the PluginConfig for invalid values.
