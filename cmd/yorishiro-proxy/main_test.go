@@ -604,35 +604,6 @@ func TestDeprecatedFlagsNotRegistered(t *testing.T) {
 	}
 }
 
-func TestParseBool(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{"true", true},
-		{"TRUE", true},
-		{"True", true},
-		{"1", true},
-		{"false", false},
-		{"FALSE", false},
-		{"False", false},
-		{"0", false},
-		{"t", true},
-		{"f", false},
-		{"", false},
-		{"invalid", false},
-		{"  true  ", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := parseBool(tt.input)
-			if got != tt.want {
-				t.Errorf("parseBool(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
 
 func TestEnvVarMap_AllFlagsHaveMapping(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)

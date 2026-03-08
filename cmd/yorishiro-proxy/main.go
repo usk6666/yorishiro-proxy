@@ -12,8 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -263,24 +261,6 @@ func applyEnvFallback(fs *flag.FlagSet) {
 	}
 }
 
-// parseBool parses a boolean string, accepting "true", "false", "1", "0".
-// Returns false for unrecognized values.
-func parseBool(s string) bool {
-	s = strings.ToLower(strings.TrimSpace(s))
-	switch s {
-	case "true", "1":
-		return true
-	case "false", "0":
-		return false
-	default:
-		// Fallback to strconv for broader coverage (e.g. "t", "f", "yes", "no").
-		v, err := strconv.ParseBool(s)
-		if err != nil {
-			return false
-		}
-		return v
-	}
-}
 
 // configsResult holds loaded configuration files.
 type configsResult struct {
