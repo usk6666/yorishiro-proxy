@@ -64,6 +64,13 @@ func NewSQLiteStore(ctx context.Context, path string, logger *slog.Logger) (*SQL
 	return s, nil
 }
 
+// DB returns the underlying *sql.DB connection.
+// This allows other subsystems (e.g. plugin store) to share the same database
+// and benefit from WAL mode and connection pool settings.
+func (s *SQLiteStore) DB() *sql.DB {
+	return s.db
+}
+
 func (s *SQLiteStore) writeLoop() {
 	defer s.wg.Done()
 	for {
