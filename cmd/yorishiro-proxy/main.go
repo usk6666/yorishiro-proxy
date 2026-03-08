@@ -12,8 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -139,97 +137,34 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
 		fmt.Fprintf(fs.Output(), "  YP_INSECURE=true yorishiro-proxy                  # skip TLS verification\n")
 	}
-	// Allow YP_MCP_HTTP_TOKEN environment variable as fallback when no flag is set.
-	if cfg.MCPHTTPToken == "" {
-		cfg.MCPHTTPToken = os.Getenv("YP_MCP_HTTP_TOKEN")
-	}
-
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	// Apply environment variable fallback for flags not explicitly set.
-	applyEnvFallback(fs, cfg, &configFile, &targetPolicyFile)
+	applyEnvFallback(fs)
 
 	// Validate configuration values before proceeding with initialization.
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Load proxy config file if specified.
-	var proxyCfg *config.ProxyConfig
-	if configFile != "" {
-		var err error
-		proxyCfg, err = config.LoadFile(configFile)
-		if err != nil {
-			return fmt.Errorf("load config file: %w", err)
-		}
-	}
-
-	// Load target scope policy rules.
-	// Priority: -target-policy-file > config file target_scope_policy section.
-	var targetScopePolicy *config.TargetScopePolicyConfig
-	var targetScopePolicySource string
-	if targetPolicyFile != "" {
-		var err error
-		targetScopePolicy, err = config.LoadPolicyFile(targetPolicyFile)
-		if err != nil {
-			return fmt.Errorf("load target policy file: %w", err)
-		}
-		targetScopePolicySource = "policy file"
-	} else if proxyCfg != nil && proxyCfg.TargetScopePolicy != nil {
-		targetScopePolicy = proxyCfg.TargetScopePolicy
-		targetScopePolicySource = "config file"
-	}
-
-	// Apply smart DB path resolution: project name -> ~/.yorishiro-proxy/<name>.db.
-	resolvedDBPath, err := config.ResolveDBPath(cfg.DBPath)
+	// Load proxy config and target scope policy.
+	configs, err := loadConfigs(configFile, targetPolicyFile)
 	if err != nil {
-		return fmt.Errorf("resolve db path: %w", err)
+		return err
 	}
-	cfg.DBPath = resolvedDBPath
+	proxyCfg := configs.proxyCfg
+	targetScopePolicy := configs.targetScopePolicy
+	targetScopePolicySource := configs.targetScopePolicySource
 
-	// Initialize logger.
-	// Logs go to stderr by default (the logging package never writes to stdout),
-	// keeping stdout clean for MCP JSON-RPC messages.
-	logger, logCleanup, err := logging.Setup(logging.Config{
-		Level:  cfg.LogLevel,
-		Format: cfg.LogFormat,
-		File:   cfg.LogFile,
-	})
+	infra, err := initInfra(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("init logger: %w", err)
+		return err
 	}
-	defer logCleanup()
-	slog.SetDefault(logger)
-
-	// Ensure the database directory exists (e.g. ~/.yorishiro-proxy/).
-	if err := config.EnsureDBDir(cfg.DBPath); err != nil {
-		return fmt.Errorf("ensure db directory: %w", err)
-	}
-
-	// Initialize SQLite flow store.
-	store, err := flow.NewSQLiteStore(ctx, cfg.DBPath, logger)
-	if err != nil {
-		return fmt.Errorf("init flow store: %w", err)
-	}
-	defer store.Close()
-
-	// Start flow cleaner if retention policy is configured.
-	cleanerCfg := flow.CleanerConfig{
-		MaxFlows: cfg.RetentionMaxFlows,
-		MaxAge:   cfg.RetentionMaxAge,
-		Interval: cfg.CleanupInterval,
-	}
-	if cleanerCfg.Enabled() {
-		cleaner := flow.NewCleaner(store, cleanerCfg, logger)
-		cleaner.Start(ctx)
-		defer cleaner.Stop()
-		logger.Info("flow cleaner started",
-			"max_flows", cleanerCfg.MaxFlows,
-			"max_age", cleanerCfg.MaxAge,
-			"interval", cleanerCfg.Interval)
-	}
+	defer infra.cleanup()
+	logger := infra.logger
+	store := infra.store
 
 	// Initialize CA and certificate issuer for HTTPS MITM.
 	ca, err := initCA(cfg, logger)
@@ -249,32 +184,245 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		logger.Info("TLS passthrough configured", "patterns", passthrough.Len())
 	}
 
-	// Build protocol handlers and detector.
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-	httpHandler.SetRequestTimeout(cfg.RequestTimeout)
-	httpHandler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
-	httpHandler.SetPassthroughList(passthrough)
-
 	// Create shared capture scope for controlling flow recording.
 	scope := proxy.NewCaptureScope()
-	httpHandler.SetCaptureScope(scope)
 
 	// Initialize intercept engine and queue.
 	interceptEngine := intercept.NewEngine()
 	interceptQueue := intercept.NewQueue()
-	httpHandler.SetInterceptEngine(interceptEngine)
-	httpHandler.SetInterceptQueue(interceptQueue)
 
 	// Initialize auto-transform pipeline for request/response modification.
 	pipeline := rules.NewPipeline()
-	httpHandler.SetTransformPipeline(pipeline)
+
+	proto, err := initProtocolHandlers(ctx, protocolDeps{
+		cfg:             cfg,
+		proxyCfg:        proxyCfg,
+		store:           store,
+		issuer:          issuer,
+		passthrough:     passthrough,
+		scope:           scope,
+		interceptEngine: interceptEngine,
+		interceptQueue:  interceptQueue,
+		pipeline:        pipeline,
+		logger:          logger,
+	})
+	if err != nil {
+		return err
+	}
+	if proto.pluginEngine != nil {
+		defer proto.pluginEngine.Close()
+	}
+
+	// Create proxy manager for MCP tool control.
+	manager := proxy.NewManager(proto.detector, logger)
+	manager.SetPeekTimeout(cfg.PeekTimeout)
+	manager.SetMaxConnections(cfg.MaxConnections)
+
+	// Build target scope with policy rules if configured.
+	var targetScope *proxy.TargetScope
+	if targetScopePolicy != nil {
+		targetScope = proxy.NewTargetScope()
+		allows := convertTargetRules(targetScopePolicy.Allows)
+		denies := convertTargetRules(targetScopePolicy.Denies)
+		targetScope.SetPolicyRules(allows, denies)
+		proto.socks5Handler.SetTargetScope(targetScope)
+	}
+
+	opts, err := buildMCPOptions(cfg, proxyCfg, store, issuer, passthrough, scope,
+		interceptEngine, interceptQueue, pipeline, proto, targetScope,
+		targetScopePolicySource, logger)
+	if err != nil {
+		return err
+	}
+
+	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
+	logger.Info("starting MCP server on stdio")
+
+	return startServers(ctx, cfg, mcpServer, proto.webUIToken, logger)
+}
+
+// applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
+// set on the command line, it falls back to the corresponding YP_ environment
+// variable. Priority: CLI flag > environment variable > config file > default value.
+//
+// Because all flags are registered with fs.StringVar/fs.BoolVar pointing to the
+// target struct fields, fs.Set() updates those fields directly.
+func applyEnvFallback(fs *flag.FlagSet) {
+	flagSet := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { flagSet[f.Name] = true })
+
+	for flagName, envVar := range envVarMap {
+		if flagSet[flagName] {
+			continue
+		}
+		if v := os.Getenv(envVar); v != "" {
+			_ = fs.Set(flagName, v)
+		}
+	}
+}
+
+// configsResult holds loaded configuration files.
+type configsResult struct {
+	proxyCfg                *config.ProxyConfig
+	targetScopePolicy       *config.TargetScopePolicyConfig
+	targetScopePolicySource string
+}
+
+// loadConfigs loads the proxy config file and target scope policy.
+// Priority for target scope: -target-policy-file > config file target_scope_policy section.
+func loadConfigs(configFile, targetPolicyFile string) (*configsResult, error) {
+	var proxyCfg *config.ProxyConfig
+	if configFile != "" {
+		var err error
+		proxyCfg, err = config.LoadFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("load config file: %w", err)
+		}
+	}
+
+	var targetScopePolicy *config.TargetScopePolicyConfig
+	var targetScopePolicySource string
+	if targetPolicyFile != "" {
+		var err error
+		targetScopePolicy, err = config.LoadPolicyFile(targetPolicyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load target policy file: %w", err)
+		}
+		targetScopePolicySource = "policy file"
+	} else if proxyCfg != nil && proxyCfg.TargetScopePolicy != nil {
+		targetScopePolicy = proxyCfg.TargetScopePolicy
+		targetScopePolicySource = "config file"
+	}
+
+	return &configsResult{
+		proxyCfg:                proxyCfg,
+		targetScopePolicy:       targetScopePolicy,
+		targetScopePolicySource: targetScopePolicySource,
+	}, nil
+}
+
+// infraResult holds infrastructure components initialized by initInfra.
+type infraResult struct {
+	logger  *slog.Logger
+	store   *flow.SQLiteStore
+	cleanup func()
+}
+
+// initInfra resolves the DB path, sets up the logger, opens the SQLite store,
+// and starts the flow cleaner. The returned cleanup function closes all resources.
+func initInfra(ctx context.Context, cfg *config.Config) (*infraResult, error) {
+	// Apply smart DB path resolution: project name -> ~/.yorishiro-proxy/<name>.db.
+	resolvedDBPath, err := config.ResolveDBPath(cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve db path: %w", err)
+	}
+	cfg.DBPath = resolvedDBPath
+
+	// Initialize logger.
+	// Logs go to stderr by default (the logging package never writes to stdout),
+	// keeping stdout clean for MCP JSON-RPC messages.
+	logger, logCleanup, err := logging.Setup(logging.Config{
+		Level:  cfg.LogLevel,
+		Format: cfg.LogFormat,
+		File:   cfg.LogFile,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init logger: %w", err)
+	}
+	slog.SetDefault(logger)
+
+	// Ensure the database directory exists (e.g. ~/.yorishiro-proxy/).
+	if err := config.EnsureDBDir(cfg.DBPath); err != nil {
+		logCleanup()
+		return nil, fmt.Errorf("ensure db directory: %w", err)
+	}
+
+	// Initialize SQLite flow store.
+	store, err := flow.NewSQLiteStore(ctx, cfg.DBPath, logger)
+	if err != nil {
+		logCleanup()
+		return nil, fmt.Errorf("init flow store: %w", err)
+	}
+
+	// Build composite cleanup function.
+	var cleanerStop func()
+	cleanup := func() {
+		if cleanerStop != nil {
+			cleanerStop()
+		}
+		store.Close()
+		logCleanup()
+	}
+
+	// Start flow cleaner if retention policy is configured.
+	cleanerCfg := flow.CleanerConfig{
+		MaxFlows: cfg.RetentionMaxFlows,
+		MaxAge:   cfg.RetentionMaxAge,
+		Interval: cfg.CleanupInterval,
+	}
+	if cleanerCfg.Enabled() {
+		cleaner := flow.NewCleaner(store, cleanerCfg, logger)
+		cleaner.Start(ctx)
+		cleanerStop = cleaner.Stop
+		logger.Info("flow cleaner started",
+			"max_flows", cleanerCfg.MaxFlows,
+			"max_age", cleanerCfg.MaxAge,
+			"interval", cleanerCfg.Interval)
+	}
+
+	return &infraResult{logger: logger, store: store, cleanup: cleanup}, nil
+}
+
+// protocolDeps holds dependencies needed by initProtocolHandlers.
+type protocolDeps struct {
+	cfg             *config.Config
+	proxyCfg        *config.ProxyConfig
+	store           *flow.SQLiteStore
+	issuer          *cert.Issuer
+	passthrough     *proxy.PassthroughList
+	scope           *proxy.CaptureScope
+	interceptEngine *intercept.Engine
+	interceptQueue  *intercept.Queue
+	pipeline        *rules.Pipeline
+	logger          *slog.Logger
+}
+
+// protocolResult holds all protocol handlers and related components.
+type protocolResult struct {
+	detector      *protocol.Detector
+	httpHandler   *protohttp.Handler
+	http2Handler  *protohttp2.Handler
+	tcpHandler    *prototcp.Handler
+	socks5Handler *protosocks5.Handler
+	socks5Adapter *socks5AuthAdapter
+	pluginEngine  *plugin.Engine
+	fuzzRunner    *fuzzer.Runner
+	webUIToken    string
+}
+
+// initProtocolHandlers builds all protocol handlers, the plugin engine, and the
+// fuzzer. It returns a protocolResult containing all initialized components.
+func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResult, error) {
+	cfg := deps.cfg
+	logger := deps.logger
+	store := deps.store
+
+	// Build protocol handlers and detector.
+	httpHandler := protohttp.NewHandler(store, deps.issuer, logger)
+	httpHandler.SetRequestTimeout(cfg.RequestTimeout)
+	httpHandler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
+	httpHandler.SetPassthroughList(deps.passthrough)
+	httpHandler.SetCaptureScope(deps.scope)
+	httpHandler.SetInterceptEngine(deps.interceptEngine)
+	httpHandler.SetInterceptQueue(deps.interceptQueue)
+	httpHandler.SetTransformPipeline(deps.pipeline)
 
 	// Build HTTP/2 handler for h2c detection and h2 (TLS ALPN) delegation.
 	http2Handler := protohttp2.NewHandler(store, logger)
 	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
-	http2Handler.SetCaptureScope(scope)
-	http2Handler.SetInterceptEngine(interceptEngine)
-	http2Handler.SetInterceptQueue(interceptQueue)
+	http2Handler.SetCaptureScope(deps.scope)
+	http2Handler.SetInterceptEngine(deps.interceptEngine)
+	http2Handler.SetInterceptQueue(deps.interceptQueue)
 
 	// Build gRPC handler and attach to the HTTP/2 handler for gRPC-specific recording.
 	grpcHandler := protogrpc.NewHandler(store, logger)
@@ -284,8 +432,6 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	httpHandler.SetH2Handler(http2Handler)
 
 	// Initialize fuzzer components for async fuzz job execution.
-	// Use a default HTTP client with explicit timeout and redirect suppression.
-	// Access control is handled by the target scope enforcement layer.
 	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewDefaultHTTPClient(), "")
 	fuzzRegistry := fuzzer.NewJobRegistry()
 	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
@@ -303,12 +449,12 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	socks5Handler.SetPostHandshake(socks5Dispatch)
 
 	// Build SOCKS5 auth adapter for MCP tool control.
-	socks5AuthAdapter := newSOCKS5AuthAdapter(socks5Handler)
+	socks5Adapter := newSOCKS5AuthAdapter(socks5Handler)
 
 	// Apply SOCKS5 auth from config file if specified.
-	if proxyCfg != nil && proxyCfg.SOCKS5Auth == "password" {
-		if proxyCfg.SOCKS5Username != "" && proxyCfg.SOCKS5Password != "" {
-			socks5AuthAdapter.SetPasswordAuth(proxyCfg.SOCKS5Username, proxyCfg.SOCKS5Password)
+	if deps.proxyCfg != nil && deps.proxyCfg.SOCKS5Auth == "password" {
+		if deps.proxyCfg.SOCKS5Username != "" && deps.proxyCfg.SOCKS5Password != "" {
+			socks5Adapter.SetPasswordAuth(deps.proxyCfg.SOCKS5Username, deps.proxyCfg.SOCKS5Password)
 			logger.Info("SOCKS5 password authentication configured from config file")
 		} else {
 			logger.Warn("SOCKS5 password auth requested but username/password missing in config file")
@@ -317,19 +463,18 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	// Initialize plugin engine from config if plugins are configured.
 	var pluginEngine *plugin.Engine
-	if proxyCfg != nil && len(proxyCfg.Plugins) > 0 {
+	if deps.proxyCfg != nil && len(deps.proxyCfg.Plugins) > 0 {
 		var pluginConfigs []plugin.PluginConfig
-		if err := json.Unmarshal(proxyCfg.Plugins, &pluginConfigs); err != nil {
-			return fmt.Errorf("parse plugin configs: %w", err)
+		if err := json.Unmarshal(deps.proxyCfg.Plugins, &pluginConfigs); err != nil {
+			return nil, fmt.Errorf("parse plugin configs: %w", err)
 		}
 		pluginEngine = plugin.NewEngine(logger)
 		if err := pluginEngine.SetDB(ctx, store.DB()); err != nil {
-			return fmt.Errorf("init plugin store: %w", err)
+			return nil, fmt.Errorf("init plugin store: %w", err)
 		}
 		if err := pluginEngine.LoadPlugins(ctx, pluginConfigs); err != nil {
-			return fmt.Errorf("load plugins: %w", err)
+			return nil, fmt.Errorf("load plugins: %w", err)
 		}
-		defer pluginEngine.Close()
 		httpHandler.SetPluginEngine(pluginEngine)
 		http2Handler.SetPluginEngine(pluginEngine)
 		grpcHandler.SetPluginEngine(pluginEngine)
@@ -339,26 +484,36 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	// Register handlers in priority order: h2c -> HTTP/1.x -> SOCKS5 -> raw TCP fallback.
-	// SOCKS5 is after HTTP because 0x05 does not conflict with HTTP method bytes.
 	detector := protocol.NewDetector(http2Handler, httpHandler, socks5Handler, tcpHandler)
 
-	// Create proxy manager for MCP tool control.
-	manager := proxy.NewManager(detector, logger)
-	manager.SetPeekTimeout(cfg.PeekTimeout)
-	manager.SetMaxConnections(cfg.MaxConnections)
+	return &protocolResult{
+		detector:      detector,
+		httpHandler:   httpHandler,
+		http2Handler:  http2Handler,
+		tcpHandler:    tcpHandler,
+		socks5Handler: socks5Handler,
+		socks5Adapter: socks5Adapter,
+		pluginEngine:  pluginEngine,
+		fuzzRunner:    fuzzRunner,
+	}, nil
+}
 
-	// Build target scope with policy rules if configured.
-	var targetScope *proxy.TargetScope
-	if targetScopePolicy != nil {
-		targetScope = proxy.NewTargetScope()
-		allows := convertTargetRules(targetScopePolicy.Allows)
-		denies := convertTargetRules(targetScopePolicy.Denies)
-		targetScope.SetPolicyRules(allows, denies)
-		// Apply to SOCKS5 handler for target scope enforcement.
-		socks5Handler.SetTargetScope(targetScope)
-	}
-
-	// Build MCP server options.
+// buildMCPOptions assembles the MCP server option slice from all components.
+func buildMCPOptions(
+	cfg *config.Config,
+	proxyCfg *config.ProxyConfig,
+	store *flow.SQLiteStore,
+	issuer *cert.Issuer,
+	passthrough *proxy.PassthroughList,
+	scope *proxy.CaptureScope,
+	interceptEngine *intercept.Engine,
+	interceptQueue *intercept.Queue,
+	pipeline *rules.Pipeline,
+	proto *protocolResult,
+	targetScope *proxy.TargetScope,
+	targetScopePolicySource string,
+	logger *slog.Logger,
+) ([]mcp.ServerOption, error) {
 	opts := []mcp.ServerOption{
 		mcp.WithVersion(version),
 		mcp.WithDBPath(cfg.DBPath),
@@ -367,29 +522,24 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		mcp.WithInterceptEngine(interceptEngine),
 		mcp.WithInterceptQueue(interceptQueue),
 		mcp.WithTransformPipeline(pipeline),
-		mcp.WithFuzzRunner(fuzzRunner),
+		mcp.WithFuzzRunner(proto.fuzzRunner),
 		mcp.WithFuzzStore(store),
 		mcp.WithIssuer(issuer),
-		mcp.WithTCPHandler(tcpHandler),
-		mcp.WithUpstreamProxySetter(httpHandler),
-		mcp.WithUpstreamProxySetter(http2Handler),
-		mcp.WithTargetScopeSetter(httpHandler),
-		mcp.WithTargetScopeSetter(http2Handler),
-		mcp.WithSOCKS5Handler(socks5AuthAdapter),
+		mcp.WithTCPHandler(proto.tcpHandler),
+		mcp.WithUpstreamProxySetter(proto.httpHandler),
+		mcp.WithUpstreamProxySetter(proto.http2Handler),
+		mcp.WithTargetScopeSetter(proto.httpHandler),
+		mcp.WithTargetScopeSetter(proto.http2Handler),
+		mcp.WithSOCKS5Handler(proto.socks5Adapter),
 	}
 
-	// Pass proxy config file defaults to the MCP server.
 	if proxyCfg != nil {
 		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
 		logger.Info("loaded proxy config file defaults")
 	}
-
-	// Pass plugin engine to the MCP server for runtime management.
-	if pluginEngine != nil {
-		opts = append(opts, mcp.WithPluginEngine(pluginEngine))
+	if proto.pluginEngine != nil {
+		opts = append(opts, mcp.WithPluginEngine(proto.pluginEngine))
 	}
-
-	// Pass target scope policy to the MCP server.
 	if targetScope != nil {
 		opts = append(opts, mcp.WithTargetScope(targetScope))
 		allows, denies := targetScope.PolicyRules()
@@ -398,20 +548,17 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 			"denies", len(denies),
 			"source", targetScopePolicySource)
 	}
-
-	// Set up WebUI override directory if specified.
 	if cfg.UIDir != "" {
 		opts = append(opts, mcp.WithUIDir(cfg.UIDir))
 	}
 
 	// Set up Bearer token authentication middleware for HTTP transport.
-	var webUIToken string
 	if cfg.MCPHTTPAddr != "" {
 		token, err := resolveHTTPToken(cfg.MCPHTTPToken, logger)
 		if err != nil {
-			return fmt.Errorf("MCP HTTP token: %w", err)
+			return nil, fmt.Errorf("MCP HTTP token: %w", err)
 		}
-		webUIToken = token
+		proto.webUIToken = token
 		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
 			return mcp.BearerAuthMiddleware(next, token)
 		}))
@@ -419,16 +566,17 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 			"url", fmt.Sprintf("http://%s/?token=%s", cfg.MCPHTTPAddr, url.QueryEscape(token)))
 	}
 
-	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
-	logger.Info("starting MCP server on stdio")
+	return opts, nil
+}
 
+// startServers launches the MCP stdio and optional HTTP servers using an errgroup.
+func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server, webUIToken string, logger *slog.Logger) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	// Always start stdio transport (single flow via Server.Run).
 	g.Go(func() error {
 		transport := &gomcp.StdioTransport{}
 		if err := mcpServer.Run(gctx, transport); err != nil {
-			// Context cancellation is expected during graceful shutdown.
 			if gctx.Err() != nil {
 				logger.Info("MCP stdio server stopped")
 				return nil
@@ -440,21 +588,19 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	// Optionally start Streamable HTTP transport (multi-flow via Server.Connect).
 	if cfg.MCPHTTPAddr != "" {
-		// Build onListening callback to open browser when server is ready.
 		var onListening func(addr string)
 		if !cfg.NoOpenBrowser {
 			capturedToken := webUIToken
 			onListening = func(addr string) {
-				url := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
-				if err := openBrowser(url); err != nil {
-					logger.Warn("failed to open browser", "url", url, "error", err)
+				u := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
+				if err := openBrowser(u); err != nil {
+					logger.Warn("failed to open browser", "url", u, "error", err)
 				}
 			}
 		}
 
 		g.Go(func() error {
 			if err := mcpServer.RunHTTP(gctx, cfg.MCPHTTPAddr, onListening); err != nil {
-				// Context cancellation is expected during graceful shutdown.
 				if gctx.Err() != nil {
 					logger.Info("MCP HTTP server stopped")
 					return nil
@@ -466,80 +612,6 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	return g.Wait()
-}
-
-// applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
-// set on the command line, it falls back to the corresponding YP_ environment
-// variable. Priority: CLI flag > environment variable > config file > default value.
-func applyEnvFallback(fs *flag.FlagSet, cfg *config.Config, configFile *string, targetPolicyFile *string) {
-	// Collect flags that were explicitly set on the command line.
-	flagSet := make(map[string]bool)
-	fs.Visit(func(f *flag.Flag) {
-		flagSet[f.Name] = true
-	})
-
-	for flagName, envVar := range envVarMap {
-		if flagSet[flagName] {
-			continue
-		}
-		v := os.Getenv(envVar)
-		if v == "" {
-			continue
-		}
-		switch flagName {
-		case "config":
-			if configFile != nil && *configFile == "" {
-				*configFile = v
-			}
-		case "db":
-			cfg.DBPath = v
-		case "ca-cert":
-			cfg.CACertPath = v
-		case "ca-key":
-			cfg.CAKeyPath = v
-		case "ca-ephemeral":
-			cfg.CAEphemeral = parseBool(v)
-		case "insecure":
-			cfg.InsecureSkipVerify = parseBool(v)
-		case "log-level":
-			cfg.LogLevel = v
-		case "log-format":
-			cfg.LogFormat = v
-		case "log-file":
-			cfg.LogFile = v
-		case "mcp-http-addr":
-			cfg.MCPHTTPAddr = v
-		case "mcp-http-token":
-			cfg.MCPHTTPToken = v
-		case "ui-dir":
-			cfg.UIDir = v
-		case "target-policy-file":
-			if targetPolicyFile != nil && *targetPolicyFile == "" {
-				*targetPolicyFile = v
-			}
-		case "no-open-browser":
-			cfg.NoOpenBrowser = parseBool(v)
-		}
-	}
-}
-
-// parseBool parses a boolean string, accepting "true", "false", "1", "0".
-// Returns false for unrecognized values.
-func parseBool(s string) bool {
-	s = strings.ToLower(strings.TrimSpace(s))
-	switch s {
-	case "true", "1":
-		return true
-	case "false", "0":
-		return false
-	default:
-		// Fallback to strconv for broader coverage (e.g. "t", "f", "yes", "no").
-		v, err := strconv.ParseBool(s)
-		if err != nil {
-			return false
-		}
-		return v
-	}
 }
 
 // convertTargetRules converts config TargetRuleConfig values to proxy TargetRule values.
