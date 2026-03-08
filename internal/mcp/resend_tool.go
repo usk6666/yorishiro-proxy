@@ -492,7 +492,7 @@ func applyHeaders(req *http.Request, headers map[string][]string) {
 		// Go's net/http ignores the "Host" key in req.Header and uses
 		// req.Host instead (mapped to :authority in HTTP/2).
 		if http.CanonicalHeaderKey(key) == "Host" && len(values) > 0 {
-			httpReq.Host = values[0]
+			req.Host = values[0]
 		}
 	}
 }
