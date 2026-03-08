@@ -140,54 +140,43 @@ type Result struct {
 	Tag string `json:"tag,omitempty"`
 }
 
-// Run executes a fuzz job synchronously. It creates the job in the DB, iterates
-// through all fuzz cases, sends requests, records results, and returns a summary.
-func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
+// setupRun validates the config, fetches the template flow, resolves payloads,
+// creates the iterator, and persists the job to the DB.
+func (e *Engine) setupRun(ctx context.Context, cfg Config) (*flow.Flow, *RequestData, Iterator, *flow.FuzzJob, error) {
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid fuzz config: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("invalid fuzz config: %w", err)
 	}
 
-	// Fetch the template flow.
 	fl, err := e.flowFetcher.GetFlow(ctx, cfg.FlowID)
 	if err != nil {
-		return nil, fmt.Errorf("get template flow: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("get template flow: %w", err)
 	}
 
 	sendMsgs, err := e.flowFetcher.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
-		return nil, fmt.Errorf("get send messages: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, fmt.Errorf("template flow %s has no send messages", cfg.FlowID)
-	}
-	sendMsg := sendMsgs[0]
-
-	// Build the base request data from the template flow (deep clone).
-	baseData := BuildRequestData(sendMsg)
-
-	// Resolve payload sets.
-	resolvedPayloads := make(map[string][]string)
-	for name, ps := range cfg.PayloadSets {
-		payloads, err := ps.Generate(e.wordlistDir)
-		if err != nil {
-			return nil, fmt.Errorf("generate payload set %q: %w", name, err)
-		}
-		resolvedPayloads[name] = payloads
+		return nil, nil, nil, nil, fmt.Errorf("template flow %s has no send messages", cfg.FlowID)
 	}
 
-	// Create iterator.
+	baseData := BuildRequestData(sendMsgs[0])
+
+	resolvedPayloads, err := ResolvePayloads(cfg.PayloadSets, e.wordlistDir)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
 	iter, err := NewIterator(cfg.AttackType, cfg.Positions, resolvedPayloads)
 	if err != nil {
-		return nil, fmt.Errorf("create iterator: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("create iterator: %w", err)
 	}
 
-	// Serialize config for DB storage.
 	configJSON, err := json.Marshal(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("marshal fuzz config: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("marshal fuzz config: %w", err)
 	}
 
-	// Create fuzz job in DB.
 	now := time.Now()
 	job := &flow.FuzzJob{
 		ID:        uuid.New().String(),
@@ -199,7 +188,18 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 		Total:     iter.Total(),
 	}
 	if err := e.fuzzStore.SaveFuzzJob(ctx, job); err != nil {
-		return nil, fmt.Errorf("save fuzz job: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("save fuzz job: %w", err)
+	}
+
+	return fl, baseData, iter, job, nil
+}
+
+// Run executes a fuzz job synchronously. It creates the job in the DB, iterates
+// through all fuzz cases, sends requests, records results, and returns a summary.
+func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
+	fl, baseData, iter, job, err := e.setupRun(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	// Determine per-request timeout.
@@ -284,22 +284,14 @@ func (e *Engine) executeFuzzCase(
 	}
 
 	// Clone and apply positions.
-	data := baseData.Clone()
-	for _, pos := range positions {
-		payload, ok := fc.Payloads[pos.ID]
-		if !ok {
-			continue
-		}
-		if err := ApplyPosition(data, pos, payload); err != nil {
-			result.Error = fmt.Sprintf("apply position %s: %s", pos.ID, err.Error())
-			// FlowID left empty for error results (no FK to flows table).
-			return result
-		}
+	data, err := applyPositions(baseData, positions, fc)
+	if err != nil {
+		result.Error = err.Error()
+		return result
 	}
 
 	if data.URL == nil {
 		result.Error = "template flow has no URL"
-		// FlowID left empty for error results (no FK to flows table).
 		return result
 	}
 
@@ -312,7 +304,49 @@ func (e *Engine) executeFuzzCase(
 		}
 	}
 
-	// Build HTTP request.
+	// Send request and collect response.
+	doer := e.httpDoer
+	if doerOverride != nil {
+		doer = doerOverride
+	}
+	resp, err := e.sendFuzzRequest(ctx, data, doer, timeout, result)
+	if err != nil {
+		return result
+	}
+
+	// Record the flow and messages.
+	e.recordFuzzFlow(ctx, data, resp, protocol, fuzzID, result)
+	return result
+}
+
+// applyPositions clones baseData and applies all positions with their payloads.
+func applyPositions(baseData *RequestData, positions []Position, fc FuzzCase) (*RequestData, error) {
+	data := baseData.Clone()
+	for _, pos := range positions {
+		payload, ok := fc.Payloads[pos.ID]
+		if !ok {
+			continue
+		}
+		if err := ApplyPosition(data, pos, payload); err != nil {
+			return nil, fmt.Errorf("apply position %s: %s", pos.ID, err.Error())
+		}
+	}
+	return data, nil
+}
+
+// fuzzResponse holds the HTTP response data captured during a fuzz request.
+type fuzzResponse struct {
+	statusCode int
+	headers    map[string][]string
+	body       []byte
+	reqHeaders map[string][]string
+	start      time.Time
+	duration   time.Duration
+}
+
+// sendFuzzRequest builds and sends the HTTP request, populating result on error.
+// Returns the response data on success, or an error if the request failed.
+func (e *Engine) sendFuzzRequest(ctx context.Context, data *RequestData, doer HTTPDoer, timeout time.Duration, result *flow.FuzzResult) (*fuzzResponse, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -324,8 +358,7 @@ func (e *Engine) executeFuzzCase(
 	httpReq, err := http.NewRequestWithContext(reqCtx, data.Method, data.URL.String(), body)
 	if err != nil {
 		result.Error = fmt.Sprintf("create request: %s", err.Error())
-		// FlowID left empty for error results (no FK to flows table).
-		return result
+		return nil, err
 	}
 
 	for key, values := range data.Headers {
@@ -338,19 +371,13 @@ func (e *Engine) executeFuzzCase(
 		}
 	}
 
-	// Send request and measure duration.
-	doer := e.httpDoer
-	if doerOverride != nil {
-		doer = doerOverride
-	}
 	start := time.Now()
 	resp, err := doer.Do(httpReq)
 	if err != nil {
 		duration := time.Since(start)
 		result.Error = fmt.Sprintf("send request: %s", err.Error())
 		result.DurationMs = int(duration.Milliseconds())
-		// FlowID left empty for error results (no FK to flows table).
-		return result
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -359,78 +386,81 @@ func (e *Engine) executeFuzzCase(
 		duration := time.Since(start)
 		result.Error = fmt.Sprintf("read response: %s", err.Error())
 		result.DurationMs = int(duration.Milliseconds())
-		// FlowID left empty for error results (no FK to flows table).
-		return result
+		return nil, err
 	}
 	duration := time.Since(start)
 
-	// Build response headers snapshot.
 	respHeaders := make(map[string][]string)
 	for key, values := range resp.Header {
 		respHeaders[key] = values
 	}
 
-	// Build recorded request headers.
-	recordedHeaders := make(map[string][]string)
+	reqHeaders := make(map[string][]string)
 	for key, values := range httpReq.Header {
-		recordedHeaders[key] = values
+		reqHeaders[key] = values
 	}
 
-	// Record the fuzz iteration as a new flow.
+	return &fuzzResponse{
+		statusCode: resp.StatusCode,
+		headers:    respHeaders,
+		body:       respBody,
+		reqHeaders: reqHeaders,
+		start:      start,
+		duration:   duration,
+	}, nil
+}
+
+// recordFuzzFlow saves the flow and its send/receive messages, populating result.
+func (e *Engine) recordFuzzFlow(ctx context.Context, data *RequestData, resp *fuzzResponse, protocol, fuzzID string, result *flow.FuzzResult) {
 	newFl := &flow.Flow{
 		Protocol:  protocol,
 		FlowType:  "unary",
 		State:     "complete",
-		Timestamp: start,
-		Duration:  duration,
+		Timestamp: resp.start,
+		Duration:  resp.duration,
 		Tags:      map[string]string{"fuzz_id": fuzzID},
 	}
 
 	if err := e.flowRecorder.SaveFlow(ctx, newFl); err != nil {
 		result.Error = fmt.Sprintf("save flow: %s", err.Error())
-		// FlowID left empty for error results (no FK to flows table).
-		return result
+		return
 	}
 
-	// Save send message.
 	newSendMsg := &flow.Message{
 		FlowID:    newFl.ID,
 		Sequence:  0,
 		Direction: "send",
-		Timestamp: start,
+		Timestamp: resp.start,
 		Method:    data.Method,
 		URL:       data.URL,
-		Headers:   recordedHeaders,
+		Headers:   resp.reqHeaders,
 		Body:      data.Body,
 	}
 	if err := e.flowRecorder.AppendMessage(ctx, newSendMsg); err != nil {
 		result.Error = fmt.Sprintf("save send message: %s", err.Error())
 		result.FlowID = newFl.ID
-		return result
+		return
 	}
 
-	// Save receive message.
 	newRecvMsg := &flow.Message{
 		FlowID:     newFl.ID,
 		Sequence:   1,
 		Direction:  "receive",
-		Timestamp:  start.Add(duration),
-		StatusCode: resp.StatusCode,
-		Headers:    respHeaders,
-		Body:       respBody,
+		Timestamp:  resp.start.Add(resp.duration),
+		StatusCode: resp.statusCode,
+		Headers:    resp.headers,
+		Body:       resp.body,
 	}
 	if err := e.flowRecorder.AppendMessage(ctx, newRecvMsg); err != nil {
 		result.Error = fmt.Sprintf("save receive message: %s", err.Error())
 		result.FlowID = newFl.ID
-		return result
+		return
 	}
 
 	result.FlowID = newFl.ID
-	result.StatusCode = resp.StatusCode
-	result.ResponseLength = len(respBody)
-	result.DurationMs = int(duration.Milliseconds())
-
-	return result
+	result.StatusCode = resp.statusCode
+	result.ResponseLength = len(resp.body)
+	result.DurationMs = int(resp.duration.Milliseconds())
 }
 
 // executeFuzzCaseWithHooks wraps executeFuzzCase with pre_send and post_receive hook execution.
