@@ -261,7 +261,6 @@ func applyEnvFallback(fs *flag.FlagSet) {
 	}
 }
 
-
 // configsResult holds loaded configuration files.
 type configsResult struct {
 	proxyCfg                *config.ProxyConfig

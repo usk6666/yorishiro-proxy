@@ -604,7 +604,6 @@ func TestDeprecatedFlagsNotRegistered(t *testing.T) {
 	}
 }
 
-
 func TestEnvVarMap_AllFlagsHaveMapping(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
