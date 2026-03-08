@@ -343,6 +343,23 @@ export function ResendPage() {
           }
         }
       }
+
+      // Fallback: if Host header is missing, extract from flow.url
+      // (mirrors reconstructHttp11() logic for raw mode).
+      const hasHost = headerPairs.some(
+        (h) => h.key.toLowerCase() === "host",
+      );
+      if (!hasHost && flow.url) {
+        try {
+          const host = new URL(flow.url).host;
+          if (host) {
+            headerPairs.unshift({ key: "Host", value: host });
+          }
+        } catch {
+          // URL parse failure — skip.
+        }
+      }
+
       setHeaders(headerPairs);
 
       // Populate raw editor fields.
