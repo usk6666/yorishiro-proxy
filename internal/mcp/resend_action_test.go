@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -1410,6 +1412,66 @@ func TestExecute_Resend_LegacyMapFormat_BackwardCompat(t *testing.T) {
 	// X-Added should be present.
 	if vals, exists := out.RequestPreview.Headers["X-Added"]; !exists || len(vals) != 1 || vals[0] != "added-value" {
 		t.Errorf("X-Added = %v, want [added-value]", vals)
+	}
+}
+
+// TestExecute_Resend_HostHeaderOverride_SetsReqHost verifies that overriding
+// the Host header via override_headers actually sets httpReq.Host so that
+// the server receives the modified Host (important for HTTP/2 :authority).
+func TestExecute_Resend_HostHeaderOverride_SetsReqHost(t *testing.T) {
+	store := newTestStore(t)
+
+	// Custom server that echoes r.Host (Go strips Host from r.Header).
+	var receivedHost string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHost = r.Host
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"host": r.Host})
+	}))
+	t.Cleanup(server.Close)
+
+	u, _ := url.Parse(server.URL + "/host-test")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{"Host": {u.Host}},
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+			"override_headers": map[string]any{
+				"Host": "spoofed.example.com",
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	if receivedHost != "spoofed.example.com" {
+		t.Errorf("server received Host = %q, want %q", receivedHost, "spoofed.example.com")
 	}
 }
 
