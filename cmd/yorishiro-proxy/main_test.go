@@ -522,13 +522,13 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			cfgFile, policyFile := registerTestFlags(fs, cfg)
+			registerTestFlags(fs, cfg)
 
 			if err := fs.Parse(tt.flagArgs); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs, cfg, cfgFile, policyFile)
+			applyEnvFallback(fs)
 
 			got := getStringConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -565,13 +565,13 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			cfgFile, policyFile := registerTestFlags(fs, cfg)
+			registerTestFlags(fs, cfg)
 
 			if err := fs.Parse(nil); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs, cfg, cfgFile, policyFile)
+			applyEnvFallback(fs)
 
 			got := getBoolConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -739,13 +739,13 @@ func TestConfigFlag_EnvVarFallback(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile, policyFile := registerTestFlags(fs, cfg)
+	cfgFile, _ := registerTestFlags(fs, cfg)
 
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs, cfg, cfgFile, policyFile)
+	applyEnvFallback(fs)
 
 	if *cfgFile != cfgPath {
 		t.Errorf("configFile = %q, want %q", *cfgFile, cfgPath)
@@ -767,13 +767,13 @@ func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile, policyFile := registerTestFlags(fs, cfg)
+	cfgFile, _ := registerTestFlags(fs, cfg)
 
 	if err := fs.Parse([]string{"-config", flagPath}); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs, cfg, cfgFile, policyFile)
+	applyEnvFallback(fs)
 
 	// CLI flag should take precedence over YP_CONFIG env var.
 	if *cfgFile != flagPath {
@@ -800,13 +800,13 @@ func TestTargetPolicyFileFlag_EnvVarFallback(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile, policyFile := registerTestFlags(fs, cfg)
+	_, policyFile := registerTestFlags(fs, cfg)
 
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs, cfg, cfgFile, policyFile)
+	applyEnvFallback(fs)
 
 	if *policyFile != policyPath {
 		t.Errorf("targetPolicyFile = %q, want %q", *policyFile, policyPath)
@@ -828,13 +828,13 @@ func TestTargetPolicyFileFlag_CLIOverridesEnvVar(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile, policyFile := registerTestFlags(fs, cfg)
+	_, policyFile := registerTestFlags(fs, cfg)
 
 	if err := fs.Parse([]string{"-target-policy-file", flagPath}); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs, cfg, cfgFile, policyFile)
+	applyEnvFallback(fs)
 
 	// CLI flag should take precedence over YP_TARGET_POLICY_FILE env var.
 	if *policyFile != flagPath {
@@ -968,13 +968,13 @@ func TestNoOpenBrowserFlag(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			cfgFile, policyFile := registerTestFlags(fs, cfg)
+			registerTestFlags(fs, cfg)
 
 			if err := fs.Parse(tt.flagArgs); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs, cfg, cfgFile, policyFile)
+			applyEnvFallback(fs)
 
 			if cfg.NoOpenBrowser != tt.want {
 				t.Errorf("NoOpenBrowser = %v, want %v", cfg.NoOpenBrowser, tt.want)
