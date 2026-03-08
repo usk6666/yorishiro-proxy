@@ -248,78 +248,27 @@ func (s *Server) handleConfigure(_ context.Context, _ *gomcp.CallToolRequest, in
 func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResult, *configureResult, error) {
 	result := &configureResult{Status: "configured"}
 
-	if input.UpstreamProxy != nil {
-		if err := s.applyUpstreamProxy(*input.UpstreamProxy); err != nil {
-			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
-		}
-		current := ""
-		if s.deps.manager != nil {
-			current = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
-		}
-		result.UpstreamProxy = &current
+	if err := s.configureUpstreamProxy(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.CaptureScope != nil {
-		if s.deps.scope == nil {
-			return nil, nil, fmt.Errorf("capture scope is not initialized: proxy may not be running")
-		}
-		if err := s.mergeScope(input.CaptureScope); err != nil {
-			return nil, nil, fmt.Errorf("capture_scope merge: %w", err)
-		}
-		includes, excludes := s.deps.scope.Rules()
-		result.CaptureScope = &configureScopeResult{
-			IncludeCount: len(includes),
-			ExcludeCount: len(excludes),
-		}
+	if err := s.configureMergeScope(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.TLSPassthrough != nil {
-		if s.deps.passthrough == nil {
-			return nil, nil, fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
-		}
-		s.mergePassthrough(input.TLSPassthrough)
-		result.TLSPassthrough = &configurePassthroughResult{
-			TotalPatterns: s.deps.passthrough.Len(),
-		}
+	if err := s.configureMergePassthrough(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.InterceptRules != nil {
-		if s.deps.interceptEngine == nil {
-			return nil, nil, fmt.Errorf("intercept engine is not initialized: proxy may not be running")
-		}
-		if err := s.mergeInterceptRules(input.InterceptRules); err != nil {
-			return nil, nil, fmt.Errorf("intercept_rules merge: %w", err)
-		}
-		result.InterceptRules = s.interceptRulesResult()
+	if err := s.configureMergeInterceptRules(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.InterceptQueue != nil {
-		if s.deps.interceptQueue == nil {
-			return nil, nil, fmt.Errorf("intercept queue is not initialized: proxy may not be running")
-		}
-		if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
-			return nil, nil, fmt.Errorf("intercept_queue: %w", err)
-		}
-		result.InterceptQueue = s.interceptQueueResult()
+	if err := s.configureInterceptQueue(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.AutoTransform != nil {
-		if s.deps.transformPipeline == nil {
-			return nil, nil, fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
-		}
-		if err := s.mergeAutoTransform(input.AutoTransform); err != nil {
-			return nil, nil, fmt.Errorf("auto_transform merge: %w", err)
-		}
-		result.AutoTransform = s.autoTransformResult()
+	if err := s.configureMergeAutoTransform(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.SOCKS5Auth != nil {
-		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password, input.SOCKS5Auth.ListenerName); err != nil {
-			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
-		}
-		result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}
+	if err := s.configureSOCKS5(input, result); err != nil {
+		return nil, nil, err
 	}
-
 	if err := s.applyConnectionLimits(input, result); err != nil {
 		return nil, nil, err
 	}
@@ -331,89 +280,208 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolResult, *configureResult, error) {
 	result := &configureResult{Status: "configured"}
 
-	if input.UpstreamProxy != nil {
-		if err := s.applyUpstreamProxy(*input.UpstreamProxy); err != nil {
-			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
-		}
-		current := ""
-		if s.deps.manager != nil {
-			current = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
-		}
-		result.UpstreamProxy = &current
+	if err := s.configureUpstreamProxy(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.CaptureScope != nil {
-		if s.deps.scope == nil {
-			return nil, nil, fmt.Errorf("capture scope is not initialized: proxy may not be running")
-		}
-		// Validate rules before applying.
-		if err := validateScopeRules("include", input.CaptureScope.Includes); err != nil {
-			return nil, nil, fmt.Errorf("capture_scope replace: %w", err)
-		}
-		if err := validateScopeRules("exclude", input.CaptureScope.Excludes); err != nil {
-			return nil, nil, fmt.Errorf("capture_scope replace: %w", err)
-		}
-		includes := toScopeRules(input.CaptureScope.Includes)
-		excludes := toScopeRules(input.CaptureScope.Excludes)
-		s.deps.scope.SetRules(includes, excludes)
-		result.CaptureScope = &configureScopeResult{
-			IncludeCount: len(includes),
-			ExcludeCount: len(excludes),
-		}
+	if err := s.configureReplaceScope(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.TLSPassthrough != nil {
-		if s.deps.passthrough == nil {
-			return nil, nil, fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
-		}
-		s.replacePassthrough(input.TLSPassthrough)
-		result.TLSPassthrough = &configurePassthroughResult{
-			TotalPatterns: s.deps.passthrough.Len(),
-		}
+	if err := s.configureReplacePassthrough(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.InterceptRules != nil {
-		if s.deps.interceptEngine == nil {
-			return nil, nil, fmt.Errorf("intercept engine is not initialized: proxy may not be running")
-		}
-		if err := s.replaceInterceptRules(input.InterceptRules); err != nil {
-			return nil, nil, fmt.Errorf("intercept_rules replace: %w", err)
-		}
-		result.InterceptRules = s.interceptRulesResult()
+	if err := s.configureReplaceInterceptRules(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.InterceptQueue != nil {
-		if s.deps.interceptQueue == nil {
-			return nil, nil, fmt.Errorf("intercept queue is not initialized: proxy may not be running")
-		}
-		if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
-			return nil, nil, fmt.Errorf("intercept_queue: %w", err)
-		}
-		result.InterceptQueue = s.interceptQueueResult()
+	if err := s.configureInterceptQueue(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.AutoTransform != nil {
-		if s.deps.transformPipeline == nil {
-			return nil, nil, fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
-		}
-		if err := s.replaceAutoTransform(input.AutoTransform); err != nil {
-			return nil, nil, fmt.Errorf("auto_transform replace: %w", err)
-		}
-		result.AutoTransform = s.autoTransformResult()
+	if err := s.configureReplaceAutoTransform(input, result); err != nil {
+		return nil, nil, err
 	}
-
-	if input.SOCKS5Auth != nil {
-		if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password, input.SOCKS5Auth.ListenerName); err != nil {
-			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
-		}
-		result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}
+	if err := s.configureSOCKS5(input, result); err != nil {
+		return nil, nil, err
 	}
-
 	if err := s.applyConnectionLimits(input, result); err != nil {
 		return nil, nil, err
 	}
 
 	return nil, result, nil
+}
+
+// configureUpstreamProxy applies upstream proxy configuration if provided.
+func (s *Server) configureUpstreamProxy(input configureInput, result *configureResult) error {
+	if input.UpstreamProxy == nil {
+		return nil
+	}
+	if err := s.applyUpstreamProxy(*input.UpstreamProxy); err != nil {
+		return fmt.Errorf("upstream_proxy: %w", err)
+	}
+	current := ""
+	if s.deps.manager != nil {
+		current = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
+	}
+	result.UpstreamProxy = &current
+	return nil
+}
+
+// configureMergeScope applies merge (delta) capture scope changes if provided.
+func (s *Server) configureMergeScope(input configureInput, result *configureResult) error {
+	if input.CaptureScope == nil {
+		return nil
+	}
+	if s.deps.scope == nil {
+		return fmt.Errorf("capture scope is not initialized: proxy may not be running")
+	}
+	if err := s.mergeScope(input.CaptureScope); err != nil {
+		return fmt.Errorf("capture_scope merge: %w", err)
+	}
+	includes, excludes := s.deps.scope.Rules()
+	result.CaptureScope = &configureScopeResult{
+		IncludeCount: len(includes),
+		ExcludeCount: len(excludes),
+	}
+	return nil
+}
+
+// configureReplaceScope replaces the entire capture scope if provided.
+func (s *Server) configureReplaceScope(input configureInput, result *configureResult) error {
+	if input.CaptureScope == nil {
+		return nil
+	}
+	if s.deps.scope == nil {
+		return fmt.Errorf("capture scope is not initialized: proxy may not be running")
+	}
+	if err := validateScopeRules("include", input.CaptureScope.Includes); err != nil {
+		return fmt.Errorf("capture_scope replace: %w", err)
+	}
+	if err := validateScopeRules("exclude", input.CaptureScope.Excludes); err != nil {
+		return fmt.Errorf("capture_scope replace: %w", err)
+	}
+	includes := toScopeRules(input.CaptureScope.Includes)
+	excludes := toScopeRules(input.CaptureScope.Excludes)
+	s.deps.scope.SetRules(includes, excludes)
+	result.CaptureScope = &configureScopeResult{
+		IncludeCount: len(includes),
+		ExcludeCount: len(excludes),
+	}
+	return nil
+}
+
+// configureMergePassthrough applies merge (delta) TLS passthrough changes if provided.
+func (s *Server) configureMergePassthrough(input configureInput, result *configureResult) error {
+	if input.TLSPassthrough == nil {
+		return nil
+	}
+	if s.deps.passthrough == nil {
+		return fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
+	}
+	s.mergePassthrough(input.TLSPassthrough)
+	result.TLSPassthrough = &configurePassthroughResult{
+		TotalPatterns: s.deps.passthrough.Len(),
+	}
+	return nil
+}
+
+// configureReplacePassthrough replaces the entire TLS passthrough list if provided.
+func (s *Server) configureReplacePassthrough(input configureInput, result *configureResult) error {
+	if input.TLSPassthrough == nil {
+		return nil
+	}
+	if s.deps.passthrough == nil {
+		return fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
+	}
+	s.replacePassthrough(input.TLSPassthrough)
+	result.TLSPassthrough = &configurePassthroughResult{
+		TotalPatterns: s.deps.passthrough.Len(),
+	}
+	return nil
+}
+
+// configureMergeInterceptRules applies merge (delta) intercept rule changes if provided.
+func (s *Server) configureMergeInterceptRules(input configureInput, result *configureResult) error {
+	if input.InterceptRules == nil {
+		return nil
+	}
+	if s.deps.interceptEngine == nil {
+		return fmt.Errorf("intercept engine is not initialized: proxy may not be running")
+	}
+	if err := s.mergeInterceptRules(input.InterceptRules); err != nil {
+		return fmt.Errorf("intercept_rules merge: %w", err)
+	}
+	result.InterceptRules = s.interceptRulesResult()
+	return nil
+}
+
+// configureReplaceInterceptRules replaces all intercept rules if provided.
+func (s *Server) configureReplaceInterceptRules(input configureInput, result *configureResult) error {
+	if input.InterceptRules == nil {
+		return nil
+	}
+	if s.deps.interceptEngine == nil {
+		return fmt.Errorf("intercept engine is not initialized: proxy may not be running")
+	}
+	if err := s.replaceInterceptRules(input.InterceptRules); err != nil {
+		return fmt.Errorf("intercept_rules replace: %w", err)
+	}
+	result.InterceptRules = s.interceptRulesResult()
+	return nil
+}
+
+// configureInterceptQueue applies intercept queue configuration if provided.
+func (s *Server) configureInterceptQueue(input configureInput, result *configureResult) error {
+	if input.InterceptQueue == nil {
+		return nil
+	}
+	if s.deps.interceptQueue == nil {
+		return fmt.Errorf("intercept queue is not initialized: proxy may not be running")
+	}
+	if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
+		return fmt.Errorf("intercept_queue: %w", err)
+	}
+	result.InterceptQueue = s.interceptQueueResult()
+	return nil
+}
+
+// configureMergeAutoTransform applies merge (delta) auto-transform rule changes if provided.
+func (s *Server) configureMergeAutoTransform(input configureInput, result *configureResult) error {
+	if input.AutoTransform == nil {
+		return nil
+	}
+	if s.deps.transformPipeline == nil {
+		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+	}
+	if err := s.mergeAutoTransform(input.AutoTransform); err != nil {
+		return fmt.Errorf("auto_transform merge: %w", err)
+	}
+	result.AutoTransform = s.autoTransformResult()
+	return nil
+}
+
+// configureReplaceAutoTransform replaces all auto-transform rules if provided.
+func (s *Server) configureReplaceAutoTransform(input configureInput, result *configureResult) error {
+	if input.AutoTransform == nil {
+		return nil
+	}
+	if s.deps.transformPipeline == nil {
+		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+	}
+	if err := s.replaceAutoTransform(input.AutoTransform); err != nil {
+		return fmt.Errorf("auto_transform replace: %w", err)
+	}
+	result.AutoTransform = s.autoTransformResult()
+	return nil
+}
+
+// configureSOCKS5 applies SOCKS5 authentication configuration if provided.
+func (s *Server) configureSOCKS5(input configureInput, result *configureResult) error {
+	if input.SOCKS5Auth == nil {
+		return nil
+	}
+	if err := s.applySOCKS5Auth(input.SOCKS5Auth.Method, input.SOCKS5Auth.Username, input.SOCKS5Auth.Password, input.SOCKS5Auth.ListenerName); err != nil {
+		return fmt.Errorf("socks5_auth: %w", err)
+	}
+	result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}
+	return nil
 }
 
 // applyConnectionLimits validates and applies max_connections, peek_timeout_ms,

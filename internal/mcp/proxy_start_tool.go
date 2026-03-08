@@ -9,6 +9,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -156,100 +157,8 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	// Merge config file defaults for fields not explicitly provided by the caller.
 	s.applyProxyDefaults(&input)
 
-	// Validate listen address format if provided.
-	if input.ListenAddr != "" {
-		if err := validateLoopbackAddr(input.ListenAddr); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	// Validate and apply upstream proxy if provided.
-	if input.UpstreamProxy != "" {
-		if err := s.applyUpstreamProxy(input.UpstreamProxy); err != nil {
-			return nil, nil, fmt.Errorf("upstream_proxy: %w", err)
-		}
-	}
-
-	// Validate and apply capture scope if provided.
-	if input.CaptureScope != nil {
-		if err := s.applyCaptureScope(input.CaptureScope); err != nil {
-			return nil, nil, fmt.Errorf("capture_scope: %w", err)
-		}
-	}
-
-	// Apply TLS passthrough patterns if provided.
-	if len(input.TLSPassthrough) > 0 {
-		if err := s.applyTLSPassthrough(input.TLSPassthrough); err != nil {
-			return nil, nil, fmt.Errorf("tls_passthrough: %w", err)
-		}
-	}
-
-	// Apply intercept rules if provided.
-	if len(input.InterceptRules) > 0 {
-		if err := s.applyInterceptRules(input.InterceptRules); err != nil {
-			return nil, nil, fmt.Errorf("intercept_rules: %w", err)
-		}
-	}
-
-	// Apply auto-transform rules if provided.
-	if len(input.AutoTransform) > 0 {
-		if err := s.applyTransformRules(input.AutoTransform); err != nil {
-			return nil, nil, fmt.Errorf("auto_transform: %w", err)
-		}
-	}
-
-	// Validate and store TCP forwards if provided.
-	if len(input.TCPForwards) > 0 {
-		if err := validateTCPForwards(input.TCPForwards); err != nil {
-			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
-		}
-		if s.deps.tcpHandler == nil {
-			return nil, nil, fmt.Errorf("tcp_forwards: TCP handler is not initialized")
-		}
-		s.deps.tcpForwards = input.TCPForwards
-	}
-
-	// Validate and store enabled protocols if provided.
-	if len(input.Protocols) > 0 {
-		if err := validateProtocols(input.Protocols); err != nil {
-			return nil, nil, fmt.Errorf("protocols: %w", err)
-		}
-		s.deps.enabledProtocols = input.Protocols
-	}
-
-	// Apply SOCKS5 authentication configuration if provided.
-	// Use the listener name so each listener gets independent auth settings.
-	if input.SOCKS5Auth != "" {
-		socks5ListenerName := input.Name
-		if socks5ListenerName == "" {
-			socks5ListenerName = proxy.DefaultListenerName
-		}
-		if err := s.applySOCKS5Auth(input.SOCKS5Auth, input.SOCKS5Username, input.SOCKS5Password, socks5ListenerName); err != nil {
-			return nil, nil, fmt.Errorf("socks5_auth: %w", err)
-		}
-	}
-
-	// Apply connection limits and timeouts if provided.
-	if input.MaxConnections != nil {
-		n := *input.MaxConnections
-		if n < minMaxConnections || n > maxMaxConnections {
-			return nil, nil, fmt.Errorf("max_connections must be between %d and %d, got %d", minMaxConnections, maxMaxConnections, n)
-		}
-		s.deps.manager.SetMaxConnections(n)
-	}
-	if input.PeekTimeoutMs != nil {
-		ms := *input.PeekTimeoutMs
-		if ms < minTimeoutMs || ms > maxTimeoutMs {
-			return nil, nil, fmt.Errorf("peek_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
-		}
-		s.deps.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
-	}
-	if input.RequestTimeoutMs != nil {
-		ms := *input.RequestTimeoutMs
-		if ms < minTimeoutMs || ms > maxTimeoutMs {
-			return nil, nil, fmt.Errorf("request_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
-		}
-		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
+	if err := s.applyProxyStartSettings(&input); err != nil {
+		return nil, nil, err
 	}
 
 	// Resolve listener name (default: "default").
@@ -262,30 +171,11 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
 	}
 
-	// Start TCP forward listeners if configured.
-	if len(input.TCPForwards) > 0 {
-		// Update the TCP handler's forward mappings so it knows which
-		// upstream to connect to for each local port.
-		s.deps.tcpHandler.SetForwards(input.TCPForwards)
-
-		if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, input.TCPForwards, s.deps.tcpHandler); err != nil {
-			// Stop the listener since forward listeners failed.
-			s.deps.manager.StopNamed(ctx, listenerName)
-			return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
-		}
+	if err := s.startTCPForwards(ctx, listenerName, input.TCPForwards); err != nil {
+		return nil, nil, err
 	}
 
-	_, addr := s.deps.manager.Status()
-	// For named listeners that are not the default, get address from ListenerStatuses.
-	if listenerName != proxy.DefaultListenerName {
-		statuses := s.deps.manager.ListenerStatuses()
-		for _, st := range statuses {
-			if st.Name == listenerName {
-				addr = st.ListenAddr
-				break
-			}
-		}
-	}
+	addr := s.resolveListenerAddr(listenerName)
 
 	result := &proxyStartResult{
 		Name:        listenerName,
@@ -295,6 +185,161 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		Protocols:   input.Protocols,
 	}
 	return nil, result, nil
+}
+
+// applyProxyStartSettings validates and applies all proxy configuration sections
+// from the proxy_start input. It handles listen address, upstream proxy, capture
+// scope, TLS passthrough, intercept rules, auto-transform, TCP forwards,
+// protocols, SOCKS5 auth, and connection limits/timeouts.
+func (s *Server) applyProxyStartSettings(input *proxyStartInput) error {
+	if err := s.applyProxyStartPipeline(input); err != nil {
+		return err
+	}
+	if err := s.applyTCPForwardsConfig(input.TCPForwards); err != nil {
+		return err
+	}
+	if err := s.applyProtocolsConfig(input.Protocols); err != nil {
+		return err
+	}
+	if err := s.applySOCKS5AuthFromInput(input); err != nil {
+		return err
+	}
+	return s.applyProxyStartLimits(input)
+}
+
+// applyProxyStartPipeline validates and applies the proxy pipeline settings:
+// listen address, upstream proxy, capture scope, TLS passthrough, intercept rules,
+// and auto-transform rules.
+func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
+	if input.ListenAddr != "" {
+		if err := validateLoopbackAddr(input.ListenAddr); err != nil {
+			return err
+		}
+	}
+	if input.UpstreamProxy != "" {
+		if err := s.applyUpstreamProxy(input.UpstreamProxy); err != nil {
+			return fmt.Errorf("upstream_proxy: %w", err)
+		}
+	}
+	if input.CaptureScope != nil {
+		if err := s.applyCaptureScope(input.CaptureScope); err != nil {
+			return fmt.Errorf("capture_scope: %w", err)
+		}
+	}
+	if len(input.TLSPassthrough) > 0 {
+		if err := s.applyTLSPassthrough(input.TLSPassthrough); err != nil {
+			return fmt.Errorf("tls_passthrough: %w", err)
+		}
+	}
+	if len(input.InterceptRules) > 0 {
+		if err := s.applyInterceptRules(input.InterceptRules); err != nil {
+			return fmt.Errorf("intercept_rules: %w", err)
+		}
+	}
+	if len(input.AutoTransform) > 0 {
+		if err := s.applyTransformRules(input.AutoTransform); err != nil {
+			return fmt.Errorf("auto_transform: %w", err)
+		}
+	}
+	return nil
+}
+
+// applyTCPForwardsConfig validates and stores TCP forward mappings.
+func (s *Server) applyTCPForwardsConfig(forwards map[string]string) error {
+	if len(forwards) == 0 {
+		return nil
+	}
+	if err := validateTCPForwards(forwards); err != nil {
+		return fmt.Errorf("tcp_forwards: %w", err)
+	}
+	if s.deps.tcpHandler == nil {
+		return fmt.Errorf("tcp_forwards: TCP handler is not initialized")
+	}
+	s.deps.tcpForwards = forwards
+	return nil
+}
+
+// applyProtocolsConfig validates and stores enabled protocols.
+func (s *Server) applyProtocolsConfig(protocols []string) error {
+	if len(protocols) == 0 {
+		return nil
+	}
+	if err := validateProtocols(protocols); err != nil {
+		return fmt.Errorf("protocols: %w", err)
+	}
+	s.deps.enabledProtocols = protocols
+	return nil
+}
+
+// applySOCKS5AuthFromInput applies SOCKS5 authentication configuration from proxy_start input.
+func (s *Server) applySOCKS5AuthFromInput(input *proxyStartInput) error {
+	if input.SOCKS5Auth == "" {
+		return nil
+	}
+	listenerName := input.Name
+	if listenerName == "" {
+		listenerName = proxy.DefaultListenerName
+	}
+	if err := s.applySOCKS5Auth(input.SOCKS5Auth, input.SOCKS5Username, input.SOCKS5Password, listenerName); err != nil {
+		return fmt.Errorf("socks5_auth: %w", err)
+	}
+	return nil
+}
+
+// applyProxyStartLimits validates and applies connection limits and timeouts
+// from the proxy_start input.
+func (s *Server) applyProxyStartLimits(input *proxyStartInput) error {
+	if input.MaxConnections != nil {
+		n := *input.MaxConnections
+		if n < minMaxConnections || n > maxMaxConnections {
+			return fmt.Errorf("max_connections must be between %d and %d, got %d", minMaxConnections, maxMaxConnections, n)
+		}
+		s.deps.manager.SetMaxConnections(n)
+	}
+	if input.PeekTimeoutMs != nil {
+		ms := *input.PeekTimeoutMs
+		if ms < minTimeoutMs || ms > maxTimeoutMs {
+			return fmt.Errorf("peek_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
+		}
+		s.deps.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
+	}
+	if input.RequestTimeoutMs != nil {
+		ms := *input.RequestTimeoutMs
+		if ms < minTimeoutMs || ms > maxTimeoutMs {
+			return fmt.Errorf("request_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
+		}
+		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
+	}
+	return nil
+}
+
+// startTCPForwards starts TCP forward listeners for the given listener name.
+// If no forwards are configured, it is a no-op.
+func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forwards map[string]string) error {
+	if len(forwards) == 0 {
+		return nil
+	}
+	s.deps.tcpHandler.SetForwards(forwards)
+
+	if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, forwards, s.deps.tcpHandler); err != nil {
+		s.deps.manager.StopNamed(ctx, listenerName)
+		return fmt.Errorf("tcp_forwards: %w", err)
+	}
+	return nil
+}
+
+// resolveListenerAddr returns the listen address for the given listener name.
+func (s *Server) resolveListenerAddr(listenerName string) string {
+	_, addr := s.deps.manager.Status()
+	if listenerName != proxy.DefaultListenerName {
+		statuses := s.deps.manager.ListenerStatuses()
+		for _, st := range statuses {
+			if st.Name == listenerName {
+				return st.ListenAddr
+			}
+		}
+	}
+	return addr
 }
 
 // validateLoopbackAddr validates that the given address is a loopback address.
@@ -427,43 +472,19 @@ func (s *Server) applyProxyDefaults(input *proxyStartInput) {
 	}
 	d := s.deps.proxyDefaults
 
+	s.applyProxyDefaultStrings(input, d)
+	s.applyProxyDefaultJSON(input, d)
+	s.applyProxyDefaultSlicesAndMaps(input, d)
+}
+
+// applyProxyDefaultStrings merges simple string defaults from config into the input.
+func (s *Server) applyProxyDefaultStrings(input *proxyStartInput, d *config.ProxyConfig) {
 	if input.ListenAddr == "" && d.ListenAddr != "" {
 		input.ListenAddr = d.ListenAddr
 	}
-
-	if input.CaptureScope == nil && len(d.CaptureScope) > 0 {
-		var scope captureScopeInput
-		if json.Unmarshal(d.CaptureScope, &scope) == nil {
-			input.CaptureScope = &scope
-		}
-	}
-
-	if len(input.TLSPassthrough) == 0 && len(d.TLSPassthrough) > 0 {
-		input.TLSPassthrough = d.TLSPassthrough
-	}
-
-	if len(input.InterceptRules) == 0 && len(d.InterceptRules) > 0 {
-		var rules []interceptRuleInput
-		if json.Unmarshal(d.InterceptRules, &rules) == nil {
-			input.InterceptRules = rules
-		}
-	}
-
-	if len(input.AutoTransform) == 0 && len(d.AutoTransform) > 0 {
-		var transforms []transformRuleInput
-		if json.Unmarshal(d.AutoTransform, &transforms) == nil {
-			input.AutoTransform = transforms
-		}
-	}
-
-	if len(input.TCPForwards) == 0 && len(d.TCPForwards) > 0 {
-		input.TCPForwards = d.TCPForwards
-	}
-
 	if input.UpstreamProxy == "" && d.UpstreamProxy != "" {
 		input.UpstreamProxy = d.UpstreamProxy
 	}
-
 	if input.SOCKS5Auth == "" && d.SOCKS5Auth != "" {
 		input.SOCKS5Auth = d.SOCKS5Auth
 	}
@@ -472,6 +493,39 @@ func (s *Server) applyProxyDefaults(input *proxyStartInput) {
 	}
 	if input.SOCKS5Password == "" && d.SOCKS5Password != "" {
 		input.SOCKS5Password = d.SOCKS5Password
+	}
+}
+
+// applyProxyDefaultJSON merges JSON-encoded defaults (capture scope, intercept rules,
+// auto-transform) from config into the input.
+func (s *Server) applyProxyDefaultJSON(input *proxyStartInput, d *config.ProxyConfig) {
+	if input.CaptureScope == nil && len(d.CaptureScope) > 0 {
+		var scope captureScopeInput
+		if json.Unmarshal(d.CaptureScope, &scope) == nil {
+			input.CaptureScope = &scope
+		}
+	}
+	if len(input.InterceptRules) == 0 && len(d.InterceptRules) > 0 {
+		var rules []interceptRuleInput
+		if json.Unmarshal(d.InterceptRules, &rules) == nil {
+			input.InterceptRules = rules
+		}
+	}
+	if len(input.AutoTransform) == 0 && len(d.AutoTransform) > 0 {
+		var transforms []transformRuleInput
+		if json.Unmarshal(d.AutoTransform, &transforms) == nil {
+			input.AutoTransform = transforms
+		}
+	}
+}
+
+// applyProxyDefaultSlicesAndMaps merges slice and map defaults from config into the input.
+func (s *Server) applyProxyDefaultSlicesAndMaps(input *proxyStartInput, d *config.ProxyConfig) {
+	if len(input.TLSPassthrough) == 0 && len(d.TLSPassthrough) > 0 {
+		input.TLSPassthrough = d.TLSPassthrough
+	}
+	if len(input.TCPForwards) == 0 && len(d.TCPForwards) > 0 {
+		input.TCPForwards = d.TCPForwards
 	}
 }
 
