@@ -21,6 +21,7 @@ type Engine struct {
 	mu       sync.RWMutex
 	registry *Registry
 	plugins  []*loadedPlugin
+	states   map[string]*PluginState
 	logger   *slog.Logger
 }
 
@@ -53,6 +54,7 @@ func NewEngine(logger *slog.Logger) *Engine {
 	}
 	return &Engine{
 		registry: NewRegistry(),
+		states:   make(map[string]*PluginState),
 		logger:   logger,
 	}
 }
@@ -114,10 +116,19 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 		},
 	}
 
+	// Ensure a PluginState exists for this plugin. State survives reloads.
+	name := pluginName(cfg.Path)
+	ps, ok := e.states[name]
+	if !ok {
+		ps = NewPluginState()
+		e.states[name] = ps
+	}
+
 	predeclared := starlark.StringDict{
 		"action": newActionModule(),
 		"crypto": newCryptoModule(),
 		"config": newConfigDict(cfg.Vars),
+		"state":  newStateModule(ps),
 	}
 
 	globals, err := starlark.ExecFileOptions(
