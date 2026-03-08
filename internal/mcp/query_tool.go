@@ -153,16 +153,8 @@ type queryFlowsResult struct {
 	Total int               `json:"total"`
 }
 
-// handleQueryFlows returns a paginated list of flows with message summary data.
-func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowsResult, error) {
-	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("flow store is not initialized")
-	}
-
-	if input.Offset < 0 {
-		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
-	}
-
+// buildFlowListOptions constructs flow.ListOptions from query input parameters.
+func buildFlowListOptions(input queryInput) flow.ListOptions {
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
@@ -180,6 +172,43 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 		opts.BlockedBy = input.Filter.BlockedBy
 		opts.State = input.Filter.State
 	}
+	return opts
+}
+
+// extractFlowSummary extracts the effective method, URL, and status code from flow messages.
+// It prefers "modified" variant messages as they represent the actually transmitted data.
+func extractFlowSummary(msgs []*flow.Message) (method, urlStr string, statusCode int) {
+	for _, msg := range msgs {
+		if msg.Direction == "send" {
+			variant := msg.Metadata["variant"]
+			if method == "" || variant == "modified" {
+				method = msg.Method
+				if msg.URL != nil {
+					urlStr = msg.URL.String()
+				}
+			}
+		}
+		if msg.Direction == "receive" {
+			variant := msg.Metadata["variant"]
+			if statusCode == 0 || variant == "modified" {
+				statusCode = msg.StatusCode
+			}
+		}
+	}
+	return method, urlStr, statusCode
+}
+
+// handleQueryFlows returns a paginated list of flows with message summary data.
+func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowsResult, error) {
+	if s.deps.store == nil {
+		return nil, nil, fmt.Errorf("flow store is not initialized")
+	}
+
+	if input.Offset < 0 {
+		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
+	}
+
+	opts := buildFlowListOptions(input)
 
 	flowList, err := s.deps.store.ListFlows(ctx, opts)
 	if err != nil {
@@ -199,30 +228,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
 
-		var method, urlStr string
-		var statusCode int
-		for _, msg := range msgs {
-			if msg.Direction == "send" {
-				// For variant messages, prefer the "modified" variant
-				// as it represents what was actually sent.
-				variant := msg.Metadata["variant"]
-				if method == "" || variant == "modified" {
-					method = msg.Method
-					if msg.URL != nil {
-						urlStr = msg.URL.String()
-					}
-				}
-			}
-			if msg.Direction == "receive" {
-				// For variant messages, prefer the "modified" variant
-				// as it represents what was actually sent to the client.
-				variant := msg.Metadata["variant"]
-				if statusCode == 0 || variant == "modified" {
-					statusCode = msg.StatusCode
-				}
-			}
-		}
-
+		method, urlStr, statusCode := extractFlowSummary(msgs)
 		summary := buildProtocolSummary(fl.Protocol, fl.FlowType, msgs)
 
 		entries = append(entries, queryFlowsEntry{
@@ -310,6 +316,110 @@ type queryVariantResponse struct {
 // streamPreviewLimit is the maximum number of messages to include in a streaming flow preview.
 const streamPreviewLimit = 10
 
+// categorizedMessages holds messages split by direction with variant resolution.
+type categorizedMessages struct {
+	// sendMsg is the effective send message (modified variant if present).
+	sendMsg *flow.Message
+	// originalSendMsg is the original send message before modification (nil if no variant).
+	originalSendMsg *flow.Message
+	// recvMsg is the effective receive message (modified variant if present).
+	recvMsg *flow.Message
+	// originalRecvMsg is the original receive message before modification (nil if no variant).
+	originalRecvMsg *flow.Message
+}
+
+// categorizeMessages splits messages by direction and resolves variant pairs.
+// For each direction, if multiple messages exist, the "modified" variant is the effective
+// message and the "original" variant is preserved for diff display.
+func categorizeMessages(msgs []*flow.Message) categorizedMessages {
+	var sendMsgs []*flow.Message
+	var recvMsgs []*flow.Message
+	for _, msg := range msgs {
+		if msg.Direction == "send" {
+			sendMsgs = append(sendMsgs, msg)
+		}
+		if msg.Direction == "receive" {
+			recvMsgs = append(recvMsgs, msg)
+		}
+	}
+
+	var result categorizedMessages
+	result.sendMsg, result.originalSendMsg = resolveVariantPair(sendMsgs)
+	result.recvMsg, result.originalRecvMsg = resolveVariantPair(recvMsgs)
+	return result
+}
+
+// resolveVariantPair determines the effective and original messages from a slice of
+// directional messages. If variants exist, "modified" is the effective message and
+// "original" is preserved for diff display.
+func resolveVariantPair(msgs []*flow.Message) (effective, original *flow.Message) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	if len(msgs) == 1 {
+		return msgs[0], nil
+	}
+	for _, m := range msgs {
+		variant := m.Metadata["variant"]
+		if variant == "modified" {
+			effective = m
+		} else if variant == "original" {
+			original = m
+		}
+	}
+	// Fallback: if no variant metadata, use the last as effective and first as original.
+	if effective == nil {
+		effective = msgs[len(msgs)-1]
+		original = msgs[0]
+	}
+	return effective, original
+}
+
+// buildOriginalRequest builds a queryVariantRequest from the original send message.
+// Returns nil if originalMsg is nil.
+func buildOriginalRequest(originalMsg *flow.Message) *queryVariantRequest {
+	if originalMsg == nil {
+		return nil
+	}
+	origBodyStr, origBodyEnc := encodeBody(originalMsg.Body)
+	var origURLStr string
+	if originalMsg.URL != nil {
+		origURLStr = originalMsg.URL.String()
+	}
+	return &queryVariantRequest{
+		Method:       originalMsg.Method,
+		URL:          origURLStr,
+		Headers:      originalMsg.Headers,
+		Body:         origBodyStr,
+		BodyEncoding: origBodyEnc,
+	}
+}
+
+// buildOriginalResponse builds a queryVariantResponse from the original receive message.
+// Returns nil if originalMsg is nil.
+func buildOriginalResponse(originalMsg *flow.Message) *queryVariantResponse {
+	if originalMsg == nil {
+		return nil
+	}
+	origBodyStr, origBodyEnc := encodeBody(originalMsg.Body)
+	return &queryVariantResponse{
+		StatusCode:    originalMsg.StatusCode,
+		Headers:       originalMsg.Headers,
+		Body:          origBodyStr,
+		BodyEncoding:  origBodyEnc,
+		BodyTruncated: originalMsg.BodyTruncated,
+	}
+}
+
+// buildMessagePreview creates a preview of messages for streaming flows, limited to streamPreviewLimit.
+func buildMessagePreview(msgs []*flow.Message) []queryMessageEntry {
+	previewLimit := streamPreviewLimit
+	if previewLimit > len(msgs) {
+		previewLimit = len(msgs)
+	}
+	return convertMessagesToEntries(msgs[:previewLimit])
+}
+
 // handleQueryFlow returns detailed information about a single flow.
 func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowResult, error) {
 	if s.deps.store == nil {
@@ -330,61 +440,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	// Collect send messages (may include original + modified variants) and receive messages.
-	var sendMsgs []*flow.Message
-	var recvMsgs []*flow.Message
-	for _, msg := range msgs {
-		if msg.Direction == "send" {
-			sendMsgs = append(sendMsgs, msg)
-		}
-		if msg.Direction == "receive" {
-			recvMsgs = append(recvMsgs, msg)
-		}
-	}
-
-	// Determine the effective send message (the one actually sent to the server).
-	// If variants exist, the "modified" variant is the effective request.
-	// The "original" variant is preserved separately for diff display.
-	var sendMsg, originalSendMsg *flow.Message
-	if len(sendMsgs) > 1 {
-		for _, m := range sendMsgs {
-			variant := m.Metadata["variant"]
-			if variant == "modified" {
-				sendMsg = m
-			} else if variant == "original" {
-				originalSendMsg = m
-			}
-		}
-		// Fallback: if no variant metadata, use the last send message.
-		if sendMsg == nil {
-			sendMsg = sendMsgs[len(sendMsgs)-1]
-			originalSendMsg = sendMsgs[0]
-		}
-	} else if len(sendMsgs) == 1 {
-		sendMsg = sendMsgs[0]
-	}
-
-	// Determine the effective receive message (the one actually sent to the client).
-	// If variants exist, the "modified" variant is the effective response.
-	// The "original" variant is preserved separately for diff display.
-	var recvMsg, originalRecvMsg *flow.Message
-	if len(recvMsgs) > 1 {
-		for _, m := range recvMsgs {
-			variant := m.Metadata["variant"]
-			if variant == "modified" {
-				recvMsg = m
-			} else if variant == "original" {
-				originalRecvMsg = m
-			}
-		}
-		// Fallback: if no variant metadata, use the last receive message.
-		if recvMsg == nil {
-			recvMsg = recvMsgs[len(recvMsgs)-1]
-			originalRecvMsg = recvMsgs[0]
-		}
-	} else if len(recvMsgs) == 1 {
-		recvMsg = recvMsgs[0]
-	}
+	cat := categorizeMessages(msgs)
 
 	var urlStr, method string
 	var reqHeaders, respHeaders map[string][]string
@@ -393,55 +449,25 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	var statusCode int
 	var rawReqStr, rawRespStr string
 
-	if sendMsg != nil {
-		method = sendMsg.Method
-		if sendMsg.URL != nil {
-			urlStr = sendMsg.URL.String()
+	if cat.sendMsg != nil {
+		method = cat.sendMsg.Method
+		if cat.sendMsg.URL != nil {
+			urlStr = cat.sendMsg.URL.String()
 		}
-		reqHeaders = sendMsg.Headers
-		reqBody = sendMsg.Body
-		reqTruncated = sendMsg.BodyTruncated
-		if len(sendMsg.RawBytes) > 0 {
-			rawReqStr = base64.StdEncoding.EncodeToString(sendMsg.RawBytes)
-		}
-	}
-	if recvMsg != nil {
-		statusCode = recvMsg.StatusCode
-		respHeaders = recvMsg.Headers
-		respBody = recvMsg.Body
-		respTruncated = recvMsg.BodyTruncated
-		if len(recvMsg.RawBytes) > 0 {
-			rawRespStr = base64.StdEncoding.EncodeToString(recvMsg.RawBytes)
+		reqHeaders = cat.sendMsg.Headers
+		reqBody = cat.sendMsg.Body
+		reqTruncated = cat.sendMsg.BodyTruncated
+		if len(cat.sendMsg.RawBytes) > 0 {
+			rawReqStr = base64.StdEncoding.EncodeToString(cat.sendMsg.RawBytes)
 		}
 	}
-
-	// Build original request variant if available.
-	var originalReq *queryVariantRequest
-	if originalSendMsg != nil {
-		origBodyStr, origBodyEnc := encodeBody(originalSendMsg.Body)
-		var origURLStr string
-		if originalSendMsg.URL != nil {
-			origURLStr = originalSendMsg.URL.String()
-		}
-		originalReq = &queryVariantRequest{
-			Method:       originalSendMsg.Method,
-			URL:          origURLStr,
-			Headers:      originalSendMsg.Headers,
-			Body:         origBodyStr,
-			BodyEncoding: origBodyEnc,
-		}
-	}
-
-	// Build original response variant if available.
-	var originalResp *queryVariantResponse
-	if originalRecvMsg != nil {
-		origRespBodyStr, origRespBodyEnc := encodeBody(originalRecvMsg.Body)
-		originalResp = &queryVariantResponse{
-			StatusCode:    originalRecvMsg.StatusCode,
-			Headers:       originalRecvMsg.Headers,
-			Body:          origRespBodyStr,
-			BodyEncoding:  origRespBodyEnc,
-			BodyTruncated: originalRecvMsg.BodyTruncated,
+	if cat.recvMsg != nil {
+		statusCode = cat.recvMsg.StatusCode
+		respHeaders = cat.recvMsg.Headers
+		respBody = cat.recvMsg.Body
+		respTruncated = cat.recvMsg.BodyTruncated
+		if len(cat.recvMsg.RawBytes) > 0 {
+			rawRespStr = base64.StdEncoding.EncodeToString(cat.recvMsg.RawBytes)
 		}
 	}
 
@@ -488,44 +514,13 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		ConnInfo:              connInfo,
 		MessageCount:          len(msgs),
 		ProtocolSummary:       summary,
-		OriginalRequest:       originalReq,
-		OriginalResponse:      originalResp,
+		OriginalRequest:       buildOriginalRequest(cat.originalSendMsg),
+		OriginalResponse:      buildOriginalResponse(cat.originalRecvMsg),
 	}
 
 	// For streaming flows, include a message preview instead of full request/response.
 	if fl.FlowType != "unary" {
-		previewLimit := streamPreviewLimit
-		if previewLimit > len(msgs) {
-			previewLimit = len(msgs)
-		}
-		preview := make([]queryMessageEntry, 0, previewLimit)
-		for _, msg := range msgs[:previewLimit] {
-			// Use Body for text content; fall back to RawBytes for binary protocols.
-			bodyData := msg.Body
-			if len(bodyData) == 0 && len(msg.RawBytes) > 0 {
-				bodyData = msg.RawBytes
-			}
-			bodyStr, bodyEnc := encodeBody(bodyData)
-			var msgURLStr string
-			if msg.URL != nil {
-				msgURLStr = msg.URL.String()
-			}
-			entry := queryMessageEntry{
-				ID:           msg.ID,
-				Sequence:     msg.Sequence,
-				Direction:    msg.Direction,
-				Method:       msg.Method,
-				URL:          msgURLStr,
-				StatusCode:   msg.StatusCode,
-				Headers:      msg.Headers,
-				Body:         bodyStr,
-				BodyEncoding: bodyEnc,
-				Timestamp:    msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-				Metadata:     msg.Metadata,
-			}
-			preview = append(preview, entry)
-		}
-		result.MessagePreview = preview
+		result.MessagePreview = buildMessagePreview(msgs)
 	}
 
 	return nil, result, nil
@@ -555,74 +550,11 @@ type queryMessagesResult struct {
 	Total    int                 `json:"total"`
 }
 
-// handleQueryMessages returns paginated messages for a flow.
-func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMessagesResult, error) {
-	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("flow store is not initialized")
-	}
-
-	if input.ID == "" {
-		return nil, nil, fmt.Errorf("id is required for messages resource")
-	}
-
-	if input.Offset < 0 {
-		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
-	}
-
-	// Verify the flow exists and resolve prefix IDs.
-	fl, err := s.deps.store.GetFlow(ctx, input.ID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get flow: %w", err)
-	}
-	resolvedID := fl.ID
-
-	// Get total message count for pagination.
-	total, err := s.deps.store.CountMessages(ctx, resolvedID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("count messages: %w", err)
-	}
-
-	// Build message list options with direction filter if specified.
-	msgOpts := flow.MessageListOptions{}
-	if input.Filter != nil && input.Filter.Direction != "" {
-		if input.Filter.Direction != "send" && input.Filter.Direction != "receive" {
-			return nil, nil, fmt.Errorf("direction filter must be \"send\" or \"receive\", got %q", input.Filter.Direction)
-		}
-		msgOpts.Direction = input.Filter.Direction
-	}
-
-	// Fetch messages with optional direction filter.
-	allMsgs, err := s.deps.store.GetMessages(ctx, resolvedID, msgOpts)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get messages: %w", err)
-	}
-
-	// Use filtered count as total for pagination when direction filter is active.
-	filteredTotal := total
-	if msgOpts.Direction != "" {
-		filteredTotal = len(allMsgs)
-	}
-
-	// Apply pagination in-memory.
-	limit := input.Limit
-	if limit <= 0 || limit > maxListLimit {
-		limit = defaultListLimit
-	}
-
-	offset := input.Offset
-	if offset > len(allMsgs) {
-		offset = len(allMsgs)
-	}
-	end := offset + limit
-	if end > len(allMsgs) {
-		end = len(allMsgs)
-	}
-	pageMsgs := allMsgs[offset:end]
-
-	entries := make([]queryMessageEntry, 0, len(pageMsgs))
-	for _, msg := range pageMsgs {
-		// Use Body for text content; fall back to RawBytes for binary protocols
-		// (e.g. WebSocket binary/control frames store payload in RawBytes).
+// convertMessagesToEntries converts flow messages to queryMessageEntry slice.
+// It uses Body for text content and falls back to RawBytes for binary protocols.
+func convertMessagesToEntries(msgs []*flow.Message) []queryMessageEntry {
+	entries := make([]queryMessageEntry, 0, len(msgs))
+	for _, msg := range msgs {
 		bodyData := msg.Body
 		if len(bodyData) == 0 && len(msg.RawBytes) > 0 {
 			bodyData = msg.RawBytes
@@ -648,6 +580,81 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 			Timestamp:    msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		})
 	}
+	return entries
+}
+
+// buildMessageListOptions validates and builds message list options from query input.
+// Returns an error if the direction filter value is invalid.
+func buildMessageListOptions(input queryInput) (flow.MessageListOptions, error) {
+	opts := flow.MessageListOptions{}
+	if input.Filter != nil && input.Filter.Direction != "" {
+		if input.Filter.Direction != "send" && input.Filter.Direction != "receive" {
+			return opts, fmt.Errorf("direction filter must be \"send\" or \"receive\", got %q", input.Filter.Direction)
+		}
+		opts.Direction = input.Filter.Direction
+	}
+	return opts, nil
+}
+
+// paginateMessages applies offset and limit to a message slice, returning the page.
+func paginateMessages(msgs []*flow.Message, offset, limit int) []*flow.Message {
+	if limit <= 0 || limit > maxListLimit {
+		limit = defaultListLimit
+	}
+	if offset > len(msgs) {
+		offset = len(msgs)
+	}
+	end := offset + limit
+	if end > len(msgs) {
+		end = len(msgs)
+	}
+	return msgs[offset:end]
+}
+
+// handleQueryMessages returns paginated messages for a flow.
+func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMessagesResult, error) {
+	if s.deps.store == nil {
+		return nil, nil, fmt.Errorf("flow store is not initialized")
+	}
+
+	if input.ID == "" {
+		return nil, nil, fmt.Errorf("id is required for messages resource")
+	}
+
+	if input.Offset < 0 {
+		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
+	}
+
+	// Verify the flow exists and resolve prefix IDs.
+	fl, err := s.deps.store.GetFlow(ctx, input.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get flow: %w", err)
+	}
+
+	// Get total message count for pagination.
+	total, err := s.deps.store.CountMessages(ctx, fl.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("count messages: %w", err)
+	}
+
+	msgOpts, err := buildMessageListOptions(input)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	allMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, msgOpts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get messages: %w", err)
+	}
+
+	// Use filtered count as total for pagination when direction filter is active.
+	filteredTotal := total
+	if msgOpts.Direction != "" {
+		filteredTotal = len(allMsgs)
+	}
+
+	pageMsgs := paginateMessages(allMsgs, input.Offset, input.Limit)
+	entries := convertMessagesToEntries(pageMsgs)
 
 	result := &queryMessagesResult{
 		Messages: entries,
