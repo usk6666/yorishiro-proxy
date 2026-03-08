@@ -296,6 +296,115 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 	}
 }
 
+// recordReceiveWithVariant records the receive phase with variant support. If
+// the response was modified by intercept (detected by comparing snap against
+// the current response), it records two receive messages:
+//   - Sequence N:   original (variant="original") with the snapshot's status/headers/body
+//   - Sequence N+1: modified (variant="modified") with the current status/headers/body
+//
+// If no modification occurred (snap is nil or status/headers/body unchanged),
+// this behaves identically to recordReceive (single receive, no variant metadata).
+func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *sendRecordResult, p receiveRecordParams, snap *responseSnapshot, logger *slog.Logger) {
+	if sendResult == nil || h.Store == nil {
+		return
+	}
+
+	if p.resp == nil {
+		return
+	}
+
+	// Detect whether modification occurred.
+	modified := snap != nil && responseModified(*snap, p.resp.StatusCode, p.resp.Header, p.respBody)
+
+	if !modified {
+		// No modification: delegate to the standard single-message recording.
+		h.recordReceive(ctx, sendResult, p, logger)
+		return
+	}
+
+	// Decompress the original snapshot body for recording.
+	origRecordBody := snap.body
+	var origTruncated bool
+	origDecompressed := false
+	if ce := snap.headers.Get("Content-Encoding"); ce != "" {
+		decoded, err := httputil.DecompressBody(snap.body, ce, config.MaxBodySize)
+		if err != nil {
+			logger.Debug("original response body decompression failed, storing as-is", "encoding", ce, "error", err)
+		} else {
+			origRecordBody = decoded
+			origDecompressed = true
+		}
+	}
+	if len(origRecordBody) > int(config.MaxBodySize) {
+		origRecordBody = origRecordBody[:int(config.MaxBodySize)]
+		origTruncated = true
+	}
+
+	// Record original (unmodified) response.
+	origMsg := &flow.Message{
+		FlowID:        sendResult.flowID,
+		Sequence:      sendResult.recvSequence,
+		Direction:     "receive",
+		Timestamp:     p.start.Add(p.duration),
+		StatusCode:    snap.statusCode,
+		Headers:       httputil.RecordingHeaders(snap.headers, origDecompressed, len(origRecordBody)),
+		Body:          origRecordBody,
+		RawBytes:      p.rawResponse,
+		BodyTruncated: origTruncated,
+		Metadata:      map[string]string{"variant": "original"},
+	}
+	if err := h.Store.AppendMessage(ctx, origMsg); err != nil {
+		logger.Error("original receive message save failed", "error", err)
+	}
+
+	// Decompress the modified body for recording.
+	modRecordBody := p.respBody
+	var modTruncated bool
+	modDecompressed := false
+	if ce := p.resp.Header.Get("Content-Encoding"); ce != "" {
+		decoded, err := httputil.DecompressBody(p.respBody, ce, config.MaxBodySize)
+		if err != nil {
+			logger.Debug("modified response body decompression failed, storing as-is", "encoding", ce, "error", err)
+		} else {
+			modRecordBody = decoded
+			modDecompressed = true
+		}
+	}
+	if len(modRecordBody) > int(config.MaxBodySize) {
+		modRecordBody = modRecordBody[:int(config.MaxBodySize)]
+		modTruncated = true
+	}
+
+	// Record modified response.
+	modMsg := &flow.Message{
+		FlowID:        sendResult.flowID,
+		Sequence:      sendResult.recvSequence + 1,
+		Direction:     "receive",
+		Timestamp:     p.start.Add(p.duration),
+		StatusCode:    p.resp.StatusCode,
+		Headers:       httputil.RecordingHeaders(p.resp.Header, modDecompressed, len(modRecordBody)),
+		Body:          modRecordBody,
+		BodyTruncated: modTruncated,
+		Metadata:      map[string]string{"variant": "modified"},
+	}
+	if err := h.Store.AppendMessage(ctx, modMsg); err != nil {
+		logger.Error("modified receive message save failed", "error", err)
+	}
+
+	// Update the flow to complete.
+	update := flow.FlowUpdate{
+		State:      "complete",
+		Duration:   p.duration,
+		ServerAddr: p.serverAddr,
+	}
+	if p.tlsServerCertSubject != "" {
+		update.TLSServerCertSubject = p.tlsServerCertSubject
+	}
+	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+		logger.Error("flow update failed", "error", err)
+	}
+}
+
 // recordSendError updates a flow to State="error" after an upstream failure.
 // The send message is already recorded by recordSend; this only updates the
 // flow metadata.

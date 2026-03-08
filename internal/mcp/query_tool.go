@@ -88,6 +88,7 @@ func (s *Server) registerQuery() {
 			"Streaming flows (flow_type != unary) include message_preview with the first 10 messages. " +
 			"Messages include metadata with protocol-specific fields (e.g. WebSocket opcode, gRPC service/method/grpc_status, variant original/modified). " +
 			"When intercept/transform modifies a request, the flow contains variant messages: original (seq=0, variant=original) and modified (seq=1, variant=modified). " +
+			"Similarly, when intercept modifies a response, the flow contains variant receive messages with original_response in the flow detail. " +
 			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
 			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
 			"Results are paginated with limit/offset for flows, messages, fuzz_jobs, and fuzz_results resources. " +
@@ -212,8 +213,13 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 					}
 				}
 			}
-			if msg.Direction == "receive" && statusCode == 0 {
-				statusCode = msg.StatusCode
+			if msg.Direction == "receive" {
+				// For variant messages, prefer the "modified" variant
+				// as it represents what was actually sent to the client.
+				variant := msg.Metadata["variant"]
+				if statusCode == 0 || variant == "modified" {
+					statusCode = msg.StatusCode
+				}
 			}
 		}
 
@@ -277,6 +283,10 @@ type queryFlowResult struct {
 	// when a variant exists (intercept/transform modified the request).
 	// Only populated when the flow contains variant messages.
 	OriginalRequest *queryVariantRequest `json:"original_request,omitempty"`
+	// OriginalResponse holds the original (pre-modification) response data
+	// when a variant exists (intercept modified the response).
+	// Only populated when the flow contains variant receive messages.
+	OriginalResponse *queryVariantResponse `json:"original_response,omitempty"`
 }
 
 // queryVariantRequest represents the original request before intercept/transform modification.
@@ -286,6 +296,15 @@ type queryVariantRequest struct {
 	Headers      map[string][]string `json:"headers"`
 	Body         string              `json:"body"`
 	BodyEncoding string              `json:"body_encoding"`
+}
+
+// queryVariantResponse represents the original response before intercept modification.
+type queryVariantResponse struct {
+	StatusCode    int                 `json:"status_code"`
+	Headers       map[string][]string `json:"headers"`
+	Body          string              `json:"body"`
+	BodyEncoding  string              `json:"body_encoding"`
+	BodyTruncated bool                `json:"body_truncated"`
 }
 
 // streamPreviewLimit is the maximum number of messages to include in a streaming flow preview.
@@ -311,15 +330,15 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	// Collect send messages (may include original + modified variants) and the first receive.
+	// Collect send messages (may include original + modified variants) and receive messages.
 	var sendMsgs []*flow.Message
-	var recvMsg *flow.Message
+	var recvMsgs []*flow.Message
 	for _, msg := range msgs {
 		if msg.Direction == "send" {
 			sendMsgs = append(sendMsgs, msg)
 		}
-		if msg.Direction == "receive" && recvMsg == nil {
-			recvMsg = msg
+		if msg.Direction == "receive" {
+			recvMsgs = append(recvMsgs, msg)
 		}
 	}
 
@@ -343,6 +362,28 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		}
 	} else if len(sendMsgs) == 1 {
 		sendMsg = sendMsgs[0]
+	}
+
+	// Determine the effective receive message (the one actually sent to the client).
+	// If variants exist, the "modified" variant is the effective response.
+	// The "original" variant is preserved separately for diff display.
+	var recvMsg, originalRecvMsg *flow.Message
+	if len(recvMsgs) > 1 {
+		for _, m := range recvMsgs {
+			variant := m.Metadata["variant"]
+			if variant == "modified" {
+				recvMsg = m
+			} else if variant == "original" {
+				originalRecvMsg = m
+			}
+		}
+		// Fallback: if no variant metadata, use the last receive message.
+		if recvMsg == nil {
+			recvMsg = recvMsgs[len(recvMsgs)-1]
+			originalRecvMsg = recvMsgs[0]
+		}
+	} else if len(recvMsgs) == 1 {
+		recvMsg = recvMsgs[0]
 	}
 
 	var urlStr, method string
@@ -391,6 +432,19 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		}
 	}
 
+	// Build original response variant if available.
+	var originalResp *queryVariantResponse
+	if originalRecvMsg != nil {
+		origRespBodyStr, origRespBodyEnc := encodeBody(originalRecvMsg.Body)
+		originalResp = &queryVariantResponse{
+			StatusCode:    originalRecvMsg.StatusCode,
+			Headers:       originalRecvMsg.Headers,
+			Body:          origRespBodyStr,
+			BodyEncoding:  origRespBodyEnc,
+			BodyTruncated: originalRecvMsg.BodyTruncated,
+		}
+	}
+
 	reqBodyStr, reqEncoding := encodeBody(reqBody)
 	respBodyStr, respEncoding := encodeBody(respBody)
 
@@ -435,6 +489,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		MessageCount:          len(msgs),
 		ProtocolSummary:       summary,
 		OriginalRequest:       originalReq,
+		OriginalResponse:      originalResp,
 	}
 
 	// For streaming flows, include a message preview instead of full request/response.

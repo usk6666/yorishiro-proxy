@@ -437,6 +437,9 @@ func (h *Handler) handleStream(
 		logger.Warn("HTTP/2 failed to read response body", "error", err)
 	}
 
+	// Snapshot response before intercept for variant recording.
+	respSnap := snapshotResponse(resp.StatusCode, resp.Header, fullRespBody)
+
 	// Response intercept: check if the response matches any intercept rules
 	// and allow the AI agent to modify or drop it before sending to the client.
 	if action, intercepted := h.interceptResponse(ctx, req, resp, fullRespBody, logger); intercepted {
@@ -526,14 +529,14 @@ func (h *Handler) handleStream(
 			}
 		}
 	} else {
-		h.recordReceive(ctx, sendResult, receiveRecordParams{
+		h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 			start:                start,
 			duration:             duration,
 			serverAddr:           serverAddr,
 			tlsServerCertSubject: tlsCertSubject,
 			resp:                 resp,
 			respBody:             fullRespBody,
-		}, logger)
+		}, &respSnap, logger)
 	}
 
 	logProtocol := "http/2"

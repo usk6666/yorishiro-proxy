@@ -616,6 +616,112 @@ export function FlowDetailPage() {
         </div>
       )}
 
+      {/* Variant diff: original vs modified response */}
+      {flowData.original_response && (
+        <div className="sd-section">
+          <h2 className="sd-section-title">Response Modification (Original vs Modified)</h2>
+          <div className="sd-panels">
+            {/* Original response */}
+            <div className="sd-panel">
+              <div className="sd-panel-header">
+                <span className="sd-panel-title">Original Response</span>
+                <Badge variant="default">original</Badge>
+                {flowData.original_response.status_code > 0 && (
+                  <Badge
+                    variant={
+                      flowData.original_response.status_code < 300
+                        ? "success"
+                        : flowData.original_response.status_code < 400
+                          ? "info"
+                          : flowData.original_response.status_code < 500
+                            ? "warning"
+                            : "danger"
+                    }
+                  >
+                    {flowData.original_response.status_code}
+                  </Badge>
+                )}
+              </div>
+              <Tabs
+                tabs={resTabs}
+                activeTab={responseTab}
+                onTabChange={setResponseTab}
+              >
+                {responseTab === "pseudo" && isH2 && (
+                  <Http2PseudoHeaders
+                    headers={flowData.original_response.headers}
+                    type="response"
+                  />
+                )}
+                {responseTab === "headers" && (
+                  <HeadersTable
+                    headers={
+                      isH2
+                        ? filterRegularHeaders(flowData.original_response.headers)
+                        : flowData.original_response.headers
+                    }
+                  />
+                )}
+                {responseTab === "body" && (
+                  <BodyViewer
+                    body={flowData.original_response.body}
+                    encoding={flowData.original_response.body_encoding}
+                    truncated={flowData.original_response.body_truncated}
+                    headers={flowData.original_response.headers}
+                  />
+                )}
+              </Tabs>
+            </div>
+
+            {/* Modified response */}
+            <div className="sd-panel">
+              <div className="sd-panel-header">
+                <span className="sd-panel-title">Modified Response</span>
+                <Badge variant="warning">modified</Badge>
+                {flowData.response_status_code > 0 && (
+                  <Badge
+                    variant={
+                      flowData.response_status_code < 300
+                        ? "success"
+                        : flowData.response_status_code < 400
+                          ? "info"
+                          : flowData.response_status_code < 500
+                            ? "warning"
+                            : "danger"
+                    }
+                  >
+                    {flowData.response_status_code}
+                  </Badge>
+                )}
+              </div>
+              <Tabs
+                tabs={resTabs}
+                activeTab={responseTab}
+                onTabChange={setResponseTab}
+              >
+                {responseTab === "pseudo" && isH2 && (
+                  <Http2PseudoHeaders
+                    headers={flowData.response_headers}
+                    type="response"
+                  />
+                )}
+                {responseTab === "headers" && (
+                  <HeadersTable headers={displayRespHeaders} />
+                )}
+                {responseTab === "body" && (
+                  <BodyViewer
+                    body={flowData.response_body}
+                    encoding={flowData.response_body_encoding}
+                    truncated={flowData.response_body_truncated}
+                    headers={flowData.response_headers}
+                  />
+                )}
+              </Tabs>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Request / Response panels */}
       <div className="sd-panels">
         {/* Request panel (shown when no variant diff) */}
@@ -650,7 +756,8 @@ export function FlowDetailPage() {
           </div>
         )}
 
-        {/* Response panel */}
+        {/* Response panel (shown when no response variant diff) */}
+        {!flowData.original_response && (
         <div className={flowData.original_request ? "sd-panel sd-panel--full-width" : "sd-panel"}>
           <div className="sd-panel-header">
             <span className="sd-panel-title">Response</span>
@@ -709,6 +816,7 @@ export function FlowDetailPage() {
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );
