@@ -63,57 +63,81 @@ func evaluateConditions(guard *Guard, stepResults map[string]*stepState, kvStore
 	// All conditions must pass (AND).
 	conditions := 0
 
-	if guard.StatusCode != nil {
-		conditions++
-		if state.StatusCode != *guard.StatusCode {
-			return false, nil
-		}
+	checkers := []func() (bool, error){
+		func() (bool, error) { return checkStatusCode(guard, state, &conditions) },
+		func() (bool, error) { return checkStatusCodeRange(guard, state, &conditions) },
+		func() (bool, error) { return checkHeaderMatch(guard, state, &conditions) },
+		func() (bool, error) { return checkBodyMatch(guard, state, &conditions) },
+		func() (bool, error) { return checkExtractedVar(guard, kvStore, &conditions) },
 	}
 
-	if guard.StatusCodeRange[0] != 0 || guard.StatusCodeRange[1] != 0 {
-		conditions++
-		if state.StatusCode < guard.StatusCodeRange[0] || state.StatusCode > guard.StatusCodeRange[1] {
-			return false, nil
-		}
-	}
-
-	if len(guard.HeaderMatch) > 0 {
-		conditions++
-		match, err := matchHeaders(guard.HeaderMatch, state.Headers)
+	for _, check := range checkers {
+		ok, err := check()
 		if err != nil {
-			return false, fmt.Errorf("header_match evaluation: %w", err)
+			return false, err
 		}
-		if !match {
-			return false, nil
-		}
-	}
-
-	if guard.BodyMatch != "" {
-		conditions++
-		match, err := matchBody(guard.BodyMatch, state.Body)
-		if err != nil {
-			return false, fmt.Errorf("body_match evaluation: %w", err)
-		}
-		if !match {
-			return false, nil
-		}
-	}
-
-	if guard.ExtractedVar != "" {
-		conditions++
-		_, exists := kvStore[guard.ExtractedVar]
-		if !exists {
+		if !ok {
 			return false, nil
 		}
 	}
 
 	// If no conditions were specified at all (just a step reference),
 	// treat it as checking that the step executed successfully.
-	if conditions == 0 {
+	return true, nil
+}
+
+// checkStatusCode checks if the step's status code matches the guard's expected status code.
+func checkStatusCode(guard *Guard, state *stepState, conditions *int) (bool, error) {
+	if guard.StatusCode == nil {
 		return true, nil
 	}
+	*conditions++
+	return state.StatusCode == *guard.StatusCode, nil
+}
 
-	return true, nil
+// checkStatusCodeRange checks if the step's status code falls within the guard's range.
+func checkStatusCodeRange(guard *Guard, state *stepState, conditions *int) (bool, error) {
+	if guard.StatusCodeRange[0] == 0 && guard.StatusCodeRange[1] == 0 {
+		return true, nil
+	}
+	*conditions++
+	return state.StatusCode >= guard.StatusCodeRange[0] && state.StatusCode <= guard.StatusCodeRange[1], nil
+}
+
+// checkHeaderMatch checks if the step's headers match the guard's header patterns.
+func checkHeaderMatch(guard *Guard, state *stepState, conditions *int) (bool, error) {
+	if len(guard.HeaderMatch) == 0 {
+		return true, nil
+	}
+	*conditions++
+	match, err := matchHeaders(guard.HeaderMatch, state.Headers)
+	if err != nil {
+		return false, fmt.Errorf("header_match evaluation: %w", err)
+	}
+	return match, nil
+}
+
+// checkBodyMatch checks if the step's body matches the guard's body pattern.
+func checkBodyMatch(guard *Guard, state *stepState, conditions *int) (bool, error) {
+	if guard.BodyMatch == "" {
+		return true, nil
+	}
+	*conditions++
+	match, err := matchBody(guard.BodyMatch, state.Body)
+	if err != nil {
+		return false, fmt.Errorf("body_match evaluation: %w", err)
+	}
+	return match, nil
+}
+
+// checkExtractedVar checks if the guard's referenced variable exists in the KV store.
+func checkExtractedVar(guard *Guard, kvStore map[string]string, conditions *int) (bool, error) {
+	if guard.ExtractedVar == "" {
+		return true, nil
+	}
+	*conditions++
+	_, exists := kvStore[guard.ExtractedVar]
+	return exists, nil
 }
 
 // matchHeaders checks if all header patterns match (AND evaluation).
