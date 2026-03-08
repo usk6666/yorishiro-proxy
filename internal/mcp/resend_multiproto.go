@@ -44,7 +44,6 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		return nil, nil, fmt.Errorf("flow_id is required for tcp_replay action")
 	}
 
-	// Retrieve the flow.
 	fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
@@ -54,7 +53,6 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		return nil, nil, fmt.Errorf("tcp_replay is only supported for TCP sessions, got protocol %q", fl.Protocol)
 	}
 
-	// Retrieve all send messages.
 	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
@@ -63,132 +61,134 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		return nil, nil, fmt.Errorf("flow %s has no send messages to replay", params.FlowID)
 	}
 
-	// Determine target address.
-	targetAddr := params.TargetAddr
-	if targetAddr == "" {
-		if fl.ConnInfo != nil && fl.ConnInfo.ServerAddr != "" {
-			targetAddr = fl.ConnInfo.ServerAddr
-		} else {
-			return nil, nil, fmt.Errorf("flow has no server address and no target_addr was provided")
-		}
+	targetAddr, err := resolveTargetAddrFromConnInfo(fl, params)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Target scope enforcement: check the target address.
 	if err := s.checkTargetScopeAddr("", targetAddr); err != nil {
 		return nil, nil, err
 	}
 
-	// Determine timeout.
+	useTLS, timeout := determineTLSAndTimeout(false, params)
+
+	totalBytesSent, respData, start, duration, err := s.replayAllMessages(ctx, targetAddr, useTLS, timeout, sendMsgs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	result, err := s.recordReplay(ctx, targetAddr, params, sendMsgs, respData, totalBytesSent, start, duration)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return nil, result, nil
+}
+
+// resolveTargetAddrFromConnInfo determines the target address from the flow's
+// connection info or the explicit target_addr parameter.
+func resolveTargetAddrFromConnInfo(fl *flow.Flow, params resendParams) (string, error) {
+	if params.TargetAddr != "" {
+		return params.TargetAddr, nil
+	}
+	if fl.ConnInfo != nil && fl.ConnInfo.ServerAddr != "" {
+		return fl.ConnInfo.ServerAddr, nil
+	}
+	return "", fmt.Errorf("flow has no server address and no target_addr was provided")
+}
+
+// determineTLSAndTimeout resolves TLS and timeout settings from the default protocol
+// state and explicit parameter overrides.
+func determineTLSAndTimeout(defaultTLS bool, params resendParams) (bool, time.Duration) {
+	useTLS := defaultTLS
+	if params.UseTLS != nil {
+		useTLS = *params.UseTLS
+	}
 	timeout := defaultReplayTimeout
 	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
 		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
 	}
+	return useTLS, timeout
+}
 
-	// Determine TLS.
-	useTLS := false
-	if params.UseTLS != nil {
-		useTLS = *params.UseTLS
-	}
-
-	// Establish connection.
+// replayAllMessages establishes a connection and sends all messages sequentially,
+// returning the total bytes sent, response data, and timing information.
+func (s *Server) replayAllMessages(ctx context.Context, targetAddr string, useTLS bool, timeout time.Duration, sendMsgs []*flow.Message) (int, []byte, time.Time, time.Duration, error) {
 	dialer := s.rawDialerFunc()
 	start := time.Now()
 
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to %s: %w", targetAddr, err)
+		return 0, nil, start, 0, fmt.Errorf("connect to %s: %w", targetAddr, err)
 	}
 	defer conn.Close()
 
-	// Upgrade to TLS if needed.
 	if useTLS {
-		host, _, _ := net.SplitHostPort(targetAddr)
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: true, //nolint:gosec // tcp_replay intentionally targets test servers
-			MinVersion:         tls.VersionTLS12,
-		})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, nil, fmt.Errorf("TLS handshake with %s: %w", targetAddr, err)
+		conn, err = upgradeTLS(ctx, conn, targetAddr)
+		if err != nil {
+			return 0, nil, start, 0, err
 		}
-		conn = tlsConn
 	}
 
-	// Set deadline.
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, nil, fmt.Errorf("set connection deadline: %w", err)
+		return 0, nil, start, 0, fmt.Errorf("set connection deadline: %w", err)
 	}
 
-	// Send all send messages sequentially.
 	totalBytesSent := 0
 	for _, msg := range sendMsgs {
 		if len(msg.Body) > 0 {
 			n, err := conn.Write(msg.Body)
 			if err != nil {
-				return nil, nil, fmt.Errorf("send message seq=%d: %w", msg.Sequence, err)
+				return totalBytesSent, nil, start, 0, fmt.Errorf("send message seq=%d: %w", msg.Sequence, err)
 			}
 			totalBytesSent += n
 		}
 	}
 
-	// Read response.
 	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
 	if err != nil && len(respData) == 0 {
-		return nil, nil, fmt.Errorf("read response: %w", err)
+		return totalBytesSent, nil, start, 0, fmt.Errorf("read response: %w", err)
 	}
 	duration := time.Since(start)
 
-	// Record the replay as a new flow.
+	return totalBytesSent, respData, start, duration, nil
+}
+
+// recordReplay saves the replayed flow and all its messages to the store.
+func (s *Server) recordReplay(ctx context.Context, targetAddr string, params resendParams, sendMsgs []*flow.Message, respData []byte, totalBytesSent int, start time.Time, duration time.Duration) (*resendReplayRawResult, error) {
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
 	}
 
 	newFl := &flow.Flow{
-		Protocol:  "TCP",
-		FlowType:  "bidirectional",
-		State:     "complete",
-		Timestamp: start,
-		Duration:  duration,
-		Tags:      tags,
-		ConnInfo: &flow.ConnectionInfo{
-			ServerAddr: targetAddr,
-		},
+		Protocol: "TCP", FlowType: "bidirectional", State: "complete",
+		Timestamp: start, Duration: duration, Tags: tags,
+		ConnInfo: &flow.ConnectionInfo{ServerAddr: targetAddr},
 	}
-
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
-		return nil, nil, fmt.Errorf("save replay_raw session: %w", err)
+		return nil, fmt.Errorf("save replay_raw session: %w", err)
 	}
 
-	// Save send messages.
 	seq := 0
 	for _, msg := range sendMsgs {
 		if len(msg.Body) > 0 {
-			newMsg := &flow.Message{
-				FlowID:    newFl.ID,
-				Sequence:  seq,
-				Direction: "send",
-				Timestamp: start,
-				Body:      msg.Body,
-			}
-			if err := s.deps.store.AppendMessage(ctx, newMsg); err != nil {
-				return nil, nil, fmt.Errorf("save replay_raw send message: %w", err)
+			if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+				FlowID: newFl.ID, Sequence: seq, Direction: "send",
+				Timestamp: start, Body: msg.Body,
+			}); err != nil {
+				return nil, fmt.Errorf("save replay_raw send message: %w", err)
 			}
 			seq++
 		}
 	}
 
-	// Save receive message.
 	if len(respData) > 0 {
-		newRecvMsg := &flow.Message{
-			FlowID:    newFl.ID,
-			Sequence:  seq,
-			Direction: "receive",
-			Timestamp: start.Add(duration),
-			Body:      respData,
-		}
-		if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
-			return nil, nil, fmt.Errorf("save replay_raw receive message: %w", err)
+		if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+			FlowID: newFl.ID, Sequence: seq, Direction: "receive",
+			Timestamp: start.Add(duration), Body: respData,
+		}); err != nil {
+			return nil, fmt.Errorf("save replay_raw receive message: %w", err)
 		}
 	}
 
@@ -197,17 +197,12 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		messagesReceived = 1
 	}
 
-	result := &resendReplayRawResult{
-		NewFlowID:          newFl.ID,
-		MessagesSent:       len(sendMsgs),
-		MessagesReceived:   messagesReceived,
-		TotalBytesSent:     totalBytesSent,
-		TotalBytesReceived: len(respData),
-		DurationMs:         duration.Milliseconds(),
-		Tag:                params.Tag,
-	}
-
-	return nil, result, nil
+	return &resendReplayRawResult{
+		NewFlowID: newFl.ID, MessagesSent: len(sendMsgs),
+		MessagesReceived: messagesReceived, TotalBytesSent: totalBytesSent,
+		TotalBytesReceived: len(respData), DurationMs: duration.Milliseconds(),
+		Tag: params.Tag,
+	}, nil
 }
 
 // resendWebSocketResult is the structured output of a WebSocket resend action.
@@ -234,103 +229,90 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, fmt.Errorf("message_sequence is required for WebSocket resend")
 	}
 
-	// Get the specific message.
-	allMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	targetMsg, err := findSendMessage(ctx, s.deps.store, fl.ID, *params.MessageSequence)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get messages: %w", err)
+		return nil, nil, err
 	}
 
-	var targetMsg *flow.Message
-	for _, msg := range allMsgs {
-		if msg.Sequence == *params.MessageSequence {
-			targetMsg = msg
-			break
-		}
-	}
-	if targetMsg == nil {
-		return nil, nil, fmt.Errorf("message with sequence %d not found in flow %s", *params.MessageSequence, fl.ID)
-	}
-	if targetMsg.Direction != "send" {
-		return nil, nil, fmt.Errorf("message sequence %d is a %q message, only send messages can be resent", *params.MessageSequence, targetMsg.Direction)
+	targetAddr, err := s.resolveWebSocketTargetAddr(ctx, fl, params)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Determine target address from session or override.
-	targetAddr := params.TargetAddr
-	if targetAddr == "" {
-		// Try to derive from the flow's first send message URL or ConnInfo.
-		if fl.ConnInfo != nil && fl.ConnInfo.ServerAddr != "" {
-			targetAddr = fl.ConnInfo.ServerAddr
-		} else {
-			// Look for URL in first send message.
-			sendMsgs, _ := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
-			for _, m := range sendMsgs {
-				if m.URL != nil {
-					host := m.URL.Hostname()
-					port := m.URL.Port()
-					if port == "" {
-						if m.URL.Scheme == "wss" || m.URL.Scheme == "https" {
-							port = "443"
-						} else {
-							port = "80"
-						}
-					}
-					targetAddr = net.JoinHostPort(host, port)
-					break
-				}
-			}
-		}
-		if targetAddr == "" {
-			return nil, nil, fmt.Errorf("cannot determine target address: no server address in session and no target_addr provided")
-		}
-	}
-
-	// Target scope enforcement: check the WebSocket target address.
 	if err := s.checkTargetScopeAddr("", targetAddr); err != nil {
 		return nil, nil, err
 	}
 
-	// Determine TLS.
-	useTLS := false
-	if params.UseTLS != nil {
-		useTLS = *params.UseTLS
-	} else if fl.ConnInfo != nil && fl.ConnInfo.TLSVersion != "" {
-		useTLS = true
-	}
+	defaultTLS := fl.ConnInfo != nil && fl.ConnInfo.TLSVersion != ""
+	useTLS, timeout := determineTLSAndTimeout(defaultTLS, params)
 
-	// Determine timeout.
-	timeout := defaultReplayTimeout
-	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
-		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
-	}
-
-	// Connect.
-	dialer := s.rawDialerFunc()
-	start := time.Now()
-
-	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
+	sendBody, err := resolveWebSocketBody(targetMsg, params)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to %s: %w", targetAddr, err)
+		return nil, nil, err
 	}
-	defer conn.Close()
 
-	if useTLS {
-		host, _, _ := net.SplitHostPort(targetAddr)
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: true, //nolint:gosec // WebSocket resend intentionally targets test servers
-			MinVersion:         tls.VersionTLS12,
-		})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, nil, fmt.Errorf("TLS handshake: %w", err)
+	respData, start, duration, err := s.establishAndSend(ctx, targetAddr, useTLS, timeout, sendBody)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	result, err := s.recordWebSocketResend(ctx, params, targetMsg, sendBody, respData, start, duration)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return nil, result, nil
+}
+
+// findSendMessage locates a specific send message by sequence number within a flow.
+func findSendMessage(ctx context.Context, store flow.Store, flowID string, seq int) (*flow.Message, error) {
+	allMsgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get messages: %w", err)
+	}
+
+	for _, msg := range allMsgs {
+		if msg.Sequence == seq {
+			if msg.Direction != "send" {
+				return nil, fmt.Errorf("message sequence %d is a %q message, only send messages can be resent", seq, msg.Direction)
+			}
+			return msg, nil
 		}
-		conn = tlsConn
+	}
+	return nil, fmt.Errorf("message with sequence %d not found in flow %s", seq, flowID)
+}
+
+// resolveWebSocketTargetAddr determines the target address for a WebSocket resend
+// from the explicit parameter, flow connection info, or the first send message URL.
+func (s *Server) resolveWebSocketTargetAddr(ctx context.Context, fl *flow.Flow, params resendParams) (string, error) {
+	if params.TargetAddr != "" {
+		return params.TargetAddr, nil
 	}
 
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, nil, fmt.Errorf("set deadline: %w", err)
+	if fl.ConnInfo != nil && fl.ConnInfo.ServerAddr != "" {
+		return fl.ConnInfo.ServerAddr, nil
 	}
 
-	// Apply body override if provided.
+	sendMsgs, _ := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	for _, m := range sendMsgs {
+		if m.URL != nil {
+			host := m.URL.Hostname()
+			port := m.URL.Port()
+			if port == "" {
+				if m.URL.Scheme == "wss" || m.URL.Scheme == "https" {
+					port = "443"
+				} else {
+					port = "80"
+				}
+			}
+			return net.JoinHostPort(host, port), nil
+		}
+	}
+	return "", fmt.Errorf("cannot determine target address: no server address in session and no target_addr provided")
+}
+
+// resolveWebSocketBody determines the body to send, applying any overrides.
+func resolveWebSocketBody(targetMsg *flow.Message, params resendParams) ([]byte, error) {
 	sendBody := targetMsg.Body
 	if params.OverrideBody != nil {
 		sendBody = []byte(*params.OverrideBody)
@@ -338,76 +320,99 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 	if params.OverrideBodyBase64 != nil {
 		decoded, err := base64.StdEncoding.DecodeString(*params.OverrideBodyBase64)
 		if err != nil {
-			return nil, nil, fmt.Errorf("invalid override_body_base64: %w", err)
+			return nil, fmt.Errorf("invalid override_body_base64: %w", err)
 		}
 		sendBody = decoded
 	}
+	return sendBody, nil
+}
 
-	// Send the message body directly.
-	if len(sendBody) > 0 {
-		if _, err := conn.Write(sendBody); err != nil {
-			return nil, nil, fmt.Errorf("send WebSocket message: %w", err)
+// establishAndSend establishes a TCP/TLS connection, sends data, and reads the response.
+func (s *Server) establishAndSend(ctx context.Context, targetAddr string, useTLS bool, timeout time.Duration, sendBody []byte) ([]byte, time.Time, time.Duration, error) {
+	dialer := s.rawDialerFunc()
+	start := time.Now()
+
+	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
+	if err != nil {
+		return nil, start, 0, fmt.Errorf("connect to %s: %w", targetAddr, err)
+	}
+	defer conn.Close()
+
+	if useTLS {
+		conn, err = upgradeTLS(ctx, conn, targetAddr)
+		if err != nil {
+			return nil, start, 0, err
 		}
 	}
 
-	// Read response (limited).
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, start, 0, fmt.Errorf("set deadline: %w", err)
+	}
+
+	if len(sendBody) > 0 {
+		if _, err := conn.Write(sendBody); err != nil {
+			return nil, start, 0, fmt.Errorf("send WebSocket message: %w", err)
+		}
+	}
+
 	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
 	if err != nil && len(respData) == 0 {
-		return nil, nil, fmt.Errorf("read response: %w", err)
+		return nil, start, 0, fmt.Errorf("read response: %w", err)
 	}
 	duration := time.Since(start)
 
-	// Record the resend.
+	return respData, start, duration, nil
+}
+
+// upgradeTLS wraps a connection with TLS, performing the handshake.
+func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string) (net.Conn, error) {
+	host, _, _ := net.SplitHostPort(targetAddr)
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: true, //nolint:gosec // resend intentionally uses raw bytes for security testing
+		MinVersion:         tls.VersionTLS12,
+	})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return nil, fmt.Errorf("TLS handshake with %s: %w", targetAddr, err)
+	}
+	return tlsConn, nil
+}
+
+// recordWebSocketResend saves the WebSocket resend flow and messages to the store.
+func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams, targetMsg *flow.Message, sendBody, respData []byte, start time.Time, duration time.Duration) (*resendWebSocketResult, error) {
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
 	}
 
 	newFl := &flow.Flow{
-		Protocol:  "WebSocket",
-		FlowType:  "bidirectional",
-		State:     "complete",
-		Timestamp: start,
-		Duration:  duration,
-		Tags:      tags,
+		Protocol: "WebSocket", FlowType: "bidirectional", State: "complete",
+		Timestamp: start, Duration: duration, Tags: tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
-		return nil, nil, fmt.Errorf("save WebSocket resend session: %w", err)
+		return nil, fmt.Errorf("save WebSocket resend session: %w", err)
 	}
 
-	newSendMsg := &flow.Message{
-		FlowID:    newFl.ID,
-		Sequence:  0,
-		Direction: "send",
-		Timestamp: start,
-		Body:      sendBody,
-		Metadata:  targetMsg.Metadata,
-	}
-	if err := s.deps.store.AppendMessage(ctx, newSendMsg); err != nil {
-		return nil, nil, fmt.Errorf("save WebSocket resend send message: %w", err)
+	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+		FlowID: newFl.ID, Sequence: 0, Direction: "send",
+		Timestamp: start, Body: sendBody, Metadata: targetMsg.Metadata,
+	}); err != nil {
+		return nil, fmt.Errorf("save WebSocket resend send message: %w", err)
 	}
 
 	if len(respData) > 0 {
-		newRecvMsg := &flow.Message{
-			FlowID:    newFl.ID,
-			Sequence:  1,
-			Direction: "receive",
-			Timestamp: start.Add(duration),
-			Body:      respData,
-		}
-		if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
-			return nil, nil, fmt.Errorf("save WebSocket resend receive message: %w", err)
+		if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+			FlowID: newFl.ID, Sequence: 1, Direction: "receive",
+			Timestamp: start.Add(duration), Body: respData,
+		}); err != nil {
+			return nil, fmt.Errorf("save WebSocket resend receive message: %w", err)
 		}
 	}
 
-	result := &resendWebSocketResult{
-		NewFlowID:       newFl.ID,
-		MessageSequence: *params.MessageSequence,
-		ResponseData:    base64.StdEncoding.EncodeToString(respData),
-		ResponseSize:    len(respData),
-		DurationMs:      duration.Milliseconds(),
-		Tag:             params.Tag,
-	}
-
-	return nil, result, nil
+	return &resendWebSocketResult{
+		NewFlowID: newFl.ID, MessageSequence: *params.MessageSequence,
+		ResponseData: base64.StdEncoding.EncodeToString(respData),
+		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
+		Tag: params.Tag,
+	}, nil
 }
