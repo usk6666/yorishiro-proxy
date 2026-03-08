@@ -92,44 +92,86 @@ type executeFuzzControlResult struct {
 
 // handleFuzzStart handles the fuzz action within the fuzz tool.
 func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp.CallToolResult, *fuzzer.AsyncResult, error) {
-	if params.FlowID == "" {
-		return nil, nil, fmt.Errorf("flow_id is required for fuzz action")
-	}
-	if params.AttackType == "" {
-		return nil, nil, fmt.Errorf("attack_type is required for fuzz action")
-	}
-	if len(params.Positions) == 0 {
-		return nil, nil, fmt.Errorf("at least one position is required for fuzz action")
+	if err := validateFuzzParams(params); err != nil {
+		return nil, nil, err
 	}
 
-	if err := validateHooks(params.Hooks); err != nil {
-		return nil, nil, fmt.Errorf("invalid hooks: %w", err)
-	}
-
-	// Target scope enforcement: check the template flow's URL before starting fuzz.
-	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
-		if s.deps.store == nil {
-			return nil, nil, fmt.Errorf("flow store is not initialized")
-		}
-		templateSess, err := s.deps.store.GetFlow(ctx, params.FlowID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("get template flow for target scope check: %w", err)
-		}
-		sendMsgs, err := s.deps.store.GetMessages(ctx, templateSess.ID, flow.MessageListOptions{Direction: "send"})
-		if err != nil {
-			return nil, nil, fmt.Errorf("get send messages for target scope check: %w", err)
-		}
-		if len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
-			if err := s.checkTargetScopeURL(sendMsgs[0].URL); err != nil {
-				return nil, nil, err
-			}
-		}
+	if err := s.checkFuzzTargetScope(ctx, params.FlowID); err != nil {
+		return nil, nil, err
 	}
 
 	if s.deps.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 
+	cfg := buildFuzzConfig(params)
+
+	if params.Hooks != nil {
+		hooks := newFuzzHookCallbacks(s.deps, params.Hooks)
+		cfg.Hooks = hooks
+	}
+
+	// Inject target scope checker to validate URLs after position application
+	// and KV Store template expansion, preventing SSRF via payload injection.
+	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
+		ts := s.deps.targetScope
+		cfg.TargetScopeChecker = func(u *url.URL) error {
+			return checkTargetScopeURLHelper(ts, u)
+		}
+	}
+
+	result, err := s.deps.fuzzRunner.Start(s.deps.appCtx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fuzz execution: %w", err)
+	}
+
+	return nil, result, nil
+}
+
+// validateFuzzParams validates the required parameters for starting a fuzz job.
+func validateFuzzParams(params fuzzParams) error {
+	if params.FlowID == "" {
+		return fmt.Errorf("flow_id is required for fuzz action")
+	}
+	if params.AttackType == "" {
+		return fmt.Errorf("attack_type is required for fuzz action")
+	}
+	if len(params.Positions) == 0 {
+		return fmt.Errorf("at least one position is required for fuzz action")
+	}
+	if err := validateHooks(params.Hooks); err != nil {
+		return fmt.Errorf("invalid hooks: %w", err)
+	}
+	return nil
+}
+
+// checkFuzzTargetScope enforces the target scope on the template flow's URL.
+// If no target scope is configured, this is a no-op.
+func (s *Server) checkFuzzTargetScope(ctx context.Context, flowID string) error {
+	if s.deps.targetScope == nil || !s.deps.targetScope.HasRules() {
+		return nil
+	}
+	if s.deps.store == nil {
+		return fmt.Errorf("flow store is not initialized")
+	}
+	templateSess, err := s.deps.store.GetFlow(ctx, flowID)
+	if err != nil {
+		return fmt.Errorf("get template flow for target scope check: %w", err)
+	}
+	sendMsgs, err := s.deps.store.GetMessages(ctx, templateSess.ID, flow.MessageListOptions{Direction: "send"})
+	if err != nil {
+		return fmt.Errorf("get send messages for target scope check: %w", err)
+	}
+	if len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
+		if err := s.checkTargetScopeURL(sendMsgs[0].URL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// buildFuzzConfig constructs a fuzzer.RunConfig from the fuzz parameters.
+func buildFuzzConfig(params fuzzParams) fuzzer.RunConfig {
 	cfg := fuzzer.RunConfig{
 		Config: fuzzer.Config{
 			FlowID:      params.FlowID,
@@ -155,27 +197,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 	if params.MaxRetries != nil {
 		cfg.MaxRetries = *params.MaxRetries
 	}
-
-	if params.Hooks != nil {
-		hooks := newFuzzHookCallbacks(s.deps, params.Hooks)
-		cfg.Hooks = hooks
-	}
-
-	// Inject target scope checker to validate URLs after position application
-	// and KV Store template expansion, preventing SSRF via payload injection.
-	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
-		ts := s.deps.targetScope
-		cfg.TargetScopeChecker = func(u *url.URL) error {
-			return checkTargetScopeURLHelper(ts, u)
-		}
-	}
-
-	result, err := s.deps.fuzzRunner.Start(s.deps.appCtx, cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("fuzz execution: %w", err)
-	}
-
-	return nil, result, nil
+	return cfg
 }
 
 // handleFuzzPauseAction handles the fuzz_pause action within the fuzz tool.
