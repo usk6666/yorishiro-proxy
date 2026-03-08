@@ -191,35 +191,52 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 		conn.SetReadDeadline(time.Now().Add(peekTimeout))
 	}
 
-	// Two-stage peek: first try a quick peek (1 byte) for protocols that can
-	// be identified from very few bytes (e.g., SOCKS5 needs only 1 byte).
-	// This avoids blocking until peekTimeout when the client greeting is
-	// shorter than peekSize, as bufio.Reader.Peek(n) waits for n bytes.
-	peek, err := pc.Peek(quickPeekSize)
-	if err != nil && len(peek) == 0 {
-		connLogger.Debug("peek failed", "error", err)
+	// Two-stage protocol detection: quick peek then optional full peek.
+	handler, peek, ok := l.detectProtocol(pc, connLogger)
+
+	// Reset deadline before passing to handler.
+	conn.SetReadDeadline(time.Time{})
+
+	if !ok {
+		connLogger.Warn("no protocol handler matched", "peek_bytes", fmt.Sprintf("%x", peek))
 		return
 	}
 
-	quickHandler := l.detector.Detect(peek)
+	connLogger.Debug("connection dispatched", "protocol", handler.Name())
 
-	// Stage 2: refine detection when more bytes are available or when
-	// stage 1 found no match.
-	//
-	// If stage 1 matched a handler but the buffer only contains
-	// quickPeekSize bytes, we trust the stage-1 result and skip the full
-	// peek — this keeps SOCKS5 (detectable from 1 byte) fast by not
-	// blocking until peekTimeout waiting for peekSize bytes.
-	//
-	// If the buffer already holds more bytes than quickPeekSize (typical
-	// when a client sends a complete greeting/request in one write), we
-	// re-detect using the buffered bytes. This prevents a catch-all
-	// handler (e.g., raw TCP whose Detect unconditionally returns true)
-	// from short-circuiting detection of protocols that need more bytes
-	// (HTTP, HTTP/2, gRPC, WebSocket).
-	//
-	// If stage 1 found no match, we fall through to the blocking full
-	// peek as before.
+	if err := handler.Handle(ctx, pc); err != nil {
+		connLogger.Error("handler error", "protocol", handler.Name(), "error", err)
+	}
+}
+
+// detectProtocol performs two-stage protocol detection on the connection.
+// Stage 1: quick peek (1 byte) for protocols identifiable from very few bytes (e.g., SOCKS5).
+// Stage 2: refine detection when more bytes are available or stage 1 found no match.
+// Returns the matched handler, the peek bytes, and whether a handler was found.
+func (l *Listener) detectProtocol(pc *PeekConn, logger *slog.Logger) (ProtocolHandler, []byte, bool) {
+	// Stage 1: quick peek to avoid blocking for protocols with short greetings.
+	peek, err := pc.Peek(quickPeekSize)
+	if err != nil && len(peek) == 0 {
+		logger.Debug("peek failed", "error", err)
+		return nil, nil, false
+	}
+
+	quickHandler := l.detector.Detect(peek)
+	handler, peek := l.refineDetection(pc, quickHandler, peek, logger)
+	return handler, peek, handler != nil
+}
+
+// refineDetection performs stage 2 of protocol detection, refining the result
+// from the quick peek when more bytes are available or when stage 1 found no match.
+//
+// If stage 1 matched a handler but the buffer only contains quickPeekSize bytes,
+// we trust the stage-1 result (keeps SOCKS5 fast).
+//
+// If the buffer already holds more bytes than quickPeekSize, we re-detect using
+// the buffered bytes to prevent a catch-all handler from short-circuiting.
+//
+// If stage 1 found no match, we fall through to the blocking full peek.
+func (l *Listener) refineDetection(pc *PeekConn, quickHandler ProtocolHandler, peek []byte, logger *slog.Logger) (ProtocolHandler, []byte) {
 	handler := quickHandler
 	buffered := pc.Buffered()
 	switch {
@@ -239,28 +256,15 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 		// No match on quick peek — block for full peek.
 		fullPeek, fullErr := pc.Peek(peekSize)
 		if fullErr != nil && len(fullPeek) == 0 {
-			connLogger.Debug("peek failed", "error", fullErr)
-			return
+			logger.Debug("peek failed", "error", fullErr)
+			return nil, peek
 		}
 		if fullHandler := l.detector.Detect(fullPeek); fullHandler != nil {
 			handler = fullHandler
 			peek = fullPeek
 		}
 	}
-
-	// Reset deadline before passing to handler.
-	conn.SetReadDeadline(time.Time{})
-
-	if handler == nil {
-		connLogger.Warn("no protocol handler matched", "peek_bytes", fmt.Sprintf("%x", peek))
-		return
-	}
-
-	connLogger.Debug("connection dispatched", "protocol", handler.Name())
-
-	if err := handler.Handle(ctx, pc); err != nil {
-		connLogger.Error("handler error", "protocol", handler.Name(), "error", err)
-	}
+	return handler, peek
 }
 
 // hookTimeout is the maximum time allowed for lifecycle hook dispatches.

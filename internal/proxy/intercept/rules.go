@@ -145,60 +145,76 @@ func compileRule(r Rule) (*compiledRule, error) {
 // HTTP method, URL, and headers. Only applicable conditions are checked;
 // empty conditions match everything.
 func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.Header) bool {
-	// Check host pattern.
-	if cr.hostPatternRe != nil {
-		host := ""
-		if u != nil {
-			host = u.Hostname()
+	if !cr.matchesHost(u, headers) {
+		return false
+	}
+	if !cr.matchesPath(u) {
+		return false
+	}
+	if !cr.matchesMethod(method) {
+		return false
+	}
+	if !cr.matchesHeaders(headers) {
+		return false
+	}
+	return true
+}
+
+// matchesHost checks whether the request host matches the compiled host pattern.
+// For HTTPS MITM (CONNECT tunnel), u.Host may be empty; falls back to the Host header.
+func (cr *compiledRule) matchesHost(u *url.URL, headers http.Header) bool {
+	if cr.hostPatternRe == nil {
+		return true
+	}
+	host := ""
+	if u != nil {
+		host = u.Hostname()
+	}
+	if host == "" && headers != nil {
+		host = extractHostname(headers.Get("Host"))
+	}
+	return cr.hostPatternRe.MatchString(host)
+}
+
+// matchesPath checks whether the request path matches the compiled path pattern.
+func (cr *compiledRule) matchesPath(u *url.URL) bool {
+	if cr.pathPatternRe == nil {
+		return true
+	}
+	path := ""
+	if u != nil {
+		path = u.Path
+	}
+	return cr.pathPatternRe.MatchString(path)
+}
+
+// matchesMethod checks whether the HTTP method is in the configured whitelist.
+func (cr *compiledRule) matchesMethod(method string) bool {
+	if len(cr.rule.Conditions.Methods) == 0 {
+		return true
+	}
+	for _, m := range cr.rule.Conditions.Methods {
+		if strings.EqualFold(m, method) {
+			return true
 		}
-		// For HTTPS MITM (CONNECT tunnel), u.Host may be empty.
-		// Fall back to the Host header.
-		if host == "" && headers != nil {
-			host = extractHostname(headers.Get("Host"))
-		}
-		if !cr.hostPatternRe.MatchString(host) {
+	}
+	return false
+}
+
+// matchesHeaders checks whether the request headers match all compiled header patterns.
+func (cr *compiledRule) matchesHeaders(headers http.Header) bool {
+	if len(cr.headerMatchRes) == 0 {
+		return true
+	}
+	if headers == nil {
+		return false
+	}
+	for canonicalName, re := range cr.headerMatchRes {
+		val := headers.Get(canonicalName)
+		if !re.MatchString(val) {
 			return false
 		}
 	}
-
-	// Check path pattern.
-	if cr.pathPatternRe != nil {
-		path := ""
-		if u != nil {
-			path = u.Path
-		}
-		if !cr.pathPatternRe.MatchString(path) {
-			return false
-		}
-	}
-
-	// Check method whitelist.
-	if len(cr.rule.Conditions.Methods) > 0 {
-		found := false
-		for _, m := range cr.rule.Conditions.Methods {
-			if strings.EqualFold(m, method) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-
-	// Check header matches.
-	if len(cr.headerMatchRes) > 0 {
-		if headers == nil {
-			return false
-		}
-		for canonicalName, re := range cr.headerMatchRes {
-			val := headers.Get(canonicalName)
-			if !re.MatchString(val) {
-				return false
-			}
-		}
-	}
-
 	return true
 }
 
