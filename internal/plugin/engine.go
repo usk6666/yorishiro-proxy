@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +23,8 @@ type Engine struct {
 	registry *Registry
 	plugins  []*loadedPlugin
 	states   map[string]*PluginState
+	stores   map[string]*PluginStore
+	db       *sql.DB
 	logger   *slog.Logger
 }
 
@@ -55,6 +58,7 @@ func NewEngine(logger *slog.Logger) *Engine {
 	return &Engine{
 		registry: NewRegistry(),
 		states:   make(map[string]*PluginState),
+		stores:   make(map[string]*PluginStore),
 		logger:   logger,
 	}
 }
@@ -62,6 +66,19 @@ func NewEngine(logger *slog.Logger) *Engine {
 // Registry returns the hook registry used by this engine.
 func (e *Engine) Registry() *Registry {
 	return e.registry
+}
+
+// SetDB sets the SQLite database connection used by the store built-in module.
+// It creates the plugin_kv table if it does not exist.
+// Must be called before LoadPlugins if persistent store is desired.
+func (e *Engine) SetDB(ctx context.Context, db *sql.DB) error {
+	if err := EnsureTable(ctx, db); err != nil {
+		return fmt.Errorf("set db: %w", err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.db = db
+	return nil
 }
 
 // LoadPlugins loads and initializes all plugins from the given configurations.
@@ -129,6 +146,16 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 		"crypto": newCryptoModule(),
 		"config": newConfigDict(cfg.Vars),
 		"state":  newStateModule(ps),
+	}
+
+	// Inject store module if a DB connection is available.
+	if e.db != nil {
+		pstore, ok := e.stores[name]
+		if !ok {
+			pstore = NewPluginStore(e.db, name)
+			e.stores[name] = pstore
+		}
+		predeclared["store"] = newStoreModule(pstore)
 	}
 
 	globals, err := starlark.ExecFileOptions(
@@ -466,6 +493,15 @@ func (e *Engine) Close() error {
 		ps.mu.Unlock()
 	}
 	e.states = nil
+
+	// Clear each PluginStore cache to release stored values, then nil the map.
+	for _, ps := range e.stores {
+		ps.mu.Lock()
+		ps.cache = nil
+		ps.loaded = false
+		ps.mu.Unlock()
+	}
+	e.stores = nil
 
 	return nil
 }

@@ -323,6 +323,9 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 			return fmt.Errorf("parse plugin configs: %w", err)
 		}
 		pluginEngine = plugin.NewEngine(logger)
+		if err := pluginEngine.SetDB(ctx, store.DB()); err != nil {
+			return fmt.Errorf("init plugin store: %w", err)
+		}
 		if err := pluginEngine.LoadPlugins(ctx, pluginConfigs); err != nil {
 			return fmt.Errorf("load plugins: %w", err)
 		}
