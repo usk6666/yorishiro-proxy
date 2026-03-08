@@ -695,6 +695,169 @@ def on_connect(data):
 	}
 }
 
+func TestEngine_ConfigVars_Accessible(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "config_vars.star", `
+def on_connect(data):
+    data["region"] = config["aws_region"]
+    data["key"] = config.get("aws_key", "default")
+    return {"action": action.CONTINUE, "data": data}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{
+			Path:     scriptPath,
+			Protocol: "http",
+			Hooks:    []string{"on_connect"},
+			Vars: map[string]string{
+				"aws_region": "ap-northeast-1",
+				"aws_key":    "AKIA_TEST",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	result, err := e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if result == nil || result.Data == nil {
+		t.Fatal("expected result with data")
+	}
+	if v := result.Data["region"]; v != "ap-northeast-1" {
+		t.Errorf("region = %v, want 'ap-northeast-1'", v)
+	}
+	if v := result.Data["key"]; v != "AKIA_TEST" {
+		t.Errorf("key = %v, want 'AKIA_TEST'", v)
+	}
+}
+
+func TestEngine_ConfigVars_Frozen(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "config_frozen.star", `
+def on_connect(data):
+    config["new_key"] = "value"  # should fail: frozen dict
+    return {"action": action.CONTINUE}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{
+			Path:     scriptPath,
+			Protocol: "http",
+			Hooks:    []string{"on_connect"},
+			OnError:  "abort",
+			Vars:     map[string]string{"existing": "value"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	_, err = e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
+	if err == nil {
+		t.Fatal("expected error when modifying frozen config dict")
+	}
+}
+
+func TestEngine_ConfigVars_EmptyWhenNil(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "config_empty.star", `
+def on_connect(data):
+    data["count"] = len(config)
+    data["default"] = config.get("missing", "fallback")
+    return {"action": action.CONTINUE, "data": data}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{
+			Path:     scriptPath,
+			Protocol: "http",
+			Hooks:    []string{"on_connect"},
+			// Vars is nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	result, err := e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if result == nil || result.Data == nil {
+		t.Fatal("expected result with data")
+	}
+	if v := result.Data["count"]; v != int64(0) {
+		t.Errorf("config length = %v, want 0", v)
+	}
+	if v := result.Data["default"]; v != "fallback" {
+		t.Errorf("default = %v, want 'fallback'", v)
+	}
+}
+
+func TestEngine_ConfigVars_ReloadUpdatesVars(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeScript(t, dir, "config_reload.star", `
+def on_connect(data):
+    data["region"] = config.get("region", "unknown")
+    return {"action": action.CONTINUE, "data": data}
+`)
+
+	e := NewEngine(nil)
+	defer e.Close()
+
+	err := e.LoadPlugins(context.Background(), []PluginConfig{
+		{
+			Path:     scriptPath,
+			Protocol: "http",
+			Hooks:    []string{"on_connect"},
+			Vars:     map[string]string{"region": "us-east-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins() error = %v", err)
+	}
+
+	// Verify initial value.
+	result, err := e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if result == nil || result.Data == nil {
+		t.Fatal("expected result with data")
+	}
+	if v := result.Data["region"]; v != "us-east-1" {
+		t.Errorf("region = %v, want 'us-east-1'", v)
+	}
+
+	// Reload preserves config (same Vars from the stored PluginConfig).
+	if err := e.ReloadPlugin(context.Background(), "config_reload"); err != nil {
+		t.Fatalf("ReloadPlugin() error = %v", err)
+	}
+
+	result, err = e.Dispatch(context.Background(), HookOnConnect, map[string]any{})
+	if err != nil {
+		t.Fatalf("Dispatch() after reload error = %v", err)
+	}
+	if result == nil || result.Data == nil {
+		t.Fatal("expected result with data after reload")
+	}
+	if v := result.Data["region"]; v != "us-east-1" {
+		t.Errorf("region after reload = %v, want 'us-east-1'", v)
+	}
+}
+
 func TestPluginName(t *testing.T) {
 	tests := []struct {
 		path string
