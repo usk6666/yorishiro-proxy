@@ -628,6 +628,403 @@ func TestRecordSendWithVariant_SelfContainedMessages(t *testing.T) {
 	}
 }
 
+// --- Response variant recording tests ---
+
+func TestSnapshotResponse(t *testing.T) {
+	headers := gohttp.Header{
+		"Content-Type": {"application/json"},
+		"X-Custom":     {"value"},
+	}
+	body := []byte(`{"key":"value"}`)
+
+	snap := snapshotResponse(200, headers, body)
+
+	// Verify deep copy: modifying original should not affect snapshot.
+	headers.Set("Content-Type", "text/plain")
+	body[0] = 'X'
+
+	if snap.statusCode != 200 {
+		t.Errorf("snapshot statusCode = %d, want 200", snap.statusCode)
+	}
+	if snap.headers.Get("Content-Type") != "application/json" {
+		t.Errorf("snapshot headers mutated: got %q", snap.headers.Get("Content-Type"))
+	}
+	if snap.body[0] != '{' {
+		t.Errorf("snapshot body mutated: got %q", snap.body)
+	}
+}
+
+func TestSnapshotResponse_NilInputs(t *testing.T) {
+	snap := snapshotResponse(0, nil, nil)
+	if snap.headers != nil {
+		t.Errorf("expected nil headers, got %v", snap.headers)
+	}
+	if snap.body != nil {
+		t.Errorf("expected nil body, got %v", snap.body)
+	}
+}
+
+func TestResponseModified_NoChange(t *testing.T) {
+	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	body := []byte("hello")
+	snap := snapshotResponse(200, headers, body)
+
+	if responseModified(snap, 200, headers, body) {
+		t.Error("expected no modification, but responseModified returned true")
+	}
+}
+
+func TestResponseModified_StatusCodeChanged(t *testing.T) {
+	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	body := []byte("hello")
+	snap := snapshotResponse(200, headers, body)
+
+	if !responseModified(snap, 404, headers, body) {
+		t.Error("expected modification detected for changed status code")
+	}
+}
+
+func TestResponseModified_BodyChanged(t *testing.T) {
+	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	body := []byte("hello")
+	snap := snapshotResponse(200, headers, body)
+
+	if !responseModified(snap, 200, headers, []byte("world")) {
+		t.Error("expected modification detected for changed body")
+	}
+}
+
+func TestResponseModified_HeaderChanged(t *testing.T) {
+	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	body := []byte("hello")
+	snap := snapshotResponse(200, headers, body)
+
+	modifiedHeaders := headers.Clone()
+	modifiedHeaders.Set("X-Modified", "true")
+
+	if !responseModified(snap, 200, modifiedHeaders, body) {
+		t.Error("expected modification detected for changed headers")
+	}
+}
+
+func TestRecordReceiveWithVariant_NoModification(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+	start := time.Now()
+
+	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+
+	// Record send first.
+	sendResult := handler.recordSend(ctx, sendRecordParams{
+		connID:   "conn-rv-1",
+		protocol: "HTTP/1.x",
+		start:    start,
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:      req,
+	}, logger)
+
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		ProtoMajor: 1, ProtoMinor: 1,
+		Header: gohttp.Header{"Content-Type": {"text/plain"}},
+	}
+	body := []byte("response body")
+
+	// Snapshot matches current: no modification.
+	snap := snapshotResponse(resp.StatusCode, resp.Header, body)
+
+	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
+		start:      start,
+		duration:   50 * time.Millisecond,
+		serverAddr: "93.184.216.34:80",
+		resp:       resp,
+		respBody:   body,
+	}, &snap, logger)
+
+	// Should have 1 send + 1 receive = 2 messages total, no variant metadata on receive.
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	recvMsgs := filterDirection(msgs, "receive")
+	if len(recvMsgs) != 1 {
+		t.Fatalf("expected 1 receive message, got %d", len(recvMsgs))
+	}
+	if recvMsgs[0].Metadata != nil {
+		t.Errorf("metadata should be nil for non-variant receive, got %v", recvMsgs[0].Metadata)
+	}
+	if recvMsgs[0].StatusCode != 200 {
+		t.Errorf("status code = %d, want 200", recvMsgs[0].StatusCode)
+	}
+}
+
+func TestRecordReceiveWithVariant_StatusModified(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+	start := time.Now()
+
+	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+
+	sendResult := handler.recordSend(ctx, sendRecordParams{
+		connID:   "conn-rv-2",
+		protocol: "HTTP/1.x",
+		start:    start,
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:      req,
+	}, logger)
+
+	body := []byte("response body")
+	origHeaders := gohttp.Header{"Content-Type": {"text/plain"}}
+
+	// Snapshot captures original 200 response.
+	snap := snapshotResponse(200, origHeaders, body)
+
+	// After intercept: status changed to 403.
+	modifiedResp := &gohttp.Response{
+		StatusCode: 403,
+		ProtoMajor: 1, ProtoMinor: 1,
+		Header: origHeaders.Clone(),
+	}
+
+	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
+		start:      start,
+		duration:   50 * time.Millisecond,
+		serverAddr: "93.184.216.34:80",
+		resp:       modifiedResp,
+		respBody:   body,
+	}, &snap, logger)
+
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	recvMsgs := filterDirection(msgs, "receive")
+	if len(recvMsgs) != 2 {
+		t.Fatalf("expected 2 receive messages, got %d", len(recvMsgs))
+	}
+
+	// Original: status 200, variant="original"
+	if recvMsgs[0].StatusCode != 200 {
+		t.Errorf("original status = %d, want 200", recvMsgs[0].StatusCode)
+	}
+	if recvMsgs[0].Metadata == nil || recvMsgs[0].Metadata["variant"] != "original" {
+		t.Errorf("original metadata = %v, want variant=original", recvMsgs[0].Metadata)
+	}
+
+	// Modified: status 403, variant="modified"
+	if recvMsgs[1].StatusCode != 403 {
+		t.Errorf("modified status = %d, want 403", recvMsgs[1].StatusCode)
+	}
+	if recvMsgs[1].Metadata == nil || recvMsgs[1].Metadata["variant"] != "modified" {
+		t.Errorf("modified metadata = %v, want variant=modified", recvMsgs[1].Metadata)
+	}
+}
+
+func TestRecordReceiveWithVariant_BodyModified(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+	start := time.Now()
+
+	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+
+	sendResult := handler.recordSend(ctx, sendRecordParams{
+		connID:   "conn-rv-3",
+		protocol: "HTTP/1.x",
+		start:    start,
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:      req,
+	}, logger)
+
+	origBody := []byte(`{"status":"original"}`)
+	modBody := []byte(`{"status":"modified"}`)
+	headers := gohttp.Header{"Content-Type": {"application/json"}}
+
+	snap := snapshotResponse(200, headers, origBody)
+
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		ProtoMajor: 1, ProtoMinor: 1,
+		Header: headers.Clone(),
+	}
+
+	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
+		start:      start,
+		duration:   50 * time.Millisecond,
+		serverAddr: "93.184.216.34:80",
+		resp:       resp,
+		respBody:   modBody,
+	}, &snap, logger)
+
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	recvMsgs := filterDirection(msgs, "receive")
+	if len(recvMsgs) != 2 {
+		t.Fatalf("expected 2 receive messages, got %d", len(recvMsgs))
+	}
+
+	if string(recvMsgs[0].Body) != `{"status":"original"}` {
+		t.Errorf("original body = %q, want %q", recvMsgs[0].Body, `{"status":"original"}`)
+	}
+	if string(recvMsgs[1].Body) != `{"status":"modified"}` {
+		t.Errorf("modified body = %q, want %q", recvMsgs[1].Body, `{"status":"modified"}`)
+	}
+}
+
+func TestRecordReceiveWithVariant_NilSnap(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+	start := time.Now()
+
+	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+
+	sendResult := handler.recordSend(ctx, sendRecordParams{
+		connID:   "conn-rv-4",
+		protocol: "HTTP/1.x",
+		start:    start,
+		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:      req,
+	}, logger)
+
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		ProtoMajor: 1, ProtoMinor: 1,
+		Header: gohttp.Header{},
+	}
+
+	// Nil snapshot should behave like recordReceive (no variant).
+	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
+		start:      start,
+		duration:   50 * time.Millisecond,
+		serverAddr: "93.184.216.34:80",
+		resp:       resp,
+		respBody:   []byte("ok"),
+	}, nil, logger)
+
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	recvMsgs := filterDirection(msgs, "receive")
+	if len(recvMsgs) != 1 {
+		t.Fatalf("expected 1 receive message, got %d", len(recvMsgs))
+	}
+	if recvMsgs[0].Metadata != nil {
+		t.Errorf("metadata should be nil, got %v", recvMsgs[0].Metadata)
+	}
+}
+
+func TestRecordReceiveWithVariant_NilSendResult(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	// Should be a no-op with nil sendResult.
+	handler.recordReceiveWithVariant(context.Background(), nil, receiveRecordParams{
+		resp:     &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}},
+		respBody: []byte("ok"),
+	}, &responseSnapshot{statusCode: 200, headers: gohttp.Header{}, body: []byte("ok")}, testutil.DiscardLogger())
+	// No panic = pass.
+}
+
+func TestRecordReceiveWithVariant_SequenceWithSendVariant(t *testing.T) {
+	// When both send and receive have variants:
+	// send original=0, send modified=1, receive original=2, receive modified=3
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+	start := time.Now()
+
+	req, _ := gohttp.NewRequest("POST", "http://example.com/api", nil)
+	req.Header.Set("Content-Type", "application/json")
+
+	origReqBody := []byte(`{"action":"original"}`)
+	modReqBody := []byte(`{"action":"modified"}`)
+
+	reqSnap := snapshotRequest(req.Header, origReqBody)
+
+	sendResult := handler.recordSendWithVariant(ctx, sendRecordParams{
+		connID:   "conn-rv-5",
+		protocol: "HTTP/1.x",
+		start:    start,
+		connInfo: &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
+		req:      req,
+		reqBody:  modReqBody,
+	}, &reqSnap, logger)
+
+	if sendResult == nil {
+		t.Fatal("recordSendWithVariant returned nil")
+	}
+	if sendResult.recvSequence != 2 {
+		t.Errorf("recvSequence = %d, want 2", sendResult.recvSequence)
+	}
+
+	// Now record response with variant.
+	origRespBody := []byte(`{"result":"original"}`)
+	modRespBody := []byte(`{"result":"modified"}`)
+	respHeaders := gohttp.Header{"Content-Type": {"application/json"}}
+	respSnap := snapshotResponse(200, respHeaders, origRespBody)
+
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		ProtoMajor: 1, ProtoMinor: 1,
+		Header: respHeaders.Clone(),
+	}
+
+	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
+		start:      start,
+		duration:   100 * time.Millisecond,
+		serverAddr: "93.184.216.34:80",
+		resp:       resp,
+		respBody:   modRespBody,
+	}, &respSnap, logger)
+
+	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages (2 send + 2 receive), got %d", len(msgs))
+	}
+
+	// Verify sequence numbers.
+	for _, m := range msgs {
+		switch {
+		case m.Direction == "send" && m.Metadata["variant"] == "original":
+			if m.Sequence != 0 {
+				t.Errorf("send original sequence = %d, want 0", m.Sequence)
+			}
+		case m.Direction == "send" && m.Metadata["variant"] == "modified":
+			if m.Sequence != 1 {
+				t.Errorf("send modified sequence = %d, want 1", m.Sequence)
+			}
+		case m.Direction == "receive" && m.Metadata["variant"] == "original":
+			if m.Sequence != 2 {
+				t.Errorf("receive original sequence = %d, want 2", m.Sequence)
+			}
+		case m.Direction == "receive" && m.Metadata["variant"] == "modified":
+			if m.Sequence != 3 {
+				t.Errorf("receive modified sequence = %d, want 3", m.Sequence)
+			}
+		}
+	}
+
+	// Flow should be complete.
+	fl, _ := store.GetFlow(ctx, sendResult.flowID)
+	if fl.State != "complete" {
+		t.Errorf("final state = %q, want %q", fl.State, "complete")
+	}
+}
+
+// filterDirection returns only messages with the given direction.
+func filterDirection(msgs []*flow.Message, direction string) []*flow.Message {
+	var result []*flow.Message
+	for _, m := range msgs {
+		if m.Direction == direction {
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
 func TestHeadersModified(t *testing.T) {
 	tests := []struct {
 		name string

@@ -299,6 +299,15 @@ export interface VariantRequest {
   body_encoding: string;
 }
 
+/** Original response data before intercept modification. */
+export interface VariantResponse {
+  status_code: number;
+  headers: Record<string, string[]>;
+  body: string;
+  body_encoding: string;
+  body_truncated: boolean;
+}
+
 /** Response for query resource="flow". */
 export interface FlowDetailResult {
   id: string;
@@ -328,6 +337,7 @@ export interface FlowDetailResult {
   protocol_summary?: Record<string, string>;
   message_preview?: MessageEntry[];
   original_request?: VariantRequest;
+  original_response?: VariantResponse;
 }
 
 /** Response for query resource="messages". */

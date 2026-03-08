@@ -386,6 +386,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Plugin hook: on_receive_from_server — after response received, before Transform.
 	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, logger)
 
+	// Snapshot response before intercept for variant recording.
+	// If intercept modifies the response, both the original and modified
+	// versions are recorded as separate receive messages.
+	respSnap := snapshotResponse(fwd.resp.StatusCode, fwd.resp.Header, fullRespBody)
+
 	// Response intercept: check if the response matches any intercept rules
 	// and allow the AI agent to modify or drop it before sending to the client.
 	var respDropped bool
@@ -406,15 +411,17 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 
 	// Progressive recording: record receive (response + session completion).
+	// Uses variant-aware recording to capture both original and modified
+	// versions when intercept changed the response.
 	duration := time.Since(start)
-	h.recordReceive(ctx, sendResult, receiveRecordParams{
+	h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:       start,
 		duration:    duration,
 		serverAddr:  fwd.serverAddr,
 		resp:        fwd.resp,
 		rawResponse: rawResponse,
 		respBody:    fullRespBody,
-	}, logger)
+	}, &respSnap, logger)
 
 	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
 	return nil

@@ -1493,3 +1493,281 @@ func TestQuery_Sessions_FilterByInterceptDrop(t *testing.T) {
 		t.Errorf("blocked_by = %q, want intercept_drop", out.Flows[0].BlockedBy)
 	}
 }
+
+// --- Test: response variant messages ---
+
+// seedResponseVariantSession creates a session with original and modified
+// variant receive messages (simulating response intercept modification).
+func seedResponseVariantSession(t *testing.T, store flow.Store, id string) {
+	t.Helper()
+	ctx := context.Background()
+
+	sess := &flow.Flow{
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  200 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, sess); err != nil {
+		t.Fatalf("SaveFlow(%s): %v", id, err)
+	}
+
+	reqURL, _ := url.Parse("https://example.com/api")
+	sendMsg := &flow.Message{
+		ID:        id + "-send",
+		FlowID:    id,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       reqURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      []byte("request body"),
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	originalRecv := &flow.Message{
+		ID:         id + "-recv-orig",
+		FlowID:     id,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"application/json"}, "X-Original": {"true"}},
+		Body:       []byte(`{"status":"original"}`),
+		Metadata:   map[string]string{"variant": "original"},
+	}
+	if err := store.AppendMessage(ctx, originalRecv); err != nil {
+		t.Fatalf("AppendMessage(original recv): %v", err)
+	}
+
+	modifiedRecv := &flow.Message{
+		ID:         id + "-recv-mod",
+		FlowID:     id,
+		Sequence:   2,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: 403,
+		Headers:    map[string][]string{"Content-Type": {"application/json"}, "X-Modified": {"true"}},
+		Body:       []byte(`{"status":"modified"}`),
+		Metadata:   map[string]string{"variant": "modified"},
+	}
+	if err := store.AppendMessage(ctx, modifiedRecv); err != nil {
+		t.Fatalf("AppendMessage(modified recv): %v", err)
+	}
+}
+
+func TestQuery_Session_ResponseVariantMessages(t *testing.T) {
+	store := newTestStore(t)
+	seedResponseVariantSession(t, store, "resp-variant-sess")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flow",
+		ID:       "resp-variant-sess",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryFlowResult
+	unmarshalQueryResult(t, result, &out)
+
+	// The effective response should be the modified version.
+	if out.ResponseStatusCode != 403 {
+		t.Errorf("response_status_code = %d, want 403 (modified)", out.ResponseStatusCode)
+	}
+	if out.ResponseBody != `{"status":"modified"}` {
+		t.Errorf("response_body = %q, want '{\"status\":\"modified\"}'", out.ResponseBody)
+	}
+
+	// Original response should be populated.
+	if out.OriginalResponse == nil {
+		t.Fatal("original_response is nil, expected original variant data")
+	}
+	if out.OriginalResponse.StatusCode != 200 {
+		t.Errorf("original_response.status_code = %d, want 200", out.OriginalResponse.StatusCode)
+	}
+	if out.OriginalResponse.Body != `{"status":"original"}` {
+		t.Errorf("original_response.body = %q, want '{\"status\":\"original\"}'", out.OriginalResponse.Body)
+	}
+
+	// Original request should be nil (no request variant in this test).
+	if out.OriginalRequest != nil {
+		t.Errorf("original_request should be nil, got %+v", out.OriginalRequest)
+	}
+}
+
+func TestQuery_Session_NoResponseVariant(t *testing.T) {
+	store := newTestStore(t)
+	// Use a regular session (no response variant).
+	seedVariantSession(t, store, "no-resp-variant")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flow",
+		ID:       "no-resp-variant",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryFlowResult
+	unmarshalQueryResult(t, result, &out)
+
+	// No response variant, so original_response should be nil.
+	if out.OriginalResponse != nil {
+		t.Errorf("original_response should be nil for non-variant response, got %+v", out.OriginalResponse)
+	}
+}
+
+func TestQuery_Flows_ResponseVariantUsesModifiedStatus(t *testing.T) {
+	store := newTestStore(t)
+	seedResponseVariantSession(t, store, "resp-variant-flows")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryFlowsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.Count != 1 {
+		t.Fatalf("count = %d, want 1", out.Count)
+	}
+	// The flows list should show the modified status code.
+	if out.Flows[0].StatusCode != 403 {
+		t.Errorf("status_code = %d, want 403 (modified variant)", out.Flows[0].StatusCode)
+	}
+}
+
+// seedBothVariantsSession creates a session with both request and response variants.
+func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
+	t.Helper()
+	ctx := context.Background()
+
+	sess := &flow.Flow{
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  200 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, sess); err != nil {
+		t.Fatalf("SaveFlow(%s): %v", id, err)
+	}
+
+	reqURL, _ := url.Parse("https://example.com/api")
+
+	// Original send (variant=original)
+	if err := store.AppendMessage(ctx, &flow.Message{
+		ID: id + "-send-orig", FlowID: id, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: reqURL,
+		Headers:  map[string][]string{"Host": {"example.com"}},
+		Body:     []byte("orig-req-body"),
+		Metadata: map[string]string{"variant": "original"},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Modified send (variant=modified)
+	modURL, _ := url.Parse("https://example.com/api-mod")
+	if err := store.AppendMessage(ctx, &flow.Message{
+		ID: id + "-send-mod", FlowID: id, Sequence: 1, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: modURL,
+		Headers:  map[string][]string{"Host": {"example.com"}},
+		Body:     []byte("mod-req-body"),
+		Metadata: map[string]string{"variant": "modified"},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Original receive (variant=original)
+	if err := store.AppendMessage(ctx, &flow.Message{
+		ID: id + "-recv-orig", FlowID: id, Sequence: 2, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 200,
+		Headers:  map[string][]string{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"r":"orig"}`),
+		Metadata: map[string]string{"variant": "original"},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Modified receive (variant=modified)
+	if err := store.AppendMessage(ctx, &flow.Message{
+		ID: id + "-recv-mod", FlowID: id, Sequence: 3, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 401,
+		Headers:  map[string][]string{"Content-Type": {"text/plain"}},
+		Body:     []byte("Unauthorized"),
+		Metadata: map[string]string{"variant": "modified"},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+}
+
+func TestQuery_Session_BothRequestAndResponseVariants(t *testing.T) {
+	store := newTestStore(t)
+	seedBothVariantsSession(t, store, "both-variants")
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flow",
+		ID:       "both-variants",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryFlowResult
+	unmarshalQueryResult(t, result, &out)
+
+	// Request: effective should be modified.
+	if out.Method != "POST" {
+		t.Errorf("method = %q, want POST", out.Method)
+	}
+	if out.RequestBody != "mod-req-body" {
+		t.Errorf("request_body = %q, want 'mod-req-body'", out.RequestBody)
+	}
+
+	// Original request populated.
+	if out.OriginalRequest == nil {
+		t.Fatal("original_request is nil")
+	}
+	if out.OriginalRequest.Method != "GET" {
+		t.Errorf("original_request.method = %q, want GET", out.OriginalRequest.Method)
+	}
+
+	// Response: effective should be modified.
+	if out.ResponseStatusCode != 401 {
+		t.Errorf("response_status_code = %d, want 401", out.ResponseStatusCode)
+	}
+	if out.ResponseBody != "Unauthorized" {
+		t.Errorf("response_body = %q, want 'Unauthorized'", out.ResponseBody)
+	}
+
+	// Original response populated.
+	if out.OriginalResponse == nil {
+		t.Fatal("original_response is nil")
+	}
+	if out.OriginalResponse.StatusCode != 200 {
+		t.Errorf("original_response.status_code = %d, want 200", out.OriginalResponse.StatusCode)
+	}
+	if out.OriginalResponse.Body != `{"r":"orig"}` {
+		t.Errorf("original_response.body = %q, want '{\"r\":\"orig\"}'", out.OriginalResponse.Body)
+	}
+}
