@@ -3,7 +3,6 @@ package mcp
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -227,51 +226,71 @@ type requestPreview struct {
 	BodyEncoding string              `json:"body_encoding"`
 }
 
+// resendPrepared holds the validated and prepared state for a resend action,
+// produced by validateResendParams before execution.
+type resendPrepared struct {
+	flow    *flow.Flow
+	sendMsg *flow.Message
+	method  string
+	url     *url.URL
+	body    []byte
+	headers map[string][]string
+	kvStore map[string]string
+}
+
 // handleResendAction handles the resend action within the resend tool.
 func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*gomcp.CallToolResult, any, error) {
+	prep, wsResult, wsStructured, err := s.validateResendParams(ctx, &params)
+	if err != nil {
+		return nil, nil, err
+	}
+	if wsResult != nil || wsStructured != nil {
+		return wsResult, wsStructured, nil
+	}
+
+	if params.DryRun {
+		return nil, buildDryRunResult(prep.method, prep.url, prep.headers, prep.body), nil
+	}
+
+	return s.executeResend(ctx, prep, params)
+}
+
+// validateResendParams validates all resend parameters, executes hooks, retrieves the flow
+// and send message, and prepares the method/URL/body/headers for the resend.
+// If the flow is WebSocket, it delegates to handleWebSocketResend and returns the result.
+func (s *Server) validateResendParams(ctx context.Context, params *resendParams) (*resendPrepared, *gomcp.CallToolResult, any, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("flow store is not initialized")
+		return nil, nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.FlowID == "" {
-		return nil, nil, fmt.Errorf("flow_id is required for resend action")
+		return nil, nil, nil, fmt.Errorf("flow_id is required for resend action")
 	}
 
 	if err := validateHooks(params.Hooks); err != nil {
-		return nil, nil, fmt.Errorf("invalid hooks: %w", err)
+		return nil, nil, nil, fmt.Errorf("invalid hooks: %w", err)
 	}
 
-	var kvStore map[string]string
-	if params.Hooks != nil && params.Hooks.PreSend != nil {
-		state := &hookState{}
-		executor := newHookExecutor(s.deps, params.Hooks, state)
-		var err error
-		kvStore, err = executor.executePreSend(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	if len(kvStore) > 0 {
-		if err := expandParamsWithKVStore(&params, kvStore); err != nil {
-			return nil, nil, fmt.Errorf("template expansion: %w", err)
-		}
+	kvStore, err := s.executePreSendHook(ctx, params)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get flow: %w", err)
+		return nil, nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
 	if fl.Protocol == "WebSocket" {
-		return s.handleWebSocketResend(ctx, fl, params)
+		r1, r2, err := s.handleWebSocketResend(ctx, fl, *params)
+		return nil, r1, r2, err
 	}
 
 	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
-		return nil, nil, fmt.Errorf("get send messages: %w", err)
+		return nil, nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, nil, fmt.Errorf("flow %s has no send messages", params.FlowID)
+		return nil, nil, nil, fmt.Errorf("flow %s has no send messages", params.FlowID)
 	}
 	sendMsg := sendMsgs[0]
 
@@ -280,96 +299,127 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 		method = params.OverrideMethod
 	}
 
-	targetURL := sendMsg.URL
+	targetURL, err := buildResendURL(sendMsg.URL, *params)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	if err := s.validateResendScope(targetURL, *params); err != nil {
+		return nil, nil, nil, err
+	}
+
+	if err := validateResendHeaders(*params); err != nil {
+		return nil, nil, nil, err
+	}
+
+	reqBody, err := buildResendBody(sendMsg.Body, *params)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	headers := buildResendHeaders(sendMsg.Headers, *params)
+
+	return &resendPrepared{
+		flow: fl, sendMsg: sendMsg,
+		method: method, url: targetURL,
+		body: reqBody, headers: headers,
+		kvStore: kvStore,
+	}, nil, nil, nil
+}
+
+// executePreSendHook runs the pre-send hook if configured, returning the KV store
+// and expanding template parameters.
+func (s *Server) executePreSendHook(ctx context.Context, params *resendParams) (map[string]string, error) {
+	var kvStore map[string]string
+	if params.Hooks != nil && params.Hooks.PreSend != nil {
+		state := &hookState{}
+		executor := newHookExecutor(s.deps, params.Hooks, state)
+		var err error
+		kvStore, err = executor.executePreSend(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(kvStore) > 0 {
+		if err := expandParamsWithKVStore(params, kvStore); err != nil {
+			return nil, fmt.Errorf("template expansion: %w", err)
+		}
+	}
+	return kvStore, nil
+}
+
+// buildResendURL resolves the target URL from the original message URL and any override.
+func buildResendURL(originalURL *url.URL, params resendParams) (*url.URL, error) {
+	targetURL := originalURL
 	if params.OverrideURL != "" {
 		parsed, err := url.Parse(params.OverrideURL)
 		if err != nil {
-			return nil, nil, fmt.Errorf("invalid override_url %q: %w", params.OverrideURL, err)
+			return nil, fmt.Errorf("invalid override_url %q: %w", params.OverrideURL, err)
 		}
 		if parsed.Scheme == "" || parsed.Host == "" {
-			return nil, nil, fmt.Errorf("invalid override_url %q: must include scheme and host", params.OverrideURL)
+			return nil, fmt.Errorf("invalid override_url %q: must include scheme and host", params.OverrideURL)
 		}
 		if err := validateURLScheme(parsed); err != nil {
-			return nil, nil, fmt.Errorf("invalid override_url %q: %w", params.OverrideURL, err)
+			return nil, fmt.Errorf("invalid override_url %q: %w", params.OverrideURL, err)
 		}
 		targetURL = parsed
 	}
 
 	if targetURL == nil {
-		return nil, nil, fmt.Errorf("original flow has no URL and no override_url was provided")
+		return nil, fmt.Errorf("original flow has no URL and no override_url was provided")
 	}
 	if err := validateURLScheme(targetURL); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	return targetURL, nil
+}
 
+// validateResendScope validates override_host and checks target scope for the URL and host.
+func (s *Server) validateResendScope(targetURL *url.URL, params resendParams) error {
 	if params.OverrideHost != "" {
 		if err := validateOverrideHost(params.OverrideHost); err != nil {
-			return nil, nil, fmt.Errorf("invalid override_host %q: %w", params.OverrideHost, err)
+			return fmt.Errorf("invalid override_host %q: %w", params.OverrideHost, err)
 		}
 	}
 
 	if err := s.checkTargetScopeURL(targetURL); err != nil {
-		return nil, nil, err
+		return err
 	}
 	if params.OverrideHost != "" {
 		if err := s.checkTargetScopeAddr(targetURL.Scheme, params.OverrideHost); err != nil {
-			return nil, nil, err
+			return err
 		}
 	}
+	return nil
+}
 
-	if err := validateResendHeaders(params); err != nil {
-		return nil, nil, err
+// buildDryRunResult creates a dry-run result from the prepared request parameters.
+func buildDryRunResult(method string, targetURL *url.URL, headers map[string][]string, reqBody []byte) *resendDryRunResult {
+	bodyStr, bodyEncoding := encodeBody(reqBody)
+	previewHeaders := make(map[string][]string)
+	for k, v := range headers {
+		if len(v) > 0 {
+			previewHeaders[k] = v
+		}
 	}
+	return &resendDryRunResult{
+		DryRun: true,
+		RequestPreview: &requestPreview{
+			Method:       method,
+			URL:          targetURL.String(),
+			Headers:      previewHeaders,
+			Body:         bodyStr,
+			BodyEncoding: bodyEncoding,
+		},
+	}
+}
 
-	reqBody, err := buildResendBody(sendMsg.Body, params)
+// executeResend sends the HTTP request and records the flow and messages.
+func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params resendParams) (*gomcp.CallToolResult, any, error) {
+	httpReq, err := s.buildHTTPRequest(ctx, prep)
 	if err != nil {
 		return nil, nil, err
-	}
-
-	headers := buildResendHeaders(sendMsg.Headers, params)
-
-	if params.DryRun {
-		bodyStr, bodyEncoding := encodeBody(reqBody)
-		previewHeaders := make(map[string][]string)
-		for k, v := range headers {
-			if len(v) > 0 {
-				previewHeaders[k] = v
-			}
-		}
-		return nil, &resendDryRunResult{
-			DryRun: true,
-			RequestPreview: &requestPreview{
-				Method:       method,
-				URL:          targetURL.String(),
-				Headers:      previewHeaders,
-				Body:         bodyStr,
-				BodyEncoding: bodyEncoding,
-			},
-		}, nil
-	}
-
-	var body io.Reader
-	if len(reqBody) > 0 {
-		body = bytes.NewReader(reqBody)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, method, targetURL.String(), body)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create resend request: %w", err)
-	}
-
-	for key, values := range headers {
-		if len(values) == 0 {
-			httpReq.Header[key] = values
-			continue
-		}
-		for i, v := range values {
-			if i == 0 {
-				httpReq.Header.Set(key, v)
-			} else {
-				httpReq.Header.Add(key, v)
-			}
-		}
 	}
 
 	client := s.resendHTTPClient(params)
@@ -386,36 +436,104 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 	}
 	duration := time.Since(start)
 
-	respHeaders := make(map[string][]string)
-	for key, values := range resp.Header {
-		respHeaders[key] = values
+	if err := s.recordResendFlow(ctx, prep, params, httpReq, resp, respBody, start, duration); err != nil {
+		return nil, nil, err
 	}
 
-	recordedHeaders := make(map[string][]string)
-	for key, values := range httpReq.Header {
-		recordedHeaders[key] = values
+	if params.Hooks != nil && params.Hooks.PostReceive != nil {
+		state := &hookState{}
+		executor := newHookExecutor(s.deps, params.Hooks, state)
+		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody, prep.kvStore); err != nil {
+			return nil, nil, err
+		}
 	}
 
+	respBodyStr, respBodyEncoding := encodeBody(respBody)
+	return nil, &resendActionResult{
+		NewFlowID: prep.flow.ID, StatusCode: resp.StatusCode,
+		ResponseHeaders: copyHeaders(resp.Header), ResponseBody: respBodyStr,
+		ResponseBodyEncoding: respBodyEncoding, DurationMs: duration.Milliseconds(),
+		Tag: params.Tag,
+	}, nil
+}
+
+// buildHTTPRequest creates an *http.Request from the prepared resend state.
+func (s *Server) buildHTTPRequest(ctx context.Context, prep *resendPrepared) (*http.Request, error) {
+	var body io.Reader
+	if len(prep.body) > 0 {
+		body = bytes.NewReader(prep.body)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, prep.method, prep.url.String(), body)
+	if err != nil {
+		return nil, fmt.Errorf("create resend request: %w", err)
+	}
+
+	applyHeaders(httpReq, prep.headers)
+	return httpReq, nil
+}
+
+// applyHeaders sets the headers on the HTTP request, preserving multi-value headers.
+func applyHeaders(req *http.Request, headers map[string][]string) {
+	for key, values := range headers {
+		if len(values) == 0 {
+			req.Header[key] = values
+			continue
+		}
+		for i, v := range values {
+			if i == 0 {
+				req.Header.Set(key, v)
+			} else {
+				req.Header.Add(key, v)
+			}
+		}
+	}
+}
+
+// copyHeaders creates a shallow copy of HTTP headers.
+func copyHeaders(src http.Header) map[string][]string {
+	result := make(map[string][]string)
+	for key, values := range src {
+		result[key] = values
+	}
+	return result
+}
+
+// recordResendFlow saves the resend flow and its send/receive messages to the store.
+func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, params resendParams, httpReq *http.Request, resp *http.Response, respBody []byte, start time.Time, duration time.Duration) error {
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
 	}
 
 	newFl := &flow.Flow{
-		Protocol: fl.Protocol, FlowType: "unary", State: "complete",
+		Protocol: prep.flow.Protocol, FlowType: "unary", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
-		return nil, nil, fmt.Errorf("save resend flow: %w", err)
+		return fmt.Errorf("save resend flow: %w", err)
+	}
+
+	// Update prep.flow.ID to the new flow ID for the result.
+	prep.flow = newFl
+
+	recordedHeaders := make(map[string][]string)
+	for key, values := range httpReq.Header {
+		recordedHeaders[key] = values
 	}
 
 	newSendMsg := &flow.Message{
 		FlowID: newFl.ID, Sequence: 0, Direction: "send",
-		Timestamp: start, Method: method, URL: targetURL,
-		Headers: recordedHeaders, Body: reqBody,
+		Timestamp: start, Method: prep.method, URL: prep.url,
+		Headers: recordedHeaders, Body: prep.body,
 	}
 	if err := s.deps.store.AppendMessage(ctx, newSendMsg); err != nil {
-		return nil, nil, fmt.Errorf("save resend send message: %w", err)
+		return fmt.Errorf("save resend send message: %w", err)
+	}
+
+	respHeaders := make(map[string][]string)
+	for key, values := range resp.Header {
+		respHeaders[key] = values
 	}
 
 	newRecvMsg := &flow.Message{
@@ -424,24 +542,9 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 		Headers: respHeaders, Body: respBody,
 	}
 	if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
-		return nil, nil, fmt.Errorf("save resend receive message: %w", err)
+		return fmt.Errorf("save resend receive message: %w", err)
 	}
-
-	if params.Hooks != nil && params.Hooks.PostReceive != nil {
-		state := &hookState{}
-		executor := newHookExecutor(s.deps, params.Hooks, state)
-		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody, kvStore); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	respBodyStr, respBodyEncoding := encodeBody(respBody)
-	return nil, &resendActionResult{
-		NewFlowID: newFl.ID, StatusCode: resp.StatusCode,
-		ResponseHeaders: respHeaders, ResponseBody: respBodyStr,
-		ResponseBodyEncoding: respBodyEncoding, DurationMs: duration.Milliseconds(),
-		Tag: params.Tag,
-	}, nil
+	return nil
 }
 
 // --- Resend helper functions ---
@@ -579,6 +682,56 @@ type rawPreview struct {
 }
 
 func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams) (*gomcp.CallToolResult, any, error) {
+	fl, sendMsg, err := s.loadRawResendFlow(ctx, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rawBytes, patchCount, err := buildResendRawBytes(sendMsg.RawBytes, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if params.DryRun {
+		return nil, &resendRawDryRunResult{
+			DryRun: true,
+			RawPreview: &rawPreview{
+				DataBase64: base64.StdEncoding.EncodeToString(rawBytes),
+				DataSize:   len(rawBytes), PatchesApplied: patchCount,
+			},
+		}, nil
+	}
+
+	targetAddr, err := resolveTargetAddrRaw(sendMsg, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := s.checkRawTargetScope(fl, targetAddr); err != nil {
+		return nil, nil, err
+	}
+
+	respData, start, duration, err := s.buildAndSendRaw(ctx, fl, params, targetAddr, rawBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	newFlowID, err := s.recordRawResend(ctx, fl, params, rawBytes, respData, start, duration)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return nil, &resendRawResult{
+		NewFlowID:    newFlowID,
+		ResponseData: base64.StdEncoding.EncodeToString(respData),
+		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
+		Tag: params.Tag,
+	}, nil
+}
+
+// loadRawResendFlow validates parameters, loads the flow and its first send message,
+// and checks the target scope for the URL.
+func (s *Server) loadRawResendFlow(ctx context.Context, params resendParams) (*flow.Flow, *flow.Message, error) {
 	if s.deps.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
@@ -610,46 +763,41 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		}
 	}
 
-	rawBytes, patchCount, err := buildResendRawBytes(sendMsg.RawBytes, params)
-	if err != nil {
-		return nil, nil, err
-	}
+	return fl, sendMsg, nil
+}
 
-	if params.DryRun {
-		return nil, &resendRawDryRunResult{
-			DryRun: true,
-			RawPreview: &rawPreview{
-				DataBase64: base64.StdEncoding.EncodeToString(rawBytes),
-				DataSize:   len(rawBytes), PatchesApplied: patchCount,
-			},
-		}, nil
-	}
-
-	targetAddr := params.TargetAddr
-	if targetAddr == "" {
-		if sendMsg.URL == nil {
-			return nil, nil, fmt.Errorf("flow has no URL and no target_addr was provided")
-		}
-		host := sendMsg.URL.Hostname()
-		port := sendMsg.URL.Port()
-		if port == "" {
-			if sendMsg.URL.Scheme == "https" {
-				port = "443"
-			} else {
-				port = "80"
-			}
-		}
-		targetAddr = net.JoinHostPort(host, port)
-	}
-
+// checkRawTargetScope checks target scope for a raw resend target address.
+func (s *Server) checkRawTargetScope(fl *flow.Flow, targetAddr string) error {
 	scheme := ""
 	if fl.Protocol == "HTTPS" {
 		scheme = "https"
 	}
-	if err := s.checkTargetScopeAddr(scheme, targetAddr); err != nil {
-		return nil, nil, err
-	}
+	return s.checkTargetScopeAddr(scheme, targetAddr)
+}
 
+// resolveTargetAddrRaw determines the target address for a raw resend from the
+// send message URL or the explicit target_addr parameter.
+func resolveTargetAddrRaw(sendMsg *flow.Message, params resendParams) (string, error) {
+	if params.TargetAddr != "" {
+		return params.TargetAddr, nil
+	}
+	if sendMsg.URL == nil {
+		return "", fmt.Errorf("flow has no URL and no target_addr was provided")
+	}
+	host := sendMsg.URL.Hostname()
+	port := sendMsg.URL.Port()
+	if port == "" {
+		if sendMsg.URL.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// buildAndSendRaw establishes a TCP/TLS connection, sends raw bytes, and reads the response.
+func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Flow, params resendParams, targetAddr string, rawBytes []byte) ([]byte, time.Time, time.Duration, error) {
 	useTLS := fl.Protocol == "HTTPS"
 	if params.UseTLS != nil {
 		useTLS = *params.UseTLS
@@ -665,38 +813,35 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to %s: %w", targetAddr, err)
+		return nil, start, 0, fmt.Errorf("connect to %s: %w", targetAddr, err)
 	}
 	defer conn.Close()
 
 	if useTLS {
-		host, _, _ := net.SplitHostPort(targetAddr)
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: true, //nolint:gosec // resend_raw intentionally uses raw bytes for security testing
-			MinVersion:         tls.VersionTLS12,
-		})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, nil, fmt.Errorf("TLS handshake with %s: %w", targetAddr, err)
+		conn, err = upgradeTLS(ctx, conn, targetAddr, "resend_raw")
+		if err != nil {
+			return nil, start, 0, err
 		}
-		conn = tlsConn
 	}
 
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, nil, fmt.Errorf("set connection deadline: %w", err)
+		return nil, start, 0, fmt.Errorf("set connection deadline: %w", err)
 	}
 	if _, err := conn.Write(rawBytes); err != nil {
-		return nil, nil, fmt.Errorf("send raw request: %w", err)
+		return nil, start, 0, fmt.Errorf("send raw request: %w", err)
 	}
 
 	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
-	if err != nil {
-		if len(respData) == 0 {
-			return nil, nil, fmt.Errorf("read raw response: %w", err)
-		}
+	if err != nil && len(respData) == 0 {
+		return nil, start, 0, fmt.Errorf("read raw response: %w", err)
 	}
 	duration := time.Since(start)
 
+	return respData, start, duration, nil
+}
+
+// recordRawResend saves the raw resend flow and its send/receive messages.
+func (s *Server) recordRawResend(ctx context.Context, fl *flow.Flow, params resendParams, rawBytes, respData []byte, start time.Time, duration time.Duration) (string, error) {
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
@@ -707,29 +852,24 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
-		return nil, nil, fmt.Errorf("save resend_raw flow: %w", err)
+		return "", fmt.Errorf("save resend_raw flow: %w", err)
 	}
 
 	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 		FlowID: newFl.ID, Sequence: 0, Direction: "send",
 		Timestamp: start, RawBytes: rawBytes,
 	}); err != nil {
-		return nil, nil, fmt.Errorf("save resend_raw send message: %w", err)
+		return "", fmt.Errorf("save resend_raw send message: %w", err)
 	}
 
 	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 		FlowID: newFl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: start.Add(duration), RawBytes: respData,
 	}); err != nil {
-		return nil, nil, fmt.Errorf("save resend_raw receive message: %w", err)
+		return "", fmt.Errorf("save resend_raw receive message: %w", err)
 	}
 
-	return nil, &resendRawResult{
-		NewFlowID:    newFl.ID,
-		ResponseData: base64.StdEncoding.EncodeToString(respData),
-		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
-		Tag: params.Tag,
-	}, nil
+	return newFl.ID, nil
 }
 
 func buildResendRawBytes(originalRaw []byte, params resendParams) ([]byte, int, error) {
