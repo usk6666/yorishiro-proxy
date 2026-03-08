@@ -214,7 +214,17 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 	}
 
 	// Launch the background execution.
-	go r.execute(jobCtx, job, ctrl, iter, baseData, cfg, fl.Protocol, timeout, concurrency, monitor)
+	go r.execute(jobCtx, executeParams{
+		job:         job,
+		ctrl:        ctrl,
+		iter:        iter,
+		baseData:    baseData,
+		cfg:         cfg,
+		protocol:    fl.Protocol,
+		timeout:     timeout,
+		concurrency: concurrency,
+		monitor:     monitor,
+	})
 
 	return &AsyncResult{
 		FuzzID:        job.ID,
@@ -225,36 +235,29 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 	}, nil
 }
 
+// executeParams bundles the parameters for a fuzz job execution.
+type executeParams struct {
+	job         *flow.FuzzJob
+	ctrl        *JobController
+	iter        Iterator
+	baseData    *RequestData
+	cfg         RunConfig
+	protocol    string
+	timeout     time.Duration
+	concurrency int
+	monitor     *OverloadMonitor
+}
+
 // execute runs the fuzz iterations with the given concurrency, rate limiting,
 // and stop conditions. It updates the job status in the DB upon completion.
-func (r *Runner) execute(
-	ctx context.Context,
-	job *flow.FuzzJob,
-	ctrl *JobController,
-	iter Iterator,
-	baseData *RequestData,
-	cfg RunConfig,
-	protocol string,
-	timeout time.Duration,
-	concurrency int,
-	monitor *OverloadMonitor,
-) {
-	defer r.registry.Remove(job.ID)
+func (r *Runner) execute(ctx context.Context, p executeParams) {
+	defer r.registry.Remove(p.job.ID)
 
 	var completedCount atomic.Int32
 	var errorCount atomic.Int32
 
-	// Compute rate limiter interval.
-	var rateLimitInterval time.Duration
-	if cfg.RateLimitRPS > 0 {
-		rateLimitInterval = time.Duration(float64(time.Second) / cfg.RateLimitRPS)
-	}
-
-	// Fixed delay between requests.
-	delay := time.Duration(cfg.DelayMs) * time.Millisecond
-
 	// Channel for distributing fuzz cases to workers.
-	cases := make(chan FuzzCase, concurrency)
+	cases := make(chan FuzzCase, p.concurrency)
 	// stopOnce ensures we only stop once.
 	var stopOnce sync.Once
 	// stopped signals that a stop condition was triggered.
@@ -262,122 +265,179 @@ func (r *Runner) execute(
 
 	triggerStop := func(reason string) {
 		stopOnce.Do(func() {
-			ctrl.Stop(StatusError, reason)
+			p.ctrl.Stop(StatusError, reason)
 			close(stopped)
 		})
 	}
 
-	// Rate limiter: a channel that workers read from before sending a request.
-	// If no rate limiting, the channel is nil and workers proceed immediately.
-	var rateTick <-chan time.Time
-	var rateTicker *time.Ticker
-	if rateLimitInterval > 0 {
-		rateTicker = time.NewTicker(rateLimitInterval)
-		rateTick = rateTicker.C
+	rateTick, rateTicker := r.setupRateLimiter(p.cfg)
+	if rateTicker != nil {
 		defer rateTicker.Stop()
 	}
 
 	// Create a shared hook state per job (tracks cross-iteration state like "once", "every_n").
 	var hookState *HookState
-	if cfg.Hooks != nil {
+	if p.cfg.Hooks != nil {
 		hookState = &HookState{}
 	}
 
+	delay := time.Duration(p.cfg.DelayMs) * time.Millisecond
+
 	// Worker pool.
 	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
+	for i := 0; i < p.concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for fc := range cases {
-				// Check for pause.
-				if err := ctrl.WaitIfPaused(ctx); err != nil {
-					return
-				}
-
-				// Rate limit.
-				if rateTick != nil {
-					select {
-					case <-rateTick:
-					case <-ctx.Done():
-						return
-					}
-				}
-
-				// Fixed delay.
-				if delay > 0 {
-					select {
-					case <-time.After(delay):
-					case <-ctx.Done():
-						return
-					}
-				}
-
-				// Execute with retries.
-				var result *flow.FuzzResult
-				attempts := 1 + cfg.MaxRetries
-				for attempt := 0; attempt < attempts; attempt++ {
-					result = r.engine.executeFuzzCaseWithHooks(ctx, baseData, cfg.Positions, fc, protocol, timeout, job.ID, cfg.Hooks, hookState, cfg.HTTPDoer, cfg.TargetScopeChecker)
-					if result.Error == "" {
-						break
-					}
-					// Don't retry if context is cancelled.
-					if ctx.Err() != nil {
-						break
-					}
-				}
-
-				// Save result.
-				if err := r.engine.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
-					errorCount.Add(1)
-					r.updateJobProgress(ctx, job, int(completedCount.Load()), int(errorCount.Load()))
-					continue
-				}
-
-				if result.Error != "" {
-					errorCount.Add(1)
-				} else {
-					completedCount.Add(1)
-				}
-
-				// Update hook state after request completion.
-				if cfg.Hooks != nil && hookState != nil {
-					hookState.Mu.Lock()
-					hadError := result.Error != ""
-					cfg.Hooks.UpdateState(hookState, result.StatusCode, hadError)
-					hookState.Mu.Unlock()
-				}
-
-				// Update progress in DB.
-				r.updateJobProgress(ctx, job, int(completedCount.Load()), int(errorCount.Load()))
-
-				// Check stop conditions.
-				if cfg.StopOn != nil {
-					// Status code stop condition.
-					if result.StatusCode != 0 && checkStatusCode(result.StatusCode, cfg.StopOn.StatusCodes) {
-						triggerStop(fmt.Sprintf("stop condition: received status code %d", result.StatusCode))
-						return
-					}
-
-					// Error count stop condition.
-					if cfg.StopOn.ErrorCount > 0 && int(errorCount.Load()) >= cfg.StopOn.ErrorCount {
-						triggerStop(fmt.Sprintf("stop condition: error count reached %d", cfg.StopOn.ErrorCount))
-						return
-					}
-				}
-
-				// Overload detection.
-				if monitor != nil && result.DurationMs > 0 {
-					if monitor.Record(result.DurationMs) {
-						triggerStop("stop condition: overload detected (latency threshold exceeded)")
-						return
-					}
-				}
-			}
+			r.workerLoop(ctx, p, cases, rateTick, delay, hookState, &completedCount, &errorCount, triggerStop)
 		}()
 	}
 
 	// Producer: feed fuzz cases to the workers.
+	r.startProducer(ctx, p.iter, cases, stopped)
+
+	// Wait for all workers to finish.
+	wg.Wait()
+
+	r.finalizeJob(p.job, p.ctrl, int(completedCount.Load()), int(errorCount.Load()))
+}
+
+// setupRateLimiter creates a rate limiter ticker based on the config.
+// Returns a nil channel and nil ticker if no rate limiting is configured.
+func (r *Runner) setupRateLimiter(cfg RunConfig) (<-chan time.Time, *time.Ticker) {
+	if cfg.RateLimitRPS <= 0 {
+		return nil, nil
+	}
+	interval := time.Duration(float64(time.Second) / cfg.RateLimitRPS)
+	if interval <= 0 {
+		return nil, nil
+	}
+	ticker := time.NewTicker(interval)
+	return ticker.C, ticker
+}
+
+// workerLoop processes fuzz cases from the cases channel, applying rate limiting,
+// delays, retries, stop conditions, and overload detection.
+func (r *Runner) workerLoop(
+	ctx context.Context,
+	p executeParams,
+	cases <-chan FuzzCase,
+	rateTick <-chan time.Time,
+	delay time.Duration,
+	hookState *HookState,
+	completedCount, errorCount *atomic.Int32,
+	triggerStop func(string),
+) {
+	for fc := range cases {
+		// Check for pause.
+		if err := p.ctrl.WaitIfPaused(ctx); err != nil {
+			return
+		}
+
+		if !r.waitForRateAndDelay(ctx, rateTick, delay) {
+			return
+		}
+
+		result := r.executeWithRetries(ctx, p, fc, hookState)
+
+		if !r.saveAndUpdateProgress(ctx, p.job, result, completedCount, errorCount) {
+			continue
+		}
+
+		// Update hook state after request completion.
+		if p.cfg.Hooks != nil && hookState != nil {
+			hookState.Mu.Lock()
+			hadError := result.Error != ""
+			p.cfg.Hooks.UpdateState(hookState, result.StatusCode, hadError)
+			hookState.Mu.Unlock()
+		}
+
+		// Update progress in DB.
+		r.updateJobProgress(ctx, p.job, int(completedCount.Load()), int(errorCount.Load()))
+
+		if r.checkStopConditions(result, p.cfg.StopOn, p.monitor, errorCount, triggerStop) {
+			return
+		}
+	}
+}
+
+// waitForRateAndDelay waits for the rate limiter and fixed delay.
+// Returns false if the context was cancelled.
+func (r *Runner) waitForRateAndDelay(ctx context.Context, rateTick <-chan time.Time, delay time.Duration) bool {
+	if rateTick != nil {
+		select {
+		case <-rateTick:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
+// executeWithRetries executes a fuzz case with the configured number of retries.
+func (r *Runner) executeWithRetries(ctx context.Context, p executeParams, fc FuzzCase, hookState *HookState) *flow.FuzzResult {
+	var result *flow.FuzzResult
+	attempts := 1 + p.cfg.MaxRetries
+	for attempt := 0; attempt < attempts; attempt++ {
+		result = r.engine.executeFuzzCaseWithHooks(ctx, p.baseData, p.cfg.Positions, fc, p.protocol, p.timeout, p.job.ID, p.cfg.Hooks, hookState, p.cfg.HTTPDoer, p.cfg.TargetScopeChecker)
+		if result.Error == "" {
+			break
+		}
+		// Don't retry if context is cancelled.
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return result
+}
+
+// saveAndUpdateProgress saves the fuzz result and updates counters.
+// Returns false if saving failed (caller should continue to next case).
+func (r *Runner) saveAndUpdateProgress(ctx context.Context, job *flow.FuzzJob, result *flow.FuzzResult, completedCount, errorCount *atomic.Int32) bool {
+	if err := r.engine.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
+		errorCount.Add(1)
+		r.updateJobProgress(ctx, job, int(completedCount.Load()), int(errorCount.Load()))
+		return false
+	}
+	if result.Error != "" {
+		errorCount.Add(1)
+	} else {
+		completedCount.Add(1)
+	}
+	return true
+}
+
+// checkStopConditions evaluates stop conditions and overload detection.
+// Returns true if the worker should stop.
+func (r *Runner) checkStopConditions(result *flow.FuzzResult, stopOn *StopCondition, monitor *OverloadMonitor, errorCount *atomic.Int32, triggerStop func(string)) bool {
+	if stopOn != nil {
+		if result.StatusCode != 0 && checkStatusCode(result.StatusCode, stopOn.StatusCodes) {
+			triggerStop(fmt.Sprintf("stop condition: received status code %d", result.StatusCode))
+			return true
+		}
+		if stopOn.ErrorCount > 0 && int(errorCount.Load()) >= stopOn.ErrorCount {
+			triggerStop(fmt.Sprintf("stop condition: error count reached %d", stopOn.ErrorCount))
+			return true
+		}
+	}
+	if monitor != nil && result.DurationMs > 0 {
+		if monitor.Record(result.DurationMs) {
+			triggerStop("stop condition: overload detected (latency threshold exceeded)")
+			return true
+		}
+	}
+	return false
+}
+
+// startProducer feeds fuzz cases from the iterator to the workers channel.
+func (r *Runner) startProducer(ctx context.Context, iter Iterator, cases chan<- FuzzCase, stopped <-chan struct{}) {
 	go func() {
 		defer close(cases)
 		for {
@@ -395,14 +455,11 @@ func (r *Runner) execute(
 			}
 		}
 	}()
+}
 
-	// Wait for all workers to finish.
-	wg.Wait()
-
-	// Determine final status.
+// finalizeJob determines the final job status and persists it to the DB.
+func (r *Runner) finalizeJob(job *flow.FuzzJob, ctrl *JobController, completed, errors int) {
 	finalStatus := ctrl.Status()
-	finalCompleted := int(completedCount.Load())
-	finalErrors := int(errorCount.Load())
 
 	switch finalStatus {
 	case StatusRunning:
@@ -426,8 +483,8 @@ func (r *Runner) execute(
 		CreatedAt:      job.CreatedAt,
 		CompletedAt:    &completedAt,
 		Total:          job.Total,
-		CompletedCount: finalCompleted,
-		ErrorCount:     finalErrors,
+		CompletedCount: completed,
+		ErrorCount:     errors,
 	}
 
 	// Use a background context since the job context may be cancelled.
