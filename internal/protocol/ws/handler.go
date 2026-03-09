@@ -166,16 +166,6 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	return err
 }
 
-// relayDirection reads frames from src, records them, and writes them to dst.
-// It handles fragmentation by assembling continuation frames into complete messages.
-// Fragment accumulation is capped at config.MaxWebSocketMessageSize to prevent OOM (CWE-400).
-//
-// Plugin hooks are dispatched per-frame (not per-message):
-//   - "send" direction: on_receive_from_client → on_before_send_to_server
-//   - "receive" direction: on_receive_from_server → on_before_send_to_client
-//
-// If a plugin returns ActionDrop, the frame is silently skipped.
-// If a plugin modifies the payload via result Data, the modified payload is used.
 // hookPair holds the plugin hooks for a relay direction.
 type hookPair struct {
 	receiveHook plugin.Hook
@@ -190,6 +180,16 @@ type fragmentState struct {
 	active bool
 }
 
+// relayDirection reads frames from src, records them, and writes them to dst.
+// It handles fragmentation by assembling continuation frames into complete messages.
+// Fragment accumulation is capped at config.MaxWebSocketMessageSize to prevent OOM (CWE-400).
+//
+// Plugin hooks are dispatched per-frame (not per-message):
+//   - "send" direction: on_receive_from_client → on_before_send_to_server
+//   - "receive" direction: on_receive_from_server → on_before_send_to_client
+//
+// If a plugin returns ActionDrop, the frame is silently skipped.
+// If a plugin modifies the payload via result Data, the modified payload is used.
 func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
 	hooks := resolveHookPair(direction)
 
