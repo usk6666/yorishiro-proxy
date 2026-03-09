@@ -2,6 +2,7 @@ package codec
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -41,12 +42,17 @@ func (c *unicodeEscapeCodec) Decode(s string) (string, error) {
 				remaining = remaining[2:]
 				continue
 			}
+			if val > math.MaxInt32 {
+				b.WriteString(remaining[:2])
+				remaining = remaining[2:]
+				continue
+			}
 			r := rune(val)
 			// Handle surrogate pairs.
 			if r >= 0xD800 && r <= 0xDBFF && len(remaining) >= 12 && remaining[6:8] == "\\u" {
 				lowHex := remaining[8:12]
 				lowVal, err := strconv.ParseUint(lowHex, 16, 32)
-				if err == nil {
+				if err == nil && lowVal <= math.MaxInt32 {
 					lowR := rune(lowVal)
 					if lowR >= 0xDC00 && lowR <= 0xDFFF {
 						combined := 0x10000 + (r-0xD800)*0x400 + (lowR - 0xDC00)
