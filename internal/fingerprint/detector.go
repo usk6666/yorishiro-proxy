@@ -16,13 +16,25 @@ func NewDetector() *Detector {
 	return &Detector{rules: defaultRules}
 }
 
+// maxFingerprintBodySize is the maximum number of body bytes inspected for
+// technology pattern matching. Technology signatures (meta tags, generator
+// comments, etc.) typically appear in the first few kilobytes. Limiting the
+// scan avoids CPU spikes on large response bodies.
+const maxFingerprintBodySize = 64 * 1024 // 64KB
+
 // Analyze inspects the given HTTP response headers and body to detect
 // technologies. The body parameter should contain the response body content
 // (or a prefix thereof — full body is not required).
 // Both headers and body may be nil/empty.
 func (d *Detector) Analyze(headers http.Header, body []byte) *Result {
 	seen := make(map[string]Detection) // key = "name|category" for dedup
-	bodyStr := string(body)
+	// Truncate body for pattern matching to avoid CPU spikes on large bodies.
+	// Technology signatures typically appear early in the response.
+	bodyForMatch := body
+	if len(bodyForMatch) > maxFingerprintBodySize {
+		bodyForMatch = bodyForMatch[:maxFingerprintBodySize]
+	}
+	bodyStr := string(bodyForMatch)
 	cookieNames := extractCookieNames(headers)
 
 	for _, r := range d.rules {
