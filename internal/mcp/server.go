@@ -53,6 +53,7 @@ type deps struct {
 	pluginEngine          *plugin.Engine
 	socks5AuthSetter      socks5AuthSetter
 	tlsTransport          httputil.TLSTransport
+	tlsFingerprintSetters []tlsFingerprintSetter
 }
 
 // Server wraps the MCP server and registers proxy-related tools.
@@ -90,6 +91,13 @@ type requestTimeoutSetter interface {
 // target scope enforcement (HTTP/1.x and HTTP/2 handlers).
 type targetScopeSetter interface {
 	SetTargetScope(scope *proxy.TargetScope)
+}
+
+// tlsFingerprintSetter is implemented by protocol handlers that support
+// TLS fingerprint profile configuration (HTTP/1.x and HTTP/2 handlers).
+type tlsFingerprintSetter interface {
+	SetTLSFingerprint(profile string)
+	TLSFingerprint() string
 }
 
 // socks5AuthSetter is implemented by a wrapper around the SOCKS5 handler
@@ -260,6 +268,15 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 func WithPluginEngine(engine *plugin.Engine) ServerOption {
 	return func(s *Server) {
 		s.deps.pluginEngine = engine
+	}
+}
+
+// WithTLSFingerprintSetter registers a protocol handler that should be updated
+// when the TLS fingerprint profile changes. Call this for each handler that
+// implements the tlsFingerprintSetter interface (e.g., HTTP/1.x, HTTP/2).
+func WithTLSFingerprintSetter(setter tlsFingerprintSetter) ServerOption {
+	return func(s *Server) {
+		s.deps.tlsFingerprintSetters = append(s.deps.tlsFingerprintSetters, setter)
 	}
 }
 

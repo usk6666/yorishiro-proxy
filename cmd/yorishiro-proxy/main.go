@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -61,6 +62,7 @@ var envVarMap = map[string]string{
 	"ui-dir":             "YP_UI_DIR",
 	"target-policy-file": "YP_TARGET_POLICY_FILE",
 	"no-open-browser":    "YP_NO_OPEN_BROWSER",
+	"tls-fingerprint":    "YP_TLS_FINGERPRINT",
 }
 
 func run(ctx context.Context) error {
@@ -92,6 +94,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// Target scope policy file path.
 	var targetPolicyFile string
 	fs.StringVar(&targetPolicyFile, "target-policy-file", "", "target scope policy JSON file path (env: YP_TARGET_POLICY_FILE)")
+
+	// TLS fingerprint profile override. Applied as a proxy default when set.
+	var tlsFingerprint string
+	fs.StringVar(&tlsFingerprint, "tls-fingerprint", "", "TLS fingerprint profile: chrome, firefox, safari, edge, random, none (env: YP_TLS_FINGERPRINT)")
 
 	// Define flags — only those requiring startup-time decisions.
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath,
@@ -158,6 +164,12 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	proxyCfg := configs.proxyCfg
 	targetScopePolicy := configs.targetScopePolicy
 	targetScopePolicySource := configs.targetScopePolicySource
+
+	// Apply CLI TLS fingerprint flag. CLI flag takes precedence over config file.
+	proxyCfg, err = applyTLSFingerprintFlag(tlsFingerprint, proxyCfg)
+	if err != nil {
+		return err
+	}
 
 	infra, err := initInfra(ctx, cfg)
 	if err != nil {
@@ -267,6 +279,27 @@ type configsResult struct {
 	proxyCfg                *config.ProxyConfig
 	targetScopePolicy       *config.TargetScopePolicyConfig
 	targetScopePolicySource string
+}
+
+// applyTLSFingerprintFlag validates and applies the CLI -tls-fingerprint flag value.
+// Returns the (possibly initialized) ProxyConfig with the fingerprint set.
+func applyTLSFingerprintFlag(tlsFingerprint string, proxyCfg *config.ProxyConfig) (*config.ProxyConfig, error) {
+	if tlsFingerprint == "" {
+		return proxyCfg, nil
+	}
+	tlsFingerprint = strings.ToLower(tlsFingerprint)
+	validProfiles := map[string]bool{
+		"chrome": true, "firefox": true, "safari": true,
+		"edge": true, "random": true, "none": true,
+	}
+	if !validProfiles[tlsFingerprint] {
+		return nil, fmt.Errorf("invalid -tls-fingerprint value %q: valid values are chrome, firefox, safari, edge, random, none", tlsFingerprint)
+	}
+	if proxyCfg == nil {
+		proxyCfg = &config.ProxyConfig{}
+	}
+	proxyCfg.TLSFingerprint = tlsFingerprint
+	return proxyCfg, nil
 }
 
 // loadConfigs loads the proxy config file and target scope policy.
@@ -549,6 +582,8 @@ func buildMCPOptions(
 		mcp.WithUpstreamProxySetter(proto.http2Handler),
 		mcp.WithTargetScopeSetter(proto.httpHandler),
 		mcp.WithTargetScopeSetter(proto.http2Handler),
+		mcp.WithTLSFingerprintSetter(proto.httpHandler),
+		mcp.WithTLSFingerprintSetter(proto.http2Handler),
 		mcp.WithSOCKS5Handler(proto.socks5Adapter),
 	}
 

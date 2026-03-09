@@ -55,6 +55,17 @@ Specifies which protocols are enabled for detection.
 - If omitted, all protocols are enabled (default behavior)
 - Restricting protocols can improve performance and reduce noise
 
+### tls_fingerprint (string, optional)
+TLS ClientHello fingerprint profile for upstream connections.
+- `"chrome"` (default): Mimic Chrome browser TLS fingerprint.
+- `"firefox"`: Mimic Firefox browser TLS fingerprint.
+- `"safari"`: Mimic Safari browser TLS fingerprint.
+- `"edge"`: Mimic Edge browser TLS fingerprint.
+- `"random"`: Select a random browser fingerprint per connection.
+- `"none"`: Use standard Go crypto/tls (no fingerprint mimicry).
+
+This helps evade JA3/JA4-based bot detection during vulnerability assessments.
+
 ### socks5_auth (string, optional)
 SOCKS5 authentication method.
 - `"none"` (default): SOCKS5 clients connect without authentication.
@@ -141,6 +152,22 @@ Password for SOCKS5 password authentication.
 Then configure proxychains (`/etc/proxychains.conf`):
 ```
 socks5 127.0.0.1 1080
+```
+
+### Start with TLS fingerprint
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "tls_fingerprint": "firefox"
+}
+```
+
+### Start with standard TLS (no fingerprint)
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "tls_fingerprint": "none"
+}
 ```
 
 ### Start with intercept rules

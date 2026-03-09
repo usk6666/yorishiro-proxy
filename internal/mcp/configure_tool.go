@@ -50,6 +50,11 @@ type configureInput struct {
 	// If omitted, the current setting is not changed.
 	SOCKS5Auth *configureSOCKS5Auth `json:"socks5_auth,omitempty" jsonschema:"SOCKS5 authentication configuration"`
 
+	// TLSFingerprint sets the TLS ClientHello fingerprint profile for upstream connections.
+	// Valid values: "chrome", "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
+	// If omitted, the current setting is not changed.
+	TLSFingerprint *string `json:"tls_fingerprint,omitempty" jsonschema:"TLS fingerprint profile: chrome, firefox, safari, edge, random, none"`
+
 	// MaxConnections dynamically changes the maximum number of concurrent proxy connections.
 	// Existing connections exceeding the new limit are not interrupted.
 	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (1-100000)"`
@@ -176,6 +181,9 @@ type configureResult struct {
 
 	// RequestTimeoutMs is the current request timeout in milliseconds (set when changed).
 	RequestTimeoutMs *int64 `json:"request_timeout_ms,omitempty"`
+
+	// TLSFingerprint is the current TLS fingerprint profile (set when changed).
+	TLSFingerprint *string `json:"tls_fingerprint,omitempty"`
 }
 
 // configureInterceptQueueResult summarizes intercept queue state in the configure response.
@@ -212,7 +220,7 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, auto-transform rules, SOCKS5 authentication, and connection limits/timeouts. " +
+		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, auto-transform rules, SOCKS5 authentication, TLS fingerprint profile, and connection limits/timeouts. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
 			"Upstream proxy routes all outgoing traffic through an HTTP CONNECT or SOCKS5 proxy; set to empty string to disable. " +
@@ -269,6 +277,9 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	if err := s.configureSOCKS5(input, result); err != nil {
 		return nil, nil, err
 	}
+	if err := s.configureTLSFingerprint(input, result); err != nil {
+		return nil, nil, err
+	}
 	if err := s.applyConnectionLimits(input, result); err != nil {
 		return nil, nil, err
 	}
@@ -299,6 +310,9 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		return nil, nil, err
 	}
 	if err := s.configureSOCKS5(input, result); err != nil {
+		return nil, nil, err
+	}
+	if err := s.configureTLSFingerprint(input, result); err != nil {
 		return nil, nil, err
 	}
 	if err := s.applyConnectionLimits(input, result); err != nil {
@@ -481,6 +495,19 @@ func (s *Server) configureSOCKS5(input configureInput, result *configureResult) 
 		return fmt.Errorf("socks5_auth: %w", err)
 	}
 	result.SOCKS5Auth = &configureSOCKS5AuthResult{Method: input.SOCKS5Auth.Method}
+	return nil
+}
+
+// configureTLSFingerprint applies TLS fingerprint profile configuration if provided.
+func (s *Server) configureTLSFingerprint(input configureInput, result *configureResult) error {
+	if input.TLSFingerprint == nil {
+		return nil
+	}
+	if err := s.applyTLSFingerprint(*input.TLSFingerprint); err != nil {
+		return fmt.Errorf("tls_fingerprint: %w", err)
+	}
+	profile := s.currentTLSFingerprint()
+	result.TLSFingerprint = &profile
 	return nil
 }
 
