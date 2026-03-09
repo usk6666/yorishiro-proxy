@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
 	"time"
 
@@ -500,4 +501,62 @@ func TestValidateProtocols(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mockTLSTransportForResend implements httputil.TLSTransport for testing.
+type mockTLSTransportForResend struct {
+	called     bool
+	serverName string
+}
+
+func (m *mockTLSTransportForResend) TLSConnect(ctx context.Context, conn net.Conn, serverName string) (net.Conn, string, error) {
+	m.called = true
+	m.serverName = serverName
+	return conn, "http/1.1", nil
+}
+
+func TestUpgradeTLS_UsesProvidedTransport(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	mock := &mockTLSTransportForResend{}
+
+	go func() {
+		// upgradeTLS will call TLSConnect which will return the pipe conn.
+		// The mock doesn't actually do TLS, just passes through.
+		_, _ = upgradeTLS(context.Background(), client, "example.com:443", mock)
+	}()
+
+	// Give time for the goroutine to call upgradeTLS.
+	time.Sleep(50 * time.Millisecond)
+
+	if !mock.called {
+		t.Error("TLSTransport.TLSConnect was not called")
+	}
+	if mock.serverName != "example.com" {
+		t.Errorf("serverName = %q, want %q", mock.serverName, "example.com")
+	}
+}
+
+func TestUpgradeTLS_NilTransportFallsBackToStandard(t *testing.T) {
+	// With nil transport, upgradeTLS should fall back to StandardTransport.
+	// We can't easily test the actual handshake without a TLS server,
+	// but we verify it doesn't panic with nil transport.
+	server, client := net.Pipe()
+	defer server.Close()
+
+	go func() {
+		// This will fail the handshake because there's no TLS server on the pipe,
+		// but it should not panic — it should return an error.
+		_, err := upgradeTLS(context.Background(), client, "example.com:443", nil)
+		if err == nil {
+			t.Error("expected error for TLS handshake on plain pipe")
+		}
+	}()
+
+	// Read some data from the server side to avoid blocking.
+	buf := make([]byte, 1024)
+	server.Read(buf)
+	server.Close()
 }

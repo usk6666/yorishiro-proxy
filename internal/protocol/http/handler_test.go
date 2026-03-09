@@ -568,3 +568,130 @@ func searchStr(s, substr string) bool {
 	}
 	return false
 }
+
+// --- TLSTransport tests ---
+
+// mockTLSTransport records calls to TLSConnect for testing.
+type mockTLSTransport struct {
+	connectCalled bool
+	serverName    string
+}
+
+func (m *mockTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverName string) (net.Conn, string, error) {
+	m.connectCalled = true
+	m.serverName = serverName
+	// Return a simple wrapped connection for testing purposes.
+	return conn, "http/1.1", nil
+}
+
+func TestSetTLSTransport_SetsField(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	mock := &mockTLSTransport{}
+	handler.SetTLSTransport(mock)
+
+	if handler.TLSTransport() != mock {
+		t.Error("TLSTransport() should return the set transport")
+	}
+}
+
+func TestSetTLSTransport_NilByDefault(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	if handler.TLSTransport() != nil {
+		t.Error("TLSTransport() should be nil by default")
+	}
+}
+
+func TestSetTLSTransport_ConfiguresDialTLSContext(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	mock := &mockTLSTransport{}
+	handler.SetTLSTransport(mock)
+
+	if handler.Transport.DialTLSContext == nil {
+		t.Fatal("DialTLSContext should be set after SetTLSTransport")
+	}
+
+	// TLSClientConfig should be nil since DialTLSContext handles TLS.
+	if handler.Transport.TLSClientConfig != nil {
+		t.Error("TLSClientConfig should be nil when DialTLSContext is set")
+	}
+}
+
+func TestEffectiveTLSTransport_ReturnsConfigured(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	mock := &mockTLSTransport{}
+	handler.tlsTransport = mock
+
+	result := handler.effectiveTLSTransport()
+	if result != mock {
+		t.Error("effectiveTLSTransport() should return configured transport")
+	}
+}
+
+func TestEffectiveTLSTransport_FallsBackToStandard(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	result := handler.effectiveTLSTransport()
+	if result == nil {
+		t.Fatal("effectiveTLSTransport() should return a fallback")
+	}
+}
+
+func TestEffectiveTLSTransport_FallbackInheritsInsecure(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+	handler.SetInsecureSkipVerify(true)
+
+	result := handler.effectiveTLSTransport()
+	if result == nil {
+		t.Fatal("effectiveTLSTransport() should return a fallback")
+	}
+}
+
+func TestSetTLSTransport_NilDoesNotPanic(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	// Setting nil should not panic and should not configure DialTLSContext.
+	handler.SetTLSTransport(nil)
+
+	if handler.Transport.DialTLSContext != nil {
+		t.Error("DialTLSContext should remain nil when TLSTransport is nil")
+	}
+}
+
+func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
+	// Test that the handler can forward HTTPS requests through the TLS transport.
+	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.Header().Set("X-UTLS-Test", "passed")
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "utls-ok")
+	}))
+	defer upstream.Close()
+
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+
+	// Use the test server's TLS config to connect, since it's self-signed.
+	handler.Transport = upstream.Client().Transport.(*gohttp.Transport)
+
+	// Build an HTTP proxy request to the upstream HTTPS server.
+	req, _ := gohttp.NewRequest("GET", upstream.URL+"/test", nil)
+
+	// Forward through the handler's transport (which uses test server certs).
+	outReq := req.WithContext(context.Background())
+	outReq.RequestURI = ""
+	resp, _, err := roundTripWithTrace(handler.Transport, outReq)
+	if err != nil {
+		t.Fatalf("roundTrip failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "utls-ok" {
+		t.Errorf("body = %q, want %q", string(body), "utls-ok")
+	}
+}

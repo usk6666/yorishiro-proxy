@@ -118,6 +118,13 @@ type Config struct {
 	//   - Wildcard: "*.example.com" (matches any subdomain)
 	TLSPassthrough []string `json:"tls_passthrough"`
 
+	// TLSFingerprint selects the TLS ClientHello fingerprint profile for
+	// upstream HTTPS connections. When set, uTLS is used to mimic a browser's
+	// TLS fingerprint, evading JA3/JA4-based bot detection.
+	// Valid values: "chrome", "firefox", "safari", "edge", "random".
+	// Empty or unset means Go's default TLS stack is used (no fingerprint spoofing).
+	TLSFingerprint string `json:"tls_fingerprint"`
+
 	// CAEphemeral forces in-memory-only CA generation with no file persistence.
 	// When true, a new CA is generated on each startup.
 	CAEphemeral bool `json:"ca_ephemeral"`

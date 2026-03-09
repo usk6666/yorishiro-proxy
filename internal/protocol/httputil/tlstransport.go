@@ -149,3 +149,33 @@ func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverNam
 	proto := utlsConn.ConnectionState().NegotiatedProtocol
 	return utlsConn, proto, nil
 }
+
+// TLSConnectionState extracts the TLS connection state from a net.Conn.
+// It handles both standard *tls.Conn and *utls.UConn connections.
+// Returns the state and true if the connection has TLS state,
+// or a zero value and false otherwise.
+func TLSConnectionState(conn net.Conn) (tls.ConnectionState, bool) {
+	switch tc := conn.(type) {
+	case *tls.Conn:
+		return tc.ConnectionState(), true
+	case *utls.UConn:
+		// utls.ConnectionState is a separate type; convert via the
+		// underlying *tls.Conn that utls.UConn embeds.
+		uState := tc.ConnectionState()
+		state := tls.ConnectionState{
+			Version:            uState.Version,
+			HandshakeComplete:  uState.HandshakeComplete,
+			DidResume:          uState.DidResume,
+			CipherSuite:        uState.CipherSuite,
+			NegotiatedProtocol: uState.NegotiatedProtocol,
+			ServerName:         uState.ServerName,
+			PeerCertificates:   uState.PeerCertificates,
+			VerifiedChains:     uState.VerifiedChains,
+			OCSPResponse:       uState.OCSPResponse,
+			TLSUnique:          uState.TLSUnique,
+		}
+		return state, true
+	default:
+		return tls.ConnectionState{}, false
+	}
+}

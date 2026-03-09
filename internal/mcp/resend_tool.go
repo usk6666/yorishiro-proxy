@@ -658,6 +658,29 @@ func (s *Server) resendHTTPClient(params resendParams) httpDoer {
 			return dialer.DialContext(ctx, network, addr)
 		},
 	}
+	// Use uTLS transport for HTTPS connections if configured.
+	if s.deps.tlsTransport != nil {
+		tlsT := s.deps.tlsTransport
+		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if params.OverrideHost != "" {
+				addr = params.OverrideHost
+			}
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr
+			}
+			rawConn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn, _, err := tlsT.TLSConnect(ctx, rawConn, host)
+			if err != nil {
+				rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		}
+	}
 	checkRedirect := func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -825,7 +848,7 @@ func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Flow, params rese
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr)
+		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
 		if err != nil {
 			return nil, start, 0, err
 		}

@@ -110,6 +110,7 @@ type Handler struct {
 	transformPipeline *rules.Pipeline
 	h2Handler         H2Handler
 	pluginEngine      *plugin.Engine
+	tlsTransport      httputil.TLSTransport
 }
 
 // NewHandler creates a new HTTP handler with flow recording.
@@ -180,6 +181,60 @@ func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
 // PluginEngine returns the handler's current plugin engine, or nil.
 func (h *Handler) PluginEngine() *plugin.Engine {
 	return h.pluginEngine
+}
+
+// SetTLSTransport sets the TLS transport used for upstream HTTPS connections.
+// When set, the transport's TLSConnect method is used instead of Go's default
+// crypto/tls, enabling uTLS fingerprint spoofing.
+func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
+	h.tlsTransport = t
+	h.configureTLSDialer()
+}
+
+// TLSTransport returns the handler's current TLS transport, or nil.
+func (h *Handler) TLSTransport() httputil.TLSTransport {
+	return h.tlsTransport
+}
+
+// effectiveTLSTransport returns the configured TLS transport, falling back to
+// a StandardTransport with InsecureSkipVerify matching the handler's transport
+// configuration.
+func (h *Handler) effectiveTLSTransport() httputil.TLSTransport {
+	if h.tlsTransport != nil {
+		return h.tlsTransport
+	}
+	insecure := h.Transport != nil && h.Transport.TLSClientConfig != nil &&
+		h.Transport.TLSClientConfig.InsecureSkipVerify
+	return &httputil.StandardTransport{InsecureSkipVerify: insecure}
+}
+
+// configureTLSDialer installs a DialTLSContext function on the handler's
+// http.Transport so that outgoing HTTPS requests use the configured
+// TLSTransport (e.g. uTLS) instead of Go's default TLS stack.
+func (h *Handler) configureTLSDialer() {
+	if h.Transport == nil || h.tlsTransport == nil {
+		return
+	}
+	transport := h.tlsTransport
+	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+		dialer := &net.Dialer{Timeout: 30 * time.Second}
+		rawConn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		tlsConn, _, err := transport.TLSConnect(ctx, rawConn, host)
+		if err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
+	}
+	// Disable the default TLS config since DialTLSContext handles TLS.
+	h.Transport.TLSClientConfig = nil
 }
 
 // Issuer returns the handler's TLS certificate issuer, or nil if not configured.
