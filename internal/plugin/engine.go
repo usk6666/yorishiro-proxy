@@ -143,6 +143,7 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 
 	predeclared := starlark.StringDict{
 		"action": newActionModule(),
+		"codec":  newCodecModule(),
 		"crypto": newCryptoModule(),
 		"config": newConfigDict(cfg.Vars),
 		"state":  newStateModule(ps),
