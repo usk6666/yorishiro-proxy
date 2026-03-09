@@ -231,7 +231,9 @@ func (h *Handler) configureTLSDialer() {
 			rawConn.Close()
 			return nil, err
 		}
-		return tlsConn, nil
+		// Wrap the connection so http.Transport can detect TLS and
+		// populate resp.TLS via ConnectionState() tls.ConnectionState.
+		return httputil.WrapTLSConn(tlsConn), nil
 	}
 	// Disable the default TLS config since DialTLSContext handles TLS.
 	h.Transport.TLSClientConfig = nil

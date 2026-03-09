@@ -522,14 +522,16 @@ func TestUpgradeTLS_UsesProvidedTransport(t *testing.T) {
 
 	mock := &mockTLSTransportForResend{}
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		// upgradeTLS will call TLSConnect which will return the pipe conn.
 		// The mock doesn't actually do TLS, just passes through.
 		_, _ = upgradeTLS(context.Background(), client, "example.com:443", mock)
 	}()
 
-	// Give time for the goroutine to call upgradeTLS.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the goroutine to complete.
+	<-done
 
 	if !mock.called {
 		t.Error("TLSTransport.TLSConnect was not called")
@@ -546,17 +548,21 @@ func TestUpgradeTLS_NilTransportFallsBackToStandard(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
 
+	errCh := make(chan error, 1)
 	go func() {
 		// This will fail the handshake because there's no TLS server on the pipe,
 		// but it should not panic — it should return an error.
 		_, err := upgradeTLS(context.Background(), client, "example.com:443", nil)
-		if err == nil {
-			t.Error("expected error for TLS handshake on plain pipe")
-		}
+		errCh <- err
 	}()
 
-	// Read some data from the server side to avoid blocking.
+	// Read some data from the server side to unblock the handshake, then close.
 	buf := make([]byte, 1024)
-	server.Read(buf)
+	server.Read(buf) //nolint:errcheck // intentionally ignoring; we just need to unblock
 	server.Close()
+
+	// Collect the error from the goroutine.
+	if err := <-errCh; err == nil {
+		t.Error("expected error for TLS handshake on plain pipe")
+	}
 }

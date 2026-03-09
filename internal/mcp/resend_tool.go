@@ -16,6 +16,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // resendInput is the typed input for the resend tool.
@@ -678,7 +679,9 @@ func (s *Server) resendHTTPClient(params resendParams) httpDoer {
 				rawConn.Close()
 				return nil, err
 			}
-			return tlsConn, nil
+			// Wrap the connection so http.Transport can detect TLS and
+			// populate resp.TLS via ConnectionState() tls.ConnectionState.
+			return httputil.WrapTLSConn(tlsConn), nil
 		}
 	}
 	checkRedirect := func(req *http.Request, via []*http.Request) error {

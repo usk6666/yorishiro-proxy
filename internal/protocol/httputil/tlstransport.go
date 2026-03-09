@@ -155,27 +155,69 @@ func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverNam
 // Returns the state and true if the connection has TLS state,
 // or a zero value and false otherwise.
 func TLSConnectionState(conn net.Conn) (tls.ConnectionState, bool) {
+	// Check for our adapter first, which already exposes the standard type.
+	if adapter, ok := conn.(*tlsConnAdapter); ok {
+		return adapter.ConnectionState(), true
+	}
 	switch tc := conn.(type) {
 	case *tls.Conn:
 		return tc.ConnectionState(), true
 	case *utls.UConn:
-		// utls.ConnectionState is a separate type; convert via the
-		// underlying *tls.Conn that utls.UConn embeds.
-		uState := tc.ConnectionState()
-		state := tls.ConnectionState{
-			Version:            uState.Version,
-			HandshakeComplete:  uState.HandshakeComplete,
-			DidResume:          uState.DidResume,
-			CipherSuite:        uState.CipherSuite,
-			NegotiatedProtocol: uState.NegotiatedProtocol,
-			ServerName:         uState.ServerName,
-			PeerCertificates:   uState.PeerCertificates,
-			VerifiedChains:     uState.VerifiedChains,
-			OCSPResponse:       uState.OCSPResponse,
-			TLSUnique:          uState.TLSUnique,
-		}
-		return state, true
+		return convertUTLSState(tc.ConnectionState()), true
 	default:
 		return tls.ConnectionState{}, false
+	}
+}
+
+// convertUTLSState converts a utls.ConnectionState to the standard
+// tls.ConnectionState type.
+func convertUTLSState(uState utls.ConnectionState) tls.ConnectionState {
+	return tls.ConnectionState{
+		Version:            uState.Version,
+		HandshakeComplete:  uState.HandshakeComplete,
+		DidResume:          uState.DidResume,
+		CipherSuite:        uState.CipherSuite,
+		NegotiatedProtocol: uState.NegotiatedProtocol,
+		ServerName:         uState.ServerName,
+		PeerCertificates:   uState.PeerCertificates,
+		VerifiedChains:     uState.VerifiedChains,
+		OCSPResponse:       uState.OCSPResponse,
+		TLSUnique:          uState.TLSUnique,
+	}
+}
+
+// tlsConnAdapter wraps a net.Conn (typically *utls.UConn) and implements
+// the ConnectionState() tls.ConnectionState method that Go's http.Transport
+// expects. Without this adapter, http.Transport cannot detect that the
+// connection is TLS and leaves resp.TLS nil.
+type tlsConnAdapter struct {
+	net.Conn
+	state tls.ConnectionState
+}
+
+// ConnectionState returns the TLS connection state. This method signature
+// matches what http.Transport checks via interface assertion to populate
+// resp.TLS.
+func (c *tlsConnAdapter) ConnectionState() tls.ConnectionState {
+	return c.state
+}
+
+// WrapTLSConn wraps a TLS connection (standard or uTLS) with an adapter that
+// exposes ConnectionState() tls.ConnectionState. This ensures http.Transport
+// can detect TLS and populate resp.TLS.
+// If the connection is already a *tls.Conn, it is returned as-is since
+// http.Transport already handles that type natively.
+func WrapTLSConn(conn net.Conn) net.Conn {
+	switch tc := conn.(type) {
+	case *tls.Conn:
+		// Standard TLS conn already works with http.Transport.
+		return tc
+	case *utls.UConn:
+		return &tlsConnAdapter{
+			Conn:  tc,
+			state: convertUTLSState(tc.ConnectionState()),
+		}
+	default:
+		return conn
 	}
 }
