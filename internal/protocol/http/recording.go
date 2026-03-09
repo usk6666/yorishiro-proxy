@@ -2,11 +2,13 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	gohttp "net/http"
 	"net/url"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -269,6 +271,9 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		sharedSnap = &s
 	}
 
+	// Merge existing tags (from send phase) with fingerprint detection results.
+	tags := mergeTechnologyTags(sendResult.tags, h.detector, p.resp.Header, p.respBody)
+
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
 		RecvSequence:         sendResult.recvSequence,
@@ -279,6 +284,7 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		Resp:                 p.resp,
 		RespBody:             p.respBody,
 		RawResponse:          p.rawResponse,
+		Tags:                 tags,
 	}, sharedSnap, logger)
 }
 
@@ -444,6 +450,31 @@ func socks5Protocol(ctx context.Context, base string) string {
 		}
 	}
 	return base
+}
+
+// mergeTechnologyTags runs the fingerprint detector (if non-nil) on the
+// response headers and body, and merges the detection results into the given
+// base tags map. The result is stored as a JSON array under the key
+// "technologies". If the detector is nil or detects nothing, the original
+// tags are returned unchanged.
+func mergeTechnologyTags(baseTags map[string]string, det *fingerprint.Detector, headers gohttp.Header, body []byte) map[string]string {
+	if det == nil {
+		return baseTags
+	}
+	result := det.Analyze(headers, body)
+	if len(result.Detections) == 0 {
+		return baseTags
+	}
+	data, err := json.Marshal(result.Detections)
+	if err != nil {
+		return baseTags
+	}
+	tags := make(map[string]string)
+	for k, v := range baseTags {
+		tags[k] = v
+	}
+	tags["technologies"] = string(data)
+	return tags
 }
 
 // mergeSOCKS5Tags adds SOCKS5 metadata tags to the given tags map if the

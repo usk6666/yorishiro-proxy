@@ -22,6 +22,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
@@ -56,6 +57,10 @@ type Handler struct {
 	// pluginEngine dispatches Starlark plugin hooks during HTTP/2 stream processing.
 	// If nil, no plugin hooks are invoked.
 	pluginEngine *plugin.Engine
+
+	// detector performs technology stack detection on HTTP responses.
+	// If nil, fingerprinting is skipped.
+	detector *fingerprint.Detector
 }
 
 // NewHandler creates a new HTTP/2 handler with flow recording.
@@ -130,6 +135,18 @@ func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
 // PluginEngine returns the handler's current plugin engine, or nil.
 func (h *Handler) PluginEngine() *plugin.Engine {
 	return h.pluginEngine
+}
+
+// SetDetector sets the fingerprint detector for technology stack detection on
+// HTTP/2 responses. When set, response headers and body are analyzed during
+// flow recording and the results are stored as flow tags.
+func (h *Handler) SetDetector(d *fingerprint.Detector) {
+	h.detector = d
+}
+
+// Detector returns the handler's current fingerprint detector, or nil.
+func (h *Handler) Detector() *fingerprint.Detector {
+	return h.detector
 }
 
 // Name returns the protocol name for h2c (cleartext HTTP/2).
