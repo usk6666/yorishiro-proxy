@@ -48,13 +48,17 @@
             "type": "object",
             "required": ["type"],
             "properties": {
-              "type": { "type": "string", "enum": ["wordlist", "file", "range", "sequence"] },
+              "type": { "type": "string", "enum": ["wordlist", "file", "range", "sequence", "charset", "case_variation", "null_byte_injection"] },
               "values": { "type": "array", "items": { "type": "string" } },
               "path": { "type": "string" },
               "start": { "type": "integer" },
               "end": { "type": "integer" },
               "step": { "type": "integer" },
-              "format": { "type": "string" }
+              "format": { "type": "string" },
+              "encoding": { "type": "array", "items": { "type": "string" }, "description": "Codec chain to apply to each payload." },
+              "charset": { "type": "string", "description": "Character set for charset type." },
+              "length": { "type": "integer", "description": "Combination length for charset type.", "minimum": 1 },
+              "input": { "type": "string", "description": "Base string for case_variation and null_byte_injection types." }
             },
             "additionalProperties": false
           }

@@ -32,7 +32,7 @@ Resend a recorded HTTP/HTTP2/WebSocket request with optional mutations. Records 
 - **remove_headers** (array of strings, optional): Header names to remove.
 - **override_body** (string, optional): Override the request body (text).
 - **override_body_base64** (string, optional): Override the request body (Base64-encoded binary). Mutually exclusive with `override_body`.
-- **body_patches** (array, optional): Partial body modifications. Each patch is either `{"json_path": "$.key", "value": "new"}` or `{"regex": "pattern", "replace": "replacement"}`. Ignored when `override_body` or `override_body_base64` is set.
+- **body_patches** (array, optional): Partial body modifications. Each patch is either `{"json_path": "$.key", "value": "new"}` or `{"regex": "pattern", "replace": "replacement"}`. An optional `"encoding"` array can be added to apply codec transformations to the patch value before applying. Codecs are applied in order as a pipeline — e.g. `["url_encode_query", "base64"]` first URL-encodes the value, then Base64-encodes the result. Maximum 10 codecs per chain. Ignored when `override_body` or `override_body_base64` is set. Available codecs: base64, base64url, url_encode_query, url_encode_path, url_encode_full, double_url_encode, hex, html_entity, html_escape, unicode_escape, md5, sha256, lower, upper.
 - **override_host** (string, optional): TCP connection target as `"host:port"`, independent of the URL host. Subject to SSRF protection.
 - **follow_redirects** (boolean, optional): Follow HTTP redirects automatically (default: `false`).
 - **timeout_ms** (integer, optional): Request timeout in milliseconds (default: `30000`).
@@ -135,6 +135,20 @@ The `resend` action supports optional hooks that execute macros before sending t
     "override_method": "POST",
     "body_patches": [{"json_path": "$.user.role", "value": "admin"}],
     "dry_run": true
+  }
+}
+```
+
+### Resend with encoded body patch
+```json
+{
+  "action": "resend",
+  "params": {
+    "flow_id": "abc-123",
+    "body_patches": [
+      {"json_path": "$.token", "value": "test-payload", "encoding": ["base64"]},
+      {"regex": "csrf_token=[^&]+", "replace": "csrf_token=injected", "encoding": ["url_encode_query"]}
+    ]
   }
 }
 ```

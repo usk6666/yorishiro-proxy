@@ -62,7 +62,8 @@
               "json_path": { "type": "string" },
               "value": {},
               "regex": { "type": "string" },
-              "replace": { "type": "string" }
+              "replace": { "type": "string" },
+              "encoding": { "type": "array", "items": { "type": "string" }, "description": "Codec chain to apply to the patch value before applying." }
             },
             "additionalProperties": false
           }
