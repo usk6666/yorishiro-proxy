@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -630,7 +631,9 @@ var validTLSFingerprints = map[string]bool{
 }
 
 // applyTLSFingerprint validates the profile name and applies it to all registered handlers.
+// The profile name is normalized to lowercase before validation.
 func (s *Server) applyTLSFingerprint(profile string) error {
+	profile = strings.ToLower(profile)
 	if !validTLSFingerprints[profile] {
 		return fmt.Errorf("invalid tls_fingerprint %q: valid values are chrome, firefox, safari, edge, random, none", profile)
 	}

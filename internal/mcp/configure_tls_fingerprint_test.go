@@ -135,6 +135,54 @@ func TestConfigure_TLSFingerprint_InvalidProfile(t *testing.T) {
 	}
 }
 
+func TestConfigure_TLSFingerprint_CaseInsensitive(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"Chrome", "chrome"},
+		{"FIREFOX", "firefox"},
+		{"Safari", "safari"},
+		{"EDGE", "edge"},
+		{"Random", "random"},
+		{"NONE", "none"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			setter := &mockTLSFingerprintSetter{}
+			cs := setupTLSFingerprintTestSession(t, nil, nil, setter)
+
+			input := configureInput{
+				TLSFingerprint: &tc.input,
+			}
+			data, err := json.Marshal(input)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var args map[string]json.RawMessage
+			if err := json.Unmarshal(data, &args); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+				Name:      "configure",
+				Arguments: args,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if result.IsError {
+				t.Fatalf("expected success for %q, got error: %v", tc.input, result.Content)
+			}
+
+			if setter.profile != tc.expected {
+				t.Errorf("setter.profile = %q, want %q", setter.profile, tc.expected)
+			}
+		})
+	}
+}
+
 func TestConfigure_TLSFingerprint_OmittedDoesNotChange(t *testing.T) {
 	setter := &mockTLSFingerprintSetter{profile: "firefox"}
 	cs := setupTLSFingerprintTestSession(t, nil, nil, setter)

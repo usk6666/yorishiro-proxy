@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -164,11 +165,9 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	targetScopePolicySource := configs.targetScopePolicySource
 
 	// Apply CLI TLS fingerprint flag. CLI flag takes precedence over config file.
-	if tlsFingerprint != "" {
-		if proxyCfg == nil {
-			proxyCfg = &config.ProxyConfig{}
-		}
-		proxyCfg.TLSFingerprint = tlsFingerprint
+	proxyCfg, err = applyTLSFingerprintFlag(tlsFingerprint, proxyCfg)
+	if err != nil {
+		return err
 	}
 
 	infra, err := initInfra(ctx, cfg)
@@ -279,6 +278,27 @@ type configsResult struct {
 	proxyCfg                *config.ProxyConfig
 	targetScopePolicy       *config.TargetScopePolicyConfig
 	targetScopePolicySource string
+}
+
+// applyTLSFingerprintFlag validates and applies the CLI -tls-fingerprint flag value.
+// Returns the (possibly initialized) ProxyConfig with the fingerprint set.
+func applyTLSFingerprintFlag(tlsFingerprint string, proxyCfg *config.ProxyConfig) (*config.ProxyConfig, error) {
+	if tlsFingerprint == "" {
+		return proxyCfg, nil
+	}
+	tlsFingerprint = strings.ToLower(tlsFingerprint)
+	validProfiles := map[string]bool{
+		"chrome": true, "firefox": true, "safari": true,
+		"edge": true, "random": true, "none": true,
+	}
+	if !validProfiles[tlsFingerprint] {
+		return nil, fmt.Errorf("invalid -tls-fingerprint value %q: valid values are chrome, firefox, safari, edge, random, none", tlsFingerprint)
+	}
+	if proxyCfg == nil {
+		proxyCfg = &config.ProxyConfig{}
+	}
+	proxyCfg.TLSFingerprint = tlsFingerprint
+	return proxyCfg, nil
 }
 
 // loadConfigs loads the proxy config file and target scope policy.
