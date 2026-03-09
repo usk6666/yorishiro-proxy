@@ -1,44 +1,61 @@
 package macro
 
 import (
-	"crypto/md5"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"fmt"
-	"html"
-	"net/url"
-	"strings"
+	"sort"
+
+	"github.com/usk6666/yorishiro-proxy/internal/codec"
 )
 
 // EncoderFunc is a function that transforms a string value.
 type EncoderFunc func(string) (string, error)
 
-// builtinEncoders maps encoder names to their implementations.
-var builtinEncoders = map[string]EncoderFunc{
-	"url_encode":    encodeURL,
-	"base64":        encodeBase64,
-	"base64_decode": decodeBase64,
-	"html_encode":   encodeHTML,
-	"hex":           encodeHex,
-	"lower":         encodeLower,
-	"upper":         encodeUpper,
-	"md5":           encodeMD5,
-	"sha256":        encodeSHA256,
+// encoderAliases maps legacy macro encoder names to their codec equivalents.
+var encoderAliases = map[string]string{
+	"url_encode":  "url_encode_query",
+	"html_encode": "html_escape",
 }
 
 // GetEncoder returns the encoder function for the given name.
 // Returns nil if the encoder is not found.
+// Supports both legacy names (url_encode, html_encode, base64_decode) and
+// codec names.
 func GetEncoder(name string) EncoderFunc {
-	return builtinEncoders[name]
+	// Handle base64_decode as a special case: it maps to codec base64's Decode.
+	if name == "base64_decode" {
+		return func(s string) (string, error) {
+			return codec.Decode(s, []string{"base64"})
+		}
+	}
+
+	// Resolve legacy aliases.
+	codecName := name
+	if alias, ok := encoderAliases[name]; ok {
+		codecName = alias
+	}
+
+	c, ok := codec.DefaultRegistry().Get(codecName)
+	if !ok {
+		return nil
+	}
+	return c.Encode
 }
 
 // ListEncoders returns the names of all available built-in encoders.
+// This returns the legacy encoder names for backward compatibility.
 func ListEncoders() []string {
-	names := make([]string, 0, len(builtinEncoders))
-	for name := range builtinEncoders {
-		names = append(names, name)
+	names := []string{
+		"url_encode",
+		"base64",
+		"base64_decode",
+		"html_encode",
+		"hex",
+		"lower",
+		"upper",
+		"md5",
+		"sha256",
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -58,46 +75,4 @@ func ApplyEncoders(value string, encoderNames []string) (string, error) {
 		}
 	}
 	return result, nil
-}
-
-func encodeURL(s string) (string, error) {
-	return url.QueryEscape(s), nil
-}
-
-func encodeBase64(s string) (string, error) {
-	return base64.StdEncoding.EncodeToString([]byte(s)), nil
-}
-
-func decodeBase64(s string) (string, error) {
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return "", fmt.Errorf("invalid base64 input: %w", err)
-	}
-	return string(b), nil
-}
-
-func encodeHTML(s string) (string, error) {
-	return html.EscapeString(s), nil
-}
-
-func encodeHex(s string) (string, error) {
-	return hex.EncodeToString([]byte(s)), nil
-}
-
-func encodeLower(s string) (string, error) {
-	return strings.ToLower(s), nil
-}
-
-func encodeUpper(s string) (string, error) {
-	return strings.ToUpper(s), nil
-}
-
-func encodeMD5(s string) (string, error) {
-	h := md5.Sum([]byte(s))
-	return hex.EncodeToString(h[:]), nil
-}
-
-func encodeSHA256(s string) (string, error) {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:]), nil
 }
