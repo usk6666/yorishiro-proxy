@@ -112,54 +112,84 @@ func ApplyHTTPRequestChanges(req *gohttp.Request, data map[string]any) (*gohttp.
 		return req, nil, nil
 	}
 
-	var body []byte
+	applyMethod(req, data)
 
+	if err := applyURL(req, data); err != nil {
+		return req, nil, err
+	}
+
+	applyHost(req, data)
+	applyRequestHeaders(req, data)
+	body := extractBody(data)
+
+	return req, body, nil
+}
+
+// applyMethod updates the request method from the data map if present.
+func applyMethod(req *gohttp.Request, data map[string]any) {
 	if v, ok := data["method"].(string); ok && v != "" {
 		req.Method = v
 	}
+}
 
-	if v, ok := data["url"].(string); ok && v != "" {
-		parsed, err := url.Parse(v)
-		if err != nil {
-			return req, nil, fmt.Errorf("plugin returned invalid URL: %w", err)
-		}
-		// Only allow http and https schemes to prevent SSRF via plugin URL rewrite.
-		// Empty scheme is permitted for relative URLs.
-		switch parsed.Scheme {
-		case "http", "https", "":
-			req.URL = parsed
-			if parsed.Host != "" {
-				req.Host = parsed.Host
-			}
-		default:
-			// Ignore URL change with disallowed scheme — keep original URL.
-		}
+// applyURL updates the request URL from the data map if present.
+// Only http, https, and empty schemes are allowed to prevent SSRF.
+func applyURL(req *gohttp.Request, data map[string]any) error {
+	v, ok := data["url"].(string)
+	if !ok || v == "" {
+		return nil
 	}
+	parsed, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("plugin returned invalid URL: %w", err)
+	}
+	// Only allow http and https schemes to prevent SSRF via plugin URL rewrite.
+	// Empty scheme is permitted for relative URLs.
+	switch parsed.Scheme {
+	case "http", "https", "":
+		req.URL = parsed
+		if parsed.Host != "" {
+			req.Host = parsed.Host
+		}
+	default:
+		// Ignore URL change with disallowed scheme — keep original URL.
+	}
+	return nil
+}
 
+// applyHost updates the request host from the data map if present.
+func applyHost(req *gohttp.Request, data map[string]any) {
 	if v, ok := data["host"].(string); ok && v != "" {
 		req.Host = v
 		if req.URL != nil {
 			req.URL.Host = v
 		}
 	}
+}
 
+// applyRequestHeaders updates the request headers from the data map if present.
+func applyRequestHeaders(req *gohttp.Request, data map[string]any) {
 	if v, ok := data["headers"]; ok {
 		newHeaders := mapToHeaders(v)
 		if newHeaders != nil {
 			req.Header = newHeaders
 		}
 	}
+}
 
-	if v, ok := data["body"]; ok {
-		switch b := v.(type) {
-		case []byte:
-			body = b
-		case string:
-			body = []byte(b)
-		}
+// extractBody extracts body bytes from the data map, supporting both []byte and string.
+func extractBody(data map[string]any) []byte {
+	v, ok := data["body"]
+	if !ok {
+		return nil
 	}
-
-	return req, body, nil
+	switch b := v.(type) {
+	case []byte:
+		return b
+	case string:
+		return []byte(b)
+	}
+	return nil
 }
 
 // ApplyHTTPResponseChanges applies modifications from a plugin hook result

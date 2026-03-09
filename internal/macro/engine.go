@@ -135,34 +135,49 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, kvStore map[string
 		}, state, nil
 	}
 
-	// Determine step timeout.
-	stepTimeoutMs := step.TimeoutMs
-	if stepTimeoutMs <= 0 {
-		stepTimeoutMs = DefaultStepTimeoutMs
+	params := resolveStepParams(step)
+	return e.executeWithRetry(ctx, step, kvStore, params)
+}
+
+// stepParams holds resolved step execution parameters with defaults applied.
+type stepParams struct {
+	timeoutMs    int
+	onError      OnError
+	retryCount   int
+	retryDelayMs int
+}
+
+// resolveStepParams resolves step execution parameters, applying defaults.
+func resolveStepParams(step *Step) stepParams {
+	p := stepParams{
+		timeoutMs:    step.TimeoutMs,
+		onError:      step.OnError,
+		retryCount:   step.RetryCount,
+		retryDelayMs: step.RetryDelayMs,
+	}
+	if p.timeoutMs <= 0 {
+		p.timeoutMs = DefaultStepTimeoutMs
+	}
+	if p.onError == "" {
+		p.onError = OnErrorAbort
+	}
+	if p.retryCount <= 0 {
+		p.retryCount = DefaultRetryCount
+	}
+	if p.retryDelayMs <= 0 {
+		p.retryDelayMs = DefaultRetryDelayMs
+	}
+	return p
+}
+
+// executeWithRetry runs step execution with retry logic based on the error policy.
+func (e *Engine) executeWithRetry(ctx context.Context, step *Step, kvStore map[string]string, params stepParams) (*StepResult, *stepState, error) {
+	var maxAttempts int = 1
+	if params.onError == OnErrorRetry {
+		maxAttempts = params.retryCount + 1
 	}
 
-	onError := step.OnError
-	if onError == "" {
-		onError = OnErrorAbort
-	}
-
-	retryCount := step.RetryCount
-	if retryCount <= 0 {
-		retryCount = DefaultRetryCount
-	}
-
-	retryDelayMs := step.RetryDelayMs
-	if retryDelayMs <= 0 {
-		retryDelayMs = DefaultRetryDelayMs
-	}
-
-	// Execute with error handling policy.
 	var lastErr error
-	maxAttempts := 1
-	if onError == OnErrorRetry {
-		maxAttempts = retryCount + 1
-	}
-
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			// Wait before retry, but respect context cancellation.
@@ -173,11 +188,11 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, kvStore map[string
 					Status: "error",
 					Error:  "macro timeout exceeded during retry wait",
 				}, nil, ctx.Err()
-			case <-time.After(time.Duration(retryDelayMs) * time.Millisecond):
+			case <-time.After(time.Duration(params.retryDelayMs) * time.Millisecond):
 			}
 		}
 
-		stepResult, state, err := e.doStepExecution(ctx, step, kvStore, stepTimeoutMs)
+		stepResult, state, err := e.doStepExecution(ctx, step, kvStore, params.timeoutMs)
 		if err == nil {
 			return stepResult, state, nil
 		}
@@ -194,10 +209,15 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, kvStore map[string
 		}
 	}
 
-	// All attempts failed.
+	return handleStepFailure(step, params, lastErr)
+}
+
+// handleStepFailure determines the step result when all attempts have failed,
+// based on the error policy.
+func handleStepFailure(step *Step, params stepParams, lastErr error) (*StepResult, *stepState, error) {
 	errorMsg := fmt.Sprintf("step %q failed: %v", step.ID, lastErr)
 
-	switch onError {
+	switch params.onError {
 	case OnErrorSkip:
 		return &StepResult{
 			ID:     step.ID,
@@ -209,8 +229,8 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, kvStore map[string
 		return &StepResult{
 			ID:     step.ID,
 			Status: "error",
-			Error:  fmt.Sprintf("%s (after %d retries)", errorMsg, retryCount),
-		}, nil, fmt.Errorf("%s (after %d retries)", errorMsg, retryCount)
+			Error:  fmt.Sprintf("%s (after %d retries)", errorMsg, params.retryCount),
+		}, nil, fmt.Errorf("%s (after %d retries)", errorMsg, params.retryCount)
 	default: // abort
 		return &StepResult{
 			ID:     step.ID,
@@ -374,53 +394,77 @@ func validateMacro(m *Macro) error {
 		return fmt.Errorf("macro exceeds maximum step count (%d > %d)", len(m.Steps), MaxSteps)
 	}
 
-	// Validate step IDs are unique and non-empty.
 	seenIDs := make(map[string]bool, len(m.Steps))
 	for i := range m.Steps {
-		step := &m.Steps[i]
-		if step.ID == "" {
-			return fmt.Errorf("step at index %d has no ID", i)
-		}
-		if seenIDs[step.ID] {
-			return fmt.Errorf("duplicate step ID %q", step.ID)
-		}
-		seenIDs[step.ID] = true
-
-		if step.FlowID == "" {
-			return fmt.Errorf("step %q has no session_id", step.ID)
-		}
-
-		// Validate on_error value.
-		if step.OnError != "" && step.OnError != OnErrorAbort && step.OnError != OnErrorSkip && step.OnError != OnErrorRetry {
-			return fmt.Errorf("step %q has invalid on_error value %q", step.ID, step.OnError)
-		}
-
-		// Validate retry_count upper bound (CWE-770).
-		if step.RetryCount > MaxRetryCount {
-			return fmt.Errorf("step %q retry_count %d exceeds maximum (%d)", step.ID, step.RetryCount, MaxRetryCount)
-		}
-
-		// Validate guard references only previously defined steps.
-		if step.When != nil && step.When.Step != "" {
-			if !seenIDs[step.When.Step] {
-				return fmt.Errorf("step %q guard references unknown or forward step %q", step.ID, step.When.Step)
-			}
-		}
-
-		// Validate extraction rules.
-		for j := range step.Extract {
-			rule := &step.Extract[j]
-			if rule.Name == "" {
-				return fmt.Errorf("step %q extraction rule at index %d has no name", step.ID, j)
-			}
-			if rule.Source == "" {
-				return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
-			}
-			if rule.From == "" {
-				return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
-			}
+		if err := validateStep(&m.Steps[i], i, seenIDs); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// validateStep validates a single macro step, checking its ID uniqueness,
+// required fields, error policy, guard references, and extraction rules.
+func validateStep(step *Step, index int, seenIDs map[string]bool) error {
+	if step.ID == "" {
+		return fmt.Errorf("step at index %d has no ID", index)
+	}
+	if seenIDs[step.ID] {
+		return fmt.Errorf("duplicate step ID %q", step.ID)
+	}
+	seenIDs[step.ID] = true
+
+	if step.FlowID == "" {
+		return fmt.Errorf("step %q has no session_id", step.ID)
+	}
+
+	if err := validateStepErrorPolicy(step); err != nil {
+		return err
+	}
+
+	if err := validateStepGuard(step, seenIDs); err != nil {
+		return err
+	}
+
+	return validateExtractRules(step)
+}
+
+// validateStepErrorPolicy validates the on_error and retry_count fields of a step.
+func validateStepErrorPolicy(step *Step) error {
+	if step.OnError != "" && step.OnError != OnErrorAbort && step.OnError != OnErrorSkip && step.OnError != OnErrorRetry {
+		return fmt.Errorf("step %q has invalid on_error value %q", step.ID, step.OnError)
+	}
+	// Validate retry_count upper bound (CWE-770).
+	if step.RetryCount > MaxRetryCount {
+		return fmt.Errorf("step %q retry_count %d exceeds maximum (%d)", step.ID, step.RetryCount, MaxRetryCount)
+	}
+	return nil
+}
+
+// validateStepGuard validates that a step's guard references only previously defined steps.
+func validateStepGuard(step *Step, seenIDs map[string]bool) error {
+	if step.When != nil && step.When.Step != "" {
+		if !seenIDs[step.When.Step] {
+			return fmt.Errorf("step %q guard references unknown or forward step %q", step.ID, step.When.Step)
+		}
+	}
+	return nil
+}
+
+// validateExtractRules validates the extraction rules of a step.
+func validateExtractRules(step *Step) error {
+	for j := range step.Extract {
+		rule := &step.Extract[j]
+		if rule.Name == "" {
+			return fmt.Errorf("step %q extraction rule at index %d has no name", step.ID, j)
+		}
+		if rule.Source == "" {
+			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
+		}
+		if rule.From == "" {
+			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
+		}
+	}
 	return nil
 }
