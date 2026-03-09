@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
@@ -111,6 +112,7 @@ type Handler struct {
 	h2Handler         H2Handler
 	pluginEngine      *plugin.Engine
 	tlsTransport      httputil.TLSTransport
+	detector          *fingerprint.Detector
 }
 
 // NewHandler creates a new HTTP handler with flow recording.
@@ -194,6 +196,18 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 // TLSTransport returns the handler's current TLS transport, or nil.
 func (h *Handler) TLSTransport() httputil.TLSTransport {
 	return h.tlsTransport
+}
+
+// SetDetector sets the fingerprint detector for technology stack detection on
+// HTTP responses. When set, response headers and body are analyzed during flow
+// recording and the results are stored as flow tags.
+func (h *Handler) SetDetector(d *fingerprint.Detector) {
+	h.detector = d
+}
+
+// Detector returns the handler's current fingerprint detector, or nil.
+func (h *Handler) Detector() *fingerprint.Detector {
+	return h.detector
 }
 
 // effectiveTLSTransport returns the configured TLS transport, falling back to

@@ -5,7 +5,7 @@ Unified information query tool. Retrieve flows, flow details, messages, proxy st
 ## Parameters
 
 ### resource (string, required)
-The resource to query. One of: `flows`, `flow`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`, `fuzz_jobs`, `fuzz_results`.
+The resource to query. One of: `flows`, `flow`, `messages`, `status`, `config`, `ca_cert`, `intercept_queue`, `macros`, `macro`, `fuzz_jobs`, `fuzz_results`, `technologies`.
 
 ### id (string, conditional)
 Flow ID or macro name. Required for `flow`, `messages`, and `macro` resources.
@@ -21,6 +21,7 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **status_code** (integer): HTTP status code filter for flows and fuzz_results (e.g. `200`, `404`).
 - **blocked_by** (string): Filter for blocked flows (e.g. `"target_scope"`, `"intercept_drop"`).
 - **state** (string): Flow lifecycle state filter (`"active"`, `"complete"`, `"error"`).
+- **technology** (string): Technology name filter for flows (case-insensitive substring match, e.g. `"nginx"`, `"wordpress"`).
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
 - **status** (string): Job status filter for fuzz_jobs (e.g. `"running"`, `"completed"`).
@@ -232,6 +233,15 @@ Supports `filter.status`, `filter.tag`, `fields`, `limit`, and `offset`.
 
 Returns: `jobs[]` (id, flow_id, status, tag, total, completed_count, error_count, created_at, completed_at), `count`, `total`.
 
+### technologies
+Aggregate detected technology stacks per host across all completed flows. Technologies are automatically detected from HTTP response headers and body content during flow recording.
+
+No additional parameters required. Returns a list of hosts with their detected technologies.
+
+Returns: `hosts[]` (host, technologies[] with name, version, category, confidence), `count`.
+
+Categories include: `web_server`, `framework`, `language`, `cms`, `cdn`, `waf`, `js_framework`.
+
 ### fuzz_results
 Get results for a specific fuzz job with filtering, sorting, pagination, and aggregate summary.
 
@@ -247,6 +257,19 @@ Returns: `results[]` (id, fuzz_id, index, flow_id, payloads, status_code, respon
 ### List running fuzz jobs
 ```json
 {"resource": "fuzz_jobs", "filter": {"status": "running"}}
+```
+
+### List detected technologies per host
+```json
+{"resource": "technologies"}
+```
+
+### Filter flows by detected technology
+```json
+{
+  "resource": "flows",
+  "filter": {"technology": "nginx"}
+}
 ```
 
 ### Get fuzz results with filtering

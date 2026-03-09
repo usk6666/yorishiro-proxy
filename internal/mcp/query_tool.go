@@ -17,8 +17,8 @@ import (
 
 // queryInput is the typed input for the query tool.
 type queryInput struct {
-	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results.
-	Resource string `json:"resource" jsonschema:"resource to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results"`
+	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results, technologies.
+	Resource string `json:"resource" jsonschema:"resource to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results, technologies"`
 
 	// ID is required for flow and messages resources.
 	// For flow: the flow ID. For messages: the flow_id.
@@ -60,6 +60,8 @@ type queryFilter struct {
 	State string `json:"state,omitempty" jsonschema:"flow lifecycle state filter (active, complete, error)"`
 	// Direction filters messages by direction ("send" or "receive").
 	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
+	// Technology filters flows by detected technology name (case-insensitive substring match).
+	Technology string `json:"technology,omitempty" jsonschema:"technology name filter for flows (e.g. nginx, wordpress)"`
 	// BodyContains filters fuzz_results by response body substring.
 	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
 	// Status filters fuzz_jobs by status (e.g. "running", "completed").
@@ -69,18 +71,18 @@ type queryFilter struct {
 }
 
 // availableResources lists all valid resource names for error messages.
-var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"}
+var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results", "technologies"}
 
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "query",
 		Description: "Unified information query tool. Retrieve flows, flow details, messages, " +
-			"proxy status, configuration, CA certificate, intercept queue, macro definitions, or fuzz results. " +
-			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
+			"proxy status, configuration, CA certificate, intercept queue, macro definitions, fuzz results, or technology stack detections. " +
+			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
 			"The 'id' parameter is required for flow, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop), and state (active, complete, error); " +
+			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop), state (active, complete, error), and technology (e.g. nginx, wordpress); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code and body_contains. " +
 			"Flows include protocol_summary with protocol-specific information. " +
@@ -92,7 +94,8 @@ func (s *Server) registerQuery() {
 			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
 			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
 			"Results are paginated with limit/offset for flows, messages, fuzz_jobs, and fuzz_results resources. " +
-			"'intercept_queue' returns currently blocked requests and responses (with phase field) waiting for release/modify_and_forward/drop actions.",
+			"'intercept_queue' returns currently blocked requests and responses (with phase field) waiting for release/modify_and_forward/drop actions. " +
+			"'technologies' aggregates detected technology stacks per host across all flows.",
 	}, s.handleQuery)
 }
 
@@ -121,6 +124,8 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 		return s.handleQueryFuzzJobs(ctx, input)
 	case "fuzz_results":
 		return s.handleQueryFuzzResults(ctx, input)
+	case "technologies":
+		return s.handleQueryTechnologies(ctx, input)
 	case "":
 		return nil, nil, fmt.Errorf("resource is required: available resources are %s", strings.Join(availableResources, ", "))
 	default:
@@ -171,6 +176,7 @@ func buildFlowListOptions(input queryInput) flow.ListOptions {
 		opts.StatusCode = input.Filter.StatusCode
 		opts.BlockedBy = input.Filter.BlockedBy
 		opts.State = input.Filter.State
+		opts.Technology = input.Filter.Technology
 	}
 	return opts
 }

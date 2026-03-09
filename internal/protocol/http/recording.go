@@ -269,6 +269,9 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		sharedSnap = &s
 	}
 
+	// Merge existing tags (from send phase) with fingerprint detection results.
+	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, p.resp.Header, p.respBody)
+
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
 		RecvSequence:         sendResult.recvSequence,
@@ -279,6 +282,7 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		Resp:                 p.resp,
 		RespBody:             p.respBody,
 		RawResponse:          p.rawResponse,
+		Tags:                 tags,
 	}, sharedSnap, logger)
 }
 

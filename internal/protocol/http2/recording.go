@@ -320,6 +320,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		sharedSnap = &s
 	}
 
+	tags := httputil.MergeTechnologyTags(nil, h.detector, p.resp.Header, p.respBody)
+
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
 		RecvSequence:         sendResult.recvSequence,
@@ -329,6 +331,7 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		TLSServerCertSubject: p.tlsServerCertSubject,
 		Resp:                 p.resp,
 		RespBody:             p.respBody,
+		Tags:                 tags,
 	}, sharedSnap, logger)
 }
 
