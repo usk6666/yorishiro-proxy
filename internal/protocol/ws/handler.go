@@ -176,25 +176,24 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 //
 // If a plugin returns ActionDrop, the frame is silently skipped.
 // If a plugin modifies the payload via result Data, the modified payload is used.
+// hookPair holds the plugin hooks for a relay direction.
+type hookPair struct {
+	receiveHook plugin.Hook
+	sendHook    plugin.Hook
+	direction   string // "client_to_server" or "server_to_client"
+}
+
+// fragmentState tracks the state of fragmented message assembly.
+type fragmentState struct {
+	buf    []byte
+	opcode byte
+	active bool
+}
+
 func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
-	// Determine hook pair based on direction.
-	var receiveHook, sendHook plugin.Hook
-	var pluginDirection string
-	if direction == "send" {
-		receiveHook = plugin.HookOnReceiveFromClient
-		sendHook = plugin.HookOnBeforeSendToServer
-		pluginDirection = "client_to_server"
-	} else {
-		receiveHook = plugin.HookOnReceiveFromServer
-		sendHook = plugin.HookOnBeforeSendToClient
-		pluginDirection = "server_to_client"
-	}
+	hooks := resolveHookPair(direction)
 
-	// Fragment assembly state.
-	var fragmentBuf []byte
-	var fragmentOpcode byte
-	inFragment := false
-
+	var frag fragmentState
 	for {
 		select {
 		case <-ctx.Done():
@@ -214,104 +213,140 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 		// plugins from dropping Close frames, which would cause the relay to hang
 		// until context timeout (CWE-400).
 		if !frame.IsControl() {
-			// Create a transaction context scoped to this frame's hook pair.
-			frameTxCtx := plugin.NewTxCtx()
-
-			// Dispatch receive hook (on_receive_from_client / on_receive_from_server).
-			if dropped := h.dispatchFrameHook(ctx, receiveHook, frame, pluginDirection, upgradeReq, connInfo, flowID, frameTxCtx); dropped {
-				continue
-			}
-
-			// Dispatch send hook (on_before_send_to_server / on_before_send_to_client).
-			if dropped := h.dispatchFrameHook(ctx, sendHook, frame, pluginDirection, upgradeReq, connInfo, flowID, frameTxCtx); dropped {
+			if dropped := h.dispatchDataFrameHooks(ctx, hooks, frame, upgradeReq, connInfo, flowID); dropped {
 				continue
 			}
 		}
 
-		// Forward the frame to the destination.
-		// For client->server: frames were originally masked; we read them unmasked.
-		// We need to write them masked to the server (re-mask with original key).
-		// For server->client: frames are unmasked; write them unmasked.
-		outFrame := &Frame{
-			Fin:     frame.Fin,
-			RSV1:    frame.RSV1,
-			RSV2:    frame.RSV2,
-			RSV3:    frame.RSV3,
-			Opcode:  frame.Opcode,
-			Masked:  frame.Masked,
-			Payload: frame.Payload,
-		}
-		if frame.Masked {
-			outFrame.MaskKey = frame.MaskKey
+		if err := forwardFrame(dst, frame, direction); err != nil {
+			return err
 		}
 
-		if err := WriteFrame(dst, outFrame); err != nil {
-			return fmt.Errorf("write %s frame: %w", direction, err)
-		}
-
-		// Handle control frames (these can appear between data frame fragments).
 		if frame.IsControl() {
 			h.recordControlFrame(ctx, frame, flowID, direction, seq, start)
-
-			// Close frame: signal end of relay.
 			if frame.Opcode == OpcodeClose {
 				return nil
 			}
 			continue
 		}
 
-		// Handle data frames (with fragmentation support).
-		if frame.Opcode != OpcodeContinuation {
-			// Start of a new message (or a single unfragmented message).
-			if inFragment {
-				// Protocol violation: new data frame while a fragmented message is pending.
-				// Record what we have and start fresh.
-				h.logger.Warn("websocket protocol violation: new data frame while fragment pending",
-					"flow_id", flowID, "direction", direction)
-				fragmentBuf = nil
-				inFragment = false
-			}
-			if frame.Fin {
-				// Single unfragmented message.
-				h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, flowID, direction, seq, start)
-			} else {
-				// First fragment: start accumulating (cap checked on continuation).
-				fragmentOpcode = frame.Opcode
-				fragmentBuf = make([]byte, len(frame.Payload))
-				copy(fragmentBuf, frame.Payload)
-				inFragment = true
-			}
-		} else {
-			// Continuation frame.
-			if !inFragment {
-				h.logger.Warn("websocket protocol violation: continuation frame without initial fragment",
-					"flow_id", flowID, "direction", direction)
-				continue
-			}
-			if int64(len(fragmentBuf))+int64(len(frame.Payload)) > config.MaxWebSocketMessageSize {
-				h.logger.Warn("websocket message size limit exceeded, closing connection",
-					"flow_id", flowID, "direction", direction,
-					"accumulated", len(fragmentBuf), "incoming", len(frame.Payload),
-					"limit", config.MaxWebSocketMessageSize)
-				// Send Close frame (1009 = message too big).
-				closePayload := make([]byte, 2)
-				closePayload[0] = 0x03
-				closePayload[1] = 0xF1 // 1009
-				closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Payload: closePayload}
-				if err := WriteFrame(dst, closeFrame); err != nil {
-					h.logger.Debug("failed to send close frame for oversized message", "flow_id", flowID, "error", err)
-				}
-				return fmt.Errorf("fragmented message exceeded config.MaxWebSocketMessageSize (%d bytes)", config.MaxWebSocketMessageSize)
-			}
-			fragmentBuf = append(fragmentBuf, frame.Payload...)
-			if frame.Fin {
-				// Final fragment: record the assembled message.
-				h.recordDataMessage(ctx, fragmentOpcode, fragmentBuf, frame.Masked, flowID, direction, seq, start)
-				fragmentBuf = nil
-				inFragment = false
-			}
+		if err := h.handleDataFrame(ctx, dst, frame, &frag, flowID, direction, seq, start); err != nil {
+			return err
 		}
 	}
+}
+
+// resolveHookPair returns the plugin hook pair for the given relay direction.
+func resolveHookPair(direction string) hookPair {
+	if direction == "send" {
+		return hookPair{
+			receiveHook: plugin.HookOnReceiveFromClient,
+			sendHook:    plugin.HookOnBeforeSendToServer,
+			direction:   "client_to_server",
+		}
+	}
+	return hookPair{
+		receiveHook: plugin.HookOnReceiveFromServer,
+		sendHook:    plugin.HookOnBeforeSendToClient,
+		direction:   "server_to_client",
+	}
+}
+
+// dispatchDataFrameHooks dispatches the receive and send plugin hooks for a
+// data frame. Returns true if the frame should be dropped.
+func (h *Handler) dispatchDataFrameHooks(ctx context.Context, hooks hookPair, frame *Frame, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, flowID string) bool {
+	frameTxCtx := plugin.NewTxCtx()
+	if dropped := h.dispatchFrameHook(ctx, hooks.receiveHook, frame, hooks.direction, upgradeReq, connInfo, flowID, frameTxCtx); dropped {
+		return true
+	}
+	return h.dispatchFrameHook(ctx, hooks.sendHook, frame, hooks.direction, upgradeReq, connInfo, flowID, frameTxCtx)
+}
+
+// forwardFrame writes the frame to the destination connection, preserving
+// mask state and key.
+func forwardFrame(dst net.Conn, frame *Frame, direction string) error {
+	outFrame := &Frame{
+		Fin:     frame.Fin,
+		RSV1:    frame.RSV1,
+		RSV2:    frame.RSV2,
+		RSV3:    frame.RSV3,
+		Opcode:  frame.Opcode,
+		Masked:  frame.Masked,
+		Payload: frame.Payload,
+	}
+	if frame.Masked {
+		outFrame.MaskKey = frame.MaskKey
+	}
+	if err := WriteFrame(dst, outFrame); err != nil {
+		return fmt.Errorf("write %s frame: %w", direction, err)
+	}
+	return nil
+}
+
+// handleDataFrame processes a data frame for fragment assembly and recording.
+// Returns an error if the message size limit was exceeded.
+func (h *Handler) handleDataFrame(ctx context.Context, dst net.Conn, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time) error {
+	if frame.Opcode != OpcodeContinuation {
+		h.handleNewDataFrame(ctx, frame, frag, flowID, direction, seq, start)
+		return nil
+	}
+	return h.handleContinuationFrame(ctx, dst, frame, frag, flowID, direction, seq, start)
+}
+
+// handleNewDataFrame processes a non-continuation data frame, starting a new
+// message or recording a single unfragmented message.
+func (h *Handler) handleNewDataFrame(ctx context.Context, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time) {
+	if frag.active {
+		h.logger.Warn("websocket protocol violation: new data frame while fragment pending",
+			"flow_id", flowID, "direction", direction)
+		frag.buf = nil
+		frag.active = false
+	}
+	if frame.Fin {
+		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, flowID, direction, seq, start)
+	} else {
+		frag.opcode = frame.Opcode
+		frag.buf = make([]byte, len(frame.Payload))
+		copy(frag.buf, frame.Payload)
+		frag.active = true
+	}
+}
+
+// handleContinuationFrame processes a continuation frame for fragment assembly.
+// Returns an error if the accumulated message exceeds the size limit.
+func (h *Handler) handleContinuationFrame(ctx context.Context, dst net.Conn, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time) error {
+	if !frag.active {
+		h.logger.Warn("websocket protocol violation: continuation frame without initial fragment",
+			"flow_id", flowID, "direction", direction)
+		return nil
+	}
+	if int64(len(frag.buf))+int64(len(frame.Payload)) > config.MaxWebSocketMessageSize {
+		return h.closeOversizedMessage(dst, frag, frame, flowID, direction)
+	}
+	frag.buf = append(frag.buf, frame.Payload...)
+	if frame.Fin {
+		h.recordDataMessage(ctx, frag.opcode, frag.buf, frame.Masked, flowID, direction, seq, start)
+		frag.buf = nil
+		frag.active = false
+	}
+	return nil
+}
+
+// closeOversizedMessage sends a Close frame (1009 = message too big) and
+// returns an error indicating the message size limit was exceeded.
+func (h *Handler) closeOversizedMessage(dst net.Conn, frag *fragmentState, frame *Frame, flowID, direction string) error {
+	h.logger.Warn("websocket message size limit exceeded, closing connection",
+		"flow_id", flowID, "direction", direction,
+		"accumulated", len(frag.buf), "incoming", len(frame.Payload),
+		"limit", config.MaxWebSocketMessageSize)
+	closePayload := make([]byte, 2)
+	closePayload[0] = 0x03
+	closePayload[1] = 0xF1 // 1009
+	closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Payload: closePayload}
+	if err := WriteFrame(dst, closeFrame); err != nil {
+		h.logger.Debug("failed to send close frame for oversized message", "flow_id", flowID, "error", err)
+	}
+	return fmt.Errorf("fragmented message exceeded config.MaxWebSocketMessageSize (%d bytes)", config.MaxWebSocketMessageSize)
 }
 
 // buildFrameData constructs the plugin hook data map for a WebSocket frame.
