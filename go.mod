@@ -5,6 +5,7 @@ go 1.25.4
 require (
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
+	github.com/refraction-networking/utls v1.8.2
 	go.starlark.net v0.0.0-20260210143700-b62fd896b91b
 	golang.org/x/net v0.51.0
 	golang.org/x/sync v0.19.0
@@ -18,7 +19,6 @@ require (
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.5.3 // indirect
