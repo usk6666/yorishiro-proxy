@@ -300,64 +300,89 @@ func parseHookResult(hook Hook, val starlark.Value) (*HookResult, error) {
 		return nil, fmt.Errorf("hook must return a dict or None, got %s", val.Type())
 	}
 
-	// Parse action.
-	actionVal, found, err := dict.Get(starlark.String("action"))
+	action, err := parseActionFromDict(hook, dict)
 	if err != nil {
-		return nil, fmt.Errorf("get action from result: %w", err)
-	}
-	if !found {
-		return &HookResult{Action: ActionContinue}, nil
-	}
-
-	actionStr, ok := starlark.AsString(actionVal)
-	if !ok {
-		return nil, fmt.Errorf("action must be a string, got %s", actionVal.Type())
-	}
-
-	action, err := ParseActionType(actionStr)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := ValidateAction(hook, action); err != nil {
 		return nil, err
 	}
 
 	result := &HookResult{Action: action}
 
-	// Parse data if present.
+	if err := parseDataFromDict(dict, result); err != nil {
+		return nil, err
+	}
+
+	if action == ActionRespond {
+		if err := parseResponseFromDict(dict, result); err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
+// parseActionFromDict extracts and validates the action field from a Starlark dict.
+func parseActionFromDict(hook Hook, dict *starlark.Dict) (ActionType, error) {
+	actionVal, found, err := dict.Get(starlark.String("action"))
+	if err != nil {
+		return 0, fmt.Errorf("get action from result: %w", err)
+	}
+	if !found {
+		return ActionContinue, nil
+	}
+
+	actionStr, ok := starlark.AsString(actionVal)
+	if !ok {
+		return 0, fmt.Errorf("action must be a string, got %s", actionVal.Type())
+	}
+
+	action, err := ParseActionType(actionStr)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := ValidateAction(hook, action); err != nil {
+		return 0, err
+	}
+
+	return action, nil
+}
+
+// parseDataFromDict extracts the optional "data" field from a Starlark dict
+// and populates it into the HookResult.
+func parseDataFromDict(dict *starlark.Dict, result *HookResult) error {
 	dataVal, found, err := dict.Get(starlark.String("data"))
 	if err != nil {
-		return nil, fmt.Errorf("get data from result: %w", err)
+		return fmt.Errorf("get data from result: %w", err)
 	}
 	if found && dataVal != starlark.None {
 		goData, err := starlarkToGo(dataVal)
 		if err != nil {
-			return nil, fmt.Errorf("convert result data: %w", err)
+			return fmt.Errorf("convert result data: %w", err)
 		}
 		if m, ok := goData.(map[string]any); ok {
 			result.Data = m
 		}
 	}
+	return nil
+}
 
-	// Parse response data if present (for RESPOND action).
-	if action == ActionRespond {
-		respVal, found, err := dict.Get(starlark.String("response"))
+// parseResponseFromDict extracts the optional "response" field from a Starlark dict
+// and populates it into the HookResult. Used for RESPOND actions.
+func parseResponseFromDict(dict *starlark.Dict, result *HookResult) error {
+	respVal, found, err := dict.Get(starlark.String("response"))
+	if err != nil {
+		return fmt.Errorf("get response from result: %w", err)
+	}
+	if found && respVal != starlark.None {
+		goResp, err := starlarkToGo(respVal)
 		if err != nil {
-			return nil, fmt.Errorf("get response from result: %w", err)
+			return fmt.Errorf("convert response data: %w", err)
 		}
-		if found && respVal != starlark.None {
-			goResp, err := starlarkToGo(respVal)
-			if err != nil {
-				return nil, fmt.Errorf("convert response data: %w", err)
-			}
-			if m, ok := goResp.(map[string]any); ok {
-				result.ResponseData = m
-			}
+		if m, ok := goResp.(map[string]any); ok {
+			result.ResponseData = m
 		}
 	}
-
-	return result, nil
+	return nil
 }
 
 // Dispatch dispatches a hook through the registry.

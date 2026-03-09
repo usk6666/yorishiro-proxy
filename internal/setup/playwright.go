@@ -57,38 +57,14 @@ func WritePlaywrightConfig(projectDir, listenAddr string, httpsOption Playwright
 		return "", fmt.Errorf("create .playwright directory: %w", err)
 	}
 
-	// Read existing config if present.
-	existingData, readErr := os.ReadFile(configPath)
-	var existing map[string]json.RawMessage
-
-	if readErr == nil {
-		// File exists — back it up.
-		bp, bErr := CreateBackup(configPath, now)
-		if bErr != nil {
-			return "", fmt.Errorf("backup existing config: %w", bErr)
-		}
-		backupPath = bp
-
-		if err := json.Unmarshal(existingData, &existing); err != nil {
-			return backupPath, fmt.Errorf("parse existing playwright config: %w", err)
-		}
-	} else if !os.IsNotExist(readErr) {
-		return "", fmt.Errorf("read existing playwright config: %w", readErr)
+	existing, backupPath, err := readExistingConfig(configPath, now)
+	if err != nil {
+		return backupPath, err
 	}
 
-	if existing == nil {
-		existing = make(map[string]json.RawMessage)
-	}
-
-	// Build/update browser section.
-	var browser map[string]json.RawMessage
-	if raw, ok := existing["browser"]; ok {
-		if err := json.Unmarshal(raw, &browser); err != nil {
-			return backupPath, fmt.Errorf("parse browser config: %w", err)
-		}
-	}
-	if browser == nil {
-		browser = make(map[string]json.RawMessage)
+	browser, err := unmarshalJSONSection(existing, "browser")
+	if err != nil {
+		return backupPath, fmt.Errorf("parse browser config: %w", err)
 	}
 
 	// Set browserName if not already set.
@@ -96,15 +72,64 @@ func WritePlaywrightConfig(projectDir, listenAddr string, httpsOption Playwright
 		browser["browserName"] = json.RawMessage(`"chromium"`)
 	}
 
-	// Build/update launchOptions with proxy.
-	var launchOptions map[string]json.RawMessage
-	if raw, ok := browser["launchOptions"]; ok {
-		if err := json.Unmarshal(raw, &launchOptions); err != nil {
-			return backupPath, fmt.Errorf("parse launchOptions: %w", err)
-		}
+	if err := applyProxySettings(browser, listenAddr); err != nil {
+		return backupPath, err
 	}
-	if launchOptions == nil {
-		launchOptions = make(map[string]json.RawMessage)
+
+	if err := applyHTTPSOption(browser, httpsOption); err != nil {
+		return backupPath, err
+	}
+
+	browserJSON, _ := json.Marshal(browser)
+	existing["browser"] = browserJSON
+
+	return backupPath, writeConfig(configPath, existing)
+}
+
+// readExistingConfig reads and parses an existing config file, creating a backup if it exists.
+// Returns the parsed config (or an empty map), the backup path, and any error.
+func readExistingConfig(configPath string, now time.Time) (map[string]json.RawMessage, string, error) {
+	existingData, readErr := os.ReadFile(configPath)
+	if os.IsNotExist(readErr) {
+		return make(map[string]json.RawMessage), "", nil
+	}
+	if readErr != nil {
+		return nil, "", fmt.Errorf("read existing playwright config: %w", readErr)
+	}
+
+	// File exists — back it up.
+	backupPath, bErr := CreateBackup(configPath, now)
+	if bErr != nil {
+		return nil, "", fmt.Errorf("backup existing config: %w", bErr)
+	}
+
+	var existing map[string]json.RawMessage
+	if err := json.Unmarshal(existingData, &existing); err != nil {
+		return nil, backupPath, fmt.Errorf("parse existing playwright config: %w", err)
+	}
+
+	return existing, backupPath, nil
+}
+
+// unmarshalJSONSection extracts and unmarshals a nested JSON object from a parent map.
+// If the key is missing, returns an empty map.
+func unmarshalJSONSection(parent map[string]json.RawMessage, key string) (map[string]json.RawMessage, error) {
+	result := make(map[string]json.RawMessage)
+	raw, ok := parent[key]
+	if !ok {
+		return result, nil
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// applyProxySettings adds proxy configuration to the browser's launchOptions.
+func applyProxySettings(browser map[string]json.RawMessage, listenAddr string) error {
+	launchOptions, err := unmarshalJSONSection(browser, "launchOptions")
+	if err != nil {
+		return fmt.Errorf("parse launchOptions: %w", err)
 	}
 
 	proxyServer := fmt.Sprintf("http://%s", listenAddr)
@@ -114,37 +139,36 @@ func WritePlaywrightConfig(projectDir, listenAddr string, httpsOption Playwright
 
 	launchOptionsJSON, _ := json.Marshal(launchOptions)
 	browser["launchOptions"] = launchOptionsJSON
+	return nil
+}
 
-	// Handle HTTPS option.
-	if httpsOption == PlaywrightHTTPSIgnore || httpsOption == PlaywrightHTTPSBoth {
-		var contextOptions map[string]json.RawMessage
-		if raw, ok := browser["contextOptions"]; ok {
-			if err := json.Unmarshal(raw, &contextOptions); err != nil {
-				return backupPath, fmt.Errorf("parse contextOptions: %w", err)
-			}
-		}
-		if contextOptions == nil {
-			contextOptions = make(map[string]json.RawMessage)
-		}
-		contextOptions["ignoreHTTPSErrors"] = json.RawMessage(`true`)
-
-		contextOptionsJSON, _ := json.Marshal(contextOptions)
-		browser["contextOptions"] = contextOptionsJSON
+// applyHTTPSOption configures contextOptions.ignoreHTTPSErrors if the HTTPS option requires it.
+func applyHTTPSOption(browser map[string]json.RawMessage, httpsOption PlaywrightHTTPSOption) error {
+	if httpsOption != PlaywrightHTTPSIgnore && httpsOption != PlaywrightHTTPSBoth {
+		return nil
 	}
 
-	browserJSON, _ := json.Marshal(browser)
-	existing["browser"] = browserJSON
-
-	// Write the config.
-	output, err := json.MarshalIndent(existing, "", "  ")
+	contextOptions, err := unmarshalJSONSection(browser, "contextOptions")
 	if err != nil {
-		return backupPath, fmt.Errorf("marshal playwright config: %w", err)
+		return fmt.Errorf("parse contextOptions: %w", err)
+	}
+	contextOptions["ignoreHTTPSErrors"] = json.RawMessage(`true`)
+
+	contextOptionsJSON, _ := json.Marshal(contextOptions)
+	browser["contextOptions"] = contextOptionsJSON
+	return nil
+}
+
+// writeConfig marshals and writes the configuration to disk.
+func writeConfig(configPath string, config map[string]json.RawMessage) error {
+	output, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal playwright config: %w", err)
 	}
 	output = append(output, '\n')
 
 	if err := os.WriteFile(configPath, output, 0644); err != nil {
-		return backupPath, fmt.Errorf("write playwright config: %w", err)
+		return fmt.Errorf("write playwright config: %w", err)
 	}
-
-	return backupPath, nil
+	return nil
 }

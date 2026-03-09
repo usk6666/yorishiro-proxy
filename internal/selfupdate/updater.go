@@ -268,36 +268,62 @@ func (u *Updater) Upgrade(ctx context.Context) (*CheckResult, error) {
 		return result, nil
 	}
 
-	// Find the platform-specific binary asset.
+	if err := u.downloadAndReplace(ctx, release); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// downloadAndReplace downloads the release binary, verifies its checksum,
+// and atomically replaces the running binary.
+func (u *Updater) downloadAndReplace(ctx context.Context, release *Release) error {
 	binaryURL, err := findAsset(release, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// Find the checksums asset.
 	checksumURL, err := findChecksumAsset(release)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// Get the path of the currently running binary.
-	execPath, err := os.Executable()
+	execPath, execDir, err := resolveExecPath()
 	if err != nil {
-		return nil, fmt.Errorf("determine executable path: %w", err)
+		return err
+	}
+
+	checksums, err := u.downloadChecksums(ctx, checksumURL, execDir)
+	if err != nil {
+		return err
+	}
+
+	return u.downloadVerifyAndInstall(ctx, binaryURL, execDir, execPath, release, checksums)
+}
+
+// resolveExecPath resolves the current executable path and its directory,
+// verifying write permissions.
+func resolveExecPath() (execPath, execDir string, err error) {
+	execPath, err = os.Executable()
+	if err != nil {
+		return "", "", fmt.Errorf("determine executable path: %w", err)
 	}
 	execPath, err = filepath.EvalSymlinks(execPath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve executable symlinks: %w", err)
+		return "", "", fmt.Errorf("resolve executable symlinks: %w", err)
 	}
 
-	// Verify write permission to the binary directory.
-	execDir := filepath.Dir(execPath)
+	execDir = filepath.Dir(execPath)
 	if err := checkWritePermission(execDir); err != nil {
-		return nil, fmt.Errorf("insufficient permissions to update %s: %w", execPath, err)
+		return "", "", fmt.Errorf("insufficient permissions to update %s: %w", execPath, err)
 	}
 
-	// Download the checksums file.
-	checksumPath, err := u.downloadToFile(ctx, checksumURL, execDir)
+	return execPath, execDir, nil
+}
+
+// downloadChecksums downloads and parses the checksums file.
+func (u *Updater) downloadChecksums(ctx context.Context, checksumURL, dir string) (map[string]string, error) {
+	checksumPath, err := u.downloadToFile(ctx, checksumURL, dir)
 	if err != nil {
 		return nil, fmt.Errorf("download checksums: %w", err)
 	}
@@ -307,12 +333,16 @@ func (u *Updater) Upgrade(ctx context.Context) (*CheckResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read checksums file: %w", err)
 	}
-	checksums := parseChecksums(checksumData)
 
-	// Download the binary directly.
+	return parseChecksums(checksumData), nil
+}
+
+// downloadVerifyAndInstall downloads the binary, verifies its checksum,
+// and atomically replaces the current binary.
+func (u *Updater) downloadVerifyAndInstall(ctx context.Context, binaryURL, execDir, execPath string, release *Release, checksums map[string]string) error {
 	binaryPath, err := u.downloadToFile(ctx, binaryURL, execDir)
 	if err != nil {
-		return nil, fmt.Errorf("download binary: %w", err)
+		return fmt.Errorf("download binary: %w", err)
 	}
 	defer func() {
 		// Clean up if rename fails or on other errors.
@@ -321,29 +351,26 @@ func (u *Updater) Upgrade(ctx context.Context) (*CheckResult, error) {
 		}
 	}()
 
-	// Verify checksum of the downloaded binary.
 	expectedAssetName := assetName(release.TagName, runtime.GOOS, runtime.GOARCH)
 	expectedHash, ok := checksums[expectedAssetName]
 	if !ok {
-		return nil, fmt.Errorf("no checksum found for %s in checksums.txt", expectedAssetName)
+		return fmt.Errorf("no checksum found for %s in checksums.txt", expectedAssetName)
 	}
 	if err := verifyChecksum(binaryPath, expectedHash); err != nil {
-		return nil, fmt.Errorf("binary checksum verification failed: %w", err)
+		return fmt.Errorf("binary checksum verification failed: %w", err)
 	}
 
-	// Make the downloaded binary executable.
 	if err := os.Chmod(binaryPath, 0755); err != nil {
-		return nil, fmt.Errorf("set binary permissions: %w", err)
+		return fmt.Errorf("set binary permissions: %w", err)
 	}
 
-	// Atomically replace the current binary.
 	if err := atomicReplace(execPath, binaryPath, runtime.GOOS); err != nil {
-		return nil, fmt.Errorf("replace binary: %w", err)
+		return fmt.Errorf("replace binary: %w", err)
 	}
 	// Clear binaryPath so the deferred cleanup doesn't remove the new binary.
 	binaryPath = ""
 
-	return result, nil
+	return nil
 }
 
 // checkWritePermission checks that the directory is writable by creating and
