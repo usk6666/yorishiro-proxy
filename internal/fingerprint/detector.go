@@ -71,15 +71,27 @@ func addDetection(seen map[string]Detection, r rule, version string) {
 		}
 		return
 	}
-	// Prefer higher confidence or version info.
-	if confidenceRank(r.confidence) > confidenceRank(existing.Confidence) ||
-		(existing.Version == "" && version != "") {
+	// Prefer higher confidence; at equal confidence prefer version info.
+	newRank := confidenceRank(r.confidence)
+	existingRank := confidenceRank(existing.Confidence)
+	if newRank > existingRank {
 		seen[key] = Detection{
 			Name:       r.name,
 			Version:    version,
 			Category:   r.category,
 			Confidence: r.confidence,
 		}
+	} else if newRank == existingRank && existing.Version == "" && version != "" {
+		seen[key] = Detection{
+			Name:       r.name,
+			Version:    version,
+			Category:   r.category,
+			Confidence: r.confidence,
+		}
+	} else if newRank < existingRank && existing.Version == "" && version != "" {
+		// Lower confidence has version info — copy version only, keep high confidence.
+		existing.Version = version
+		seen[key] = existing
 	}
 }
 

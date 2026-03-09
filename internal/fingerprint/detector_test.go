@@ -439,3 +439,67 @@ func TestAnalyze_RubyPassenger(t *testing.T) {
 		t.Errorf("expected Ruby from Phusion Passenger, got: %v", result.Names())
 	}
 }
+
+func TestAddDetection_NoConfidenceDowngrade(t *testing.T) {
+	// F-1: A lower-confidence detection with a version should NOT replace
+	// a higher-confidence detection. It should only copy the version string.
+	seen := make(map[string]Detection)
+
+	// First: high-confidence detection without version (e.g., from Server header).
+	highRule := rule{
+		name: "nginx", category: CategoryWebServer,
+		confidence: "high",
+	}
+	addDetection(seen, highRule, "")
+
+	// Second: medium-confidence detection with version (e.g., from body pattern).
+	medRule := rule{
+		name: "nginx", category: CategoryWebServer,
+		confidence: "medium",
+	}
+	addDetection(seen, medRule, "1.20")
+
+	det := seen["nginx|"+string(CategoryWebServer)]
+	if det.Confidence != "high" {
+		t.Errorf("confidence = %q, want high (should not be downgraded)", det.Confidence)
+	}
+	if det.Version != "1.20" {
+		t.Errorf("version = %q, want 1.20 (should be merged from lower-confidence)", det.Version)
+	}
+}
+
+func TestAnalyze_jQueryVersionExtraction(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantVersion string
+	}{
+		{
+			"minified jQuery",
+			`<script src="/js/jquery-3.7.1.min.js"></script>`,
+			"3.7.1",
+		},
+		{
+			"non-minified jQuery",
+			`<script src="/js/jquery-3.6.0.js"></script>`,
+			"3.6.0",
+		},
+	}
+
+	d := NewDetector()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := d.Analyze(http.Header{}, []byte(tt.body))
+			if !result.Has("jQuery") {
+				t.Fatalf("expected jQuery detection, got: %v", result.Names())
+			}
+			for _, det := range result.Detections {
+				if det.Name == "jQuery" {
+					if det.Version != tt.wantVersion {
+						t.Errorf("version = %q, want %q", det.Version, tt.wantVersion)
+					}
+				}
+			}
+		})
+	}
+}

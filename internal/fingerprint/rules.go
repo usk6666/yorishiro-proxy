@@ -239,7 +239,7 @@ var defaultRules = []rule{
 	},
 	{
 		name: "jQuery", category: CategoryJSFramework, target: targetBody,
-		pattern:    mustCompile(`(?i)jquery[.-](\d[\d.]*(?:\.min)?\.js)`),
+		pattern:    mustCompile(`(?i)jquery[.-](\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js`),
 		confidence: "medium",
 	},
 	{
