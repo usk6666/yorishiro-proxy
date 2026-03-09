@@ -65,7 +65,7 @@ func Suffix(suffix string) Transform {
 // ApplyTransforms applies a sequence of transforms to each payload in the list.
 func ApplyTransforms(payloads []string, transforms ...Transform) []string {
 	if len(transforms) == 0 {
-		return payloads
+		return append([]string(nil), payloads...)
 	}
 	result := make([]string, len(payloads))
 	for i, p := range payloads {
