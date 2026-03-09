@@ -45,6 +45,13 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 type Handler struct {
 	proxy.HandlerBase
 
+	// tlsTransport abstracts TLS connection establishment to upstream servers.
+	// When set, the handler uses this transport (e.g. uTLS) for upstream TLS
+	// handshakes instead of the standard crypto/tls library, enabling
+	// browser-like TLS fingerprinting for evasion of JA3/JA4-based detection.
+	// If nil, the standard crypto/tls library is used (default behavior).
+	tlsTransport httputil.TLSTransport
+
 	// grpcHandler processes gRPC flow recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
 	grpcHandler *protogrpc.Handler
@@ -64,6 +71,45 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 				ForceAttemptHTTP2: true,
 			},
 		},
+	}
+}
+
+// SetTLSTransport configures the TLS transport used for upstream TLS connections.
+// When set, the handler uses this transport (e.g. uTLS with browser fingerprinting)
+// instead of the standard crypto/tls library. The transport's DialTLSContext on
+// the underlying gohttp.Transport is reconfigured to route TLS handshakes through
+// the provided TLSTransport. If t is nil, the default crypto/tls behavior is restored.
+func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
+	h.tlsTransport = t
+	if t == nil {
+		h.Transport.DialTLSContext = nil
+		return
+	}
+	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		rawConn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, fmt.Errorf("dial upstream %s: %w", addr, err)
+		}
+
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("parse upstream address %s: %w", addr, err)
+		}
+
+		tlsConn, negotiatedProto, err := t.TLSConnect(ctx, rawConn, host)
+		if err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("TLS connect to %s: %w", addr, err)
+		}
+
+		// Log ALPN negotiation result for debugging protocol mismatches.
+		h.Logger.Debug("upstream TLS handshake complete",
+			"addr", addr,
+			"negotiated_protocol", negotiatedProto,
+		)
+
+		return tlsConn, nil
 	}
 }
 
