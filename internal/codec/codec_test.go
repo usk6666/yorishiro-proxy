@@ -22,6 +22,7 @@ func TestAllCodecs_Roundtrip(t *testing.T) {
 		{name: "url_encode_path spaces", codec: "url_encode_path", input: "hello world"},
 		{name: "url_encode_path slashes", codec: "url_encode_path", input: "path/to/file"},
 		{name: "url_encode_full special", codec: "url_encode_full", input: "<script>alert(1)</script>"},
+		{name: "url_encode_full plus sign", codec: "url_encode_full", input: "a+b"},
 		{name: "url_encode_full empty", codec: "url_encode_full", input: ""},
 		{name: "double_url_encode basic", codec: "double_url_encode", input: "hello world"},
 		{name: "double_url_encode special", codec: "double_url_encode", input: "a=b&c=d"},
@@ -132,8 +133,13 @@ func TestCodecs_DecodeErrors(t *testing.T) {
 		input string
 	}{
 		{name: "base64 invalid", codec: "base64", input: "not-valid-base64!!!"},
+		{name: "base64url invalid", codec: "base64url", input: "not-valid-base64!!!"},
 		{name: "hex invalid", codec: "hex", input: "xyz"},
 		{name: "hex odd length", codec: "hex", input: "abc"},
+		{name: "url_encode_query truncated percent", codec: "url_encode_query", input: "%zz"},
+		{name: "url_encode_path truncated percent", codec: "url_encode_path", input: "%zz"},
+		{name: "url_encode_full truncated percent", codec: "url_encode_full", input: "%zz"},
+		{name: "double_url_encode outer invalid", codec: "double_url_encode", input: "%zz"},
 	}
 
 	r := NewRegistry()

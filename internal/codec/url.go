@@ -60,7 +60,7 @@ func (c *urlEncodeFullCodec) Encode(s string) (string, error) {
 }
 
 func (c *urlEncodeFullCodec) Decode(s string) (string, error) {
-	decoded, err := url.QueryUnescape(s)
+	decoded, err := url.PathUnescape(s)
 	if err != nil {
 		return "", err
 	}
