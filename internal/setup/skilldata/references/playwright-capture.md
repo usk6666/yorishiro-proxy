@@ -32,6 +32,7 @@ yorishiro-proxy と playwright-cli を組み合わせて、ブラウザ操作の
 - `includes` で対象ホストのみに限定する (ノイズ削減)
 - `excludes` で静的アセット、ヘルスチェック等を除外する
 - `tls_passthrough` で証明書ピンニングされたサービスを除外する
+- Cloudflare 等の WAF で bot 検知される場合は `tls_fingerprint` を設定する（デフォルト: "chrome"）
 
 ## Step 2: playwright-cli でブラウザ操作
 
