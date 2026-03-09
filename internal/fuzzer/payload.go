@@ -7,11 +7,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/codec"
+	"github.com/usk6666/yorishiro-proxy/internal/payload"
 )
 
 // PayloadSet defines a set of payloads to inject at a position.
 type PayloadSet struct {
-	// Type is the payload generation type: wordlist, file, range, sequence.
+	// Type is the payload generation type: wordlist, file, range, sequence,
+	// charset, case_variation, or null_byte_injection.
 	Type string `json:"type"`
 	// Values is the list of payload strings (for wordlist type).
 	Values []string `json:"values,omitempty"`
@@ -25,38 +29,118 @@ type PayloadSet struct {
 	Step *int `json:"step,omitempty"`
 	// Format is the format string for sequence type (e.g., "user%04d").
 	Format string `json:"format,omitempty"`
+	// Encoding is an optional chain of codec names to apply to each generated payload.
+	// Codecs are applied in order using codec.Encode (e.g., ["url_encode_query", "base64"]).
+	Encoding []string `json:"encoding,omitempty"`
+	// Charset is the character set for charset type (e.g., "abc" or "0123456789").
+	Charset string `json:"charset,omitempty"`
+	// Length is the combination length for charset type.
+	Length *int `json:"length,omitempty"`
+	// Input is the base string for case_variation and null_byte_injection types.
+	Input string `json:"input,omitempty"`
 }
 
 // Validate checks that a PayloadSet is well-formed.
 func (ps *PayloadSet) Validate() error {
+	if err := ps.validateType(); err != nil {
+		return err
+	}
+	return ps.validateEncoding()
+}
+
+// validateType checks that the PayloadSet type and its required fields are valid.
+func (ps *PayloadSet) validateType() error {
 	switch ps.Type {
 	case "wordlist":
-		if len(ps.Values) == 0 {
-			return fmt.Errorf("wordlist payload set requires at least one value")
-		}
-		if len(ps.Values) > maxPayloadCount {
-			return fmt.Errorf("wordlist payload set contains %d values, exceeding maximum of %d", len(ps.Values), maxPayloadCount)
-		}
+		return ps.validateWordlist()
 	case "file":
-		if ps.Path == "" {
-			return fmt.Errorf("file payload set requires a path")
-		}
-		if filepath.IsAbs(ps.Path) {
-			return fmt.Errorf("file path must be relative, got absolute path %q", ps.Path)
-		}
+		return ps.validateFile()
 	case "range":
-		if ps.Start == nil || ps.End == nil {
-			return fmt.Errorf("range payload set requires start and end")
-		}
+		return ps.validateRange()
 	case "sequence":
-		if ps.Start == nil || ps.End == nil {
-			return fmt.Errorf("sequence payload set requires start and end")
-		}
-		if ps.Format == "" {
-			return fmt.Errorf("sequence payload set requires a format string")
-		}
+		return ps.validateSequence()
+	case "charset":
+		return ps.validateCharset()
+	case "case_variation":
+		return ps.validateInputRequired("case_variation")
+	case "null_byte_injection":
+		return ps.validateInputRequired("null_byte_injection")
 	default:
-		return fmt.Errorf("invalid payload set type %q: must be one of wordlist, file, range, sequence", ps.Type)
+		return fmt.Errorf("invalid payload set type %q: must be one of wordlist, file, range, sequence, charset, case_variation, null_byte_injection", ps.Type)
+	}
+}
+
+func (ps *PayloadSet) validateWordlist() error {
+	if len(ps.Values) == 0 {
+		return fmt.Errorf("wordlist payload set requires at least one value")
+	}
+	if len(ps.Values) > maxPayloadCount {
+		return fmt.Errorf("wordlist payload set contains %d values, exceeding maximum of %d", len(ps.Values), maxPayloadCount)
+	}
+	return nil
+}
+
+func (ps *PayloadSet) validateFile() error {
+	if ps.Path == "" {
+		return fmt.Errorf("file payload set requires a path")
+	}
+	if filepath.IsAbs(ps.Path) {
+		return fmt.Errorf("file path must be relative, got absolute path %q", ps.Path)
+	}
+	return nil
+}
+
+func (ps *PayloadSet) validateRange() error {
+	if ps.Start == nil || ps.End == nil {
+		return fmt.Errorf("range payload set requires start and end")
+	}
+	return nil
+}
+
+func (ps *PayloadSet) validateSequence() error {
+	if ps.Start == nil || ps.End == nil {
+		return fmt.Errorf("sequence payload set requires start and end")
+	}
+	if ps.Format == "" {
+		return fmt.Errorf("sequence payload set requires a format string")
+	}
+	return nil
+}
+
+func (ps *PayloadSet) validateCharset() error {
+	if ps.Charset == "" {
+		return fmt.Errorf("charset payload set requires a charset")
+	}
+	if ps.Length == nil || *ps.Length <= 0 {
+		return fmt.Errorf("charset payload set requires a positive length")
+	}
+	return nil
+}
+
+func (ps *PayloadSet) validateInputRequired(typeName string) error {
+	if ps.Input == "" {
+		return fmt.Errorf("%s payload set requires an input string", typeName)
+	}
+	return nil
+}
+
+// maxEncodingChainLen is the maximum number of codecs allowed in an encoding chain
+// to prevent excessive CPU consumption from very long chains.
+const maxEncodingChainLen = 10
+
+// validateEncoding checks that all encoding codec names exist in the registry.
+func (ps *PayloadSet) validateEncoding() error {
+	if len(ps.Encoding) == 0 {
+		return nil
+	}
+	if len(ps.Encoding) > maxEncodingChainLen {
+		return fmt.Errorf("encoding chain length %d exceeds maximum of %d", len(ps.Encoding), maxEncodingChainLen)
+	}
+	reg := codec.DefaultRegistry()
+	for _, name := range ps.Encoding {
+		if _, ok := reg.Get(name); !ok {
+			return fmt.Errorf("unknown encoding codec %q", name)
+		}
 	}
 	return nil
 }
@@ -64,18 +148,78 @@ func (ps *PayloadSet) Validate() error {
 // Generate produces the list of payload strings from this PayloadSet.
 // baseDir is the wordlists base directory (used for file type).
 func (ps *PayloadSet) Generate(baseDir string) ([]string, error) {
+	var payloads []string
+	var err error
+
 	switch ps.Type {
 	case "wordlist":
-		return ps.Values, nil
+		payloads = ps.Values
 	case "file":
-		return ps.generateFromFile(baseDir)
+		payloads, err = ps.generateFromFile(baseDir)
 	case "range":
-		return ps.generateRange()
+		payloads, err = ps.generateRange()
 	case "sequence":
-		return ps.generateSequence()
+		payloads, err = ps.generateSequence()
+	case "charset":
+		payloads, err = ps.generateCharset()
+	case "case_variation":
+		payloads, err = ps.generateCaseVariation()
+	case "null_byte_injection":
+		payloads, err = ps.generateNullByteInjection()
 	default:
 		return nil, fmt.Errorf("unsupported payload set type %q", ps.Type)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply encoding chain if specified.
+	if len(ps.Encoding) > 0 {
+		payloads, err = applyEncoding(payloads, ps.Encoding)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return payloads, nil
+}
+
+// generateCharset delegates to payload.CharsetGenerator.
+func (ps *PayloadSet) generateCharset() ([]string, error) {
+	gen := &payload.CharsetGenerator{
+		Charset: ps.Charset,
+		Length:  *ps.Length,
+	}
+	return gen.Generate()
+}
+
+// generateCaseVariation delegates to payload.CaseVariationGenerator.
+func (ps *PayloadSet) generateCaseVariation() ([]string, error) {
+	gen := &payload.CaseVariationGenerator{
+		Input: ps.Input,
+	}
+	return gen.Generate()
+}
+
+// generateNullByteInjection delegates to payload.NullByteInjectionGenerator.
+func (ps *PayloadSet) generateNullByteInjection() ([]string, error) {
+	gen := &payload.NullByteInjectionGenerator{
+		Input: ps.Input,
+	}
+	return gen.Generate()
+}
+
+// applyEncoding applies a codec encoding chain to each payload.
+func applyEncoding(payloads []string, encodingChain []string) ([]string, error) {
+	encoded := make([]string, 0, len(payloads))
+	for _, p := range payloads {
+		enc, err := codec.Encode(p, encodingChain)
+		if err != nil {
+			return nil, fmt.Errorf("encode payload %q: %w", p, err)
+		}
+		encoded = append(encoded, enc)
+	}
+	return encoded, nil
 }
 
 // generateFromFile reads payloads from a file, one per line.
