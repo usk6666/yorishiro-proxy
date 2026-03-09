@@ -438,6 +438,27 @@ func TestValidateBodyPatch_EncodingValidation(t *testing.T) {
 			name:  "nil encoding is valid",
 			patch: BodyPatch{JSONPath: "$.key", Value: "v"},
 		},
+		{
+			name: "encoding chain at max length",
+			patch: BodyPatch{JSONPath: "$.key", Value: "v", Encoding: func() []string {
+				chain := make([]string, maxEncodingChainLen)
+				for i := range chain {
+					chain[i] = "base64"
+				}
+				return chain
+			}()},
+		},
+		{
+			name: "encoding chain exceeds max length",
+			patch: BodyPatch{JSONPath: "$.key", Value: "v", Encoding: func() []string {
+				chain := make([]string, maxEncodingChainLen+1)
+				for i := range chain {
+					chain[i] = "base64"
+				}
+				return chain
+			}()},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

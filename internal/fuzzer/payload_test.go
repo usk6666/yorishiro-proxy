@@ -127,6 +127,27 @@ func TestPayloadSet_Validate(t *testing.T) {
 			ps:      PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: []string{"nonexistent_codec"}},
 			wantErr: true,
 		},
+		{
+			name: "encoding chain at max length",
+			ps: PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: func() []string {
+				chain := make([]string, maxEncodingChainLen)
+				for i := range chain {
+					chain[i] = "base64"
+				}
+				return chain
+			}()},
+		},
+		{
+			name: "encoding chain exceeds max length",
+			ps: PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: func() []string {
+				chain := make([]string, maxEncodingChainLen+1)
+				for i := range chain {
+					chain[i] = "base64"
+				}
+				return chain
+			}()},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

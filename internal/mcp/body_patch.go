@@ -43,6 +43,9 @@ func validateBodyPatch(bp BodyPatch) error {
 
 	// Validate encoding codec names if specified.
 	if len(bp.Encoding) > 0 {
+		if len(bp.Encoding) > maxEncodingChainLen {
+			return fmt.Errorf("encoding chain length %d exceeds maximum of %d", len(bp.Encoding), maxEncodingChainLen)
+		}
 		reg := codec.DefaultRegistry()
 		for _, name := range bp.Encoding {
 			if _, ok := reg.Get(name); !ok {
@@ -161,6 +164,10 @@ func setNestedValue(root any, keys []string, value any) error {
 	m[lastKey] = value
 	return nil
 }
+
+// maxEncodingChainLen is the maximum number of codecs allowed in an encoding chain
+// to prevent excessive CPU consumption from very long chains.
+const maxEncodingChainLen = 10
 
 // maxRegexPatternLen is the maximum allowed length for regex patterns in body patches.
 // This prevents resource exhaustion from very large patterns during compilation and matching.

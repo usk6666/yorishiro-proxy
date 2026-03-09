@@ -124,10 +124,17 @@ func (ps *PayloadSet) validateInputRequired(typeName string) error {
 	return nil
 }
 
+// maxEncodingChainLen is the maximum number of codecs allowed in an encoding chain
+// to prevent excessive CPU consumption from very long chains.
+const maxEncodingChainLen = 10
+
 // validateEncoding checks that all encoding codec names exist in the registry.
 func (ps *PayloadSet) validateEncoding() error {
 	if len(ps.Encoding) == 0 {
 		return nil
+	}
+	if len(ps.Encoding) > maxEncodingChainLen {
+		return fmt.Errorf("encoding chain length %d exceeds maximum of %d", len(ps.Encoding), maxEncodingChainLen)
 	}
 	reg := codec.DefaultRegistry()
 	for _, name := range ps.Encoding {
