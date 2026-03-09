@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -97,6 +98,11 @@ type proxyStartInput struct {
 	// Required when socks5_auth is "password".
 	SOCKS5Password string `json:"socks5_password,omitempty" jsonschema:"password for SOCKS5 password authentication"`
 
+	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
+	// Valid values: "chrome" (default), "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
+	// If omitted, defaults to "chrome".
+	TLSFingerprint string `json:"tls_fingerprint,omitempty" jsonschema:"TLS fingerprint profile: chrome (default), firefox, safari, edge, random, none"`
+
 	// MaxConnections is the maximum number of concurrent proxy connections.
 	// Defaults to 128 if omitted or zero.
 	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (default: 128)"`
@@ -141,10 +147,11 @@ func (s *Server) registerProxyStart() {
 			"protocols to specify which protocols are enabled for detection (including SOCKS5), " +
 			"socks5_auth to set SOCKS5 authentication method ('none' or 'password'), " +
 			"socks5_username and socks5_password for SOCKS5 password authentication, " +
+			"tls_fingerprint to set the TLS ClientHello fingerprint profile ('chrome' (default), 'firefox', 'safari', 'edge', 'random', 'none' for standard crypto/tls), " +
 			"max_connections to set the concurrent connection limit (default: 128), " +
 			"peek_timeout_ms for protocol detection timeout (default: 30000ms), " +
 			"and request_timeout_ms for HTTP request header read timeout (default: 60000ms). " +
-			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, socks5_auth=none, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
+			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, socks5_auth=none, tls_fingerprint=chrome, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
 	}, s.handleProxyStart)
 }
 
@@ -239,6 +246,11 @@ func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 	if len(input.AutoTransform) > 0 {
 		if err := s.applyTransformRules(input.AutoTransform); err != nil {
 			return fmt.Errorf("auto_transform: %w", err)
+		}
+	}
+	if input.TLSFingerprint != "" {
+		if err := s.applyTLSFingerprint(input.TLSFingerprint); err != nil {
+			return fmt.Errorf("tls_fingerprint: %w", err)
 		}
 	}
 	return nil
@@ -494,6 +506,9 @@ func (s *Server) applyProxyDefaultStrings(input *proxyStartInput, d *config.Prox
 	if input.SOCKS5Password == "" && d.SOCKS5Password != "" {
 		input.SOCKS5Password = d.SOCKS5Password
 	}
+	if input.TLSFingerprint == "" && d.TLSFingerprint != "" {
+		input.TLSFingerprint = d.TLSFingerprint
+	}
 }
 
 // applyProxyDefaultJSON merges JSON-encoded defaults (capture scope, intercept rules,
@@ -603,6 +618,41 @@ func (s *Server) applyTLSPassthrough(patterns []string) error {
 		}
 	}
 	return nil
+}
+
+// validTLSFingerprints is the set of accepted TLS fingerprint profile names.
+var validTLSFingerprints = map[string]bool{
+	"chrome":  true,
+	"firefox": true,
+	"safari":  true,
+	"edge":    true,
+	"random":  true,
+	"none":    true,
+}
+
+// applyTLSFingerprint validates the profile name and applies it to all registered handlers.
+// The profile name is normalized to lowercase before validation.
+func (s *Server) applyTLSFingerprint(profile string) error {
+	profile = strings.ToLower(profile)
+	if !validTLSFingerprints[profile] {
+		return fmt.Errorf("invalid tls_fingerprint %q: valid values are chrome, firefox, safari, edge, random, none", profile)
+	}
+	for _, setter := range s.deps.tlsFingerprintSetters {
+		setter.SetTLSFingerprint(profile)
+	}
+	return nil
+}
+
+// currentTLSFingerprint returns the current TLS fingerprint profile from the first
+// registered handler, or "chrome" (the default) if none is registered.
+func (s *Server) currentTLSFingerprint() string {
+	if len(s.deps.tlsFingerprintSetters) > 0 {
+		p := s.deps.tlsFingerprintSetters[0].TLSFingerprint()
+		if p != "" {
+			return p
+		}
+	}
+	return "chrome"
 }
 
 // applyRequestTimeout updates the request timeout on all registered protocol handlers.
