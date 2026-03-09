@@ -49,48 +49,73 @@ func (s *Server) handleQueryTechnologies(ctx context.Context, input queryInput) 
 		return nil, nil, fmt.Errorf("list flows: %w", err)
 	}
 
-	// hostMap aggregates unique technologies per host.
-	// Key: host, Value: map of "name|category" -> technologyEntry (dedup by name+category, keep best version).
+	hostMap := s.aggregateTechnologies(ctx, flowList)
+	hosts := buildSortedHosts(hostMap)
+
+	return nil, &queryTechnologiesResult{
+		Hosts: hosts,
+		Count: len(hosts),
+	}, nil
+}
+
+// aggregateTechnologies collects unique technologies per host from the given flows.
+// Key: host, Value: map of "name|category" -> technologyEntry (dedup by name+category, keep best version).
+func (s *Server) aggregateTechnologies(ctx context.Context, flowList []*flow.Flow) map[string]map[string]technologyEntry {
 	hostMap := make(map[string]map[string]technologyEntry)
 
 	for _, fl := range flowList {
-		techJSON, ok := fl.Tags["technologies"]
-		if !ok || techJSON == "" {
-			continue
-		}
-
-		var detections []fingerprint.Detection
-		if err := json.Unmarshal([]byte(techJSON), &detections); err != nil {
-			continue
-		}
-		if len(detections) == 0 {
-			continue
-		}
-
-		// Extract the host from the first send message.
-		host := extractHostFromFlow(ctx, s, fl)
-		if host == "" {
+		detections, host := s.extractFlowTechnologies(ctx, fl)
+		if host == "" || len(detections) == 0 {
 			continue
 		}
 
 		if hostMap[host] == nil {
 			hostMap[host] = make(map[string]technologyEntry)
 		}
-		for _, d := range detections {
-			key := d.Name + "|" + string(d.Category)
-			existing, exists := hostMap[host][key]
-			if !exists || (existing.Version == "" && d.Version != "") {
-				hostMap[host][key] = technologyEntry{
-					Name:       d.Name,
-					Version:    d.Version,
-					Category:   string(d.Category),
-					Confidence: d.Confidence,
-				}
+		mergeDetections(hostMap[host], detections)
+	}
+	return hostMap
+}
+
+// extractFlowTechnologies parses technology detections from a flow's tags
+// and resolves the associated host. Returns nil detections or empty host on failure.
+func (s *Server) extractFlowTechnologies(ctx context.Context, fl *flow.Flow) ([]fingerprint.Detection, string) {
+	techJSON, ok := fl.Tags["technologies"]
+	if !ok || techJSON == "" {
+		return nil, ""
+	}
+
+	var detections []fingerprint.Detection
+	if err := json.Unmarshal([]byte(techJSON), &detections); err != nil {
+		return nil, ""
+	}
+	if len(detections) == 0 {
+		return nil, ""
+	}
+
+	host := extractHostFromFlow(ctx, s, fl)
+	return detections, host
+}
+
+// mergeDetections merges fingerprint detections into an existing technology map,
+// deduplicating by name+category and preferring entries that have a version.
+func mergeDetections(techMap map[string]technologyEntry, detections []fingerprint.Detection) {
+	for _, d := range detections {
+		key := d.Name + "|" + string(d.Category)
+		existing, exists := techMap[key]
+		if !exists || (existing.Version == "" && d.Version != "") {
+			techMap[key] = technologyEntry{
+				Name:       d.Name,
+				Version:    d.Version,
+				Category:   string(d.Category),
+				Confidence: d.Confidence,
 			}
 		}
 	}
+}
 
-	// Convert hostMap to sorted output.
+// buildSortedHosts converts a host-to-technologies map into a sorted slice of hostTechnologies.
+func buildSortedHosts(hostMap map[string]map[string]technologyEntry) []hostTechnologies {
 	hosts := make([]hostTechnologies, 0, len(hostMap))
 	for host, techMap := range hostMap {
 		techs := make([]technologyEntry, 0, len(techMap))
@@ -111,11 +136,7 @@ func (s *Server) handleQueryTechnologies(ctx context.Context, input queryInput) 
 	sort.Slice(hosts, func(i, j int) bool {
 		return hosts[i].Host < hosts[j].Host
 	})
-
-	return nil, &queryTechnologiesResult{
-		Hosts: hosts,
-		Count: len(hosts),
-	}, nil
+	return hosts
 }
 
 // extractHostFromFlow retrieves the host from the first send message of a flow.
