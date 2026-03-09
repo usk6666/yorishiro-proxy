@@ -67,62 +67,81 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 		Masked: header[1]&0x80 != 0,
 	}
 
-	// Parse payload length (7 bits, 7+16 bits, or 7+64 bits).
-	payloadLen := uint64(header[1] & 0x7F)
+	payloadLen, err := decodePayloadLength(r, header[1]&0x7F)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateFrameConstraints(f, payloadLen); err != nil {
+		return nil, err
+	}
+
+	if err := readMaskAndPayload(r, f, payloadLen); err != nil {
+		return nil, err
+	}
+
+	return f, nil
+}
+
+// decodePayloadLength reads the extended payload length from r based on the
+// initial 7-bit length indicator per RFC 6455 Section 5.2.
+func decodePayloadLength(r io.Reader, initial byte) (uint64, error) {
+	payloadLen := uint64(initial)
 	switch {
 	case payloadLen == 126:
 		var ext [2]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
-			return nil, fmt.Errorf("read extended payload length (16-bit): %w", err)
+			return 0, fmt.Errorf("read extended payload length (16-bit): %w", err)
 		}
 		payloadLen = uint64(binary.BigEndian.Uint16(ext[:]))
 	case payloadLen == 127:
 		var ext [8]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
-			return nil, fmt.Errorf("read extended payload length (64-bit): %w", err)
+			return 0, fmt.Errorf("read extended payload length (64-bit): %w", err)
 		}
 		payloadLen = binary.BigEndian.Uint64(ext[:])
 		// MSB must be 0 per RFC 6455 Section 5.2.
 		if payloadLen>>63 != 0 {
-			return nil, fmt.Errorf("invalid frame: payload length MSB is set")
+			return 0, fmt.Errorf("invalid frame: payload length MSB is set")
 		}
 	}
+	return payloadLen, nil
+}
 
-	// Validate control frame constraints.
+// validateFrameConstraints checks control frame rules and payload size limits.
+func validateFrameConstraints(f *Frame, payloadLen uint64) error {
 	if f.IsControl() {
 		if payloadLen > maxControlPayloadSize {
-			return nil, fmt.Errorf("control frame payload too large: %d > %d", payloadLen, maxControlPayloadSize)
+			return fmt.Errorf("control frame payload too large: %d > %d", payloadLen, maxControlPayloadSize)
 		}
 		if !f.Fin {
-			return nil, fmt.Errorf("control frame must not be fragmented")
+			return fmt.Errorf("control frame must not be fragmented")
 		}
 	}
-
-	// Guard against excessive memory allocation.
 	if payloadLen > maxFramePayloadSize {
-		return nil, fmt.Errorf("frame payload too large: %d > %d", payloadLen, maxFramePayloadSize)
+		return fmt.Errorf("frame payload too large: %d > %d", payloadLen, maxFramePayloadSize)
 	}
+	return nil
+}
 
-	// Read masking key if present.
+// readMaskAndPayload reads the masking key (if present) and the frame payload,
+// unmasking the payload if necessary.
+func readMaskAndPayload(r io.Reader, f *Frame, payloadLen uint64) error {
 	if f.Masked {
 		if _, err := io.ReadFull(r, f.MaskKey[:]); err != nil {
-			return nil, fmt.Errorf("read mask key: %w", err)
+			return fmt.Errorf("read mask key: %w", err)
 		}
 	}
-
-	// Read payload.
 	if payloadLen > 0 {
 		f.Payload = make([]byte, payloadLen)
 		if _, err := io.ReadFull(r, f.Payload); err != nil {
-			return nil, fmt.Errorf("read payload: %w", err)
+			return fmt.Errorf("read payload: %w", err)
 		}
-		// Unmask the payload if masked.
 		if f.Masked {
 			maskPayload(f.MaskKey, f.Payload)
 		}
 	}
-
-	return f, nil
+	return nil
 }
 
 // WriteFrame serializes a WebSocket frame and writes it to w.

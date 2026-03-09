@@ -191,6 +191,29 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 	return nil
 }
 
+// streamContext holds the state for a single HTTP/2 stream being proxied.
+type streamContext struct {
+	ctx              context.Context
+	w                gohttp.ResponseWriter
+	req              *gohttp.Request
+	connID           string
+	clientAddr       string
+	connectAuthority string
+	tlsMeta          tlsMetadata
+	logger           *slog.Logger
+	start            time.Time
+
+	reqBody      []byte
+	reqTruncated bool
+	reqURL       *url.URL
+	connInfo     *flow.ConnectionInfo
+	srp          sendRecordParams
+
+	// Plugin state shared across hooks for this stream.
+	pluginConnInfo *plugin.ConnInfo
+	txCtx          map[string]any
+}
+
 // handleStream proxies a single HTTP/2 stream to the upstream server
 // and records the flow.
 func (h *Handler) handleStream(
@@ -201,358 +224,418 @@ func (h *Handler) handleStream(
 	tlsMeta tlsMetadata,
 	logger *slog.Logger,
 ) {
-	start := time.Now()
-
-	// Read the full request body.
-	var reqBody []byte
-	var reqTruncated bool
-	if req.Body != nil {
-		fullBody, err := io.ReadAll(req.Body)
-		if err != nil {
-			logger.Warn("HTTP/2 failed to read request body", "error", err)
-		}
-		req.Body.Close()
-		reqBody = fullBody
-		req.Body = io.NopCloser(bytes.NewReader(fullBody))
+	sc := &streamContext{
+		ctx:              ctx,
+		w:                w,
+		req:              req,
+		connID:           connID,
+		clientAddr:       clientAddr,
+		connectAuthority: connectAuthority,
+		tlsMeta:          tlsMeta,
+		logger:           logger,
+		start:            time.Now(),
 	}
 
-	recordReqBody := reqBody
-	if len(reqBody) > int(config.MaxBodySize) {
-		recordReqBody = reqBody[:int(config.MaxBodySize)]
-		reqTruncated = true
-	}
+	h.readAndTruncateBody(sc)
+	h.resolveSchemeAndHost(sc)
+	h.buildStreamRecordParams(sc)
 
-	// Determine scheme and host for the upstream request.
-	scheme := "http"
-	if connectAuthority != "" {
-		scheme = "https"
-	}
-	host := req.Host
-	if host == "" && connectAuthority != "" {
-		host = connectAuthority
-	}
-	if req.URL.Host == "" {
-		req.URL.Host = host
-	}
-	if req.URL.Scheme == "" {
-		req.URL.Scheme = scheme
-	}
-
-	// Build the request URL for recording. This is computed early so that
-	// all recording paths (success, error, intercept drop) use the same URL.
-	reqURL := &url.URL{
-		Scheme:   scheme,
-		Host:     req.URL.Host,
-		Path:     req.URL.Path,
-		RawQuery: req.URL.RawQuery,
-		Fragment: req.URL.Fragment,
-	}
-
-	// Build the connection info for flow recording (without ServerAddr and
-	// TLSServerCertSubject which are only known after upstream connection).
-	connInfo := &flow.ConnectionInfo{
-		ClientAddr: clientAddr,
-		TLSVersion: tlsMeta.Version,
-		TLSCipher:  tlsMeta.CipherSuite,
-		TLSALPN:    tlsMeta.ALPN,
-	}
-
-	// Prepare send record params used across all recording paths.
-	srp := sendRecordParams{
-		connID:       connID,
-		clientAddr:   clientAddr,
-		start:        start,
-		connInfo:     connInfo,
-		req:          req,
-		reqURL:       reqURL,
-		reqBody:      recordReqBody,
-		reqTruncated: reqTruncated,
-	}
-
-	// Target scope enforcement: check if the target is allowed before
-	// forwarding the request upstream. For h2c connections this is the
-	// only scope check; for h2 via CONNECT the tunnel-level check in
-	// the HTTP/1.x handler provides the first line of defense (S-2).
-	if h.TargetScope != nil && h.TargetScope.HasRules() {
-		if allowed, reason := h.TargetScope.CheckURL(req.URL); !allowed {
-			body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`,
-				req.URL.Hostname(), reason)
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-			w.WriteHeader(gohttp.StatusForbidden)
-			w.Write([]byte(body))
-			logger.Info("HTTP/2 request blocked by target scope",
-				"host", req.URL.Host, "reason", reason)
-			return
-		}
-	}
-
-	// Build plugin ConnInfo for hook dispatch.
-	pluginConnInfo := &plugin.ConnInfo{
-		ClientAddr: clientAddr,
-		TLSVersion: tlsMeta.Version,
-		TLSCipher:  tlsMeta.CipherSuite,
-		TLSALPN:    tlsMeta.ALPN,
-	}
-
-	// Create transaction context shared across all plugin hooks for this
-	// HTTP/2 stream (request-response pair). Plugins can store and retrieve
-	// values via data["ctx"] to pass data between hooks.
-	txCtx := plugin.NewTxCtx()
-
-	// Plugin hook: on_receive_from_client — allows plugins to inspect,
-	// modify, drop, or respond to the request before forwarding.
-	var terminated bool
-	req, reqBody, terminated = h.dispatchOnReceiveFromClient(ctx, w, req, reqBody, pluginConnInfo, txCtx, logger)
-	if terminated {
+	if h.checkTargetScope(sc) {
 		return
 	}
 
-	// Re-compute recordReqBody after potential plugin modification.
-	recordReqBody = reqBody
-	if len(reqBody) > int(config.MaxBodySize) {
-		recordReqBody = reqBody[:int(config.MaxBodySize)]
-		reqTruncated = true
-	}
-
-	// Update reqURL and srp with potentially modified request and body.
-	reqURL = &url.URL{
-		Scheme:   req.URL.Scheme,
-		Host:     req.URL.Host,
-		Path:     req.URL.Path,
-		RawQuery: req.URL.RawQuery,
-		Fragment: req.URL.Fragment,
-	}
-	srp.req = req
-	srp.reqURL = reqURL
-	srp.reqBody = recordReqBody
-	srp.reqTruncated = reqTruncated
-
-	// Build the outbound request for the upstream server.
-	outURL := &url.URL{
-		Scheme:   req.URL.Scheme,
-		Host:     req.URL.Host,
-		Path:     req.URL.Path,
-		RawQuery: req.URL.RawQuery,
-		Fragment: req.URL.Fragment,
-	}
-
-	outReq, err := gohttp.NewRequestWithContext(ctx, req.Method, outURL.String(), io.NopCloser(bytes.NewReader(reqBody)))
-	if err != nil {
-		logger.Error("HTTP/2 failed to build upstream request", "error", err)
-		h.recordOutReqError(ctx, srp, err, logger)
-		w.WriteHeader(gohttp.StatusBadGateway)
+	if h.runClientPluginHook(sc) {
 		return
 	}
 
-	// Copy headers from the original request, skipping HTTP/2 pseudo-headers
-	// and hop-by-hop headers that should not be forwarded.
-	for key, vals := range req.Header {
-		outReq.Header[key] = vals
-	}
-	removeHTTP2HopByHop(outReq.Header)
+	h.refreshRecordParams(sc)
 
-	// Snapshot headers/body before intercept for variant recording.
-	// If intercept modifies the request, both the original and modified
-	// versions are recorded as separate send messages.
-	snap := snapshotRequest(outReq.Header, recordReqBody)
-
-	// Intercept check: if an intercept engine and queue are configured,
-	// check if the request matches any intercept rules. If so, enqueue
-	// the request and block until the AI agent responds with an action.
-	if action, intercepted := h.interceptRequest(ctx, req, recordReqBody, logger); intercepted {
-		switch action.Type {
-		case intercept.ActionDrop:
-			// Drop: record intercept drop and return 502 to client.
-			h.recordInterceptDrop(ctx, srp, logger)
-			w.WriteHeader(gohttp.StatusBadGateway)
-			logger.Info("intercepted HTTP/2 request dropped", "method", req.Method, "url", outURL.String())
-			return
-		case intercept.ActionModifyAndForward:
-			// Apply modifications to the outbound request.
-			var modErr error
-			outReq, modErr = applyInterceptModifications(outReq, action, reqBody)
-			if modErr != nil {
-				logger.Error("HTTP/2 intercept modification failed", "error", modErr)
-				w.WriteHeader(gohttp.StatusBadRequest)
-				return
-			}
-			// Re-check target scope after URL override to prevent SSRF (CWE-918, S-1).
-			if action.OverrideURL != "" && h.TargetScope != nil && h.TargetScope.HasRules() {
-				if allowed, reason := h.TargetScope.CheckURL(outReq.URL); !allowed {
-					body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`,
-						outReq.URL.Hostname(), reason)
-					w.Header().Set("Content-Type", "application/json")
-					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-					w.WriteHeader(gohttp.StatusForbidden)
-					w.Write([]byte(body))
-					logger.Warn("HTTP/2 intercept override_url blocked by target scope",
-						"url", outReq.URL.String(), "reason", reason)
-					return
-				}
-			}
-			// Update recordReqBody and srp for flow recording.
-			if action.OverrideBody != nil {
-				recordReqBody = []byte(*action.OverrideBody)
-				srp.reqBody = recordReqBody
-			}
-			// Update srp headers to reflect the modified outbound request.
-			srp.req = outReq
-		case intercept.ActionRelease:
-			// Continue with the original request.
-		}
+	outReq, ok := h.buildOutboundRequest(sc)
+	if !ok {
+		return
 	}
 
-	// Plugin hook: on_before_send_to_server — allows plugins to modify
-	// the outbound request before it is sent to the upstream server.
-	outReq, reqBody = h.dispatchOnBeforeSendToServer(ctx, outReq, reqBody, pluginConnInfo, txCtx, logger)
-	if reqBody != nil {
-		outReq.Body = io.NopCloser(bytes.NewReader(reqBody))
-		outReq.ContentLength = int64(len(reqBody))
+	snap := snapshotRequest(outReq.Header, sc.srp.reqBody)
+
+	outReq, ok = h.handleRequestIntercept(sc, outReq, &snap)
+	if !ok {
+		return
 	}
 
-	// Determine if this is a gRPC request. gRPC sessions are recorded by the
-	// gRPC handler using its own recording logic (not progressive recording).
-	isGRPC := h.grpcHandler != nil && isGRPCContentType(req.Header.Get("Content-Type"))
+	outReq = h.runServerPluginHook(sc, outReq)
 
-	// Progressive recording: record the send (request) phase before forwarding
-	// to upstream, so even if the upstream fails, the request is persisted.
-	// Uses variant-aware recording to capture both original and modified
-	// versions when intercept changed the request.
-	// gRPC sessions use their own recording path (grpcHandler.RecordSession).
+	isGRPC := h.grpcHandler != nil && isGRPCContentType(sc.req.Header.Get("Content-Type"))
+
 	var sendResult *sendRecordResult
 	if !isGRPC {
-		sendResult = h.recordSendWithVariant(ctx, srp, &snap, logger)
+		sendResult = h.recordSendWithVariant(sc.ctx, sc.srp, &snap, sc.logger)
 	}
 
-	// Forward to upstream.
-	resp, serverAddr, err := h.roundTripWithTrace(outReq)
-	if err != nil {
-		logger.Error("HTTP/2 upstream request failed",
-			"method", req.Method, "url", outURL.String(), "error", err)
-		h.recordSendError(ctx, sendResult, start, err, logger)
-		w.WriteHeader(gohttp.StatusBadGateway)
+	resp, serverAddr, fullRespBody, ok := h.forwardUpstream(sc, outReq, sendResult)
+	if !ok {
 		return
 	}
-	defer resp.Body.Close()
 
-	// Read the response body with a size limit to prevent OOM (CWE-770).
-	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
-	if err != nil {
-		logger.Warn("HTTP/2 failed to read response body", "error", err)
-	}
-
-	// Snapshot response before intercept for variant recording.
 	respSnap := snapshotResponse(resp.StatusCode, resp.Header, fullRespBody)
 
-	// Response intercept: check if the response matches any intercept rules
-	// and allow the AI agent to modify or drop it before sending to the client.
-	if action, intercepted := h.interceptResponse(ctx, req, resp, fullRespBody, logger); intercepted {
-		switch action.Type {
-		case intercept.ActionDrop:
-			w.WriteHeader(gohttp.StatusBadGateway)
-			logger.Info("intercepted HTTP/2 response dropped",
-				"method", req.Method, "url", outURL.String(), "status", resp.StatusCode)
-			return
-		case intercept.ActionModifyAndForward:
-			var modErr error
-			resp, fullRespBody, modErr = applyResponseModifications(resp, action, fullRespBody)
-			if modErr != nil {
-				logger.Error("HTTP/2 response intercept modification failed", "error", modErr)
-				w.WriteHeader(gohttp.StatusBadGateway)
-				return
-			}
-		case intercept.ActionRelease:
-			// Continue with the original response.
-		}
+	resp, fullRespBody, ok = h.handleResponseIntercept(sc, resp, fullRespBody)
+	if !ok {
+		return
 	}
 
-	// Plugin hook: on_receive_from_server — allows plugins to inspect or
-	// modify the response received from the upstream server.
-	resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
+	resp, fullRespBody = h.runResponsePluginHooks(sc, resp, fullRespBody)
 
-	// Plugin hook: on_before_send_to_client — allows plugins to make
-	// final modifications to the response before it is sent to the client.
-	resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
+	writeResponseToClient(sc, resp, fullRespBody)
 
-	// Write response headers back to the client.
-	for key, vals := range resp.Header {
-		for _, val := range vals {
-			w.Header().Add(key, val)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
+	duration := time.Since(sc.start)
+	tlsCertSubject := extractTLSCertSubject(resp)
 
-	// Write response body back to the client.
-	if len(fullRespBody) > 0 {
-		if _, err := w.Write(fullRespBody); err != nil {
-			logger.Debug("HTTP/2 failed to write response body", "error", err)
-		}
-	}
-
-	duration := time.Since(start)
-
-	// Extract the upstream server's TLS certificate subject if available.
-	var tlsCertSubject string
-	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-		tlsCertSubject = resp.TLS.PeerCertificates[0].Subject.String()
-	}
-
-	// Record the receive (response) phase.
-	if isGRPC {
-		// gRPC flow recording is handled by the gRPC handler.
-		if h.shouldCapture(req.Method, reqURL) {
-			var trailers map[string][]string
-			if resp.Trailer != nil {
-				trailers = make(map[string][]string, len(resp.Trailer))
-				for k, vals := range resp.Trailer {
-					trailers[k] = vals
-				}
-			}
-
-			info := &protogrpc.StreamInfo{
-				ConnID:               connID,
-				ClientAddr:           clientAddr,
-				ServerAddr:           serverAddr,
-				Method:               req.Method,
-				URL:                  reqURL,
-				RequestHeaders:       req.Header,
-				ResponseHeaders:      resp.Header,
-				Trailers:             trailers,
-				RequestBody:          reqBody,
-				ResponseBody:         fullRespBody,
-				StatusCode:           resp.StatusCode,
-				Start:                start,
-				Duration:             duration,
-				TLSVersion:           tlsMeta.Version,
-				TLSCipher:            tlsMeta.CipherSuite,
-				TLSALPN:              tlsMeta.ALPN,
-				TLSServerCertSubject: tlsCertSubject,
-			}
-			if err := h.grpcHandler.RecordSession(ctx, info); err != nil {
-				logger.Error("gRPC flow recording failed", "error", err)
-			}
-		}
-	} else {
-		h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
-			start:                start,
-			duration:             duration,
-			serverAddr:           serverAddr,
-			tlsServerCertSubject: tlsCertSubject,
-			resp:                 resp,
-			respBody:             fullRespBody,
-		}, &respSnap, logger)
-	}
+	h.recordStreamResponse(sc, isGRPC, sendResult, resp, fullRespBody, serverAddr, duration, tlsCertSubject, &respSnap)
 
 	logProtocol := "http/2"
 	if isGRPC {
 		logProtocol = "grpc"
 	}
-	logger.Info(logProtocol+" request",
-		"method", req.Method,
-		"url", outURL.String(),
+	sc.logger.Info(logProtocol+" request",
+		"method", sc.req.Method,
+		"url", sc.reqURL.String(),
 		"status", resp.StatusCode,
 		"duration_ms", duration.Milliseconds())
+}
+
+// readAndTruncateBody reads the full request body and truncates for recording.
+func (h *Handler) readAndTruncateBody(sc *streamContext) {
+	if sc.req.Body != nil {
+		fullBody, err := io.ReadAll(sc.req.Body)
+		if err != nil {
+			sc.logger.Warn("HTTP/2 failed to read request body", "error", err)
+		}
+		sc.req.Body.Close()
+		sc.reqBody = fullBody
+		sc.req.Body = io.NopCloser(bytes.NewReader(fullBody))
+	}
+	sc.reqTruncated = len(sc.reqBody) > int(config.MaxBodySize)
+}
+
+// resolveSchemeAndHost determines the scheme and host for the upstream request.
+func (h *Handler) resolveSchemeAndHost(sc *streamContext) {
+	scheme := "http"
+	if sc.connectAuthority != "" {
+		scheme = "https"
+	}
+	host := sc.req.Host
+	if host == "" && sc.connectAuthority != "" {
+		host = sc.connectAuthority
+	}
+	if sc.req.URL.Host == "" {
+		sc.req.URL.Host = host
+	}
+	if sc.req.URL.Scheme == "" {
+		sc.req.URL.Scheme = scheme
+	}
+	sc.reqURL = cloneURL(sc.req.URL)
+}
+
+// buildStreamRecordParams builds the initial send record params and connection info.
+func (h *Handler) buildStreamRecordParams(sc *streamContext) {
+	sc.connInfo = &flow.ConnectionInfo{
+		ClientAddr: sc.clientAddr,
+		TLSVersion: sc.tlsMeta.Version,
+		TLSCipher:  sc.tlsMeta.CipherSuite,
+		TLSALPN:    sc.tlsMeta.ALPN,
+	}
+
+	recordBody := sc.reqBody
+	if sc.reqTruncated {
+		recordBody = sc.reqBody[:int(config.MaxBodySize)]
+	}
+
+	sc.srp = sendRecordParams{
+		connID:       sc.connID,
+		clientAddr:   sc.clientAddr,
+		start:        sc.start,
+		connInfo:     sc.connInfo,
+		req:          sc.req,
+		reqURL:       sc.reqURL,
+		reqBody:      recordBody,
+		reqTruncated: sc.reqTruncated,
+	}
+}
+
+// checkTargetScope enforces target scope rules. Returns true if the request was blocked.
+func (h *Handler) checkTargetScope(sc *streamContext) bool {
+	if h.TargetScope == nil || !h.TargetScope.HasRules() {
+		return false
+	}
+	allowed, reason := h.TargetScope.CheckURL(sc.req.URL)
+	if allowed {
+		return false
+	}
+	writeScopeBlockResponse(sc.w, sc.req.URL.Hostname(), reason)
+	sc.logger.Info("HTTP/2 request blocked by target scope",
+		"host", sc.req.URL.Host, "reason", reason)
+	return true
+}
+
+// writeScopeBlockResponse writes a 403 Forbidden response for scope violations.
+func writeScopeBlockResponse(w gohttp.ResponseWriter, target, reason string) {
+	body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`,
+		target, reason)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(gohttp.StatusForbidden)
+	w.Write([]byte(body))
+}
+
+// runClientPluginHook dispatches the on_receive_from_client plugin hook.
+// Returns true if the request was terminated.
+func (h *Handler) runClientPluginHook(sc *streamContext) bool {
+	pluginConnInfo := &plugin.ConnInfo{
+		ClientAddr: sc.clientAddr,
+		TLSVersion: sc.tlsMeta.Version,
+		TLSCipher:  sc.tlsMeta.CipherSuite,
+		TLSALPN:    sc.tlsMeta.ALPN,
+	}
+	txCtx := plugin.NewTxCtx()
+	var terminated bool
+	sc.req, sc.reqBody, terminated = h.dispatchOnReceiveFromClient(sc.ctx, sc.w, sc.req, sc.reqBody, pluginConnInfo, txCtx, sc.logger)
+	// Store txCtx and pluginConnInfo on the context for later hooks — we
+	// piggyback on the streamContext's context value.  For simplicity we
+	// store them as unexported fields (added below).
+	sc.pluginConnInfo = pluginConnInfo
+	sc.txCtx = txCtx
+	return terminated
+}
+
+// refreshRecordParams updates record params after plugin modification.
+func (h *Handler) refreshRecordParams(sc *streamContext) {
+	if len(sc.reqBody) > int(config.MaxBodySize) {
+		sc.srp.reqBody = sc.reqBody[:int(config.MaxBodySize)]
+		sc.reqTruncated = true
+		sc.srp.reqTruncated = true
+	} else {
+		sc.srp.reqBody = sc.reqBody
+	}
+	sc.reqURL = cloneURL(sc.req.URL)
+	sc.srp.req = sc.req
+	sc.srp.reqURL = sc.reqURL
+}
+
+// buildOutboundRequest creates the outbound HTTP request for the upstream server.
+// Returns false if the request could not be built.
+func (h *Handler) buildOutboundRequest(sc *streamContext) (*gohttp.Request, bool) {
+	outURL := cloneURL(sc.req.URL)
+	outReq, err := gohttp.NewRequestWithContext(sc.ctx, sc.req.Method, outURL.String(), io.NopCloser(bytes.NewReader(sc.reqBody)))
+	if err != nil {
+		sc.logger.Error("HTTP/2 failed to build upstream request", "error", err)
+		h.recordOutReqError(sc.ctx, sc.srp, err, sc.logger)
+		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		return nil, false
+	}
+	for key, vals := range sc.req.Header {
+		outReq.Header[key] = vals
+	}
+	removeHTTP2HopByHop(outReq.Header)
+	return outReq, true
+}
+
+// handleRequestIntercept processes request interception. Returns the (possibly
+// modified) outbound request and false if the request was dropped/blocked.
+func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Request, snap *requestSnapshot) (*gohttp.Request, bool) {
+	action, intercepted := h.interceptRequest(sc.ctx, sc.req, sc.srp.reqBody, sc.logger)
+	if !intercepted {
+		return outReq, true
+	}
+	switch action.Type {
+	case intercept.ActionDrop:
+		h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
+		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		sc.logger.Info("intercepted HTTP/2 request dropped",
+			"method", sc.req.Method, "url", sc.reqURL.String())
+		return nil, false
+	case intercept.ActionModifyAndForward:
+		return h.applyRequestInterceptMods(sc, outReq, action)
+	default:
+		return outReq, true
+	}
+}
+
+// applyRequestInterceptMods applies intercept modifications to the outbound
+// request, including re-checking target scope after URL override.
+func (h *Handler) applyRequestInterceptMods(sc *streamContext, outReq *gohttp.Request, action intercept.InterceptAction) (*gohttp.Request, bool) {
+	var modErr error
+	outReq, modErr = applyInterceptModifications(outReq, action, sc.reqBody)
+	if modErr != nil {
+		sc.logger.Error("HTTP/2 intercept modification failed", "error", modErr)
+		sc.w.WriteHeader(gohttp.StatusBadRequest)
+		return nil, false
+	}
+	if action.OverrideURL != "" && h.TargetScope != nil && h.TargetScope.HasRules() {
+		if allowed, reason := h.TargetScope.CheckURL(outReq.URL); !allowed {
+			writeScopeBlockResponse(sc.w, outReq.URL.Hostname(), reason)
+			sc.logger.Warn("HTTP/2 intercept override_url blocked by target scope",
+				"url", outReq.URL.String(), "reason", reason)
+			return nil, false
+		}
+	}
+	if action.OverrideBody != nil {
+		sc.srp.reqBody = []byte(*action.OverrideBody)
+	}
+	sc.srp.req = outReq
+	return outReq, true
+}
+
+// runServerPluginHook dispatches the on_before_send_to_server hook.
+func (h *Handler) runServerPluginHook(sc *streamContext, outReq *gohttp.Request) *gohttp.Request {
+	outReq, body := h.dispatchOnBeforeSendToServer(sc.ctx, outReq, sc.reqBody, sc.pluginConnInfo, sc.txCtx, sc.logger)
+	if body != nil {
+		outReq.Body = io.NopCloser(bytes.NewReader(body))
+		outReq.ContentLength = int64(len(body))
+		sc.reqBody = body
+	}
+	return outReq
+}
+
+// forwardUpstream sends the request to the upstream server and reads the response.
+// Returns false if the upstream request failed.
+func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*gohttp.Response, string, []byte, bool) {
+	resp, serverAddr, err := h.roundTripWithTrace(outReq)
+	if err != nil {
+		sc.logger.Error("HTTP/2 upstream request failed",
+			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
+		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
+		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		return nil, "", nil, false
+	}
+	defer resp.Body.Close()
+
+	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
+	if err != nil {
+		sc.logger.Warn("HTTP/2 failed to read response body", "error", err)
+	}
+	return resp, serverAddr, fullRespBody, true
+}
+
+// handleResponseIntercept processes response interception.
+// Returns false if the response was dropped.
+func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Response, fullRespBody []byte) (*gohttp.Response, []byte, bool) {
+	action, intercepted := h.interceptResponse(sc.ctx, sc.req, resp, fullRespBody, sc.logger)
+	if !intercepted {
+		return resp, fullRespBody, true
+	}
+	switch action.Type {
+	case intercept.ActionDrop:
+		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		sc.logger.Info("intercepted HTTP/2 response dropped",
+			"method", sc.req.Method, "url", sc.reqURL.String(), "status", resp.StatusCode)
+		return nil, nil, false
+	case intercept.ActionModifyAndForward:
+		var modErr error
+		resp, fullRespBody, modErr = applyResponseModifications(resp, action, fullRespBody)
+		if modErr != nil {
+			sc.logger.Error("HTTP/2 response intercept modification failed", "error", modErr)
+			sc.w.WriteHeader(gohttp.StatusBadGateway)
+			return nil, nil, false
+		}
+		return resp, fullRespBody, true
+	default:
+		return resp, fullRespBody, true
+	}
+}
+
+// runResponsePluginHooks dispatches the on_receive_from_server and
+// on_before_send_to_client hooks.
+func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *gohttp.Response, fullRespBody []byte) (*gohttp.Response, []byte) {
+	resp, fullRespBody = h.dispatchOnReceiveFromServer(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.logger)
+	resp, fullRespBody = h.dispatchOnBeforeSendToClient(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.logger)
+	return resp, fullRespBody
+}
+
+// writeResponseToClient writes the HTTP response headers and body to the client.
+func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte) {
+	for key, vals := range resp.Header {
+		for _, val := range vals {
+			sc.w.Header().Add(key, val)
+		}
+	}
+	sc.w.WriteHeader(resp.StatusCode)
+	if len(body) > 0 {
+		if _, err := sc.w.Write(body); err != nil {
+			sc.logger.Debug("HTTP/2 failed to write response body", "error", err)
+		}
+	}
+}
+
+// extractTLSCertSubject returns the upstream server's TLS certificate subject,
+// or an empty string if not available.
+func extractTLSCertSubject(resp *gohttp.Response) string {
+	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		return resp.TLS.PeerCertificates[0].Subject.String()
+	}
+	return ""
+}
+
+// recordStreamResponse records the receive phase for HTTP/2 or gRPC flows.
+func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot) {
+	if isGRPC {
+		h.recordGRPCFlow(sc, resp, fullRespBody, serverAddr, duration, tlsCertSubject)
+	} else {
+		h.recordReceiveWithVariant(sc.ctx, sendResult, receiveRecordParams{
+			start:                sc.start,
+			duration:             duration,
+			serverAddr:           serverAddr,
+			tlsServerCertSubject: tlsCertSubject,
+			resp:                 resp,
+			respBody:             fullRespBody,
+		}, respSnap, sc.logger)
+	}
+}
+
+// recordGRPCFlow records a gRPC session via the gRPC handler.
+func (h *Handler) recordGRPCFlow(sc *streamContext, resp *gohttp.Response, fullRespBody []byte, serverAddr string, duration time.Duration, tlsCertSubject string) {
+	if !h.shouldCapture(sc.req.Method, sc.reqURL) {
+		return
+	}
+	var trailers map[string][]string
+	if resp.Trailer != nil {
+		trailers = make(map[string][]string, len(resp.Trailer))
+		for k, vals := range resp.Trailer {
+			trailers[k] = vals
+		}
+	}
+	info := &protogrpc.StreamInfo{
+		ConnID:               sc.connID,
+		ClientAddr:           sc.clientAddr,
+		ServerAddr:           serverAddr,
+		Method:               sc.req.Method,
+		URL:                  sc.reqURL,
+		RequestHeaders:       sc.req.Header,
+		ResponseHeaders:      resp.Header,
+		Trailers:             trailers,
+		RequestBody:          sc.reqBody,
+		ResponseBody:         fullRespBody,
+		StatusCode:           resp.StatusCode,
+		Start:                sc.start,
+		Duration:             duration,
+		TLSVersion:           sc.tlsMeta.Version,
+		TLSCipher:            sc.tlsMeta.CipherSuite,
+		TLSALPN:              sc.tlsMeta.ALPN,
+		TLSServerCertSubject: tlsCertSubject,
+	}
+	if err := h.grpcHandler.RecordSession(sc.ctx, info); err != nil {
+		sc.logger.Error("gRPC flow recording failed", "error", err)
+	}
+}
+
+// cloneURL creates a shallow copy of a URL suitable for recording/forwarding.
+func cloneURL(u *url.URL) *url.URL {
+	return &url.URL{
+		Scheme:   u.Scheme,
+		Host:     u.Host,
+		Path:     u.Path,
+		RawQuery: u.RawQuery,
+		Fragment: u.Fragment,
+	}
 }
 
 // roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
