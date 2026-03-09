@@ -84,7 +84,7 @@ var defaultRules = []rule{
 	},
 	{
 		name: "ASP.NET", category: CategoryFramework, target: targetHeader,
-		header: "X-Powered-By", pattern: mustCompile(`(?i)ASP\.NET`),
+		header: "X-Powered-By", pattern: mustCompile(`(?i)\bASP\.NET\b`),
 		confidence: "high",
 	},
 	{
