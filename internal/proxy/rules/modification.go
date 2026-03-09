@@ -147,54 +147,70 @@ func compileRule(r Rule) (*compiledRule, error) {
 		return nil, fmt.Errorf("invalid action type %q", r.Action.Type)
 	}
 
-	// Validate action fields based on type.
 	if err := validateAction(r.Action); err != nil {
 		return nil, err
 	}
 
 	cr := &compiledRule{rule: r}
 
-	// Compile URL pattern.
-	if r.Conditions.URLPattern != "" {
-		if len(r.Conditions.URLPattern) > maxRegexPatternLen {
-			return nil, fmt.Errorf("url_pattern too long: %d > %d", len(r.Conditions.URLPattern), maxRegexPatternLen)
-		}
-		re, err := regexp.Compile(r.Conditions.URLPattern)
+	if err := compileConditionPatterns(r.Conditions, cr); err != nil {
+		return nil, err
+	}
+
+	if err := compileBodyPattern(r.Action, cr); err != nil {
+		return nil, err
+	}
+
+	return cr, nil
+}
+
+// compileConditionPatterns compiles URL and header match patterns from conditions.
+func compileConditionPatterns(cond Conditions, cr *compiledRule) error {
+	if cond.URLPattern != "" {
+		re, err := compileRegexWithLimit(cond.URLPattern, "url_pattern")
 		if err != nil {
-			return nil, fmt.Errorf("invalid url_pattern %q: %w", r.Conditions.URLPattern, err)
+			return err
 		}
 		cr.urlPatternRe = re
 	}
 
-	// Compile header match patterns.
-	if len(r.Conditions.HeaderMatch) > 0 {
-		cr.headerMatchRes = make(map[string]*regexp.Regexp, len(r.Conditions.HeaderMatch))
-		for name, pattern := range r.Conditions.HeaderMatch {
-			if len(pattern) > maxRegexPatternLen {
-				return nil, fmt.Errorf("header_match pattern for %q too long: %d > %d", name, len(pattern), maxRegexPatternLen)
-			}
-			re, err := regexp.Compile(pattern)
+	if len(cond.HeaderMatch) > 0 {
+		cr.headerMatchRes = make(map[string]*regexp.Regexp, len(cond.HeaderMatch))
+		for name, pattern := range cond.HeaderMatch {
+			re, err := compileRegexWithLimit(pattern, fmt.Sprintf("header_match pattern for %q", name))
 			if err != nil {
-				return nil, fmt.Errorf("invalid header_match pattern for %q: %w", name, err)
+				return err
 			}
-			// Store with canonical header name for consistent lookup.
 			cr.headerMatchRes[http.CanonicalHeaderKey(name)] = re
 		}
 	}
 
-	// Compile body replacement pattern.
-	if r.Action.Type == ActionReplaceBody && r.Action.Pattern != "" {
-		if len(r.Action.Pattern) > maxRegexPatternLen {
-			return nil, fmt.Errorf("body replacement pattern too long: %d > %d", len(r.Action.Pattern), maxRegexPatternLen)
-		}
-		re, err := regexp.Compile(r.Action.Pattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid body replacement pattern %q: %w", r.Action.Pattern, err)
-		}
-		cr.bodyPatternRe = re
-	}
+	return nil
+}
 
-	return cr, nil
+// compileBodyPattern compiles the body replacement pattern for replace_body actions.
+func compileBodyPattern(action Action, cr *compiledRule) error {
+	if action.Type != ActionReplaceBody || action.Pattern == "" {
+		return nil
+	}
+	re, err := compileRegexWithLimit(action.Pattern, "body replacement pattern")
+	if err != nil {
+		return err
+	}
+	cr.bodyPatternRe = re
+	return nil
+}
+
+// compileRegexWithLimit validates length and compiles a regex pattern.
+func compileRegexWithLimit(pattern, label string) (*regexp.Regexp, error) {
+	if len(pattern) > maxRegexPatternLen {
+		return nil, fmt.Errorf("%s too long: %d > %d", label, len(pattern), maxRegexPatternLen)
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", label, pattern, err)
+	}
+	return re, nil
 }
 
 // containsCRLF reports whether s contains any CR (\r) or LF (\n) characters.
