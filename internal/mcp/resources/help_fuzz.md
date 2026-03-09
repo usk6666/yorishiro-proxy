@@ -35,7 +35,7 @@ Start an asynchronous fuzz campaign against a recorded flow. Returns fuzz_id imm
   - **charset** (string): Character set for charset type (e.g. `"abc"`, `"0123456789"`).
   - **length** (integer): Combination length for charset type.
   - **input** (string): Base string for case_variation and null_byte_injection types.
-  - **encoding** (array of strings, optional): Codec chain to apply to each payload (e.g. `["url_encode_query", "base64"]`). Available codecs: base64, base64url, url_encode_query, url_encode_path, url_encode_full, double_url_encode, hex, html_entity, html_escape, unicode_escape, md5, sha256, lower, upper.
+  - **encoding** (array of strings, optional): Codec chain to apply to each payload. Codecs are applied in order as a pipeline — e.g. `["url_encode_query", "base64"]` first URL-encodes the payload, then Base64-encodes the result. Maximum 10 codecs per chain. Available codecs: base64, base64url, url_encode_query, url_encode_path, url_encode_full, double_url_encode, hex, html_entity, html_escape, unicode_escape, md5, sha256, lower, upper.
 - **concurrency** (integer, optional): Number of concurrent workers (default: `1`).
 - **rate_limit_rps** (number, optional): Requests per second limit. `0` means unlimited.
 - **delay_ms** (integer, optional): Fixed delay between requests in milliseconds.
