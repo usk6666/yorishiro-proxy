@@ -157,6 +157,22 @@ func TestCharsetGenerator(t *testing.T) {
 	}
 }
 
+func TestCharsetGeneratorOverflowDetection(t *testing.T) {
+	// A charset of 100 characters with length 10 would produce 100^10 = 10^20 payloads,
+	// which overflows int64. The overflow check should catch this before it happens.
+	gen := CharsetGenerator{
+		Charset: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:',.<>?/`~ab",
+		Length:  10,
+	}
+	_, err := gen.Generate()
+	if err == nil {
+		t.Fatal("expected error for overflow-inducing charset/length combination, got nil")
+	}
+	if !strings.Contains(err.Error(), "more than") {
+		t.Errorf("expected overflow error, got: %v", err)
+	}
+}
+
 func TestCharsetGeneratorNoDuplicates(t *testing.T) {
 	gen := CharsetGenerator{Charset: "abc", Length: 3}
 	got, err := gen.Generate()
@@ -334,6 +350,20 @@ func TestNullByteInjectionContainsNullByte(t *testing.T) {
 	}
 	if !hasURLNull {
 		t.Error("no payloads contain URL-encoded null byte")
+	}
+}
+
+func TestNullByteInjectionExceedsLimit(t *testing.T) {
+	// An input with enough characters to exceed maxPayloadCount should return an error.
+	// estimatedCount = 2 * (len(runes) + 1), so we need len(runes) > maxPayloadCount/2.
+	longInput := strings.Repeat("a", maxPayloadCount/2+1)
+	gen := NullByteInjectionGenerator{Input: longInput}
+	_, err := gen.Generate()
+	if err == nil {
+		t.Fatal("expected error for exceeding maxPayloadCount, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeding maximum") {
+		t.Errorf("expected error about exceeding maximum, got: %v", err)
 	}
 }
 

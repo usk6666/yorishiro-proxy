@@ -75,9 +75,13 @@ func (g *CharsetGenerator) Generate() ([]string, error) {
 		return nil, fmt.Errorf("payload: charset cannot be empty")
 	}
 
-	// Calculate total: len(chars)^length. Check for overflow and limit.
+	// Calculate total: len(chars)^length. Check for overflow and limit before each multiplication.
 	total := 1
 	for i := 0; i < g.Length; i++ {
+		if total > maxPayloadCount/len(chars) {
+			return nil, fmt.Errorf("payload: charset would generate more than %d payloads (charset=%d, length=%d)",
+				maxPayloadCount, len(chars), g.Length)
+		}
 		total *= len(chars)
 		if total > maxPayloadCount {
 			return nil, fmt.Errorf("payload: charset would generate more than %d payloads (charset=%d, length=%d)",
@@ -204,6 +208,14 @@ type NullByteInjectionGenerator struct {
 func (g *NullByteInjectionGenerator) Generate() ([]string, error) {
 	if g.Input == "" {
 		return nil, nil
+	}
+
+	// Each null byte variant (raw \x00 and %00) produces: 1 prepend + 1 append + (len(runes)-1) insertions.
+	// Total = 2 * (2 + len(runes) - 1) = 2 * (len(runes) + 1).
+	runes := []rune(g.Input)
+	estimatedCount := 2 * (len(runes) + 1)
+	if estimatedCount > maxPayloadCount {
+		return nil, fmt.Errorf("payload: null byte injection would generate up to %d payloads, exceeding maximum of %d", estimatedCount, maxPayloadCount)
 	}
 
 	seen := make(map[string]struct{})

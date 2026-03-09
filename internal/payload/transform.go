@@ -5,6 +5,10 @@ import (
 	"strings"
 )
 
+// maxRepeatBytes is the maximum byte size allowed for a Repeat result
+// to prevent out-of-memory conditions from excessively large repeat counts.
+const maxRepeatBytes = 10 * 1024 * 1024 // 10 MB
+
 // Transform is a function that transforms a single payload string.
 type Transform func(s string) string
 
@@ -19,11 +23,15 @@ func Reverse(s string) string {
 
 // Repeat returns the input string repeated n times.
 // If n <= 0, returns an empty string.
-func Repeat(s string, n int) string {
+// Returns an error if the resulting string would exceed maxRepeatBytes.
+func Repeat(s string, n int) (string, error) {
 	if n <= 0 {
-		return ""
+		return "", nil
 	}
-	return strings.Repeat(s, n)
+	if len(s) > 0 && n > maxRepeatBytes/len(s) {
+		return "", fmt.Errorf("payload: repeat would produce %d bytes, exceeding limit of %d", len(s)*n, maxRepeatBytes)
+	}
+	return strings.Repeat(s, n), nil
 }
 
 // Truncate returns the first n runes of the input string.

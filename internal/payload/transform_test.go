@@ -1,6 +1,7 @@
 package payload
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -30,25 +31,46 @@ func TestReverse(t *testing.T) {
 
 func TestRepeat(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
-		n     int
-		want  string
+		name    string
+		input   string
+		n       int
+		want    string
+		wantErr string
 	}{
-		{"repeat 3", "ab", 3, "ababab"},
-		{"repeat 1", "ab", 1, "ab"},
-		{"repeat 0", "ab", 0, ""},
-		{"repeat negative", "ab", -1, ""},
-		{"empty string", "", 5, ""},
+		{"repeat 3", "ab", 3, "ababab", ""},
+		{"repeat 1", "ab", 1, "ab", ""},
+		{"repeat 0", "ab", 0, "", ""},
+		{"repeat negative", "ab", -1, "", ""},
+		{"empty string", "", 5, "", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Repeat(tt.input, tt.n)
+			got, err := Repeat(tt.input, tt.n)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if got != tt.want {
 				t.Errorf("Repeat(%q, %d) = %q, want %q", tt.input, tt.n, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRepeatExceedsLimit(t *testing.T) {
+	// A large repeat count should return an error.
+	_, err := Repeat("abc", maxRepeatBytes+1)
+	if err == nil {
+		t.Fatal("expected error for exceeding maxRepeatBytes, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeding limit") {
+		t.Errorf("expected error about exceeding limit, got: %v", err)
 	}
 }
 
