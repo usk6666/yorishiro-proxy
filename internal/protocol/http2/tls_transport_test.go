@@ -97,16 +97,10 @@ func TestSetTLSTransport_NilRestoresDefault(t *testing.T) {
 	if handler.Transport.DialTLSContext == nil {
 		t.Fatal("DialTLSContext should be set after SetTLSTransport")
 	}
-	if handler.tlsTransport == nil {
-		t.Fatal("tlsTransport should be set")
-	}
 
 	handler.SetTLSTransport(nil)
 	if handler.Transport.DialTLSContext != nil {
 		t.Error("DialTLSContext should be nil after SetTLSTransport(nil)")
-	}
-	if handler.tlsTransport != nil {
-		t.Error("tlsTransport should be nil after SetTLSTransport(nil)")
 	}
 }
 

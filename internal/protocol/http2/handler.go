@@ -45,12 +45,9 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 type Handler struct {
 	proxy.HandlerBase
 
-	// tlsTransport abstracts TLS connection establishment to upstream servers.
-	// When set, the handler uses this transport (e.g. uTLS) for upstream TLS
-	// handshakes instead of the standard crypto/tls library, enabling
-	// browser-like TLS fingerprinting for evasion of JA3/JA4-based detection.
-	// If nil, the standard crypto/tls library is used (default behavior).
-	tlsTransport httputil.TLSTransport
+	// tlsMu protects Transport.DialTLSContext from concurrent access
+	// when SetTLSTransport is called while requests are in flight.
+	tlsMu sync.RWMutex
 
 	// grpcHandler processes gRPC flow recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
@@ -79,14 +76,18 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 // instead of the standard crypto/tls library. The transport's DialTLSContext on
 // the underlying gohttp.Transport is reconfigured to route TLS handshakes through
 // the provided TLSTransport. If t is nil, the default crypto/tls behavior is restored.
+//
+// This method is safe to call concurrently with in-flight requests.
 func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
-	h.tlsTransport = t
+	h.tlsMu.Lock()
+	defer h.tlsMu.Unlock()
+
 	if t == nil {
 		h.Transport.DialTLSContext = nil
 		return
 	}
 	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		rawConn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		rawConn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, fmt.Errorf("dial upstream %s: %w", addr, err)
 		}
