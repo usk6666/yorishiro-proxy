@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/codec"
 )
 
 // BodyPatch represents a single body modification operation.
@@ -19,6 +21,10 @@ type BodyPatch struct {
 	// Replace is the replacement string when using regex patching.
 	// Supports capture group references ($1, $2, etc.).
 	Replace string `json:"replace,omitempty"`
+	// Encoding is an optional chain of codec names to apply to the patch value
+	// before applying. For json_path patches, encoding is applied to string values only.
+	// For regex patches, encoding is applied to the replace string.
+	Encoding []string `json:"encoding,omitempty"`
 }
 
 // validateBodyPatch checks that a BodyPatch has exactly one patch mode specified.
@@ -34,6 +40,17 @@ func validateBodyPatch(bp BodyPatch) error {
 	// Note: bp.Value == nil is valid (represents JSON null).
 	// We cannot distinguish between "value not set" and "value set to null"
 	// with the any type, so we do not reject nil values.
+
+	// Validate encoding codec names if specified.
+	if len(bp.Encoding) > 0 {
+		reg := codec.DefaultRegistry()
+		for _, name := range bp.Encoding {
+			if _, ok := reg.Get(name); !ok {
+				return fmt.Errorf("unknown encoding codec %q", name)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -44,6 +61,16 @@ func applyBodyPatches(body []byte, patches []BodyPatch) ([]byte, error) {
 		if err := validateBodyPatch(p); err != nil {
 			return nil, fmt.Errorf("body_patches[%d]: %w", i, err)
 		}
+
+		// Apply encoding to patch values if specified.
+		if len(p.Encoding) > 0 {
+			var err error
+			p, err = encodePatchValue(p)
+			if err != nil {
+				return nil, fmt.Errorf("body_patches[%d]: %w", i, err)
+			}
+		}
+
 		var err error
 		if p.JSONPath != "" {
 			body, err = applyJSONPathPatch(body, p.JSONPath, p.Value)
@@ -138,6 +165,30 @@ func setNestedValue(root any, keys []string, value any) error {
 // maxRegexPatternLen is the maximum allowed length for regex patterns in body patches.
 // This prevents resource exhaustion from very large patterns during compilation and matching.
 const maxRegexPatternLen = 1024
+
+// encodePatchValue applies the encoding chain to the patch value.
+// For json_path patches, encoding is applied to string values only.
+// For regex patches, encoding is applied to the replace string.
+func encodePatchValue(p BodyPatch) (BodyPatch, error) {
+	if p.JSONPath != "" {
+		// Only encode string values for JSON path patches.
+		if strVal, ok := p.Value.(string); ok {
+			encoded, err := codec.Encode(strVal, p.Encoding)
+			if err != nil {
+				return p, fmt.Errorf("encode json_path value: %w", err)
+			}
+			p.Value = encoded
+		}
+	} else {
+		// Encode the replace string for regex patches.
+		encoded, err := codec.Encode(p.Replace, p.Encoding)
+		if err != nil {
+			return p, fmt.Errorf("encode regex replace: %w", err)
+		}
+		p.Replace = encoded
+	}
+	return p, nil
+}
 
 // applyRegexPatch applies a regex replacement to the body text.
 func applyRegexPatch(body []byte, pattern, replace string) ([]byte, error) {

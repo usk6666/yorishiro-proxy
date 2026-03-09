@@ -1,6 +1,8 @@
 package fuzzer
 
 import (
+	"encoding/base64"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,6 +79,52 @@ func TestPayloadSet_Validate(t *testing.T) {
 		{
 			name:    "invalid type",
 			ps:      PayloadSet{Type: "invalid"},
+			wantErr: true,
+		},
+		{
+			name: "valid charset",
+			ps:   PayloadSet{Type: "charset", Charset: "ab", Length: intPtr(2)},
+		},
+		{
+			name:    "charset missing charset string",
+			ps:      PayloadSet{Type: "charset", Length: intPtr(2)},
+			wantErr: true,
+		},
+		{
+			name:    "charset missing length",
+			ps:      PayloadSet{Type: "charset", Charset: "ab"},
+			wantErr: true,
+		},
+		{
+			name:    "charset zero length",
+			ps:      PayloadSet{Type: "charset", Charset: "ab", Length: intPtr(0)},
+			wantErr: true,
+		},
+		{
+			name: "valid case_variation",
+			ps:   PayloadSet{Type: "case_variation", Input: "Admin"},
+		},
+		{
+			name:    "case_variation missing input",
+			ps:      PayloadSet{Type: "case_variation"},
+			wantErr: true,
+		},
+		{
+			name: "valid null_byte_injection",
+			ps:   PayloadSet{Type: "null_byte_injection", Input: "test.php"},
+		},
+		{
+			name:    "null_byte_injection missing input",
+			ps:      PayloadSet{Type: "null_byte_injection"},
+			wantErr: true,
+		},
+		{
+			name: "valid encoding",
+			ps:   PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: []string{"base64"}},
+		},
+		{
+			name:    "unknown encoding codec",
+			ps:      PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: []string{"nonexistent_codec"}},
 			wantErr: true,
 		},
 	}
@@ -311,6 +359,169 @@ func TestResolveWordlistPath_Security(t *testing.T) {
 				t.Errorf("resolveWordlistPath() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestPayloadSet_GenerateWithEncoding(t *testing.T) {
+	ps := PayloadSet{
+		Type:     "wordlist",
+		Values:   []string{"hello", "world"},
+		Encoding: []string{"base64"},
+	}
+	got, err := ps.Generate("")
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d payloads, want 2", len(got))
+	}
+	// "hello" -> base64 -> "aGVsbG8="
+	want0 := base64.StdEncoding.EncodeToString([]byte("hello"))
+	if got[0] != want0 {
+		t.Errorf("got[0] = %q, want %q", got[0], want0)
+	}
+	want1 := base64.StdEncoding.EncodeToString([]byte("world"))
+	if got[1] != want1 {
+		t.Errorf("got[1] = %q, want %q", got[1], want1)
+	}
+}
+
+func TestPayloadSet_GenerateWithEncodingChain(t *testing.T) {
+	ps := PayloadSet{
+		Type:     "wordlist",
+		Values:   []string{"test value"},
+		Encoding: []string{"url_encode_query", "base64"},
+	}
+	got, err := ps.Generate("")
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d payloads, want 1", len(got))
+	}
+	// "test value" -> url_encode_query -> "test+value" -> base64 -> "dGVzdCt2YWx1ZQ=="
+	urlEncoded := url.QueryEscape("test value")
+	want := base64.StdEncoding.EncodeToString([]byte(urlEncoded))
+	if got[0] != want {
+		t.Errorf("got[0] = %q, want %q", got[0], want)
+	}
+}
+
+func TestPayloadSet_GenerateCharset(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	ps := PayloadSet{
+		Type:    "charset",
+		Charset: "ab",
+		Length:  intPtr(2),
+	}
+	got, err := ps.Generate("")
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	want := []string{"aa", "ab", "ba", "bb"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d payloads, want %d: %v", len(got), len(want), got)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPayloadSet_GenerateCharsetWithEncoding(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	ps := PayloadSet{
+		Type:     "charset",
+		Charset:  "ab",
+		Length:   intPtr(1),
+		Encoding: []string{"upper"},
+	}
+	got, err := ps.Generate("")
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	want := []string{"A", "B"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d payloads, want %d: %v", len(got), len(want), got)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPayloadSet_GenerateCaseVariation(t *testing.T) {
+	ps := PayloadSet{
+		Type:  "case_variation",
+		Input: "Ab",
+	}
+	got, err := ps.Generate("")
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("Generate() returned 0 payloads")
+	}
+	// Should contain at least: "Ab", "ab", "AB", "aB"
+	seen := make(map[string]bool)
+	for _, p := range got {
+		seen[p] = true
+	}
+	for _, expected := range []string{"Ab", "ab", "AB"} {
+		if !seen[expected] {
+			t.Errorf("expected %q in payloads, got: %v", expected, got)
+		}
+	}
+}
+
+func TestPayloadSet_GenerateNullByteInjection(t *testing.T) {
+	ps := PayloadSet{
+		Type:  "null_byte_injection",
+		Input: "test.php",
+	}
+	got, err := ps.Generate("")
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("Generate() returned 0 payloads")
+	}
+	// Should contain null byte prepended variant.
+	found := false
+	for _, p := range got {
+		if p == "\x00test.php" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected null-byte-prepended variant in payloads")
+	}
+}
+
+func TestPayloadSet_GenerateRangeWithEncoding(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	ps := PayloadSet{
+		Type:     "range",
+		Start:    intPtr(1),
+		End:      intPtr(3),
+		Encoding: []string{"base64"},
+	}
+	got, err := ps.Generate("")
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	// "1" -> base64 -> "MQ==", "2" -> "Mg==", "3" -> "Mw=="
+	for i, num := range []string{"1", "2", "3"} {
+		want := base64.StdEncoding.EncodeToString([]byte(num))
+		if got[i] != want {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want)
+		}
 	}
 }
 

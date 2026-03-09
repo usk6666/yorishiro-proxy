@@ -297,6 +297,191 @@ func TestParseJSONPath(t *testing.T) {
 	}
 }
 
+func TestApplyBodyPatches_JSONPathWithEncoding(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		patches []BodyPatch
+		want    map[string]any
+		wantErr bool
+	}{
+		{
+			name: "base64 encode string value",
+			body: `{"token":"old"}`,
+			patches: []BodyPatch{
+				{JSONPath: "$.token", Value: "test", Encoding: []string{"base64"}},
+			},
+			// "test" -> base64 -> "dGVzdA=="
+			want: map[string]any{"token": "dGVzdA=="},
+		},
+		{
+			name: "encoding chain applied in order",
+			body: `{"data":"old"}`,
+			patches: []BodyPatch{
+				{JSONPath: "$.data", Value: "hello world", Encoding: []string{"url_encode_query", "base64"}},
+			},
+			// "hello world" -> url_encode_query -> "hello+world" -> base64 -> "aGVsbG8rd29ybGQ="
+			want: map[string]any{"data": "aGVsbG8rd29ybGQ="},
+		},
+		{
+			name: "non-string value ignores encoding",
+			body: `{"count":1}`,
+			patches: []BodyPatch{
+				{JSONPath: "$.count", Value: float64(42), Encoding: []string{"base64"}},
+			},
+			// Encoding is only applied to string values; numeric values pass through.
+			want: map[string]any{"count": float64(42)},
+		},
+		{
+			name:    "unknown codec returns error",
+			body:    `{"key":"val"}`,
+			patches: []BodyPatch{{JSONPath: "$.key", Value: "v", Encoding: []string{"nonexistent"}}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := applyBodyPatches([]byte(tt.body), tt.patches)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("applyBodyPatches() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			var gotMap map[string]any
+			if err := json.Unmarshal(got, &gotMap); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+
+			wantJSON, _ := json.Marshal(tt.want)
+			gotJSON, _ := json.Marshal(gotMap)
+			if string(gotJSON) != string(wantJSON) {
+				t.Errorf("got %s, want %s", gotJSON, wantJSON)
+			}
+		})
+	}
+}
+
+func TestApplyBodyPatches_RegexWithEncoding(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		patches []BodyPatch
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "base64 encode replace string",
+			body: "token=old_value",
+			patches: []BodyPatch{
+				{Regex: "token=[^&]+", Replace: "token=test", Encoding: []string{"base64"}},
+			},
+			// "token=test" -> base64 -> "dG9rZW49dGVzdA=="
+			// The entire replace string is encoded, then used as the replacement.
+			want: "dG9rZW49dGVzdA==",
+		},
+		{
+			name: "url encode replace string",
+			body: "value=old",
+			patches: []BodyPatch{
+				{Regex: "value=old", Replace: "value=hello world", Encoding: []string{"url_encode_query"}},
+			},
+			// "value=hello world" -> url_encode_query -> "value%3Dhello+world"
+			want: "value%3Dhello+world",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := applyBodyPatches([]byte(tt.body), tt.patches)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("applyBodyPatches() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+			if string(got) != tt.want {
+				t.Errorf("got %q, want %q", string(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateBodyPatch_EncodingValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		patch   BodyPatch
+		wantErr bool
+	}{
+		{
+			name:  "valid encoding",
+			patch: BodyPatch{JSONPath: "$.key", Value: "v", Encoding: []string{"base64"}},
+		},
+		{
+			name:  "valid multi-codec encoding",
+			patch: BodyPatch{JSONPath: "$.key", Value: "v", Encoding: []string{"url_encode_query", "base64"}},
+		},
+		{
+			name:    "unknown codec",
+			patch:   BodyPatch{JSONPath: "$.key", Value: "v", Encoding: []string{"nonexistent"}},
+			wantErr: true,
+		},
+		{
+			name:  "empty encoding is valid",
+			patch: BodyPatch{JSONPath: "$.key", Value: "v", Encoding: []string{}},
+		},
+		{
+			name:  "nil encoding is valid",
+			patch: BodyPatch{JSONPath: "$.key", Value: "v"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBodyPatch(tt.patch)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateBodyPatch() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEncodePatchValue(t *testing.T) {
+	// Test json_path with string value.
+	p := BodyPatch{JSONPath: "$.key", Value: "hello", Encoding: []string{"base64"}}
+	result, err := encodePatchValue(p)
+	if err != nil {
+		t.Fatalf("encodePatchValue() error = %v", err)
+	}
+	if result.Value != "aGVsbG8=" {
+		t.Errorf("got value %q, want %q", result.Value, "aGVsbG8=")
+	}
+
+	// Test json_path with non-string value (should not encode).
+	p2 := BodyPatch{JSONPath: "$.key", Value: float64(42), Encoding: []string{"base64"}}
+	result2, err := encodePatchValue(p2)
+	if err != nil {
+		t.Fatalf("encodePatchValue() error = %v", err)
+	}
+	if result2.Value != float64(42) {
+		t.Errorf("got value %v, want %v", result2.Value, float64(42))
+	}
+
+	// Test regex replace encoding.
+	p3 := BodyPatch{Regex: "pat", Replace: "hello", Encoding: []string{"base64"}}
+	result3, err := encodePatchValue(p3)
+	if err != nil {
+		t.Fatalf("encodePatchValue() error = %v", err)
+	}
+	if result3.Replace != "aGVsbG8=" {
+		t.Errorf("got replace %q, want %q", result3.Replace, "aGVsbG8=")
+	}
+}
+
 // containsStr is a helper for substring checks.
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))

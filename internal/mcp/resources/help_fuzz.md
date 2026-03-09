@@ -27,11 +27,15 @@ Start an asynchronous fuzz campaign against a recorded flow. Returns fuzz_id imm
   - **match** (string, optional): Regex pattern for partial replacement. Capture groups replace only the group.
   - **payload_set** (string): Name of the payload set to use (not required for remove mode).
 - **payload_sets** (object, required): Named payload sets. Each set specifies:
-  - **type** (string, required): `wordlist`, `file`, `range`, or `sequence`.
+  - **type** (string, required): `wordlist`, `file`, `range`, `sequence`, `charset`, `case_variation`, or `null_byte_injection`.
   - **values** (array): Payload strings (for wordlist).
   - **path** (string): Relative path under `~/.yorishiro-proxy/wordlists/` (for file).
   - **start**, **end**, **step** (integer): Range parameters (for range/sequence).
   - **format** (string): Format string (for sequence, e.g. `"user%04d"`).
+  - **charset** (string): Character set for charset type (e.g. `"abc"`, `"0123456789"`).
+  - **length** (integer): Combination length for charset type.
+  - **input** (string): Base string for case_variation and null_byte_injection types.
+  - **encoding** (array of strings, optional): Codec chain to apply to each payload (e.g. `["url_encode_query", "base64"]`). Available codecs: base64, base64url, url_encode_query, url_encode_path, url_encode_full, double_url_encode, hex, html_entity, html_escape, unicode_escape, md5, sha256, lower, upper.
 - **concurrency** (integer, optional): Number of concurrent workers (default: `1`).
 - **rate_limit_rps** (number, optional): Requests per second limit. `0` means unlimited.
 - **delay_ms** (integer, optional): Fixed delay between requests in milliseconds.
@@ -116,6 +120,69 @@ Returns: fuzz_id, action, status.
     "payload_sets": {
       "users": {"type": "wordlist", "values": ["admin", "root", "user"]},
       "passwords": {"type": "wordlist", "values": ["pass1", "pass2", "pass3"]}
+    }
+  }
+}
+```
+
+### Fuzz with encoded payloads
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "flow_id": "abc-123",
+    "attack_type": "sequential",
+    "positions": [
+      {"id": "pos-0", "location": "query", "name": "search", "payload_set": "xss"}
+    ],
+    "payload_sets": {
+      "xss": {
+        "type": "wordlist",
+        "values": ["<script>alert(1)</script>", "<img onerror=alert(1)>"],
+        "encoding": ["url_encode_query"]
+      }
+    }
+  }
+}
+```
+
+### Fuzz with charset generator
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "flow_id": "abc-123",
+    "attack_type": "sequential",
+    "positions": [
+      {"id": "pos-0", "location": "query", "name": "pin", "payload_set": "pins"}
+    ],
+    "payload_sets": {
+      "pins": {
+        "type": "charset",
+        "charset": "0123456789",
+        "length": 4,
+        "encoding": ["url_encode_query"]
+      }
+    }
+  }
+}
+```
+
+### Fuzz with case variation generator
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "flow_id": "abc-123",
+    "attack_type": "sequential",
+    "positions": [
+      {"id": "pos-0", "location": "body_json", "json_path": "$.role", "payload_set": "roles"}
+    ],
+    "payload_sets": {
+      "roles": {
+        "type": "case_variation",
+        "input": "Admin"
+      }
     }
   }
 }
