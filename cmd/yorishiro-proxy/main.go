@@ -18,6 +18,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
@@ -468,12 +469,17 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		logger.Info("uTLS fingerprint enabled", "profile", profile.String())
 	}
 
+	// Configure technology stack fingerprint detector for response analysis.
+	fpDetector := fingerprint.NewDetector()
+	httpHandler.SetDetector(fpDetector)
+
 	// Build HTTP/2 handler for h2c detection and h2 (TLS ALPN) delegation.
 	http2Handler := protohttp2.NewHandler(store, logger)
 	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	http2Handler.SetCaptureScope(deps.scope)
 	http2Handler.SetInterceptEngine(deps.interceptEngine)
 	http2Handler.SetInterceptQueue(deps.interceptQueue)
+	http2Handler.SetDetector(fpDetector)
 
 	// Build gRPC handler and attach to the HTTP/2 handler for gRPC-specific recording.
 	grpcHandler := protogrpc.NewHandler(store, logger)

@@ -117,6 +117,10 @@ type ListOptions struct {
 	// State filters flows by their lifecycle state
 	// ("active", "complete", or "error").
 	State string
+	// Technology filters flows whose tags contain a technology detection
+	// matching this name (case-insensitive substring match on the
+	// JSON-encoded "technologies" tag value).
+	Technology string
 	// Limit is the maximum number of flows to return.
 	Limit int
 	// Offset is the number of flows to skip for pagination.

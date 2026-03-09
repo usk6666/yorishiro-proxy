@@ -51,6 +51,9 @@ type ReceiveVariantParams struct {
 	// RawResponse holds the raw wire bytes of the response. May be nil for
 	// protocols that do not capture raw bytes (e.g., HTTP/2).
 	RawResponse []byte
+	// Tags holds additional key-value metadata to merge into the flow on
+	// completion (e.g., technology fingerprint results). May be nil.
+	Tags map[string]string
 }
 
 // RecordReceiveVariant records the receive phase with variant support. When
@@ -187,6 +190,9 @@ func completeFlow(
 	}
 	if p.TLSServerCertSubject != "" {
 		update.TLSServerCertSubject = p.TLSServerCertSubject
+	}
+	if len(p.Tags) > 0 {
+		update.Tags = p.Tags
 	}
 	if err := store.UpdateFlow(ctx, p.FlowID, update); err != nil {
 		logger.Error("flow update failed", "error", err)

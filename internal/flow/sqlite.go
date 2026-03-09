@@ -333,6 +333,16 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 		conditions = append(conditions, "s.state = ?")
 		args = append(args, opts.State)
 	}
+	if opts.Technology != "" {
+		// Match technology name inside the JSON-encoded "technologies" tag value.
+		// Tags column stores JSON-marshaled map[string]string. The technologies
+		// value is a nested JSON array encoded as a string value, so it appears
+		// with escaped quotes in the outer JSON: \"name\":\"nginx\".
+		// We use SQLite's INSTR on the lowercased column for reliable matching
+		// without LIKE escape complexity.
+		conditions = append(conditions, "INSTR(LOWER(s.tags), ?) > 0")
+		args = append(args, strings.ToLower(opts.Technology))
+	}
 
 	clause := ""
 	if len(conditions) > 0 {
