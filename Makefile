@@ -48,7 +48,7 @@ lint: ensure-ui
 	@echo "==> ineffassign"
 	ineffassign ./...
 	@echo "==> gocyclo (threshold: 15)"
-	@test -z "$$(gocyclo -over 15 cmd/)" || (gocyclo -over 15 cmd/ && exit 1)
+	@test -z "$$(gocyclo -over 15 -ignore '_test\.go$$' .)" || (gocyclo -over 15 -ignore '_test\.go$$' . && exit 1)
 
 bench: ensure-ui
 	go test -bench=. -benchmem -run=^$$ ./...
