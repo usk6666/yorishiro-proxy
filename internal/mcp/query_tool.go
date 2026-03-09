@@ -691,6 +691,7 @@ type queryStatusResult struct {
 	CAInitialized     bool                       `json:"ca_initialized"`
 	SOCKS5Enabled     bool                       `json:"socks5_enabled"`
 	SOCKS5Auth        string                     `json:"socks5_auth,omitempty"`
+	TLSFingerprint    string                     `json:"tls_fingerprint"`
 }
 
 // handleQueryStatus returns the current proxy status and health metrics.
@@ -760,6 +761,8 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 	if s.deps.socks5AuthSetter != nil {
 		result.SOCKS5Enabled = true
 	}
+
+	result.TLSFingerprint = s.currentTLSFingerprint()
 
 	return nil, result, nil
 }

@@ -317,6 +317,10 @@ type ProxyConfig struct {
 	// UpstreamProxy is the upstream proxy URL for proxy chaining.
 	UpstreamProxy string `json:"upstream_proxy,omitempty"`
 
+	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
+	// Valid values: "chrome" (default), "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
+	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
+
 	// Plugins configures Starlark-based plugins for the proxy pipeline.
 	// Each entry specifies a script path, target protocol, subscribed hooks,
 	// and error handling behavior. Plugins are executed in order.
