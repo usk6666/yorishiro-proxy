@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
 	"time"
 
@@ -499,5 +500,69 @@ func TestValidateProtocols(t *testing.T) {
 				t.Errorf("validateProtocols() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// mockTLSTransportForResend implements httputil.TLSTransport for testing.
+type mockTLSTransportForResend struct {
+	called     bool
+	serverName string
+}
+
+func (m *mockTLSTransportForResend) TLSConnect(ctx context.Context, conn net.Conn, serverName string) (net.Conn, string, error) {
+	m.called = true
+	m.serverName = serverName
+	return conn, "http/1.1", nil
+}
+
+func TestUpgradeTLS_UsesProvidedTransport(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	mock := &mockTLSTransportForResend{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// upgradeTLS will call TLSConnect which will return the pipe conn.
+		// The mock doesn't actually do TLS, just passes through.
+		_, _ = upgradeTLS(context.Background(), client, "example.com:443", mock)
+	}()
+
+	// Wait for the goroutine to complete.
+	<-done
+
+	if !mock.called {
+		t.Error("TLSTransport.TLSConnect was not called")
+	}
+	if mock.serverName != "example.com" {
+		t.Errorf("serverName = %q, want %q", mock.serverName, "example.com")
+	}
+}
+
+func TestUpgradeTLS_NilTransportFallsBackToStandard(t *testing.T) {
+	// With nil transport, upgradeTLS should fall back to StandardTransport.
+	// We can't easily test the actual handshake without a TLS server,
+	// but we verify it doesn't panic with nil transport.
+	server, client := net.Pipe()
+	defer server.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		// This will fail the handshake because there's no TLS server on the pipe,
+		// but it should not panic — it should return an error.
+		_, err := upgradeTLS(context.Background(), client, "example.com:443", nil)
+		errCh <- err
+	}()
+
+	// Read some data from the server side to unblock the handshake, then close.
+	buf := make([]byte, 1024)
+	server.Read(buf) //nolint:errcheck // intentionally ignoring; we just need to unblock
+	server.Close()
+
+	// Collect the error from the goroutine.
+	if err := <-errCh; err == nil {
+		t.Error("expected error for TLS handshake on plain pipe")
 	}
 }
