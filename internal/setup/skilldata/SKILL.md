@@ -100,6 +100,7 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 | `max_connections` | int | 最大同時接続数（デフォルト: 128、範囲: 1-100000） |
 | `peek_timeout_ms` | int | プロトコル検出タイムアウト（デフォルト: 30000） |
 | `request_timeout_ms` | int | HTTP リクエストヘッダ読み込みタイムアウト（デフォルト: 60000） |
+| `tls_fingerprint` | string | TLS フィンガープリントプロファイル（"chrome", "firefox", "safari", "edge", "random", "none"。デフォルト: "chrome"） |
 
 ### proxy_stop -- プロキシ停止
 
@@ -516,6 +517,7 @@ yorishiro-proxy のスコープ制御は 2 層構造:
 | `max_connections` | 最大同時接続数（1-100000） |
 | `peek_timeout_ms` | プロトコル検出タイムアウト（100-600000） |
 | `request_timeout_ms` | HTTP リクエストタイムアウト（100-600000） |
+| `tls_fingerprint` | TLS フィンガープリントプロファイル変更 |
 
 ### plugin -- プラグイン管理
 
