@@ -16,6 +16,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
@@ -51,6 +52,7 @@ type deps struct {
 	targetScope           *proxy.TargetScope
 	pluginEngine          *plugin.Engine
 	socks5AuthSetter      socks5AuthSetter
+	tlsTransport          httputil.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
 }
 
@@ -283,6 +285,15 @@ func WithTLSFingerprintSetter(setter tlsFingerprintSetter) ServerOption {
 func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
 	return func(s *Server) {
 		s.deps.socks5AuthSetter = setter
+	}
+}
+
+// WithTLSTransport sets the TLS transport used for upstream HTTPS connections
+// in resend/resend_raw operations. When set, uTLS fingerprint spoofing is
+// used instead of Go's default TLS stack.
+func WithTLSTransport(t httputil.TLSTransport) ServerOption {
+	return func(s *Server) {
+		s.deps.tlsTransport = t
 	}
 }
 

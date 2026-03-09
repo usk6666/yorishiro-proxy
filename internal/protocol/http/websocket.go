@@ -3,7 +3,6 @@ package http
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,20 +199,15 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	}
 	defer rawConn.Close()
 
-	// Perform TLS handshake with the upstream server.
+	// Perform TLS handshake with the upstream server using the configured
+	// TLS transport (uTLS or standard crypto/tls).
 	hostname, _, splitErr := net.SplitHostPort(host)
 	if splitErr != nil {
 		hostname = host
 	}
-	tlsConfig := &tls.Config{
-		ServerName: hostname,
-		MinVersion: tls.VersionTLS12,
-	}
-	if h.Transport != nil && h.Transport.TLSClientConfig != nil {
-		tlsConfig.InsecureSkipVerify = h.Transport.TLSClientConfig.InsecureSkipVerify
-	}
-	upstreamTLS := tls.Client(rawConn, tlsConfig)
-	if err := upstreamTLS.HandshakeContext(ctx); err != nil {
+	tlsTransport := h.effectiveTLSTransport()
+	upstreamTLS, _, err := tlsTransport.TLSConnect(ctx, rawConn, hostname)
+	if err != nil {
 		logger.Error("wss upstream TLS handshake failed", "host", host, "error", err)
 		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		h.recordWebSocketError(ctx, ep, fmt.Errorf("wss upstream TLS handshake: %w", err), logger)
@@ -225,9 +219,8 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 
 	// Extract the upstream server's TLS certificate subject if available.
 	var tlsCertSubject string
-	upstreamState := upstreamTLS.ConnectionState()
-	if len(upstreamState.PeerCertificates) > 0 {
-		tlsCertSubject = upstreamState.PeerCertificates[0].Subject.String()
+	if tc, ok := httputil.TLSConnectionState(upstreamTLS); ok && len(tc.PeerCertificates) > 0 {
+		tlsCertSubject = tc.PeerCertificates[0].Subject.String()
 	}
 
 	// Forward the upgrade request to the upstream TLS connection.

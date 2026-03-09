@@ -380,3 +380,80 @@ func TestUTLSTransport_AllProfiles(t *testing.T) {
 		})
 	}
 }
+
+func TestTLSConnectionState_StandardTLS(t *testing.T) {
+	cert := generateTestCert(t, "localhost")
+	ln := startTLSServer(t, cert, []string{"http/1.1"})
+	defer ln.Close()
+
+	transport := &StandardTransport{InsecureSkipVerify: true}
+
+	rawConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tlsConn, _, err := transport.TLSConnect(ctx, rawConn, "localhost")
+	if err != nil {
+		t.Fatalf("TLSConnect: %v", err)
+	}
+	defer tlsConn.Close()
+
+	state, ok := TLSConnectionState(tlsConn)
+	if !ok {
+		t.Fatal("TLSConnectionState should return true for *tls.Conn")
+	}
+	if state.Version == 0 {
+		t.Error("TLS version should be non-zero")
+	}
+}
+
+func TestTLSConnectionState_UTLSConn(t *testing.T) {
+	cert := generateTestCert(t, "localhost")
+	ln := startTLSServer(t, cert, []string{"http/1.1"})
+	defer ln.Close()
+
+	transport := &UTLSTransport{
+		Profile:            ProfileChrome,
+		InsecureSkipVerify: true,
+	}
+
+	rawConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tlsConn, _, err := transport.TLSConnect(ctx, rawConn, "localhost")
+	if err != nil {
+		t.Fatalf("TLSConnect: %v", err)
+	}
+	defer tlsConn.Close()
+
+	state, ok := TLSConnectionState(tlsConn)
+	if !ok {
+		t.Fatal("TLSConnectionState should return true for *utls.UConn")
+	}
+	if state.Version == 0 {
+		t.Error("TLS version should be non-zero")
+	}
+}
+
+func TestTLSConnectionState_PlainConn(t *testing.T) {
+	// A plain net.Conn should not have TLS state.
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	_, ok := TLSConnectionState(client)
+	if ok {
+		t.Error("TLSConnectionState should return false for plain net.Conn")
+	}
+}

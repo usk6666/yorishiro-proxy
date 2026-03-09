@@ -27,6 +27,7 @@ import (
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	protohttp2 "github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	protosocks5 "github.com/usk6666/yorishiro-proxy/internal/protocol/socks5"
 	prototcp "github.com/usk6666/yorishiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -430,6 +431,7 @@ type protocolResult struct {
 	socks5Adapter *socks5AuthAdapter
 	pluginEngine  *plugin.Engine
 	fuzzRunner    *fuzzer.Runner
+	tlsTransport  httputil.TLSTransport
 	webUIToken    string
 }
 
@@ -449,6 +451,22 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	httpHandler.SetInterceptEngine(deps.interceptEngine)
 	httpHandler.SetInterceptQueue(deps.interceptQueue)
 	httpHandler.SetTransformPipeline(deps.pipeline)
+
+	// Configure uTLS transport for upstream HTTPS connections if a browser
+	// fingerprint profile is specified in the config.
+	var tlsTransport httputil.TLSTransport
+	if cfg.TLSFingerprint != "" {
+		profile, err := httputil.ParseBrowserProfile(cfg.TLSFingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("tls_fingerprint: %w", err)
+		}
+		tlsTransport = &httputil.UTLSTransport{
+			Profile:            profile,
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+		}
+		httpHandler.SetTLSTransport(tlsTransport)
+		logger.Info("uTLS fingerprint enabled", "profile", profile.String())
+	}
 
 	// Build HTTP/2 handler for h2c detection and h2 (TLS ALPN) delegation.
 	http2Handler := protohttp2.NewHandler(store, logger)
@@ -528,6 +546,7 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		socks5Adapter: socks5Adapter,
 		pluginEngine:  pluginEngine,
 		fuzzRunner:    fuzzRunner,
+		tlsTransport:  tlsTransport,
 	}, nil
 }
 
@@ -566,6 +585,10 @@ func buildMCPOptions(
 		mcp.WithTLSFingerprintSetter(proto.httpHandler),
 		mcp.WithTLSFingerprintSetter(proto.http2Handler),
 		mcp.WithSOCKS5Handler(proto.socks5Adapter),
+	}
+
+	if proto.tlsTransport != nil {
+		opts = append(opts, mcp.WithTLSTransport(proto.tlsTransport))
 	}
 
 	if proxyCfg != nil {

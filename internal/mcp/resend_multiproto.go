@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // resendReplayRawResult is the structured output of the tcp_replay action.
@@ -124,7 +124,7 @@ func (s *Server) replayAllMessages(ctx context.Context, targetAddr string, useTL
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr)
+		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
 		if err != nil {
 			return 0, nil, start, 0, err
 		}
@@ -339,7 +339,7 @@ func (s *Server) establishAndSend(ctx context.Context, targetAddr string, useTLS
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr)
+		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
 		if err != nil {
 			return nil, start, 0, err
 		}
@@ -364,15 +364,15 @@ func (s *Server) establishAndSend(ctx context.Context, targetAddr string, useTLS
 	return respData, start, duration, nil
 }
 
-// upgradeTLS wraps a connection with TLS, performing the handshake.
-func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string) (net.Conn, error) {
+// upgradeTLS wraps a connection with TLS using the provided TLSTransport.
+// If transport is nil, it falls back to a StandardTransport with InsecureSkipVerify.
+func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string, transport httputil.TLSTransport) (net.Conn, error) {
+	if transport == nil {
+		transport = &httputil.StandardTransport{InsecureSkipVerify: true}
+	}
 	host, _, _ := net.SplitHostPort(targetAddr)
-	tlsConn := tls.Client(conn, &tls.Config{
-		ServerName:         host,
-		InsecureSkipVerify: true, //nolint:gosec // resend intentionally uses raw bytes for security testing
-		MinVersion:         tls.VersionTLS12,
-	})
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
+	tlsConn, _, err := transport.TLSConnect(ctx, conn, host)
+	if err != nil {
 		return nil, fmt.Errorf("TLS handshake with %s: %w", targetAddr, err)
 	}
 	return tlsConn, nil

@@ -240,6 +240,7 @@ func TestDefault_FieldsHaveSensibleDefaults(t *testing.T) {
 		{"CleanupInterval", cfg.CleanupInterval, false},
 		{"MCPHTTPAddr", cfg.MCPHTTPAddr, true},
 		{"MCPHTTPToken", cfg.MCPHTTPToken, true},
+		{"TLSFingerprint", cfg.TLSFingerprint, true},
 	}
 
 	for _, tt := range tests {
