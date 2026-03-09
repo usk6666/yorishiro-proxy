@@ -337,6 +337,25 @@ Each auto-transform rule has:
 }
 ```
 
+### tls_fingerprint (string, optional)
+Sets the TLS ClientHello fingerprint profile for upstream connections at runtime.
+- Valid values: `"chrome"`, `"firefox"`, `"safari"`, `"edge"`, `"random"`, `"none"` (standard crypto/tls).
+- If omitted, the current setting is not changed.
+
+### Change TLS fingerprint profile
+```json
+{
+  "tls_fingerprint": "firefox"
+}
+```
+
+### Disable TLS fingerprinting (use standard TLS)
+```json
+{
+  "tls_fingerprint": "none"
+}
+```
+
 ### socks5_auth (object, optional)
 Configures SOCKS5 authentication at runtime.
 

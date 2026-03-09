@@ -87,7 +87,7 @@ Returns: `messages[]` (id, sequence, direction, method, url, status_code, header
 ### status
 Get current proxy status and health metrics. No additional parameters.
 
-Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized.
+Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized, tls_fingerprint.
 
 ### config
 Get current configuration including capture scope, TLS passthrough, TCP forwards, and enabled protocols. No additional parameters.

@@ -28,6 +28,11 @@ type HandlerBase struct {
 	// UpstreamMu protects UpstreamProxy for concurrent access.
 	UpstreamMu    sync.RWMutex
 	UpstreamProxy *url.URL
+
+	// TLSFingerprintProfile stores the current TLS fingerprint profile name.
+	// Protected by TLSFingerprintMu for concurrent access.
+	TLSFingerprintMu      sync.RWMutex
+	TLSFingerprintProfile string
 }
 
 // SetTransport replaces the handler's HTTP transport. This is primarily
@@ -109,6 +114,23 @@ func (b *HandlerBase) ShouldCapture(method string, u *url.URL) bool {
 		return true
 	}
 	return b.Scope.ShouldCapture(method, u)
+}
+
+// SetTLSFingerprint sets the TLS ClientHello fingerprint profile for upstream
+// connections. Valid values: "chrome", "firefox", "safari", "edge", "random", "none".
+// This method is safe to call concurrently.
+func (b *HandlerBase) SetTLSFingerprint(profile string) {
+	b.TLSFingerprintMu.Lock()
+	defer b.TLSFingerprintMu.Unlock()
+	b.TLSFingerprintProfile = profile
+}
+
+// TLSFingerprint returns the current TLS fingerprint profile name.
+// Returns an empty string if not explicitly set.
+func (b *HandlerBase) TLSFingerprint() string {
+	b.TLSFingerprintMu.RLock()
+	defer b.TLSFingerprintMu.RUnlock()
+	return b.TLSFingerprintProfile
 }
 
 // ConnLogger returns the connection-scoped logger from context,
