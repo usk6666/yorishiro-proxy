@@ -161,6 +161,7 @@ The Web UI communicates with the backend via Streamable HTTP MCP -- the same pro
 | `-ca-cert` / `-ca-key` | `YP_CA_CERT` / `YP_CA_KEY` | -- | CA certificate and private key paths |
 | `-ca-ephemeral` | `YP_CA_EPHEMERAL` | `false` | Use ephemeral in-memory CA |
 | `-insecure` | `YP_INSECURE` | `false` | Skip upstream TLS verification |
+| `-tls-fingerprint <profile>` | `YP_TLS_FINGERPRINT` | `chrome` | TLS fingerprint profile: chrome, firefox, safari, edge, random, none |
 | `-config` | `YP_CONFIG` | -- | JSON config file path for proxy defaults |
 | `-log-level` | `YP_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `-log-format` | `YP_LOG_FORMAT` | `text` | Log format: text, json |

@@ -71,6 +71,7 @@ Common CLI flags to include in `args`:
 | `-log-level debug` | Set log verbosity (`debug`, `info`, `warn`, `error`) |
 | `-db <name-or-path>` | SQLite database path or project name (e.g., `-db pentest-2026` creates `~/.yorishiro-proxy/pentest-2026.db`) |
 | `-ca-ephemeral` | Use an ephemeral in-memory CA (no persistent certificate files) |
+| `-tls-fingerprint <profile>` | TLS fingerprint profile: `chrome`, `firefox`, `safari`, `edge`, `random`, `none` (default: `chrome`) |
 | `-mcp-http-addr <host:port>` | Enable Streamable HTTP transport and serve the WebUI (e.g., `-mcp-http-addr 127.0.0.1:3000`) |
 
 All flags also accept environment variables with the `YP_` prefix (e.g., `YP_INSECURE=true`, `YP_LOG_LEVEL=debug`). Priority: CLI flag > environment variable > config file > default value.
@@ -555,6 +556,29 @@ Intercepted requests appear in the intercept queue. Release, modify, or drop the
 // intercept
 {"action": "release", "params": {"intercept_id": "<id>"}}
 ```
+
+### TLS fingerprint evasion
+
+When targeting sites protected by WAF services such as Cloudflare, JA3/JA4-based bot detection may block requests made with the default Go TLS stack. Use the `tls_fingerprint` parameter to mimic a real browser's TLS ClientHello:
+
+```json
+// proxy_start
+{
+  "listen_addr": "127.0.0.1:8080",
+  "tls_fingerprint": "chrome"
+}
+```
+
+To change the profile at runtime:
+
+```json
+// configure
+{
+  "tls_fingerprint": "firefox"
+}
+```
+
+Valid profiles: `chrome`, `firefox`, `safari`, `edge`, `random`, `none`. The default is `chrome`.
 
 ### Macros
 
