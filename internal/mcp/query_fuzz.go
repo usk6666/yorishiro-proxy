@@ -224,30 +224,35 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 
 	opts := buildFuzzResultListOptions(input)
 
-	summary, err := s.buildFuzzResultsSummary(ctx, input.FuzzID, opts)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
-	}
-
-	// When outliers_only is set, pass outlier IDs to the SQL query so the DB
-	// handles filtering with correct pagination and total count.
+	// When outliers_only is set, we need the summary first to obtain outlier IDs
+	// for the DB query filter. Otherwise, defer summary computation until after
+	// ListFuzzResults succeeds to avoid wasted DB work on error.
 	outliersOnly := input.Filter != nil && input.Filter.OutliersOnly
-	if outliersOnly && summary.Outliers != nil {
-		ids := collectOutlierIDs(summary.Outliers)
-		if len(ids) == 0 {
-			// No outliers found; return empty results with correct summary.
-			emptyResult := &queryFuzzResultsResult{
-				Results: []queryFuzzResultEntry{},
-				Count:   0,
-				Total:   0,
-				Summary: summary,
-			}
-			if len(input.Fields) > 0 {
-				return nil, filterFields(emptyResult, input.Fields), nil
-			}
-			return nil, emptyResult, nil
+
+	var summary *queryFuzzResultsSummary
+	if outliersOnly {
+		var err error
+		summary, err = s.buildFuzzResultsSummary(ctx, input.FuzzID, opts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
 		}
-		opts.ResultIDs = ids
+		if summary.Outliers != nil {
+			ids := collectOutlierIDs(summary.Outliers)
+			if len(ids) == 0 {
+				// No outliers found; return empty results with correct summary.
+				emptyResult := &queryFuzzResultsResult{
+					Results: []queryFuzzResultEntry{},
+					Count:   0,
+					Total:   0,
+					Summary: summary,
+				}
+				if len(input.Fields) > 0 {
+					return nil, filterFields(emptyResult, input.Fields), nil
+				}
+				return nil, emptyResult, nil
+			}
+			opts.ResultIDs = ids
+		}
 	}
 
 	results, err := s.deps.fuzzStore.ListFuzzResults(ctx, input.FuzzID, opts)
@@ -258,6 +263,14 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 	total, err := s.deps.fuzzStore.CountFuzzResults(ctx, input.FuzzID, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count fuzz results: %w", err)
+	}
+
+	// Compute summary after list succeeds (when not already computed for outliers_only).
+	if summary == nil {
+		summary, err = s.buildFuzzResultsSummary(ctx, input.FuzzID, opts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
+		}
 	}
 
 	entries := make([]queryFuzzResultEntry, 0, len(results))
