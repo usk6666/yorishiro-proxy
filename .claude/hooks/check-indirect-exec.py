@@ -19,6 +19,24 @@ import bashlex
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.realpath(os.path.join(_SCRIPT_DIR, "..", ".."))
 
+# If running inside a worktree, also allow the main repository root.
+# Worktrees have a .git file (not directory) pointing to the main repo.
+_MAIN_REPO_ROOT = None
+_dot_git = os.path.join(PROJECT_ROOT, ".git")
+if os.path.isfile(_dot_git):
+    # .git file contains: "gitdir: /path/to/main/.git/worktrees/<name>"
+    try:
+        with open(_dot_git) as f:
+            gitdir_line = f.read().strip()
+        if gitdir_line.startswith("gitdir:"):
+            gitdir = gitdir_line.split(":", 1)[1].strip()
+            # Navigate from .git/worktrees/<name> → main repo root
+            _MAIN_REPO_ROOT = os.path.realpath(
+                os.path.join(gitdir, "..", "..", "..")
+            )
+    except OSError:
+        pass
+
 # Commands that are inherently command launchers
 LAUNCHER_COMMANDS = frozenset(
     {
@@ -192,13 +210,142 @@ def check_cd_target(words, cwd):
     else:
         resolved = os.path.realpath(os.path.join(cwd, target))
 
-    # Check if resolved path is under PROJECT_ROOT
+    # Check if resolved path is under PROJECT_ROOT (or main repo root for worktrees)
     # Use trailing separator to prevent prefix match on sibling directories
     # e.g., /home/user/project-other should not match /home/user/project
-    if not (resolved == PROJECT_ROOT or resolved.startswith(PROJECT_ROOT + os.sep)):
+    def _is_under(path, root):
+        return path == root or path.startswith(root + os.sep)
+
+    if not _is_under(resolved, PROJECT_ROOT) and not (
+        _MAIN_REPO_ROOT and _is_under(resolved, _MAIN_REPO_ROOT)
+    ):
         return f"'cd {target}' resolves to '{resolved}' (outside project root)"
 
     return None
+
+
+def _split_command_segments(command_str):
+    """Split a command string into pipeline groups separated by &&, ||, ;.
+
+    Each pipeline group is a list of command strings separated by |.
+    Returns a list of pipeline groups, where each group is a list of
+    command segment strings.
+
+    Example:
+        "echo foo && curl x | sh; make"
+        → [["echo foo"], ["curl x", "sh"], ["make"]]
+    """
+    import re
+
+    # Split on &&, ||, ; (but not inside quotes)
+    # Use a simple heuristic: split on these operators at the top level.
+    # This won't handle all edge cases but covers common patterns.
+    pipeline_groups = re.split(r"\s*(?:&&|\|\||;)\s*", command_str)
+
+    result = []
+    for group in pipeline_groups:
+        group = group.strip()
+        if group:
+            # Split on | to get individual commands in the pipeline
+            segments = [s.strip() for s in group.split("|") if s.strip()]
+            if segments:
+                result.append(segments)
+    return result
+
+
+def _check_command_segment(tokens, cwd):
+    """Check a single tokenised command segment for dangerous patterns.
+
+    Returns a list of reason strings (empty = safe).
+    """
+    reasons = []
+    if not tokens:
+        return reasons
+
+    cmd = basename(tokens[0])
+
+    # 1. Check launcher commands
+    if cmd in LAUNCHER_COMMANDS:
+        reasons.append(f"'{cmd}' can execute arbitrary commands")
+
+    # 2. Check dangerous flags
+    if cmd in DANGEROUS_FLAG_PREFIXES:
+        prefixes = DANGEROUS_FLAG_PREFIXES[cmd]
+        for token in tokens[1:]:
+            for prefix in prefixes:
+                if token == prefix or token.startswith(prefix + "="):
+                    reasons.append(
+                        f"'{cmd}' with '{token}' enables indirect execution"
+                    )
+
+    # 3. Script interpreter with inline execution
+    if cmd in SCRIPT_EXEC_FLAGS:
+        flags = SCRIPT_EXEC_FLAGS[cmd]
+        for token in tokens[1:]:
+            if token in flags:
+                reasons.append(f"'{cmd} {token}' executes inline script")
+
+    # 4. awk/gawk with system() call
+    if cmd in ("awk", "gawk", "mawk", "nawk"):
+        for token in tokens[1:]:
+            if "system(" in token or "system (" in token:
+                reasons.append(
+                    f"'{cmd}' with system() enables command execution"
+                )
+
+    # 5. cd outside project
+    cd_reason = check_cd_target(tokens, cwd)
+    if cd_reason:
+        reasons.append(cd_reason)
+
+    return reasons
+
+
+def _fallback_analyze(command_str, cwd):
+    """Lightweight fallback when bashlex cannot parse the command.
+
+    Splits on shell operators (&&, ||, ;, |) and inspects every segment for
+    dangerous patterns.  Also detects pipe-to-shell patterns
+    (e.g. ``curl ... | sh``).
+
+    This handles the common case of commands with heredocs or complex quoting
+    that bashlex chokes on (e.g. ``gh pr create --body "$(cat <<'EOF' ...)"``).
+
+    Returns a list of reason strings (empty = safe).
+    """
+    import shlex
+
+    reasons = []
+    pipeline_groups = _split_command_segments(command_str)
+
+    for pipeline in pipeline_groups:
+        cmd_names_in_pipe = []
+
+        for segment in pipeline:
+            try:
+                tokens = shlex.split(segment)
+            except ValueError:
+                reasons.append(
+                    "Command contains syntax that cannot be statically analyzed"
+                )
+                continue
+
+            if not tokens:
+                continue
+
+            cmd_names_in_pipe.append(basename(tokens[0]))
+            reasons.extend(_check_command_segment(tokens, cwd))
+
+        # Check pipe-to-shell pattern (e.g. curl ... | sh)
+        for i, cmd in enumerate(cmd_names_in_pipe[:-1]):
+            if cmd in DOWNLOAD_COMMANDS:
+                next_cmd = cmd_names_in_pipe[i + 1]
+                if next_cmd in PIPE_TO_SHELL:
+                    reasons.append(
+                        f"'{cmd}' piped to '{next_cmd}' — remote code execution"
+                    )
+
+    return reasons
 
 
 def analyze(command_str, cwd):
@@ -208,8 +355,9 @@ def analyze(command_str, cwd):
     try:
         trees = bashlex.parse(command_str)
     except bashlex.errors.ParsingError:
-        # Unparseable command → err on the side of caution
-        return ["Command contains syntax that cannot be statically analyzed"]
+        # bashlex cannot handle heredocs, complex substitutions, etc.
+        # Fall back to a simpler token-based analysis.
+        return _fallback_analyze(command_str, cwd)
 
     # Check individual commands
     for tree in trees:
