@@ -12,11 +12,11 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// --- M4 Integration Test Helpers ---
+// --- Multi-Protocol Integration Test Helpers ---
 
-// seedM4Session creates a complete flow with messages in the store for M4 integration tests.
+// seedMultiProtoSession creates a complete flow with messages in the store for multi-protocol integration tests.
 // It accepts protocol-specific parameters and optional metadata for messages.
-func seedM4Session(t *testing.T, store flow.Store, opts m4SessionOpts) string {
+func seedMultiProtoSession(t *testing.T, store flow.Store, opts multiProtoSessionOpts) string {
 	t.Helper()
 	ctx := context.Background()
 
@@ -42,8 +42,8 @@ func seedM4Session(t *testing.T, store flow.Store, opts m4SessionOpts) string {
 	return fl.ID
 }
 
-// m4SessionOpts configures a flow for M4 integration tests.
-type m4SessionOpts struct {
+// multiProtoSessionOpts configures a flow for multi-protocol integration tests.
+type multiProtoSessionOpts struct {
 	Protocol string
 	FlowType string
 	Duration time.Duration
@@ -53,11 +53,11 @@ type m4SessionOpts struct {
 
 // --- Test: HTTP/2 Session Recording and Query ---
 
-func TestM4_HTTP2_SessionRecordingAndQuery(t *testing.T) {
+func TestMultiProto_HTTP2_SessionRecordingAndQuery(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	reqURL, _ := url.Parse("https://api.example.com/v2/users")
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
 		FlowType: "unary",
 		Duration: 50 * time.Millisecond,
@@ -155,12 +155,12 @@ func TestM4_HTTP2_SessionRecordingAndQuery(t *testing.T) {
 	}
 }
 
-// TestM4_HTTP2_H2C_SessionRecordingAndQuery tests h2c (cleartext HTTP/2) flow recording.
-func TestM4_HTTP2_H2C_SessionRecordingAndQuery(t *testing.T) {
+// TestMultiProto_HTTP2_H2C_SessionRecordingAndQuery tests h2c (cleartext HTTP/2) flow recording.
+func TestMultiProto_HTTP2_H2C_SessionRecordingAndQuery(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	reqURL, _ := url.Parse("http://internal-service:8080/health")
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
 		FlowType: "unary",
 		Duration: 30 * time.Millisecond,
@@ -207,10 +207,10 @@ func TestM4_HTTP2_H2C_SessionRecordingAndQuery(t *testing.T) {
 
 // --- Test: WebSocket Session Recording and Query ---
 
-func TestM4_WebSocket_SessionRecordingAndQuery(t *testing.T) {
+func TestMultiProto_WebSocket_SessionRecordingAndQuery(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
 		FlowType: "bidirectional",
 		Duration: 2 * time.Second,
@@ -335,12 +335,12 @@ func TestM4_WebSocket_SessionRecordingAndQuery(t *testing.T) {
 	}
 }
 
-// TestM4_WebSocket_BinaryFrame verifies that WebSocket binary frames are stored
+// TestMultiProto_WebSocket_BinaryFrame verifies that WebSocket binary frames are stored
 // as raw bytes and correctly encoded/decoded through the query tool.
-func TestM4_WebSocket_BinaryFrame(t *testing.T) {
+func TestMultiProto_WebSocket_BinaryFrame(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
 		FlowType: "bidirectional",
 		Duration: 100 * time.Millisecond,
@@ -369,11 +369,11 @@ func TestM4_WebSocket_BinaryFrame(t *testing.T) {
 
 // --- Test: gRPC Session Recording and Query ---
 
-func TestM4_GRPC_UnarySessionRecordingAndQuery(t *testing.T) {
+func TestMultiProto_GRPC_UnarySessionRecordingAndQuery(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	reqURL, _ := url.Parse("https://api.example.com/pkg.UserService/GetUser")
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
 		FlowType: "unary",
 		Duration: 25 * time.Millisecond,
@@ -493,13 +493,13 @@ func TestM4_GRPC_UnarySessionRecordingAndQuery(t *testing.T) {
 	}
 }
 
-// TestM4_GRPC_StreamingSession verifies that gRPC streaming flows with multiple
+// TestMultiProto_GRPC_StreamingSession verifies that gRPC streaming flows with multiple
 // request/response frames are correctly recorded and queryable.
-func TestM4_GRPC_StreamingSession(t *testing.T) {
+func TestMultiProto_GRPC_StreamingSession(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	reqURL, _ := url.Parse("https://api.example.com/pkg.StreamService/Subscribe")
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
 		FlowType: "stream",
 		Duration: 500 * time.Millisecond,
@@ -552,10 +552,10 @@ func TestM4_GRPC_StreamingSession(t *testing.T) {
 
 // --- Test: Raw TCP Session Recording and Query ---
 
-func TestM4_TCP_SessionRecordingAndQuery(t *testing.T) {
+func TestMultiProto_TCP_SessionRecordingAndQuery(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP",
 		FlowType: "bidirectional",
 		Duration: 1 * time.Second,
@@ -647,12 +647,12 @@ func TestM4_TCP_SessionRecordingAndQuery(t *testing.T) {
 
 // --- Test: Query Protocol Filter (cross-protocol) ---
 
-func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
+func TestMultiProto_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Seed sessions for multiple protocols.
 	reqURL1, _ := url.Parse("http://example.com/api")
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
 		FlowType: "unary",
 		Duration: 10 * time.Millisecond,
@@ -662,7 +662,7 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 		},
 	})
 
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
 		FlowType: "unary",
 		Duration: 20 * time.Millisecond,
@@ -678,7 +678,7 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 		},
 	})
 
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
 		FlowType: "bidirectional",
 		Duration: 100 * time.Millisecond,
@@ -687,7 +687,7 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 		},
 	})
 
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP",
 		FlowType: "bidirectional",
 		Duration: 200 * time.Millisecond,
@@ -732,7 +732,7 @@ func TestM4_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 
 // --- Test: proxy_start with tcp_forwards and protocols parameters ---
 
-func TestM4_ProxyStart_TCPForwards(t *testing.T) {
+func TestMultiProto_ProxyStart_TCPForwards(t *testing.T) {
 	tcpHandler := &mockTCPHandler{}
 	env := setupIntegrationEnvWithOpts(t, WithTCPHandler(tcpHandler))
 
@@ -759,7 +759,7 @@ func TestM4_ProxyStart_TCPForwards(t *testing.T) {
 	}
 }
 
-func TestM4_ProxyStart_Protocols(t *testing.T) {
+func TestMultiProto_ProxyStart_Protocols(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
@@ -783,7 +783,7 @@ func TestM4_ProxyStart_Protocols(t *testing.T) {
 	}
 }
 
-func TestM4_ProxyStart_InvalidProtocol(t *testing.T) {
+func TestMultiProto_ProxyStart_InvalidProtocol(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	callToolExpectError(t, env.cs, "proxy_start", map[string]any{
@@ -792,7 +792,7 @@ func TestM4_ProxyStart_InvalidProtocol(t *testing.T) {
 	})
 }
 
-func TestM4_ProxyStart_InvalidTCPForwards(t *testing.T) {
+func TestMultiProto_ProxyStart_InvalidTCPForwards(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	callToolExpectError(t, env.cs, "proxy_start", map[string]any{
@@ -805,7 +805,7 @@ func TestM4_ProxyStart_InvalidTCPForwards(t *testing.T) {
 
 // --- Test: Query config reflects tcp_forwards and enabled_protocols ---
 
-func TestM4_QueryConfig_TCPForwardsAndProtocols(t *testing.T) {
+func TestMultiProto_QueryConfig_TCPForwardsAndProtocols(t *testing.T) {
 	tcpHandler := &mockTCPHandler{}
 	env := setupIntegrationEnvWithOpts(t, WithTCPHandler(tcpHandler))
 
@@ -835,7 +835,7 @@ func TestM4_QueryConfig_TCPForwardsAndProtocols(t *testing.T) {
 
 // --- Test: Protocol Mixed — Multiple Protocol Flows Coexisting ---
 
-func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
+func TestMultiProto_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Start the proxy.
@@ -848,7 +848,7 @@ func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 
 	// Seed sessions for multiple protocols simulating concurrent usage.
 	httpURL, _ := url.Parse("http://example.com/api/data")
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
 		FlowType: "unary",
 		Duration: 50 * time.Millisecond,
@@ -859,7 +859,7 @@ func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 	})
 
 	h2URL, _ := url.Parse("https://api.example.com/v2/resource")
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
 		FlowType: "unary",
 		Duration: 30 * time.Millisecond,
@@ -872,7 +872,7 @@ func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 		},
 	})
 
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
 		FlowType: "bidirectional",
 		Duration: 2 * time.Second,
@@ -939,7 +939,7 @@ func TestM4_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 
 // --- Test: tcp_replay for TCP sessions via execute tool ---
 
-func TestM4_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
+func TestMultiProto_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
 	addr, cleanup := newRawEchoServer(t)
 	t.Cleanup(cleanup)
 
@@ -1017,7 +1017,7 @@ func TestM4_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
 	}
 }
 
-func TestM4_Execute_TCPReplay_ProtocolMismatch(t *testing.T) {
+func TestMultiProto_Execute_TCPReplay_ProtocolMismatch(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1047,23 +1047,23 @@ func TestM4_Execute_TCPReplay_ProtocolMismatch(t *testing.T) {
 
 // --- Test: delete_flows across protocols ---
 
-func TestM4_Execute_DeleteFlows_MixedProtocols(t *testing.T) {
+func TestMultiProto_Execute_DeleteFlows_MixedProtocols(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Seed sessions for different protocols.
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2", FlowType: "unary", Duration: 10 * time.Millisecond,
 		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()}},
 	})
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC", FlowType: "unary", Duration: 10 * time.Millisecond,
 		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()}},
 	})
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket", FlowType: "bidirectional", Duration: 10 * time.Millisecond,
 		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Metadata: map[string]string{"opcode": "1"}}},
 	})
-	seedM4Session(t, env.store, m4SessionOpts{
+	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP", FlowType: "bidirectional", Duration: 10 * time.Millisecond,
 		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("data")}},
 	})
@@ -1098,7 +1098,7 @@ func TestM4_Execute_DeleteFlows_MixedProtocols(t *testing.T) {
 
 // --- Test: Session detail message_preview for streaming protocols ---
 
-func TestM4_Session_MessagePreview_LargeStreamingSession(t *testing.T) {
+func TestMultiProto_Session_MessagePreview_LargeStreamingSession(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Create a WebSocket flow with 20 messages.
@@ -1117,7 +1117,7 @@ func TestM4_Session_MessagePreview_LargeStreamingSession(t *testing.T) {
 		}
 	}
 
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
 		FlowType: "bidirectional",
 		Duration: 5 * time.Second,
@@ -1145,11 +1145,11 @@ func TestM4_Session_MessagePreview_LargeStreamingSession(t *testing.T) {
 
 // --- Test: gRPC error status recording ---
 
-func TestM4_GRPC_ErrorStatusRecording(t *testing.T) {
+func TestMultiProto_GRPC_ErrorStatusRecording(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	reqURL, _ := url.Parse("https://api.example.com/pkg.AuthService/Authenticate")
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
 		FlowType: "unary",
 		Duration: 15 * time.Millisecond,
@@ -1203,12 +1203,12 @@ func TestM4_GRPC_ErrorStatusRecording(t *testing.T) {
 
 // --- Test: Session delete by individual ID across protocols ---
 
-func TestM4_Execute_DeleteSingleSession_ByProtocol(t *testing.T) {
+func TestMultiProto_Execute_DeleteSingleSession_ByProtocol(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Seed an HTTP/2 and a gRPC flow.
 	h2URL, _ := url.Parse("https://example.com/api")
-	h2ID := seedM4Session(t, env.store, m4SessionOpts{
+	h2ID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2", FlowType: "unary", Duration: 10 * time.Millisecond,
 		Messages: []*flow.Message{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: h2URL},
@@ -1217,7 +1217,7 @@ func TestM4_Execute_DeleteSingleSession_ByProtocol(t *testing.T) {
 	})
 
 	grpcURL, _ := url.Parse("https://example.com/pkg.Svc/Method")
-	grpcID := seedM4Session(t, env.store, m4SessionOpts{
+	grpcID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC", FlowType: "unary", Duration: 10 * time.Millisecond,
 		Messages: []*flow.Message{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "POST", URL: grpcURL, Metadata: map[string]string{"service": "pkg.Svc", "method": "Method"}},
@@ -1253,27 +1253,27 @@ func TestM4_Execute_DeleteSingleSession_ByProtocol(t *testing.T) {
 
 // --- Test: Query sessions pagination with mixed protocols ---
 
-func TestM4_Query_SessionsPagination_MixedProtocols(t *testing.T) {
+func TestMultiProto_Query_SessionsPagination_MixedProtocols(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Seed 6 sessions (2 per protocol).
 	for i := 0; i < 2; i++ {
 		reqURL, _ := url.Parse(fmt.Sprintf("https://example.com/api/h2-%d", i))
-		seedM4Session(t, env.store, m4SessionOpts{
+		seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 			Protocol: "HTTP/2", FlowType: "unary", Duration: 10 * time.Millisecond,
 			Messages: []*flow.Message{
 				{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: reqURL},
 				{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200},
 			},
 		})
-		seedM4Session(t, env.store, m4SessionOpts{
+		seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 			Protocol: "gRPC", FlowType: "unary", Duration: 10 * time.Millisecond,
 			Messages: []*flow.Message{
 				{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Metadata: map[string]string{"service": "Svc", "method": "M"}},
 				{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), Metadata: map[string]string{"grpc_status": "0"}},
 			},
 		})
-		seedM4Session(t, env.store, m4SessionOpts{
+		seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 			Protocol: "WebSocket", FlowType: "bidirectional", Duration: 100 * time.Millisecond,
 			Messages: []*flow.Message{
 				{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("ws"), Metadata: map[string]string{"opcode": "1"}},
@@ -1324,7 +1324,7 @@ func TestM4_Query_SessionsPagination_MixedProtocols(t *testing.T) {
 
 // --- Test: Messages pagination for streaming session ---
 
-func TestM4_Query_MessagesPagination_StreamingSession(t *testing.T) {
+func TestMultiProto_Query_MessagesPagination_StreamingSession(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Create a TCP flow with 8 messages.
@@ -1342,7 +1342,7 @@ func TestM4_Query_MessagesPagination_StreamingSession(t *testing.T) {
 		}
 	}
 
-	flowID := seedM4Session(t, env.store, m4SessionOpts{
+	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP",
 		FlowType: "bidirectional",
 		Duration: 500 * time.Millisecond,
