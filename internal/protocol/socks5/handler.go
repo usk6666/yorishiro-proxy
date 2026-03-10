@@ -46,6 +46,7 @@ type Handler struct {
 	auth          Authenticator            // default authenticator (used when no per-listener override exists)
 	listenerAuth  map[string]Authenticator // per-listener authenticator overrides keyed by listener name
 	targetScope   *proxy.TargetScope
+	rateLimiter   *proxy.RateLimiter
 	postHandshake PostHandshakeFunc
 	dialer        func(ctx context.Context, network, addr string) (net.Conn, error)
 	pluginEngine  *plugin.Engine
@@ -100,6 +101,11 @@ func (h *Handler) getAuthForListener(listenerName string) Authenticator {
 // SOCKS5 error reply (connection not allowed by ruleset).
 func (h *Handler) SetTargetScope(scope *proxy.TargetScope) {
 	h.targetScope = scope
+}
+
+// SetRateLimiter sets the rate limiter for SOCKS5 connections.
+func (h *Handler) SetRateLimiter(rl *proxy.RateLimiter) {
+	h.rateLimiter = rl
 }
 
 // SetPostHandshake sets the post-handshake function called after successful
@@ -181,6 +187,13 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		return nil
 	}
 
+	// 4b. Rate limit check.
+	if h.checkRateLimit(target) {
+		logger.Info("socks5 target blocked by rate limit", "target", target)
+		_ = writeReply(conn, replyConnectionNotAllowed, nil)
+		return nil
+	}
+
 	// 5. Dial upstream.
 	upstream, err := h.dialUpstream(ctx, target)
 	if err != nil {
@@ -256,6 +269,18 @@ func (h *Handler) dialUpstream(ctx context.Context, target string) (net.Conn, er
 	}
 	d := &net.Dialer{Timeout: dialTimeout}
 	return d.DialContext(ctx, "tcp", target)
+}
+
+// checkRateLimit checks if the target is rate limited.
+func (h *Handler) checkRateLimit(target string) bool {
+	if h.rateLimiter == nil || !h.rateLimiter.HasLimits() {
+		return false
+	}
+	host, _, err := parseHostPort(target)
+	if err != nil {
+		return false
+	}
+	return !h.rateLimiter.Allow(host)
 }
 
 // checkTargetScope checks if the target host:port is allowed.

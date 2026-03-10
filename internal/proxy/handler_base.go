@@ -22,6 +22,7 @@ type HandlerBase struct {
 	Logger          *slog.Logger
 	Scope           *CaptureScope
 	TargetScope     *TargetScope
+	RateLimiter     *RateLimiter
 	InterceptEngine *intercept.Engine
 	InterceptQueue  *intercept.Queue
 
@@ -74,6 +75,13 @@ func (b *HandlerBase) CaptureScope() *CaptureScope {
 // receive a 403 Forbidden response.
 func (b *HandlerBase) SetTargetScope(scope *TargetScope) {
 	b.TargetScope = scope
+}
+
+// SetRateLimiter sets the rate limiter used to enforce request rate limits.
+// When set, requests that exceed the configured rate receive a 429 Too Many
+// Requests response.
+func (b *HandlerBase) SetRateLimiter(rl *RateLimiter) {
+	b.RateLimiter = rl
 }
 
 // SetInterceptEngine sets the intercept rule engine used to determine which

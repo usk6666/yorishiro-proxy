@@ -62,7 +62,14 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	if blocked, reason := h.checkTargetScopeHost(hostname, port); blocked {
 		h.writeBlockedResponse(conn, hostname, reason, logger)
-		h.recordBlockedCONNECTSession(ctx, req, hostname, connectAuthority, logger)
+		h.recordBlockedCONNECTSession(ctx, req, hostname, connectAuthority, "target_scope", logger)
+		return nil
+	}
+
+	// Rate limit check for CONNECT tunnels.
+	if blocked := h.checkRateLimit(hostname); blocked {
+		h.writeRateLimitResponse(conn, logger)
+		h.recordBlockedCONNECTSession(ctx, req, hostname, connectAuthority, "rate_limit", logger)
 		return nil
 	}
 
@@ -530,8 +537,8 @@ func parseConnectPort(hostPort string) int {
 }
 
 // recordBlockedCONNECTSession records a blocked CONNECT request as a flow
-// with BlockedBy="target_scope".
-func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.Request, hostname, authority string, logger *slog.Logger) {
+// with the specified blockedBy reason (e.g. "target_scope", "rate_limit").
+func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.Request, hostname, authority, blockedBy string, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
@@ -556,7 +563,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
-		BlockedBy: "target_scope",
+		BlockedBy: blockedBy,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 		},
