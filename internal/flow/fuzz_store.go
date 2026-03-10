@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -84,9 +83,6 @@ type FuzzStore interface {
 	// CountFuzzResults returns the total number of results for a fuzz job
 	// matching the given filter options, ignoring Limit and Offset.
 	CountFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) (int, error)
-
-	// GetFuzzResultRawStats retrieves raw result data for aggregate statistics computation.
-	GetFuzzResultRawStats(ctx context.Context, fuzzID string) ([]FuzzResultRawRow, error)
 }
 
 // FuzzResultListOptions configures fuzz result listing behavior.
@@ -99,10 +95,6 @@ type FuzzResultListOptions struct {
 	// SortBy specifies the column to sort results by (e.g. "status_code", "duration_ms", "index_num").
 	// Default is "index_num".
 	SortBy string
-	// OutliersOnly when true returns only results whose IDs are in the OutlierIDs set.
-	OutliersOnly bool
-	// OutlierIDs is the set of result IDs considered outliers (used when OutliersOnly is true).
-	OutlierIDs map[string]bool
 	// Limit is the maximum number of results to return (0 means no limit).
 	Limit int
 	// Offset is the number of results to skip for pagination.
@@ -241,17 +233,6 @@ func fuzzResultWhereClause(fuzzID string, opts FuzzResultListOptions) (string, [
 			  AND INSTR(CAST(m.body AS TEXT), ?) > 0
 		)`
 		args = append(args, opts.BodyContains)
-	}
-	if opts.OutliersOnly && len(opts.OutlierIDs) > 0 {
-		placeholders := make([]string, 0, len(opts.OutlierIDs))
-		for id := range opts.OutlierIDs {
-			placeholders = append(placeholders, "?")
-			args = append(args, id)
-		}
-		where += " AND id IN (" + strings.Join(placeholders, ",") + ")"
-	} else if opts.OutliersOnly {
-		// No outlier IDs means no results match.
-		where += " AND 1=0"
 	}
 	return where, args
 }
@@ -441,40 +422,6 @@ func scanFuzzResult(row scannable) (*FuzzResult, error) {
 	}
 
 	return &result, nil
-}
-
-// FuzzResultRawRow holds the raw values needed for aggregate statistics computation.
-type FuzzResultRawRow struct {
-	// ID is the unique identifier of the result.
-	ID string
-	// StatusCode is the HTTP response status code.
-	StatusCode int
-	// ResponseLength is the response body length in bytes.
-	ResponseLength int
-	// DurationMs is the request duration in milliseconds.
-	DurationMs int
-}
-
-// GetFuzzResultRawStats retrieves raw result data for aggregate statistics computation.
-// It returns all results for the given fuzz job without pagination, using only the
-// columns needed for statistics (id, status_code, response_length, duration_ms).
-func (s *SQLiteStore) GetFuzzResultRawStats(ctx context.Context, fuzzID string) ([]FuzzResultRawRow, error) {
-	query := `SELECT id, status_code, response_length, duration_ms FROM fuzz_results WHERE fuzz_id = ? ORDER BY index_num ASC`
-	rows, err := s.db.QueryContext(ctx, query, fuzzID)
-	if err != nil {
-		return nil, fmt.Errorf("get fuzz result raw stats: %w", err)
-	}
-	defer rows.Close()
-
-	var results []FuzzResultRawRow
-	for rows.Next() {
-		var r FuzzResultRawRow
-		if err := rows.Scan(&r.ID, &r.StatusCode, &r.ResponseLength, &r.DurationMs); err != nil {
-			return nil, fmt.Errorf("scan fuzz result raw stats: %w", err)
-		}
-		results = append(results, r)
-	}
-	return results, rows.Err()
 }
 
 // PayloadsToJSON converts a map of position ID to payload value into JSON string.

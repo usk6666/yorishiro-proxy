@@ -114,7 +114,7 @@ type queryFuzzResultEntry struct {
 	Error          string            `json:"error,omitempty"`
 }
 
-// distributionStats holds min, max, median, and standard deviation for a numeric metric.
+// distributionStats holds min/max/median/stddev statistics for a numeric field.
 type distributionStats struct {
 	Min    float64 `json:"min"`
 	Max    float64 `json:"max"`
@@ -122,8 +122,15 @@ type distributionStats struct {
 	Stddev float64 `json:"stddev"`
 }
 
-// outlierSets holds result IDs grouped by the outlier detection criteria.
-type outlierSets struct {
+// fuzzStatistics holds aggregate statistics for fuzz results.
+type fuzzStatistics struct {
+	StatusCodeDistribution map[string]int     `json:"status_code_distribution"`
+	BodyLength             *distributionStats `json:"body_length"`
+	TimingMs               *distributionStats `json:"timing_ms"`
+}
+
+// fuzzOutliers holds IDs of fuzz results that are outliers.
+type fuzzOutliers struct {
 	ByStatusCode []string `json:"by_status_code"`
 	ByBodyLength []string `json:"by_body_length"`
 	ByTiming     []string `json:"by_timing"`
@@ -131,11 +138,9 @@ type outlierSets struct {
 
 // queryFuzzResultsSummary provides aggregate stats for fuzz results.
 type queryFuzzResultsSummary struct {
-	TotalResults           int                `json:"total_results"`
-	StatusCodeDistribution map[string]int     `json:"status_code_distribution"`
-	BodyLength             *distributionStats `json:"body_length"`
-	TimingMs               *distributionStats `json:"timing_ms"`
-	Outliers               *outlierSets       `json:"outliers"`
+	TotalResults int             `json:"total_results"`
+	Statistics   *fuzzStatistics `json:"statistics"`
+	Outliers     *fuzzOutliers   `json:"outliers"`
 }
 
 // queryFuzzResultsResult is the response for the fuzz_results resource.
@@ -146,31 +151,12 @@ type queryFuzzResultsResult struct {
 	Summary *queryFuzzResultsSummary `json:"summary"`
 }
 
-// handleQueryFuzzResults returns fuzz results for a specific job with filtering, sorting, and summary.
-func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (*gomcp.CallToolResult, any, error) {
-	if s.deps.fuzzStore == nil {
-		return nil, nil, fmt.Errorf("fuzz store is not initialized")
-	}
-
-	if input.FuzzID == "" {
-		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_results resource")
-	}
-
-	if input.Offset < 0 {
-		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
-	}
-
+// buildFuzzResultListOptions constructs FuzzResultListOptions from query input.
+func buildFuzzResultListOptions(input queryInput) flow.FuzzResultListOptions {
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
 	}
-
-	// Build summary from all results for the job (pre-filter).
-	summary, err := s.buildFuzzResultsSummary(ctx, input.FuzzID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
-	}
-
 	opts := flow.FuzzResultListOptions{
 		SortBy: input.SortBy,
 		Limit:  limit,
@@ -179,10 +165,59 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 	if input.Filter != nil {
 		opts.StatusCode = input.Filter.StatusCode
 		opts.BodyContains = input.Filter.BodyContains
-		if input.Filter.OutliersOnly {
-			opts.OutliersOnly = true
-			opts.OutlierIDs = collectAllOutlierIDs(summary)
+	}
+	return opts
+}
+
+// fuzzResultToEntry converts a flow.FuzzResult to a queryFuzzResultEntry.
+func fuzzResultToEntry(r *flow.FuzzResult) queryFuzzResultEntry {
+	payloads := make(map[string]string)
+	if r.Payloads != "" {
+		if err := json.Unmarshal([]byte(r.Payloads), &payloads); err != nil {
+			slog.Warn("failed to parse fuzz result payloads", "result_id", r.ID, "error", err)
 		}
+	}
+	return queryFuzzResultEntry{
+		ID:             r.ID,
+		FuzzID:         r.FuzzID,
+		IndexNum:       r.IndexNum,
+		FlowID:         r.FlowID,
+		Payloads:       payloads,
+		StatusCode:     r.StatusCode,
+		ResponseLength: r.ResponseLength,
+		DurationMs:     r.DurationMs,
+		Error:          r.Error,
+	}
+}
+
+// filterByOutliers filters results to only include those in the outlier ID set.
+func filterByOutliers(results []*flow.FuzzResult, outlierIDSet map[string]bool) []queryFuzzResultEntry {
+	entries := make([]queryFuzzResultEntry, 0)
+	for _, r := range results {
+		if outlierIDSet[r.ID] {
+			entries = append(entries, fuzzResultToEntry(r))
+		}
+	}
+	return entries
+}
+
+// handleQueryFuzzResults returns fuzz results for a specific job with filtering, sorting, and summary.
+func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (*gomcp.CallToolResult, any, error) {
+	if s.deps.fuzzStore == nil {
+		return nil, nil, fmt.Errorf("fuzz store is not initialized")
+	}
+	if input.FuzzID == "" {
+		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_results resource")
+	}
+	if input.Offset < 0 {
+		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
+	}
+
+	opts := buildFuzzResultListOptions(input)
+
+	summary, err := s.buildFuzzResultsSummary(ctx, input.FuzzID, opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
 	}
 
 	results, err := s.deps.fuzzStore.ListFuzzResults(ctx, input.FuzzID, opts)
@@ -195,27 +230,16 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		return nil, nil, fmt.Errorf("count fuzz results: %w", err)
 	}
 
-	entries := make([]queryFuzzResultEntry, 0, len(results))
-	for _, r := range results {
-		payloads := make(map[string]string)
-		if r.Payloads != "" {
-			// Best-effort parse; if it fails, return empty map.
-			if err := json.Unmarshal([]byte(r.Payloads), &payloads); err != nil {
-				slog.Warn("failed to parse fuzz result payloads", "result_id", r.ID, "error", err)
-			}
+	outliersOnly := input.Filter != nil && input.Filter.OutliersOnly
+	var entries []queryFuzzResultEntry
+	if outliersOnly && summary.Outliers != nil {
+		entries = filterByOutliers(results, buildOutlierIDSet(summary.Outliers))
+		total = len(entries)
+	} else {
+		entries = make([]queryFuzzResultEntry, 0, len(results))
+		for _, r := range results {
+			entries = append(entries, fuzzResultToEntry(r))
 		}
-
-		entries = append(entries, queryFuzzResultEntry{
-			ID:             r.ID,
-			FuzzID:         r.FuzzID,
-			IndexNum:       r.IndexNum,
-			FlowID:         r.FlowID,
-			Payloads:       payloads,
-			StatusCode:     r.StatusCode,
-			ResponseLength: r.ResponseLength,
-			DurationMs:     r.DurationMs,
-			Error:          r.Error,
-		})
 	}
 
 	result := &queryFuzzResultsResult{
@@ -231,174 +255,160 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 	return nil, result, nil
 }
 
-// collectAllOutlierIDs merges all outlier ID lists into a single set.
-func collectAllOutlierIDs(summary *queryFuzzResultsSummary) map[string]bool {
-	if summary == nil || summary.Outliers == nil {
-		return nil
+// buildOutlierIDSet collects all outlier result IDs into a set.
+func buildOutlierIDSet(outliers *fuzzOutliers) map[string]bool {
+	set := make(map[string]bool)
+	for _, id := range outliers.ByStatusCode {
+		set[id] = true
 	}
-	ids := make(map[string]bool)
-	for _, id := range summary.Outliers.ByStatusCode {
-		ids[id] = true
+	for _, id := range outliers.ByBodyLength {
+		set[id] = true
 	}
-	for _, id := range summary.Outliers.ByBodyLength {
-		ids[id] = true
+	for _, id := range outliers.ByTiming {
+		set[id] = true
 	}
-	for _, id := range summary.Outliers.ByTiming {
-		ids[id] = true
-	}
-	return ids
+	return set
 }
 
-// buildFuzzResultsSummary computes aggregate statistics and outlier detection
-// for all results in a fuzz job using the efficient raw stats query.
-func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string) (*queryFuzzResultsSummary, error) {
-	rawRows, err := s.deps.fuzzStore.GetFuzzResultRawStats(ctx, fuzzID)
+// buildFuzzResultsSummary computes aggregate statistics and outlier detection for fuzz results.
+// It fetches all matching results (without pagination) to compute the summary.
+func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opts flow.FuzzResultListOptions) (*queryFuzzResultsSummary, error) {
+	// Fetch all matching results without pagination for summary computation.
+	allOpts := opts
+	allOpts.Limit = 0
+	allOpts.Offset = 0
+	allOpts.SortBy = ""
+
+	allResults, err := s.deps.fuzzStore.ListFuzzResults(ctx, fuzzID, allOpts)
 	if err != nil {
-		return nil, fmt.Errorf("get fuzz result raw stats: %w", err)
+		return nil, fmt.Errorf("list all fuzz results for summary: %w", err)
 	}
 
-	summary := &queryFuzzResultsSummary{
-		TotalResults:           len(rawRows),
+	stats := &fuzzStatistics{
 		StatusCodeDistribution: make(map[string]int),
-		Outliers:               &outlierSets{},
 	}
 
-	if len(rawRows) == 0 {
-		return summary, nil
+	if len(allResults) == 0 {
+		return &queryFuzzResultsSummary{
+			TotalResults: 0,
+			Statistics:   stats,
+			Outliers: &fuzzOutliers{
+				ByStatusCode: []string{},
+				ByBodyLength: []string{},
+				ByTiming:     []string{},
+			},
+		}, nil
 	}
 
-	// Collect data for distribution computation.
-	bodyLengths := make([]float64, len(rawRows))
-	timings := make([]float64, len(rawRows))
-	statusCounts := make(map[int]int)
+	// Collect values for distribution computation.
+	bodyLengths := make([]float64, 0, len(allResults))
+	timings := make([]float64, 0, len(allResults))
 
-	for i, r := range rawRows {
-		statusCounts[r.StatusCode]++
-		bodyLengths[i] = float64(r.ResponseLength)
-		timings[i] = float64(r.DurationMs)
+	for _, r := range allResults {
+		key := fmt.Sprintf("%d", r.StatusCode)
+		stats.StatusCodeDistribution[key]++
+		bodyLengths = append(bodyLengths, float64(r.ResponseLength))
+		timings = append(timings, float64(r.DurationMs))
 	}
 
-	// Status code distribution.
-	for code, count := range statusCounts {
-		summary.StatusCodeDistribution[fmt.Sprintf("%d", code)] = count
-	}
+	stats.BodyLength = computeDistribution(bodyLengths)
+	stats.TimingMs = computeDistribution(timings)
 
-	// Body length stats.
-	summary.BodyLength = computeDistributionStats(bodyLengths)
+	// Detect outliers.
+	outliers := detectOutliers(allResults, stats)
 
-	// Timing stats.
-	summary.TimingMs = computeDistributionStats(timings)
-
-	// Outlier detection.
-	summary.Outliers = detectOutliers(rawRows, statusCounts, summary.BodyLength, summary.TimingMs)
-
-	return summary, nil
+	return &queryFuzzResultsSummary{
+		TotalResults: len(allResults),
+		Statistics:   stats,
+		Outliers:     outliers,
+	}, nil
 }
 
-// detectOutliers identifies outlier results by status code, body length, and timing.
-func detectOutliers(rows []flow.FuzzResultRawRow, statusCounts map[int]int, bodyStats, timingStats *distributionStats) *outlierSets {
-	out := &outlierSets{
-		ByStatusCode: []string{},
-		ByBodyLength: []string{},
-		ByTiming:     []string{},
+// computeDistribution calculates min, max, median, and stddev for a set of values.
+func computeDistribution(values []float64) *distributionStats {
+	if len(values) == 0 {
+		return &distributionStats{}
 	}
 
-	// Status code: baseline is the most frequent status code; others are outliers.
-	baselineStatus := findMostFrequent(statusCounts)
-	for _, r := range rows {
-		if r.StatusCode != baselineStatus {
-			out.ByStatusCode = append(out.ByStatusCode, r.ID)
-		}
-	}
-
-	// Body length: median +/- 2*stddev.
-	out.ByBodyLength = detectNumericOutliers(rows, bodyStats, func(r flow.FuzzResultRawRow) float64 {
-		return float64(r.ResponseLength)
-	})
-
-	// Timing: median +/- 2*stddev.
-	out.ByTiming = detectNumericOutliers(rows, timingStats, func(r flow.FuzzResultRawRow) float64 {
-		return float64(r.DurationMs)
-	})
-
-	return out
-}
-
-// detectNumericOutliers returns IDs of rows whose value (extracted by valueFunc)
-// falls outside median +/- 2*stddev. Returns empty slice if stats is nil or stddev is 0.
-func detectNumericOutliers(rows []flow.FuzzResultRawRow, stats *distributionStats, valueFunc func(flow.FuzzResultRawRow) float64) []string {
-	if stats == nil || stats.Stddev <= 0 {
-		return []string{}
-	}
-	low := stats.Median - 2*stats.Stddev
-	high := stats.Median + 2*stats.Stddev
-	var ids []string
-	for _, r := range rows {
-		v := valueFunc(r)
-		if v < low || v > high {
-			ids = append(ids, r.ID)
-		}
-	}
-	if ids == nil {
-		return []string{}
-	}
-	return ids
-}
-
-// computeDistributionStats computes min, max, median, and standard deviation
-// for the given values. Returns nil if values is empty.
-func computeDistributionStats(values []float64) *distributionStats {
-	n := len(values)
-	if n == 0 {
-		return nil
-	}
-
-	sorted := make([]float64, n)
+	sorted := make([]float64, len(values))
 	copy(sorted, values)
 	sort.Float64s(sorted)
 
-	minVal := sorted[0]
-	maxVal := sorted[n-1]
+	n := len(sorted)
+	sum := 0.0
+	for _, v := range sorted {
+		sum += v
+	}
+	mean := sum / float64(n)
 
+	// Median.
 	var median float64
 	if n%2 == 0 {
-		median = (sorted[n/2-1] + sorted[n/2]) / 2
+		median = (sorted[n/2-1] + sorted[n/2]) / 2.0
 	} else {
 		median = sorted[n/2]
 	}
 
 	// Standard deviation (population).
-	var sum float64
-	for _, v := range values {
-		sum += v
-	}
-	mean := sum / float64(n)
-
-	var varianceSum float64
-	for _, v := range values {
+	variance := 0.0
+	for _, v := range sorted {
 		diff := v - mean
-		varianceSum += diff * diff
+		variance += diff * diff
 	}
-	stddev := math.Sqrt(varianceSum / float64(n))
+	variance /= float64(n)
+	stddev := math.Sqrt(variance)
 
 	return &distributionStats{
-		Min:    minVal,
-		Max:    maxVal,
-		Median: median,
-		Stddev: math.Round(stddev*10) / 10, // round to 1 decimal place
+		Min:    sorted[0],
+		Max:    sorted[n-1],
+		Median: math.Round(median*100) / 100,
+		Stddev: math.Round(stddev*100) / 100,
 	}
 }
 
-// findMostFrequent returns the key with the highest count in the map.
-func findMostFrequent(counts map[int]int) int {
-	var maxKey, maxCount int
-	for k, c := range counts {
-		if c > maxCount || (c == maxCount && k < maxKey) {
-			maxKey = k
-			maxCount = c
+// detectOutliers identifies fuzz results that deviate from the baseline.
+// Status code: any result with a status code different from the most frequent one.
+// Body length: results outside median +/- 2*stddev.
+// Timing: results outside median +/- 2*stddev.
+func detectOutliers(results []*flow.FuzzResult, stats *fuzzStatistics) *fuzzOutliers {
+	outliers := &fuzzOutliers{
+		ByStatusCode: []string{},
+		ByBodyLength: []string{},
+		ByTiming:     []string{},
+	}
+
+	// Find the most frequent status code (baseline).
+	baselineStatus := ""
+	maxCount := 0
+	for code, count := range stats.StatusCodeDistribution {
+		if count > maxCount {
+			maxCount = count
+			baselineStatus = code
 		}
 	}
-	return maxKey
+
+	for _, r := range results {
+		code := fmt.Sprintf("%d", r.StatusCode)
+		if code != baselineStatus {
+			outliers.ByStatusCode = append(outliers.ByStatusCode, r.ID)
+		}
+
+		if stats.BodyLength != nil && stats.BodyLength.Stddev > 0 {
+			bl := float64(r.ResponseLength)
+			if bl < stats.BodyLength.Median-2*stats.BodyLength.Stddev || bl > stats.BodyLength.Median+2*stats.BodyLength.Stddev {
+				outliers.ByBodyLength = append(outliers.ByBodyLength, r.ID)
+			}
+		}
+
+		if stats.TimingMs != nil && stats.TimingMs.Stddev > 0 {
+			t := float64(r.DurationMs)
+			if t < stats.TimingMs.Median-2*stats.TimingMs.Stddev || t > stats.TimingMs.Median+2*stats.TimingMs.Stddev {
+				outliers.ByTiming = append(outliers.ByTiming, r.ID)
+			}
+		}
+	}
+
+	return outliers
 }
 
 // filterFields converts the result to a map and removes fields not in the requested list.
