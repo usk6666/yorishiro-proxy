@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -226,6 +227,41 @@ func TestEffectiveRate(t *testing.T) {
 				t.Errorf("effectiveRate(%v, %v) = %v, want %v", tt.policy, tt.agent, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRateLimiter_HostLimitersEviction(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.SetPolicyLimits(RateLimitConfig{
+		MaxRequestsPerHostPerSecond: 1000, // High rate so requests aren't denied.
+	})
+
+	// Fill up to the cap with unique hostnames.
+	for i := 0; i < maxHostLimiters; i++ {
+		host := fmt.Sprintf("host-%d.example.com", i)
+		if !rl.Allow(host) {
+			t.Fatalf("request to %s should be allowed", host)
+		}
+	}
+
+	// Verify the map is at the cap.
+	rl.mu.Lock()
+	size := len(rl.hostLimiters)
+	rl.mu.Unlock()
+	if size != maxHostLimiters {
+		t.Fatalf("expected %d host limiters, got %d", maxHostLimiters, size)
+	}
+
+	// One more unique host should trigger eviction (map cleared then new entry added).
+	if !rl.Allow("overflow.example.com") {
+		t.Error("request after eviction should be allowed")
+	}
+
+	rl.mu.Lock()
+	sizeAfter := len(rl.hostLimiters)
+	rl.mu.Unlock()
+	if sizeAfter != 1 {
+		t.Errorf("expected 1 host limiter after eviction, got %d", sizeAfter)
 	}
 }
 

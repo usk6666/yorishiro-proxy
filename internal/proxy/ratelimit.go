@@ -27,6 +27,11 @@ func (c RateLimitConfig) IsZero() bool {
 	return c.MaxRequestsPerSecond == 0 && c.MaxRequestsPerHostPerSecond == 0
 }
 
+// maxHostLimiters is the maximum number of per-host rate limiters to keep.
+// When this cap is reached, the entire map is cleared to prevent unbounded
+// memory growth from unique subdomain flooding (CWE-400).
+const maxHostLimiters = 1024
+
 // RateLimiter manages global and per-host rate limiting using token bucket
 // algorithm via golang.org/x/time/rate. It supports two layers (Policy and Agent)
 // matching the TargetScope architecture.
@@ -124,6 +129,11 @@ func (rl *RateLimiter) Allow(hostname string) bool {
 		key := strings.ToLower(hostname)
 		limiter, ok := rl.hostLimiters[key]
 		if !ok {
+			// Evict all entries when the map exceeds the cap to prevent
+			// unbounded memory growth from unique subdomain flooding.
+			if len(rl.hostLimiters) >= maxHostLimiters {
+				rl.hostLimiters = make(map[string]*rate.Limiter)
+			}
 			burst := int(rl.effectiveHostRPS) + 1
 			if burst < 1 {
 				burst = 1
