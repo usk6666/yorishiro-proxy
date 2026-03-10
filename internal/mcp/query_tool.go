@@ -54,8 +54,8 @@ type queryFilter struct {
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
 	// StatusCode filters flows/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
-	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop").
-	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop)"`
+	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop", "rate_limit").
+	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop, rate_limit)"`
 	// State filters flows by lifecycle state ("active", "complete", or "error").
 	State string `json:"state,omitempty" jsonschema:"flow lifecycle state filter (active, complete, error)"`
 	// Direction filters messages by direction ("send" or "receive").
@@ -82,7 +82,7 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
 			"The 'id' parameter is required for flow, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop), state (active, complete, error), and technology (e.g. nginx, wordpress); " +
+			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), and technology (e.g. nginx, wordpress); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code and body_contains. " +
 			"Flows include protocol_summary with protocol-specific information. " +
@@ -698,6 +698,13 @@ type queryStatusResult struct {
 	SOCKS5Enabled     bool                       `json:"socks5_enabled"`
 	SOCKS5Auth        string                     `json:"socks5_auth,omitempty"`
 	TLSFingerprint    string                     `json:"tls_fingerprint"`
+	RateLimits        *queryRateLimitStatus      `json:"rate_limits,omitempty"`
+}
+
+// queryRateLimitStatus holds rate limit information for the status response.
+type queryRateLimitStatus struct {
+	Effective proxy.RateLimitConfig `json:"effective"`
+	Enabled   bool                  `json:"enabled"`
 }
 
 // handleQueryStatus returns the current proxy status and health metrics.
@@ -769,6 +776,14 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 	}
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
+
+	if s.deps.rateLimiter != nil {
+		effective := s.deps.rateLimiter.EffectiveLimits()
+		result.RateLimits = &queryRateLimitStatus{
+			Effective: effective,
+			Enabled:   s.deps.rateLimiter.HasLimits(),
+		}
+	}
 
 	return nil, result, nil
 }

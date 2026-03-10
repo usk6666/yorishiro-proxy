@@ -66,6 +66,12 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 		return nil
 	}
 
+	// Rate limit check for CONNECT tunnels.
+	if blocked := h.checkRateLimit(hostname); blocked {
+		h.writeRateLimitResponse(conn, logger)
+		return nil
+	}
+
 	// Check if the target host is in the TLS passthrough list.
 	// If so, relay encrypted bytes directly without MITM interception.
 	if h.passthrough != nil && h.passthrough.Contains(hostname) {

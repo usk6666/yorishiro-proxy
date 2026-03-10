@@ -50,6 +50,8 @@ type deps struct {
 	requestTimeoutSetters []requestTimeoutSetter
 	targetScopeSetters    []targetScopeSetter
 	targetScope           *proxy.TargetScope
+	rateLimiter           *proxy.RateLimiter
+	rateLimiterSetters    []rateLimiterSetter
 	pluginEngine          *plugin.Engine
 	socks5AuthSetter      socks5AuthSetter
 	tlsTransport          httputil.TLSTransport
@@ -91,6 +93,12 @@ type requestTimeoutSetter interface {
 // target scope enforcement (HTTP/1.x and HTTP/2 handlers).
 type targetScopeSetter interface {
 	SetTargetScope(scope *proxy.TargetScope)
+}
+
+// rateLimiterSetter is implemented by protocol handlers that support
+// rate limiting (HTTP/1.x, HTTP/2, and SOCKS5 handlers).
+type rateLimiterSetter interface {
+	SetRateLimiter(rl *proxy.RateLimiter)
 }
 
 // tlsFingerprintSetter is implemented by protocol handlers that support
@@ -263,6 +271,23 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 	}
 }
 
+// WithRateLimiter sets the rate limiter for the MCP server,
+// enabling rate limit management via the security MCP tool.
+func WithRateLimiter(rl *proxy.RateLimiter) ServerOption {
+	return func(s *Server) {
+		s.deps.rateLimiter = rl
+	}
+}
+
+// WithRateLimiterSetter registers a protocol handler that should be updated
+// when the rate limiter is set. Call this for each handler that implements
+// the rateLimiterSetter interface (e.g., HTTP/1.x, HTTP/2, SOCKS5).
+func WithRateLimiterSetter(setter rateLimiterSetter) ServerOption {
+	return func(s *Server) {
+		s.deps.rateLimiterSetters = append(s.deps.rateLimiterSetters, setter)
+	}
+}
+
 // WithPluginEngine sets the plugin engine for the MCP server,
 // enabling plugin management via the plugin tool (list, reload, enable, disable).
 func WithPluginEngine(engine *plugin.Engine) ServerOption {
@@ -330,6 +355,14 @@ func NewServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *prox
 	// Propagate target scope to all registered protocol handlers.
 	for _, setter := range s.deps.targetScopeSetters {
 		setter.SetTargetScope(s.deps.targetScope)
+	}
+	// Initialize default RateLimiter if not provided via WithRateLimiter.
+	if s.deps.rateLimiter == nil {
+		s.deps.rateLimiter = proxy.NewRateLimiter()
+	}
+	// Propagate rate limiter to all registered protocol handlers.
+	for _, setter := range s.deps.rateLimiterSetters {
+		setter.SetRateLimiter(s.deps.rateLimiter)
 	}
 	s.registerTools()
 	s.registerResources()

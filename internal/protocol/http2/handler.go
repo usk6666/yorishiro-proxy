@@ -308,6 +308,10 @@ func (h *Handler) handleStream(
 		return
 	}
 
+	if h.checkRateLimit(sc) {
+		return
+	}
+
 	if h.runClientPluginHook(sc) {
 		return
 	}
@@ -439,6 +443,32 @@ func (h *Handler) checkTargetScope(sc *streamContext) bool {
 	sc.logger.Info("HTTP/2 request blocked by target scope",
 		"host", sc.req.URL.Host, "reason", reason)
 	return true
+}
+
+// checkRateLimit enforces rate limits. Returns true if the request was blocked.
+func (h *Handler) checkRateLimit(sc *streamContext) bool {
+	if h.RateLimiter == nil || !h.RateLimiter.HasLimits() {
+		return false
+	}
+	if h.RateLimiter.Allow(sc.req.URL.Hostname()) {
+		return false
+	}
+	writeRateLimitResponse(sc.w)
+	sc.logger.Info("HTTP/2 request blocked by rate limit",
+		"host", sc.req.URL.Host)
+	return true
+}
+
+// writeRateLimitResponse writes a 429 Too Many Requests response for rate limiting.
+func writeRateLimitResponse(w gohttp.ResponseWriter) {
+	body := `{"error":"rate limit exceeded","blocked_by":"rate_limit"}`
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Blocked-By", "yorishiro-proxy")
+	w.Header().Set("X-Block-Reason", "rate_limit")
+	w.Header().Set("Retry-After", "1")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(gohttp.StatusTooManyRequests)
+	w.Write([]byte(body))
 }
 
 // writeScopeBlockResponse writes a 403 Forbidden response for scope violations.

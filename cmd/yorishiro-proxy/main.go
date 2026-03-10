@@ -242,8 +242,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		proto.socks5Handler.SetTargetScope(targetScope)
 	}
 
+	rateLimiter := initRateLimiter(targetScopePolicy, logger)
+
 	opts, err := buildMCPOptions(cfg, proxyCfg, store, issuer, passthrough, scope,
-		interceptEngine, interceptQueue, pipeline, proto, targetScope,
+		interceptEngine, interceptQueue, pipeline, proto, targetScope, rateLimiter,
 		targetScopePolicySource, logger)
 	if err != nil {
 		return err
@@ -569,6 +571,7 @@ func buildMCPOptions(
 	pipeline *rules.Pipeline,
 	proto *protocolResult,
 	targetScope *proxy.TargetScope,
+	rateLimiter *proxy.RateLimiter,
 	targetScopePolicySource string,
 	logger *slog.Logger,
 ) ([]mcp.ServerOption, error) {
@@ -591,6 +594,10 @@ func buildMCPOptions(
 		mcp.WithTLSFingerprintSetter(proto.httpHandler),
 		mcp.WithTLSFingerprintSetter(proto.http2Handler),
 		mcp.WithSOCKS5Handler(proto.socks5Adapter),
+		mcp.WithRateLimiter(rateLimiter),
+		mcp.WithRateLimiterSetter(proto.httpHandler),
+		mcp.WithRateLimiterSetter(proto.http2Handler),
+		mcp.WithRateLimiterSetter(proto.socks5Handler),
 	}
 
 	if proto.tlsTransport != nil {
@@ -676,6 +683,21 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 	}
 
 	return g.Wait()
+}
+
+// initRateLimiter creates a RateLimiter and applies policy limits from the config.
+func initRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger) *proxy.RateLimiter {
+	rl := proxy.NewRateLimiter()
+	if policy != nil && policy.RateLimits != nil {
+		rl.SetPolicyLimits(proxy.RateLimitConfig{
+			MaxRequestsPerSecond:        policy.RateLimits.MaxRequestsPerSecond,
+			MaxRequestsPerHostPerSecond: policy.RateLimits.MaxRequestsPerHostPerSecond,
+		})
+		logger.Info("rate limits policy loaded",
+			"max_rps", policy.RateLimits.MaxRequestsPerSecond,
+			"max_rps_per_host", policy.RateLimits.MaxRequestsPerHostPerSecond)
+	}
+	return rl
 }
 
 // convertTargetRules converts config TargetRuleConfig values to proxy TargetRule values.
