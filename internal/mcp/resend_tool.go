@@ -63,10 +63,15 @@ func (h *HeaderEntries) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// resendParams holds parameters for the resend tool actions (resend, resend_raw, tcp_replay).
+// resendParams holds parameters for the resend tool actions (resend, resend_raw, tcp_replay, compare).
 type resendParams struct {
 	// FlowID identifies the flow to resend/replay.
 	FlowID string `json:"flow_id,omitempty"`
+
+	// FlowIDA identifies the first flow for the compare action.
+	FlowIDA string `json:"flow_id_a,omitempty"`
+	// FlowIDB identifies the second flow for the compare action.
+	FlowIDB string `json:"flow_id_b,omitempty"`
 
 	// MessageSequence specifies a specific message within a flow for WebSocket/streaming resend.
 	MessageSequence *int `json:"message_sequence,omitempty"`
@@ -158,18 +163,19 @@ func parseHeaderEntriesFromAny(v any) (HeaderEntries, error) {
 }
 
 // availableResendActions lists the valid action names for the resend tool.
-var availableResendActions = []string{"resend", "resend_raw", "tcp_replay"}
+var availableResendActions = []string{"resend", "resend_raw", "tcp_replay", "compare"}
 
 // registerResend registers the resend MCP tool.
 func (s *Server) registerResend() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "resend",
-		Description: "Resend and replay recorded proxy requests with optional mutations. " +
+		Description: "Resend and replay recorded proxy requests with optional mutations, or compare two flows. " +
 			"Available actions: " +
 			"'resend' resends a recorded HTTP/HTTP2/WebSocket request with optional mutation (method/URL/header/body overrides, body patches, dry-run). " +
 			"For WebSocket flows, use message_sequence to specify which message to resend as a raw TCP frame; " +
 			"'resend_raw' resends raw bytes from a recorded flow over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
-			"'tcp_replay' replays a Raw TCP flow by sending all 'send' messages sequentially to the target. " +
+			"'tcp_replay' replays a Raw TCP flow by sending all 'send' messages sequentially to the target; " +
+			"'compare' compares two flows structurally (status code, headers, body length, timing) for triage — use query tool for full details. " +
 			"('replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'). " +
 			"For flow management (delete/export/import), use the 'manage' tool. " +
 			"For fuzzing, use the 'fuzz' tool. " +
@@ -194,6 +200,11 @@ func (s *Server) handleResend(ctx context.Context, _ *gomcp.CallToolRequest, inp
 		return s.handleResendActionRaw(ctx, input.Params)
 	case "tcp_replay":
 		return s.handleResendReplayRaw(ctx, input.Params)
+	case "compare":
+		return s.handleCompare(ctx, compareParams{
+			FlowIDA: input.Params.FlowIDA,
+			FlowIDB: input.Params.FlowIDB,
+		})
 	default:
 		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableResendActions)
 	}
