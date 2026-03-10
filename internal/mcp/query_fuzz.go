@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strconv"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -190,15 +191,23 @@ func fuzzResultToEntry(r *flow.FuzzResult) queryFuzzResultEntry {
 	}
 }
 
-// filterByOutliers filters results to only include those in the outlier ID set.
-func filterByOutliers(results []*flow.FuzzResult, outlierIDSet map[string]bool) []queryFuzzResultEntry {
-	entries := make([]queryFuzzResultEntry, 0)
-	for _, r := range results {
-		if outlierIDSet[r.ID] {
-			entries = append(entries, fuzzResultToEntry(r))
-		}
+// collectOutlierIDs returns a deduplicated slice of all outlier result IDs.
+func collectOutlierIDs(outliers *fuzzOutliers) []string {
+	set := make(map[string]bool)
+	for _, id := range outliers.ByStatusCode {
+		set[id] = true
 	}
-	return entries
+	for _, id := range outliers.ByBodyLength {
+		set[id] = true
+	}
+	for _, id := range outliers.ByTiming {
+		set[id] = true
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // handleQueryFuzzResults returns fuzz results for a specific job with filtering, sorting, and summary.
@@ -220,6 +229,27 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
 	}
 
+	// When outliers_only is set, pass outlier IDs to the SQL query so the DB
+	// handles filtering with correct pagination and total count.
+	outliersOnly := input.Filter != nil && input.Filter.OutliersOnly
+	if outliersOnly && summary.Outliers != nil {
+		ids := collectOutlierIDs(summary.Outliers)
+		if len(ids) == 0 {
+			// No outliers found; return empty results with correct summary.
+			emptyResult := &queryFuzzResultsResult{
+				Results: []queryFuzzResultEntry{},
+				Count:   0,
+				Total:   0,
+				Summary: summary,
+			}
+			if len(input.Fields) > 0 {
+				return nil, filterFields(emptyResult, input.Fields), nil
+			}
+			return nil, emptyResult, nil
+		}
+		opts.ResultIDs = ids
+	}
+
 	results, err := s.deps.fuzzStore.ListFuzzResults(ctx, input.FuzzID, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list fuzz results: %w", err)
@@ -230,16 +260,9 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		return nil, nil, fmt.Errorf("count fuzz results: %w", err)
 	}
 
-	outliersOnly := input.Filter != nil && input.Filter.OutliersOnly
-	var entries []queryFuzzResultEntry
-	if outliersOnly && summary.Outliers != nil {
-		entries = filterByOutliers(results, buildOutlierIDSet(summary.Outliers))
-		total = len(entries)
-	} else {
-		entries = make([]queryFuzzResultEntry, 0, len(results))
-		for _, r := range results {
-			entries = append(entries, fuzzResultToEntry(r))
-		}
+	entries := make([]queryFuzzResultEntry, 0, len(results))
+	for _, r := range results {
+		entries = append(entries, fuzzResultToEntry(r))
 	}
 
 	result := &queryFuzzResultsResult{
@@ -253,21 +276,6 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		return nil, filterFields(result, input.Fields), nil
 	}
 	return nil, result, nil
-}
-
-// buildOutlierIDSet collects all outlier result IDs into a set.
-func buildOutlierIDSet(outliers *fuzzOutliers) map[string]bool {
-	set := make(map[string]bool)
-	for _, id := range outliers.ByStatusCode {
-		set[id] = true
-	}
-	for _, id := range outliers.ByBodyLength {
-		set[id] = true
-	}
-	for _, id := range outliers.ByTiming {
-		set[id] = true
-	}
-	return set
 }
 
 // buildFuzzResultsSummary computes aggregate statistics and outlier detection for fuzz results.
@@ -311,11 +319,14 @@ func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opt
 		timings = append(timings, float64(r.DurationMs))
 	}
 
-	stats.BodyLength = computeDistribution(bodyLengths)
-	stats.TimingMs = computeDistribution(timings)
+	rawBodyLength := computeRawDistribution(bodyLengths)
+	rawTimingMs := computeRawDistribution(timings)
 
-	// Detect outliers.
-	outliers := detectOutliers(allResults, stats)
+	stats.BodyLength = rawBodyLength.rounded()
+	stats.TimingMs = rawTimingMs.rounded()
+
+	// Detect outliers using full-precision values.
+	outliers := detectOutliers(allResults, stats.StatusCodeDistribution, rawBodyLength, rawTimingMs)
 
 	return &queryFuzzResultsSummary{
 		TotalResults: len(allResults),
@@ -324,10 +335,28 @@ func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opt
 	}, nil
 }
 
-// computeDistribution calculates min, max, median, and stddev for a set of values.
-func computeDistribution(values []float64) *distributionStats {
+// rawDistribution holds full-precision distribution statistics for internal use.
+type rawDistribution struct {
+	Min    float64
+	Max    float64
+	Median float64
+	Stddev float64
+}
+
+// rounded returns a distributionStats with median and stddev rounded to 2 decimal places.
+func (r *rawDistribution) rounded() *distributionStats {
+	return &distributionStats{
+		Min:    r.Min,
+		Max:    r.Max,
+		Median: math.Round(r.Median*100) / 100,
+		Stddev: math.Round(r.Stddev*100) / 100,
+	}
+}
+
+// computeRawDistribution calculates min, max, median, and stddev at full precision.
+func computeRawDistribution(values []float64) *rawDistribution {
 	if len(values) == 0 {
-		return &distributionStats{}
+		return &rawDistribution{}
 	}
 
 	sorted := make([]float64, len(values))
@@ -358,51 +387,70 @@ func computeDistribution(values []float64) *distributionStats {
 	variance /= float64(n)
 	stddev := math.Sqrt(variance)
 
-	return &distributionStats{
+	return &rawDistribution{
 		Min:    sorted[0],
 		Max:    sorted[n-1],
-		Median: math.Round(median*100) / 100,
-		Stddev: math.Round(stddev*100) / 100,
+		Median: median,
+		Stddev: stddev,
 	}
+}
+
+// computeDistribution calculates min, max, median, and stddev for a set of values.
+// Median and stddev are rounded to 2 decimal places.
+func computeDistribution(values []float64) *distributionStats {
+	return computeRawDistribution(values).rounded()
+}
+
+// baselineStatusCode returns the most frequent status code from the distribution.
+// When multiple status codes have equal count, the numerically smallest is chosen
+// as tiebreaker for deterministic results.
+func baselineStatusCode(statusDist map[string]int) string {
+	baseline := ""
+	maxCount := 0
+	for code, count := range statusDist {
+		if count > maxCount {
+			maxCount = count
+			baseline = code
+		} else if count == maxCount && baseline != "" {
+			codeNum, _ := strconv.Atoi(code)
+			baseNum, _ := strconv.Atoi(baseline)
+			if codeNum < baseNum {
+				baseline = code
+			}
+		}
+	}
+	return baseline
 }
 
 // detectOutliers identifies fuzz results that deviate from the baseline.
 // Status code: any result with a status code different from the most frequent one.
-// Body length: results outside median +/- 2*stddev.
-// Timing: results outside median +/- 2*stddev.
-func detectOutliers(results []*flow.FuzzResult, stats *fuzzStatistics) *fuzzOutliers {
+// Body length: results outside median +/- 2*stddev (using full-precision values).
+// Timing: results outside median +/- 2*stddev (using full-precision values).
+func detectOutliers(results []*flow.FuzzResult, statusDist map[string]int, bodyDist, timingDist *rawDistribution) *fuzzOutliers {
 	outliers := &fuzzOutliers{
 		ByStatusCode: []string{},
 		ByBodyLength: []string{},
 		ByTiming:     []string{},
 	}
 
-	// Find the most frequent status code (baseline).
-	baselineStatus := ""
-	maxCount := 0
-	for code, count := range stats.StatusCodeDistribution {
-		if count > maxCount {
-			maxCount = count
-			baselineStatus = code
-		}
-	}
+	baseline := baselineStatusCode(statusDist)
 
 	for _, r := range results {
 		code := fmt.Sprintf("%d", r.StatusCode)
-		if code != baselineStatus {
+		if code != baseline {
 			outliers.ByStatusCode = append(outliers.ByStatusCode, r.ID)
 		}
 
-		if stats.BodyLength != nil && stats.BodyLength.Stddev > 0 {
+		if bodyDist != nil && bodyDist.Stddev > 0 {
 			bl := float64(r.ResponseLength)
-			if bl < stats.BodyLength.Median-2*stats.BodyLength.Stddev || bl > stats.BodyLength.Median+2*stats.BodyLength.Stddev {
+			if bl < bodyDist.Median-2*bodyDist.Stddev || bl > bodyDist.Median+2*bodyDist.Stddev {
 				outliers.ByBodyLength = append(outliers.ByBodyLength, r.ID)
 			}
 		}
 
-		if stats.TimingMs != nil && stats.TimingMs.Stddev > 0 {
+		if timingDist != nil && timingDist.Stddev > 0 {
 			t := float64(r.DurationMs)
-			if t < stats.TimingMs.Median-2*stats.TimingMs.Stddev || t > stats.TimingMs.Median+2*stats.TimingMs.Stddev {
+			if t < timingDist.Median-2*timingDist.Stddev || t > timingDist.Median+2*timingDist.Stddev {
 				outliers.ByTiming = append(outliers.ByTiming, r.ID)
 			}
 		}

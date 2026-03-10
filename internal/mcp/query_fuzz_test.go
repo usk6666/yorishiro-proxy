@@ -1100,18 +1100,16 @@ func TestDetectOutliers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			bodyLengths := make([]float64, len(tc.results))
 			timings := make([]float64, len(tc.results))
-			stats := &fuzzStatistics{
-				StatusCodeDistribution: make(map[string]int),
-			}
+			statusDist := make(map[string]int)
 			for i, r := range tc.results {
 				bodyLengths[i] = float64(r.ResponseLength)
 				timings[i] = float64(r.DurationMs)
-				stats.StatusCodeDistribution[fmt.Sprintf("%d", r.StatusCode)]++
+				statusDist[fmt.Sprintf("%d", r.StatusCode)]++
 			}
-			stats.BodyLength = computeDistribution(bodyLengths)
-			stats.TimingMs = computeDistribution(timings)
+			bodyDist := computeRawDistribution(bodyLengths)
+			timingDist := computeRawDistribution(timings)
 
-			outliers := detectOutliers(tc.results, stats)
+			outliers := detectOutliers(tc.results, statusDist, bodyDist, timingDist)
 			if len(outliers.ByStatusCode) != tc.wantStatusOutliers {
 				t.Errorf("by_status_code = %d, want %d", len(outliers.ByStatusCode), tc.wantStatusOutliers)
 			}
