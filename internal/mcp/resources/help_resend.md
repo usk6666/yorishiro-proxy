@@ -5,7 +5,7 @@ Resend and replay recorded proxy requests with optional mutations.
 ## Parameters
 
 ### action (string, required)
-The action to perform. One of: `resend`, `resend_raw`, `tcp_replay`.
+The action to perform. One of: `resend`, `resend_raw`, `tcp_replay`, `compare`.
 
 > **Note:** `replay` is a deprecated alias for `resend`; `replay_raw` is a deprecated alias for `resend_raw`.
 
@@ -69,6 +69,19 @@ Replay a Raw TCP flow by sending all recorded send messages sequentially to the 
 - **tag** (string, optional): Tag to attach to the result flow.
 
 Returns: new_flow_id, messages_sent, messages_received, total_bytes_sent, total_bytes_received, duration_ms, tag.
+
+### compare
+Compare two flows structurally. Returns a summary of differences in status code, headers, body length, timing, and (for JSON responses) key-level diffs. Designed as a triage tool — use `query messages` for full body content.
+
+**Parameters:**
+- **flow_id_a** (string, required): ID of the first flow to compare.
+- **flow_id_b** (string, required): ID of the second flow to compare.
+
+Returns: status_code (a, b, changed), body_length (a, b, delta), headers_added, headers_removed, headers_changed, timing_ms (a, b, delta), body (content_type, identical, json_diff).
+
+For JSON responses, `body.json_diff` includes: keys_added, keys_removed, keys_changed (top-level keys only).
+
+For non-JSON responses, only `body.identical` and size delta are provided.
 
 ## Hooks (pre_send / post_receive)
 
@@ -149,6 +162,17 @@ The `resend` action supports optional hooks that execute macros before sending t
       {"json_path": "$.token", "value": "test-payload", "encoding": ["base64"]},
       {"regex": "csrf_token=[^&]+", "replace": "csrf_token=injected", "encoding": ["url_encode_query"]}
     ]
+  }
+}
+```
+
+### Compare two flows
+```json
+{
+  "action": "compare",
+  "params": {
+    "flow_id_a": "original-flow-123",
+    "flow_id_b": "mutated-flow-456"
   }
 }
 ```

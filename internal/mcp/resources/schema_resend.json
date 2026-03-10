@@ -8,7 +8,7 @@
     "action": {
       "type": "string",
       "description": "The action to perform. 'replay' is a deprecated alias for 'resend'; 'replay_raw' is a deprecated alias for 'resend_raw'.",
-      "enum": ["resend", "resend_raw", "tcp_replay", "replay", "replay_raw"]
+      "enum": ["resend", "resend_raw", "tcp_replay", "compare", "replay", "replay_raw"]
     },
     "params": {
       "type": "object",
@@ -125,6 +125,14 @@
             "post_receive": { "type": "object" }
           },
           "additionalProperties": false
+        },
+        "flow_id_a": {
+          "type": "string",
+          "description": "First flow ID for compare action."
+        },
+        "flow_id_b": {
+          "type": "string",
+          "description": "Second flow ID for compare action."
         }
       },
       "additionalProperties": false
