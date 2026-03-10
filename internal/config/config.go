@@ -292,6 +292,22 @@ type TargetScopePolicyConfig struct {
 	// Denies lists the rules that block network access.
 	// Deny rules take precedence over allow rules.
 	Denies []TargetRuleConfig `json:"denies,omitempty"`
+
+	// RateLimits configures rate limiting for AI agent request throttling.
+	// These limits are immutable at runtime (Policy Layer).
+	RateLimits *RateLimitPolicyConfig `json:"rate_limits,omitempty"`
+}
+
+// RateLimitPolicyConfig holds rate limit settings in configuration files.
+// These define the upper boundary that the Agent Layer cannot exceed.
+type RateLimitPolicyConfig struct {
+	// MaxRequestsPerSecond is the global rate limit (requests per second).
+	// 0 means no global rate limit.
+	MaxRequestsPerSecond float64 `json:"max_requests_per_second,omitempty"`
+
+	// MaxRequestsPerHostPerSecond is the per-host rate limit (requests per second).
+	// 0 means no per-host rate limit.
+	MaxRequestsPerHostPerSecond float64 `json:"max_requests_per_host_per_second,omitempty"`
 }
 
 // ProxyConfig holds the proxy configuration loaded from a JSON config file.

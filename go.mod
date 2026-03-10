@@ -9,6 +9,7 @@ require (
 	go.starlark.net v0.0.0-20260210143700-b62fd896b91b
 	golang.org/x/net v0.51.0
 	golang.org/x/sync v0.19.0
+	golang.org/x/time v0.11.0
 	modernc.org/sqlite v1.46.1
 )
 

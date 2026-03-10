@@ -384,7 +384,14 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Target scope enforcement (before WebSocket — S-1: CWE-863).
 	if blocked, reason := h.checkTargetScope(req.URL); blocked {
 		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
-		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "target_scope", logger)
+		return nil
+	}
+
+	// Rate limit enforcement (after target scope, before WebSocket).
+	if blocked := h.checkRateLimit(req.URL.Hostname()); blocked {
+		h.writeRateLimitResponse(conn, logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", logger)
 		return nil
 	}
 	if isWebSocketUpgrade(req) {
@@ -660,6 +667,27 @@ func (h *Handler) checkTargetScopeHost(hostname string, port int) (blocked bool,
 	return false, ""
 }
 
+// checkRateLimit checks whether the request is rate limited.
+// Returns true if the request should be blocked due to rate limiting.
+func (h *Handler) checkRateLimit(hostname string) bool {
+	if h.RateLimiter == nil || !h.RateLimiter.HasLimits() {
+		return false
+	}
+	return !h.RateLimiter.Allow(hostname)
+}
+
+// writeRateLimitResponse writes a 429 Too Many Requests response with
+// the standard rate limit headers.
+func (h *Handler) writeRateLimitResponse(conn net.Conn, logger *slog.Logger) {
+	body := `{"error":"rate limit exceeded","blocked_by":"rate_limit"}`
+	resp := fmt.Sprintf("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nX-Blocked-By: yorishiro-proxy\r\nX-Block-Reason: rate_limit\r\nRetry-After: 1\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		len(body), body)
+	if _, err := conn.Write([]byte(resp)); err != nil {
+		logger.Debug("failed to write rate limit response", "error", err)
+	}
+	logger.Info("request blocked by rate limit")
+}
+
 // writeBlockedResponse writes a 403 Forbidden response with a JSON body
 // indicating that the target was blocked by the target scope.
 func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, logger *slog.Logger) {
@@ -672,8 +700,8 @@ func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, log
 	logger.Info("request blocked by target scope", "target", target, "reason", reason)
 }
 
-// recordBlockedSession records a blocked request as a flow with BlockedBy="target_scope".
-func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, logger *slog.Logger) {
+// recordBlockedSession records a blocked request as a flow with the given blockedBy reason.
+func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr, blockedBy string, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
@@ -690,7 +718,7 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 		Timestamp: start,
 		Duration:  duration,
 		Tags:      smugglingTags(smuggling),
-		BlockedBy: "target_scope",
+		BlockedBy: blockedBy,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 		},

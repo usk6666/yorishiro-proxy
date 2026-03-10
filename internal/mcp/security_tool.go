@@ -14,7 +14,7 @@ import (
 // securityInput is the typed input for the security tool.
 type securityInput struct {
 	// Action specifies the security action to execute.
-	// Available actions: set_target_scope, update_target_scope, get_target_scope, test_target.
+	// Available actions: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits.
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
 	Params securityParams `json:"params"`
@@ -35,6 +35,10 @@ type securityParams struct {
 
 	// test_target: dry-run URL check
 	URL string `json:"url,omitempty" jsonschema:"URL to test against target scope rules (test_target)"`
+
+	// set_rate_limits: agent layer rate limits
+	MaxRequestsPerSecond        *float64 `json:"max_requests_per_second,omitempty" jsonschema:"global rate limit in RPS (set_rate_limits)"`
+	MaxRequestsPerHostPerSecond *float64 `json:"max_requests_per_host_per_second,omitempty" jsonschema:"per-host rate limit in RPS (set_rate_limits)"`
 }
 
 // targetRuleInput is the JSON input representation of a target rule.
@@ -46,22 +50,24 @@ type targetRuleInput struct {
 }
 
 // availableSecurityActions lists the valid action names for error messages.
-var availableSecurityActions = []string{"set_target_scope", "update_target_scope", "get_target_scope", "test_target"}
+var availableSecurityActions = []string{"set_target_scope", "update_target_scope", "get_target_scope", "test_target", "set_rate_limits", "get_rate_limits"}
 
 // registerSecurity registers the security MCP tool.
 func (s *Server) registerSecurity() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "security",
-		Description: "Configure runtime security settings including target scope rules. " +
+		Description: "Configure runtime security settings including target scope rules and rate limits. " +
 			"Target scope uses a two-layer architecture: Policy Layer (immutable, set by config) " +
 			"and Agent Layer (mutable via this tool). This tool only modifies Agent Layer rules; " +
 			"Policy Layer rules are read-only. Agent allow rules must fall within the Policy " +
-			"allow boundary. " +
+			"allow boundary. Rate limits also use the two-layer architecture. " +
 			"Available actions: " +
 			"'set_target_scope' replaces all Agent Layer allow/deny rules (use empty arrays to clear rules); " +
 			"'update_target_scope' applies incremental add/remove changes to Agent Layer rules; " +
 			"'get_target_scope' returns Policy and Agent Layer rules with enforcement mode; " +
-			"'test_target' checks a URL against current rules and reports which layer decided.",
+			"'test_target' checks a URL against current rules and reports which layer decided; " +
+			"'set_rate_limits' sets Agent Layer rate limits (max_requests_per_second, max_requests_per_host_per_second); " +
+			"'get_rate_limits' returns Policy and Agent Layer rate limits with effective values.",
 	}, s.handleSecurity)
 }
 
@@ -76,6 +82,10 @@ func (s *Server) handleSecurity(_ context.Context, _ *gomcp.CallToolRequest, inp
 		return s.handleGetTargetScope()
 	case "test_target":
 		return s.handleTestTarget(input.Params)
+	case "set_rate_limits":
+		return s.handleSetRateLimits(input.Params)
+	case "get_rate_limits":
+		return s.handleGetRateLimits()
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableSecurityActions, ", "))
 	default:
@@ -613,4 +623,64 @@ func ensureNonNilRules(rules []proxy.TargetRule) []proxy.TargetRule {
 		return []proxy.TargetRule{}
 	}
 	return rules
+}
+
+// --- Rate limit actions ---
+
+// rateLimitResult is the structured output for set_rate_limits.
+type rateLimitResult struct {
+	Status    string                `json:"status"`
+	Effective proxy.RateLimitConfig `json:"effective"`
+	Agent     proxy.RateLimitConfig `json:"agent"`
+}
+
+// getRateLimitsResult is the structured output for get_rate_limits.
+type getRateLimitsResult struct {
+	Policy    proxy.RateLimitConfig `json:"policy"`
+	Agent     proxy.RateLimitConfig `json:"agent"`
+	Effective proxy.RateLimitConfig `json:"effective"`
+}
+
+// handleSetRateLimits sets agent layer rate limits.
+func (s *Server) handleSetRateLimits(params securityParams) (*gomcp.CallToolResult, any, error) {
+	if s.deps.rateLimiter == nil {
+		return nil, nil, fmt.Errorf("rate limiter is not initialized")
+	}
+
+	cfg := proxy.RateLimitConfig{}
+	if params.MaxRequestsPerSecond != nil {
+		if *params.MaxRequestsPerSecond < 0 {
+			return nil, nil, fmt.Errorf("max_requests_per_second must be >= 0")
+		}
+		cfg.MaxRequestsPerSecond = *params.MaxRequestsPerSecond
+	}
+	if params.MaxRequestsPerHostPerSecond != nil {
+		if *params.MaxRequestsPerHostPerSecond < 0 {
+			return nil, nil, fmt.Errorf("max_requests_per_host_per_second must be >= 0")
+		}
+		cfg.MaxRequestsPerHostPerSecond = *params.MaxRequestsPerHostPerSecond
+	}
+
+	if err := s.deps.rateLimiter.SetAgentLimits(cfg); err != nil {
+		return nil, nil, fmt.Errorf("set rate limits: %w", err)
+	}
+
+	return nil, &rateLimitResult{
+		Status:    "updated",
+		Effective: s.deps.rateLimiter.EffectiveLimits(),
+		Agent:     s.deps.rateLimiter.AgentLimits(),
+	}, nil
+}
+
+// handleGetRateLimits returns the current rate limit configuration.
+func (s *Server) handleGetRateLimits() (*gomcp.CallToolResult, any, error) {
+	if s.deps.rateLimiter == nil {
+		return nil, nil, fmt.Errorf("rate limiter is not initialized")
+	}
+
+	return nil, &getRateLimitsResult{
+		Policy:    s.deps.rateLimiter.PolicyLimits(),
+		Agent:     s.deps.rateLimiter.AgentLimits(),
+		Effective: s.deps.rateLimiter.EffectiveLimits(),
+	}, nil
 }
