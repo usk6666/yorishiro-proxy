@@ -25,10 +25,10 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// --- M5 Integration Test Helpers ---
+// --- HTTP Transport Integration Test Helpers ---
 
-// m5HTTPEnv holds the components needed for an HTTP-transport MCP integration test.
-type m5HTTPEnv struct {
+// httpTransportEnv holds the components needed for an HTTP-transport MCP integration test.
+type httpTransportEnv struct {
 	mcpServer *Server
 	store     flow.Store
 	manager   *proxy.Manager
@@ -39,10 +39,10 @@ type m5HTTPEnv struct {
 	stopped   sync.Once // ensures cancel+drain only happens once
 }
 
-// setupM5HTTPEnv creates a fully-wired MCP server environment and starts
+// setupHTTPTransportEnv creates a fully-wired MCP server environment and starts
 // the Streamable HTTP transport on a dynamically-allocated loopback port.
 // If token is non-empty, Bearer token authentication is enabled.
-func setupM5HTTPEnv(t *testing.T, token string) *m5HTTPEnv {
+func setupHTTPTransportEnv(t *testing.T, token string) *httpTransportEnv {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -105,7 +105,7 @@ func setupM5HTTPEnv(t *testing.T, token string) *m5HTTPEnv {
 		t.Fatalf("HTTP server did not start: %v", err)
 	}
 
-	env := &m5HTTPEnv{
+	env := &httpTransportEnv{
 		mcpServer: mcpServer,
 		store:     store,
 		manager:   manager,
@@ -123,7 +123,7 @@ func setupM5HTTPEnv(t *testing.T, token string) *m5HTTPEnv {
 }
 
 // shutdown cancels the server context and drains the error channel exactly once.
-func (e *m5HTTPEnv) shutdown() {
+func (e *httpTransportEnv) shutdown() {
 	e.stopped.Do(func() {
 		e.cancel()
 		select {
@@ -181,14 +181,14 @@ func newHTTPMCPClient(t *testing.T, ctx context.Context, addr, token string) *go
 
 // --- Test: HTTP Transport Basic Operations ---
 
-// TestM5_HTTPTransport_BasicOperations tests the full lifecycle over Streamable HTTP:
+// TestHTTPTransport_HTTPTransport_BasicOperations tests the full lifecycle over Streamable HTTP:
 // connect -> proxy_start -> HTTP request -> query sessions -> verify.
-func TestM5_HTTPTransport_BasicOperations(t *testing.T) {
+func TestHTTPTransport_HTTPTransport_BasicOperations(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 	ctx := context.Background()
 
 	// Connect MCP client via Streamable HTTP.
@@ -288,14 +288,14 @@ func TestM5_HTTPTransport_BasicOperations(t *testing.T) {
 
 // --- Test: Multi-Client Concurrent Access ---
 
-// TestM5_MultiClient_ConcurrentAccess tests that multiple MCP clients can
+// TestHTTPTransport_MultiClient_ConcurrentAccess tests that multiple MCP clients can
 // connect simultaneously via Streamable HTTP and perform independent operations.
-func TestM5_MultiClient_ConcurrentAccess(t *testing.T) {
+func TestHTTPTransport_MultiClient_ConcurrentAccess(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 	ctx := context.Background()
 
 	// Create two independent MCP clients.
@@ -385,13 +385,13 @@ func TestM5_MultiClient_ConcurrentAccess(t *testing.T) {
 
 // --- Test: Bearer Token Authentication ---
 
-// TestM5_BearerTokenAuth tests Bearer token authentication scenarios via raw HTTP.
-func TestM5_BearerTokenAuth(t *testing.T) {
+// TestHTTPTransport_BearerTokenAuth tests Bearer token authentication scenarios via raw HTTP.
+func TestHTTPTransport_BearerTokenAuth(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 
 	// Valid MCP initialize request payload.
 	initPayload := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}`
@@ -467,14 +467,14 @@ func TestM5_BearerTokenAuth(t *testing.T) {
 	}
 }
 
-// TestM5_BearerTokenAuth_MCPClientConnect tests that an MCP client with valid
+// TestHTTPTransport_BearerTokenAuth_MCPClientConnect tests that an MCP client with valid
 // credentials can connect and call tools, while invalid credentials fail.
-func TestM5_BearerTokenAuth_MCPClientConnect(t *testing.T) {
+func TestHTTPTransport_BearerTokenAuth_MCPClientConnect(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 	ctx := context.Background()
 
 	// Valid token: client should connect and call ListTools.
@@ -512,10 +512,10 @@ func TestM5_BearerTokenAuth_MCPClientConnect(t *testing.T) {
 	}
 }
 
-// TestM5_NoAuthMiddleware_NoTokenRequired tests that the HTTP transport
+// TestHTTPTransport_NoAuthMiddleware_NoTokenRequired tests that the HTTP transport
 // works without any authentication middleware when no token is configured.
-func TestM5_NoAuthMiddleware_NoTokenRequired(t *testing.T) {
-	env := setupM5HTTPEnv(t, "") // no token
+func TestHTTPTransport_NoAuthMiddleware_NoTokenRequired(t *testing.T) {
+	env := setupHTTPTransportEnv(t, "") // no token
 	ctx := context.Background()
 
 	// Client without any auth header should connect successfully.
@@ -531,9 +531,9 @@ func TestM5_NoAuthMiddleware_NoTokenRequired(t *testing.T) {
 
 // --- Test: Graceful Shutdown ---
 
-// TestM5_GracefulShutdown tests that the HTTP server shuts down gracefully
+// TestHTTPTransport_GracefulShutdown tests that the HTTP server shuts down gracefully
 // when the context is cancelled.
-func TestM5_GracefulShutdown(t *testing.T) {
+func TestHTTPTransport_GracefulShutdown(t *testing.T) {
 	// Override shutdown timeout for faster test.
 	origTimeout := shutdownTimeout
 	shutdownTimeout = 2 * time.Second
@@ -543,7 +543,7 @@ func TestM5_GracefulShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 	ctx := context.Background()
 
 	// Connect MCP client and verify it works.
@@ -563,8 +563,8 @@ func TestM5_GracefulShutdown(t *testing.T) {
 	}
 }
 
-// TestM5_GracefulShutdown_WithActiveProxy tests shutdown with an active proxy.
-func TestM5_GracefulShutdown_WithActiveProxy(t *testing.T) {
+// TestHTTPTransport_GracefulShutdown_WithActiveProxy tests shutdown with an active proxy.
+func TestHTTPTransport_GracefulShutdown_WithActiveProxy(t *testing.T) {
 	origTimeout := shutdownTimeout
 	shutdownTimeout = 2 * time.Second
 	t.Cleanup(func() { shutdownTimeout = origTimeout })
@@ -573,7 +573,7 @@ func TestM5_GracefulShutdown_WithActiveProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 	ctx := context.Background()
 
 	// Start proxy via MCP.
@@ -591,14 +591,14 @@ func TestM5_GracefulShutdown_WithActiveProxy(t *testing.T) {
 
 // --- Test: HTTP Transport Without Auth (Optional Middleware) ---
 
-// TestM5_HTTPTransport_ToolOperations tests various tool operations over HTTP
+// TestHTTPTransport_HTTPTransport_ToolOperations tests various tool operations over HTTP
 // transport: configure, execute delete_flows.
-func TestM5_HTTPTransport_ToolOperations(t *testing.T) {
+func TestHTTPTransport_HTTPTransport_ToolOperations(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 	ctx := context.Background()
 
 	cs := newHTTPMCPClient(t, ctx, env.addr, token)
@@ -684,14 +684,14 @@ func TestM5_HTTPTransport_ToolOperations(t *testing.T) {
 
 // --- Test: Multiple Clients with Independent Tool Calls ---
 
-// TestM5_MultiClient_IndependentToolCalls tests that multiple clients can
+// TestHTTPTransport_MultiClient_IndependentToolCalls tests that multiple clients can
 // independently call MCP tools without interference.
-func TestM5_MultiClient_IndependentToolCalls(t *testing.T) {
+func TestHTTPTransport_MultiClient_IndependentToolCalls(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 	ctx := context.Background()
 
 	const numClients = 3
@@ -752,11 +752,11 @@ func TestM5_MultiClient_IndependentToolCalls(t *testing.T) {
 
 // --- Test: stdio + HTTP Simultaneous Operation ---
 
-// TestM5_StdioAndHTTP_SharedState tests that stdio and HTTP transports share
+// TestHTTPTransport_StdioAndHTTP_SharedState tests that stdio and HTTP transports share
 // state correctly. We simulate this by connecting one client via in-memory
 // transport (simulating stdio) and another via HTTP transport, then verifying
 // they share the same MCP server state.
-func TestM5_StdioAndHTTP_SharedState(t *testing.T) {
+func TestHTTPTransport_StdioAndHTTP_SharedState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -899,9 +899,9 @@ func TestM5_StdioAndHTTP_SharedState(t *testing.T) {
 
 // --- Test: HTTP Server Address Validation ---
 
-// TestM5_HTTPServer_RejectsNonLoopback tests that RunHTTP rejects non-loopback
+// TestHTTPTransport_HTTPServer_RejectsNonLoopback tests that RunHTTP rejects non-loopback
 // addresses. This is tested at the unit level already but we verify integration.
-func TestM5_HTTPServer_RejectsNonLoopback(t *testing.T) {
+func TestHTTPTransport_HTTPServer_RejectsNonLoopback(t *testing.T) {
 	s := NewServer(context.Background(), nil, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -927,15 +927,15 @@ func TestM5_HTTPServer_RejectsNonLoopback(t *testing.T) {
 
 // --- Test: Generate Token ---
 
-// TestM5_GenerateToken_Integration tests that GenerateToken produces usable
+// TestHTTPTransport_GenerateToken_Integration tests that GenerateToken produces usable
 // tokens for the auth middleware.
-func TestM5_GenerateToken_Integration(t *testing.T) {
+func TestHTTPTransport_GenerateToken_Integration(t *testing.T) {
 	token, err := GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
 
-	env := setupM5HTTPEnv(t, token)
+	env := setupHTTPTransportEnv(t, token)
 
 	// Connect with the generated token.
 	ctx := context.Background()
