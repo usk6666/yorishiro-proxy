@@ -7,7 +7,6 @@
       "Bash(./node_modules/.bin/vite build:*)",
       "Bash(cat:*)",
       "Bash(cd:*)",
-      "Bash(find:*)",
       "Bash(gh issue list:*)",
       "Bash(gh issue view:*)",
       "Bash(gh pr checks:*)",
@@ -148,6 +147,7 @@
     ],
     "ask": [
       "Bash(curl:*)",
+      "Bash(find:*)",
       "Bash(git branch -D:*)",
       "Bash(git branch -d:*)",
       "Bash(git rebase:*)",
@@ -165,19 +165,7 @@
       "Write(**/secrets/**)"
     ]
   },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/check-indirect-exec.py"
-          }
-        ]
-      }
-    ]
-  },
+  "hooks": {},
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "yorishiro-proxy"
