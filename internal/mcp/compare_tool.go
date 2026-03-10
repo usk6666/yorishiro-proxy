@@ -1,11 +1,13 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -220,7 +222,7 @@ func firstHeaderValue(vals []string) string {
 // buildBodyDiff constructs the body diff section of the compare result.
 func buildBodyDiff(recvA, recvB *flow.Message) *bodyDiff {
 	contentType := detectResponseContentType(recvA, recvB)
-	identical := bodyBytesEqual(recvA.Body, recvB.Body)
+	identical := bytes.Equal(recvA.Body, recvB.Body)
 
 	diff := &bodyDiff{
 		ContentType: contentType,
@@ -256,33 +258,16 @@ func getHeaderValues(headers map[string][]string, key string) []string {
 	return nil
 }
 
-// bodyBytesEqual compares two byte slices for equality.
-func bodyBytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // isJSONContentType checks if a content type string indicates JSON.
 func isJSONContentType(ct string) bool {
 	// Match "application/json" and variants like "application/json; charset=utf-8".
 	if ct == "" {
 		return false
 	}
-	// Simple check: contains "json" in the media type.
-	for i := 0; i < len(ct); i++ {
-		if ct[i] == ';' {
-			ct = ct[:i]
-			break
-		}
-	}
-	return ct == "application/json" || ct == "text/json"
+	// Strip parameters (e.g. "; charset=utf-8").
+	mediaType, _, _ := strings.Cut(ct, ";")
+	mediaType = strings.TrimSpace(mediaType)
+	return mediaType == "application/json" || mediaType == "text/json" || strings.HasSuffix(mediaType, "+json")
 }
 
 // computeJSONKeyDiff computes the key-level diff between two JSON objects.

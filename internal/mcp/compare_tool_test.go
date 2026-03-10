@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/url"
@@ -498,6 +499,9 @@ func TestIsJSONContentType(t *testing.T) {
 		{"application/json", true},
 		{"application/json; charset=utf-8", true},
 		{"text/json", true},
+		{"application/vnd.api+json", true},
+		{"application/hal+json", true},
+		{"application/vnd.api+json; charset=utf-8", true},
 		{"text/html", false},
 		{"text/plain", false},
 		{"application/xml", false},
@@ -654,7 +658,7 @@ func TestComputeJSONKeyDiff(t *testing.T) {
 	}
 }
 
-func TestBodyBytesEqual(t *testing.T) {
+func TestBytesEqual(t *testing.T) {
 	tests := []struct {
 		name string
 		a, b []byte
@@ -669,8 +673,8 @@ func TestBodyBytesEqual(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := bodyBytesEqual(tt.a, tt.b); got != tt.want {
-				t.Errorf("bodyBytesEqual(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+			if got := bytes.Equal(tt.a, tt.b); got != tt.want {
+				t.Errorf("bytes.Equal(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
 			}
 		})
 	}
