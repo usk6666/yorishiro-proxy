@@ -64,6 +64,8 @@ type queryFilter struct {
 	Technology string `json:"technology,omitempty" jsonschema:"technology name filter for flows (e.g. nginx, wordpress)"`
 	// BodyContains filters fuzz_results by response body substring.
 	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
+	// OutliersOnly when true returns only outlier results (fuzz_results).
+	OutliersOnly bool `json:"outliers_only,omitempty" jsonschema:"return only outlier results (fuzz_results)"`
 	// Status filters fuzz_jobs by status (e.g. "running", "completed").
 	Status string `json:"status,omitempty" jsonschema:"fuzz job status filter (e.g. running, completed)"`
 	// Tag filters fuzz_jobs by tag (exact match).
@@ -84,7 +86,7 @@ func (s *Server) registerQuery() {
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
 			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop), state (active, complete, error), and technology (e.g. nginx, wordpress); " +
 			"messages by direction (send or receive); " +
-			"fuzz_jobs by status and tag; fuzz_results by status_code and body_contains. " +
+			"fuzz_jobs by status and tag; fuzz_results by status_code, body_contains, and outliers_only. " +
 			"Flows include protocol_summary with protocol-specific information. " +
 			"Flow state indicates lifecycle: 'active' (in progress), 'complete' (finished), 'error' (failed with 502 etc.). " +
 			"Streaming flows (flow_type != unary) include message_preview with the first 10 messages. " +

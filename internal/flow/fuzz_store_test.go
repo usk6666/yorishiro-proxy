@@ -588,6 +588,143 @@ func TestListFuzzResults_SortBy(t *testing.T) {
 	}
 }
 
+func TestGetFuzzResultRawStats(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	job := &FuzzJob{
+		FlowID:    fl.ID,
+		Config:    `{}`,
+		Status:    "completed",
+		CreatedAt: time.Now().UTC(),
+		Total:     3,
+	}
+	if err := store.SaveFuzzJob(ctx, job); err != nil {
+		t.Fatalf("SaveFuzzJob: %v", err)
+	}
+
+	// Create results with varying metrics.
+	for i, tc := range []struct {
+		sc, rl, dur int
+	}{
+		{200, 100, 50},
+		{401, 20, 30},
+		{200, 150, 200},
+	} {
+		s := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+		if err := store.SaveFlow(ctx, s); err != nil {
+			t.Fatalf("SaveFlow: %v", err)
+		}
+		r := &FuzzResult{
+			FuzzID: job.ID, IndexNum: i, FlowID: s.ID,
+			Payloads: `{}`, StatusCode: tc.sc,
+			ResponseLength: tc.rl, DurationMs: tc.dur,
+		}
+		if err := store.SaveFuzzResult(ctx, r); err != nil {
+			t.Fatalf("SaveFuzzResult: %v", err)
+		}
+	}
+
+	rows, err := store.GetFuzzResultRawStats(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetFuzzResultRawStats: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+
+	// Verify ordering (by index_num).
+	if rows[0].StatusCode != 200 || rows[0].ResponseLength != 100 || rows[0].DurationMs != 50 {
+		t.Errorf("row[0] = %+v, unexpected", rows[0])
+	}
+	if rows[1].StatusCode != 401 || rows[1].ResponseLength != 20 || rows[1].DurationMs != 30 {
+		t.Errorf("row[1] = %+v, unexpected", rows[1])
+	}
+	if rows[2].StatusCode != 200 || rows[2].ResponseLength != 150 || rows[2].DurationMs != 200 {
+		t.Errorf("row[2] = %+v, unexpected", rows[2])
+	}
+
+	// Empty job returns empty.
+	rows, err = store.GetFuzzResultRawStats(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetFuzzResultRawStats(nonexistent): %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("got %d rows for nonexistent job, want 0", len(rows))
+	}
+}
+
+func TestListFuzzResults_OutliersOnly(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	job := &FuzzJob{
+		FlowID:    fl.ID,
+		Config:    `{}`,
+		Status:    "completed",
+		CreatedAt: time.Now().UTC(),
+		Total:     3,
+	}
+	if err := store.SaveFuzzJob(ctx, job); err != nil {
+		t.Fatalf("SaveFuzzJob: %v", err)
+	}
+
+	// Create 3 results; track their IDs.
+	var resultIDs []string
+	for i := range 3 {
+		s := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+		if err := store.SaveFlow(ctx, s); err != nil {
+			t.Fatalf("SaveFlow: %v", err)
+		}
+		r := &FuzzResult{
+			FuzzID: job.ID, IndexNum: i, FlowID: s.ID,
+			Payloads: `{}`, StatusCode: 200,
+		}
+		if err := store.SaveFuzzResult(ctx, r); err != nil {
+			t.Fatalf("SaveFuzzResult: %v", err)
+		}
+		resultIDs = append(resultIDs, r.ID)
+	}
+
+	// OutliersOnly with specific IDs.
+	outlierSet := map[string]bool{resultIDs[1]: true}
+	got, err := store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{
+		OutliersOnly: true,
+		OutlierIDs:   outlierSet,
+	})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1", len(got))
+	}
+	if got[0].ID != resultIDs[1] {
+		t.Errorf("result ID = %q, want %q", got[0].ID, resultIDs[1])
+	}
+
+	// OutliersOnly with empty set returns nothing.
+	got, err = store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{
+		OutliersOnly: true,
+		OutlierIDs:   map[string]bool{},
+	})
+	if err != nil {
+		t.Fatalf("ListFuzzResults: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d results with empty outlier set, want 0", len(got))
+	}
+}
+
 func TestListFuzzResults_BodyContains(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

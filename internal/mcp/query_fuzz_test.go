@@ -502,19 +502,27 @@ func TestQuery_FuzzResults_WithData(t *testing.T) {
 	if out.Summary == nil {
 		t.Fatal("summary is nil")
 	}
-	if out.Summary.StatusDistribution["200"] != 2 {
-		t.Errorf("status_distribution[200] = %d, want 2", out.Summary.StatusDistribution["200"])
+	if out.Summary.TotalResults != 3 {
+		t.Errorf("total_results = %d, want 3", out.Summary.TotalResults)
 	}
-	if out.Summary.StatusDistribution["401"] != 1 {
-		t.Errorf("status_distribution[401] = %d, want 1", out.Summary.StatusDistribution["401"])
+	if out.Summary.StatusCodeDistribution["200"] != 2 {
+		t.Errorf("status_code_distribution[200] = %d, want 2", out.Summary.StatusCodeDistribution["200"])
 	}
-	expectedTotal := 50 + 30 + 45
-	if out.Summary.TotalDurationMs != expectedTotal {
-		t.Errorf("total_duration_ms = %d, want %d", out.Summary.TotalDurationMs, expectedTotal)
+	if out.Summary.StatusCodeDistribution["401"] != 1 {
+		t.Errorf("status_code_distribution[401] = %d, want 1", out.Summary.StatusCodeDistribution["401"])
 	}
-	expectedAvg := expectedTotal / 3
-	if out.Summary.AvgDurationMs != expectedAvg {
-		t.Errorf("avg_duration_ms = %d, want %d", out.Summary.AvgDurationMs, expectedAvg)
+	if out.Summary.TimingMs == nil {
+		t.Fatal("timing_ms is nil")
+	}
+	if out.Summary.BodyLength == nil {
+		t.Fatal("body_length is nil")
+	}
+	if out.Summary.Outliers == nil {
+		t.Fatal("outliers is nil")
+	}
+	// 401 is the outlier by status code (200 is baseline).
+	if len(out.Summary.Outliers.ByStatusCode) != 1 {
+		t.Errorf("outliers.by_status_code len = %d, want 1", len(out.Summary.Outliers.ByStatusCode))
 	}
 }
 
@@ -761,7 +769,7 @@ func TestQuery_FuzzResults_SummaryWithFilter(t *testing.T) {
 	seedFuzzResult(t, store, job.ID, 1, 401, 200, `{}`)
 	seedFuzzResult(t, store, job.ID, 2, 200, 150, `{}`)
 
-	// Filter by status_code=200; summary should only cover matching results.
+	// Filter by status_code=200; summary is computed from ALL results (pre-filter).
 	result := callQueryRaw(t, cs, map[string]any{
 		"resource": "fuzz_results",
 		"fuzz_id":  job.ID,
@@ -777,18 +785,389 @@ func TestQuery_FuzzResults_SummaryWithFilter(t *testing.T) {
 	if out.Summary == nil {
 		t.Fatal("summary is nil")
 	}
-	if out.Summary.StatusDistribution["200"] != 2 {
-		t.Errorf("status_distribution[200] = %d, want 2", out.Summary.StatusDistribution["200"])
+	// Summary covers all 3 results, not just the filtered ones.
+	if out.Summary.TotalResults != 3 {
+		t.Errorf("total_results = %d, want 3", out.Summary.TotalResults)
 	}
-	if _, ok := out.Summary.StatusDistribution["401"]; ok {
-		t.Error("status_distribution should not contain 401 when filtered")
+	if out.Summary.StatusCodeDistribution["200"] != 2 {
+		t.Errorf("status_code_distribution[200] = %d, want 2", out.Summary.StatusCodeDistribution["200"])
 	}
-	if out.Summary.TotalDurationMs != 250 {
-		t.Errorf("total_duration_ms = %d, want 250", out.Summary.TotalDurationMs)
+	if out.Summary.StatusCodeDistribution["401"] != 1 {
+		t.Errorf("status_code_distribution[401] = %d, want 1", out.Summary.StatusCodeDistribution["401"])
 	}
-	if out.Summary.AvgDurationMs != 125 {
-		t.Errorf("avg_duration_ms = %d, want 125", out.Summary.AvgDurationMs)
+	// But the paginated results should be filtered.
+	if out.Count != 2 {
+		t.Errorf("count = %d, want 2 (filtered)", out.Count)
 	}
+}
+
+// --- aggregate statistics and outlier detection tests ---
+
+func TestComputeDistributionStats(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []float64
+		want   *distributionStats
+	}{
+		{
+			name:   "empty",
+			values: []float64{},
+			want:   nil,
+		},
+		{
+			name:   "single value",
+			values: []float64{42},
+			want:   &distributionStats{Min: 42, Max: 42, Median: 42, Stddev: 0},
+		},
+		{
+			name:   "two values",
+			values: []float64{10, 20},
+			want:   &distributionStats{Min: 10, Max: 20, Median: 15, Stddev: 5},
+		},
+		{
+			name:   "odd count",
+			values: []float64{1, 3, 5},
+			want:   &distributionStats{Min: 1, Max: 5, Median: 3, Stddev: 1.6},
+		},
+		{
+			name:   "even count",
+			values: []float64{1, 2, 3, 4},
+			want:   &distributionStats{Min: 1, Max: 4, Median: 2.5, Stddev: 1.1},
+		},
+		{
+			name:   "all same",
+			values: []float64{100, 100, 100},
+			want:   &distributionStats{Min: 100, Max: 100, Median: 100, Stddev: 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeDistributionStats(tt.values)
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("want nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("got nil, want non-nil")
+			}
+			if got.Min != tt.want.Min {
+				t.Errorf("min = %v, want %v", got.Min, tt.want.Min)
+			}
+			if got.Max != tt.want.Max {
+				t.Errorf("max = %v, want %v", got.Max, tt.want.Max)
+			}
+			if got.Median != tt.want.Median {
+				t.Errorf("median = %v, want %v", got.Median, tt.want.Median)
+			}
+			if got.Stddev != tt.want.Stddev {
+				t.Errorf("stddev = %v, want %v", got.Stddev, tt.want.Stddev)
+			}
+		})
+	}
+}
+
+func TestFindMostFrequent(t *testing.T) {
+	tests := []struct {
+		name   string
+		counts map[int]int
+		want   int
+	}{
+		{
+			name:   "single entry",
+			counts: map[int]int{200: 5},
+			want:   200,
+		},
+		{
+			name:   "clear winner",
+			counts: map[int]int{200: 10, 404: 3, 500: 1},
+			want:   200,
+		},
+		{
+			name:   "tie breaks to smaller key",
+			counts: map[int]int{200: 5, 500: 5},
+			want:   200,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := findMostFrequent(tt.counts)
+			if got != tt.want {
+				t.Errorf("findMostFrequent() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCollectAllOutlierIDs(t *testing.T) {
+	t.Run("nil summary", func(t *testing.T) {
+		ids := collectAllOutlierIDs(nil)
+		if ids != nil {
+			t.Errorf("want nil, got %v", ids)
+		}
+	})
+
+	t.Run("nil outliers", func(t *testing.T) {
+		ids := collectAllOutlierIDs(&queryFuzzResultsSummary{})
+		if ids != nil {
+			t.Errorf("want nil, got %v", ids)
+		}
+	})
+
+	t.Run("merges all categories", func(t *testing.T) {
+		summary := &queryFuzzResultsSummary{
+			Outliers: &outlierSets{
+				ByStatusCode: []string{"a", "b"},
+				ByBodyLength: []string{"b", "c"},
+				ByTiming:     []string{"d"},
+			},
+		}
+		ids := collectAllOutlierIDs(summary)
+		if len(ids) != 4 {
+			t.Errorf("len = %d, want 4 (a, b, c, d)", len(ids))
+		}
+		for _, id := range []string{"a", "b", "c", "d"} {
+			if !ids[id] {
+				t.Errorf("missing id %q", id)
+			}
+		}
+	})
+}
+
+func TestQuery_FuzzResults_AggregateStatistics(t *testing.T) {
+	store := newTestFuzzStore(t)
+	cs := setupFuzzQueryTestSession(t, store, store)
+
+	job := seedFuzzJob(t, store, "completed", "stats-test")
+	// 5 results with 200, 1 with 403 (outlier by status code).
+	// Body lengths: 100, 100, 100, 100, 100, 5000 (5000 is an outlier).
+	// Timings: 50, 55, 45, 60, 50, 2000 (2000 is an outlier).
+	seedFuzzResultWithLength(t, store, job.ID, 0, 200, 50, 100, `ok`)
+	seedFuzzResultWithLength(t, store, job.ID, 1, 200, 55, 100, `ok`)
+	seedFuzzResultWithLength(t, store, job.ID, 2, 200, 45, 100, `ok`)
+	seedFuzzResultWithLength(t, store, job.ID, 3, 200, 60, 100, `ok`)
+	seedFuzzResultWithLength(t, store, job.ID, 4, 200, 50, 100, `ok`)
+	seedFuzzResultWithLength(t, store, job.ID, 5, 403, 2000, 5000, `forbidden`)
+
+	result := callQueryRaw(t, cs, map[string]any{
+		"resource": "fuzz_results",
+		"fuzz_id":  job.ID,
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryFuzzResultsResult
+	unmarshalQueryResultRaw(t, result, &out)
+
+	s := out.Summary
+	if s == nil {
+		t.Fatal("summary is nil")
+	}
+
+	// Total results.
+	if s.TotalResults != 6 {
+		t.Errorf("total_results = %d, want 6", s.TotalResults)
+	}
+
+	// Status code distribution.
+	if s.StatusCodeDistribution["200"] != 5 {
+		t.Errorf("status_code_distribution[200] = %d, want 5", s.StatusCodeDistribution["200"])
+	}
+	if s.StatusCodeDistribution["403"] != 1 {
+		t.Errorf("status_code_distribution[403] = %d, want 1", s.StatusCodeDistribution["403"])
+	}
+
+	// Body length stats.
+	if s.BodyLength == nil {
+		t.Fatal("body_length is nil")
+	}
+	if s.BodyLength.Min != 100 {
+		t.Errorf("body_length.min = %v, want 100", s.BodyLength.Min)
+	}
+	if s.BodyLength.Max != 5000 {
+		t.Errorf("body_length.max = %v, want 5000", s.BodyLength.Max)
+	}
+
+	// Timing stats.
+	if s.TimingMs == nil {
+		t.Fatal("timing_ms is nil")
+	}
+	if s.TimingMs.Min != 45 {
+		t.Errorf("timing_ms.min = %v, want 45", s.TimingMs.Min)
+	}
+	if s.TimingMs.Max != 2000 {
+		t.Errorf("timing_ms.max = %v, want 2000", s.TimingMs.Max)
+	}
+
+	// Outlier detection.
+	if s.Outliers == nil {
+		t.Fatal("outliers is nil")
+	}
+	// Status code outlier: the 403 result.
+	if len(s.Outliers.ByStatusCode) != 1 {
+		t.Errorf("outliers.by_status_code len = %d, want 1", len(s.Outliers.ByStatusCode))
+	}
+	// Body length outlier: the 5000 result.
+	if len(s.Outliers.ByBodyLength) != 1 {
+		t.Errorf("outliers.by_body_length len = %d, want 1", len(s.Outliers.ByBodyLength))
+	}
+	// Timing outlier: the 2000ms result.
+	if len(s.Outliers.ByTiming) != 1 {
+		t.Errorf("outliers.by_timing len = %d, want 1", len(s.Outliers.ByTiming))
+	}
+}
+
+func TestQuery_FuzzResults_OutliersOnly(t *testing.T) {
+	store := newTestFuzzStore(t)
+	cs := setupFuzzQueryTestSession(t, store, store)
+
+	job := seedFuzzJob(t, store, "completed", "outlier-test")
+	// Majority 200 status, one 500 outlier.
+	seedFuzzResult(t, store, job.ID, 0, 200, 50, `ok`)
+	seedFuzzResult(t, store, job.ID, 1, 200, 50, `ok`)
+	seedFuzzResult(t, store, job.ID, 2, 200, 50, `ok`)
+	seedFuzzResult(t, store, job.ID, 3, 200, 50, `ok`)
+	seedFuzzResult(t, store, job.ID, 4, 500, 50, `error`)
+
+	result := callQueryRaw(t, cs, map[string]any{
+		"resource": "fuzz_results",
+		"fuzz_id":  job.ID,
+		"filter":   map[string]any{"outliers_only": true},
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryFuzzResultsResult
+	unmarshalQueryResultRaw(t, result, &out)
+
+	// Only the 500 status code result should appear.
+	if out.Count < 1 {
+		t.Errorf("count = %d, want >= 1 (at least status code outlier)", out.Count)
+	}
+	found500 := false
+	for _, r := range out.Results {
+		if r.StatusCode == 500 {
+			found500 = true
+		}
+	}
+	if !found500 {
+		t.Error("outliers_only should include the 500 status code result")
+	}
+
+	// Summary should still cover all results.
+	if out.Summary.TotalResults != 5 {
+		t.Errorf("summary.total_results = %d, want 5", out.Summary.TotalResults)
+	}
+}
+
+func TestQuery_FuzzResults_NoOutliers(t *testing.T) {
+	store := newTestFuzzStore(t)
+	cs := setupFuzzQueryTestSession(t, store, store)
+
+	job := seedFuzzJob(t, store, "completed", "no-outlier")
+	// All identical: no outliers.
+	seedFuzzResult(t, store, job.ID, 0, 200, 50, `ok`)
+	seedFuzzResult(t, store, job.ID, 1, 200, 50, `ok`)
+	seedFuzzResult(t, store, job.ID, 2, 200, 50, `ok`)
+
+	result := callQueryRaw(t, cs, map[string]any{
+		"resource": "fuzz_results",
+		"fuzz_id":  job.ID,
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryFuzzResultsResult
+	unmarshalQueryResultRaw(t, result, &out)
+
+	if out.Summary.Outliers == nil {
+		t.Fatal("outliers should not be nil")
+	}
+	if len(out.Summary.Outliers.ByStatusCode) != 0 {
+		t.Errorf("by_status_code len = %d, want 0", len(out.Summary.Outliers.ByStatusCode))
+	}
+	if len(out.Summary.Outliers.ByBodyLength) != 0 {
+		t.Errorf("by_body_length len = %d, want 0", len(out.Summary.Outliers.ByBodyLength))
+	}
+	if len(out.Summary.Outliers.ByTiming) != 0 {
+		t.Errorf("by_timing len = %d, want 0", len(out.Summary.Outliers.ByTiming))
+	}
+}
+
+func TestQuery_FuzzResults_OutliersOnlyEmpty(t *testing.T) {
+	store := newTestFuzzStore(t)
+	cs := setupFuzzQueryTestSession(t, store, store)
+
+	job := seedFuzzJob(t, store, "completed", "no-outlier")
+	// All identical: no outliers. outliers_only should return empty.
+	seedFuzzResult(t, store, job.ID, 0, 200, 50, `ok`)
+	seedFuzzResult(t, store, job.ID, 1, 200, 50, `ok`)
+
+	result := callQueryRaw(t, cs, map[string]any{
+		"resource": "fuzz_results",
+		"fuzz_id":  job.ID,
+		"filter":   map[string]any{"outliers_only": true},
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryFuzzResultsResult
+	unmarshalQueryResultRaw(t, result, &out)
+
+	if out.Count != 0 {
+		t.Errorf("count = %d, want 0 (no outliers)", out.Count)
+	}
+}
+
+// seedFuzzResultWithLength creates a fuzz result with explicit response length.
+func seedFuzzResultWithLength(t *testing.T, store *flow.SQLiteStore, fuzzID string, index, statusCode, durationMs, responseLength int, body string) *flow.FuzzResult {
+	t.Helper()
+	ctx := context.Background()
+
+	fl := &flow.Flow{
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now(),
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	msg := &flow.Message{
+		ID:         fl.ID + "-recv",
+		FlowID:     fl.ID,
+		Sequence:   0,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: statusCode,
+		Body:       []byte(body),
+	}
+	if err := store.AppendMessage(ctx, msg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	result := &flow.FuzzResult{
+		FuzzID:         fuzzID,
+		IndexNum:       index,
+		FlowID:         fl.ID,
+		Payloads:       `{"pos-0":"payload-` + fmt.Sprintf("%d", index) + `"}`,
+		StatusCode:     statusCode,
+		ResponseLength: responseLength,
+		DurationMs:     durationMs,
+	}
+
+	if err := store.SaveFuzzResult(ctx, result); err != nil {
+		t.Fatalf("SaveFuzzResult: %v", err)
+	}
+	return result
 }
 
 func TestQuery_FuzzResults_ErrorField(t *testing.T) {
