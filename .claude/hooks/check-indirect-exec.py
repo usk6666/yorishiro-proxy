@@ -19,6 +19,24 @@ import bashlex
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.realpath(os.path.join(_SCRIPT_DIR, "..", ".."))
 
+# If running inside a worktree, also allow the main repository root.
+# Worktrees have a .git file (not directory) pointing to the main repo.
+_MAIN_REPO_ROOT = None
+_dot_git = os.path.join(PROJECT_ROOT, ".git")
+if os.path.isfile(_dot_git):
+    # .git file contains: "gitdir: /path/to/main/.git/worktrees/<name>"
+    try:
+        with open(_dot_git) as f:
+            gitdir_line = f.read().strip()
+        if gitdir_line.startswith("gitdir:"):
+            gitdir = gitdir_line.split(":", 1)[1].strip()
+            # Navigate from .git/worktrees/<name> → main repo root
+            _MAIN_REPO_ROOT = os.path.realpath(
+                os.path.join(gitdir, "..", "..", "..")
+            )
+    except OSError:
+        pass
+
 # Commands that are inherently command launchers
 LAUNCHER_COMMANDS = frozenset(
     {
@@ -192,10 +210,15 @@ def check_cd_target(words, cwd):
     else:
         resolved = os.path.realpath(os.path.join(cwd, target))
 
-    # Check if resolved path is under PROJECT_ROOT
+    # Check if resolved path is under PROJECT_ROOT (or main repo root for worktrees)
     # Use trailing separator to prevent prefix match on sibling directories
     # e.g., /home/user/project-other should not match /home/user/project
-    if not (resolved == PROJECT_ROOT or resolved.startswith(PROJECT_ROOT + os.sep)):
+    def _is_under(path, root):
+        return path == root or path.startswith(root + os.sep)
+
+    if not _is_under(resolved, PROJECT_ROOT) and not (
+        _MAIN_REPO_ROOT and _is_under(resolved, _MAIN_REPO_ROOT)
+    ):
         return f"'cd {target}' resolves to '{resolved}' (outside project root)"
 
     return None
