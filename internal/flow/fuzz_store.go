@@ -92,6 +92,9 @@ type FuzzResultListOptions struct {
 	// BodyContains filters results whose response body (in the linked flow message)
 	// contains this substring. Empty string means no filter.
 	BodyContains string
+	// ResultIDs filters results to only those whose ID is in this set.
+	// When non-nil and non-empty, an IN clause is added to the query.
+	ResultIDs []string
 	// SortBy specifies the column to sort results by (e.g. "status_code", "duration_ms", "index_num").
 	// Default is "index_num".
 	SortBy string
@@ -233,6 +236,17 @@ func fuzzResultWhereClause(fuzzID string, opts FuzzResultListOptions) (string, [
 			  AND INSTR(CAST(m.body AS TEXT), ?) > 0
 		)`
 		args = append(args, opts.BodyContains)
+	}
+	if len(opts.ResultIDs) > 0 {
+		placeholders := ""
+		for i, id := range opts.ResultIDs {
+			if i > 0 {
+				placeholders += ", "
+			}
+			placeholders += "?"
+			args = append(args, id)
+		}
+		where += " AND id IN (" + placeholders + ")"
 	}
 	return where, args
 }

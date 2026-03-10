@@ -24,6 +24,7 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **technology** (string): Technology name filter for flows (case-insensitive substring match, e.g. `"nginx"`, `"wordpress"`).
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
+- **outliers_only** (boolean): Return only outlier fuzz results (detected by status_code, body_length, or timing deviation).
 - **status** (string): Job status filter for fuzz_jobs (e.g. `"running"`, `"completed"`).
 - **tag** (string): Job tag filter for fuzz_jobs (exact match).
 
@@ -243,11 +244,21 @@ Returns: `hosts[]` (host, technologies[] with name, version, category, confidenc
 Categories include: `web_server`, `framework`, `language`, `cms`, `cdn`, `waf`, `js_framework`.
 
 ### fuzz_results
-Get results for a specific fuzz job with filtering, sorting, pagination, and aggregate summary.
+Get results for a specific fuzz job with filtering, sorting, pagination, aggregate statistics, and outlier detection.
 
-Requires: `fuzz_id` (fuzz job ID). Supports `filter.status_code`, `filter.body_contains`, `fields`, `sort_by`, `limit`, and `offset`.
+Requires: `fuzz_id` (fuzz job ID). Supports `filter.status_code`, `filter.body_contains`, `filter.outliers_only`, `fields`, `sort_by`, `limit`, and `offset`.
 
-Returns: `results[]` (id, fuzz_id, index, flow_id, payloads, status_code, response_length, duration_ms, error), `count`, `total`, `summary` (status_distribution, avg_duration_ms, total_duration_ms).
+The `summary` includes:
+- **total_results**: Total number of matching results.
+- **statistics**: Aggregate statistics with `status_code_distribution` (map of status code to count), `body_length` and `timing_ms` distributions (each with `min`, `max`, `median`, `stddev`).
+- **outliers**: Result IDs that deviate from the baseline:
+  - `by_status_code`: Results with a status code different from the most frequent one.
+  - `by_body_length`: Results with body length outside median +/- 2 standard deviations.
+  - `by_timing`: Results with timing outside median +/- 2 standard deviations.
+
+Use `filter.outliers_only: true` to return only outlier results.
+
+Returns: `results[]` (id, fuzz_id, index, flow_id, payloads, status_code, response_length, duration_ms, error), `count`, `total`, `summary` (total_results, statistics, outliers).
 
 ### List fuzz jobs
 ```json
@@ -282,5 +293,22 @@ Returns: `results[]` (id, fuzz_id, index, flow_id, payloads, status_code, respon
   "sort_by": "status_code",
   "limit": 50,
   "offset": 0
+}
+```
+
+### Get fuzz results with aggregate statistics and outliers
+```json
+{
+  "resource": "fuzz_results",
+  "fuzz_id": "fuzz-789"
+}
+```
+
+### Get only outlier fuzz results
+```json
+{
+  "resource": "fuzz_results",
+  "fuzz_id": "fuzz-789",
+  "filter": {"outliers_only": true}
 }
 ```
