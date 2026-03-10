@@ -27,23 +27,23 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// --- M18 Integration: Technology Stack Detection ---
+// --- Technology Stack Detection ---
 
-// m18Env holds all components for an M18 integration test with fingerprint detection.
-type m18Env struct {
+// techFuzzEnv holds all components for a tech/fuzz integration test with fingerprint detection.
+type techFuzzEnv struct {
 	cs          *gomcp.ClientSession
 	store       flow.Store
 	manager     *proxy.Manager
 	httpHandler *protohttp.Handler
 }
 
-// setupM18Env creates a fully-wired MCP test environment with fingerprint
+// setupTechFuzzEnv creates a fully-wired MCP test environment with fingerprint
 // detection enabled on the HTTP handler.
-func setupM18Env(t *testing.T) *m18Env {
+func setupTechFuzzEnv(t *testing.T) *techFuzzEnv {
 	t.Helper()
 	ctx := context.Background()
 
-	dbPath := filepath.Join(t.TempDir(), "m18-integration.db")
+	dbPath := filepath.Join(t.TempDir(), "tech-fuzz-integration.db")
 	logger := testutil.DiscardLogger()
 	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
 	if err != nil {
@@ -75,7 +75,7 @@ func setupM18Env(t *testing.T) *m18Env {
 	t.Cleanup(func() { ss.Close() })
 
 	client := gomcp.NewClient(&gomcp.Implementation{
-		Name:    "m18-test-client",
+		Name:    "tech-fuzz-test-client",
 		Version: "0.1",
 	}, nil)
 	cs, err := client.Connect(ctx, ct, nil)
@@ -84,7 +84,7 @@ func setupM18Env(t *testing.T) *m18Env {
 	}
 	t.Cleanup(func() { cs.Close() })
 
-	return &m18Env{
+	return &techFuzzEnv{
 		cs:          cs,
 		store:       store,
 		manager:     manager,
@@ -92,10 +92,10 @@ func setupM18Env(t *testing.T) *m18Env {
 	}
 }
 
-// TestM18_TechDetection_NginxPHP verifies that HTTP responses with nginx and PHP
+// TestTechDetect_NginxPHP verifies that HTTP responses with nginx and PHP
 // headers are detected and recorded as technology tags in flows.
-func TestM18_TechDetection_NginxPHP(t *testing.T) {
-	env := setupM18Env(t)
+func TestTechDetect_NginxPHP(t *testing.T) {
+	env := setupTechFuzzEnv(t)
 
 	// Mock upstream server that responds with nginx + PHP headers.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,9 +178,9 @@ func TestM18_TechDetection_NginxPHP(t *testing.T) {
 	client.CloseIdleConnections()
 }
 
-// TestM18_TechDetection_Express verifies that Express.js responses are detected.
-func TestM18_TechDetection_Express(t *testing.T) {
-	env := setupM18Env(t)
+// TestTechDetect_Express verifies that Express.js responses are detected.
+func TestTechDetect_Express(t *testing.T) {
+	env := setupTechFuzzEnv(t)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Powered-By", "Express")
@@ -243,9 +243,9 @@ func TestM18_TechDetection_Express(t *testing.T) {
 	client.CloseIdleConnections()
 }
 
-// TestM18_TechDetection_WordPress verifies that WordPress body patterns are detected.
-func TestM18_TechDetection_WordPress(t *testing.T) {
-	env := setupM18Env(t)
+// TestTechDetect_WordPress verifies that WordPress body patterns are detected.
+func TestTechDetect_WordPress(t *testing.T) {
+	env := setupTechFuzzEnv(t)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "Apache/2.4.54")
@@ -318,13 +318,13 @@ func TestM18_TechDetection_WordPress(t *testing.T) {
 	client.CloseIdleConnections()
 }
 
-// --- M18 Integration: Query Technologies Resource ---
+// --- Query Technologies Resource ---
 
-// TestM18_QueryTechnologies_Aggregation verifies that the technologies resource
+// TestQueryTechnologies_Aggregation verifies that the technologies resource
 // aggregates detected technologies per host across multiple flows.
 // Both test servers are on 127.0.0.1, so technologies are aggregated under one host.
-func TestM18_QueryTechnologies_Aggregation(t *testing.T) {
-	env := setupM18Env(t)
+func TestQueryTechnologies_Aggregation(t *testing.T) {
+	env := setupTechFuzzEnv(t)
 
 	// Create two upstream servers simulating different tech stacks.
 	// Both are on 127.0.0.1 (different ports), so they aggregate under the same host.
@@ -399,10 +399,10 @@ func TestM18_QueryTechnologies_Aggregation(t *testing.T) {
 	client.CloseIdleConnections()
 }
 
-// TestM18_QueryTechnologies_Empty verifies that the technologies resource returns
+// TestQueryTechnologies_Empty verifies that the technologies resource returns
 // an empty result when no flows have technology detections.
-func TestM18_QueryTechnologies_Empty(t *testing.T) {
-	env := setupM18Env(t)
+func TestQueryTechnologies_Empty(t *testing.T) {
+	env := setupTechFuzzEnv(t)
 
 	techResult := callTool[queryTechnologiesResult](t, env.cs, "query", map[string]any{
 		"resource": "technologies",
@@ -415,10 +415,10 @@ func TestM18_QueryTechnologies_Empty(t *testing.T) {
 	}
 }
 
-// TestM18_QueryFlows_TechnologyFilter verifies that the technology filter on the
+// TestQueryFlows_TechnologyFilter verifies that the technology filter on the
 // flows resource correctly filters flows by detected technology name.
-func TestM18_QueryFlows_TechnologyFilter(t *testing.T) {
-	env := setupM18Env(t)
+func TestQueryFlows_TechnologyFilter(t *testing.T) {
+	env := setupTechFuzzEnv(t)
 
 	// Two upstream servers: one with nginx, one without any detectable tech.
 	nginxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -496,11 +496,11 @@ func TestM18_QueryFlows_TechnologyFilter(t *testing.T) {
 	client.CloseIdleConnections()
 }
 
-// --- M18 Integration: Fuzz Generator Types ---
+// --- Fuzz Generator Types ---
 
-// TestM18_Fuzz_CaseVariationGenerator verifies that the case_variation generator
+// TestFuzzGen_CaseVariation verifies that the case_variation generator
 // produces case-variant payloads in a fuzz campaign.
-func TestM18_Fuzz_CaseVariationGenerator(t *testing.T) {
+func TestFuzzGen_CaseVariation(t *testing.T) {
 	store := newFuzzTestStore(t)
 
 	var receivedBodies []string
@@ -568,9 +568,9 @@ func TestM18_Fuzz_CaseVariationGenerator(t *testing.T) {
 	}
 }
 
-// TestM18_Fuzz_NullByteInjectionGenerator verifies that the null_byte_injection
+// TestFuzzGen_NullByteInjection verifies that the null_byte_injection
 // generator produces payloads with null byte variants.
-func TestM18_Fuzz_NullByteInjectionGenerator(t *testing.T) {
+func TestFuzzGen_NullByteInjection(t *testing.T) {
 	store := newFuzzTestStore(t)
 
 	var receivedBodies []string
@@ -641,9 +641,9 @@ func TestM18_Fuzz_NullByteInjectionGenerator(t *testing.T) {
 	}
 }
 
-// TestM18_Fuzz_RangeWithEncoding verifies that the range generator works with
+// TestFuzzGen_RangeWithEncoding verifies that the range generator works with
 // encoding chains applied to the generated payloads.
-func TestM18_Fuzz_RangeWithEncoding(t *testing.T) {
+func TestFuzzGen_RangeWithEncoding(t *testing.T) {
 	store := newFuzzTestStore(t)
 
 	var receivedBodies []string
@@ -714,11 +714,11 @@ func TestM18_Fuzz_RangeWithEncoding(t *testing.T) {
 	}
 }
 
-// --- M18 Integration: Resend with Regex Body Patch + Encoding ---
+// --- Resend with Regex Body Patch + Encoding ---
 
-// TestM18_Resend_RegexBodyPatchWithEncoding verifies that resend body patches
+// TestResendEnc_RegexBodyPatch verifies that resend body patches
 // using regex matching combined with encoding work correctly.
-func TestM18_Resend_RegexBodyPatchWithEncoding(t *testing.T) {
+func TestResendEnc_RegexBodyPatch(t *testing.T) {
 	store := newFuzzTestStore(t)
 
 	var receivedBody string
@@ -785,12 +785,12 @@ func TestM18_Resend_RegexBodyPatchWithEncoding(t *testing.T) {
 	}
 }
 
-// --- M18 Integration: Multiple Technologies on Same Host ---
+// --- Multiple Technologies on Same Host ---
 
-// TestM18_TechDetection_MultipleDetections verifies that when a single response
+// TestTechDetect_MultipleDetections verifies that when a single response
 // reveals multiple technologies, all are recorded in the flow tags.
-func TestM18_TechDetection_MultipleDetections(t *testing.T) {
-	env := setupM18Env(t)
+func TestTechDetect_MultipleDetections(t *testing.T) {
+	env := setupTechFuzzEnv(t)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "nginx/1.24.0")
