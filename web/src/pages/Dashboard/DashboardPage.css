@@ -417,6 +417,111 @@
   color: var(--text-secondary);
 }
 
+/* Budget widget */
+.dashboard-budget-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+}
+
+.dashboard-budget-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.dashboard-budget-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.dashboard-budget-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.dashboard-budget-label--danger {
+  color: var(--accent-danger);
+}
+
+.dashboard-budget-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dashboard-budget-value--danger {
+  color: var(--accent-danger);
+}
+
+.dashboard-budget-progress {
+  width: 100%;
+  height: 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.dashboard-budget-progress-bar {
+  height: 100%;
+  border-radius: var(--radius-sm);
+  background-color: var(--accent-success);
+  transition: width var(--transition-normal);
+}
+
+.dashboard-budget-progress-bar--warning {
+  background-color: var(--accent-warning);
+}
+
+.dashboard-budget-progress-bar--danger {
+  background-color: var(--accent-danger);
+}
+
+.dashboard-budget-remaining {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* Rate limit widget */
+.dashboard-ratelimit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-md);
+}
+
+.dashboard-ratelimit-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-md);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+}
+
+.dashboard-ratelimit-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.dashboard-ratelimit-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
 /* Empty state */
 .dashboard-empty {
   display: flex;

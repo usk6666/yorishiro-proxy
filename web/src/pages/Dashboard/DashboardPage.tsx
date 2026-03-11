@@ -1,12 +1,17 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
-import { useQuery } from "../../lib/mcp/hooks.js";
+import { useMcpContext } from "../../lib/mcp/context.js";
+import { useQuery, useSecurity } from "../../lib/mcp/hooks.js";
 import type {
   FlowsResult,
   ListenerStatusEntry,
+  SecurityGetBudgetResult,
+  SecurityGetRateLimitsResult,
 } from "../../lib/mcp/types.js";
+import { BudgetWidget } from "./BudgetWidget.js";
+import { RateLimitWidget } from "./RateLimitWidget.js";
 import { TechnologiesWidget } from "./TechnologiesWidget.js";
 import "./DashboardPage.css";
 
@@ -142,6 +147,75 @@ export function DashboardPage() {
     refetch: refetchTech,
   } = useQuery("technologies", { pollInterval: POLL_INTERVAL });
 
+  // Fetch budget and rate limits via security tool
+  const { status: mcpStatus } = useMcpContext();
+  const { security } = useSecurity();
+
+  const [budgetData, setBudgetData] = useState<SecurityGetBudgetResult | null>(null);
+  const [budgetLoading, setBudgetLoading] = useState(false);
+  const [budgetError, setBudgetError] = useState<Error | null>(null);
+
+  const [rateLimitData, setRateLimitData] = useState<SecurityGetRateLimitsResult | null>(null);
+  const [rateLimitLoading, setRateLimitLoading] = useState(false);
+  const [rateLimitError, setRateLimitError] = useState<Error | null>(null);
+
+  const fetchBudget = useCallback(async () => {
+    if (mcpStatus !== "connected") return;
+    setBudgetLoading(true);
+    setBudgetError(null);
+    try {
+      const result = await security<SecurityGetBudgetResult>({
+        action: "get_budget",
+        params: {},
+      });
+      setBudgetData(result);
+    } catch (err) {
+      setBudgetError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setBudgetLoading(false);
+    }
+  }, [security, mcpStatus]);
+
+  const fetchRateLimits = useCallback(async () => {
+    if (mcpStatus !== "connected") return;
+    setRateLimitLoading(true);
+    setRateLimitError(null);
+    try {
+      const result = await security<SecurityGetRateLimitsResult>({
+        action: "get_rate_limits",
+        params: {},
+      });
+      setRateLimitData(result);
+    } catch (err) {
+      setRateLimitError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setRateLimitLoading(false);
+    }
+  }, [security, mcpStatus]);
+
+  // Initial fetch
+  useEffect(() => {
+    if (mcpStatus === "connected") {
+      fetchBudget();
+      fetchRateLimits();
+    }
+  }, [mcpStatus, fetchBudget, fetchRateLimits]);
+
+  // Polling for budget and rate limits
+  const fetchBudgetRef = useRef(fetchBudget);
+  fetchBudgetRef.current = fetchBudget;
+  const fetchRateLimitsRef = useRef(fetchRateLimits);
+  fetchRateLimitsRef.current = fetchRateLimits;
+
+  useEffect(() => {
+    if (mcpStatus !== "connected") return;
+    const timer = setInterval(() => {
+      fetchBudgetRef.current();
+      fetchRateLimitsRef.current();
+    }, POLL_INTERVAL);
+    return () => clearInterval(timer);
+  }, [mcpStatus]);
+
   const handleRefreshAll = useCallback(() => {
     refetchStatus();
     refetchFlows();
@@ -149,7 +223,9 @@ export function DashboardPage() {
     refetchFuzz();
     refetchConfig();
     refetchTech();
-  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz, refetchConfig, refetchTech]);
+    fetchBudget();
+    fetchRateLimits();
+  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz, refetchConfig, refetchTech, fetchBudget, fetchRateLimits]);
 
   // Build protocol breakdown
   const protocolCounts: Record<string, number> = {};
@@ -365,6 +441,10 @@ export function DashboardPage() {
 
       {/* Technologies */}
       <TechnologiesWidget data={techData} loading={techLoading} error={techError} />
+
+      {/* Budget & Rate Limits */}
+      <BudgetWidget data={budgetData} loading={budgetLoading} error={budgetError} />
+      <RateLimitWidget data={rateLimitData} loading={rateLimitLoading} error={rateLimitError} />
 
       {/* Connection settings info */}
       {statusData && (
