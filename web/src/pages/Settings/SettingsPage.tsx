@@ -11,6 +11,7 @@ import { ProtocolFilter } from "./ProtocolFilter.js";
 import { ProxyControl } from "./ProxyControl.js";
 import "./SettingsPage.css";
 import { TcpForwards } from "./TcpForwards.js";
+import { TlsFingerprint } from "./TlsFingerprint.js";
 import { TlsPassthrough } from "./TlsPassthrough.js";
 
 const TABS = [
@@ -20,6 +21,7 @@ const TABS = [
   { id: "tcp-forwards", label: "TCP Forwards" },
   { id: "intercept", label: "Intercept Rules" },
   { id: "transform", label: "Auto-Transform" },
+  { id: "tls-fingerprint", label: "TLS Fingerprint" },
   { id: "connection", label: "Connection" },
   { id: "ca-cert", label: "CA Certificate" },
   { id: "plugins", label: "Plugins" },
@@ -114,6 +116,16 @@ export function SettingsPage() {
         }
         if (!configData) return null;
         return <AutoTransformRules config={configData} onRefresh={handleRefresh} />;
+
+      case "tls-fingerprint":
+        if (statusLoading && !statusData) {
+          return <div className="settings-loading"><Spinner size="md" /></div>;
+        }
+        if (statusError) {
+          return <div className="settings-error">Error loading status: {statusError.message}</div>;
+        }
+        if (!statusData) return null;
+        return <TlsFingerprint status={statusData} onRefresh={handleRefresh} />;
 
       case "connection":
         if (statusLoading && !statusData) {

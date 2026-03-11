@@ -172,6 +172,7 @@ export interface ConfigureParams {
   intercept_rules?: ConfigureInterceptRules;
   intercept_queue?: ConfigureInterceptQueue;
   auto_transform?: ConfigureAutoTransform;
+  tls_fingerprint?: string;
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
   request_timeout_ms?: number | null;
@@ -201,6 +202,7 @@ export interface ConfigureResult {
     total_rules: number;
     enabled_rules: number;
   };
+  tls_fingerprint?: string;
   max_connections?: number;
   peek_timeout_ms?: number;
   request_timeout_ms?: number;
@@ -371,6 +373,7 @@ export interface StatusResult {
   db_size_bytes: number;
   uptime_seconds: number;
   ca_initialized: boolean;
+  tls_fingerprint?: string;
 }
 
 /** Scope rule in config output. */
