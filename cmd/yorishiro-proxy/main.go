@@ -71,8 +71,8 @@ func run(ctx context.Context) error {
 	// Check for subcommands before parsing flags.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "setup":
-			return runSetup(ctx, os.Args[2:])
+		case "install":
+			return runInstall(ctx, os.Args[2:])
 		case "upgrade":
 			return runUpgrade(ctx, os.Args[2:])
 		case "version":
@@ -122,12 +122,12 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy %s\n\n", buildVersion())
 		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n")
-		fmt.Fprintf(fs.Output(), "       yorishiro-proxy setup [setup-flags]\n")
+		fmt.Fprintf(fs.Output(), "       yorishiro-proxy install [target] [flags]\n")
 		fmt.Fprintf(fs.Output(), "       yorishiro-proxy upgrade [--check]\n\n")
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy is an AI agent network proxy (MCP server).\n")
 		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
 		fmt.Fprintf(fs.Output(), "Subcommands:\n")
-		fmt.Fprintf(fs.Output(), "  setup    Interactive setup wizard for Claude Code integration\n")
+		fmt.Fprintf(fs.Output(), "  install  Install and configure components (MCP, CA, Skills, Playwright)\n")
 		fmt.Fprintf(fs.Output(), "  upgrade  Check for and install updates from GitHub Releases\n\n")
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
@@ -137,8 +137,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> YP_LOG_LEVEL).\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy                                  # MCP stdio mode (default)\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy setup                            # interactive setup wizard\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy setup --non-interactive           # setup with defaults\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install                          # install all components\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install mcp                      # register MCP config only\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install ca --trust               # generate CA + register in OS\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install skills                   # install skills only\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -db pentest-2026                 # project DB: ~/.yorishiro-proxy/pentest-2026.db\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -db /data/project.db             # absolute path: used as-is\n")
 		fmt.Fprintf(fs.Output(), "  YP_DB=client-audit yorishiro-proxy               # project name via env var\n")
