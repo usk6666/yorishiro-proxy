@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -14,7 +15,7 @@ import (
 // securityInput is the typed input for the security tool.
 type securityInput struct {
 	// Action specifies the security action to execute.
-	// Available actions: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits.
+	// Available actions: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits, set_budget, get_budget.
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
 	Params securityParams `json:"params"`
@@ -39,6 +40,10 @@ type securityParams struct {
 	// set_rate_limits: agent layer rate limits
 	MaxRequestsPerSecond        *float64 `json:"max_requests_per_second,omitempty" jsonschema:"global rate limit in RPS (set_rate_limits)"`
 	MaxRequestsPerHostPerSecond *float64 `json:"max_requests_per_host_per_second,omitempty" jsonschema:"per-host rate limit in RPS (set_rate_limits)"`
+
+	// set_budget: agent layer budget limits
+	MaxTotalRequests *int64  `json:"max_total_requests,omitempty" jsonschema:"max total requests for the session (set_budget)"`
+	MaxDuration      *string `json:"max_duration,omitempty" jsonschema:"max session duration e.g. 30m (set_budget)"`
 }
 
 // targetRuleInput is the JSON input representation of a target rule.
@@ -50,24 +55,26 @@ type targetRuleInput struct {
 }
 
 // availableSecurityActions lists the valid action names for error messages.
-var availableSecurityActions = []string{"set_target_scope", "update_target_scope", "get_target_scope", "test_target", "set_rate_limits", "get_rate_limits"}
+var availableSecurityActions = []string{"set_target_scope", "update_target_scope", "get_target_scope", "test_target", "set_rate_limits", "get_rate_limits", "set_budget", "get_budget"}
 
 // registerSecurity registers the security MCP tool.
 func (s *Server) registerSecurity() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "security",
-		Description: "Configure runtime security settings including target scope rules and rate limits. " +
+		Description: "Configure runtime security settings including target scope rules, rate limits, and diagnostic budgets. " +
 			"Target scope uses a two-layer architecture: Policy Layer (immutable, set by config) " +
 			"and Agent Layer (mutable via this tool). This tool only modifies Agent Layer rules; " +
 			"Policy Layer rules are read-only. Agent allow rules must fall within the Policy " +
-			"allow boundary. Rate limits also use the two-layer architecture. " +
+			"allow boundary. Rate limits and budgets also use the two-layer architecture. " +
 			"Available actions: " +
 			"'set_target_scope' replaces all Agent Layer allow/deny rules (use empty arrays to clear rules); " +
 			"'update_target_scope' applies incremental add/remove changes to Agent Layer rules; " +
 			"'get_target_scope' returns Policy and Agent Layer rules with enforcement mode; " +
 			"'test_target' checks a URL against current rules and reports which layer decided; " +
 			"'set_rate_limits' sets Agent Layer rate limits (max_requests_per_second, max_requests_per_host_per_second); " +
-			"'get_rate_limits' returns Policy and Agent Layer rate limits with effective values.",
+			"'get_rate_limits' returns Policy and Agent Layer rate limits with effective values; " +
+			"'set_budget' sets Agent Layer diagnostic budget (max_total_requests, max_duration); " +
+			"'get_budget' returns Policy and Agent Layer budgets with effective values and current usage.",
 	}, s.handleSecurity)
 }
 
@@ -86,6 +93,10 @@ func (s *Server) handleSecurity(_ context.Context, _ *gomcp.CallToolRequest, inp
 		return s.handleSetRateLimits(input.Params)
 	case "get_rate_limits":
 		return s.handleGetRateLimits()
+	case "set_budget":
+		return s.handleSetBudget(input.Params)
+	case "get_budget":
+		return s.handleGetBudget()
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableSecurityActions, ", "))
 	default:
@@ -682,5 +693,77 @@ func (s *Server) handleGetRateLimits() (*gomcp.CallToolResult, any, error) {
 		Policy:    s.deps.rateLimiter.PolicyLimits(),
 		Agent:     s.deps.rateLimiter.AgentLimits(),
 		Effective: s.deps.rateLimiter.EffectiveLimits(),
+	}, nil
+}
+
+// --- Budget actions ---
+
+// budgetResult is the structured output for set_budget.
+type budgetResult struct {
+	Status    string             `json:"status"`
+	Effective proxy.BudgetConfig `json:"effective"`
+	Agent     proxy.BudgetConfig `json:"agent"`
+}
+
+// getBudgetResult is the structured output for get_budget.
+type getBudgetResult struct {
+	Policy       proxy.BudgetConfig `json:"policy"`
+	Agent        proxy.BudgetConfig `json:"agent"`
+	Effective    proxy.BudgetConfig `json:"effective"`
+	RequestCount int64              `json:"request_count"`
+	StopReason   string             `json:"stop_reason,omitempty"`
+}
+
+// handleSetBudget sets agent layer budget limits using full-replace semantics.
+// All fields start from zero; only explicitly provided fields are set.
+// This matches the set_rate_limits pattern. Omitted fields reset to zero (no limit).
+// For merge semantics (only update provided fields, keep others unchanged),
+// use the configure tool's budget section instead.
+func (s *Server) handleSetBudget(params securityParams) (*gomcp.CallToolResult, any, error) {
+	if s.deps.budgetManager == nil {
+		return nil, nil, fmt.Errorf("budget manager is not initialized")
+	}
+
+	cfg := proxy.BudgetConfig{}
+	if params.MaxTotalRequests != nil {
+		if *params.MaxTotalRequests < 0 {
+			return nil, nil, fmt.Errorf("max_total_requests must be >= 0")
+		}
+		cfg.MaxTotalRequests = *params.MaxTotalRequests
+	}
+	if params.MaxDuration != nil {
+		d, err := time.ParseDuration(*params.MaxDuration)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid max_duration %q: %w", *params.MaxDuration, err)
+		}
+		if d < 0 {
+			return nil, nil, fmt.Errorf("max_duration must be >= 0")
+		}
+		cfg.MaxDuration = d
+	}
+
+	if err := s.deps.budgetManager.SetAgentBudget(cfg); err != nil {
+		return nil, nil, fmt.Errorf("set budget: %w", err)
+	}
+
+	return nil, &budgetResult{
+		Status:    "updated",
+		Effective: s.deps.budgetManager.EffectiveBudget(),
+		Agent:     s.deps.budgetManager.AgentBudget(),
+	}, nil
+}
+
+// handleGetBudget returns the current budget configuration and usage.
+func (s *Server) handleGetBudget() (*gomcp.CallToolResult, any, error) {
+	if s.deps.budgetManager == nil {
+		return nil, nil, fmt.Errorf("budget manager is not initialized")
+	}
+
+	return nil, &getBudgetResult{
+		Policy:       s.deps.budgetManager.PolicyBudget(),
+		Agent:        s.deps.budgetManager.AgentBudget(),
+		Effective:    s.deps.budgetManager.EffectiveBudget(),
+		RequestCount: s.deps.budgetManager.RequestCount(),
+		StopReason:   s.deps.budgetManager.ShutdownReason(),
 	}, nil
 }

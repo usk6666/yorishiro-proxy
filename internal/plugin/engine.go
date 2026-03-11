@@ -19,13 +19,14 @@ import (
 // It loads scripts, initializes the Starlark runtime, and registers
 // hook handlers with the Registry for dispatch.
 type Engine struct {
-	mu       sync.RWMutex
-	registry *Registry
-	plugins  []*loadedPlugin
-	states   map[string]*PluginState
-	stores   map[string]*PluginStore
-	db       *sql.DB
-	logger   *slog.Logger
+	mu         sync.RWMutex
+	registry   *Registry
+	plugins    []*loadedPlugin
+	states     map[string]*PluginState
+	stores     map[string]*PluginStore
+	db         *sql.DB
+	logger     *slog.Logger
+	shutdownFn ShutdownFunc
 }
 
 // loadedPlugin represents a successfully loaded and initialized plugin.
@@ -66,6 +67,15 @@ func NewEngine(logger *slog.Logger) *Engine {
 // Registry returns the hook registry used by this engine.
 func (e *Engine) Registry() *Registry {
 	return e.registry
+}
+
+// SetShutdownFunc sets the callback invoked when a plugin calls proxy.shutdown(reason).
+// This connects the plugin engine to the budget manager's shutdown path.
+// Must be called before LoadPlugins.
+func (e *Engine) SetShutdownFunc(fn ShutdownFunc) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.shutdownFn = fn
 }
 
 // SetDB sets the SQLite database connection used by the store built-in module.
@@ -147,6 +157,7 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 		"crypto": newCryptoModule(),
 		"config": newConfigDict(cfg.Vars),
 		"state":  newStateModule(ps),
+		"proxy":  newProxyModule(e.shutdownFn),
 	}
 
 	// Inject store module if a DB connection is available.

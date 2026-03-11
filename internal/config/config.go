@@ -296,6 +296,10 @@ type TargetScopePolicyConfig struct {
 	// RateLimits configures rate limiting for AI agent request throttling.
 	// These limits are immutable at runtime (Policy Layer).
 	RateLimits *RateLimitPolicyConfig `json:"rate_limits,omitempty"`
+
+	// Budget configures diagnostic session budgets (max total requests, max duration).
+	// These limits are immutable at runtime (Policy Layer).
+	Budget *BudgetPolicyConfig `json:"budget,omitempty"`
 }
 
 // RateLimitPolicyConfig holds rate limit settings in configuration files.
@@ -308,6 +312,50 @@ type RateLimitPolicyConfig struct {
 	// MaxRequestsPerHostPerSecond is the per-host rate limit (requests per second).
 	// 0 means no per-host rate limit.
 	MaxRequestsPerHostPerSecond float64 `json:"max_requests_per_host_per_second,omitempty"`
+}
+
+// BudgetPolicyConfig holds diagnostic session budget settings in configuration files.
+// These define the upper boundary that the Agent Layer cannot exceed.
+type BudgetPolicyConfig struct {
+	// MaxTotalRequests is the maximum number of requests allowed in the session.
+	// 0 means no request count limit.
+	MaxTotalRequests int64 `json:"max_total_requests,omitempty"`
+
+	// MaxDuration is the maximum duration of the diagnostic session as a string
+	// (e.g. "30m", "1h"). 0 means no duration limit.
+	MaxDuration Duration `json:"max_duration,omitempty"`
+}
+
+// Duration wraps time.Duration for JSON marshal/unmarshal as a string (e.g. "30m").
+type Duration time.Duration
+
+// MarshalJSON implements json.Marshaler for Duration.
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// UnmarshalJSON implements json.Unmarshaler for Duration.
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		// Try as a number (nanoseconds) for backward compatibility.
+		var ns int64
+		if err2 := json.Unmarshal(data, &ns); err2 != nil {
+			return fmt.Errorf("duration must be a string (e.g. \"30m\") or number: %w", err)
+		}
+		*d = Duration(time.Duration(ns))
+		return nil
+	}
+	if s == "" || s == "0" || s == "0s" {
+		*d = 0
+		return nil
+	}
+	dur, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	*d = Duration(dur)
+	return nil
 }
 
 // ProxyConfig holds the proxy configuration loaded from a JSON config file.
