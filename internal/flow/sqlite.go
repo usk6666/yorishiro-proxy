@@ -351,11 +351,15 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 		// Match against server_addr (host:port or host) or the host portion
 		// of the URL stored in send messages. server_addr may contain a port,
 		// so we check both exact match and host-prefix match (host:*).
-		// For URL-based matching, we extract the host via an EXISTS subquery
-		// using SQLite string functions on the message url column.
+		// For URL-based matching, we use multiple LIKE patterns with right-side
+		// boundary anchoring to avoid subdomain false positives:
+		//   %://host/  — path follows
+		//   %://host?  — query string follows (no path)
+		//   %://host:  — port number follows
+		//   %://host   — end of string (bare host)
 		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.Host)
-		conditions = append(conditions, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND (m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\')))")
-		args = append(args, opts.Host, escaped+":%", "%://"+escaped+"/%", "%://"+escaped)
+		conditions = append(conditions, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND (m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\')))")
+		args = append(args, opts.Host, escaped+":%", "%://"+escaped+"/%", "%://"+escaped+"?%", "%://"+escaped+":%", "%://"+escaped)
 	}
 
 	clause := ""
