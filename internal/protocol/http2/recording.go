@@ -258,6 +258,13 @@ type receiveRecordParams struct {
 
 	resp     *gohttp.Response
 	respBody []byte
+
+	// sendMs is the time in milliseconds to send the request upstream.
+	sendMs *int64
+	// waitMs is the server processing time in milliseconds (TTFB).
+	waitMs *int64
+	// receiveMs is the time in milliseconds to receive the response.
+	receiveMs *int64
 }
 
 // recordReceive records the receive phase of an HTTP/2 session: appends the
@@ -332,6 +339,9 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		Resp:                 p.resp,
 		RespBody:             p.respBody,
 		Tags:                 tags,
+		SendMs:               p.sendMs,
+		WaitMs:               p.waitMs,
+		ReceiveMs:            p.receiveMs,
 	}, sharedSnap, logger)
 }
 

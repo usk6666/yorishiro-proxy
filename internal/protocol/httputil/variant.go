@@ -54,6 +54,15 @@ type ReceiveVariantParams struct {
 	// Tags holds additional key-value metadata to merge into the flow on
 	// completion (e.g., technology fingerprint results). May be nil.
 	Tags map[string]string
+	// SendMs is the time in milliseconds to send the request.
+	// Nil when not measured.
+	SendMs *int64
+	// WaitMs is the server processing time in milliseconds (TTFB).
+	// Nil when not measured.
+	WaitMs *int64
+	// ReceiveMs is the time in milliseconds to receive the response.
+	// Nil when not measured.
+	ReceiveMs *int64
 }
 
 // RecordReceiveVariant records the receive phase with variant support. When
@@ -187,6 +196,9 @@ func completeFlow(
 		State:      "complete",
 		Duration:   p.Duration,
 		ServerAddr: p.ServerAddr,
+		SendMs:     p.SendMs,
+		WaitMs:     p.WaitMs,
+		ReceiveMs:  p.ReceiveMs,
 	}
 	if p.TLSServerCertSubject != "" {
 		update.TLSServerCertSubject = p.TLSServerCertSubject

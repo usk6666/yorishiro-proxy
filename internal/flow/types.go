@@ -37,6 +37,15 @@ type Flow struct {
 	// Empty string means the request was not blocked.
 	// "target_scope" means it was blocked by the target scope rules.
 	BlockedBy string
+	// SendMs is the time in milliseconds to send the request (headers + body).
+	// Nil when not measured (e.g., Raw TCP, or legacy flows before this feature).
+	SendMs *int64 `json:"send_ms,omitempty"`
+	// WaitMs is the server processing time in milliseconds (TTFB).
+	// Nil when not measured.
+	WaitMs *int64 `json:"wait_ms,omitempty"`
+	// ReceiveMs is the time in milliseconds to receive the response body.
+	// Nil when not measured.
+	ReceiveMs *int64 `json:"receive_ms,omitempty"`
 }
 
 // ConnectionInfo holds network-level and TLS metadata for a proxy flow.
@@ -112,4 +121,13 @@ type FlowUpdate struct {
 	// TLSServerCertSubject sets the upstream server TLS certificate subject in ConnInfo.
 	// Only applied when non-empty.
 	TLSServerCertSubject string
+	// SendMs sets the request send time in milliseconds.
+	// Only applied when non-nil.
+	SendMs *int64
+	// WaitMs sets the server processing (TTFB) time in milliseconds.
+	// Only applied when non-nil.
+	WaitMs *int64
+	// ReceiveMs sets the response receive time in milliseconds.
+	// Only applied when non-nil.
+	ReceiveMs *int64
 }

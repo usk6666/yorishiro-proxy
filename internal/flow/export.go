@@ -55,6 +55,9 @@ type ExportFlow struct {
 	Tags       map[string]string `json:"tags,omitempty"`
 	ConnInfo   *ExportConnInfo   `json:"conn_info,omitempty"`
 	BlockedBy  string            `json:"blocked_by,omitempty"`
+	SendMs     *int64            `json:"send_ms,omitempty"`
+	WaitMs     *int64            `json:"wait_ms,omitempty"`
+	ReceiveMs  *int64            `json:"receive_ms,omitempty"`
 }
 
 // ExportConnInfo is the JSON-serializable representation of ConnectionInfo.
@@ -153,6 +156,9 @@ func flowToExport(s *Flow) *ExportFlow {
 		DurationMs: s.Duration.Milliseconds(),
 		Tags:       s.Tags,
 		BlockedBy:  s.BlockedBy,
+		SendMs:     s.SendMs,
+		WaitMs:     s.WaitMs,
+		ReceiveMs:  s.ReceiveMs,
 	}
 	if s.ConnInfo != nil {
 		es.ConnInfo = &ExportConnInfo{
