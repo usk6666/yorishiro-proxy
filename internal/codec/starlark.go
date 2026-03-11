@@ -10,6 +10,10 @@ import (
 	"go.starlark.net/syntax"
 )
 
+// defaultMaxSteps is the default maximum number of Starlark execution steps
+// per codec invocation. This prevents infinite loops from causing DoS.
+const defaultMaxSteps uint64 = 1_000_000
+
 // StarlarkCodec wraps Starlark encode/decode functions as a Codec.
 // It is safe for concurrent use because a new starlark.Thread is
 // created for each Encode/Decode call.
@@ -17,6 +21,7 @@ type StarlarkCodec struct {
 	name      string
 	encodeFn  starlark.Callable
 	decodeFn  starlark.Callable // nil if decode is not defined
+	maxSteps  uint64
 	printFunc func(msg string)
 }
 
@@ -33,6 +38,7 @@ func (c *StarlarkCodec) Encode(s string) (string, error) {
 			}
 		},
 	}
+	thread.SetMaxExecutionSteps(c.maxSteps)
 
 	result, err := starlark.Call(thread, c.encodeFn, starlark.Tuple{starlark.String(s)}, nil)
 	if err != nil {
@@ -60,6 +66,7 @@ func (c *StarlarkCodec) Decode(s string) (string, error) {
 			}
 		},
 	}
+	thread.SetMaxExecutionSteps(c.maxSteps)
 
 	result, err := starlark.Call(thread, c.decodeFn, starlark.Tuple{starlark.String(s)}, nil)
 	if err != nil {
@@ -88,6 +95,7 @@ func LoadStarlarkCodec(path string) (*StarlarkCodec, error) {
 // filename is used for error messages.
 func ParseStarlarkCodec(filename string, data []byte) (*StarlarkCodec, error) {
 	thread := &starlark.Thread{Name: filename}
+	thread.SetMaxExecutionSteps(defaultMaxSteps)
 
 	globals, err := starlark.ExecFileOptions(
 		&syntax.FileOptions{},
@@ -136,6 +144,7 @@ func ParseStarlarkCodec(filename string, data []byte) (*StarlarkCodec, error) {
 		name:     name,
 		encodeFn: encodeFn,
 		decodeFn: decodeFn,
+		maxSteps: defaultMaxSteps,
 	}, nil
 }
 

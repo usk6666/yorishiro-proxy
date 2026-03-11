@@ -555,6 +555,73 @@ func TestRegistry_Unregister(t *testing.T) {
 	}
 }
 
+func TestStarlarkCodec_EncodeStepLimitPreventsExcessiveComputation(t *testing.T) {
+	// Use deep recursion to exhaust step limit.
+	src := []byte(`
+name = "expensive"
+
+def spin(n):
+    if n <= 0:
+        return ""
+    return spin(n - 1)
+
+def encode(s):
+    return spin(10000000)
+`)
+
+	c, err := ParseStarlarkCodec("test.star", src)
+	if err != nil {
+		t.Fatalf("ParseStarlarkCodec() error = %v", err)
+	}
+
+	_, err = c.Encode("hello")
+	if err == nil {
+		t.Fatal("Encode() expected error for excessive computation, got nil")
+	}
+}
+
+func TestStarlarkCodec_DecodeStepLimitPreventsExcessiveComputation(t *testing.T) {
+	src := []byte(`
+name = "expensive_decode"
+
+def spin(n):
+    if n <= 0:
+        return ""
+    return spin(n - 1)
+
+def encode(s):
+    return s
+
+def decode(s):
+    return spin(10000000)
+`)
+
+	c, err := ParseStarlarkCodec("test.star", src)
+	if err != nil {
+		t.Fatalf("ParseStarlarkCodec() error = %v", err)
+	}
+
+	_, err = c.Decode("hello")
+	if err == nil {
+		t.Fatal("Decode() expected error for excessive computation, got nil")
+	}
+}
+
+func TestParseStarlarkCodec_StepLimitPreventsExcessiveComputationAtLoad(t *testing.T) {
+	// Use a comprehension to exhaust step limit at load time.
+	src := []byte(`
+x = [i for i in range(10000000)]
+name = "never_reached"
+def encode(s):
+    return s
+`)
+
+	_, err := ParseStarlarkCodec("test.star", src)
+	if err == nil {
+		t.Fatal("ParseStarlarkCodec() expected error for excessive computation at load time")
+	}
+}
+
 // writeStarFile creates a .star file in the given directory.
 func writeStarFile(t *testing.T, dir, name, content string) {
 	t.Helper()
