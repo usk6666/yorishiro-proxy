@@ -1,5 +1,10 @@
 /* Page header */
 .resend-page .resend-header {
+  margin-bottom: var(--space-md);
+}
+
+/* Page mode tabs (Resend / Compare) */
+.resend-page-mode-tabs {
   margin-bottom: var(--space-lg);
 }
 

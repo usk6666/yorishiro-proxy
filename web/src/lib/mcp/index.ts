@@ -44,6 +44,7 @@ export type {
   // Connection
   ConnectionStatus, ConnInfo,
   // resend
+  CompareBodyDiff, CompareBodyLengthDiff, CompareHeaderDiff, CompareJsonDiff, CompareResult, CompareStatusCodeDiff, CompareTimingDiff,
   ExecuteAction, ExecuteDryRunResult, ExecuteParams, ExecuteRawDryRunResult, ExecuteResendRawResult, ExecuteResendResult, ExportFilter, ExtractionRule, FlowDetailResult, FlowEntry,
   FlowsResult,
   // fuzz
