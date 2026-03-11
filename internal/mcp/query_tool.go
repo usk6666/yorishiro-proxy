@@ -832,6 +832,13 @@ type queryConfigResult struct {
 	TCPForwards      map[string]string       `json:"tcp_forwards,omitempty"`
 	EnabledProtocols []string                `json:"enabled_protocols,omitempty"`
 	SOCKS5Enabled    bool                    `json:"socks5_enabled"`
+	ClientCert       *queryClientCertResult  `json:"client_cert,omitempty"`
+}
+
+// queryClientCertResult holds client certificate info in the config response.
+type queryClientCertResult struct {
+	CertPath string `json:"cert_path"`
+	KeyPath  string `json:"key_path"`
 }
 
 // queryScopeResult holds capture scope rules in the config response.
@@ -890,6 +897,14 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 
 	if s.deps.socks5AuthSetter != nil {
 		result.SOCKS5Enabled = true
+	}
+
+	certPath, keyPath := s.currentClientCert()
+	if certPath != "" {
+		result.ClientCert = &queryClientCertResult{
+			CertPath: certPath,
+			KeyPath:  keyPath,
+		}
 	}
 
 	return nil, result, nil

@@ -429,16 +429,17 @@ type protocolDeps struct {
 
 // protocolResult holds all protocol handlers and related components.
 type protocolResult struct {
-	detector      *protocol.Detector
-	httpHandler   *protohttp.Handler
-	http2Handler  *protohttp2.Handler
-	tcpHandler    *prototcp.Handler
-	socks5Handler *protosocks5.Handler
-	socks5Adapter *socks5AuthAdapter
-	pluginEngine  *plugin.Engine
-	fuzzRunner    *fuzzer.Runner
-	tlsTransport  httputil.TLSTransport
-	webUIToken    string
+	detector        *protocol.Detector
+	httpHandler     *protohttp.Handler
+	http2Handler    *protohttp2.Handler
+	tcpHandler      *prototcp.Handler
+	socks5Handler   *protosocks5.Handler
+	socks5Adapter   *socks5AuthAdapter
+	pluginEngine    *plugin.Engine
+	fuzzRunner      *fuzzer.Runner
+	tlsTransport    httputil.TLSTransport
+	hostTLSRegistry *httputil.HostTLSRegistry
+	webUIToken      string
 }
 
 // initProtocolHandlers builds all protocol handlers, the plugin engine, and the
@@ -458,21 +459,12 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	httpHandler.SetInterceptQueue(deps.interceptQueue)
 	httpHandler.SetTransformPipeline(deps.pipeline)
 
-	// Configure uTLS transport for upstream HTTPS connections if a browser
-	// fingerprint profile is specified in the config.
-	var tlsTransport httputil.TLSTransport
-	if cfg.TLSFingerprint != "" {
-		profile, err := httputil.ParseBrowserProfile(cfg.TLSFingerprint)
-		if err != nil {
-			return nil, fmt.Errorf("tls_fingerprint: %w", err)
-		}
-		tlsTransport = &httputil.UTLSTransport{
-			Profile:            profile,
-			InsecureSkipVerify: cfg.InsecureSkipVerify,
-		}
-		httpHandler.SetTLSTransport(tlsTransport)
-		logger.Info("uTLS fingerprint enabled", "profile", profile.String())
+	// Build the host TLS registry and TLS transport.
+	hostTLSRegistry, err := initHostTLSRegistry(cfg, deps.proxyCfg, logger)
+	if err != nil {
+		return nil, err
 	}
+	tlsTransport := initTLSTransport(cfg, hostTLSRegistry, httpHandler, logger)
 
 	// Configure technology stack fingerprint detector for response analysis.
 	fpDetector := fingerprint.NewDetector()
@@ -554,16 +546,114 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	detector := protocol.NewDetector(http2Handler, httpHandler, socks5Handler, tcpHandler)
 
 	return &protocolResult{
-		detector:      detector,
-		httpHandler:   httpHandler,
-		http2Handler:  http2Handler,
-		tcpHandler:    tcpHandler,
-		socks5Handler: socks5Handler,
-		socks5Adapter: socks5Adapter,
-		pluginEngine:  pluginEngine,
-		fuzzRunner:    fuzzRunner,
-		tlsTransport:  tlsTransport,
+		detector:        detector,
+		httpHandler:     httpHandler,
+		http2Handler:    http2Handler,
+		tcpHandler:      tcpHandler,
+		socks5Handler:   socks5Handler,
+		socks5Adapter:   socks5Adapter,
+		pluginEngine:    pluginEngine,
+		fuzzRunner:      fuzzRunner,
+		tlsTransport:    tlsTransport,
+		hostTLSRegistry: hostTLSRegistry,
 	}, nil
+}
+
+// initHostTLSRegistry builds a HostTLSRegistry from the CLI config and proxy config file.
+// CLI config settings take precedence; proxy config file settings are applied as fallbacks.
+func initHostTLSRegistry(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*httputil.HostTLSRegistry, error) {
+	reg := httputil.NewHostTLSRegistry()
+
+	// Apply global mTLS client certificate from CLI config.
+	if cfg.ClientCertPath != "" && cfg.ClientKeyPath != "" {
+		globalTLS := &httputil.HostTLSConfig{
+			ClientCertPath: cfg.ClientCertPath,
+			ClientKeyPath:  cfg.ClientKeyPath,
+		}
+		if err := globalTLS.Validate(); err != nil {
+			return nil, fmt.Errorf("global client cert: %w", err)
+		}
+		reg.SetGlobal(globalTLS)
+		logger.Info("global mTLS client certificate configured",
+			"cert", cfg.ClientCertPath, "key", cfg.ClientKeyPath)
+	}
+
+	// Apply per-host TLS configs from CLI config.
+	if err := applyHostTLSEntries(reg, cfg.HostTLS, "", logger); err != nil {
+		return nil, err
+	}
+
+	// Apply from proxy config file as fallback.
+	if proxyCfg != nil {
+		if proxyCfg.ClientCertPath != "" && proxyCfg.ClientKeyPath != "" && reg.Global() == nil {
+			globalTLS := &httputil.HostTLSConfig{
+				ClientCertPath: proxyCfg.ClientCertPath,
+				ClientKeyPath:  proxyCfg.ClientKeyPath,
+			}
+			if err := globalTLS.Validate(); err != nil {
+				return nil, fmt.Errorf("proxy config global client cert: %w", err)
+			}
+			reg.SetGlobal(globalTLS)
+			logger.Info("global mTLS client certificate configured from proxy config",
+				"cert", proxyCfg.ClientCertPath, "key", proxyCfg.ClientKeyPath)
+		}
+		if err := applyHostTLSEntries(reg, proxyCfg.HostTLS, "proxy config ", logger); err != nil {
+			return nil, err
+		}
+	}
+
+	return reg, nil
+}
+
+// applyHostTLSEntries adds per-host TLS configurations from a map to the registry.
+func applyHostTLSEntries(reg *httputil.HostTLSRegistry, entries map[string]*config.HostTLSEntry, prefix string, logger *slog.Logger) error {
+	for hostname, entry := range entries {
+		hostCfg := &httputil.HostTLSConfig{
+			ClientCertPath: entry.ClientCertPath,
+			ClientKeyPath:  entry.ClientKeyPath,
+			TLSVerify:      entry.TLSVerify,
+			CABundlePath:   entry.CABundlePath,
+		}
+		if err := hostCfg.Validate(); err != nil {
+			return fmt.Errorf("%shost_tls[%s]: %w", prefix, hostname, err)
+		}
+		reg.Set(hostname, hostCfg)
+		logger.Info("per-host TLS configured", "source", prefix+"config", "host", hostname)
+	}
+	return nil
+}
+
+// initTLSTransport creates the TLS transport with HostTLS support and attaches
+// it to the HTTP handler. If a TLS fingerprint profile is configured, uTLS is used;
+// otherwise StandardTransport is used.
+func initTLSTransport(cfg *config.Config, reg *httputil.HostTLSRegistry, httpHandler *protohttp.Handler, logger *slog.Logger) httputil.TLSTransport {
+	if cfg.TLSFingerprint != "" {
+		profile, err := httputil.ParseBrowserProfile(cfg.TLSFingerprint)
+		if err != nil {
+			// This was already validated earlier; log and use standard transport.
+			logger.Warn("invalid TLS fingerprint profile, using standard transport", "error", err)
+			return initStandardTransport(cfg, reg, httpHandler)
+		}
+		t := &httputil.UTLSTransport{
+			Profile:            profile,
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+			HostTLS:            reg,
+		}
+		httpHandler.SetTLSTransport(t)
+		logger.Info("uTLS fingerprint enabled", "profile", profile.String())
+		return t
+	}
+	return initStandardTransport(cfg, reg, httpHandler)
+}
+
+// initStandardTransport creates a StandardTransport with HostTLS and sets it on the handler.
+func initStandardTransport(cfg *config.Config, reg *httputil.HostTLSRegistry, httpHandler *protohttp.Handler) httputil.TLSTransport {
+	t := &httputil.StandardTransport{
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		HostTLS:            reg,
+	}
+	httpHandler.SetTLSTransport(t)
+	return t
 }
 
 // loadCodecPlugins loads Starlark codec plugins from the proxy config.
@@ -633,6 +723,9 @@ func buildMCPOptions(
 
 	if proto.tlsTransport != nil {
 		opts = append(opts, mcp.WithTLSTransport(proto.tlsTransport))
+	}
+	if proto.hostTLSRegistry != nil {
+		opts = append(opts, mcp.WithHostTLSRegistry(proto.hostTLSRegistry))
 	}
 
 	if proxyCfg != nil {
