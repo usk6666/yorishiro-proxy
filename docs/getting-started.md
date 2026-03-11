@@ -715,6 +715,34 @@ Reload a plugin after editing the script:
 {"action": "reload", "params": {"name": "add_auth_header"}}
 ```
 
+#### Custom codec plugins
+
+Define custom encodings in Starlark for use in fuzzer, resender, and macro encoding chains:
+
+```python
+# codecs/sql_escape.star
+name = "sql_escape"
+
+def encode(s):
+    return s.replace("'", "''")
+
+def decode(s):
+    return s.replace("''", "'")
+```
+
+Load codec plugins via config:
+
+```json
+{
+  "codec_plugins": [
+    {"path": "codecs/sql_escape.star"},
+    {"path": "codecs/"}
+  ]
+}
+```
+
+Once loaded, custom codecs work anywhere built-in codecs do (e.g., `"encoding": ["sql_escape", "url_encode_query"]`).
+
 For details on writing plugins, hook reference, and protocol data maps, see the [Plugin Development Guide](plugins.md).
 
 ### Comparing flows
