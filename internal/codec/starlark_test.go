@@ -527,31 +527,25 @@ def decode(s):
 	}
 }
 
-func TestRegistry_Unregister(t *testing.T) {
-	r := NewRegistry()
+func TestLoadStarlarkCodec_FileTooLarge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.star")
 
-	custom := &mockCodec{name: "custom_unreg"}
-	if err := r.Register("custom_unreg", custom); err != nil {
-		t.Fatalf("Register() error = %v", err)
+	// Create a file just over 1 MB.
+	data := make([]byte, 1<<20+1)
+	for i := range data {
+		data[i] = ' '
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	if _, ok := r.Get("custom_unreg"); !ok {
-		t.Fatal("custom_unreg should exist after Register")
+	_, err := LoadStarlarkCodec(path)
+	if err == nil {
+		t.Fatal("LoadStarlarkCodec() expected error for oversized file")
 	}
-
-	ok := r.Unregister("custom_unreg")
-	if !ok {
-		t.Error("Unregister() returned false, want true")
-	}
-
-	if _, ok := r.Get("custom_unreg"); ok {
-		t.Error("custom_unreg should not exist after Unregister")
-	}
-
-	// Unregister non-existent returns false.
-	ok = r.Unregister("nonexistent")
-	if ok {
-		t.Error("Unregister(nonexistent) returned true, want false")
+	if !strings.Contains(err.Error(), "exceeds limit") {
+		t.Errorf("error = %v, want mention of exceeds limit", err)
 	}
 }
 

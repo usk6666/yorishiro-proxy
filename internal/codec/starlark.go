@@ -14,6 +14,9 @@ import (
 // per codec invocation. This prevents infinite loops from causing DoS.
 const defaultMaxSteps uint64 = 1_000_000
 
+// maxCodecFileSize is the maximum allowed file size for a Starlark codec file (1 MB).
+const maxCodecFileSize int64 = 1 << 20
+
 // StarlarkCodec wraps Starlark encode/decode functions as a Codec.
 // It is safe for concurrent use because a new starlark.Thread is
 // created for each Encode/Decode call.
@@ -30,26 +33,7 @@ func (c *StarlarkCodec) Name() string { return c.name }
 
 // Encode calls the Starlark encode function.
 func (c *StarlarkCodec) Encode(s string) (string, error) {
-	thread := &starlark.Thread{
-		Name: c.name + ".encode",
-		Print: func(_ *starlark.Thread, msg string) {
-			if c.printFunc != nil {
-				c.printFunc(msg)
-			}
-		},
-	}
-	thread.SetMaxExecutionSteps(c.maxSteps)
-
-	result, err := starlark.Call(thread, c.encodeFn, starlark.Tuple{starlark.String(s)}, nil)
-	if err != nil {
-		return "", fmt.Errorf("codec %q encode: %w", c.name, err)
-	}
-
-	str, ok := starlark.AsString(result)
-	if !ok {
-		return "", fmt.Errorf("codec %q encode: returned %s, want string", c.name, result.Type())
-	}
-	return str, nil
+	return c.callStarlark("encode", c.encodeFn, s)
 }
 
 // Decode calls the Starlark decode function. Returns an error if decode is not defined.
@@ -57,9 +41,15 @@ func (c *StarlarkCodec) Decode(s string) (string, error) {
 	if c.decodeFn == nil {
 		return "", fmt.Errorf("codec %q: decode not defined", c.name)
 	}
+	return c.callStarlark("decode", c.decodeFn, s)
+}
 
+// callStarlark invokes a Starlark callable with a single string argument
+// and returns the string result. A new Thread is created per call for
+// concurrency safety.
+func (c *StarlarkCodec) callStarlark(fnName string, fn starlark.Callable, s string) (string, error) {
 	thread := &starlark.Thread{
-		Name: c.name + ".decode",
+		Name: c.name + "." + fnName,
 		Print: func(_ *starlark.Thread, msg string) {
 			if c.printFunc != nil {
 				c.printFunc(msg)
@@ -68,14 +58,14 @@ func (c *StarlarkCodec) Decode(s string) (string, error) {
 	}
 	thread.SetMaxExecutionSteps(c.maxSteps)
 
-	result, err := starlark.Call(thread, c.decodeFn, starlark.Tuple{starlark.String(s)}, nil)
+	result, err := starlark.Call(thread, fn, starlark.Tuple{starlark.String(s)}, nil)
 	if err != nil {
-		return "", fmt.Errorf("codec %q decode: %w", c.name, err)
+		return "", fmt.Errorf("codec %q %s: %w", c.name, fnName, err)
 	}
 
 	str, ok := starlark.AsString(result)
 	if !ok {
-		return "", fmt.Errorf("codec %q decode: returned %s, want string", c.name, result.Type())
+		return "", fmt.Errorf("codec %q %s: returned %s, want string", c.name, fnName, result.Type())
 	}
 	return str, nil
 }
@@ -83,7 +73,16 @@ func (c *StarlarkCodec) Decode(s string) (string, error) {
 // LoadStarlarkCodec loads a Starlark codec from a file path.
 // The file must define a top-level "name" string and an "encode" function.
 // An optional "decode" function may be provided.
+// Files larger than 1 MB are rejected to prevent excessive memory usage.
 func LoadStarlarkCodec(path string) (*StarlarkCodec, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("read codec file %s: %w", path, err)
+	}
+	if info.Size() > maxCodecFileSize {
+		return nil, fmt.Errorf("codec file %s: size %d exceeds limit %d bytes", path, info.Size(), maxCodecFileSize)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read codec file %s: %w", path, err)
@@ -238,17 +237,4 @@ func loadCodecFile(registry *Registry, path string, logWarn func(string, ...any)
 		return false, fmt.Errorf("register codec plugin %q from %s: %w", codec.name, path, err)
 	}
 	return true, nil
-}
-
-// Unregister removes a codec from the registry by name.
-// It returns true if the codec was found and removed, false otherwise.
-// This is used for codec plugin reload support.
-func (r *Registry) Unregister(name string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, exists := r.codecs[name]
-	if exists {
-		delete(r.codecs, name)
-	}
-	return exists
 }
