@@ -76,7 +76,7 @@ Common CLI flags to include in `args`:
 
 All flags also accept environment variables with the `YP_` prefix (e.g., `YP_INSECURE=true`, `YP_LOG_LEVEL=debug`). Priority: CLI flag > environment variable > config file > default value.
 
-> **Note:** A future `yorishiro-proxy setup` command will automate this configuration. For now, manual `.mcp.json` setup is required.
+> **Tip:** You can automate this configuration by running `yorishiro-proxy install` (or `yorishiro-proxy install mcp` for MCP config only).
 
 ### Verify the connection
 
