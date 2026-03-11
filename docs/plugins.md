@@ -367,6 +367,133 @@ def on_socks5_connect(data):
 
 **Config**: `protocol: "socks5"`, `hooks: ["on_socks5_connect"]`
 
+## Custom Codec Plugins
+
+In addition to protocol hook plugins, yorishiro-proxy supports **codec plugins** — Starlark scripts that define custom encode/decode transformations. These are registered alongside the 14 built-in codecs and can be used seamlessly in fuzzer, resender, and macro template encoding chains.
+
+### How Codec Plugins Differ from Hook Plugins
+
+| Aspect | Hook Plugins | Codec Plugins |
+|--------|-------------|---------------|
+| Purpose | Inspect/modify/block traffic | Define string transformations |
+| Configuration | `plugins` section | `codec_plugins` section |
+| Starlark API | Hook functions + action module | `name` variable + `encode`/`decode` functions |
+| State | Stateless per hook call | Stateless (pure functions) |
+| Execution limit | Configurable `max_steps` | Default 1,000,000 steps |
+
+### Codec Plugin File Format
+
+A codec plugin is a `.star` file that defines:
+
+- `name` (string, required): The name used to reference this codec in encoding chains
+- `encode(s)` (function, required): Takes a string, returns the encoded string
+- `decode(s)` (function, optional): Takes a string, returns the decoded string. If not defined, decode operations return an error.
+
+```python
+# codecs/sql_escape.star
+name = "sql_escape"
+
+def encode(s):
+    return s.replace("'", "''")
+
+def decode(s):
+    return s.replace("''", "'")
+```
+
+Encode-only codec (irreversible transformation):
+
+```python
+# codecs/rot13.star
+name = "rot13"
+
+_upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_lower = "abcdefghijklmnopqrstuvwxyz"
+
+def encode(s):
+    result = []
+    for c in s.elems():
+        i = _upper.find(c)
+        if i >= 0:
+            result.append(_upper[(i + 13) % 26])
+        else:
+            i = _lower.find(c)
+            if i >= 0:
+                result.append(_lower[(i + 13) % 26])
+            else:
+                result.append(c)
+    return "".join(result)
+```
+
+### Configuration
+
+Codec plugins are configured in the `codec_plugins` section of the config file. Each entry specifies a `path` to a `.star` file or a directory containing `.star` files.
+
+```json
+{
+  "codec_plugins": [
+    {"path": "codecs/sql_escape.star"},
+    {"path": "codecs/"}
+  ]
+}
+```
+
+- **File path**: Loads the specified `.star` file
+- **Directory path**: Loads all `*.star` files in the directory (non-recursive)
+- Paths are relative to the working directory
+
+### Name Collision
+
+If a codec plugin defines a `name` that conflicts with a built-in codec (e.g., `base64`, `url_encode_query`) or another already-loaded codec plugin, the proxy returns an error at startup. Choose unique names for custom codecs.
+
+### Error Handling
+
+| Error Type | Behavior |
+|-----------|----------|
+| Syntax error in `.star` file | Warning logged, codec skipped |
+| Missing `name` variable | Warning logged, codec skipped |
+| Missing `encode` function | Warning logged, codec skipped |
+| `encode`/`decode` runtime error | Error propagated to the encoding chain caller |
+| Infinite loop (exceeds step limit) | Execution halted, error returned |
+| Name conflict with existing codec | Startup error |
+
+### Using Custom Codecs
+
+Once loaded, custom codecs are available everywhere built-in codecs are used:
+
+**Fuzzer encoding chain:**
+
+```json
+{
+  "action": "fuzz",
+  "params": {
+    "flow_id": "...",
+    "targets": [{"location": "query", "name": "q"}],
+    "payloads": {
+      "type": "values",
+      "values": ["admin'--", "' OR 1=1--"],
+      "encoding": ["sql_escape", "url_encode_query"]
+    }
+  }
+}
+```
+
+**Macro template:**
+
+```
+{{payload | sql_escape | url_encode_query}}
+```
+
+**Starlark `codec` module** (in hook plugins):
+
+```python
+# The codec module automatically includes custom codecs
+encoded = codec.sql_escape("admin'--")   # "admin''--"
+decoded = codec.sql_escape_decode("admin''--")  # "admin'--"
+
+# Chain encoding also works
+result = codec.encode("admin'--", ["sql_escape", "url_encode_query"])
+```
+
 ## MCP Plugin Tool
 
 The `plugin` MCP tool provides runtime management of loaded plugins.
