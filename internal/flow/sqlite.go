@@ -343,6 +343,20 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 		conditions = append(conditions, "INSTR(LOWER(s.tags), ?) > 0")
 		args = append(args, strings.ToLower(opts.Technology))
 	}
+	if opts.ConnID != "" {
+		conditions = append(conditions, "s.conn_id = ?")
+		args = append(args, opts.ConnID)
+	}
+	if opts.Host != "" {
+		// Match against server_addr (host:port or host) or the host portion
+		// of the URL stored in send messages. server_addr may contain a port,
+		// so we check both exact match and host-prefix match (host:*).
+		// For URL-based matching, we extract the host via an EXISTS subquery
+		// using SQLite string functions on the message url column.
+		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.Host)
+		conditions = append(conditions, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND (m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\')))")
+		args = append(args, opts.Host, escaped+":%", "%://"+escaped+"/%", "%://"+escaped)
+	}
 
 	clause := ""
 	if len(conditions) > 0 {

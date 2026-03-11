@@ -22,6 +22,8 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **blocked_by** (string): Filter for blocked flows (e.g. `"target_scope"`, `"intercept_drop"`).
 - **state** (string): Flow lifecycle state filter (`"active"`, `"complete"`, `"error"`).
 - **technology** (string): Technology name filter for flows (case-insensitive substring match, e.g. `"nginx"`, `"wordpress"`).
+- **conn_id** (string): Connection ID filter for flows (exact match). Use to find all flows from the same connection.
+- **host** (string): Host filter for flows. Matches against the `server_addr` or the host portion of the request URL (e.g. `"example.com"`).
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
 - **outliers_only** (boolean): Return only outlier fuzz results (detected by status_code, body_length, or timing deviation).
@@ -149,6 +151,22 @@ Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, ma
 {
   "resource": "flows",
   "filter": {"state": "error"}
+}
+```
+
+### Filter flows by connection ID
+```json
+{
+  "resource": "flows",
+  "filter": {"conn_id": "abc-conn-123"}
+}
+```
+
+### Filter flows by host
+```json
+{
+  "resource": "flows",
+  "filter": {"host": "example.com"}
 }
 ```
 

@@ -62,6 +62,10 @@ type queryFilter struct {
 	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
 	// Technology filters flows by detected technology name (case-insensitive substring match).
 	Technology string `json:"technology,omitempty" jsonschema:"technology name filter for flows (e.g. nginx, wordpress)"`
+	// ConnID filters flows by connection ID (exact match).
+	ConnID string `json:"conn_id,omitempty" jsonschema:"connection ID filter for flows (exact match)"`
+	// Host filters flows by host (matches server_addr or URL host).
+	Host string `json:"host,omitempty" jsonschema:"host filter for flows (matches server_addr or URL host, e.g. example.com)"`
 	// BodyContains filters fuzz_results by response body substring.
 	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
 	// OutliersOnly filters fuzz_results to return only outlier results.
@@ -84,7 +88,7 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
 			"The 'id' parameter is required for flow, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), and technology (e.g. nginx, wordpress); " +
+			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code, body_contains, and outliers_only (returns only outlier results). " +
 			"Flows include protocol_summary with protocol-specific information. " +
@@ -180,6 +184,8 @@ func buildFlowListOptions(input queryInput) flow.ListOptions {
 		opts.BlockedBy = input.Filter.BlockedBy
 		opts.State = input.Filter.State
 		opts.Technology = input.Filter.Technology
+		opts.ConnID = input.Filter.ConnID
+		opts.Host = input.Filter.Host
 	}
 	return opts
 }
