@@ -132,6 +132,7 @@ func (h *Handler) applyTransform(req *gohttp.Request, recordReqBody []byte) []by
 type forwardResult struct {
 	resp       *gohttp.Response
 	serverAddr string
+	timing     *httputil.RoundTripTiming
 }
 
 // forwardUpstream sends the request to the upstream server and returns the
@@ -140,13 +141,13 @@ func (h *Handler) forwardUpstream(ctx context.Context, conn net.Conn, req *gohtt
 	outReq := req.WithContext(ctx)
 	outReq.RequestURI = ""
 
-	resp, serverAddr, err := roundTripWithTrace(h.Transport, outReq)
+	resp, serverAddr, timing, err := roundTripWithTrace(h.Transport, outReq)
 	if err != nil {
 		logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
 		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		return nil, fmt.Errorf("upstream request: %w", err)
 	}
-	return &forwardResult{resp: resp, serverAddr: serverAddr}, nil
+	return &forwardResult{resp: resp, serverAddr: serverAddr, timing: timing}, nil
 }
 
 // readResponseBody reads the full response body (up to MaxBodySize) and applies

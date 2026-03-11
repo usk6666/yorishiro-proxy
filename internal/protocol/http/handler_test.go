@@ -681,7 +681,7 @@ func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
 	// Forward through the handler's transport (which uses test server certs).
 	outReq := req.WithContext(context.Background())
 	outReq.RequestURI = ""
-	resp, _, err := roundTripWithTrace(handler.Transport, outReq)
+	resp, _, _, err := roundTripWithTrace(handler.Transport, outReq)
 	if err != nil {
 		t.Fatalf("roundTrip failed: %v", err)
 	}

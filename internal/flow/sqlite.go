@@ -160,8 +160,8 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, fl *Flow) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO flows (id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO flows (id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		fl.ID,
 		fl.ConnID,
 		fl.Protocol,
@@ -177,6 +177,9 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, fl *Flow) error {
 		tlsALPN,
 		tlsCertSubject,
 		fl.BlockedBy,
+		fl.SendMs,
+		fl.WaitMs,
+		fl.ReceiveMs,
 	)
 	if err != nil {
 		return fmt.Errorf("insert flow: %w", err)
@@ -213,6 +216,18 @@ func (s *SQLiteStore) UpdateFlow(ctx context.Context, id string, update FlowUpda
 		if update.TLSServerCertSubject != "" {
 			sets = append(sets, "tls_server_cert_subject = ?")
 			args = append(args, update.TLSServerCertSubject)
+		}
+		if update.SendMs != nil {
+			sets = append(sets, "send_ms = ?")
+			args = append(args, *update.SendMs)
+		}
+		if update.WaitMs != nil {
+			sets = append(sets, "wait_ms = ?")
+			args = append(args, *update.WaitMs)
+		}
+		if update.ReceiveMs != nil {
+			sets = append(sets, "receive_ms = ?")
+			args = append(args, *update.ReceiveMs)
 		}
 
 		if len(sets) == 0 {
@@ -300,7 +315,7 @@ func ValidateFlowID(id string) error {
 }
 
 // flowColumns is the list of columns selected in flow queries.
-const flowColumns = `id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by`
+const flowColumns = `id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms`
 
 // buildFlowWhereClause constructs a SQL WHERE clause from ListOptions.
 // Method, URLPattern, and StatusCode are matched via EXISTS subqueries on messages.
@@ -697,6 +712,9 @@ func scanFlow(row scannable) (*Flow, error) {
 		tlsALPN        string
 		tlsCertSubject string
 		blockedBy      string
+		sendMs         sql.NullInt64
+		waitMs         sql.NullInt64
+		receiveMs      sql.NullInt64
 	)
 
 	err := row.Scan(
@@ -715,6 +733,9 @@ func scanFlow(row scannable) (*Flow, error) {
 		&tlsALPN,
 		&tlsCertSubject,
 		&blockedBy,
+		&sendMs,
+		&waitMs,
+		&receiveMs,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -749,6 +770,9 @@ func scanFlow(row scannable) (*Flow, error) {
 	}
 
 	fl.BlockedBy = blockedBy
+	fl.SendMs = nullInt64ToPtr(sendMs)
+	fl.WaitMs = nullInt64ToPtr(waitMs)
+	fl.ReceiveMs = nullInt64ToPtr(receiveMs)
 
 	return &fl, nil
 }
@@ -817,4 +841,13 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// nullInt64ToPtr converts a sql.NullInt64 to a *int64.
+// Returns nil if the value is not valid (NULL in the database).
+func nullInt64ToPtr(n sql.NullInt64) *int64 {
+	if n.Valid {
+		return &n.Int64
+	}
+	return nil
 }

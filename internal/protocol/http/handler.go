@@ -456,6 +456,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// versions when intercept/transform changed the request.
 	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
 
+	sendStart := time.Now()
 	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
 	if err != nil {
 		// Upstream failed — record session as error. Send is already recorded.
@@ -465,6 +466,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	defer fwd.resp.Body.Close()
 
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
+	receiveEnd := time.Now()
 
 	// Plugin hook: on_receive_from_server — after response received, before Transform.
 	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
@@ -497,6 +499,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Uses variant-aware recording to capture both original and modified
 	// versions when intercept changed the response.
 	duration := time.Since(start)
+	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 	h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:       start,
 		duration:    duration,
@@ -504,6 +507,9 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		resp:        fwd.resp,
 		rawResponse: rawResponse,
 		respBody:    fullRespBody,
+		sendMs:      sendMs,
+		waitMs:      waitMs,
+		receiveMs:   receiveMs,
 	}, &respSnap, logger)
 
 	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
@@ -548,19 +554,27 @@ func removeHopByHopHeaders(header gohttp.Header) {
 }
 
 // roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
-// capture the remote address of the TCP connection used for the request.
-func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*gohttp.Response, string, error) {
+// capture the remote address of the TCP connection used for the request
+// and per-phase timing data (send, wait, receive).
+func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*gohttp.Response, string, *httputil.RoundTripTiming, error) {
 	var serverAddr string
+	timing := &httputil.RoundTripTiming{}
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			if info.Conn != nil {
 				serverAddr = info.Conn.RemoteAddr().String()
 			}
 		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			timing.SetWroteRequest(time.Now())
+		},
+		GotFirstResponseByte: func() {
+			timing.SetGotFirstByte(time.Now())
+		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	resp, err := transport.RoundTrip(req)
-	return resp, serverAddr, err
+	return resp, serverAddr, timing, err
 }
 
 func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
