@@ -4,16 +4,18 @@ import { useMcpContext } from "../../lib/mcp/context.js";
 import { useSecurity } from "../../lib/mcp/hooks.js";
 import type { SecurityGetScopeResult } from "../../lib/mcp/types.js";
 import { AgentLayer } from "./AgentLayer.js";
+import { Budget } from "./Budget.js";
 import { EnforcementMode } from "./EnforcementMode.js";
 import { PolicyLayer } from "./PolicyLayer.js";
+import { RateLimits } from "./RateLimits.js";
 import "./SecurityPage.css";
 import { UrlTestTool } from "./UrlTestTool.js";
 
 /**
- * SecurityPage -- Security Target Scope management page.
+ * SecurityPage -- Security management page.
  *
  * Displays the two-layer target scope model (Policy Layer + Agent Layer),
- * enforcement mode, and a URL test tool.
+ * enforcement mode, URL test tool, rate limits, and diagnostic budget.
  */
 export function SecurityPage() {
   const { status } = useMcpContext();
@@ -72,7 +74,7 @@ export function SecurityPage() {
   return (
     <div className="page security-page">
       <h1 className="page-title">Security</h1>
-      <p className="page-description">Target scope and access control management.</p>
+      <p className="page-description">Target scope, rate limits, and diagnostic budget management.</p>
 
       <div className="security-content">
         {scopeData && (
@@ -92,6 +94,10 @@ export function SecurityPage() {
         )}
 
         <UrlTestTool />
+
+        <RateLimits />
+
+        <Budget />
       </div>
     </div>
   );

@@ -952,7 +952,11 @@ export type SecurityAction =
   | "set_target_scope"
   | "update_target_scope"
   | "get_target_scope"
-  | "test_target";
+  | "test_target"
+  | "set_rate_limits"
+  | "get_rate_limits"
+  | "set_budget"
+  | "get_budget";
 
 /** Target rule for security tool. */
 export interface TargetRule {
@@ -978,6 +982,14 @@ export interface SecurityParams {
 
     // test_target
     url?: string;
+
+    // set_rate_limits
+    max_requests_per_second?: number;
+    max_requests_per_host_per_second?: number;
+
+    // set_budget
+    max_total_requests?: number;
+    max_duration?: string;
   };
 }
 
@@ -1025,6 +1037,48 @@ export interface SecurityTestTargetResult {
   layer: string;
   matched_rule?: TargetRule | null;
   tested_target: TestedTarget;
+}
+
+/** Rate limit configuration (mirrors Go proxy.RateLimitConfig). */
+export interface RateLimitConfig {
+  max_requests_per_second: number;
+  max_requests_per_host_per_second: number;
+}
+
+/** Result of set_rate_limits action. */
+export interface SecuritySetRateLimitsResult {
+  status: string;
+  effective: RateLimitConfig;
+  agent: RateLimitConfig;
+}
+
+/** Result of get_rate_limits action. */
+export interface SecurityGetRateLimitsResult {
+  policy: RateLimitConfig;
+  agent: RateLimitConfig;
+  effective: RateLimitConfig;
+}
+
+/** Budget configuration (mirrors Go proxy.BudgetConfig). */
+export interface BudgetConfig {
+  max_total_requests: number;
+  max_duration: string;
+}
+
+/** Result of set_budget action. */
+export interface SecuritySetBudgetResult {
+  status: string;
+  effective: BudgetConfig;
+  agent: BudgetConfig;
+}
+
+/** Result of get_budget action. */
+export interface SecurityGetBudgetResult {
+  policy: BudgetConfig;
+  agent: BudgetConfig;
+  effective: BudgetConfig;
+  request_count: number;
+  stop_reason?: string;
 }
 
 // ---------------------------------------------------------------------------
