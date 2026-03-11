@@ -145,7 +145,7 @@ func (r *Runner) Install(ctx context.Context) error {
 	case TargetSkills:
 		return r.installSkills()
 	case TargetPlaywright:
-		return r.installPlaywright(binaryPath)
+		return r.installPlaywright()
 	default:
 		return r.installAll(ctx, binaryPath)
 	}
@@ -304,7 +304,7 @@ func (r *Runner) installSkills() error {
 }
 
 // installPlaywright configures Playwright integration.
-func (r *Runner) installPlaywright(binaryPath string) error {
+func (r *Runner) installPlaywright() error {
 	r.printf("--- Playwright integration ---\n\n")
 
 	projectDir, err := os.Getwd()
