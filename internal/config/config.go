@@ -416,6 +416,16 @@ type ProxyConfig struct {
 	// When loaded from a config file, this section is ignored if a dedicated
 	// policy file is specified via -target-policy-file / YP_TARGET_POLICY_FILE.
 	TargetScopePolicy *TargetScopePolicyConfig `json:"target_scope_policy,omitempty"`
+
+	// CodecPlugins configures Starlark-based custom codec plugins.
+	// Each entry specifies a path to a Starlark codec file or a directory
+	// containing *.star codec files. Codec plugins are loaded at startup
+	// and registered with the codec registry alongside built-in codecs.
+	//
+	// json.RawMessage is used intentionally to avoid a dependency from the
+	// config package to the codec package. The raw JSON is decoded into
+	// []codec.CodecPluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
+	CodecPlugins json.RawMessage `json:"codec_plugins,omitempty"`
 }
 
 // LoadFile reads and parses a JSON config file from the given path.
