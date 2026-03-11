@@ -11,6 +11,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -102,6 +103,14 @@ type proxyStartInput struct {
 	// Valid values: "chrome" (default), "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
 	// If omitted, defaults to "chrome".
 	TLSFingerprint string `json:"tls_fingerprint,omitempty" jsonschema:"TLS fingerprint profile: chrome (default), firefox, safari, edge, random, none"`
+
+	// ClientCertPath is the path to a PEM-encoded client certificate for mTLS with upstream servers (global).
+	// Must be used together with client_key. If omitted, no client certificate is presented.
+	ClientCertPath string `json:"client_cert,omitempty" jsonschema:"PEM client certificate path for mTLS (global)"`
+
+	// ClientKeyPath is the path to a PEM-encoded client private key for mTLS with upstream servers (global).
+	// Must be used together with client_cert. If omitted, no client certificate is presented.
+	ClientKeyPath string `json:"client_key,omitempty" jsonschema:"PEM client private key path for mTLS (global)"`
 
 	// MaxConnections is the maximum number of concurrent proxy connections.
 	// Defaults to 128 if omitted or zero.
@@ -248,12 +257,61 @@ func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 			return fmt.Errorf("auto_transform: %w", err)
 		}
 	}
+	return s.applyProxyStartTLS(input)
+}
+
+// applyProxyStartTLS validates and applies TLS-related settings (fingerprint, client cert).
+func (s *Server) applyProxyStartTLS(input *proxyStartInput) error {
 	if input.TLSFingerprint != "" {
 		if err := s.applyTLSFingerprint(input.TLSFingerprint); err != nil {
 			return fmt.Errorf("tls_fingerprint: %w", err)
 		}
 	}
+	if input.ClientCertPath != "" || input.ClientKeyPath != "" {
+		if err := s.applyClientCert(input.ClientCertPath, input.ClientKeyPath); err != nil {
+			return fmt.Errorf("client_cert: %w", err)
+		}
+	}
 	return nil
+}
+
+// applyClientCert validates and sets the global mTLS client certificate
+// on the host TLS registry.
+func (s *Server) applyClientCert(certPath, keyPath string) error {
+	if certPath == "" {
+		return fmt.Errorf("client_cert is required when client_key is set")
+	}
+	if keyPath == "" {
+		return fmt.Errorf("client_key is required when client_cert is set")
+	}
+	if s.deps.hostTLSRegistry == nil {
+		return fmt.Errorf("host TLS registry is not initialized")
+	}
+	cfg := &httputil.HostTLSConfig{
+		ClientCertPath: certPath,
+		ClientKeyPath:  keyPath,
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	// Verify the certificate can actually be loaded.
+	if _, err := cfg.LoadClientCert(); err != nil {
+		return err
+	}
+	s.deps.hostTLSRegistry.SetGlobal(cfg)
+	return nil
+}
+
+// currentClientCert returns the current global client cert/key paths, or empty strings.
+func (s *Server) currentClientCert() (string, string) {
+	if s.deps.hostTLSRegistry == nil {
+		return "", ""
+	}
+	global := s.deps.hostTLSRegistry.Global()
+	if global == nil {
+		return "", ""
+	}
+	return global.ClientCertPath, global.ClientKeyPath
 }
 
 // applyTCPForwardsConfig validates and stores TCP forward mappings.
@@ -506,8 +564,19 @@ func (s *Server) applyProxyDefaultStrings(input *proxyStartInput, d *config.Prox
 	if input.SOCKS5Password == "" && d.SOCKS5Password != "" {
 		input.SOCKS5Password = d.SOCKS5Password
 	}
+	s.applyProxyDefaultTLSStrings(input, d)
+}
+
+// applyProxyDefaultTLSStrings merges TLS-related string defaults from config into the input.
+func (s *Server) applyProxyDefaultTLSStrings(input *proxyStartInput, d *config.ProxyConfig) {
 	if input.TLSFingerprint == "" && d.TLSFingerprint != "" {
 		input.TLSFingerprint = d.TLSFingerprint
+	}
+	if input.ClientCertPath == "" && d.ClientCertPath != "" {
+		input.ClientCertPath = d.ClientCertPath
+	}
+	if input.ClientKeyPath == "" && d.ClientKeyPath != "" {
+		input.ClientKeyPath = d.ClientKeyPath
 	}
 }
 

@@ -125,6 +125,19 @@ type Config struct {
 	// Empty or unset means Go's default TLS stack is used (no fingerprint spoofing).
 	TLSFingerprint string `json:"tls_fingerprint"`
 
+	// ClientCertPath is the path to the PEM-encoded client certificate file
+	// for mTLS authentication with upstream servers (global default).
+	ClientCertPath string `json:"client_cert"`
+
+	// ClientKeyPath is the path to the PEM-encoded client private key file
+	// for mTLS authentication with upstream servers (global default).
+	ClientKeyPath string `json:"client_key"`
+
+	// HostTLS maps hostnames to per-host TLS configurations.
+	// Each entry can specify client certificates, TLS verification, and CA bundles.
+	// Wildcard patterns (e.g. "*.example.com") are supported.
+	HostTLS map[string]*HostTLSEntry `json:"host_tls"`
+
 	// CAEphemeral forces in-memory-only CA generation with no file persistence.
 	// When true, a new CA is generated on each startup.
 	CAEphemeral bool `json:"ca_ephemeral"`
@@ -261,6 +274,22 @@ func isValidProjectNameRune(r rune) bool {
 		r == '-' || r == '_' || r == '.'
 }
 
+// HostTLSEntry defines per-host TLS configuration in the config file.
+type HostTLSEntry struct {
+	// ClientCertPath is the path to the PEM-encoded client certificate file.
+	ClientCertPath string `json:"client_cert,omitempty"`
+
+	// ClientKeyPath is the path to the PEM-encoded client private key file.
+	ClientKeyPath string `json:"client_key,omitempty"`
+
+	// TLSVerify controls TLS certificate verification for this host.
+	// nil = use global setting, false = skip verification, true = enforce verification.
+	TLSVerify *bool `json:"tls_verify,omitempty"`
+
+	// CABundlePath is the path to a PEM-encoded CA bundle file.
+	CABundlePath string `json:"ca_bundle,omitempty"`
+}
+
 // TargetRuleConfig defines a single target scope rule in configuration files.
 // All non-empty/non-nil fields must match for the rule to apply (AND logic).
 type TargetRuleConfig struct {
@@ -391,6 +420,16 @@ type ProxyConfig struct {
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
 	// Valid values: "chrome" (default), "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
 	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
+
+	// ClientCertPath is the path to a PEM-encoded client certificate for mTLS (global).
+	ClientCertPath string `json:"client_cert,omitempty"`
+
+	// ClientKeyPath is the path to a PEM-encoded client private key for mTLS (global).
+	ClientKeyPath string `json:"client_key,omitempty"`
+
+	// HostTLS maps hostnames to per-host TLS configurations for mTLS,
+	// custom CA bundles, and per-host TLS verification control.
+	HostTLS map[string]*HostTLSEntry `json:"host_tls,omitempty"`
 
 	// Plugins configures Starlark-based plugins for the proxy pipeline.
 	// Each entry specifies a script path, target protocol, subscribed hooks,
