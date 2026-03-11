@@ -1771,3 +1771,230 @@ func TestQuery_Session_BothRequestAndResponseVariants(t *testing.T) {
 		t.Errorf("original_response.body = %q, want '{\"r\":\"orig\"}'", out.OriginalResponse.Body)
 	}
 }
+
+// --- Test: conn_id filter ---
+
+func TestQuery_Sessions_FilterByConnID(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create two flows with different conn_ids.
+	for _, tc := range []struct {
+		id, connID string
+	}{
+		{"flow-a1", "conn-alpha"},
+		{"flow-a2", "conn-alpha"},
+		{"flow-b1", "conn-beta"},
+	} {
+		fl := &flow.Flow{
+			ID:        tc.id,
+			ConnID:    tc.connID,
+			Protocol:  "HTTPS",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now().UTC(),
+			Duration:  100 * time.Millisecond,
+		}
+		if err := store.SaveFlow(ctx, fl); err != nil {
+			t.Fatalf("SaveFlow(%s): %v", tc.id, err)
+		}
+		parsedURL, _ := url.Parse("https://example.com/api")
+		if err := store.AppendMessage(ctx, &flow.Message{
+			ID: tc.id + "-send", FlowID: tc.id, Sequence: 0, Direction: "send",
+			Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
+		}); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	// Filter by conn_id = conn-alpha should return 2 flows.
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{ConnID: "conn-alpha"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var out queryFlowsResult
+	unmarshalQueryResult(t, result, &out)
+	if out.Total != 2 {
+		t.Errorf("total = %d, want 2", out.Total)
+	}
+	if out.Count != 2 {
+		t.Errorf("count = %d, want 2", out.Count)
+	}
+
+	// Filter by conn_id = conn-beta should return 1 flow.
+	result = callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{ConnID: "conn-beta"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	unmarshalQueryResult(t, result, &out)
+	if out.Total != 1 {
+		t.Errorf("total = %d, want 1", out.Total)
+	}
+	if out.Flows[0].ID != "flow-b1" {
+		t.Errorf("id = %q, want flow-b1", out.Flows[0].ID)
+	}
+
+	// Filter by non-existent conn_id should return 0 flows.
+	result = callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{ConnID: "conn-nonexistent"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	unmarshalQueryResult(t, result, &out)
+	if out.Total != 0 {
+		t.Errorf("total = %d, want 0", out.Total)
+	}
+}
+
+// --- Test: host filter ---
+
+// seedFlowWithHost creates a flow with optional server_addr and a send message with the given URL.
+func seedFlowWithHost(t *testing.T, store flow.Store, id, serverAddr, urlStr string) {
+	t.Helper()
+	ctx := context.Background()
+
+	fl := &flow.Flow{
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+	}
+	if serverAddr != "" {
+		fl.ConnInfo = &flow.ConnectionInfo{
+			ServerAddr: serverAddr,
+		}
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow(%s): %v", id, err)
+	}
+
+	parsedURL, _ := url.Parse(urlStr)
+	if err := store.AppendMessage(ctx, &flow.Message{
+		ID: id + "-send", FlowID: id, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
+		Headers: map[string][]string{"Host": {parsedURL.Hostname()}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		ID: id + "-recv", FlowID: id, Sequence: 1, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 200,
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+}
+
+func TestQuery_Sessions_FilterByHost(t *testing.T) {
+	store := newTestStore(t)
+
+	// Flow with server_addr matching host exactly (no port).
+	seedFlowWithHost(t, store, "flow-h1", "example.com", "https://example.com/page1")
+	// Flow with server_addr including port.
+	seedFlowWithHost(t, store, "flow-h2", "example.com:443", "https://example.com/page2")
+	// Flow with different host.
+	seedFlowWithHost(t, store, "flow-h3", "other.com:443", "https://other.com/page3")
+	// Flow with no server_addr but URL matches host.
+	seedFlowWithHost(t, store, "flow-h4", "", "https://example.com/page4")
+
+	cs := setupQueryTestSession(t, store)
+
+	// Filter by host = example.com should match flow-h1, flow-h2, flow-h4.
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{Host: "example.com"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var out queryFlowsResult
+	unmarshalQueryResult(t, result, &out)
+	if out.Total != 3 {
+		t.Errorf("total = %d, want 3", out.Total)
+	}
+
+	// Filter by host = other.com should match flow-h3 only.
+	result = callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{Host: "other.com"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	unmarshalQueryResult(t, result, &out)
+	if out.Total != 1 {
+		t.Errorf("total = %d, want 1", out.Total)
+	}
+	if out.Flows[0].ID != "flow-h3" {
+		t.Errorf("id = %q, want flow-h3", out.Flows[0].ID)
+	}
+}
+
+func TestQuery_Sessions_FilterByConnIDAndHost(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create flows sharing same conn_id but different hosts.
+	for _, tc := range []struct {
+		id, connID, serverAddr, urlStr string
+	}{
+		{"flow-c1", "conn-shared", "example.com:443", "https://example.com/a"},
+		{"flow-c2", "conn-shared", "other.com:443", "https://other.com/b"},
+		{"flow-c3", "conn-other", "example.com:443", "https://example.com/c"},
+	} {
+		fl := &flow.Flow{
+			ID:        tc.id,
+			ConnID:    tc.connID,
+			Protocol:  "HTTPS",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: time.Now().UTC(),
+			Duration:  100 * time.Millisecond,
+			ConnInfo:  &flow.ConnectionInfo{ServerAddr: tc.serverAddr},
+		}
+		if err := store.SaveFlow(ctx, fl); err != nil {
+			t.Fatalf("SaveFlow(%s): %v", tc.id, err)
+		}
+		parsedURL, _ := url.Parse(tc.urlStr)
+		if err := store.AppendMessage(ctx, &flow.Message{
+			ID: tc.id + "-send", FlowID: tc.id, Sequence: 0, Direction: "send",
+			Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
+		}); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	// Combine conn_id + host filters: conn-shared AND example.com.
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{ConnID: "conn-shared", Host: "example.com"},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var out queryFlowsResult
+	unmarshalQueryResult(t, result, &out)
+	if out.Total != 1 {
+		t.Errorf("total = %d, want 1", out.Total)
+	}
+	if out.Count != 1 {
+		t.Errorf("count = %d, want 1", out.Count)
+	}
+	if len(out.Flows) > 0 && out.Flows[0].ID != "flow-c1" {
+		t.Errorf("id = %q, want flow-c1", out.Flows[0].ID)
+	}
+}

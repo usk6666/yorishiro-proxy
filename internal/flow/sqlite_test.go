@@ -1374,3 +1374,51 @@ func TestGetFlow_PrefixMatch_UniqueAfterAmbiguity(t *testing.T) {
 		t.Errorf("GetFlow(bbbbbbbb) ID = %q, want %q", got2.ID, fl2.ID)
 	}
 }
+
+func TestSQLiteStore_HostFilter_BoundaryAnchoring(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Flow 1: URL with path — https://example.com/path
+	saveTestSession(t, store, "HTTPS", now, "GET", "https://example.com/path", 200, nil, []byte("ok"))
+	// Flow 2: URL with query string only — https://example.com?q=1
+	saveTestSession(t, store, "HTTPS", now, "GET", "https://example.com?q=1", 200, nil, []byte("ok"))
+	// Flow 3: URL with port — https://example.com:8443/path
+	saveTestSession(t, store, "HTTPS", now, "GET", "https://example.com:8443/path", 200, nil, []byte("ok"))
+	// Flow 4: bare host URL — https://example.com
+	saveTestSession(t, store, "HTTPS", now, "GET", "https://example.com", 200, nil, []byte("ok"))
+	// Flow 5: subdomain impostor — https://example.com.evil.com/path (should NOT match)
+	saveTestSession(t, store, "HTTPS", now, "GET", "https://example.com.evil.com/path", 200, nil, []byte("ok"))
+	// Flow 6: subdomain impostor bare — https://example.com.evil.com (should NOT match)
+	saveTestSession(t, store, "HTTPS", now, "GET", "https://example.com.evil.com", 200, nil, []byte("ok"))
+
+	tests := []struct {
+		name string
+		host string
+		want int
+	}{
+		{"matches path URL", "example.com", 4},
+		{"no subdomain false positive", "example.com", 4},
+		{"evil domain matches itself", "example.com.evil.com", 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flows, err := store.ListFlows(ctx, ListOptions{Host: tt.host})
+			if err != nil {
+				t.Fatalf("ListFlows(Host=%q): %v", tt.host, err)
+			}
+			if len(flows) != tt.want {
+				var urls []string
+				for _, f := range flows {
+					msgs, _ := store.GetMessages(ctx, f.ID, MessageListOptions{Direction: "send"})
+					if len(msgs) > 0 && msgs[0].URL != nil {
+						urls = append(urls, msgs[0].URL.String())
+					}
+				}
+				t.Errorf("Host=%q: got %d flows %v, want %d", tt.host, len(flows), urls, tt.want)
+			}
+		})
+	}
+}

@@ -121,6 +121,11 @@ type ListOptions struct {
 	// matching this name (case-insensitive substring match on the
 	// JSON-encoded "technologies" tag value).
 	Technology string
+	// ConnID filters flows by connection ID (exact match).
+	ConnID string
+	// Host filters flows by host. Matches against the server_addr column
+	// or the host portion of the URL in send messages.
+	Host string
 	// Limit is the maximum number of flows to return.
 	Limit int
 	// Offset is the number of flows to skip for pagination.
