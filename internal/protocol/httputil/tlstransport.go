@@ -91,15 +91,27 @@ type StandardTransport struct {
 	// InsecureSkipVerify disables server certificate verification.
 	// This is required for MITM proxy use cases.
 	InsecureSkipVerify bool
+
+	// HostTLS provides per-host TLS configuration (mTLS, custom CA, verification).
+	// When set, serverName-based lookup is performed to apply host-specific settings.
+	HostTLS *HostTLSRegistry
 }
 
 // TLSConnect establishes a TLS connection using the standard crypto/tls library.
+// When HostTLS is configured, per-host settings (client certificates, CA bundles,
+// verification) are applied based on the serverName.
 func (t *StandardTransport) TLSConnect(ctx context.Context, conn net.Conn, serverName string) (net.Conn, string, error) {
 	tlsConfig := &tls.Config{
 		ServerName:         serverName,
 		InsecureSkipVerify: t.InsecureSkipVerify, //nolint:gosec // proxy requires MITM
 		NextProtos:         []string{"h2", "http/1.1"},
 		MinVersion:         tls.VersionTLS12,
+	}
+
+	if t.HostTLS != nil {
+		if err := t.HostTLS.ApplyToTLSConfig(tlsConfig, serverName, t.InsecureSkipVerify); err != nil {
+			return nil, "", fmt.Errorf("host TLS config for %s: %w", serverName, err)
+		}
 	}
 
 	tlsConn := tls.Client(conn, tlsConfig)
@@ -120,10 +132,17 @@ type UTLSTransport struct {
 
 	// InsecureSkipVerify disables server certificate verification.
 	InsecureSkipVerify bool
+
+	// HostTLS provides per-host TLS configuration (mTLS, custom CA, verification).
+	// When set, serverName-based lookup is performed to apply host-specific settings.
+	// Note: uTLS supports client certificates and InsecureSkipVerify but custom
+	// RootCAs are applied through the utls.Config (which supports them).
+	HostTLS *HostTLSRegistry
 }
 
 // TLSConnect establishes a TLS connection using uTLS with the configured
-// browser profile.
+// browser profile. When HostTLS is configured, per-host settings (client
+// certificates, CA bundles, verification) are applied based on the serverName.
 func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverName string) (net.Conn, string, error) {
 	profile := t.Profile
 	if profile == 0 {
@@ -141,6 +160,13 @@ func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverNam
 		MinVersion:         tls.VersionTLS12,
 	}
 
+	// Apply per-host TLS configuration if registry is set.
+	if t.HostTLS != nil {
+		if err := t.applyHostTLS(tlsConfig, serverName); err != nil {
+			return nil, "", fmt.Errorf("host TLS config for %s: %w", serverName, err)
+		}
+	}
+
 	utlsConn := utls.UClient(conn, tlsConfig, *helloID)
 	if err := utlsConn.HandshakeContext(ctx); err != nil {
 		return nil, "", fmt.Errorf("uTLS handshake with %s (profile=%s): %w", serverName, profile, err)
@@ -148,6 +174,50 @@ func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverNam
 
 	proto := utlsConn.ConnectionState().NegotiatedProtocol
 	return utlsConn, proto, nil
+}
+
+// applyHostTLS applies per-host TLS settings from the registry to a utls.Config.
+// uTLS uses its own tls types that mirror crypto/tls, so we convert as needed.
+func (t *UTLSTransport) applyHostTLS(cfg *utls.Config, serverName string) error {
+	hostCfg := t.HostTLS.Lookup(serverName)
+	if hostCfg == nil {
+		return nil
+	}
+
+	// Apply client certificate. uTLS Certificate type is compatible with crypto/tls.
+	cert, err := hostCfg.LoadClientCert()
+	if err != nil {
+		return err
+	}
+	if cert != nil {
+		// Convert crypto/tls.Certificate to utls.Certificate.
+		utlsCert := utls.Certificate{
+			Certificate:                 cert.Certificate,
+			PrivateKey:                  cert.PrivateKey,
+			OCSPStaple:                  cert.OCSPStaple,
+			SignedCertificateTimestamps: cert.SignedCertificateTimestamps,
+			Leaf:                        cert.Leaf,
+		}
+		cfg.Certificates = []utls.Certificate{utlsCert}
+	}
+
+	// Apply TLS verification setting.
+	if hostCfg.TLSVerify != nil {
+		cfg.InsecureSkipVerify = !*hostCfg.TLSVerify //nolint:gosec // per-host TLS verify control
+	} else {
+		cfg.InsecureSkipVerify = t.InsecureSkipVerify //nolint:gosec // proxy requires MITM
+	}
+
+	// Apply custom CA bundle.
+	pool, err := hostCfg.LoadCABundle()
+	if err != nil {
+		return err
+	}
+	if pool != nil {
+		cfg.RootCAs = pool
+	}
+
+	return nil
 }
 
 // TLSConnectionState extracts the TLS connection state from a net.Conn.

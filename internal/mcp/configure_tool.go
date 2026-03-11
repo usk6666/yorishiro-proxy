@@ -70,6 +70,21 @@ type configureInput struct {
 	// Budget dynamically configures diagnostic session budget limits.
 	// Agent layer budget values must not exceed policy limits.
 	Budget *configureBudget `json:"budget,omitempty" jsonschema:"diagnostic session budget configuration"`
+
+	// ClientCert configures the global mTLS client certificate for upstream connections.
+	// Set both cert and key paths to enable, or set both to empty strings to disable.
+	ClientCert *configureClientCert `json:"client_cert,omitempty" jsonschema:"global mTLS client certificate configuration"`
+}
+
+// configureClientCert holds mTLS client certificate configuration.
+type configureClientCert struct {
+	// CertPath is the path to the PEM-encoded client certificate file.
+	// Set to empty string to remove the global client certificate.
+	CertPath string `json:"cert_path" jsonschema:"PEM client certificate path (empty to remove)"`
+
+	// KeyPath is the path to the PEM-encoded client private key file.
+	// Set to empty string to remove the global client certificate.
+	KeyPath string `json:"key_path" jsonschema:"PEM client private key path (empty to remove)"`
 }
 
 // configureSOCKS5Auth holds SOCKS5 authentication configuration.
@@ -208,6 +223,16 @@ type configureResult struct {
 
 	// Budget summarizes the current budget state (set when changed).
 	Budget *configureBudgetResult `json:"budget,omitempty"`
+
+	// ClientCert summarizes the current mTLS client certificate state (set when changed).
+	ClientCert *configureClientCertResult `json:"client_cert,omitempty"`
+}
+
+// configureClientCertResult summarizes client cert state in the configure response.
+type configureClientCertResult struct {
+	CertPath string `json:"cert_path,omitempty"`
+	KeyPath  string `json:"key_path,omitempty"`
+	Status   string `json:"status"`
 }
 
 // configureInterceptQueueResult summarizes intercept queue state in the configure response.
@@ -310,6 +335,9 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	if err := s.configureBudgetLimits(input, result); err != nil {
 		return nil, nil, err
 	}
+	if err := s.configureClientCertSetting(input, result); err != nil {
+		return nil, nil, err
+	}
 
 	return nil, result, nil
 }
@@ -346,6 +374,9 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		return nil, nil, err
 	}
 	if err := s.configureBudgetLimitsReplace(input, result); err != nil {
+		return nil, nil, err
+	}
+	if err := s.configureClientCertSetting(input, result); err != nil {
 		return nil, nil, err
 	}
 
@@ -815,6 +846,33 @@ func (s *Server) configureBudgetLimitsWithOp(input configureInput, result *confi
 	result.Budget = &configureBudgetResult{
 		Effective:    s.deps.budgetManager.EffectiveBudget(),
 		RequestCount: s.deps.budgetManager.RequestCount(),
+	}
+	return nil
+}
+
+// configureClientCertSetting applies global mTLS client certificate configuration if provided.
+func (s *Server) configureClientCertSetting(input configureInput, result *configureResult) error {
+	if input.ClientCert == nil {
+		return nil
+	}
+	if s.deps.hostTLSRegistry == nil {
+		return fmt.Errorf("host TLS registry is not initialized")
+	}
+
+	// Empty paths mean "remove the global client certificate".
+	if input.ClientCert.CertPath == "" && input.ClientCert.KeyPath == "" {
+		s.deps.hostTLSRegistry.SetGlobal(nil)
+		result.ClientCert = &configureClientCertResult{Status: "removed"}
+		return nil
+	}
+
+	if err := s.applyClientCert(input.ClientCert.CertPath, input.ClientCert.KeyPath); err != nil {
+		return fmt.Errorf("client_cert: %w", err)
+	}
+	result.ClientCert = &configureClientCertResult{
+		CertPath: input.ClientCert.CertPath,
+		KeyPath:  input.ClientCert.KeyPath,
+		Status:   "configured",
 	}
 	return nil
 }

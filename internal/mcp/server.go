@@ -57,6 +57,7 @@ type deps struct {
 	socks5AuthSetter      socks5AuthSetter
 	tlsTransport          httputil.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
+	hostTLSRegistry       *httputil.HostTLSRegistry
 }
 
 // Server wraps the MCP server and registers proxy-related tools.
@@ -328,6 +329,15 @@ func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
 func WithTLSTransport(t httputil.TLSTransport) ServerOption {
 	return func(s *Server) {
 		s.deps.tlsTransport = t
+	}
+}
+
+// WithHostTLSRegistry sets the host TLS registry for per-host mTLS
+// configuration. The registry is used by proxy_start, configure, and query
+// tools to manage client certificates and TLS verification settings.
+func WithHostTLSRegistry(r *httputil.HostTLSRegistry) ServerOption {
+	return func(s *Server) {
+		s.deps.hostTLSRegistry = r
 	}
 }
 
