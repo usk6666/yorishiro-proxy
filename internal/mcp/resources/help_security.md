@@ -129,8 +129,123 @@ Response:
 
 All specified fields must match for a rule to apply (AND logic).
 
+## Rate Limiting
+
+Rate limits use the same two-layer architecture as target scope. The Policy Layer defines upper bounds (set via config file); the Agent Layer can set equal or stricter limits at runtime.
+
+Requests that exceed rate limits receive a `429 Too Many Requests` response with an `X-Blocked-By: rate_limit` header.
+
+### `set_rate_limits`
+
+Set Agent Layer rate limits. Omitted fields reset to 0 (no limit). This is full-replace semantics.
+
+```json
+{
+  "action": "set_rate_limits",
+  "params": {
+    "max_requests_per_second": 10,
+    "max_requests_per_host_per_second": 5
+  }
+}
+```
+
+**Parameters:**
+- **max_requests_per_second** (number, optional): Global rate limit in RPS. `0` means no global limit.
+- **max_requests_per_host_per_second** (number, optional): Per-host rate limit in RPS. `0` means no per-host limit.
+
+Returns: status, effective (merged Policy+Agent limits), agent (current Agent Layer values).
+
+### `get_rate_limits`
+
+Returns Policy and Agent Layer rate limits with the effective (merged) values.
+
+```json
+{
+  "action": "get_rate_limits"
+}
+```
+
+Response:
+
+```json
+{
+  "policy": {
+    "max_requests_per_second": 50,
+    "max_requests_per_host_per_second": 20
+  },
+  "agent": {
+    "max_requests_per_second": 10,
+    "max_requests_per_host_per_second": 5
+  },
+  "effective": {
+    "max_requests_per_second": 10,
+    "max_requests_per_host_per_second": 5
+  }
+}
+```
+
+## Diagnostic Budget
+
+Diagnostic budgets limit the total number of requests and/or the session duration. When a budget is exhausted, the proxy automatically stops accepting new requests. Like rate limits, budgets use the two-layer architecture.
+
+### `set_budget`
+
+Set Agent Layer budget limits. Omitted fields reset to 0 (no limit). This is full-replace semantics.
+
+```json
+{
+  "action": "set_budget",
+  "params": {
+    "max_total_requests": 1000,
+    "max_duration": "30m"
+  }
+}
+```
+
+**Parameters:**
+- **max_total_requests** (integer, optional): Maximum total requests for the session. `0` means no request count limit.
+- **max_duration** (string, optional): Maximum session duration as a Go duration string (e.g. `"30m"`, `"1h"`, `"2h30m"`). `"0s"` means no duration limit.
+
+Returns: status, effective (merged Policy+Agent limits), agent (current Agent Layer values).
+
+### `get_budget`
+
+Returns Policy and Agent Layer budgets with effective values and current usage.
+
+```json
+{
+  "action": "get_budget"
+}
+```
+
+Response:
+
+```json
+{
+  "policy": {
+    "max_total_requests": 5000,
+    "max_duration": "2h"
+  },
+  "agent": {
+    "max_total_requests": 1000,
+    "max_duration": "30m"
+  },
+  "effective": {
+    "max_total_requests": 1000,
+    "max_duration": "30m"
+  },
+  "request_count": 142,
+  "stop_reason": ""
+}
+```
+
+- **request_count**: Number of requests made so far.
+- **stop_reason**: Non-empty when the budget has been exhausted (e.g. `"max_total_requests exceeded"`, `"max_duration exceeded"`).
+
 ## Error Handling
 
 - **Policy boundary violation**: Setting agent allows outside policy scope returns an error with the offending hostname and current policy allows.
 - **Policy deny removal**: Attempting to remove a policy deny rule via `update_target_scope` returns an error stating that policy rules are immutable.
+- **Rate limit boundary violation**: Agent rate limits cannot exceed Policy rate limits. If the policy sets 50 RPS, the agent cannot set 100 RPS.
+- **Budget boundary violation**: Agent budget limits cannot exceed Policy budget limits.
 - **Enforcement mode**: `"open"` when no rules exist in either layer; `"enforcing"` when any rule is configured.

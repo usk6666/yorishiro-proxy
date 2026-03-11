@@ -27,13 +27,13 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 | `proxy_start` | プロキシ起動・キャプチャスコープ設定。マルチリスナー・SOCKS5 対応 |
 | `proxy_stop` | プロキシ停止。名前指定で個別停止、省略で全停止 |
 | `configure` | 実行中のプロキシ設定変更 (スコープ・TLS パススルー・インターセプトルール・自動変換・upstream proxy・接続制限・SOCKS5 認証等) |
-| `query` | 統一情報検索 (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results) |
-| `resend` | リクエスト再送・リプレイ (action: resend, resend_raw, tcp_replay) |
+| `query` | 統一情報検索 (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies) |
+| `resend` | リクエスト再送・リプレイ・比較 (action: resend, resend_raw, tcp_replay, compare) |
 | `manage` | フローデータ管理・CA 証明書 (action: delete_flows, export_flows, import_flows, regenerate_ca_cert) |
 | `fuzz` | ファジング (action: fuzz, fuzz_pause, fuzz_resume, fuzz_cancel) |
 | `macro` | マクロワークフロー (action: define_macro, run_macro, delete_macro) |
 | `intercept` | インターセプト操作。リクエスト/レスポンス両 phase 対応 (action: release, modify_and_forward, drop) |
-| `security` | ターゲットスコープ制御。Policy/Agent 2 層構造 (action: set_target_scope, update_target_scope, get_target_scope, test_target) |
+| `security` | ターゲットスコープ・レート制限・診断バジェット制御。Policy/Agent 2 層構造 (action: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits, set_budget, get_budget) |
 | `plugin` | Starlark プラグイン管理 (action: list, reload, enable, disable) |
 
 ### MCP Resources
@@ -138,6 +138,18 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 
 // ファズ結果
 {"resource": "fuzz_results", "fuzz_id": "<fuzz-id>", "sort_by": "status_code"}
+
+// ファズ結果の外れ値のみ取得
+{"resource": "fuzz_results", "fuzz_id": "<fuzz-id>", "filter": {"outliers_only": true}}
+
+// コネクション ID でフロー検索
+{"resource": "flows", "filter": {"conn_id": "abc-conn-123"}}
+
+// ホストでフロー検索
+{"resource": "flows", "filter": {"host": "example.com"}}
+
+// 技術スタック検出結果
+{"resource": "technologies"}
 ```
 
 #### query フィルタパラメータ
@@ -150,14 +162,20 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 | `status_code` | flows, fuzz_results | HTTP レスポンスコード |
 | `state` | flows | フロー状態（"active", "complete", "error"） |
 | `blocked_by` | flows | ブロック理由（"target_scope", "intercept_drop"） |
+| `conn_id` | flows | コネクション ID 完全一致。同一接続のフローを検索 |
+| `host` | flows | ホスト名フィルタ。server_addr または URL のホスト部分にマッチ |
+| `technology` | flows | 技術スタック名（大文字小文字不問のサブストリングマッチ、例: "nginx"） |
 | `tag` | flows, fuzz_jobs | タグ完全一致 |
 | `direction` | messages | メッセージ方向（"send", "receive"） |
 | `status` | fuzz_jobs | ジョブ状態 |
 | `body_contains` | fuzz_results | レスポンスボディサブストリング |
+| `outliers_only` | fuzz_results | 外れ値のみ返す（ステータスコード・ボディ長・タイミングの偏差で検出） |
+
+fuzz_results には集約統計（`summary.statistics`: status_code_distribution, body_length, timing_ms の min/max/median/stddev）と外れ値検出（`summary.outliers`: by_status_code, by_body_length, by_timing）が含まれる。
 
 フロー詳細には `protocol_summary`（プロトコル固有情報）、ストリーミング系フローには `message_preview`（最初 10 メッセージ）が含まれる。resend で生成されたフローは `variant: "modified"` となる。
 
-### resend -- リクエスト再送
+### resend -- リクエスト再送・比較
 
 ```json
 // HTTP リクエスト再送（ヘッダ追加・削除）
@@ -194,6 +212,15 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
     "message_sequence": 3,
     "timeout_ms": 10000,
     "tag": "ws-replay"
+  }
+}
+
+// 2 フローの構造化比較
+{
+  "action": "compare",
+  "params": {
+    "flow_id_a": "<original-flow-id>",
+    "flow_id_b": "<modified-flow-id>"
   }
 }
 ```
@@ -460,6 +487,30 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   "action": "test_target",
   "params": {"url": "https://api.target.com/v1/users"}
 }
+
+// レート制限設定（グローバル 10 RPS、ホスト別 5 RPS）
+{
+  "action": "set_rate_limits",
+  "params": {
+    "max_requests_per_second": 10,
+    "max_requests_per_host_per_second": 5
+  }
+}
+
+// 現在のレート制限取得
+{"action": "get_rate_limits"}
+
+// 診断バジェット設定（最大 1000 リクエスト、30 分）
+{
+  "action": "set_budget",
+  "params": {
+    "max_total_requests": 1000,
+    "max_duration": "30m"
+  }
+}
+
+// 現在のバジェット・使用状況取得
+{"action": "get_budget"}
 ```
 
 #### ターゲットルール パラメータ
@@ -470,6 +521,22 @@ yorishiro-proxy のスコープ制御は 2 層構造:
 | `ports` | ポートリスト（省略時は全ポート） |
 | `schemes` | スキーム（http, https 等。省略時は全スキーム） |
 | `path_prefix` | パスプレフィックス（省略時は全パス） |
+
+#### レート制限パラメータ
+
+| パラメータ | 説明 |
+|-----------|------|
+| `max_requests_per_second` | グローバル RPS 制限（0 = 無制限） |
+| `max_requests_per_host_per_second` | ホスト別 RPS 制限（0 = 無制限） |
+
+#### 診断バジェットパラメータ
+
+| パラメータ | 説明 |
+|-----------|------|
+| `max_total_requests` | セッション全体の最大リクエスト数（0 = 無制限） |
+| `max_duration` | セッション最大時間（Go duration 形式、例: "30m", "1h"。"0s" = 無制限） |
+
+レート制限・バジェットも Policy/Agent 2 層構造。Agent Layer は Policy Layer 以下の制限のみ設定可能。バジェット超過時はプロキシが自動停止。
 
 ### configure -- プロキシ設定変更
 
@@ -561,9 +628,19 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   +-- 単発テスト or 網羅テスト?
   |     |
   |     +-- 単発確認 --> resend ツール
-  |     +-- 網羅テスト --> fuzz ツール
+  |     +-- 網羅テスト --> fuzz ツール (外れ値検出: outliers_only フィルタ)
   |     +-- HTTP パースをバイパスしたい --> resend_raw (HTTP Request Smuggling 等)
   |     +-- WebSocket/TCP メッセージ再送 --> tcp_replay
+  |
+  +-- レスポンスの差分分析が必要?
+  |     |
+  |     +-- YES --> resend compare で 2 フローを構造化比較
+  |     +-- NO --> 次へ
+  |
+  +-- レート制限・バジェット設定が必要?
+  |     |
+  |     +-- YES --> security set_rate_limits / set_budget
+  |     +-- NO --> 次へ
   |
   +-- プロトコル固有の操作?
         |
