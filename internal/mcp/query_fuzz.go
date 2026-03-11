@@ -94,10 +94,7 @@ func (s *Server) handleQueryFuzzJobs(ctx context.Context, input queryInput) (*go
 		Total: total,
 	}
 
-	if len(input.Fields) > 0 {
-		return nil, filterFields(result, input.Fields), nil
-	}
-	return nil, result, nil
+	return nil, applyFieldsFilter(result, input.Fields), nil
 }
 
 // --- fuzz_results resource ---
@@ -210,6 +207,40 @@ func collectOutlierIDs(outliers *fuzzOutliers) []string {
 	return ids
 }
 
+// applyFieldsFilter returns the result filtered by the requested fields, or the
+// result as-is when no field filtering is requested.
+func applyFieldsFilter(result any, fields []string) any {
+	if len(fields) > 0 {
+		return filterFields(result, fields)
+	}
+	return result
+}
+
+// prepareOutliersFilter computes the summary and sets ResultIDs on opts when
+// outliers_only filtering is requested. It returns the summary, a short-circuit
+// result (non-nil when zero outliers are found), and an error.
+func (s *Server) prepareOutliersFilter(ctx context.Context, fuzzID string, opts *flow.FuzzResultListOptions, fields []string) (*queryFuzzResultsSummary, any, error) {
+	summary, err := s.buildFuzzResultsSummary(ctx, fuzzID, *opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
+	}
+	if summary.Outliers != nil {
+		ids := collectOutlierIDs(summary.Outliers)
+		if len(ids) == 0 {
+			// No outliers found; return empty results with correct summary.
+			emptyResult := &queryFuzzResultsResult{
+				Results: []queryFuzzResultEntry{},
+				Count:   0,
+				Total:   0,
+				Summary: summary,
+			}
+			return summary, applyFieldsFilter(emptyResult, fields), nil
+		}
+		opts.ResultIDs = ids
+	}
+	return summary, nil, nil
+}
+
 // handleQueryFuzzResults returns fuzz results for a specific job with filtering, sorting, and summary.
 func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (*gomcp.CallToolResult, any, error) {
 	if s.deps.fuzzStore == nil {
@@ -231,27 +262,14 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 
 	var summary *queryFuzzResultsSummary
 	if outliersOnly {
+		var shortCircuit any
 		var err error
-		summary, err = s.buildFuzzResultsSummary(ctx, input.FuzzID, opts)
+		summary, shortCircuit, err = s.prepareOutliersFilter(ctx, input.FuzzID, &opts, input.Fields)
 		if err != nil {
-			return nil, nil, fmt.Errorf("build fuzz results summary: %w", err)
+			return nil, nil, err
 		}
-		if summary.Outliers != nil {
-			ids := collectOutlierIDs(summary.Outliers)
-			if len(ids) == 0 {
-				// No outliers found; return empty results with correct summary.
-				emptyResult := &queryFuzzResultsResult{
-					Results: []queryFuzzResultEntry{},
-					Count:   0,
-					Total:   0,
-					Summary: summary,
-				}
-				if len(input.Fields) > 0 {
-					return nil, filterFields(emptyResult, input.Fields), nil
-				}
-				return nil, emptyResult, nil
-			}
-			opts.ResultIDs = ids
+		if shortCircuit != nil {
+			return nil, shortCircuit, nil
 		}
 	}
 
@@ -285,10 +303,7 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		Summary: summary,
 	}
 
-	if len(input.Fields) > 0 {
-		return nil, filterFields(result, input.Fields), nil
-	}
-	return nil, result, nil
+	return nil, applyFieldsFilter(result, input.Fields), nil
 }
 
 // buildFuzzResultsSummary computes aggregate statistics and outlier detection for fuzz results.
