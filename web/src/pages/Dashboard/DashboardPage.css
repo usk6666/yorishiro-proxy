@@ -311,6 +311,112 @@
   color: var(--text-primary);
 }
 
+/* Technologies widget */
+.dashboard-tech-filter {
+  margin-bottom: var(--space-md);
+  max-width: 320px;
+}
+
+.dashboard-tech-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.dashboard-tech-host {
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.dashboard-tech-host-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-md);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.dashboard-tech-host-header:hover {
+  background-color: var(--bg-tertiary);
+}
+
+.dashboard-tech-chevron {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.dashboard-tech-chevron--open {
+  transform: rotate(90deg);
+}
+
+.dashboard-tech-hostname {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-tech-host-body {
+  padding: 0 var(--space-md) var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.dashboard-tech-category-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.dashboard-tech-category-label {
+  margin-bottom: var(--space-xs);
+}
+
+.dashboard-tech-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding-left: var(--space-md);
+}
+
+.dashboard-tech-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-tertiary);
+}
+
+.dashboard-tech-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+}
+
+.dashboard-tech-version {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
 /* Empty state */
 .dashboard-empty {
   display: flex;

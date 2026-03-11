@@ -7,6 +7,7 @@ import type {
   FlowsResult,
   ListenerStatusEntry,
 } from "../../lib/mcp/types.js";
+import { TechnologiesWidget } from "./TechnologiesWidget.js";
 import "./DashboardPage.css";
 
 // ---------------------------------------------------------------------------
@@ -133,13 +134,22 @@ export function DashboardPage() {
     refetch: refetchConfig,
   } = useQuery("config", { pollInterval: POLL_INTERVAL });
 
+  // Fetch technologies
+  const {
+    data: techData,
+    loading: techLoading,
+    error: techError,
+    refetch: refetchTech,
+  } = useQuery("technologies", { pollInterval: POLL_INTERVAL });
+
   const handleRefreshAll = useCallback(() => {
     refetchStatus();
     refetchFlows();
     refetchIntercept();
     refetchFuzz();
     refetchConfig();
-  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz, refetchConfig]);
+    refetchTech();
+  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz, refetchConfig, refetchTech]);
 
   // Build protocol breakdown
   const protocolCounts: Record<string, number> = {};
@@ -352,6 +362,9 @@ export function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Technologies */}
+      <TechnologiesWidget data={techData} loading={techLoading} error={techError} />
 
       {/* Connection settings info */}
       {statusData && (
