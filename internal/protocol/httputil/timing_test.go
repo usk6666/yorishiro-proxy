@@ -27,10 +27,12 @@ func TestComputeTiming(t *testing.T) {
 		{
 			name:      "all timestamps present",
 			sendStart: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-			timing: &RoundTripTiming{
-				WroteRequest: time.Date(2025, 1, 1, 0, 0, 0, 10*int(time.Millisecond), time.UTC),
-				GotFirstByte: time.Date(2025, 1, 1, 0, 0, 0, 60*int(time.Millisecond), time.UTC),
-			},
+			timing: func() *RoundTripTiming {
+				t := &RoundTripTiming{}
+				t.SetWroteRequest(time.Date(2025, 1, 1, 0, 0, 0, 10*int(time.Millisecond), time.UTC))
+				t.SetGotFirstByte(time.Date(2025, 1, 1, 0, 0, 0, 60*int(time.Millisecond), time.UTC))
+				return t
+			}(),
 			recvEnd:  time.Date(2025, 1, 1, 0, 0, 0, 90*int(time.Millisecond), time.UTC),
 			wantSend: ptrInt64(10),
 			wantWait: ptrInt64(50),
@@ -39,9 +41,11 @@ func TestComputeTiming(t *testing.T) {
 		{
 			name:      "zero wroteRequest",
 			sendStart: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-			timing: &RoundTripTiming{
-				GotFirstByte: time.Date(2025, 1, 1, 0, 0, 0, 60*int(time.Millisecond), time.UTC),
-			},
+			timing: func() *RoundTripTiming {
+				t := &RoundTripTiming{}
+				t.SetGotFirstByte(time.Date(2025, 1, 1, 0, 0, 0, 60*int(time.Millisecond), time.UTC))
+				return t
+			}(),
 			recvEnd:  time.Date(2025, 1, 1, 0, 0, 0, 90*int(time.Millisecond), time.UTC),
 			wantSend: nil,
 			wantWait: nil,
@@ -50,9 +54,11 @@ func TestComputeTiming(t *testing.T) {
 		{
 			name:      "zero gotFirstByte",
 			sendStart: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-			timing: &RoundTripTiming{
-				WroteRequest: time.Date(2025, 1, 1, 0, 0, 0, 10*int(time.Millisecond), time.UTC),
-			},
+			timing: func() *RoundTripTiming {
+				t := &RoundTripTiming{}
+				t.SetWroteRequest(time.Date(2025, 1, 1, 0, 0, 0, 10*int(time.Millisecond), time.UTC))
+				return t
+			}(),
 			recvEnd:  time.Date(2025, 1, 1, 0, 0, 0, 90*int(time.Millisecond), time.UTC),
 			wantSend: ptrInt64(10),
 			wantWait: nil,
@@ -61,10 +67,12 @@ func TestComputeTiming(t *testing.T) {
 		{
 			name:      "negative durations clamped to zero",
 			sendStart: time.Date(2025, 1, 1, 0, 0, 0, 100*int(time.Millisecond), time.UTC),
-			timing: &RoundTripTiming{
-				WroteRequest: time.Date(2025, 1, 1, 0, 0, 0, 50*int(time.Millisecond), time.UTC),
-				GotFirstByte: time.Date(2025, 1, 1, 0, 0, 0, 30*int(time.Millisecond), time.UTC),
-			},
+			timing: func() *RoundTripTiming {
+				t := &RoundTripTiming{}
+				t.SetWroteRequest(time.Date(2025, 1, 1, 0, 0, 0, 50*int(time.Millisecond), time.UTC))
+				t.SetGotFirstByte(time.Date(2025, 1, 1, 0, 0, 0, 30*int(time.Millisecond), time.UTC))
+				return t
+			}(),
 			recvEnd:  time.Date(2025, 1, 1, 0, 0, 0, 20*int(time.Millisecond), time.UTC),
 			wantSend: ptrInt64(0),
 			wantWait: ptrInt64(0),

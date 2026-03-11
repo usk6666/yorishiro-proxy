@@ -566,10 +566,10 @@ func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*goht
 			}
 		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			timing.WroteRequest = time.Now()
+			timing.SetWroteRequest(time.Now())
 		},
 		GotFirstResponseByte: func() {
-			timing.GotFirstByte = time.Now()
+			timing.SetGotFirstByte(time.Now())
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))

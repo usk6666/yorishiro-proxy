@@ -1,13 +1,43 @@
 package httputil
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // RoundTripTiming holds per-phase timing data captured during a round trip.
+// The fields are protected by a mutex because httptrace callbacks may fire
+// on a different goroutine than the one calling ComputeTiming — especially
+// for HTTP/2 where WroteRequest can be called after RoundTrip returns.
 type RoundTripTiming struct {
-	// WroteRequest is the time when the request was fully written.
-	WroteRequest time.Time
-	// GotFirstByte is the time when the first response byte was received.
-	GotFirstByte time.Time
+	mu           sync.Mutex
+	wroteRequest time.Time
+	gotFirstByte time.Time
+}
+
+// SetWroteRequest records the time when the request was fully written.
+// Safe for concurrent use.
+func (t *RoundTripTiming) SetWroteRequest(ts time.Time) {
+	t.mu.Lock()
+	t.wroteRequest = ts
+	t.mu.Unlock()
+}
+
+// SetGotFirstByte records the time when the first response byte was received.
+// Safe for concurrent use.
+func (t *RoundTripTiming) SetGotFirstByte(ts time.Time) {
+	t.mu.Lock()
+	t.gotFirstByte = ts
+	t.mu.Unlock()
+}
+
+// snapshot returns a copy of the timing fields under the lock.
+func (t *RoundTripTiming) snapshot() (wroteRequest, gotFirstByte time.Time) {
+	t.mu.Lock()
+	wroteRequest = t.wroteRequest
+	gotFirstByte = t.gotFirstByte
+	t.mu.Unlock()
+	return
 }
 
 // ComputeTiming calculates send/wait/receive timing in milliseconds from
@@ -18,22 +48,23 @@ func ComputeTiming(sendStart time.Time, timing *RoundTripTiming, receiveEnd time
 	if timing == nil {
 		return nil, nil, nil
 	}
-	if !timing.WroteRequest.IsZero() {
-		v := timing.WroteRequest.Sub(sendStart).Milliseconds()
+	wroteRequest, gotFirstByte := timing.snapshot()
+	if !wroteRequest.IsZero() {
+		v := wroteRequest.Sub(sendStart).Milliseconds()
 		if v < 0 {
 			v = 0
 		}
 		sendMs = &v
 	}
-	if !timing.WroteRequest.IsZero() && !timing.GotFirstByte.IsZero() {
-		v := timing.GotFirstByte.Sub(timing.WroteRequest).Milliseconds()
+	if !wroteRequest.IsZero() && !gotFirstByte.IsZero() {
+		v := gotFirstByte.Sub(wroteRequest).Milliseconds()
 		if v < 0 {
 			v = 0
 		}
 		waitMs = &v
 	}
-	if !timing.GotFirstByte.IsZero() {
-		v := receiveEnd.Sub(timing.GotFirstByte).Milliseconds()
+	if !gotFirstByte.IsZero() {
+		v := receiveEnd.Sub(gotFirstByte).Milliseconds()
 		if v < 0 {
 			v = 0
 		}
