@@ -36,6 +36,7 @@ jobs:
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@latest
           go install github.com/gordonklaus/ineffassign@latest
+          go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
 
       - name: Lint
         run: make lint
