@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button, Input, useToast } from "../../components/ui/index.js";
 import { useConfigure } from "../../lib/mcp/hooks.js";
 import type { ConfigResult } from "../../lib/mcp/types.js";
@@ -19,12 +19,21 @@ export function Socks5Auth({ config, onRefresh }: Socks5AuthProps) {
   const { addToast } = useToast();
   const { configure, loading } = useConfigure();
 
-  const [authEnabled, setAuthEnabled] = useState(false);
-  const [username, setUsername] = useState("");
+  const socks5Available = config.socks5_enabled ?? false;
+  const currentAuth = config.socks5_auth;
+
+  const [authEnabled, setAuthEnabled] = useState(currentAuth?.method === "password");
+  const [username, setUsername] = useState(currentAuth?.username ?? "");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  const socks5Available = config.socks5_enabled ?? false;
+  // Sync state when config changes (e.g. after navigation or refresh)
+  useEffect(() => {
+    setAuthEnabled(currentAuth?.method === "password");
+    setUsername(currentAuth?.username ?? "");
+    // Password is intentionally not synced from server for security
+    setPassword("");
+  }, [currentAuth]);
 
   const handleSave = useCallback(async () => {
     if (authEnabled) {
@@ -96,7 +105,7 @@ export function Socks5Auth({ config, onRefresh }: Socks5AuthProps) {
           </p>
 
           {/* Auth toggle */}
-          <div className="settings-form-row" style={{ marginBottom: "var(--space-md)" }}>
+          <div className="settings-form-row">
             <div className="input-wrapper">
               <label className="input-label" htmlFor="socks5-auth-toggle">Authentication</label>
               <select

@@ -406,6 +406,10 @@ export interface ConfigResult {
   tcp_forwards?: Record<string, string>;
   enabled_protocols?: string[];
   socks5_enabled?: boolean;
+  socks5_auth?: {
+    method: string;
+    username?: string;
+  };
 }
 
 /** Response for query resource="ca_cert". */
