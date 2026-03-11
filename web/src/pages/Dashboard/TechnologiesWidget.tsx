@@ -194,8 +194,8 @@ function HostAccordion({ hostEntry, expanded, onToggle }: HostAccordionProps) {
                 <Badge variant={categoryVariant(category)}>{categoryLabel(category)}</Badge>
               </div>
               <div className="dashboard-tech-items">
-                {techs.map((tech) => (
-                  <div key={`${tech.name}-${tech.category}`} className="dashboard-tech-item">
+                {techs.map((tech, index) => (
+                  <div key={`${tech.name}-${tech.category}-${tech.version ?? index}`} className="dashboard-tech-item">
                     <span className="dashboard-tech-name">
                       {tech.name}
                       {tech.version && (
