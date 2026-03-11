@@ -287,3 +287,102 @@
   color: var(--text-primary);
   word-break: break-all;
 }
+
+/* Rate limit & budget grid */
+.security-ratelimit-grid {
+  display: flex;
+  gap: var(--space-xl);
+}
+
+.security-ratelimit-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.security-ratelimit-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.security-ratelimit-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.security-ratelimit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/* Budget usage section */
+.security-budget-usage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.security-budget-usage-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.security-budget-usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.security-budget-usage-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.security-budget-usage-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Progress bar */
+.security-budget-progress {
+  height: 8px;
+  background-color: var(--bg-tertiary, var(--border-default));
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.security-budget-progress-bar {
+  height: 100%;
+  background-color: var(--accent-primary);
+  border-radius: var(--radius-sm);
+  transition: width 0.3s ease;
+}
+
+.security-budget-progress-bar--warning {
+  background-color: var(--accent-warning);
+}
+
+.security-budget-progress-bar--danger {
+  background-color: var(--accent-danger);
+}
+
+/* Stop reason */
+.security-budget-stop-reason {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--accent-danger);
+  border-radius: var(--radius-sm);
+}
