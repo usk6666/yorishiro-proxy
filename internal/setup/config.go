@@ -45,5 +45,4 @@ type Options struct {
 
 	// BinaryPath overrides the auto-detected binary path for testing.
 	BinaryPath string
-
 }
