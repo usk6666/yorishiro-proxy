@@ -714,7 +714,11 @@ type getBudgetResult struct {
 	StopReason   string             `json:"stop_reason,omitempty"`
 }
 
-// handleSetBudget sets agent layer budget limits.
+// handleSetBudget sets agent layer budget limits using full-replace semantics.
+// All fields start from zero; only explicitly provided fields are set.
+// This matches the set_rate_limits pattern. Omitted fields reset to zero (no limit).
+// For merge semantics (only update provided fields, keep others unchanged),
+// use the configure tool's budget section instead.
 func (s *Server) handleSetBudget(params securityParams) (*gomcp.CallToolResult, any, error) {
 	if s.deps.budgetManager == nil {
 		return nil, nil, fmt.Errorf("budget manager is not initialized")

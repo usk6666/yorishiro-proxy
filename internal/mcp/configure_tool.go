@@ -345,7 +345,7 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	if err := s.applyConnectionLimits(input, result); err != nil {
 		return nil, nil, err
 	}
-	if err := s.configureBudgetLimits(input, result); err != nil {
+	if err := s.configureBudgetLimitsReplace(input, result); err != nil {
 		return nil, nil, err
 	}
 
@@ -761,8 +761,22 @@ func (s *Server) replaceAutoTransform(cfg *configureAutoTransform) error {
 }
 
 // configureBudgetLimits applies budget configuration if provided.
-// This is shared between merge and replace handlers since budgets are scalar values.
+// In merge mode: uses merge semantics — only explicitly provided fields are updated;
+// omitted fields retain their current values.
+// In replace mode: uses full-replace semantics — starts from a zero BudgetConfig;
+// omitted fields reset to zero (no limit).
+// For full-replace semantics via the security tool, use set_budget instead.
 func (s *Server) configureBudgetLimits(input configureInput, result *configureResult) error {
+	return s.configureBudgetLimitsWithOp(input, result, "merge")
+}
+
+// configureBudgetLimitsReplace applies budget configuration with replace semantics.
+func (s *Server) configureBudgetLimitsReplace(input configureInput, result *configureResult) error {
+	return s.configureBudgetLimitsWithOp(input, result, "replace")
+}
+
+// configureBudgetLimitsWithOp applies budget configuration with the specified operation mode.
+func (s *Server) configureBudgetLimitsWithOp(input configureInput, result *configureResult, op string) error {
 	if input.Budget == nil {
 		return nil
 	}
@@ -770,7 +784,12 @@ func (s *Server) configureBudgetLimits(input configureInput, result *configureRe
 		return fmt.Errorf("budget manager is not initialized")
 	}
 
-	cfg := s.deps.budgetManager.AgentBudget()
+	// In merge mode, start from the current agent config (preserve omitted fields).
+	// In replace mode, start from zero (omitted fields reset to no limit).
+	var cfg proxy.BudgetConfig
+	if op == "merge" {
+		cfg = s.deps.budgetManager.AgentBudget()
+	}
 
 	if input.Budget.MaxTotalRequests != nil {
 		if *input.Budget.MaxTotalRequests < 0 {

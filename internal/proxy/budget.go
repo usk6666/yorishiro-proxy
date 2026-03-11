@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,9 @@ import (
 // BudgetConfig holds the budget settings for a diagnostic session.
 // It supports two levels: Policy (immutable, set at startup) and Agent (mutable at runtime).
 // The Agent layer can only set limits that are equal to or stricter than the Policy layer.
+//
+// MaxDuration is serialized as a human-readable string (e.g. "30m", "1h") in JSON
+// responses, not as raw nanoseconds.
 type BudgetConfig struct {
 	// MaxTotalRequests is the maximum number of requests allowed in the session.
 	// 0 means no request count limit.
@@ -17,7 +21,65 @@ type BudgetConfig struct {
 
 	// MaxDuration is the maximum duration of the diagnostic session.
 	// 0 means no duration limit.
-	MaxDuration time.Duration `json:"max_duration"`
+	// JSON: serialized as a human-readable string (e.g. "30m") via custom marshaler.
+	MaxDuration time.Duration `json:"-"`
+}
+
+// MarshalJSON implements json.Marshaler for BudgetConfig.
+// MaxDuration is serialized as a human-readable duration string (e.g. "30m")
+// instead of raw nanoseconds.
+func (c BudgetConfig) MarshalJSON() ([]byte, error) {
+	type Alias struct {
+		MaxTotalRequests int64  `json:"max_total_requests"`
+		MaxDuration      string `json:"max_duration"`
+	}
+	return json.Marshal(Alias{
+		MaxTotalRequests: c.MaxTotalRequests,
+		MaxDuration:      c.MaxDuration.String(),
+	})
+}
+
+// UnmarshalJSON implements json.Unmarshaler for BudgetConfig.
+// MaxDuration accepts both human-readable duration strings (e.g. "30m") and
+// raw nanosecond numbers for backward compatibility.
+func (c *BudgetConfig) UnmarshalJSON(data []byte) error {
+	type Alias struct {
+		MaxTotalRequests int64           `json:"max_total_requests"`
+		MaxDuration      json.RawMessage `json:"max_duration"`
+	}
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	c.MaxTotalRequests = a.MaxTotalRequests
+
+	if len(a.MaxDuration) == 0 || string(a.MaxDuration) == "null" {
+		c.MaxDuration = 0
+		return nil
+	}
+
+	// Try string first (e.g. "30m").
+	var s string
+	if err := json.Unmarshal(a.MaxDuration, &s); err == nil {
+		if s == "" || s == "0" || s == "0s" {
+			c.MaxDuration = 0
+			return nil
+		}
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid max_duration %q: %w", s, err)
+		}
+		c.MaxDuration = d
+		return nil
+	}
+
+	// Fall back to number (nanoseconds) for backward compatibility.
+	var ns int64
+	if err := json.Unmarshal(a.MaxDuration, &ns); err != nil {
+		return fmt.Errorf("max_duration must be a duration string (e.g. \"30m\") or number: %w", err)
+	}
+	c.MaxDuration = time.Duration(ns)
+	return nil
 }
 
 // IsZero reports whether no budget limits are configured.
