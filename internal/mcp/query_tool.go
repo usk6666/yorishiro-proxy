@@ -725,41 +725,47 @@ type queryBudgetStatus struct {
 	StopReason   string             `json:"stop_reason,omitempty"`
 }
 
+// populateManagerStatus fills manager-related fields in the status result.
+func (s *Server) populateManagerStatus(result *queryStatusResult) {
+	if s.deps.manager == nil {
+		return
+	}
+	running, addr := s.deps.manager.Status()
+	result.Running = running
+	result.ListenAddr = addr
+	result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
+	result.ActiveConnections = s.deps.manager.ActiveConnections()
+	result.MaxConnections = s.deps.manager.MaxConnections()
+	result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
+	result.UptimeSeconds = int64(s.deps.manager.Uptime().Seconds())
+	result.ListenerCount = s.deps.manager.ListenerCount()
+
+	// Populate per-listener statuses.
+	statuses := s.deps.manager.ListenerStatuses()
+	if len(statuses) > 0 {
+		result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
+		for _, st := range statuses {
+			result.Listeners = append(result.Listeners, queryListenerStatusEntry{
+				Name:              st.Name,
+				ListenAddr:        st.ListenAddr,
+				ActiveConnections: st.ActiveConnections,
+				UptimeSeconds:     st.UptimeSeconds,
+			})
+		}
+		// Update Running to true if any listener is running (not just default).
+		if !result.Running && len(statuses) > 0 {
+			result.Running = true
+		}
+	}
+}
+
 // handleQueryStatus returns the current proxy status and health metrics.
 func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, *queryStatusResult, error) {
 	result := &queryStatusResult{
 		DBSizeBytes: -1,
 	}
 
-	if s.deps.manager != nil {
-		running, addr := s.deps.manager.Status()
-		result.Running = running
-		result.ListenAddr = addr
-		result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
-		result.ActiveConnections = s.deps.manager.ActiveConnections()
-		result.MaxConnections = s.deps.manager.MaxConnections()
-		result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
-		result.UptimeSeconds = int64(s.deps.manager.Uptime().Seconds())
-		result.ListenerCount = s.deps.manager.ListenerCount()
-
-		// Populate per-listener statuses.
-		statuses := s.deps.manager.ListenerStatuses()
-		if len(statuses) > 0 {
-			result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
-			for _, st := range statuses {
-				result.Listeners = append(result.Listeners, queryListenerStatusEntry{
-					Name:              st.Name,
-					ListenAddr:        st.ListenAddr,
-					ActiveConnections: st.ActiveConnections,
-					UptimeSeconds:     st.UptimeSeconds,
-				})
-			}
-			// Update Running to true if any listener is running (not just default).
-			if !result.Running && len(statuses) > 0 {
-				result.Running = true
-			}
-		}
-	}
+	s.populateManagerStatus(result)
 
 	// Report request timeout from the first registered handler.
 	if rt := s.currentRequestTimeout(); rt > 0 {
