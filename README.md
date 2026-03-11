@@ -42,6 +42,8 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 - **SOCKS5 Listener** -- SOCKS5 proxy with optional username/password authentication for proxychains integration
 - **Upstream Proxy** -- Chain through HTTP or SOCKS5 proxies
 - **Streamable HTTP MCP** -- Multi-agent shared access with Bearer token authentication
+- **Comparer** -- Structural diff between two flows (status code, headers, body length, timing, JSON key-level diff)
+- **AI Safety** -- Rate limiting (global/per-host RPS) and diagnostic budgets (request count/duration limits) with two-layer Policy+Agent architecture
 - **Plugin System** -- Extend proxy behavior with [Starlark](https://github.com/google/starlark-go) scripts that hook into the request/response pipeline
 - **Web UI** -- Embedded React/Vite dashboard for visual inspection and interactive testing
 
@@ -117,12 +119,12 @@ All proxy operations are exposed through eleven MCP tools:
 | `proxy_stop` | Graceful shutdown of one or all listeners |
 | `configure` | Runtime configuration changes (upstream proxy, capture scope, TLS passthrough, intercept rules, auto-transform, connection limits) |
 | `query` | Unified information retrieval: flows, flow details, messages, proxy status, config, CA certificate, intercept queue, macros, fuzz jobs/results |
-| `resend` | Replay recorded requests with mutations (method/URL/header/body overrides, JSON patches, raw byte patches, dry-run) |
+| `resend` | Replay recorded requests with mutations (method/URL/header/body overrides, JSON patches, raw byte patches, dry-run) and compare two flows structurally |
 | `fuzz` | Execute fuzz testing campaigns with payload sets, positions, concurrency control, and stop conditions |
 | `macro` | Define and execute multi-step macro workflows with variable extraction, guards, and hooks |
 | `intercept` | Act on intercepted requests: release, modify and forward, or drop |
 | `manage` | Manage flow data (delete/export/import) and CA certificate regeneration |
-| `security` | Configure target scope rules (Policy Layer + Agent Layer) to restrict proxy reach |
+| `security` | Configure target scope rules, rate limits, and diagnostic budgets (Policy Layer + Agent Layer) |
 | `plugin` | List, reload, enable, and disable Starlark plugins at runtime |
 
 ## Web UI

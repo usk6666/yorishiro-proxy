@@ -717,6 +717,56 @@ Reload a plugin after editing the script:
 
 For details on writing plugins, hook reference, and protocol data maps, see the [Plugin Development Guide](plugins.md).
 
+### Comparing flows
+
+The `resend` tool includes a `compare` action that produces a structural diff between two flows. This is useful for identifying how a parameter change affects the server's response:
+
+```json
+// resend
+{
+  "action": "compare",
+  "params": {
+    "flow_id_a": "<original-flow-id>",
+    "flow_id_b": "<modified-flow-id>"
+  }
+}
+```
+
+The result includes status code changes, added/removed/changed headers, body length delta, timing differences, and for JSON responses, key-level diffs. Use this as a triage tool after resend or fuzz to quickly spot anomalous responses.
+
+### AI Safety: Rate limits and diagnostic budgets
+
+When running automated testing, rate limits and diagnostic budgets prevent the AI agent from overwhelming the target or running indefinitely:
+
+```json
+// security -- set rate limits
+{
+  "action": "set_rate_limits",
+  "params": {
+    "max_requests_per_second": 10,
+    "max_requests_per_host_per_second": 5
+  }
+}
+
+// security -- set diagnostic budget
+{
+  "action": "set_budget",
+  "params": {
+    "max_total_requests": 1000,
+    "max_duration": "30m"
+  }
+}
+```
+
+Rate limits and budgets use the same two-layer architecture as target scope -- the Policy Layer (set via config file) defines upper bounds, and the Agent Layer (set via MCP tool) can only apply equal or stricter limits. When a budget is exhausted, the proxy automatically stops accepting new requests.
+
+Check current usage:
+
+```json
+// security
+{"action": "get_budget"}
+```
+
 ### Flow export and import
 
 Export captured flows for sharing or archival:
