@@ -620,7 +620,7 @@ func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sen
 	}
 	receiveEnd := time.Now()
 
-	sMs, wMs, rMs := computeTiming(sendStart, timing, receiveEnd)
+	sMs, wMs, rMs := httputil.ComputeTiming(sendStart, timing, receiveEnd)
 
 	return &forwardUpstreamResult{
 		resp:       resp,
@@ -758,18 +758,11 @@ func cloneURL(u *url.URL) *url.URL {
 }
 
 // roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
-// capture the remote address of the TCP connection used for the request.
-// roundTripTiming holds per-phase timing data captured during a round trip.
-type roundTripTiming struct {
-	// wroteRequest is the time when the request was fully written.
-	wroteRequest time.Time
-	// gotFirstByte is the time when the first response byte was received.
-	gotFirstByte time.Time
-}
-
-func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, string, *roundTripTiming, error) {
+// capture the remote address of the TCP connection used for the request
+// and per-phase timing data (send, wait, receive).
+func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, string, *httputil.RoundTripTiming, error) {
 	var serverAddr string
-	timing := &roundTripTiming{}
+	timing := &httputil.RoundTripTiming{}
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			if info.Conn != nil {
@@ -777,10 +770,10 @@ func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, str
 			}
 		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			timing.wroteRequest = time.Now()
+			timing.WroteRequest = time.Now()
 		},
 		GotFirstResponseByte: func() {
-			timing.gotFirstByte = time.Now()
+			timing.GotFirstByte = time.Now()
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
@@ -792,28 +785,6 @@ func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, str
 	h.UpstreamMu.RUnlock()
 
 	return resp, serverAddr, timing, err
-}
-
-// computeTiming calculates send/wait/receive timing in milliseconds from
-// httptrace timestamps. Returns nil pointers for any phase that cannot be
-// computed (e.g., if the trace callback was not called).
-func computeTiming(sendStart time.Time, timing *roundTripTiming, receiveEnd time.Time) (sendMs, waitMs, receiveMs *int64) {
-	if timing == nil {
-		return nil, nil, nil
-	}
-	if !timing.wroteRequest.IsZero() {
-		v := timing.wroteRequest.Sub(sendStart).Milliseconds()
-		sendMs = &v
-	}
-	if !timing.wroteRequest.IsZero() && !timing.gotFirstByte.IsZero() {
-		v := timing.gotFirstByte.Sub(timing.wroteRequest).Milliseconds()
-		waitMs = &v
-	}
-	if !timing.gotFirstByte.IsZero() {
-		v := receiveEnd.Sub(timing.gotFirstByte).Milliseconds()
-		receiveMs = &v
-	}
-	return sendMs, waitMs, receiveMs
 }
 
 // shouldCapture checks the capture scope to determine whether a request

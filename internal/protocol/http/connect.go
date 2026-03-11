@@ -460,7 +460,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Progressive recording: record receive (response + session completion).
 	// Update ConnInfo with server-side TLS certificate info now that we have it.
 	duration := time.Since(start)
-	sendMs, waitMs, receiveMs := computeTiming(sendStart, fwd.timing, receiveEnd)
+	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 	var tlsCertSubject string
 	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
 		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()

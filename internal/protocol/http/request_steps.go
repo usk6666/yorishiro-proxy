@@ -132,7 +132,7 @@ func (h *Handler) applyTransform(req *gohttp.Request, recordReqBody []byte) []by
 type forwardResult struct {
 	resp       *gohttp.Response
 	serverAddr string
-	timing     *roundTripTiming
+	timing     *httputil.RoundTripTiming
 }
 
 // forwardUpstream sends the request to the upstream server and returns the
@@ -347,28 +347,6 @@ func headersModified(a, b gohttp.Header) bool {
 		}
 	}
 	return false
-}
-
-// computeTiming calculates send/wait/receive timing in milliseconds from
-// httptrace timestamps. Returns nil pointers for any phase that cannot be
-// computed (e.g., if the trace callback was not called).
-func computeTiming(sendStart time.Time, timing *roundTripTiming, receiveEnd time.Time) (sendMs, waitMs, receiveMs *int64) {
-	if timing == nil {
-		return nil, nil, nil
-	}
-	if !timing.wroteRequest.IsZero() {
-		v := timing.wroteRequest.Sub(sendStart).Milliseconds()
-		sendMs = &v
-	}
-	if !timing.wroteRequest.IsZero() && !timing.gotFirstByte.IsZero() {
-		v := timing.gotFirstByte.Sub(timing.wroteRequest).Milliseconds()
-		waitMs = &v
-	}
-	if !timing.gotFirstByte.IsZero() {
-		v := receiveEnd.Sub(timing.gotFirstByte).Milliseconds()
-		receiveMs = &v
-	}
-	return sendMs, waitMs, receiveMs
 }
 
 // logHTTPRequest logs the completed HTTP request with method, URL, status, and

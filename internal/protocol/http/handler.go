@@ -499,7 +499,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Uses variant-aware recording to capture both original and modified
 	// versions when intercept changed the response.
 	duration := time.Since(start)
-	sendMs, waitMs, receiveMs := computeTiming(sendStart, fwd.timing, receiveEnd)
+	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 	h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:       start,
 		duration:    duration,
@@ -553,20 +553,12 @@ func removeHopByHopHeaders(header gohttp.Header) {
 	}
 }
 
-// roundTripTiming holds per-phase timing data captured during a round trip.
-type roundTripTiming struct {
-	// wroteRequest is the time when the request was fully written.
-	wroteRequest time.Time
-	// gotFirstByte is the time when the first response byte was received.
-	gotFirstByte time.Time
-}
-
 // roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
 // capture the remote address of the TCP connection used for the request
 // and per-phase timing data (send, wait, receive).
-func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*gohttp.Response, string, *roundTripTiming, error) {
+func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*gohttp.Response, string, *httputil.RoundTripTiming, error) {
 	var serverAddr string
-	timing := &roundTripTiming{}
+	timing := &httputil.RoundTripTiming{}
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			if info.Conn != nil {
@@ -574,10 +566,10 @@ func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*goht
 			}
 		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			timing.wroteRequest = time.Now()
+			timing.WroteRequest = time.Now()
 		},
 		GotFirstResponseByte: func() {
-			timing.gotFirstByte = time.Now()
+			timing.GotFirstByte = time.Now()
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
