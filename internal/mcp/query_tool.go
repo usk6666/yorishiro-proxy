@@ -156,6 +156,9 @@ type queryFlowsEntry struct {
 	ProtocolSummary map[string]string `json:"protocol_summary,omitempty"`
 	Timestamp       string            `json:"timestamp"`
 	DurationMs      int64             `json:"duration_ms"`
+	SendMs          *int64            `json:"send_ms,omitempty"`
+	WaitMs          *int64            `json:"wait_ms,omitempty"`
+	ReceiveMs       *int64            `json:"receive_ms,omitempty"`
 }
 
 // queryFlowsResult is the response for the flows resource.
@@ -259,6 +262,9 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			ProtocolSummary: summary,
 			Timestamp:       fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			DurationMs:      fl.Duration.Milliseconds(),
+			SendMs:          fl.SendMs,
+			WaitMs:          fl.WaitMs,
+			ReceiveMs:       fl.ReceiveMs,
 		})
 	}
 
@@ -292,6 +298,9 @@ type queryFlowResult struct {
 	ResponseBodyTruncated bool                `json:"response_body_truncated"`
 	Timestamp             string              `json:"timestamp"`
 	DurationMs            int64               `json:"duration_ms"`
+	SendMs                *int64              `json:"send_ms,omitempty"`
+	WaitMs                *int64              `json:"wait_ms,omitempty"`
+	ReceiveMs             *int64              `json:"receive_ms,omitempty"`
 	Tags                  map[string]string   `json:"tags,omitempty"`
 	BlockedBy             string              `json:"blocked_by,omitempty"`
 	RawRequest            string              `json:"raw_request,omitempty"`
@@ -522,6 +531,9 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		ResponseBodyTruncated: respTruncated,
 		Timestamp:             fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		DurationMs:            fl.Duration.Milliseconds(),
+		SendMs:                fl.SendMs,
+		WaitMs:                fl.WaitMs,
+		ReceiveMs:             fl.ReceiveMs,
 		Tags:                  fl.Tags,
 		BlockedBy:             fl.BlockedBy,
 		RawRequest:            rawReqStr,

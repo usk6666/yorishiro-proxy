@@ -339,14 +339,14 @@ func (h *Handler) handleStream(
 		sendResult = h.recordSendWithVariant(sc.ctx, sc.srp, &snap, sc.logger)
 	}
 
-	resp, serverAddr, fullRespBody, ok := h.forwardUpstream(sc, outReq, sendResult)
+	fwd, ok := h.forwardUpstream(sc, outReq, sendResult)
 	if !ok {
 		return
 	}
 
-	respSnap := snapshotResponse(resp.StatusCode, resp.Header, fullRespBody)
+	respSnap := snapshotResponse(fwd.resp.StatusCode, fwd.resp.Header, fwd.respBody)
 
-	resp, fullRespBody, ok = h.handleResponseIntercept(sc, resp, fullRespBody)
+	resp, fullRespBody, ok := h.handleResponseIntercept(sc, fwd.resp, fwd.respBody)
 	if !ok {
 		return
 	}
@@ -358,7 +358,7 @@ func (h *Handler) handleStream(
 	duration := time.Since(sc.start)
 	tlsCertSubject := extractTLSCertSubject(resp)
 
-	h.recordStreamResponse(sc, isGRPC, sendResult, resp, fullRespBody, serverAddr, duration, tlsCertSubject, &respSnap)
+	h.recordStreamResponse(sc, isGRPC, sendResult, resp, fullRespBody, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs)
 
 	logProtocol := "http/2"
 	if isGRPC {
@@ -592,14 +592,25 @@ func (h *Handler) runServerPluginHook(sc *streamContext, outReq *gohttp.Request)
 
 // forwardUpstream sends the request to the upstream server and reads the response.
 // Returns false if the upstream request failed.
-func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*gohttp.Response, string, []byte, bool) {
-	resp, serverAddr, err := h.roundTripWithTrace(outReq)
+// forwardUpstreamResult holds the result of forwarding a request upstream.
+type forwardUpstreamResult struct {
+	resp       *gohttp.Response
+	serverAddr string
+	respBody   []byte
+	sendMs     *int64
+	waitMs     *int64
+	receiveMs  *int64
+}
+
+func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
+	sendStart := time.Now()
+	resp, serverAddr, timing, err := h.roundTripWithTrace(outReq)
 	if err != nil {
 		sc.logger.Error("HTTP/2 upstream request failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
 		sc.w.WriteHeader(gohttp.StatusBadGateway)
-		return nil, "", nil, false
+		return nil, false
 	}
 	defer resp.Body.Close()
 
@@ -607,7 +618,18 @@ func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sen
 	if err != nil {
 		sc.logger.Warn("HTTP/2 failed to read response body", "error", err)
 	}
-	return resp, serverAddr, fullRespBody, true
+	receiveEnd := time.Now()
+
+	sMs, wMs, rMs := computeTiming(sendStart, timing, receiveEnd)
+
+	return &forwardUpstreamResult{
+		resp:       resp,
+		serverAddr: serverAddr,
+		respBody:   fullRespBody,
+		sendMs:     sMs,
+		waitMs:     wMs,
+		receiveMs:  rMs,
+	}, true
 }
 
 // handleResponseIntercept processes response interception.
@@ -670,7 +692,7 @@ func extractTLSCertSubject(resp *gohttp.Response) string {
 }
 
 // recordStreamResponse records the receive phase for HTTP/2 or gRPC flows.
-func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot) {
+func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64) {
 	if isGRPC {
 		h.recordGRPCFlow(sc, resp, fullRespBody, serverAddr, duration, tlsCertSubject)
 	} else {
@@ -681,6 +703,9 @@ func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResul
 			tlsServerCertSubject: tlsCertSubject,
 			resp:                 resp,
 			respBody:             fullRespBody,
+			sendMs:               sendMs,
+			waitMs:               waitMs,
+			receiveMs:            receiveMs,
 		}, respSnap, sc.logger)
 	}
 }
@@ -734,13 +759,28 @@ func cloneURL(u *url.URL) *url.URL {
 
 // roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
 // capture the remote address of the TCP connection used for the request.
-func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, string, error) {
+// roundTripTiming holds per-phase timing data captured during a round trip.
+type roundTripTiming struct {
+	// wroteRequest is the time when the request was fully written.
+	wroteRequest time.Time
+	// gotFirstByte is the time when the first response byte was received.
+	gotFirstByte time.Time
+}
+
+func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, string, *roundTripTiming, error) {
 	var serverAddr string
+	timing := &roundTripTiming{}
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			if info.Conn != nil {
 				serverAddr = info.Conn.RemoteAddr().String()
 			}
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			timing.wroteRequest = time.Now()
+		},
+		GotFirstResponseByte: func() {
+			timing.gotFirstByte = time.Now()
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
@@ -751,7 +791,29 @@ func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, str
 	resp, err := h.Transport.RoundTrip(req)
 	h.UpstreamMu.RUnlock()
 
-	return resp, serverAddr, err
+	return resp, serverAddr, timing, err
+}
+
+// computeTiming calculates send/wait/receive timing in milliseconds from
+// httptrace timestamps. Returns nil pointers for any phase that cannot be
+// computed (e.g., if the trace callback was not called).
+func computeTiming(sendStart time.Time, timing *roundTripTiming, receiveEnd time.Time) (sendMs, waitMs, receiveMs *int64) {
+	if timing == nil {
+		return nil, nil, nil
+	}
+	if !timing.wroteRequest.IsZero() {
+		v := timing.wroteRequest.Sub(sendStart).Milliseconds()
+		sendMs = &v
+	}
+	if !timing.wroteRequest.IsZero() && !timing.gotFirstByte.IsZero() {
+		v := timing.gotFirstByte.Sub(timing.wroteRequest).Milliseconds()
+		waitMs = &v
+	}
+	if !timing.gotFirstByte.IsZero() {
+		v := receiveEnd.Sub(timing.gotFirstByte).Milliseconds()
+		receiveMs = &v
+	}
+	return sendMs, waitMs, receiveMs
 }
 
 // shouldCapture checks the capture scope to determine whether a request

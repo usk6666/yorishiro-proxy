@@ -439,6 +439,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
 
 	// Step 6: Forward upstream.
+	sendStart := time.Now()
 	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
 	if err != nil {
 		// Upstream failed — record session as error. Send is already recorded.
@@ -449,6 +450,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	// Step 7: Read response, write to client, and record flow.
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
+	receiveEnd := time.Now()
 	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
 
 	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
@@ -458,6 +460,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Progressive recording: record receive (response + session completion).
 	// Update ConnInfo with server-side TLS certificate info now that we have it.
 	duration := time.Since(start)
+	sendMs, waitMs, receiveMs := computeTiming(sendStart, fwd.timing, receiveEnd)
 	var tlsCertSubject string
 	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
 		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
@@ -470,6 +473,9 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		resp:                 fwd.resp,
 		rawResponse:          rawResponse,
 		respBody:             fullRespBody,
+		sendMs:               sendMs,
+		waitMs:               waitMs,
+		receiveMs:            receiveMs,
 	}, logger)
 
 	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)

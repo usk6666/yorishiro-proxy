@@ -231,6 +231,13 @@ type receiveRecordParams struct {
 	resp        *gohttp.Response
 	rawResponse []byte
 	respBody    []byte
+
+	// sendMs is the time in milliseconds to send the request upstream.
+	sendMs *int64
+	// waitMs is the server processing time in milliseconds (TTFB).
+	waitMs *int64
+	// receiveMs is the time in milliseconds to receive the response.
+	receiveMs *int64
 }
 
 // recordReceive records the receive phase of a session: appends the receive
@@ -283,6 +290,9 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		RespBody:             p.respBody,
 		RawResponse:          p.rawResponse,
 		Tags:                 tags,
+		SendMs:               p.sendMs,
+		WaitMs:               p.waitMs,
+		ReceiveMs:            p.receiveMs,
 	}, sharedSnap, logger)
 }
 

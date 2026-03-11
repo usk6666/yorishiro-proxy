@@ -1157,7 +1157,7 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 		t.Errorf("new flow BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
 	}
 
-	// Verify schema version is now 4 (V3 adds blocked_by, V4 renames sessions→flows).
+	// Verify schema version is now 5 (V3 adds blocked_by, V4 renames sessions→flows, V5 adds timing columns).
 	checkDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open check db: %v", err)
@@ -1168,8 +1168,8 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("schema version = %d, want 4", version)
+	if version != 5 {
+		t.Errorf("schema version = %d, want 5", version)
 	}
 }
 
@@ -1420,5 +1420,211 @@ func TestSQLiteStore_HostFilter_BoundaryAnchoring(t *testing.T) {
 				t.Errorf("Host=%q: got %d flows %v, want %d", tt.host, len(flows), urls, tt.want)
 			}
 		})
+	}
+}
+
+func TestSQLiteStore_FlowTiming_SaveAndGet(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	sendMs := int64(10)
+	waitMs := int64(50)
+	receiveMs := int64(30)
+
+	fl := &Flow{
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  90 * time.Millisecond,
+		SendMs:    &sendMs,
+		WaitMs:    &waitMs,
+		ReceiveMs: &receiveMs,
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	got, err := store.GetFlow(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetFlow: %v", err)
+	}
+
+	if got.SendMs == nil || *got.SendMs != 10 {
+		t.Errorf("SendMs = %v, want 10", got.SendMs)
+	}
+	if got.WaitMs == nil || *got.WaitMs != 50 {
+		t.Errorf("WaitMs = %v, want 50", got.WaitMs)
+	}
+	if got.ReceiveMs == nil || *got.ReceiveMs != 30 {
+		t.Errorf("ReceiveMs = %v, want 30", got.ReceiveMs)
+	}
+}
+
+func TestSQLiteStore_FlowTiming_NullByDefault(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Flow without timing (e.g., Raw TCP or legacy flow).
+	fl := &Flow{
+		Protocol:  "Raw TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  200 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	got, err := store.GetFlow(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetFlow: %v", err)
+	}
+
+	if got.SendMs != nil {
+		t.Errorf("SendMs = %v, want nil", got.SendMs)
+	}
+	if got.WaitMs != nil {
+		t.Errorf("WaitMs = %v, want nil", got.WaitMs)
+	}
+	if got.ReceiveMs != nil {
+		t.Errorf("ReceiveMs = %v, want nil", got.ReceiveMs)
+	}
+}
+
+func TestSQLiteStore_FlowTiming_UpdateFlow(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create flow without timing (progressive recording: send phase).
+	fl := &Flow{
+		Protocol:  "HTTPS",
+		FlowType:  "unary",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	// Verify timing is null initially.
+	got, err := store.GetFlow(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetFlow (before update): %v", err)
+	}
+	if got.SendMs != nil || got.WaitMs != nil || got.ReceiveMs != nil {
+		t.Fatalf("timing should be nil before update")
+	}
+
+	// Update flow with timing (receive phase).
+	sendMs := int64(5)
+	waitMs := int64(120)
+	receiveMs := int64(45)
+	update := FlowUpdate{
+		State:     "complete",
+		Duration:  170 * time.Millisecond,
+		SendMs:    &sendMs,
+		WaitMs:    &waitMs,
+		ReceiveMs: &receiveMs,
+	}
+	if err := store.UpdateFlow(ctx, fl.ID, update); err != nil {
+		t.Fatalf("UpdateFlow: %v", err)
+	}
+
+	got, err = store.GetFlow(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetFlow (after update): %v", err)
+	}
+	if got.State != "complete" {
+		t.Errorf("State = %q, want %q", got.State, "complete")
+	}
+	if got.SendMs == nil || *got.SendMs != 5 {
+		t.Errorf("SendMs = %v, want 5", got.SendMs)
+	}
+	if got.WaitMs == nil || *got.WaitMs != 120 {
+		t.Errorf("WaitMs = %v, want 120", got.WaitMs)
+	}
+	if got.ReceiveMs == nil || *got.ReceiveMs != 45 {
+		t.Errorf("ReceiveMs = %v, want 45", got.ReceiveMs)
+	}
+}
+
+func TestSQLiteStore_FlowTiming_ErrorFlowNullTiming(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Simulate 502 error: flow created during send phase, then updated to error.
+	fl := &Flow{
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	// Update to error state without timing (upstream failed before response).
+	update := FlowUpdate{
+		State:    "error",
+		Duration: 50 * time.Millisecond,
+	}
+	if err := store.UpdateFlow(ctx, fl.ID, update); err != nil {
+		t.Fatalf("UpdateFlow: %v", err)
+	}
+
+	got, err := store.GetFlow(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetFlow: %v", err)
+	}
+	if got.State != "error" {
+		t.Errorf("State = %q, want %q", got.State, "error")
+	}
+	if got.SendMs != nil || got.WaitMs != nil || got.ReceiveMs != nil {
+		t.Errorf("error flow should have nil timing, got send=%v wait=%v receive=%v",
+			got.SendMs, got.WaitMs, got.ReceiveMs)
+	}
+}
+
+func TestSQLiteStore_FlowTiming_ListFlows(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a flow with timing.
+	sendMs := int64(8)
+	waitMs := int64(100)
+	receiveMs := int64(22)
+	fl := &Flow{
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  130 * time.Millisecond,
+		SendMs:    &sendMs,
+		WaitMs:    &waitMs,
+		ReceiveMs: &receiveMs,
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	flows, err := store.ListFlows(ctx, ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListFlows: %v", err)
+	}
+	if len(flows) != 1 {
+		t.Fatalf("ListFlows: got %d flows, want 1", len(flows))
+	}
+
+	got := flows[0]
+	if got.SendMs == nil || *got.SendMs != 8 {
+		t.Errorf("SendMs = %v, want 8", got.SendMs)
+	}
+	if got.WaitMs == nil || *got.WaitMs != 100 {
+		t.Errorf("WaitMs = %v, want 100", got.WaitMs)
+	}
+	if got.ReceiveMs == nil || *got.ReceiveMs != 22 {
+		t.Errorf("ReceiveMs = %v, want 22", got.ReceiveMs)
 	}
 }

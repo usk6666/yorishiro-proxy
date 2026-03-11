@@ -116,11 +116,21 @@ ALTER TABLE fuzz_jobs RENAME COLUMN session_id TO flow_id;
 ALTER TABLE fuzz_results RENAME COLUMN session_id TO flow_id;
 `
 
+// schemaV5 adds per-phase timing columns (send/wait/receive) to flows.
+// These are nullable (INTEGER with no NOT NULL) for backward compatibility
+// with existing flows and protocols where timing is not applicable (e.g., Raw TCP).
+const schemaV5 = `
+ALTER TABLE flows ADD COLUMN send_ms INTEGER;
+ALTER TABLE flows ADD COLUMN wait_ms INTEGER;
+ALTER TABLE flows ADD COLUMN receive_ms INTEGER;
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
 	2: schemaV2,
 	3: schemaV3,
 	4: schemaV4,
+	5: schemaV5,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
