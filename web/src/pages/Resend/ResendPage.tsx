@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Input } from "../../components/ui/Input.js";
@@ -15,6 +15,7 @@ import type {
   RawPatch,
 } from "../../lib/mcp/types.js";
 import { BodyPatchEditor } from "./BodyPatchEditor.js";
+import { ComparerView } from "./ComparerView.js";
 import { HeaderEditor } from "./HeaderEditor.js";
 import { RawPatchEditor } from "./RawPatchEditor.js";
 import "./ResendPage.css";
@@ -57,6 +58,12 @@ const TCP_MODE_TABS = [
 const HTTP_MODE_TABS = [
   { id: "structured", label: "Structured" },
   { id: "raw", label: "Raw" },
+];
+
+/** Top-level page mode tabs: Resend vs Compare. */
+const PAGE_MODE_TABS = [
+  { id: "resend", label: "Resend" },
+  { id: "compare", label: "Compare" },
 ];
 
 /** Resend result from MCP resend tool. */
@@ -241,9 +248,14 @@ function stringToBase64(str: string): string {
 
 export function ResendPage() {
   const { flowId: routeFlowId } = useParams<{ flowId: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { addToast } = useToast();
   const { resend, loading: executing } = useResend();
+
+  // Page mode: resend or compare.
+  const initialMode = searchParams.get("mode") === "compare" ? "compare" : "resend";
+  const [pageMode, setPageMode] = useState<"resend" | "compare">(initialMode);
 
   // Flow ID input state.
   const [flowIdInput, setFlowIdInput] = useState(routeFlowId ?? "");
@@ -643,10 +655,22 @@ export function ResendPage() {
       <div className="resend-header">
         <h1 className="page-title">Resend</h1>
         <p className="page-description">
-          Edit and resend captured requests. Supports HTTP resend, raw HTTP editing, raw TCP byte patching, and TCP replay.
+          Edit and resend captured requests. Supports HTTP resend, raw HTTP editing, raw TCP byte patching, TCP replay, and response comparison.
         </p>
       </div>
 
+      {/* Page mode tabs: Resend / Compare */}
+      <Tabs
+        tabs={PAGE_MODE_TABS}
+        activeTab={pageMode}
+        onTabChange={(id) => setPageMode(id as "resend" | "compare")}
+        className="resend-page-mode-tabs"
+      />
+
+      {pageMode === "compare" && <ComparerView />}
+
+      {pageMode === "resend" && (
+      <>
       {/* Flow selector */}
       <div className="resend-flow-selector">
         <div className="resend-flow-input-row">
@@ -1124,6 +1148,8 @@ export function ResendPage() {
             ))}
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );
