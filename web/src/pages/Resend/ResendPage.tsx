@@ -253,9 +253,20 @@ export function ResendPage() {
   const { addToast } = useToast();
   const { resend, loading: executing } = useResend();
 
-  // Page mode: resend or compare.
-  const initialMode = searchParams.get("mode") === "compare" ? "compare" : "resend";
-  const [pageMode, setPageMode] = useState<"resend" | "compare">(initialMode);
+  // Page mode: derived from URL searchParams for reactivity to URL changes.
+  const pageMode: "resend" | "compare" = searchParams.get("mode") === "compare" ? "compare" : "resend";
+  const setPageMode = useCallback(
+    (mode: "resend" | "compare") => {
+      const params = new URLSearchParams(searchParams);
+      if (mode === "compare") {
+        params.set("mode", "compare");
+      } else {
+        params.delete("mode");
+      }
+      navigate({ search: params.toString() }, { replace: true });
+    },
+    [searchParams, navigate],
+  );
 
   // Flow ID input state.
   const [flowIdInput, setFlowIdInput] = useState(routeFlowId ?? "");
@@ -670,8 +681,8 @@ export function ResendPage() {
       {pageMode === "compare" && <ComparerView />}
 
       {pageMode === "resend" && (
-      <>
-      {/* Flow selector */}
+        <>
+          {/* Flow selector */}
       <div className="resend-flow-selector">
         <div className="resend-flow-input-row">
           <Input
@@ -1149,7 +1160,7 @@ export function ResendPage() {
           </div>
         </div>
       )}
-      </>
+        </>
       )}
     </div>
   );
