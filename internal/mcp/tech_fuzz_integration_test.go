@@ -861,8 +861,8 @@ func TestTechDetect_MultipleDetections(t *testing.T) {
 
 // --- Helpers ---
 
-// containsString checks if a slice contains a given string.
-func containsString(slice []string, s string) bool {
+// containsStringInSlice checks if a slice contains a given string.
+func containsStringInSlice(slice []string, s string) bool {
 	for _, item := range slice {
 		if item == s {
 			return true
