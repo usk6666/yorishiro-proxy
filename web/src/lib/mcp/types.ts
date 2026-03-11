@@ -181,6 +181,7 @@ export interface ConfigureParams {
   intercept_queue?: ConfigureInterceptQueue;
   auto_transform?: ConfigureAutoTransform;
   socks5_auth?: ConfigureSOCKS5Auth;
+  tls_fingerprint?: string;
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
   request_timeout_ms?: number | null;
@@ -213,6 +214,7 @@ export interface ConfigureResult {
   socks5_auth?: {
     method: string;
   };
+  tls_fingerprint?: string;
   max_connections?: number;
   peek_timeout_ms?: number;
   request_timeout_ms?: number;
@@ -383,6 +385,7 @@ export interface StatusResult {
   db_size_bytes: number;
   uptime_seconds: number;
   ca_initialized: boolean;
+  tls_fingerprint?: string;
 }
 
 /** Scope rule in config output. */

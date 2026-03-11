@@ -12,6 +12,7 @@ import { ProxyControl } from "./ProxyControl.js";
 import "./SettingsPage.css";
 import { Socks5Auth } from "./Socks5Auth.js";
 import { TcpForwards } from "./TcpForwards.js";
+import { TlsFingerprint } from "./TlsFingerprint.js";
 import { TlsPassthrough } from "./TlsPassthrough.js";
 
 const TABS = [
@@ -22,6 +23,7 @@ const TABS = [
   { id: "intercept", label: "Intercept Rules" },
   { id: "transform", label: "Auto-Transform" },
   { id: "socks5-auth", label: "SOCKS5 Auth" },
+  { id: "tls-fingerprint", label: "TLS Fingerprint" },
   { id: "connection", label: "Connection" },
   { id: "ca-cert", label: "CA Certificate" },
   { id: "plugins", label: "Plugins" },
@@ -126,6 +128,16 @@ export function SettingsPage() {
         }
         if (!configData) return null;
         return <Socks5Auth config={configData} onRefresh={handleRefresh} />;
+
+      case "tls-fingerprint":
+        if (statusLoading && !statusData) {
+          return <div className="settings-loading"><Spinner size="md" /></div>;
+        }
+        if (statusError) {
+          return <div className="settings-error">Error loading status: {statusError.message}</div>;
+        }
+        if (!statusData) return null;
+        return <TlsFingerprint status={statusData} onRefresh={handleRefresh} />;
 
       case "connection":
         if (statusLoading && !statusData) {
