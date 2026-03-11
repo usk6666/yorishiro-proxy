@@ -26,6 +26,8 @@ type CAInfo struct {
 func EnsureCA(caDir string) (*CAInfo, error) {
 	if caDir == "" {
 		caDir = cert.DefaultCADir()
+	} else {
+		caDir = filepath.Clean(caDir)
 	}
 	certPath := filepath.Join(caDir, "ca.crt")
 	keyPath := filepath.Join(caDir, "ca.key")
@@ -121,6 +123,7 @@ func TrustCA(certPath string) error {
 // trustCAForOS implements OS-specific trust store registration.
 // This helper enables testing with arbitrary GOOS values.
 func trustCAForOS(certPath, goos string) error {
+	certPath = filepath.Clean(certPath)
 	switch goos {
 	case "darwin":
 		cmd := exec.Command("sudo", "security", "add-trusted-cert",

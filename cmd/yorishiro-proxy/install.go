@@ -42,7 +42,10 @@ func runInstall(ctx context.Context, args []string) error {
 
 	// CA target flags.
 	fs.BoolVar(&opts.Trust, "trust", false, "register CA in OS trust store (requires sudo)")
-	fs.StringVar(&opts.CADir, "dir", "", "CA certificate output directory or skills install directory")
+	fs.StringVar(&opts.CADir, "ca-dir", "", "CA certificate output directory")
+
+	// Skills target flags.
+	fs.StringVar(&opts.SkillsDir, "skills-dir", "", "skills installation directory")
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy install [target] [flags]\n\n")
@@ -58,7 +61,8 @@ func runInstall(ctx context.Context, args []string) error {
 		fmt.Fprintf(fs.Output(), "  --user-scope      Register in user scope (~/.claude/settings.json)\n")
 		fmt.Fprintf(fs.Output(), "  --listen-addr     Proxy listen address (default: 127.0.0.1:8080)\n")
 		fmt.Fprintf(fs.Output(), "  --trust           Register CA in OS trust store (requires sudo)\n")
-		fmt.Fprintf(fs.Output(), "  --dir             Output directory for CA or skills\n")
+		fmt.Fprintf(fs.Output(), "  --ca-dir          CA certificate output directory\n")
+		fmt.Fprintf(fs.Output(), "  --skills-dir      Skills installation directory\n")
 	}
 
 	if err := fs.Parse(flagArgs); err != nil {
@@ -68,20 +72,6 @@ func runInstall(ctx context.Context, args []string) error {
 	// Handle --user-scope flag: set scope to "user".
 	if userScope {
 		opts.Scope = "user"
-	}
-
-	// Handle --dir flag for skills target.
-	if opts.Target == setup.TargetSkills {
-		dirFlag := ""
-		fs.Visit(func(f *flag.Flag) {
-			if f.Name == "dir" {
-				dirFlag = f.Value.String()
-			}
-		})
-		if dirFlag != "" {
-			opts.SkillsDir = dirFlag
-			opts.CADir = "" // --dir is for skills, not CA
-		}
 	}
 
 	// Validate target-specific flags.

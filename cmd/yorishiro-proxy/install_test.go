@@ -79,9 +79,9 @@ func TestRunInstall_CATarget(t *testing.T) {
 		}
 	}()
 
-	// Use --dir to avoid polluting the default CA directory.
+	// Use --ca-dir to avoid polluting the default CA directory.
 	caDir := filepath.Join(dir, "test-ca")
-	err = runInstall(context.Background(), []string{"ca", "--dir", caDir})
+	err = runInstall(context.Background(), []string{"ca", "--ca-dir", caDir})
 	if err != nil {
 		t.Fatalf("runInstall(ca) error: %v", err)
 	}
