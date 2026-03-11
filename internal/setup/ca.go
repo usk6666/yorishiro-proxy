@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -108,6 +109,60 @@ func shellQuote(s string) string {
 	// Replace each ' with '\'' (end quote, escaped quote, start quote).
 	escaped := strings.ReplaceAll(s, "'", "'\\''")
 	return "'" + escaped + "'"
+}
+
+// TrustCA registers the CA certificate in the OS trust store.
+// It auto-detects the OS and runs the appropriate command.
+// Requires elevated privileges (sudo on macOS/Linux, Administrator on Windows).
+func TrustCA(certPath string) error {
+	return trustCAForOS(certPath, runtime.GOOS)
+}
+
+// trustCAForOS implements OS-specific trust store registration.
+// This helper enables testing with arbitrary GOOS values.
+func trustCAForOS(certPath, goos string) error {
+	switch goos {
+	case "darwin":
+		cmd := exec.Command("sudo", "security", "add-trusted-cert",
+			"-d", "-r", "trustRoot",
+			"-k", "/Library/Keychains/System.keychain",
+			certPath)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("macOS trust store registration: %w", err)
+		}
+		return nil
+	case "linux":
+		destPath := "/usr/local/share/ca-certificates/yorishiro-proxy.crt"
+		cpCmd := exec.Command("sudo", "cp", certPath, destPath)
+		cpCmd.Stdout = os.Stdout
+		cpCmd.Stderr = os.Stderr
+		cpCmd.Stdin = os.Stdin
+		if err := cpCmd.Run(); err != nil {
+			return fmt.Errorf("copy CA to trust store: %w", err)
+		}
+		updateCmd := exec.Command("sudo", "update-ca-certificates")
+		updateCmd.Stdout = os.Stdout
+		updateCmd.Stderr = os.Stderr
+		updateCmd.Stdin = os.Stdin
+		if err := updateCmd.Run(); err != nil {
+			return fmt.Errorf("update-ca-certificates: %w", err)
+		}
+		return nil
+	case "windows":
+		cmd := exec.Command("certutil", "-addstore", "Root", certPath)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("windows trust store registration: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported OS for trust store registration: %s", goos)
+	}
 }
 
 // formatFingerprint formats a byte slice as a colon-separated uppercase hex string.
