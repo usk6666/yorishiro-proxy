@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -26,6 +27,17 @@ type HostTLSConfig struct {
 	// CABundlePath is the path to a PEM-encoded CA bundle file for custom
 	// root certificates. Multiple certificates can be concatenated.
 	CABundlePath string `json:"ca_bundle,omitempty"`
+
+	// certOnce and caOnce guard lazy loading of the client certificate and
+	// CA bundle respectively. The parsed results are cached after first load
+	// to avoid repeated disk I/O and TOCTOU issues.
+	certOnce sync.Once
+	certVal  *tls.Certificate
+	certErr  error
+
+	caOnce sync.Once
+	caVal  *x509.CertPool
+	caErr  error
 }
 
 // Validate checks that the HostTLSConfig fields are consistent.
@@ -42,48 +54,59 @@ func (c *HostTLSConfig) Validate() error {
 	}
 	if hasCert {
 		if _, err := os.Stat(c.ClientCertPath); err != nil {
-			return fmt.Errorf("client_cert file: %w", err)
+			return fmt.Errorf("client_cert file %q: not accessible", filepath.Base(c.ClientCertPath))
 		}
 		if _, err := os.Stat(c.ClientKeyPath); err != nil {
-			return fmt.Errorf("client_key file: %w", err)
+			return fmt.Errorf("client_key file %q: not accessible", filepath.Base(c.ClientKeyPath))
 		}
 	}
 	if c.CABundlePath != "" {
 		if _, err := os.Stat(c.CABundlePath); err != nil {
-			return fmt.Errorf("ca_bundle file: %w", err)
+			return fmt.Errorf("ca_bundle file %q: not accessible", filepath.Base(c.CABundlePath))
 		}
 	}
 	return nil
 }
 
 // LoadClientCert loads the client certificate and key from the configured paths.
+// The result is cached after the first successful load.
 // Returns nil, nil if no client certificate is configured.
 func (c *HostTLSConfig) LoadClientCert() (*tls.Certificate, error) {
 	if c.ClientCertPath == "" || c.ClientKeyPath == "" {
 		return nil, nil
 	}
-	cert, err := tls.LoadX509KeyPair(c.ClientCertPath, c.ClientKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("load client certificate: %w", err)
-	}
-	return &cert, nil
+	c.certOnce.Do(func() {
+		cert, err := tls.LoadX509KeyPair(c.ClientCertPath, c.ClientKeyPath)
+		if err != nil {
+			c.certErr = fmt.Errorf("load client certificate: %w", err)
+			return
+		}
+		c.certVal = &cert
+	})
+	return c.certVal, c.certErr
 }
 
 // LoadCABundle loads the custom CA bundle from the configured path.
+// The result is cached after the first successful load.
 // Returns nil if no CA bundle is configured.
 func (c *HostTLSConfig) LoadCABundle() (*x509.CertPool, error) {
 	if c.CABundlePath == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(c.CABundlePath)
-	if err != nil {
-		return nil, fmt.Errorf("read CA bundle: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(data) {
-		return nil, fmt.Errorf("CA bundle %s: no valid PEM certificates found", c.CABundlePath)
-	}
-	return pool, nil
+	c.caOnce.Do(func() {
+		data, err := os.ReadFile(c.CABundlePath)
+		if err != nil {
+			c.caErr = fmt.Errorf("read CA bundle: %w", err)
+			return
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			c.caErr = fmt.Errorf("CA bundle %q: no valid PEM certificates found", filepath.Base(c.CABundlePath))
+			return
+		}
+		c.caVal = pool
+	})
+	return c.caVal, c.caErr
 }
 
 // HostTLSRegistry manages per-host TLS configurations and a global default.

@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,37 +111,37 @@ func TestHostTLSConfig_Validate(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     HostTLSConfig
+		cfg     *HostTLSConfig
 		wantErr bool
 	}{
 		{
 			name: "empty config is valid",
-			cfg:  HostTLSConfig{},
+			cfg:  &HostTLSConfig{},
 		},
 		{
 			name: "valid cert and key",
-			cfg: HostTLSConfig{
+			cfg: &HostTLSConfig{
 				ClientCertPath: certPath,
 				ClientKeyPath:  keyPath,
 			},
 		},
 		{
 			name: "cert without key",
-			cfg: HostTLSConfig{
+			cfg: &HostTLSConfig{
 				ClientCertPath: certPath,
 			},
 			wantErr: true,
 		},
 		{
 			name: "key without cert",
-			cfg: HostTLSConfig{
+			cfg: &HostTLSConfig{
 				ClientKeyPath: keyPath,
 			},
 			wantErr: true,
 		},
 		{
 			name: "nonexistent cert file",
-			cfg: HostTLSConfig{
+			cfg: &HostTLSConfig{
 				ClientCertPath: "/nonexistent/cert.pem",
 				ClientKeyPath:  keyPath,
 			},
@@ -148,7 +149,7 @@ func TestHostTLSConfig_Validate(t *testing.T) {
 		},
 		{
 			name: "nonexistent key file",
-			cfg: HostTLSConfig{
+			cfg: &HostTLSConfig{
 				ClientCertPath: certPath,
 				ClientKeyPath:  "/nonexistent/key.pem",
 			},
@@ -156,13 +157,13 @@ func TestHostTLSConfig_Validate(t *testing.T) {
 		},
 		{
 			name: "valid ca_bundle",
-			cfg: HostTLSConfig{
+			cfg: &HostTLSConfig{
 				CABundlePath: caPath,
 			},
 		},
 		{
 			name: "nonexistent ca_bundle",
-			cfg: HostTLSConfig{
+			cfg: &HostTLSConfig{
 				CABundlePath: "/nonexistent/ca.pem",
 			},
 			wantErr: true,
@@ -348,6 +349,75 @@ func TestHostTLSRegistry_Hosts(t *testing.T) {
 	hosts := reg.Hosts()
 	if len(hosts) != 2 {
 		t.Errorf("Hosts() returned %d entries, want 2", len(hosts))
+	}
+}
+
+func TestHostTLSConfig_LoadClientCert_Cached(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeTestCertAndKey(t, dir, "cached")
+
+	cfg := &HostTLSConfig{
+		ClientCertPath: certPath,
+		ClientKeyPath:  keyPath,
+	}
+
+	cert1, err := cfg.LoadClientCert()
+	if err != nil {
+		t.Fatalf("first LoadClientCert() error = %v", err)
+	}
+	if cert1 == nil {
+		t.Fatal("first LoadClientCert() returned nil")
+	}
+
+	// Second call should return the same cached pointer.
+	cert2, err := cfg.LoadClientCert()
+	if err != nil {
+		t.Fatalf("second LoadClientCert() error = %v", err)
+	}
+	if cert1 != cert2 {
+		t.Error("expected cached certificate pointer on second call")
+	}
+}
+
+func TestHostTLSConfig_LoadCABundle_Cached(t *testing.T) {
+	dir := t.TempDir()
+	caPath := writeTestCABundle(t, dir)
+
+	cfg := &HostTLSConfig{CABundlePath: caPath}
+
+	pool1, err := cfg.LoadCABundle()
+	if err != nil {
+		t.Fatalf("first LoadCABundle() error = %v", err)
+	}
+	if pool1 == nil {
+		t.Fatal("first LoadCABundle() returned nil")
+	}
+
+	// Second call should return the same cached pointer.
+	pool2, err := cfg.LoadCABundle()
+	if err != nil {
+		t.Fatalf("second LoadCABundle() error = %v", err)
+	}
+	if pool1 != pool2 {
+		t.Error("expected cached CertPool pointer on second call")
+	}
+}
+
+func TestHostTLSConfig_Validate_NoFullPaths(t *testing.T) {
+	cfg := &HostTLSConfig{
+		ClientCertPath: "/secret/internal/path/cert.pem",
+		ClientKeyPath:  "/secret/internal/path/key.pem",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for nonexistent files")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "/secret/internal/path/") {
+		t.Errorf("error message should not contain full path, got: %s", msg)
+	}
+	if !strings.Contains(msg, "cert.pem") {
+		t.Errorf("error message should contain base filename, got: %s", msg)
 	}
 }
 
