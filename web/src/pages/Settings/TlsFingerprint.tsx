@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, useDialog, useToast } from "../../components/ui/index.js";
 import { useConfigure } from "../../lib/mcp/hooks.js";
 import type { StatusResult } from "../../lib/mcp/types.js";
@@ -12,6 +12,8 @@ const PRESETS = [
   { value: "edge", label: "Edge", description: "Mimics Microsoft Edge's TLS ClientHello fingerprint" },
   { value: "random", label: "Random", description: "Randomly selects a browser fingerprint for each connection" },
 ] as const;
+
+type TlsPresetValue = typeof PRESETS[number]["value"];
 
 interface TlsFingerprintProps {
   status: StatusResult;
@@ -29,8 +31,13 @@ export function TlsFingerprint({ status, onRefresh }: TlsFingerprintProps) {
   const { showDialog } = useDialog();
   const { configure, loading } = useConfigure();
 
-  const currentProfile = status.tls_fingerprint || "none";
-  const [selectedProfile, setSelectedProfile] = useState(currentProfile);
+  const currentProfile: TlsPresetValue = (status.tls_fingerprint as TlsPresetValue) || "none";
+  const [selectedProfile, setSelectedProfile] = useState<TlsPresetValue>(currentProfile);
+
+  // Sync selectedProfile when status prop updates (F-1)
+  useEffect(() => {
+    setSelectedProfile(currentProfile);
+  }, [currentProfile]);
 
   const currentPreset = PRESETS.find((p) => p.value === currentProfile);
   const selectedPreset = PRESETS.find((p) => p.value === selectedProfile);
