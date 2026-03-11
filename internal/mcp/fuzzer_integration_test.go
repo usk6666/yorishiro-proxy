@@ -595,7 +595,10 @@ done:
 	if fuzzResults.Summary == nil {
 		t.Fatal("summary is nil")
 	}
-	if fuzzResults.Summary.StatusDistribution == nil {
-		t.Error("status_distribution is nil")
+	if fuzzResults.Summary.Statistics == nil {
+		t.Error("statistics is nil")
+	}
+	if fuzzResults.Summary.Statistics.StatusCodeDistribution == nil {
+		t.Error("status_code_distribution is nil")
 	}
 }
