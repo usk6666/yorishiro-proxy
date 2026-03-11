@@ -17,6 +17,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/codec"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -520,6 +521,11 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		}
 	}
 
+	// Load codec plugins from config if configured.
+	if err := loadCodecPlugins(deps.proxyCfg, logger); err != nil {
+		return nil, err
+	}
+
 	// Initialize plugin engine from config if plugins are configured.
 	var pluginEngine *plugin.Engine
 	if deps.proxyCfg != nil && len(deps.proxyCfg.Plugins) > 0 {
@@ -556,6 +562,29 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		fuzzRunner:    fuzzRunner,
 		tlsTransport:  tlsTransport,
 	}, nil
+}
+
+// loadCodecPlugins loads Starlark codec plugins from the proxy config.
+// Codec plugins are registered with the default codec registry.
+func loadCodecPlugins(proxyCfg *config.ProxyConfig, logger *slog.Logger) error {
+	if proxyCfg == nil || len(proxyCfg.CodecPlugins) == 0 {
+		return nil
+	}
+	var codecConfigs []codec.CodecPluginConfig
+	if err := json.Unmarshal(proxyCfg.CodecPlugins, &codecConfigs); err != nil {
+		return fmt.Errorf("parse codec plugin configs: %w", err)
+	}
+	logWarn := func(msg string, args ...any) {
+		logger.Warn(msg, args...)
+	}
+	n, err := codec.LoadCodecPlugins(codec.DefaultRegistry(), codecConfigs, logWarn)
+	if err != nil {
+		return fmt.Errorf("load codec plugins: %w", err)
+	}
+	if n > 0 {
+		logger.Info("codec plugins loaded", "count", n)
+	}
+	return nil
 }
 
 // buildMCPOptions assembles the MCP server option slice from all components.
