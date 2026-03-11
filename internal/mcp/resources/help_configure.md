@@ -383,6 +383,24 @@ Configures SOCKS5 authentication at runtime.
 }
 ```
 
+### budget (object, optional)
+Configures diagnostic session budget limits at runtime. Uses merge semantics by default — only provided fields are updated, others remain unchanged. In replace mode, omitted fields reset to 0.
+
+For full-replace semantics, use the `security` tool's `set_budget` action instead.
+
+- **max_total_requests** (integer): Maximum total requests for the session. `0` means no limit.
+- **max_duration** (string): Maximum session duration as a Go duration string (e.g. `"30m"`, `"1h"`). `"0s"` means no limit.
+
+### Set diagnostic budget
+```json
+{
+  "budget": {
+    "max_total_requests": 1000,
+    "max_duration": "30m"
+  }
+}
+```
+
 ### Combined update
 ```json
 {
