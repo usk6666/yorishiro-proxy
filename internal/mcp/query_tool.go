@@ -702,12 +702,21 @@ type queryStatusResult struct {
 	SOCKS5Auth        string                     `json:"socks5_auth,omitempty"`
 	TLSFingerprint    string                     `json:"tls_fingerprint"`
 	RateLimits        *queryRateLimitStatus      `json:"rate_limits,omitempty"`
+	Budget            *queryBudgetStatus         `json:"budget,omitempty"`
 }
 
 // queryRateLimitStatus holds rate limit information for the status response.
 type queryRateLimitStatus struct {
 	Effective proxy.RateLimitConfig `json:"effective"`
 	Enabled   bool                  `json:"enabled"`
+}
+
+// queryBudgetStatus holds budget information for the status response.
+type queryBudgetStatus struct {
+	Effective    proxy.BudgetConfig `json:"effective"`
+	Enabled      bool               `json:"enabled"`
+	RequestCount int64              `json:"request_count"`
+	StopReason   string             `json:"stop_reason,omitempty"`
 }
 
 // handleQueryStatus returns the current proxy status and health metrics.
@@ -785,6 +794,16 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.RateLimits = &queryRateLimitStatus{
 			Effective: effective,
 			Enabled:   s.deps.rateLimiter.HasLimits(),
+		}
+	}
+
+	if s.deps.budgetManager != nil {
+		effective := s.deps.budgetManager.EffectiveBudget()
+		result.Budget = &queryBudgetStatus{
+			Effective:    effective,
+			Enabled:      s.deps.budgetManager.HasBudget(),
+			RequestCount: s.deps.budgetManager.RequestCount(),
+			StopReason:   s.deps.budgetManager.ShutdownReason(),
 		}
 	}
 

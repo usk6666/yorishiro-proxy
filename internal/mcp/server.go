@@ -52,6 +52,7 @@ type deps struct {
 	targetScope           *proxy.TargetScope
 	rateLimiter           *proxy.RateLimiter
 	rateLimiterSetters    []rateLimiterSetter
+	budgetManager         *proxy.BudgetManager
 	pluginEngine          *plugin.Engine
 	socks5AuthSetter      socks5AuthSetter
 	tlsTransport          httputil.TLSTransport
@@ -288,6 +289,14 @@ func WithRateLimiterSetter(setter rateLimiterSetter) ServerOption {
 	}
 }
 
+// WithBudgetManager sets the budget manager for the MCP server,
+// enabling diagnostic session budget management via the security MCP tool.
+func WithBudgetManager(bm *proxy.BudgetManager) ServerOption {
+	return func(s *Server) {
+		s.deps.budgetManager = bm
+	}
+}
+
 // WithPluginEngine sets the plugin engine for the MCP server,
 // enabling plugin management via the plugin tool (list, reload, enable, disable).
 func WithPluginEngine(engine *plugin.Engine) ServerOption {
@@ -363,6 +372,10 @@ func NewServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *prox
 	// Propagate rate limiter to all registered protocol handlers.
 	for _, setter := range s.deps.rateLimiterSetters {
 		setter.SetRateLimiter(s.deps.rateLimiter)
+	}
+	// Initialize default BudgetManager if not provided via WithBudgetManager.
+	if s.deps.budgetManager == nil {
+		s.deps.budgetManager = proxy.NewBudgetManager()
 	}
 	s.registerTools()
 	s.registerResources()

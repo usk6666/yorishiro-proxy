@@ -66,6 +66,10 @@ type configureInput struct {
 	// RequestTimeoutMs dynamically changes the HTTP request header read timeout in milliseconds.
 	// Takes effect for the next incoming request.
 	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (100-600000)"`
+
+	// Budget dynamically configures diagnostic session budget limits.
+	// Agent layer budget values must not exceed policy limits.
+	Budget *configureBudget `json:"budget,omitempty" jsonschema:"diagnostic session budget configuration"`
 }
 
 // configureSOCKS5Auth holds SOCKS5 authentication configuration.
@@ -147,6 +151,23 @@ type configureInterceptRules struct {
 	Rules []interceptRuleInput `json:"rules,omitempty" jsonschema:"(replace) full list of intercept rules"`
 }
 
+// configureBudget holds budget configuration for the configure tool.
+type configureBudget struct {
+	// MaxTotalRequests sets the maximum number of requests for the session.
+	// 0 clears the limit. Nil leaves it unchanged.
+	MaxTotalRequests *int64 `json:"max_total_requests,omitempty" jsonschema:"max total requests for the session (0 to clear)"`
+
+	// MaxDuration sets the maximum session duration as a duration string (e.g. "30m").
+	// "0s" clears the limit. Nil leaves it unchanged.
+	MaxDuration *string `json:"max_duration,omitempty" jsonschema:"max session duration e.g. 30m (0s to clear)"`
+}
+
+// configureBudgetResult summarizes budget state in the configure response.
+type configureBudgetResult struct {
+	Effective    proxy.BudgetConfig `json:"effective"`
+	RequestCount int64              `json:"request_count"`
+}
+
 // configureResult is the structured output of the configure tool.
 type configureResult struct {
 	// Status indicates the result of the operation.
@@ -184,6 +205,9 @@ type configureResult struct {
 
 	// TLSFingerprint is the current TLS fingerprint profile (set when changed).
 	TLSFingerprint *string `json:"tls_fingerprint,omitempty"`
+
+	// Budget summarizes the current budget state (set when changed).
+	Budget *configureBudgetResult `json:"budget,omitempty"`
 }
 
 // configureInterceptQueueResult summarizes intercept queue state in the configure response.
@@ -283,6 +307,9 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	if err := s.applyConnectionLimits(input, result); err != nil {
 		return nil, nil, err
 	}
+	if err := s.configureBudgetLimits(input, result); err != nil {
+		return nil, nil, err
+	}
 
 	return nil, result, nil
 }
@@ -316,6 +343,9 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 		return nil, nil, err
 	}
 	if err := s.applyConnectionLimits(input, result); err != nil {
+		return nil, nil, err
+	}
+	if err := s.configureBudgetLimits(input, result); err != nil {
 		return nil, nil, err
 	}
 
@@ -728,6 +758,46 @@ func (s *Server) mergeAutoTransform(cfg *configureAutoTransform) error {
 // replaceAutoTransform replaces all auto-transform rules atomically.
 func (s *Server) replaceAutoTransform(cfg *configureAutoTransform) error {
 	return s.applyTransformRules(cfg.Rules)
+}
+
+// configureBudgetLimits applies budget configuration if provided.
+// This is shared between merge and replace handlers since budgets are scalar values.
+func (s *Server) configureBudgetLimits(input configureInput, result *configureResult) error {
+	if input.Budget == nil {
+		return nil
+	}
+	if s.deps.budgetManager == nil {
+		return fmt.Errorf("budget manager is not initialized")
+	}
+
+	cfg := s.deps.budgetManager.AgentBudget()
+
+	if input.Budget.MaxTotalRequests != nil {
+		if *input.Budget.MaxTotalRequests < 0 {
+			return fmt.Errorf("budget max_total_requests must be >= 0")
+		}
+		cfg.MaxTotalRequests = *input.Budget.MaxTotalRequests
+	}
+	if input.Budget.MaxDuration != nil {
+		d, err := time.ParseDuration(*input.Budget.MaxDuration)
+		if err != nil {
+			return fmt.Errorf("budget invalid max_duration %q: %w", *input.Budget.MaxDuration, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("budget max_duration must be >= 0")
+		}
+		cfg.MaxDuration = d
+	}
+
+	if err := s.deps.budgetManager.SetAgentBudget(cfg); err != nil {
+		return fmt.Errorf("budget: %w", err)
+	}
+
+	result.Budget = &configureBudgetResult{
+		Effective:    s.deps.budgetManager.EffectiveBudget(),
+		RequestCount: s.deps.budgetManager.RequestCount(),
+	}
+	return nil
 }
 
 // autoTransformResult returns the current auto-transform rules state.
