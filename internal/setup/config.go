@@ -31,7 +31,7 @@ type Options struct {
 	// ListenAddr is the proxy listen address for MCP configuration.
 	ListenAddr string
 
-	// Interactive enables interactive prompts (legacy setup wizard mode).
+	// Interactive enables interactive prompts.
 	Interactive bool
 
 	// Trust enables OS trust store registration for the CA certificate.
@@ -45,19 +45,4 @@ type Options struct {
 
 	// BinaryPath overrides the auto-detected binary path for testing.
 	BinaryPath string
-
-	// --- Legacy fields for backward compatibility during migration ---
-
-	// NonInteractive is the inverse of Interactive (legacy setup flag).
-	// Deprecated: use Interactive instead.
-	NonInteractive bool
-
-	// SkipPlaywright skips playwright-cli integration (legacy).
-	SkipPlaywright bool
-
-	// SkipMCPConfig skips MCP configuration generation (legacy).
-	SkipMCPConfig bool
-
-	// SkipSkills skips yorishiro skill installation (legacy).
-	SkipSkills bool
 }
