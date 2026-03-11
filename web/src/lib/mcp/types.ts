@@ -163,6 +163,14 @@ export interface ConfigureAutoTransform {
   rules?: TransformRule[];
 }
 
+/** SOCKS5 authentication configuration. */
+export interface ConfigureSOCKS5Auth {
+  method: "none" | "password";
+  username?: string;
+  password?: string;
+  listener_name?: string;
+}
+
 /** Parameters for the configure tool. */
 export interface ConfigureParams {
   operation?: "merge" | "replace";
@@ -172,6 +180,7 @@ export interface ConfigureParams {
   intercept_rules?: ConfigureInterceptRules;
   intercept_queue?: ConfigureInterceptQueue;
   auto_transform?: ConfigureAutoTransform;
+  socks5_auth?: ConfigureSOCKS5Auth;
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
   request_timeout_ms?: number | null;
@@ -200,6 +209,9 @@ export interface ConfigureResult {
   auto_transform?: {
     total_rules: number;
     enabled_rules: number;
+  };
+  socks5_auth?: {
+    method: string;
   };
   max_connections?: number;
   peek_timeout_ms?: number;
@@ -393,6 +405,7 @@ export interface ConfigResult {
   };
   tcp_forwards?: Record<string, string>;
   enabled_protocols?: string[];
+  socks5_enabled?: boolean;
 }
 
 /** Response for query resource="ca_cert". */

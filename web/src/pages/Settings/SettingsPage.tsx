@@ -10,6 +10,7 @@ import { PluginPanel } from "./PluginPanel.js";
 import { ProtocolFilter } from "./ProtocolFilter.js";
 import { ProxyControl } from "./ProxyControl.js";
 import "./SettingsPage.css";
+import { Socks5Auth } from "./Socks5Auth.js";
 import { TcpForwards } from "./TcpForwards.js";
 import { TlsPassthrough } from "./TlsPassthrough.js";
 
@@ -20,6 +21,7 @@ const TABS = [
   { id: "tcp-forwards", label: "TCP Forwards" },
   { id: "intercept", label: "Intercept Rules" },
   { id: "transform", label: "Auto-Transform" },
+  { id: "socks5-auth", label: "SOCKS5 Auth" },
   { id: "connection", label: "Connection" },
   { id: "ca-cert", label: "CA Certificate" },
   { id: "plugins", label: "Plugins" },
@@ -114,6 +116,16 @@ export function SettingsPage() {
         }
         if (!configData) return null;
         return <AutoTransformRules config={configData} onRefresh={handleRefresh} />;
+
+      case "socks5-auth":
+        if (configLoading && !configData) {
+          return <div className="settings-loading"><Spinner size="md" /></div>;
+        }
+        if (configError) {
+          return <div className="settings-error">Error loading config: {configError.message}</div>;
+        }
+        if (!configData) return null;
+        return <Socks5Auth config={configData} onRefresh={handleRefresh} />;
 
       case "connection":
         if (statusLoading && !statusData) {
