@@ -657,7 +657,7 @@ export interface ExportFilter {
 // ---------------------------------------------------------------------------
 
 /** Available resend actions. */
-export type ExecuteAction = "resend" | "resend_raw" | "tcp_replay";
+export type ExecuteAction = "resend" | "resend_raw" | "tcp_replay" | "compare";
 
 /** A single header key-value pair, allowing duplicate keys. */
 export interface ExecuteHeaderEntry {
@@ -696,6 +696,10 @@ export interface ExecuteParams {
 
     // Hooks
     hooks?: HooksInput | null;
+
+    // Compare
+    flow_id_a?: string;
+    flow_id_b?: string;
   };
 }
 
@@ -739,6 +743,62 @@ export interface ExecuteRawDryRunResult {
     data_size: number;
     patches_applied: number;
   };
+}
+
+// ---------------------------------------------------------------------------
+// resend tool — compare action
+// ---------------------------------------------------------------------------
+
+/** Status code diff in compare result. */
+export interface CompareStatusCodeDiff {
+  a: number;
+  b: number;
+  changed: boolean;
+}
+
+/** Body length diff in compare result. */
+export interface CompareBodyLengthDiff {
+  a: number;
+  b: number;
+  delta: number;
+}
+
+/** Header value diff in compare result. */
+export interface CompareHeaderDiff {
+  a: string;
+  b: string;
+}
+
+/** Timing diff in compare result. */
+export interface CompareTimingDiff {
+  a: number;
+  b: number;
+  delta: number;
+}
+
+/** JSON key-level diff in compare result. */
+export interface CompareJsonDiff {
+  keys_added?: string[];
+  keys_removed?: string[];
+  keys_changed?: string[];
+}
+
+/** Body diff in compare result. */
+export interface CompareBodyDiff {
+  content_type: string;
+  identical: boolean;
+  json_diff?: CompareJsonDiff;
+}
+
+/** Result of the compare action. */
+export interface CompareResult {
+  status_code?: CompareStatusCodeDiff;
+  body_length?: CompareBodyLengthDiff;
+  headers_added?: string[];
+  headers_removed?: string[];
+  headers_changed?: Record<string, CompareHeaderDiff>;
+  timing_ms?: CompareTimingDiff;
+  body?: CompareBodyDiff;
 }
 
 // ---------------------------------------------------------------------------
