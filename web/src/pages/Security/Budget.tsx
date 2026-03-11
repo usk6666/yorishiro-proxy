@@ -82,6 +82,11 @@ export function Budget() {
 
   const handleSave = useCallback(async () => {
     try {
+      // S-1: Reject non-integer input before parseInt silently truncates decimals.
+      if (agentMaxRequests && !/^\d+$/.test(agentMaxRequests.trim())) {
+        addToast({ type: "error", message: "Max requests must be a whole number" });
+        return;
+      }
       const maxReqs = agentMaxRequests ? parseInt(agentMaxRequests, 10) : 0;
       if (agentMaxRequests && (isNaN(maxReqs) || maxReqs < 0)) {
         addToast({ type: "error", message: "Invalid max requests value" });
@@ -89,15 +94,18 @@ export function Budget() {
       }
 
       // Validate duration format if provided.
+      // F-1: Support compound durations like "1h30m", "2m30s" as Go's time.ParseDuration accepts.
       const duration = agentMaxDuration.trim() || undefined;
-      if (duration && !/^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)$/.test(duration)) {
-        addToast({ type: "error", message: "Invalid duration format (e.g. 30m, 1h, 90s)" });
+      if (duration && !/^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/.test(duration)) {
+        addToast({ type: "error", message: "Invalid duration format (e.g. 30m, 1h, 1h30m)" });
         return;
       }
 
       await security<SecuritySetBudgetResult>({
         action: "set_budget",
         params: {
+          // F-2: 0 or empty string yields `undefined`, which tells the backend
+          // to remove the agent-level override so the policy layer value applies.
           max_total_requests: maxReqs || undefined,
           max_duration: duration,
         },
@@ -274,7 +282,7 @@ export function Budget() {
                 <Input
                   label="Max Duration"
                   type="text"
-                  placeholder="e.g. 30m, 1h"
+                  placeholder="e.g. 30m, 1h, 1h30m"
                   value={agentMaxDuration}
                   onChange={(e) => setAgentMaxDuration(e.target.value)}
                 />
