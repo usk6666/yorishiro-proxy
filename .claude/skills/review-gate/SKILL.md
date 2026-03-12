@@ -111,18 +111,34 @@ code_review_verdict = APPROVED | CHANGES_REQUESTED
 security_review_verdict = APPROVED | CHANGES_REQUESTED
 ```
 
-#### 3-2. 集約判定
+#### 3-2. 所見の有無を確認
+
+各エージェントの出力から `FINDINGS:` セクションをパースし、LOW 以上の所見が存在するかを記録する。
+`FINDINGS: None` の場合は所見なし。
+
+```
+code_review_has_findings = true | false
+security_review_has_findings = true | false
+has_any_findings = code_review_has_findings or security_review_has_findings
+```
+
+#### 3-3. 集約判定
 
 | Code Review | Security Review | 集約判定 | 次のアクション |
 |-------------|----------------|---------|-------------|
-| APPROVED | APPROVED | **APPROVED** | Phase 5 (結果報告) |
-| APPROVED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix) |
-| CHANGES_REQUESTED | APPROVED | **CHANGES_REQUESTED** | Phase 4 (Fix) |
-| CHANGES_REQUESTED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix) |
+| APPROVED (所見なし) | APPROVED (所見なし) | **APPROVED** | Phase 5 (結果報告) |
+| APPROVED (所見あり) | APPROVED (所見なし/あり) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix のみ、再レビュー不要) |
+| APPROVED (所見なし) | APPROVED (所見あり) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix のみ、再レビュー不要) |
+| APPROVED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + 再レビュー) |
+| CHANGES_REQUESTED | APPROVED | **CHANGES_REQUESTED** | Phase 4 (Fix + 再レビュー) |
+| CHANGES_REQUESTED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + 再レビュー) |
 
 ---
 
 ### Phase 4: Fix サイクル（最大 2 ラウンド）
+
+> **注意**: `APPROVED_WITH_FINDINGS` の場合は Fixer を 1 回だけ実行し、再レビューは行わない。
+> 再レビューサイクル（最大 2 ラウンド）は `CHANGES_REQUESTED` の場合のみ適用される。
 
 #### 4-1. Fixer Agent の起動
 
@@ -130,8 +146,8 @@ security_review_verdict = APPROVED | CHANGES_REQUESTED
 
 - `{{PR_NUMBER}}` → PR 番号
 - `{{BRANCH_NAME}}` → PR のヘッドブランチ名
-- `{{CODE_REVIEW_FINDINGS}}` → Code Review の所見（CHANGES_REQUESTED の場合のみ。APPROVED なら "None — Code review passed."）
-- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review の所見（CHANGES_REQUESTED の場合のみ。APPROVED なら "None — Security review passed."）
+- `{{CODE_REVIEW_FINDINGS}}` → Code Review の所見（所見がある場合は全件渡す。所見なしの場合は "None — Code review passed."）
+- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review の所見（所見がある場合は全件渡す。所見なしの場合は "None — Security review passed."）
 - `{{ORIGINAL_ISSUE_ID}}` → Issue ID
 - `{{PRODUCT_CONTEXT}}` → プロダクトコンテキスト
 
@@ -159,13 +175,19 @@ Fixer Agent の出力から各所見のステータスを抽出する:
 #### 4-4. ラウンド管理
 
 ```
+# APPROVED_WITH_FINDINGS の場合: Fix のみ、再レビューなし
+if 集約判定 == APPROVED_WITH_FINDINGS:
+    Fixer Agent 起動（LOW 所見を含む全所見を渡す）
+    → Phase 5（再レビューなしで完了）
+
+# CHANGES_REQUESTED の場合: Fix + 再レビューサイクル（最大 2 ラウンド）
 current_round = 1
 
 while current_round <= 2:
-    if 集約判定 == APPROVED:
+    if 集約判定 == APPROVED or 集約判定 == APPROVED_WITH_FINDINGS:
         break  → Phase 5
 
-    Fixer Agent 起動
+    Fixer Agent 起動（LOW 所見を含む全所見を渡す）
     再レビュー実行（CHANGES_REQUESTED だった側のみ）
     判定集約
 
@@ -268,6 +290,7 @@ git worktree prune
 ## 最大エージェント呼び出し数（1 PR あたり最悪ケース）
 
 初回レビュー 2 + Fix 1 + 再レビュー 2 + Fix 1 + 再レビュー 2 = **8 回**
+APPROVED_WITH_FINDINGS の場合: 初回レビュー 2 + Fix 1 = **3 回**
 
 ---
 
@@ -275,5 +298,6 @@ git worktree prune
 
 - レビューエージェントは **read-only** — コード変更は一切行わない
 - Fixer Agent は **worktree** で動作 — PR のブランチを直接操作する
-- LOW / NIT の所見は Fix 対象外（APPROVED 判定に影響しない）
+- **LOW 以上**の所見は全て Fix 対象（NIT のみ対象外）
+- APPROVED でも LOW 所見があれば Fixer を起動する（再レビューは不要）
 - エスカレーション時は修正を試みず、ユーザーに判断を委ねる

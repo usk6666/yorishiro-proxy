@@ -135,17 +135,20 @@ STATS:
 
 ## レビュー投稿
 
-出力フォーマットに従って結果をまとめた後、以下を実行する:
+出力フォーマットに従って結果をまとめた後、以下を実行する。
+
+> **注意**: 自動レビューは PR 作成者と同じアカウントで実行されるため、
+> `--approve` / `--request-changes` は使用できない。常に `--comment` で投稿する。
 
 ### APPROVED の場合
 
 ```bash
-gh pr review {{PR_NUMBER}} --approve -b "$(cat <<'EOF'
-## Code Review: APPROVED
+gh pr review {{PR_NUMBER}} --comment -b "$(cat <<'EOF'
+## Code Review: APPROVED ✅
 
 <SUMMARY の内容>
 
-<LOW/NIT の所見があれば記載（任意修正）>
+<LOW/NIT の所見があれば記載>
 
 ---
 Automated code review by yorishiro-proxy Code Review Agent
@@ -156,14 +159,12 @@ EOF
 ### CHANGES_REQUESTED の場合
 
 ```bash
-gh pr review {{PR_NUMBER}} --request-changes -b "$(cat <<'EOF'
-## Code Review: CHANGES REQUESTED
+gh pr review {{PR_NUMBER}} --comment -b "$(cat <<'EOF'
+## Code Review: CHANGES REQUESTED ❌
 
 <SUMMARY の内容>
 
 ### Findings
-
-<CRITICAL/HIGH/MEDIUM の所見を表形式で記載>
 
 | ID | Severity | File | Line | Category | Description |
 |----|----------|------|------|----------|-------------|

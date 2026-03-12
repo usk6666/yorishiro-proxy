@@ -163,17 +163,20 @@ STATS:
 
 ## レビュー投稿
 
-出力フォーマットに従って結果をまとめた後、以下を実行する:
+出力フォーマットに従って結果をまとめた後、以下を実行する。
+
+> **注意**: 自動レビューは PR 作成者と同じアカウントで実行されるため、
+> `--approve` / `--request-changes` は使用できない。常に `--comment` で投稿する。
 
 ### APPROVED の場合
 
 ```bash
-gh pr review {{PR_NUMBER}} --approve -b "$(cat <<'EOF'
-## Security Review: APPROVED
+gh pr review {{PR_NUMBER}} --comment -b "$(cat <<'EOF'
+## Security Review: APPROVED ✅
 
 <SUMMARY の内容>
 
-<LOW の所見があれば記載（推奨修正）>
+<LOW の所見があれば記載>
 
 ---
 Automated security review by yorishiro-proxy Security Review Agent
@@ -184,8 +187,8 @@ EOF
 ### CHANGES_REQUESTED の場合
 
 ```bash
-gh pr review {{PR_NUMBER}} --request-changes -b "$(cat <<'EOF'
-## Security Review: CHANGES REQUESTED
+gh pr review {{PR_NUMBER}} --comment -b "$(cat <<'EOF'
+## Security Review: CHANGES REQUESTED ❌
 
 <SUMMARY の内容>
 
