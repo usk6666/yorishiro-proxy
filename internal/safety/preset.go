@@ -24,7 +24,7 @@ const sqlIdent = `[\w."` + "`" + `]+`
 // Diagnostic payloads used for vulnerability assessment (e.g. UNION SELECT,
 // OR 1=1) are intentionally excluded — only operations that can cause data
 // loss or schema damage are matched.
-var destructiveSQLRules = []RuleConfig{
+var destructiveSQLRules = []PresetRuleConfig{
 	{
 		ID:      "destructive-sql:drop",
 		Name:    "DROP statement",
@@ -64,7 +64,7 @@ var destructiveSQLRules = []RuleConfig{
 }
 
 // destructiveOSCommandRules defines rules that detect destructive OS commands.
-var destructiveOSCommandRules = []RuleConfig{
+var destructiveOSCommandRules = []PresetRuleConfig{
 	{
 		ID:      "destructive-os:rm-rf",
 		Name:    "rm -rf",
@@ -130,7 +130,7 @@ func PresetNames() []string {
 	return names
 }
 
-// CompilePreset compiles a Preset's RuleConfig entries into Rules ready for
+// CompilePreset compiles a Preset's PresetRuleConfig entries into Rules ready for
 // evaluation. The caller supplies a default action to apply to all rules.
 func CompilePreset(p Preset, action Action) ([]Rule, error) {
 	rules := make([]Rule, 0, len(p.Rules))
