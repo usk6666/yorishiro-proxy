@@ -260,6 +260,11 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 		return wsResult, wsStructured, nil
 	}
 
+	// SafetyFilter input check: block destructive payloads before sending.
+	if v := s.checkSafetyInput(prep.body, prep.url.String(), headerMapToHTTPHeader(prep.headers)); v != nil {
+		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
+	}
+
 	if params.DryRun {
 		return nil, buildDryRunResult(prep.method, prep.url, prep.headers, prep.body), nil
 	}

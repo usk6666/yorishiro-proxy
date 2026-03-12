@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // defaultListLimit is the default number of sessions returned when limit is not specified.
@@ -283,4 +284,45 @@ func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http
 		}
 		return nil
 	}
+}
+
+// checkSafetyInput validates request data against the safety filter engine.
+// Returns nil if no safety engine is configured or if the input passes.
+// Returns an MCP error CallToolResult with isError=true if the input is blocked.
+func (s *Server) checkSafetyInput(body []byte, rawURL string, headers http.Header) *safety.InputViolation {
+	if s.deps.safetyEngine == nil {
+		return nil
+	}
+	return s.deps.safetyEngine.CheckInput(body, rawURL, headers)
+}
+
+// safetyViolationError formats a safety filter violation into an MCP error string.
+func safetyViolationError(v *safety.InputViolation) string {
+	return fmt.Sprintf(
+		"SafetyFilter blocked this operation: Destructive payload detected.\n"+
+			"Rule: %s\n"+
+			"Matched in: %s\n"+
+			"Pattern: %s\n\n"+
+			"This payload was classified as destructive and cannot be sent. "+
+			"If this is intentional, review the safety_filter configuration.",
+		v.RuleID, v.Target, v.RuleName,
+	)
+}
+
+// headerEntriesToHTTPHeader converts a map[string][]string to http.Header for safety checking.
+func headerMapToHTTPHeader(headers map[string][]string) http.Header {
+	h := make(http.Header, len(headers))
+	for k, vals := range headers {
+		h[k] = vals
+	}
+	return h
+}
+
+// flatHeaderMapToHTTPHeader converts a map[string]string to http.Header for safety checking.
+func flatHeaderMapToHTTPHeader(headers map[string]string) http.Header {
+	h := make(http.Header, len(headers))
+	for k, v := range headers {
+		h.Set(k, v)
+	}
+	return h
 }

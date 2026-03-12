@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -100,6 +101,11 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		return nil, nil, err
 	}
 
+	// SafetyFilter input check: validate the template flow's body/URL/headers.
+	if err := s.checkFuzzSafetyInput(ctx, params.FlowID); err != nil {
+		return nil, nil, err
+	}
+
 	if s.deps.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
@@ -117,6 +123,18 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		ts := s.deps.targetScope
 		cfg.TargetScopeChecker = func(u *url.URL) error {
 			return checkTargetScopeURLHelper(ts, u)
+		}
+	}
+
+	// Inject safety input checker to validate each expanded payload
+	// before sending, preventing destructive payloads via fuzz injection.
+	if s.deps.safetyEngine != nil {
+		se := s.deps.safetyEngine
+		cfg.SafetyInputChecker = func(body []byte, rawURL string, headers http.Header) error {
+			if v := se.CheckInput(body, rawURL, headers); v != nil {
+				return fmt.Errorf("%s", safetyViolationError(v))
+			}
+			return nil
 		}
 	}
 
@@ -166,6 +184,41 @@ func (s *Server) checkFuzzTargetScope(ctx context.Context, flowID string) error 
 		if err := s.checkTargetScopeURL(sendMsgs[0].URL); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkFuzzSafetyInput validates the template flow's body/URL/headers against
+// the safety filter engine. If no safety engine is configured, this is a no-op.
+func (s *Server) checkFuzzSafetyInput(ctx context.Context, flowID string) error {
+	if s.deps.safetyEngine == nil {
+		return nil
+	}
+	if s.deps.store == nil {
+		return fmt.Errorf("flow store is not initialized")
+	}
+	fl, err := s.deps.store.GetFlow(ctx, flowID)
+	if err != nil {
+		return fmt.Errorf("get template flow for safety check: %w", err)
+	}
+	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	if err != nil {
+		return fmt.Errorf("get send messages for safety check: %w", err)
+	}
+	if len(sendMsgs) == 0 {
+		return nil
+	}
+	msg := sendMsgs[0]
+	var rawURL string
+	if msg.URL != nil {
+		rawURL = msg.URL.String()
+	}
+	var headers http.Header
+	if msg.Headers != nil {
+		headers = headerMapToHTTPHeader(msg.Headers)
+	}
+	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
+		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil
 }
