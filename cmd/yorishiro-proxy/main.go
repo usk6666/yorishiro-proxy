@@ -35,6 +35,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -65,6 +66,7 @@ var envVarMap = map[string]string{
 	"target-policy-file": "YP_TARGET_POLICY_FILE",
 	"no-open-browser":    "YP_NO_OPEN_BROWSER",
 	"tls-fingerprint":    "YP_TLS_FINGERPRINT",
+	"safety-filter":      "YP_SAFETY_FILTER_ENABLED",
 }
 
 func run(ctx context.Context) error {
@@ -119,6 +121,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
 	fs.BoolVar(&cfg.NoOpenBrowser, "no-open-browser", cfg.NoOpenBrowser, "disable auto-opening WebUI in browser (env: YP_NO_OPEN_BROWSER)")
 
+	// SafetyFilter enable/disable override. When set via flag or env var,
+	// it overrides the config file's safety_filter.enabled value.
+	var safetyFilterEnabled bool
+	fs.BoolVar(&safetyFilterEnabled, "safety-filter", false, "enable SafetyFilter engine (env: YP_SAFETY_FILTER_ENABLED)")
+
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy %s\n\n", buildVersion())
 		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n")
@@ -154,6 +161,17 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	// Apply environment variable fallback for flags not explicitly set.
 	applyEnvFallback(fs)
+
+	// Track whether safety-filter was explicitly set (flag or env var).
+	safetyFilterExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "safety-filter" {
+			safetyFilterExplicit = true
+		}
+	})
+	if safetyFilterExplicit {
+		cfg.SafetyFilterEnabled = &safetyFilterEnabled
+	}
 
 	// Validate configuration values before proceeding with initialization.
 	if err := cfg.Validate(); err != nil {
@@ -191,15 +209,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	issuer := cert.NewIssuer(ca)
 
 	// Initialize TLS passthrough list and populate from config.
-	passthrough := proxy.NewPassthroughList()
-	for _, pattern := range cfg.TLSPassthrough {
-		if !passthrough.Add(pattern) {
-			logger.Warn("ignoring invalid TLS passthrough pattern", "pattern", pattern)
-		}
-	}
-	if passthrough.Len() > 0 {
-		logger.Info("TLS passthrough configured", "patterns", passthrough.Len())
-	}
+	passthrough := initPassthroughList(cfg, logger)
 
 	// Create shared capture scope for controlling flow recording.
 	scope := proxy.NewCaptureScope()
@@ -236,20 +246,19 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	// Build target scope with policy rules if configured.
-	var targetScope *proxy.TargetScope
-	if targetScopePolicy != nil {
-		targetScope = proxy.NewTargetScope()
-		allows := convertTargetRules(targetScopePolicy.Allows)
-		denies := convertTargetRules(targetScopePolicy.Denies)
-		targetScope.SetPolicyRules(allows, denies)
-		proto.socks5Handler.SetTargetScope(targetScope)
-	}
+	targetScope := initTargetScope(targetScopePolicy, proto.socks5Handler)
 
 	rateLimiter := initRateLimiter(targetScopePolicy, logger)
 
+	// Initialize SafetyFilter engine from config.
+	safetyEngine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	if err != nil {
+		return err
+	}
+
 	opts, err := buildMCPOptions(cfg, proxyCfg, store, issuer, passthrough, scope,
 		interceptEngine, interceptQueue, pipeline, proto, targetScope, rateLimiter,
-		targetScopePolicySource, logger)
+		safetyEngine, targetScopePolicySource, logger)
 	if err != nil {
 		return err
 	}
@@ -693,6 +702,7 @@ func buildMCPOptions(
 	proto *protocolResult,
 	targetScope *proxy.TargetScope,
 	rateLimiter *proxy.RateLimiter,
+	safetyEngine *safety.Engine,
 	targetScopePolicySource string,
 	logger *slog.Logger,
 ) ([]mcp.ServerOption, error) {
@@ -744,6 +754,9 @@ func buildMCPOptions(
 			"allows", len(allows),
 			"denies", len(denies),
 			"source", targetScopePolicySource)
+	}
+	if safetyEngine != nil {
+		opts = append(opts, mcp.WithSafetyEngine(safetyEngine))
 	}
 	if cfg.UIDir != "" {
 		opts = append(opts, mcp.WithUIDir(cfg.UIDir))
@@ -811,6 +824,68 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 	return g.Wait()
 }
 
+// initSafetyFilter creates a SafetyFilter engine from config file settings and
+// CLI/env overrides. Returns nil if SafetyFilter is not enabled or not configured.
+func initSafetyFilter(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*safety.Engine, error) {
+	var sfCfg *config.SafetyFilterConfig
+	if proxyCfg != nil {
+		sfCfg = proxyCfg.SafetyFilter
+	}
+
+	// Determine if SafetyFilter is enabled.
+	// Priority: CLI flag/env var > config file > default (disabled).
+	enabled := false
+	if sfCfg != nil {
+		enabled = sfCfg.Enabled
+	}
+	if cfg.SafetyFilterEnabled != nil {
+		enabled = *cfg.SafetyFilterEnabled
+	}
+
+	if !enabled {
+		return nil, nil
+	}
+
+	// Build safety.Config from the config file settings.
+	engineCfg := safety.Config{}
+	if sfCfg != nil && sfCfg.Input != nil {
+		// Validate before building.
+		if err := config.ValidateSafetyFilterConfig(sfCfg); err != nil {
+			return nil, fmt.Errorf("safety filter config: %w", err)
+		}
+
+		for _, rule := range sfCfg.Input.Rules {
+			rc := safety.RuleConfig{
+				Preset:  rule.Preset,
+				ID:      rule.ID,
+				Name:    rule.Name,
+				Pattern: rule.Pattern,
+				Targets: rule.Targets,
+			}
+
+			// Set action: use section-level action if set, otherwise default to "block".
+			action := "block"
+			if sfCfg.Input.Action != "" {
+				action = sfCfg.Input.Action
+			}
+			rc.Action = action
+
+			engineCfg.InputRules = append(engineCfg.InputRules, rc)
+		}
+	}
+
+	engine, err := safety.NewEngine(engineCfg)
+	if err != nil {
+		return nil, fmt.Errorf("init safety filter: %w", err)
+	}
+
+	logger.Info("safety filter enabled",
+		"input_rules", len(engine.InputRules()),
+		"output_rules", len(engine.OutputRules()))
+
+	return engine, nil
+}
+
 // initRateLimiter creates a RateLimiter and applies policy limits from the config.
 func initRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger) *proxy.RateLimiter {
 	rl := proxy.NewRateLimiter()
@@ -824,6 +899,34 @@ func initRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger
 			"max_rps_per_host", policy.RateLimits.MaxRequestsPerHostPerSecond)
 	}
 	return rl
+}
+
+// initPassthroughList creates and populates the TLS passthrough list from config.
+func initPassthroughList(cfg *config.Config, logger *slog.Logger) *proxy.PassthroughList {
+	passthrough := proxy.NewPassthroughList()
+	for _, pattern := range cfg.TLSPassthrough {
+		if !passthrough.Add(pattern) {
+			logger.Warn("ignoring invalid TLS passthrough pattern", "pattern", pattern)
+		}
+	}
+	if passthrough.Len() > 0 {
+		logger.Info("TLS passthrough configured", "patterns", passthrough.Len())
+	}
+	return passthrough
+}
+
+// initTargetScope builds a TargetScope from the policy config and attaches it
+// to the SOCKS5 handler. Returns nil if no policy is configured.
+func initTargetScope(policy *config.TargetScopePolicyConfig, socks5Handler *protosocks5.Handler) *proxy.TargetScope {
+	if policy == nil {
+		return nil
+	}
+	targetScope := proxy.NewTargetScope()
+	allows := convertTargetRules(policy.Allows)
+	denies := convertTargetRules(policy.Denies)
+	targetScope.SetPolicyRules(allows, denies)
+	socks5Handler.SetTargetScope(targetScope)
+	return targetScope
 }
 
 // convertTargetRules converts config TargetRuleConfig values to proxy TargetRule values.
