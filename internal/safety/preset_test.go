@@ -223,7 +223,7 @@ func TestCompilePreset(t *testing.T) {
 	t.Run("invalid pattern", func(t *testing.T) {
 		bad := Preset{
 			Name: "bad",
-			Rules: []RuleConfig{
+			Rules: []PresetRuleConfig{
 				{ID: "bad:1", Pattern: `(?P<name>[`, Targets: []Target{TargetBody}},
 			},
 		}
@@ -308,7 +308,7 @@ func TestFalsePositives_CommonSQL(t *testing.T) {
 		"1; WAITFOR DELAY '0:0:5'--",
 	}
 
-	rules := compileRules(t, destructiveSQLRules)
+	rules := compilePresetRules(t, destructiveSQLRules)
 
 	for _, input := range inputs {
 		for _, r := range rules {
@@ -339,7 +339,7 @@ func TestFalsePositives_CommonShellCommands(t *testing.T) {
 		"ifconfig eth0",
 	}
 
-	rules := compileRules(t, destructiveOSCommandRules)
+	rules := compilePresetRules(t, destructiveOSCommandRules)
 
 	for _, input := range inputs {
 		for _, r := range rules {
@@ -351,7 +351,7 @@ func TestFalsePositives_CommonShellCommands(t *testing.T) {
 }
 
 // buildRuleMap compiles RuleConfig entries into a map of ID -> compiled regexp.
-func buildRuleMap(t *testing.T, configs []RuleConfig) map[string]*regexp.Regexp {
+func buildRuleMap(t *testing.T, configs []PresetRuleConfig) map[string]*regexp.Regexp {
 	t.Helper()
 	m := make(map[string]*regexp.Regexp, len(configs))
 	for _, rc := range configs {
@@ -364,8 +364,8 @@ func buildRuleMap(t *testing.T, configs []RuleConfig) map[string]*regexp.Regexp 
 	return m
 }
 
-// compileRules compiles RuleConfig entries into Rule structs for testing.
-func compileRules(t *testing.T, configs []RuleConfig) []Rule {
+// compilePresetRules compiles PresetRuleConfig entries into Rule structs for testing.
+func compilePresetRules(t *testing.T, configs []PresetRuleConfig) []Rule {
 	t.Helper()
 	rules := make([]Rule, 0, len(configs))
 	for _, rc := range configs {
