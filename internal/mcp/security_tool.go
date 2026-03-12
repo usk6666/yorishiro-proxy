@@ -55,7 +55,7 @@ type targetRuleInput struct {
 }
 
 // availableSecurityActions lists the valid action names for error messages.
-var availableSecurityActions = []string{"set_target_scope", "update_target_scope", "get_target_scope", "test_target", "set_rate_limits", "get_rate_limits", "set_budget", "get_budget"}
+var availableSecurityActions = []string{"set_target_scope", "update_target_scope", "get_target_scope", "test_target", "set_rate_limits", "get_rate_limits", "set_budget", "get_budget", "get_safety_filter"}
 
 // registerSecurity registers the security MCP tool.
 func (s *Server) registerSecurity() {
@@ -74,7 +74,8 @@ func (s *Server) registerSecurity() {
 			"'set_rate_limits' sets Agent Layer rate limits (max_requests_per_second, max_requests_per_host_per_second); " +
 			"'get_rate_limits' returns Policy and Agent Layer rate limits with effective values; " +
 			"'set_budget' sets Agent Layer diagnostic budget (max_total_requests, max_duration); " +
-			"'get_budget' returns Policy and Agent Layer budgets with effective values and current usage.",
+			"'get_budget' returns Policy and Agent Layer budgets with effective values and current usage; " +
+			"'get_safety_filter' returns the current SafetyFilter configuration and rules (read-only).",
 	}, s.handleSecurity)
 }
 
@@ -97,6 +98,8 @@ func (s *Server) handleSecurity(_ context.Context, _ *gomcp.CallToolRequest, inp
 		return s.handleSetBudget(input.Params)
 	case "get_budget":
 		return s.handleGetBudget()
+	case "get_safety_filter":
+		return s.handleGetSafetyFilter()
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableSecurityActions, ", "))
 	default:
@@ -765,5 +768,60 @@ func (s *Server) handleGetBudget() (*gomcp.CallToolResult, any, error) {
 		Effective:    s.deps.budgetManager.EffectiveBudget(),
 		RequestCount: s.deps.budgetManager.RequestCount(),
 		StopReason:   s.deps.budgetManager.ShutdownReason(),
+	}, nil
+}
+
+// --- SafetyFilter actions ---
+
+// safetyFilterRuleResult describes a single SafetyFilter rule for display.
+type safetyFilterRuleResult struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Pattern  string   `json:"pattern"`
+	Targets  []string `json:"targets"`
+	Action   string   `json:"action"`
+	Category string   `json:"category"`
+}
+
+// getSafetyFilterResult is the structured output for get_safety_filter.
+type getSafetyFilterResult struct {
+	Enabled    bool                     `json:"enabled"`
+	InputRules []safetyFilterRuleResult `json:"input_rules"`
+	Immutable  bool                     `json:"immutable"`
+}
+
+// handleGetSafetyFilter returns the current SafetyFilter configuration.
+// This is a read-only action — SafetyFilter rules are part of the Policy Layer
+// and cannot be modified at runtime.
+func (s *Server) handleGetSafetyFilter() (*gomcp.CallToolResult, any, error) {
+	if s.deps.safetyEngine == nil {
+		return nil, &getSafetyFilterResult{
+			Enabled:    false,
+			InputRules: []safetyFilterRuleResult{},
+			Immutable:  true,
+		}, nil
+	}
+
+	inputRules := s.deps.safetyEngine.InputRules()
+	ruleResults := make([]safetyFilterRuleResult, 0, len(inputRules))
+	for _, r := range inputRules {
+		targets := make([]string, 0, len(r.Targets))
+		for _, t := range r.Targets {
+			targets = append(targets, t.String())
+		}
+		ruleResults = append(ruleResults, safetyFilterRuleResult{
+			ID:       r.ID,
+			Name:     r.Name,
+			Pattern:  r.Pattern.String(),
+			Targets:  targets,
+			Action:   r.Action.String(),
+			Category: r.Category,
+		})
+	}
+
+	return nil, &getSafetyFilterResult{
+		Enabled:    true,
+		InputRules: ruleResults,
+		Immutable:  true,
 	}, nil
 }

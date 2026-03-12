@@ -156,6 +156,13 @@ type Config struct {
 	// When true, the WebUI URL is only logged to stderr without opening a browser.
 	// CLI flag: -no-open-browser, env: YP_NO_OPEN_BROWSER.
 	NoOpenBrowser bool `json:"-"`
+
+	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
+	// This can be set via CLI flag (-safety-filter) or environment variable
+	// (YP_SAFETY_FILTER_ENABLED). When explicitly set, it overrides the config
+	// file's safety_filter.enabled value.
+	// CLI flag: -safety-filter, env: YP_SAFETY_FILTER_ENABLED.
+	SafetyFilterEnabled *bool `json:"-"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -465,6 +472,56 @@ type ProxyConfig struct {
 	// config package to the codec package. The raw JSON is decoded into
 	// []codec.CodecPluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
 	CodecPlugins json.RawMessage `json:"codec_plugins,omitempty"`
+
+	// SafetyFilter configures the SafetyFilter engine for blocking or logging
+	// destructive payloads. This is a Policy Layer setting: once loaded from a
+	// config file, it cannot be modified at runtime via MCP tools.
+	SafetyFilter *SafetyFilterConfig `json:"safety_filter,omitempty"`
+}
+
+// SafetyFilterConfig holds the SafetyFilter engine configuration.
+// This is part of the Policy Layer and is immutable at runtime.
+type SafetyFilterConfig struct {
+	// Enabled controls whether the SafetyFilter engine is active.
+	// Defaults to false if not specified.
+	Enabled bool `json:"enabled"`
+
+	// Input configures input (request) filtering rules.
+	Input *SafetyFilterInputConfig `json:"input,omitempty"`
+}
+
+// SafetyFilterInputConfig holds input filter rules configuration.
+type SafetyFilterInputConfig struct {
+	// Action is the default action for rules: "block" (default) or "log_only".
+	Action string `json:"action,omitempty"`
+
+	// Rules lists the filter rules to apply. Each rule is either a preset
+	// reference or a custom rule with a regex pattern.
+	Rules []SafetyFilterRuleConfig `json:"rules,omitempty"`
+}
+
+// SafetyFilterRuleConfig defines a single SafetyFilter rule in configuration files.
+// Either Preset or Pattern must be set, but not both.
+// Action is configured at the section level (SafetyFilterInputConfig.Action),
+// not per-rule. All rules within a section share the same action.
+type SafetyFilterRuleConfig struct {
+	// Preset references a built-in preset by name (e.g. "destructive-sql").
+	// Mutually exclusive with Pattern.
+	Preset string `json:"preset,omitempty"`
+
+	// ID is a unique identifier for custom rules. Required when Pattern is set.
+	ID string `json:"id,omitempty"`
+
+	// Name is a human-readable label. Optional.
+	Name string `json:"name,omitempty"`
+
+	// Pattern is a regular expression string. Mutually exclusive with Preset.
+	Pattern string `json:"pattern,omitempty"`
+
+	// Targets lists which parts of the request to inspect.
+	// Valid values: "body", "url", "query", "header", "headers".
+	// Required for custom rules; ignored for presets.
+	Targets []string `json:"targets,omitempty"`
 }
 
 // LoadFile reads and parses a JSON config file from the given path.
