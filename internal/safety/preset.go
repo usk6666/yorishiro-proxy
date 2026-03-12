@@ -3,6 +3,7 @@ package safety
 import (
 	"fmt"
 	"regexp"
+	"slices"
 )
 
 // Built-in preset names.
@@ -10,6 +11,14 @@ const (
 	PresetDestructiveSQL       = "destructive-sql"
 	PresetDestructiveOSCommand = "destructive-os-command"
 )
+
+// sqlWS matches SQL whitespace including inline comments (/**/) which are a
+// common WAF-bypass technique (CWE-185). Used in place of bare `\s+`.
+const sqlWS = `(\s|/\*.*?\*/)+`
+
+// sqlIdent matches SQL identifiers including schema-qualified names
+// (schema.table) and quoted identifiers ("table", `table`).
+const sqlIdent = `[\w."` + "`" + `]+`
 
 // destructiveSQLRules defines rules that detect destructive SQL operations.
 // Diagnostic payloads used for vulnerability assessment (e.g. UNION SELECT,
@@ -19,37 +28,37 @@ var destructiveSQLRules = []RuleConfig{
 	{
 		ID:      "destructive-sql:drop",
 		Name:    "DROP statement",
-		Pattern: `(?i)DROP\s+(TABLE|DATABASE|INDEX|VIEW|SCHEMA)\s+`,
+		Pattern: `(?i)DROP` + sqlWS + `(TABLE|DATABASE|INDEX|VIEW|SCHEMA)` + sqlWS,
 		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-sql:truncate",
 		Name:    "TRUNCATE TABLE",
-		Pattern: `(?i)TRUNCATE\s+TABLE\s+`,
+		Pattern: `(?i)TRUNCATE` + sqlWS + `TABLE` + sqlWS,
 		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-sql:delete-no-where",
 		Name:    "DELETE without WHERE clause",
-		Pattern: `(?i)DELETE\s+FROM\s+\w+\s*($|;|--)`,
+		Pattern: `(?i)DELETE` + sqlWS + `FROM` + sqlWS + sqlIdent + `\s*($|;|--|LIMIT|ORDER)`,
 		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-sql:update-all",
 		Name:    "UPDATE all rows (WHERE 1=1)",
-		Pattern: `(?i)UPDATE\s+\w+\s+SET\s+.*WHERE\s+1\s*=\s*1`,
+		Pattern: `(?i)UPDATE` + sqlWS + sqlIdent + sqlWS + `SET` + sqlWS + `.*WHERE` + sqlWS + `1\s*=\s*1`,
 		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-sql:alter-drop",
 		Name:    "ALTER TABLE DROP",
-		Pattern: `(?i)ALTER\s+TABLE\s+\w+\s+DROP\s+`,
+		Pattern: `(?i)ALTER` + sqlWS + `TABLE` + sqlWS + sqlIdent + sqlWS + `DROP` + sqlWS,
 		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-sql:exec-xp",
 		Name:    "SQL Server extended stored procedure",
-		Pattern: `(?i)(EXEC|EXECUTE)\s+xp_`,
+		Pattern: `(?i)(EXEC|EXECUTE)` + sqlWS + `xp_`,
 		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 }
@@ -59,32 +68,32 @@ var destructiveOSCommandRules = []RuleConfig{
 	{
 		ID:      "destructive-os:rm-rf",
 		Name:    "rm -rf",
-		Pattern: `rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*r`,
-		Targets: []Target{TargetBody},
+		Pattern: `rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*r|rm\s+-r\s+-f|rm\s+-f\s+-r|rm\s+--recursive\s+--force|rm\s+--force\s+--recursive`,
+		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-os:shutdown",
 		Name:    "Shutdown/reboot command",
 		Pattern: `(?i)(shutdown|reboot|halt|poweroff)\s`,
-		Targets: []Target{TargetBody},
+		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-os:mkfs",
 		Name:    "Filesystem creation (mkfs)",
-		Pattern: `mkfs\s`,
-		Targets: []Target{TargetBody},
+		Pattern: `mkfs[.\s]`,
+		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-os:dd-if",
 		Name:    "Disk write (dd)",
 		Pattern: `dd\s+if=`,
-		Targets: []Target{TargetBody},
+		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 	{
 		ID:      "destructive-os:format",
 		Name:    "Windows format command",
 		Pattern: `(?i)format\s+[a-zA-Z]:`,
-		Targets: []Target{TargetBody},
+		Targets: []Target{TargetBody, TargetURL, TargetQuery},
 	},
 }
 
@@ -117,18 +126,8 @@ func PresetNames() []string {
 		names = append(names, name)
 	}
 	// Sort for deterministic output.
-	sortStrings(names)
+	slices.Sort(names)
 	return names
-}
-
-// sortStrings sorts a slice of strings in ascending order.
-// Avoids importing the sort package for a trivial operation.
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
 }
 
 // CompilePreset compiles a Preset's RuleConfig entries into Rules ready for

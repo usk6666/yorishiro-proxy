@@ -31,22 +31,35 @@ func TestDestructiveSQLRules_Match(t *testing.T) {
 		{"delete no where", "destructive-sql:delete-no-where", "DELETE FROM users", true},
 		{"delete semicolon", "destructive-sql:delete-no-where", "DELETE FROM users;", true},
 		{"delete comment", "destructive-sql:delete-no-where", "DELETE FROM users--", true},
+		{"delete with limit", "destructive-sql:delete-no-where", "DELETE FROM users LIMIT 100", true},
+		{"delete with order", "destructive-sql:delete-no-where", "DELETE FROM users ORDER BY id", true},
+		{"delete schema-qualified", "destructive-sql:delete-no-where", "DELETE FROM public.users", true},
+		{"delete quoted table", "destructive-sql:delete-no-where", `DELETE FROM "users"`, true},
 		{"delete with where", "destructive-sql:delete-no-where", "DELETE FROM users WHERE id=1", false},
 
 		// destructive-sql:update-all
 		{"update where 1=1", "destructive-sql:update-all", "UPDATE users SET admin=1 WHERE 1=1", true},
 		{"update where 1 = 1 spaces", "destructive-sql:update-all", "UPDATE users SET admin=1 WHERE 1 = 1", true},
+		{"update schema-qualified", "destructive-sql:update-all", "UPDATE public.users SET admin=1 WHERE 1=1", true},
+		{"update quoted table", "destructive-sql:update-all", `UPDATE "users" SET admin=1 WHERE 1=1`, true},
 		{"update with condition", "destructive-sql:update-all", "UPDATE users SET admin=1 WHERE id=5", false},
 
 		// destructive-sql:alter-drop
 		{"alter drop column", "destructive-sql:alter-drop", "ALTER TABLE users DROP COLUMN email", true},
 		{"alter drop lowercase", "destructive-sql:alter-drop", "alter table users drop column name", true},
+		{"alter drop schema-qualified", "destructive-sql:alter-drop", "ALTER TABLE public.users DROP COLUMN email", true},
 		{"alter add column", "destructive-sql:alter-drop", "ALTER TABLE users ADD COLUMN email VARCHAR(255)", false},
 
 		// destructive-sql:exec-xp
 		{"exec xp_cmdshell", "destructive-sql:exec-xp", "EXEC xp_cmdshell 'whoami'", true},
 		{"execute xp_cmdshell", "destructive-sql:exec-xp", "EXECUTE xp_cmdshell 'dir'", true},
 		{"exec normal proc", "destructive-sql:exec-xp", "EXEC sp_helpdb", false},
+
+		// SQL inline comment bypass (S-4).
+		{"drop with inline comment", "destructive-sql:drop", "DROP/**/TABLE users", true},
+		{"truncate with inline comment", "destructive-sql:truncate", "TRUNCATE/**/TABLE users", true},
+		{"delete with inline comment", "destructive-sql:delete-no-where", "DELETE/**/FROM/**/users", true},
+		{"exec with inline comment", "destructive-sql:exec-xp", "EXEC/**/xp_cmdshell 'whoami'", true},
 
 		// Diagnostic payloads must NOT match any destructive-sql rule.
 		{"union select", "destructive-sql:drop", "UNION SELECT 1,2,3--", false},
@@ -81,6 +94,10 @@ func TestDestructiveOSCommandRules_Match(t *testing.T) {
 		{"rm -rf /", "destructive-os:rm-rf", "rm -rf /", true},
 		{"rm -rf dir", "destructive-os:rm-rf", "rm -rf /tmp/data", true},
 		{"rm -fr", "destructive-os:rm-rf", "rm -fr /var/log", true},
+		{"rm -r -f separated", "destructive-os:rm-rf", "rm -r -f /tmp/data", true},
+		{"rm -f -r separated", "destructive-os:rm-rf", "rm -f -r /tmp/data", true},
+		{"rm --recursive --force", "destructive-os:rm-rf", "rm --recursive --force /tmp/data", true},
+		{"rm --force --recursive", "destructive-os:rm-rf", "rm --force --recursive /tmp/data", true},
 		{"rm single file", "destructive-os:rm-rf", "rm file.txt", false},
 		{"rm -r only", "destructive-os:rm-rf", "rm -r dir", false},
 
@@ -94,7 +111,8 @@ func TestDestructiveOSCommandRules_Match(t *testing.T) {
 
 		// destructive-os:mkfs
 		{"mkfs ext4", "destructive-os:mkfs", "mkfs /dev/sda1", true},
-		{"mkfs.ext4", "destructive-os:mkfs", "mkfs.ext4 is dangerous", false},
+		{"mkfs.ext4", "destructive-os:mkfs", "mkfs.ext4 /dev/sda1", true},
+		{"mkfs.xfs", "destructive-os:mkfs", "mkfs.xfs /dev/sdb", true},
 
 		// destructive-os:dd-if
 		{"dd if=/dev/zero", "destructive-os:dd-if", "dd if=/dev/zero of=/dev/sda", true},
@@ -246,14 +264,14 @@ func TestRuleConfigTargets(t *testing.T) {
 		}
 	})
 
-	t.Run("os-command rules have body-only target", func(t *testing.T) {
+	t.Run("os-command rules have body+url+query targets", func(t *testing.T) {
 		for _, rc := range destructiveOSCommandRules {
-			if len(rc.Targets) != 1 {
-				t.Errorf("rule %s: expected 1 target, got %d", rc.ID, len(rc.Targets))
+			if len(rc.Targets) != 3 {
+				t.Errorf("rule %s: expected 3 targets, got %d", rc.ID, len(rc.Targets))
 				continue
 			}
-			if rc.Targets[0] != TargetBody {
-				t.Errorf("rule %s: target = %v, want [Body]", rc.ID, rc.Targets)
+			if rc.Targets[0] != TargetBody || rc.Targets[1] != TargetURL || rc.Targets[2] != TargetQuery {
+				t.Errorf("rule %s: targets = %v, want [Body, URL, Query]", rc.ID, rc.Targets)
 			}
 		}
 	})
