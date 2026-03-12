@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
@@ -92,6 +93,39 @@ func fromInterceptRules(rules []intercept.Rule) []interceptRuleOutput {
 		out[i] = fromInterceptRule(r)
 	}
 	return out
+}
+
+// checkInterceptSafety validates the intercept modify_and_forward parameters against
+// the safety filter engine. When OverrideBody is nil but other mutations are applied,
+// it fetches the original intercepted body to check the combined request.
+func (s *Server) checkInterceptSafety(params interceptParams) error {
+	if s.deps.safetyEngine == nil {
+		return nil
+	}
+	var body []byte
+	if params.OverrideBody != nil {
+		body = []byte(*params.OverrideBody)
+	} else if params.OverrideURL != "" || len(params.OverrideHeaders) > 0 || len(params.AddHeaders) > 0 || len(params.RemoveHeaders) > 0 {
+		// Fetch the original intercepted request body when mutations are applied.
+		origReq, err := s.deps.interceptQueue.Get(params.InterceptID)
+		if err == nil {
+			body = origReq.Body
+		}
+	}
+	var headers http.Header
+	if len(params.OverrideHeaders) > 0 || len(params.AddHeaders) > 0 {
+		headers = make(http.Header)
+		for k, v := range params.OverrideHeaders {
+			headers.Set(k, v)
+		}
+		for k, v := range params.AddHeaders {
+			headers.Add(k, v)
+		}
+	}
+	if v := s.deps.safetyEngine.CheckInput(body, params.OverrideURL, headers); v != nil {
+		return fmt.Errorf("%s", safetyViolationError(v))
+	}
+	return nil
 }
 
 // applyInterceptRules validates and sets intercept rules from the input.

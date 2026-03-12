@@ -33,6 +33,12 @@ type interceptParams struct {
 	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override (request phase)"`
 
 	// --- Response modify_and_forward mutation parameters ---
+	//
+	// Note: Response mutation fields (OverrideStatus, OverrideResponse*, OverrideResponseBody)
+	// are intentionally outside the SafetyFilter scope. SafetyFilter targets outbound
+	// destructive requests (body/URL/headers sent to upstream servers). Response
+	// modifications only affect data returned to the proxy client and do not pose
+	// the same server-side risk.
 	OverrideStatus          int               `json:"override_status,omitempty" jsonschema:"HTTP status code override (response phase)"`
 	OverrideResponseHeaders map[string]string `json:"override_response_headers,omitempty" jsonschema:"response header overrides (response phase)"`
 	AddResponseHeaders      map[string]string `json:"add_response_headers,omitempty" jsonschema:"response headers to add (response phase)"`
@@ -131,6 +137,11 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 	}
 	if err := validateHeaderKeys(params.RemoveResponseHeaders); err != nil {
 		return nil, nil, fmt.Errorf("remove_response_headers: %w", err)
+	}
+
+	// SafetyFilter input check: validate modified request data before forwarding.
+	if err := s.checkInterceptSafety(params); err != nil {
+		return nil, nil, err
 	}
 
 	action := intercept.InterceptAction{

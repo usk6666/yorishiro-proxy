@@ -230,7 +230,7 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 		default:
 		}
 
-		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, fl.Protocol, timeout, job.ID, nil, nil)
+		result := e.executeFuzzCase(ctx, baseData, cfg.Positions, fc, fl.Protocol, timeout, job.ID, nil, nil, nil)
 		if err := e.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
 			// Log and continue; don't abort the entire job for a DB write failure.
 			errorCount++
@@ -276,6 +276,7 @@ func (e *Engine) executeFuzzCase(
 	fuzzID string,
 	doerOverride HTTPDoer,
 	targetScopeChecker func(u *url.URL) error,
+	safetyInputChecker func(body []byte, rawURL string, headers http.Header) error,
 ) *flow.FuzzResult {
 	result := &flow.FuzzResult{
 		FuzzID:   fuzzID,
@@ -300,6 +301,18 @@ func (e *Engine) executeFuzzCase(
 	if targetScopeChecker != nil {
 		if err := targetScopeChecker(data.URL); err != nil {
 			result.Error = fmt.Sprintf("target scope check: %s", err.Error())
+			return result
+		}
+	}
+
+	// Safety input check: validate the expanded payload before sending.
+	if safetyInputChecker != nil {
+		var rawURL string
+		if data.URL != nil {
+			rawURL = data.URL.String()
+		}
+		if err := safetyInputChecker(data.Body, rawURL, data.Headers); err != nil {
+			result.Error = fmt.Sprintf("safety filter: %s", err.Error())
 			return result
 		}
 	}
@@ -481,9 +494,10 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	hookState *HookState,
 	doerOverride HTTPDoer,
 	targetScopeChecker func(u *url.URL) error,
+	safetyInputChecker func(body []byte, rawURL string, headers http.Header) error,
 ) *flow.FuzzResult {
 	if hooks == nil {
-		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker)
+		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker, safetyInputChecker)
 	}
 
 	// Hold the lock for the full PreSend read-execute-writeback cycle (F-2).
@@ -508,7 +522,7 @@ func (e *Engine) executeFuzzCaseWithHooks(
 
 	// Execute the fuzz case with the (potentially modified) base data.
 	// The lock is NOT held here to allow concurrent HTTP requests.
-	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker)
+	result := e.executeFuzzCase(ctx, effectiveBaseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker, safetyInputChecker)
 
 	// Execute post_receive hook if the request succeeded (has a response).
 	// Pass the kvStore from PreSend so that post_receive hooks can access
