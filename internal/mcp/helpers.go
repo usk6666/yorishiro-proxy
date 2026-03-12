@@ -308,21 +308,3 @@ func safetyViolationError(v *safety.InputViolation) string {
 		v.RuleID, v.Target, v.RuleName,
 	)
 }
-
-// headerEntriesToHTTPHeader converts a map[string][]string to http.Header for safety checking.
-func headerMapToHTTPHeader(headers map[string][]string) http.Header {
-	h := make(http.Header, len(headers))
-	for k, vals := range headers {
-		h[k] = vals
-	}
-	return h
-}
-
-// flatHeaderMapToHTTPHeader converts a map[string]string to http.Header for safety checking.
-func flatHeaderMapToHTTPHeader(headers map[string]string) http.Header {
-	h := make(http.Header, len(headers))
-	for k, v := range headers {
-		h.Set(k, v)
-	}
-	return h
-}

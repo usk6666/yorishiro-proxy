@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -135,24 +134,8 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 	}
 
 	// SafetyFilter input check: validate modified request data before forwarding.
-	if s.deps.safetyEngine != nil {
-		var body []byte
-		if params.OverrideBody != nil {
-			body = []byte(*params.OverrideBody)
-		}
-		var headers http.Header
-		if len(params.OverrideHeaders) > 0 || len(params.AddHeaders) > 0 {
-			headers = make(http.Header)
-			for k, v := range params.OverrideHeaders {
-				headers.Set(k, v)
-			}
-			for k, v := range params.AddHeaders {
-				headers.Add(k, v)
-			}
-		}
-		if v := s.deps.safetyEngine.CheckInput(body, params.OverrideURL, headers); v != nil {
-			return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
-		}
+	if err := s.checkInterceptSafety(params); err != nil {
+		return nil, nil, err
 	}
 
 	action := intercept.InterceptAction{
