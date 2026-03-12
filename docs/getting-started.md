@@ -28,9 +28,13 @@ Download the latest pre-built binary from the [GitHub Releases page](https://git
 
 **macOS / Linux:**
 
+Visit the [Releases page](https://github.com/usk6666/yorishiro-proxy/releases/latest) and download the binary for your platform, or use curl:
+
 ```bash
-# Example: download the latest release for Linux amd64
-curl -Lo yorishiro-proxy "https://github.com/usk6666/yorishiro-proxy/releases/latest/download/yorishiro-proxy-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+# Replace VERSION, OS, and ARCH with your values.
+# OS: linux, darwin  ARCH: amd64, arm64
+curl -Lo yorishiro-proxy \
+  "https://github.com/usk6666/yorishiro-proxy/releases/download/VERSION/yorishiro-proxy-VERSION-OS-ARCH"
 chmod +x yorishiro-proxy
 sudo mv yorishiro-proxy /usr/local/bin/
 ```
