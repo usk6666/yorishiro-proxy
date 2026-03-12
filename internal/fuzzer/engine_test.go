@@ -851,7 +851,7 @@ func TestExecuteFuzzCase_TargetScopeChecker(t *testing.T) {
 
 			result := engine.executeFuzzCase(
 				context.Background(), baseData, nil, fc,
-				"HTTP/1.x", 5*time.Second, "fuzz-1", wrappedDoer, tt.checker,
+				"HTTP/1.x", 5*time.Second, "fuzz-1", wrappedDoer, tt.checker, nil,
 			)
 
 			if tt.wantErr != "" {
@@ -912,7 +912,7 @@ func TestExecuteFuzzCase_TargetScopeChecker_AfterPositionApply(t *testing.T) {
 
 	result := engine.executeFuzzCase(
 		context.Background(), baseData, positions, fc,
-		"HTTP/1.x", 5*time.Second, "fuzz-1", nil, checker,
+		"HTTP/1.x", 5*time.Second, "fuzz-1", nil, checker, nil,
 	)
 
 	if checkedPath != "/admin/secret" {
@@ -962,7 +962,7 @@ func TestExecuteFuzzCaseWithHooks_TargetScopeChecker_AfterTemplateExpansion(t *t
 
 	result := engine.executeFuzzCaseWithHooks(
 		context.Background(), baseData, nil, fc,
-		"HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState, nil, checker,
+		"HTTP/1.x", 5*time.Second, "fuzz-1", hooks, hookState, nil, checker, nil,
 	)
 
 	if checkedQuery == "" {
@@ -1009,7 +1009,7 @@ func TestExecuteFuzzCaseWithHooks_TargetScopeChecker_NilHooks(t *testing.T) {
 	// nil hooks - should delegate directly to executeFuzzCase with checker.
 	result := engine.executeFuzzCaseWithHooks(
 		context.Background(), baseData, nil, fc,
-		"HTTP/1.x", 5*time.Second, "fuzz-1", nil, nil, nil, checker,
+		"HTTP/1.x", 5*time.Second, "fuzz-1", nil, nil, nil, checker, nil,
 	)
 
 	if result.Error == "" {

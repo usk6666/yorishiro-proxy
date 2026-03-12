@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // defaultListLimit is the default number of sessions returned when limit is not specified.
@@ -283,4 +285,28 @@ func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http
 		}
 		return nil
 	}
+}
+
+// checkSafetyInput validates request data against the safety filter engine.
+// Returns nil if no safety engine is configured or if the input passes.
+// Returns an MCP error CallToolResult with isError=true if the input is blocked.
+func (s *Server) checkSafetyInput(body []byte, rawURL string, headers http.Header) *safety.InputViolation {
+	if s.deps.safetyEngine == nil {
+		return nil
+	}
+	return s.deps.safetyEngine.CheckInput(body, rawURL, headers)
+}
+
+// safetyViolationError returns a generic error message for MCP clients when a safety
+// filter violation occurs. Details (rule ID, target, pattern) are logged server-side
+// to prevent leaking filter internals to the AI agent, which could enable bypass attempts.
+func safetyViolationError(v *safety.InputViolation) string {
+	slog.Warn("SafetyFilter violation",
+		"rule_id", v.RuleID,
+		"rule_name", v.RuleName,
+		"target", v.Target,
+		"matched_on", v.MatchedOn,
+	)
+	return "SafetyFilter blocked this operation: request blocked by safety policy. " +
+		"This payload was classified as destructive and cannot be sent."
 }

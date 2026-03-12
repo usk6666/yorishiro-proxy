@@ -501,6 +501,14 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 			return nil, fmt.Errorf("macro step target scope check: %w", err)
 		}
 
+		// SafetyFilter input check: macro steps go through this SendFunc (not
+		// the resend handler), so we must explicitly validate the outbound
+		// request against the safety engine here. This mirrors the check in
+		// handleResendAction / checkInterceptSafety for other MCP tools.
+		if v := s.checkSafetyInput(req.Body, httpReq.URL.String(), httpReq.Header); v != nil {
+			return nil, fmt.Errorf("%s", safetyViolationError(v))
+		}
+
 		start := time.Now()
 		resp, err := client.Do(httpReq)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,15 @@ type RunConfig struct {
 	// When nil, no target scope check is performed (open mode).
 	// Not serialized to JSON (set at runtime only).
 	TargetScopeChecker func(u *url.URL) error `json:"-"`
+
+	// SafetyInputChecker validates request body, URL, and headers against
+	// safety filter rules before sending each fuzz request. This is called
+	// after position application to prevent destructive payloads via fuzz
+	// injection. When a payload is blocked, that iteration is skipped with
+	// an error but the fuzz job continues.
+	// When nil, no safety input check is performed.
+	// Not serialized to JSON (set at runtime only).
+	SafetyInputChecker func(body []byte, rawURL string, headers http.Header) error `json:"-"`
 }
 
 // Validate checks that a RunConfig is well-formed.
@@ -386,7 +396,7 @@ func (r *Runner) executeWithRetries(ctx context.Context, p executeParams, fc Fuz
 	var result *flow.FuzzResult
 	attempts := 1 + p.cfg.MaxRetries
 	for attempt := 0; attempt < attempts; attempt++ {
-		result = r.engine.executeFuzzCaseWithHooks(ctx, p.baseData, p.cfg.Positions, fc, p.protocol, p.timeout, p.job.ID, p.cfg.Hooks, hookState, p.cfg.HTTPDoer, p.cfg.TargetScopeChecker)
+		result = r.engine.executeFuzzCaseWithHooks(ctx, p.baseData, p.cfg.Positions, fc, p.protocol, p.timeout, p.job.ID, p.cfg.Hooks, hookState, p.cfg.HTTPDoer, p.cfg.TargetScopeChecker, p.cfg.SafetyInputChecker)
 		if result.Error == "" {
 			break
 		}

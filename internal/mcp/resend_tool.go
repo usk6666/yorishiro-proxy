@@ -264,6 +264,12 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 		return nil, buildDryRunResult(prep.method, prep.url, prep.headers, prep.body), nil
 	}
 
+	// SafetyFilter input check: block destructive payloads before sending.
+	// Skipped for dry-run since no actual request is sent.
+	if v := s.checkSafetyInput(prep.body, prep.url.String(), http.Header(prep.headers)); v != nil {
+		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
+	}
+
 	return s.executeResend(ctx, prep, params)
 }
 
@@ -744,6 +750,11 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 				DataSize:   len(rawBytes), PatchesApplied: patchCount,
 			},
 		}, nil
+	}
+
+	// SafetyFilter input check: validate raw bytes before sending.
+	if v := s.checkSafetyInput(rawBytes, "", nil); v != nil {
+		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
 	targetAddr, err := resolveTargetAddrRaw(sendMsg, params)
