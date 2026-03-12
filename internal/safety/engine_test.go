@@ -59,8 +59,8 @@ func TestNewEngine_PresetExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	if len(e.InputRules()) != 2 {
-		t.Fatalf("expected 2 input rules from preset, got %d", len(e.InputRules()))
+	if len(e.InputRules()) != len(destructiveSQLRules) {
+		t.Fatalf("expected %d input rules from preset, got %d", len(destructiveSQLRules), len(e.InputRules()))
 	}
 	for _, r := range e.InputRules() {
 		if r.Category != "destructive-sql" {
@@ -73,7 +73,8 @@ func TestNewEngine_PresetReplacementOverride(t *testing.T) {
 	cfg := Config{
 		OutputRules: []RuleConfig{
 			{
-				Preset:      "sensitive-data",
+				Preset:      "destructive-sql",
+				Action:      "mask",
 				Replacement: "[CUSTOM]",
 			},
 		},
@@ -82,12 +83,16 @@ func TestNewEngine_PresetReplacementOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	if len(e.OutputRules()) != 1 {
-		t.Fatalf("expected 1 output rule, got %d", len(e.OutputRules()))
+	if len(e.OutputRules()) != len(destructiveSQLRules) {
+		t.Fatalf("expected %d output rules, got %d", len(destructiveSQLRules), len(e.OutputRules()))
 	}
-	r := e.OutputRules()[0]
-	if r.Replacement != "[CUSTOM]" {
-		t.Errorf("replacement = %q, want %q", r.Replacement, "[CUSTOM]")
+	for _, r := range e.OutputRules() {
+		if r.Replacement != "[CUSTOM]" {
+			t.Errorf("rule %q replacement = %q, want %q", r.ID, r.Replacement, "[CUSTOM]")
+		}
+		if r.Action != ActionMask {
+			t.Errorf("rule %q action = %v, want ActionMask", r.ID, r.Action)
+		}
 	}
 }
 
@@ -508,8 +513,12 @@ func TestCheckInput_WithPreset(t *testing.T) {
 		{"DROP TABLE matches", "DROP TABLE users", false},
 		{"drop database matches", "drop database mydb", false},
 		{"TRUNCATE TABLE matches", "TRUNCATE TABLE logs", false},
+		{"DELETE without WHERE matches", "DELETE FROM users", false},
+		{"ALTER TABLE DROP matches", "ALTER TABLE users DROP COLUMN email", false},
+		{"EXEC xp_ matches", "EXEC xp_cmdshell 'whoami'", false},
 		{"SELECT is allowed", "SELECT * FROM users", true},
 		{"INSERT is allowed", "INSERT INTO users VALUES (1)", true},
+		{"DELETE with WHERE is allowed", "DELETE FROM users WHERE id=1", true},
 	}
 
 	for _, tt := range tests {
@@ -732,7 +741,7 @@ func TestActionString(t *testing.T) {
 	}
 }
 
-func TestPresetNames(t *testing.T) {
+func TestPresetNames_Engine(t *testing.T) {
 	names := PresetNames()
 	if len(names) < 2 {
 		t.Errorf("expected at least 2 presets, got %d", len(names))
@@ -741,16 +750,17 @@ func TestPresetNames(t *testing.T) {
 	for _, n := range names {
 		found[n] = true
 	}
-	if !found["destructive-sql"] {
+	if !found[PresetDestructiveSQL] {
 		t.Error("missing preset: destructive-sql")
 	}
-	if !found["sensitive-data"] {
-		t.Error("missing preset: sensitive-data")
+	if !found[PresetDestructiveOSCommand] {
+		t.Error("missing preset: destructive-os-command")
 	}
 }
 
-func TestLookupPreset_NotFound(t *testing.T) {
-	if p := LookupPreset("nonexistent"); p != nil {
-		t.Errorf("LookupPreset(nonexistent) = %+v, want nil", p)
+func TestLookupPreset_NotFound_Engine(t *testing.T) {
+	_, err := LookupPreset("nonexistent")
+	if err == nil {
+		t.Error("LookupPreset(nonexistent) expected error, got nil")
 	}
 }

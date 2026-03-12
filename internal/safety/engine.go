@@ -139,9 +139,18 @@ func expandRuleConfig(rc RuleConfig, index int) ([]Rule, error) {
 
 // expandPreset resolves a preset name and compiles its rules.
 func expandPreset(rc RuleConfig) ([]Rule, error) {
-	preset := LookupPreset(rc.Preset)
-	if preset == nil {
+	preset, err := LookupPreset(rc.Preset)
+	if err != nil {
 		return nil, fmt.Errorf("unknown preset: %q", rc.Preset)
+	}
+
+	action := ActionBlock // default action for preset rules
+	if rc.Action != "" {
+		a, err := ParseAction(rc.Action)
+		if err != nil {
+			return nil, fmt.Errorf("preset %q: %w", rc.Preset, err)
+		}
+		action = a
 	}
 
 	rules := make([]Rule, 0, len(preset.Rules))
@@ -151,18 +160,13 @@ func expandPreset(rc RuleConfig) ([]Rule, error) {
 			return nil, fmt.Errorf("preset %q rule %q: invalid pattern: %w", rc.Preset, pr.ID, err)
 		}
 
-		replacement := pr.Replacement
-		if rc.Replacement != "" {
-			replacement = rc.Replacement
-		}
-
 		rules = append(rules, Rule{
 			ID:          pr.ID,
 			Name:        pr.Name,
 			Pattern:     re,
 			Targets:     pr.Targets,
-			Action:      pr.Action,
-			Replacement: replacement,
+			Action:      action,
+			Replacement: rc.Replacement,
 			Category:    preset.Name,
 		})
 	}

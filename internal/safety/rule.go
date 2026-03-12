@@ -1,7 +1,3 @@
-// Package safety provides a policy-layer filter engine that blocks or masks
-// destructive payloads before they reach upstream servers or are returned to
-// AI agents. Rules are compiled at startup and are immutable at runtime;
-// changes require a proxy restart.
 package safety
 
 import (
@@ -126,6 +122,23 @@ type Rule struct {
 	// (e.g. "Location" from the "header:Location" syntax). Empty means
 	// all headers are checked.
 	HeaderName string
+}
+
+// PresetRuleConfig defines a safety filter rule before regex compilation.
+// Presets use this type so that patterns are compiled once during engine
+// initialisation rather than at package init time.
+type PresetRuleConfig struct {
+	ID      string
+	Name    string
+	Pattern string // Regular expression pattern (uncompiled).
+	Targets []Target
+}
+
+// Preset is a named collection of rule configurations that can be referenced
+// from the proxy configuration file (e.g. preset: "destructive-sql").
+type Preset struct {
+	Name  string
+	Rules []PresetRuleConfig
 }
 
 // Validate checks that a Rule has all required fields set. This guards
