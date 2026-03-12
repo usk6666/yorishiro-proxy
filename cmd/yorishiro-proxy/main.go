@@ -209,15 +209,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	issuer := cert.NewIssuer(ca)
 
 	// Initialize TLS passthrough list and populate from config.
-	passthrough := proxy.NewPassthroughList()
-	for _, pattern := range cfg.TLSPassthrough {
-		if !passthrough.Add(pattern) {
-			logger.Warn("ignoring invalid TLS passthrough pattern", "pattern", pattern)
-		}
-	}
-	if passthrough.Len() > 0 {
-		logger.Info("TLS passthrough configured", "patterns", passthrough.Len())
-	}
+	passthrough := initPassthroughList(cfg, logger)
 
 	// Create shared capture scope for controlling flow recording.
 	scope := proxy.NewCaptureScope()
@@ -254,14 +246,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	manager.SetMaxConnections(cfg.MaxConnections)
 
 	// Build target scope with policy rules if configured.
-	var targetScope *proxy.TargetScope
-	if targetScopePolicy != nil {
-		targetScope = proxy.NewTargetScope()
-		allows := convertTargetRules(targetScopePolicy.Allows)
-		denies := convertTargetRules(targetScopePolicy.Denies)
-		targetScope.SetPolicyRules(allows, denies)
-		proto.socks5Handler.SetTargetScope(targetScope)
-	}
+	targetScope := initTargetScope(targetScopePolicy, proto.socks5Handler)
 
 	rateLimiter := initRateLimiter(targetScopePolicy, logger)
 
@@ -912,6 +897,34 @@ func initRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger
 			"max_rps_per_host", policy.RateLimits.MaxRequestsPerHostPerSecond)
 	}
 	return rl
+}
+
+// initPassthroughList creates and populates the TLS passthrough list from config.
+func initPassthroughList(cfg *config.Config, logger *slog.Logger) *proxy.PassthroughList {
+	passthrough := proxy.NewPassthroughList()
+	for _, pattern := range cfg.TLSPassthrough {
+		if !passthrough.Add(pattern) {
+			logger.Warn("ignoring invalid TLS passthrough pattern", "pattern", pattern)
+		}
+	}
+	if passthrough.Len() > 0 {
+		logger.Info("TLS passthrough configured", "patterns", passthrough.Len())
+	}
+	return passthrough
+}
+
+// initTargetScope builds a TargetScope from the policy config and attaches it
+// to the SOCKS5 handler. Returns nil if no policy is configured.
+func initTargetScope(policy *config.TargetScopePolicyConfig, socks5Handler *protosocks5.Handler) *proxy.TargetScope {
+	if policy == nil {
+		return nil
+	}
+	targetScope := proxy.NewTargetScope()
+	allows := convertTargetRules(policy.Allows)
+	denies := convertTargetRules(policy.Denies)
+	targetScope.SetPolicyRules(allows, denies)
+	socks5Handler.SetTargetScope(targetScope)
+	return targetScope
 }
 
 // convertTargetRules converts config TargetRuleConfig values to proxy TargetRule values.
