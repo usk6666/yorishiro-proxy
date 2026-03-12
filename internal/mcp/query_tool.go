@@ -838,13 +838,21 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 
 // queryConfigResult is the response for the config resource.
 type queryConfigResult struct {
-	UpstreamProxy    string                  `json:"upstream_proxy"`
-	CaptureScope     *queryScopeResult       `json:"capture_scope"`
-	TLSPassthrough   *queryPassthroughResult `json:"tls_passthrough"`
-	TCPForwards      map[string]string       `json:"tcp_forwards,omitempty"`
-	EnabledProtocols []string                `json:"enabled_protocols,omitempty"`
-	SOCKS5Enabled    bool                    `json:"socks5_enabled"`
-	ClientCert       *queryClientCertResult  `json:"client_cert,omitempty"`
+	UpstreamProxy    string                   `json:"upstream_proxy"`
+	CaptureScope     *queryScopeResult        `json:"capture_scope"`
+	TLSPassthrough   *queryPassthroughResult  `json:"tls_passthrough"`
+	TCPForwards      map[string]string        `json:"tcp_forwards,omitempty"`
+	EnabledProtocols []string                 `json:"enabled_protocols,omitempty"`
+	SOCKS5Enabled    bool                     `json:"socks5_enabled"`
+	ClientCert       *queryClientCertResult   `json:"client_cert,omitempty"`
+	SafetyFilter     *querySafetyFilterResult `json:"safety_filter,omitempty"`
+}
+
+// querySafetyFilterResult holds SafetyFilter status in the config response.
+type querySafetyFilterResult struct {
+	Enabled     bool `json:"enabled"`
+	InputRules  int  `json:"input_rules"`
+	OutputRules int  `json:"output_rules"`
 }
 
 // queryClientCertResult holds client certificate info in the config response.
@@ -916,6 +924,18 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		result.ClientCert = &queryClientCertResult{
 			CertPath: certPath,
 			KeyPath:  keyPath,
+		}
+	}
+
+	if s.deps.safetyEngine != nil {
+		result.SafetyFilter = &querySafetyFilterResult{
+			Enabled:     true,
+			InputRules:  len(s.deps.safetyEngine.InputRules()),
+			OutputRules: len(s.deps.safetyEngine.OutputRules()),
+		}
+	} else {
+		result.SafetyFilter = &querySafetyFilterResult{
+			Enabled: false,
 		}
 	}
 

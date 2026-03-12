@@ -334,8 +334,9 @@ func WithTLSTransport(t httputil.TLSTransport) ServerOption {
 	}
 }
 
-// WithSafetyEngine sets the safety filter engine for the MCP server,
-// enabling input validation checks on resend, fuzz, and intercept tools.
+// WithSafetyEngine sets the SafetyFilter engine for the MCP server,
+// enabling input validation checks on resend, fuzz, intercept, and macro tools,
+// as well as rule inspection via the security tool's get_safety_filter action.
 func WithSafetyEngine(engine *safety.Engine) ServerOption {
 	return func(s *Server) {
 		s.deps.safetyEngine = engine
