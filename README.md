@@ -38,6 +38,9 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 - **Target Scope** -- Two-layer security boundary (Policy + Agent) to restrict reachable hosts
 - **Multi-Protocol** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, WebSocket, Raw TCP, SOCKS5
 - **Multi-Listener** -- Multiple proxy listeners on different ports simultaneously
+- **mTLS Client Certificates** -- Per-host client certificate support for mutual TLS authentication
+- **TLS Verification Control** -- Per-host TLS verification and custom CA configuration
+- **Flow Timing** -- Per-phase timing recording (DNS, connect, TLS handshake, request, response) on each flow
 - **Flow Export/Import** -- JSONL, HAR 1.2, and cURL export formats
 - **SOCKS5 Listener** -- SOCKS5 proxy with optional username/password authentication for proxychains integration
 - **Upstream Proxy** -- Chain through HTTP or SOCKS5 proxies
@@ -194,6 +197,7 @@ Layer 4 TCP Listener
 
 - [Getting Started Guide](docs/getting-started.md) -- Detailed setup and usage walkthrough
 - [Plugin Development Guide](docs/plugins.md) -- Writing Starlark plugins to extend proxy behavior
+- [Roadmap](docs/roadmap.md) -- Milestone-based development plan and progress
 
 ## Contributing
 

@@ -38,6 +38,9 @@ Yorishiro Proxy は [MCP (Model Context Protocol)](https://modelcontextprotocol.
 - **Target Scope** -- 到達可能なホストを制限する 2 層セキュリティ境界（Policy + Agent）
 - **マルチプロトコル** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, WebSocket, Raw TCP, SOCKS5
 - **マルチリスナ** -- 異なるポートで複数のプロキシリスナを同時実行
+- **mTLS クライアント証明書** -- ホスト単位のクライアント証明書による相互 TLS 認証
+- **TLS 検証制御** -- ホスト単位の TLS 検証設定とカスタム CA 指定
+- **フロータイミング** -- フェーズ別タイミング記録（DNS、接続、TLS ハンドシェイク、リクエスト、レスポンス）
 - **フローエクスポート/インポート** -- JSONL、HAR 1.2、cURL エクスポート形式
 - **SOCKS5 リスナ** -- proxychains 連携のための SOCKS5 プロキシ（オプションのユーザ名/パスワード認証付き）
 - **上流プロキシ** -- HTTP または SOCKS5 プロキシ経由のチェーン接続
@@ -194,6 +197,7 @@ Layer 4 TCP リスナ
 
 - [Getting Started Guide](docs/getting-started.md) -- セットアップと使い方の詳細ウォークスルー
 - [Plugin Development Guide](docs/plugins.md) -- Starlark プラグインの開発ガイド
+- [Roadmap](docs/roadmap.md) -- マイルストーンベースの開発計画と進捗
 
 ## コントリビューション
 
