@@ -327,17 +327,19 @@ func buildExportOptions(params manageParams) (flow.ExportOptions, error) {
 	return opts, nil
 }
 
-// exportFlowsToFile exports flows to a file at the given output path.
-func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
-	cleanPath, err := validateFilePath(outputPath)
+// writeToFileAtomic validates the output path and atomically writes content
+// via a temp file. The writeFn callback receives the temp file to write to and
+// returns the number of items written.
+func writeToFileAtomic(outputPath string, writeFn func(f *os.File) (int, error)) (cleanPath string, n int, err error) {
+	cleanPath, err = validateFilePath(outputPath)
 	if err != nil {
-		return nil, fmt.Errorf("invalid output_path: %w", err)
+		return "", 0, fmt.Errorf("invalid output_path: %w", err)
 	}
 
 	dir := filepath.Dir(cleanPath)
 	tmpFile, err := os.CreateTemp(dir, ".yorishiro-export-*.tmp")
 	if err != nil {
-		return nil, fmt.Errorf("create temp file for export: %w", err)
+		return "", 0, fmt.Errorf("create temp file for export: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	success := false
@@ -349,28 +351,44 @@ func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format strin
 	}()
 
 	if err := tmpFile.Chmod(0600); err != nil {
-		return nil, fmt.Errorf("set file permissions: %w", err)
+		return "", 0, fmt.Errorf("set file permissions: %w", err)
 	}
 
-	n, err := flow.ExportFlows(ctx, s.deps.store, tmpFile, opts)
+	n, err = writeFn(tmpFile)
 	if err != nil {
-		return nil, fmt.Errorf("export flows: %w", err)
+		return "", 0, err
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		return nil, fmt.Errorf("close temp file: %w", err)
+		return "", 0, fmt.Errorf("close temp file: %w", err)
 	}
 
 	if info, statErr := os.Lstat(cleanPath); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
+			return "", 0, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
 		}
 	}
 
 	if err := os.Rename(tmpPath, cleanPath); err != nil {
-		return nil, fmt.Errorf("rename temp file to output: %w", err)
+		return "", 0, fmt.Errorf("rename temp file to output: %w", err)
 	}
 	success = true
+
+	return cleanPath, n, nil
+}
+
+// exportFlowsToFile exports flows to a file at the given output path.
+func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
+	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
+		count, err := flow.ExportFlows(ctx, s.deps.store, f, opts)
+		if err != nil {
+			return 0, fmt.Errorf("export flows: %w", err)
+		}
+		return count, nil
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	return &executeExportFlowsResult{
 		ExportedCount: n,
@@ -397,48 +415,16 @@ func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow
 
 // exportFlowsToHARFile exports flows to a HAR file at the given output path.
 func (s *Server) exportFlowsToHARFile(ctx context.Context, outputPath string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
-	cleanPath, err := validateFilePath(outputPath)
-	if err != nil {
-		return nil, fmt.Errorf("invalid output_path: %w", err)
-	}
-
-	dir := filepath.Dir(cleanPath)
-	tmpFile, err := os.CreateTemp(dir, ".yorishiro-export-*.tmp")
-	if err != nil {
-		return nil, fmt.Errorf("create temp file for HAR export: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	success := false
-	defer func() {
-		tmpFile.Close()
-		if !success {
-			os.Remove(tmpPath)
+	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
+		count, err := flow.ExportHAR(ctx, s.deps.store, f, opts, s.version)
+		if err != nil {
+			return 0, fmt.Errorf("export HAR: %w", err)
 		}
-	}()
-
-	if err := tmpFile.Chmod(0600); err != nil {
-		return nil, fmt.Errorf("set file permissions: %w", err)
-	}
-
-	n, err := flow.ExportHAR(ctx, s.deps.store, tmpFile, opts, s.version)
+		return count, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("export HAR: %w", err)
+		return nil, err
 	}
-
-	if err := tmpFile.Close(); err != nil {
-		return nil, fmt.Errorf("close temp file: %w", err)
-	}
-
-	if info, statErr := os.Lstat(cleanPath); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
-		}
-	}
-
-	if err := os.Rename(tmpPath, cleanPath); err != nil {
-		return nil, fmt.Errorf("rename temp file to output: %w", err)
-	}
-	success = true
 
 	return &executeExportFlowsResult{
 		ExportedCount: n,

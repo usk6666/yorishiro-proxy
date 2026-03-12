@@ -40,7 +40,6 @@ func (m *mockFlowReader) CountMessages(_ context.Context, flowID string) (int, e
 }
 
 func TestExportHAR_BasicHTTP(t *testing.T) {
-	t.Helper()
 	now := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
 	sendMs := int64(5)
 	waitMs := int64(100)
@@ -621,6 +620,10 @@ func TestIsBinaryContent(t *testing.T) {
 		{"custom+json", "application/vnd.api+json", []byte(`{}`), false},
 		{"custom+xml", "application/atom+xml", []byte("<feed/>"), false},
 		{"valid utf8 unknown type", "application/octet-stream", []byte("plain text"), false},
+		{"image with valid utf8 body", "image/png", []byte("valid utf8 png"), true},
+		{"audio with valid utf8 body", "audio/midi", []byte("MThd"), true},
+		{"video with valid utf8 body", "video/mp4", []byte("ftyp"), true},
+		{"font with valid utf8 body", "font/woff2", []byte("wOF2"), true},
 	}
 
 	for _, tc := range tests {

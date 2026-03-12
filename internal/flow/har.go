@@ -544,6 +544,14 @@ func isBinaryContent(mimeType string, body []byte) bool {
 		return false
 	}
 
+	// Known binary MIME prefixes — always base64-encode regardless of body content.
+	binaryPrefixes := []string{"image/", "audio/", "video/", "font/"}
+	for _, prefix := range binaryPrefixes {
+		if strings.HasPrefix(mediaType, prefix) {
+			return true
+		}
+	}
+
 	// Check if the body is valid UTF-8 without control characters.
 	if utf8.Valid(body) {
 		return false
