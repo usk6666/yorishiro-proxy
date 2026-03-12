@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"log/slog"
 	gohttp "net/http"
 	"net/url"
@@ -26,7 +27,10 @@ type HandlerBase struct {
 	RateLimiter     *RateLimiter
 	InterceptEngine *intercept.Engine
 	InterceptQueue  *intercept.Queue
-	SafetyEngine    *safety.Engine
+	// SafetyEngine is set once at initialization and read concurrently by
+	// handler goroutines. No mutex is needed because the field is never
+	// modified after the proxy starts accepting connections.
+	SafetyEngine *safety.Engine
 
 	// UpstreamMu protects UpstreamProxy for concurrent access.
 	UpstreamMu    sync.RWMutex
@@ -114,6 +118,47 @@ func (b *HandlerBase) CheckSafetyFilter(body []byte, rawURL string, headers goht
 		return nil
 	}
 	return b.SafetyEngine.CheckInput(body, rawURL, headers)
+}
+
+// SafetyFilterAction looks up the action for the matched safety rule.
+// Returns the rule's action (block, mask, or log_only). Defaults to block
+// if the engine is nil or the rule is not found.
+func (b *HandlerBase) SafetyFilterAction(violation *safety.InputViolation) safety.Action {
+	if b.SafetyEngine == nil {
+		return safety.ActionBlock
+	}
+	for _, r := range b.SafetyEngine.InputRules() {
+		if r.ID == violation.RuleID {
+			return r.Action
+		}
+	}
+	return safety.ActionBlock
+}
+
+// safetyFilterResponseBody is the JSON structure for safety filter blocked responses.
+type safetyFilterResponseBody struct {
+	Error     string `json:"error"`
+	BlockedBy string `json:"blocked_by"`
+	Rule      string `json:"rule"`
+	Message   string `json:"message"`
+}
+
+// BuildSafetyFilterResponseBody constructs a JSON body for a safety filter
+// blocked response. It uses encoding/json to ensure all values are properly
+// escaped, preventing JSON injection via rule names or matched fragments.
+func BuildSafetyFilterResponseBody(violation *safety.InputViolation) []byte {
+	body := safetyFilterResponseBody{
+		Error:     "blocked by safety filter",
+		BlockedBy: "safety_filter",
+		Rule:      violation.RuleID,
+		Message:   "Destructive payload detected: " + violation.RuleName + " matched in request " + violation.Target.String(),
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		// Fallback: this should never happen since all fields are simple strings.
+		return []byte(`{"error":"blocked by safety filter","blocked_by":"safety_filter"}`)
+	}
+	return b
 }
 
 // SetUpstreamProxy configures the upstream proxy for outgoing connections.

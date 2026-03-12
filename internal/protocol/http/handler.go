@@ -395,6 +395,10 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, logger)
 		return nil
 	}
+	// NOTE (S-LOW-1): WebSocket upgrade requests bypass the safety filter
+	// intentionally. WS upgrade requests do not carry a meaningful body,
+	// so input filtering would not add value. The safety filter runs on
+	// the body-bearing code path below instead.
 	if isWebSocketUpgrade(req) {
 		return h.handleWebSocket(ctx, conn, req)
 	}
@@ -403,8 +407,13 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	rawRequest := extractRawRequest(capture, captureStart, reader)
 
 	// Safety filter enforcement (after target scope + rate limit, before plugin hooks).
+	// NOTE (L-1): The safety filter is intentionally placed after the rate limiter
+	// rather than before it. The filter requires the request body, which is read
+	// above by readAndCaptureRequestBody. Moving it before the rate limiter would
+	// require reading the body earlier, which would allow a rate-limited client
+	// to force body reads on every request, increasing resource consumption.
 	if violation := h.CheckSafetyFilter(bodyResult.recordBody, req.URL.String(), req.Header); violation != nil {
-		if h.safetyFilterAction(violation) == safety.ActionBlock {
+		if h.SafetyFilterAction(violation) == safety.ActionBlock {
 			h.writeSafetyFilterResponse(conn, violation, logger)
 			h.recordBlockedSession(ctx, req, bodyResult.recordBody, rawRequest, bodyResult.truncated, smuggling, start, connID, clientAddr, "safety_filter", violation, logger)
 			return nil
@@ -720,8 +729,7 @@ func (h *Handler) writeRateLimitResponse(conn net.Conn, logger *slog.Logger) {
 // writeSafetyFilterResponse writes a 403 Forbidden response indicating the
 // request was blocked by the safety filter.
 func (h *Handler) writeSafetyFilterResponse(conn net.Conn, violation *safety.InputViolation, logger *slog.Logger) {
-	body := fmt.Sprintf(`{"error":"blocked by safety filter","blocked_by":"safety_filter","rule":%q,"message":"Destructive payload detected: %s matched in request %s"}`,
-		violation.RuleID, violation.RuleName, violation.Target.String())
+	body := proxy.BuildSafetyFilterResponseBody(violation)
 	resp := fmt.Sprintf("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Blocked-By: yorishiro-proxy\r\nX-Block-Reason: safety_filter\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		len(body), body)
 	if _, err := conn.Write([]byte(resp)); err != nil {
@@ -730,20 +738,6 @@ func (h *Handler) writeSafetyFilterResponse(conn net.Conn, violation *safety.Inp
 	logger.Info("request blocked by safety filter",
 		"rule_id", violation.RuleID, "rule_name", violation.RuleName,
 		"target", violation.Target.String(), "matched_on", violation.MatchedOn)
-}
-
-// safetyFilterAction looks up the action for the matched safety rule.
-// Returns the rule's action (block, mask, or log_only).
-func (h *Handler) safetyFilterAction(violation *safety.InputViolation) safety.Action {
-	if h.SafetyEngine == nil {
-		return safety.ActionBlock
-	}
-	for _, r := range h.SafetyEngine.InputRules() {
-		if r.ID == violation.RuleID {
-			return r.Action
-		}
-	}
-	return safety.ActionBlock
 }
 
 // writeBlockedResponse writes a 403 Forbidden response with a JSON body

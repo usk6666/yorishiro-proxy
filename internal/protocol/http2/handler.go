@@ -313,6 +313,12 @@ func (h *Handler) handleStream(
 		return
 	}
 
+	// Safety filter enforcement (after target scope + rate limit, before plugin hooks).
+	// NOTE (L-1): The safety filter is intentionally placed after the rate limiter.
+	// The filter requires the request body (read in readAndTruncateBody above).
+	// Placing it before the rate limiter would allow rate-limited clients to
+	// force body reads and safety checks on every request, increasing resource
+	// consumption under abuse.
 	if h.checkSafetyFilter(sc) {
 		return
 	}
@@ -457,7 +463,7 @@ func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
 		return false
 	}
 
-	action := h.safetyFilterAction(violation)
+	action := h.SafetyFilterAction(violation)
 	if action != safety.ActionBlock {
 		// log_only: log the violation but continue processing.
 		sc.logger.Warn("safety filter violation (log_only)",
@@ -473,29 +479,15 @@ func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
 	return true
 }
 
-// safetyFilterAction looks up the action for the matched safety rule.
-func (h *Handler) safetyFilterAction(violation *safety.InputViolation) safety.Action {
-	if h.SafetyEngine == nil {
-		return safety.ActionBlock
-	}
-	for _, r := range h.SafetyEngine.InputRules() {
-		if r.ID == violation.RuleID {
-			return r.Action
-		}
-	}
-	return safety.ActionBlock
-}
-
 // writeSafetyFilterResponse writes a 403 Forbidden response for safety filter violations.
 func writeSafetyFilterResponse(w gohttp.ResponseWriter, violation *safety.InputViolation) {
-	body := fmt.Sprintf(`{"error":"blocked by safety filter","blocked_by":"safety_filter","rule":%q,"message":"Destructive payload detected: %s matched in request %s"}`,
-		violation.RuleID, violation.RuleName, violation.Target.String())
+	body := proxy.BuildSafetyFilterResponseBody(violation)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Blocked-By", "yorishiro-proxy")
 	w.Header().Set("X-Block-Reason", "safety_filter")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(gohttp.StatusForbidden)
-	w.Write([]byte(body))
+	w.Write(body)
 }
 
 // checkRateLimit enforces rate limits. Returns true if the request was blocked.

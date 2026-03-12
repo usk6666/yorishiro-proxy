@@ -389,7 +389,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Step 3.5: Safety filter enforcement (after body read, before hop-by-hop removal).
 	httpsURL := (&url.URL{Scheme: "https", Host: req.URL.Host, Path: req.URL.Path, RawQuery: req.URL.RawQuery}).String()
 	if violation := h.CheckSafetyFilter(bodyResult.recordBody, httpsURL, req.Header); violation != nil {
-		if h.safetyFilterAction(violation) == safety.ActionBlock {
+		if h.SafetyFilterAction(violation) == safety.ActionBlock {
 			h.writeSafetyFilterResponse(conn, violation, logger)
 			h.recordBlockedHTTPSSession(ctx, req, bodyResult.recordBody, rawRequest, bodyResult.truncated, smuggling, start, connID, clientAddr, tlsMeta, "safety_filter", violation, logger)
 			return nil
