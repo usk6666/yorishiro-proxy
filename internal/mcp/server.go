@@ -20,6 +20,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // deps holds all shared dependencies for handler structs.
@@ -58,6 +59,7 @@ type deps struct {
 	tlsTransport          httputil.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
 	hostTLSRegistry       *httputil.HostTLSRegistry
+	safetyEngine          *safety.Engine
 }
 
 // Server wraps the MCP server and registers proxy-related tools.
@@ -329,6 +331,15 @@ func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
 func WithTLSTransport(t httputil.TLSTransport) ServerOption {
 	return func(s *Server) {
 		s.deps.tlsTransport = t
+	}
+}
+
+// WithSafetyEngine sets the SafetyFilter engine for the MCP server,
+// enabling safety filter rule inspection via the security tool's
+// get_safety_filter action.
+func WithSafetyEngine(engine *safety.Engine) ServerOption {
+	return func(s *Server) {
+		s.deps.safetyEngine = engine
 	}
 }
 
