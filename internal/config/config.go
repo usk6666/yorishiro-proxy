@@ -502,6 +502,8 @@ type SafetyFilterInputConfig struct {
 
 // SafetyFilterRuleConfig defines a single SafetyFilter rule in configuration files.
 // Either Preset or Pattern must be set, but not both.
+// Action is configured at the section level (SafetyFilterInputConfig.Action),
+// not per-rule. All rules within a section share the same action.
 type SafetyFilterRuleConfig struct {
 	// Preset references a built-in preset by name (e.g. "destructive-sql").
 	// Mutually exclusive with Pattern.

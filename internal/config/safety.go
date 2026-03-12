@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // ValidateSafetyFilterConfig validates the SafetyFilter configuration.
@@ -35,16 +36,25 @@ func ValidateSafetyFilterConfig(cfg *SafetyFilterConfig) error {
 	return nil
 }
 
+// validTargets lists the accepted target values for custom safety filter rules.
+var validTargets = map[string]bool{
+	"body":    true,
+	"url":     true,
+	"query":   true,
+	"header":  true,
+	"headers": true,
+}
+
 // validateSafetyFilterRule validates a single rule config entry.
 func validateSafetyFilterRule(index int, rule SafetyFilterRuleConfig) error {
 	hasPreset := rule.Preset != ""
 	hasPattern := rule.Pattern != ""
 
 	if hasPreset && hasPattern {
-		return fmt.Errorf("preset and pattern are mutually exclusive")
+		return fmt.Errorf("rule[%d]: preset and pattern are mutually exclusive", index)
 	}
 	if !hasPreset && !hasPattern {
-		return fmt.Errorf("either preset or pattern is required")
+		return fmt.Errorf("rule[%d]: either preset or pattern is required", index)
 	}
 
 	if hasPreset {
@@ -55,15 +65,22 @@ func validateSafetyFilterRule(index int, rule SafetyFilterRuleConfig) error {
 
 	// Custom rule validation.
 	if rule.ID == "" {
-		return fmt.Errorf("id is required for custom rules")
+		return fmt.Errorf("rule[%d]: id is required for custom rules", index)
 	}
 	if len(rule.Targets) == 0 {
-		return fmt.Errorf("at least one target is required for custom rules")
+		return fmt.Errorf("rule[%d]: at least one target is required for custom rules", index)
+	}
+
+	// Validate target values.
+	for _, t := range rule.Targets {
+		if !validTargets[strings.ToLower(t)] {
+			return fmt.Errorf("rule[%d]: invalid target %q (must be one of: body, url, query, header, headers)", index, t)
+		}
 	}
 
 	// Validate regex compiles.
 	if _, err := regexp.Compile(rule.Pattern); err != nil {
-		return fmt.Errorf("invalid pattern %q: %w", rule.Pattern, err)
+		return fmt.Errorf("rule[%d]: invalid pattern %q: %w", index, rule.Pattern, err)
 	}
 
 	return nil

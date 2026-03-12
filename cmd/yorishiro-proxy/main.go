@@ -876,17 +876,12 @@ func initSafetyFilter(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *
 				Targets: rule.Targets,
 			}
 
-			// Set action: rule-level action or section default action.
+			// Set action: use section-level action if set, otherwise default to "block".
+			action := "block"
 			if sfCfg.Input.Action != "" {
-				rc.Action = sfCfg.Input.Action
-			} else {
-				rc.Action = "block"
+				action = sfCfg.Input.Action
 			}
-
-			// Presets don't need action set in the RuleConfig (they use default).
-			if rule.Preset != "" {
-				rc.Action = sfCfg.Input.Action
-			}
+			rc.Action = action
 
 			engineCfg.InputRules = append(engineCfg.InputRules, rc)
 		}

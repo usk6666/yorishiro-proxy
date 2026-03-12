@@ -157,6 +157,18 @@ func TestValidateSafetyFilterConfig(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "invalid target value",
+			cfg: &SafetyFilterConfig{
+				Enabled: true,
+				Input: &SafetyFilterInputConfig{
+					Rules: []SafetyFilterRuleConfig{
+						{ID: "bad-target", Pattern: `DROP`, Targets: []string{"cookie"}},
+					},
+				},
+			},
+			wantErr: "invalid target",
+		},
 	}
 
 	for _, tt := range tests {
