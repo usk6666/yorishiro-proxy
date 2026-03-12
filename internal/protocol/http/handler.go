@@ -421,7 +421,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		// log_only: log the violation but continue processing.
 		logger.Warn("safety filter violation (log_only)",
 			"rule_id", violation.RuleID, "rule_name", violation.RuleName,
-			"target", violation.Target.String(), "matched_on", violation.MatchedOn)
+			"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
 	}
 
 	removeHopByHopHeaders(req.Header)
@@ -737,7 +737,7 @@ func (h *Handler) writeSafetyFilterResponse(conn net.Conn, violation *safety.Inp
 	}
 	logger.Info("request blocked by safety filter",
 		"rule_id", violation.RuleID, "rule_name", violation.RuleName,
-		"target", violation.Target.String(), "matched_on", violation.MatchedOn)
+		"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
 }
 
 // writeBlockedResponse writes a 403 Forbidden response with a JSON body

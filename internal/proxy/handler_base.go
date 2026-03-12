@@ -210,3 +210,12 @@ func (b *HandlerBase) TLSFingerprint() string {
 func (b *HandlerBase) ConnLogger(ctx context.Context) *slog.Logger {
 	return LoggerFromContext(ctx, b.Logger)
 }
+
+// TruncateForLog truncates s to maxLen bytes for safe inclusion in log fields.
+// If s exceeds maxLen, it is truncated and "..." is appended to indicate truncation.
+func TruncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}

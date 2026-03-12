@@ -301,6 +301,7 @@ func WithRateLimiterSetter(setter rateLimiterSetter) ServerOption {
 
 // WithSafetyEngine sets the safety filter engine for the MCP server,
 // enabling destructive payload detection in proxy handlers.
+// Engine creation and injection is handled by config integration (USK-308).
 func WithSafetyEngine(engine *safety.Engine) ServerOption {
 	return func(s *Server) {
 		s.deps.safetyEngine = engine

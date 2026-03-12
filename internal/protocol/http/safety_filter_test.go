@@ -9,6 +9,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,9 +142,9 @@ func TestSafetyFilter_BlocksMatchingRequest(t *testing.T) {
 }
 
 func TestSafetyFilter_LogOnlyPassesThrough(t *testing.T) {
-	upstreamReached := false
+	var upstreamReached atomic.Bool
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		upstreamReached = true
+		upstreamReached.Store(true)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -182,15 +183,15 @@ func TestSafetyFilter_LogOnlyPassesThrough(t *testing.T) {
 	if resp.StatusCode != gohttp.StatusOK {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
-	if !upstreamReached {
+	if !upstreamReached.Load() {
 		t.Error("upstream was not reached with log_only action")
 	}
 }
 
 func TestSafetyFilter_NoEnginePassesThrough(t *testing.T) {
-	upstreamReached := false
+	var upstreamReached atomic.Bool
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		upstreamReached = true
+		upstreamReached.Store(true)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -228,15 +229,15 @@ func TestSafetyFilter_NoEnginePassesThrough(t *testing.T) {
 	if resp.StatusCode != gohttp.StatusOK {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
-	if !upstreamReached {
+	if !upstreamReached.Load() {
 		t.Error("upstream was not reached without safety engine")
 	}
 }
 
 func TestSafetyFilter_NoMatchPassesThrough(t *testing.T) {
-	upstreamReached := false
+	var upstreamReached atomic.Bool
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		upstreamReached = true
+		upstreamReached.Store(true)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -275,7 +276,7 @@ func TestSafetyFilter_NoMatchPassesThrough(t *testing.T) {
 	if resp.StatusCode != gohttp.StatusOK {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
-	if !upstreamReached {
+	if !upstreamReached.Load() {
 		t.Error("upstream was not reached for non-matching request")
 	}
 }
