@@ -389,7 +389,7 @@ export function FuzzResultsPage() {
               <div className="fuzz-stat">
                 <span className="fuzz-stat-label">Status Distribution</span>
                 <div className="fuzz-stat-distribution">
-                  {Object.entries(summary.status_distribution).map(
+                  {Object.entries(summary.status_distribution ?? {}).map(
                     ([code, count]) => (
                       <span key={code} className="fuzz-stat-dist-item">
                         <span className={statusCodeClass(parseInt(code, 10))}>
@@ -522,7 +522,7 @@ export function FuzzResultsPage() {
                       {formatDuration(result.duration_ms)}
                     </td>
                     <td className="fuzz-results-cell-payloads">
-                      {Object.entries(result.payloads).map(([key, value]) => (
+                      {Object.entries(result.payloads ?? {}).map(([key, value]) => (
                         <span key={key} className="fuzz-payload-tag">
                           <span className="fuzz-payload-key">{key}:</span>
                           {value}
@@ -613,7 +613,7 @@ export function FuzzResultsPage() {
               <div className="fuzz-results-detail-section">
                 <h4 className="fuzz-results-detail-section-title">Payloads</h4>
                 <div className="fuzz-results-detail-payloads">
-                  {Object.entries(selectedResult.payloads).map(
+                  {Object.entries(selectedResult.payloads ?? {}).map(
                     ([key, value]) => (
                       <div key={key} className="fuzz-results-detail-payload">
                         <span className="fuzz-payload-key">{key}</span>
