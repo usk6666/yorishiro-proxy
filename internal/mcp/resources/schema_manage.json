@@ -33,8 +33,8 @@
         },
         "format": {
           "type": "string",
-          "description": "Export format (currently only 'jsonl' is supported).",
-          "enum": ["jsonl"]
+          "description": "Export format: 'jsonl' (default) or 'har' (HTTP Archive 1.2, file output only).",
+          "enum": ["jsonl", "har"]
         },
         "filter": {
           "type": "object",
