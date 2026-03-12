@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -107,12 +108,16 @@ func compileRules(configs []RuleConfig) ([]Rule, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range expanded {
+		for j := range expanded {
+			r := &expanded[j]
+			if err := r.Validate(); err != nil {
+				return nil, err
+			}
 			if seen[r.ID] {
 				return nil, fmt.Errorf("duplicate rule ID: %q", r.ID)
 			}
 			seen[r.ID] = true
-			rules = append(rules, r)
+			rules = append(rules, *r)
 		}
 	}
 	return rules, nil
@@ -314,11 +319,18 @@ func matchNamedHeaderValues(re *regexp.Regexp, headers http.Header, name string)
 	return false, ""
 }
 
-// matchAllHeaders concatenates all headers and checks the pattern.
+// matchAllHeaders concatenates all headers in sorted key order and checks the
+// pattern. Sorting ensures deterministic matching order for testability.
 func matchAllHeaders(re *regexp.Regexp, headers http.Header) (bool, string) {
+	keys := make([]string, 0, len(headers))
+	for name := range headers {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+
 	var sb strings.Builder
-	for name, values := range headers {
-		for _, v := range values {
+	for _, name := range keys {
+		for _, v := range headers[name] {
 			sb.WriteString(name)
 			sb.WriteString(": ")
 			sb.WriteString(v)

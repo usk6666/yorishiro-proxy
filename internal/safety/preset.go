@@ -45,7 +45,7 @@ var builtinPresets = map[string]Preset{
 			{
 				ID:          "sensitive-data-credit-card",
 				Name:        "Credit card number",
-				Pattern:     `\b(?:\d[ -]*?){13,19}\b`,
+				Pattern:     `\b(?:\d[- ]*?){13,19}\b`,
 				Targets:     []Target{TargetBody},
 				Action:      ActionMask,
 				Replacement: "[REDACTED-CC]",

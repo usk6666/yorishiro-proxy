@@ -127,3 +127,19 @@ type Rule struct {
 	// all headers are checked.
 	HeaderName string
 }
+
+// Validate checks that a Rule has all required fields set. This guards
+// against accidentally using a zero-value Rule, where iota defaults would
+// silently set Action=ActionBlock and Targets containing TargetBody.
+func (r *Rule) Validate() error {
+	if r.ID == "" {
+		return fmt.Errorf("rule validation: id is required")
+	}
+	if r.Pattern == nil {
+		return fmt.Errorf("rule %q validation: compiled pattern is required", r.ID)
+	}
+	if len(r.Targets) == 0 {
+		return fmt.Errorf("rule %q validation: at least one target is required", r.ID)
+	}
+	return nil
+}
