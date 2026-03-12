@@ -41,13 +41,14 @@ import (
 // testPKI holds a complete PKI setup for mTLS testing:
 // server CA, client CA, server cert, client cert.
 type testPKI struct {
-	ServerCAPool   *x509.CertPool
-	ServerCertFile string
-	ServerKeyFile  string
-	ClientCertFile string
-	ClientKeyFile  string
-	ClientCAPool   *x509.CertPool
-	TmpDir         string
+	ServerCAPool     *x509.CertPool
+	ServerCertFile   string
+	ServerKeyFile    string
+	ServerCACertFile string
+	ClientCertFile   string
+	ClientKeyFile    string
+	ClientCAPool     *x509.CertPool
+	TmpDir           string
 }
 
 // generateTestPKI creates a test PKI with separate server and client CAs,
@@ -149,13 +150,14 @@ func generateTestPKI(t *testing.T) *testPKI {
 	writePEMFile(t, serverCACertFile, "CERTIFICATE", serverCADER)
 
 	return &testPKI{
-		ServerCAPool:   serverCAPool,
-		ServerCertFile: serverCertFile,
-		ServerKeyFile:  serverKeyFile,
-		ClientCertFile: clientCertFile,
-		ClientKeyFile:  clientKeyFile,
-		ClientCAPool:   clientCAPool,
-		TmpDir:         tmpDir,
+		ServerCAPool:     serverCAPool,
+		ServerCertFile:   serverCertFile,
+		ServerKeyFile:    serverKeyFile,
+		ServerCACertFile: serverCACertFile,
+		ClientCertFile:   clientCertFile,
+		ClientKeyFile:    clientKeyFile,
+		ClientCAPool:     clientCAPool,
+		TmpDir:           tmpDir,
 	}
 }
 
@@ -297,6 +299,46 @@ func getFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID
 	return send, recv
 }
 
+// startMTLSProxy creates an HTTPS proxy with a pre-configured HostTLSRegistry
+// and returns the listener, handler, and a cancel function.
+// It blocks until the proxy is ready to accept connections.
+func startMTLSProxy(t *testing.T, ctx context.Context, store flow.Store, ca *cert.CA, registry *httputil.HostTLSRegistry) (*proxy.Listener, *protohttp.Handler, context.CancelFunc) {
+	t.Helper()
+
+	issuer := cert.NewIssuer(ca)
+	logger := testutil.DiscardLogger()
+	httpHandler := protohttp.NewHandler(store, issuer, logger)
+
+	tlsTransport := &httputil.StandardTransport{
+		InsecureSkipVerify: false,
+		HostTLS:            registry,
+	}
+	httpHandler.SetTLSTransport(tlsTransport)
+
+	detector := protocol.NewDetector(httpHandler)
+	listener := proxy.NewListener(proxy.ListenerConfig{
+		Addr:     "127.0.0.1:0",
+		Detector: detector,
+		Logger:   logger,
+	})
+
+	proxyCtx, proxyCancel := context.WithCancel(ctx)
+
+	go func() {
+		if err := listener.Start(proxyCtx); err != nil {
+			t.Logf("proxy listener error: %v", err)
+		}
+	}()
+
+	select {
+	case <-listener.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not become ready")
+	}
+
+	return listener, httpHandler, proxyCancel
+}
+
 // ============================================================================
 // 1. mTLS integration tests
 // ============================================================================
@@ -333,45 +375,16 @@ func TestM21_MTLS_ProxyWithClientCert(t *testing.T) {
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	// Start proxy with mTLS TLS transport configured.
-	issuer := cert.NewIssuer(ca)
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-
 	// Configure TLS transport with client certificate for localhost.
 	registry := httputil.NewHostTLSRegistry()
 	registry.Set("localhost", &httputil.HostTLSConfig{
 		ClientCertPath: pki.ClientCertFile,
 		ClientKeyPath:  pki.ClientKeyFile,
-		CABundlePath:   filepath.Join(pki.TmpDir, "server-ca.crt"),
+		CABundlePath:   pki.ServerCACertFile,
 	})
 
-	tlsTransport := &httputil.StandardTransport{
-		InsecureSkipVerify: false,
-		HostTLS:            registry,
-	}
-	httpHandler.SetTLSTransport(tlsTransport)
-
-	detector := protocol.NewDetector(httpHandler)
-	listener := proxy.NewListener(proxy.ListenerConfig{
-		Addr:     "127.0.0.1:0",
-		Detector: detector,
-		Logger:   logger,
-	})
-
-	proxyCtx, proxyCancel := context.WithCancel(ctx)
+	listener, _, proxyCancel := startMTLSProxy(t, ctx, store, ca, registry)
 	defer proxyCancel()
-
-	go func() {
-		if err := listener.Start(proxyCtx); err != nil {
-			t.Logf("proxy listener error: %v", err)
-		}
-	}()
-
-	select {
-	case <-listener.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("proxy did not become ready")
-	}
 
 	// Create client that trusts the proxy CA.
 	client := httpsProxyClient(listener.Addr(), ca.Certificate())
@@ -444,42 +457,14 @@ func TestM21_MTLS_ConnectionRejectedWithoutClientCert(t *testing.T) {
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	issuer := cert.NewIssuer(ca)
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-
 	// Configure TLS transport WITHOUT client cert but with server CA trust.
 	registry := httputil.NewHostTLSRegistry()
 	registry.Set("localhost", &httputil.HostTLSConfig{
-		CABundlePath: filepath.Join(pki.TmpDir, "server-ca.crt"),
+		CABundlePath: pki.ServerCACertFile,
 	})
 
-	tlsTransport := &httputil.StandardTransport{
-		InsecureSkipVerify: false,
-		HostTLS:            registry,
-	}
-	httpHandler.SetTLSTransport(tlsTransport)
-
-	detector := protocol.NewDetector(httpHandler)
-	listener := proxy.NewListener(proxy.ListenerConfig{
-		Addr:     "127.0.0.1:0",
-		Detector: detector,
-		Logger:   logger,
-	})
-
-	proxyCtx, proxyCancel := context.WithCancel(ctx)
+	listener, _, proxyCancel := startMTLSProxy(t, ctx, store, ca, registry)
 	defer proxyCancel()
-
-	go func() {
-		if err := listener.Start(proxyCtx); err != nil {
-			t.Logf("proxy listener error: %v", err)
-		}
-	}()
-
-	select {
-	case <-listener.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("proxy did not become ready")
-	}
 
 	client := httpsProxyClient(listener.Addr(), ca.Certificate())
 
@@ -506,6 +491,10 @@ func TestM21_MTLS_PerHostCertSwitching(t *testing.T) {
 	pki := generateTestPKI(t)
 
 	// Start mTLS upstream server (requires client cert).
+	// Both servers share the same server cert which has DNSNames=["localhost"]
+	// and IPAddresses=[127.0.0.1]. We address the mTLS server via "127.0.0.1"
+	// and the plain TLS server via "localhost" so that HostTLSRegistry
+	// differentiates them by hostname.
 	mtlsAddr, mtlsCleanup := startMTLSServer(t, pki, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		cn := ""
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
@@ -536,53 +525,29 @@ func TestM21_MTLS_PerHostCertSwitching(t *testing.T) {
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	issuer := cert.NewIssuer(ca)
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-
-	// Configure per-host TLS: mTLS host gets client cert, other host does not.
+	// Configure per-host TLS using different hostnames:
+	// "127.0.0.1" → mTLS server (with client cert + server CA)
+	// "localhost"  → plain TLS server (server CA only, no client cert)
 	_, mtlsPort, _ := net.SplitHostPort(mtlsAddr)
 	_, tlsPort, _ := net.SplitHostPort(tlsAddr)
 
 	registry := httputil.NewHostTLSRegistry()
-	// mTLS host: client cert + server CA
-	registry.Set("localhost", &httputil.HostTLSConfig{
+	registry.Set("127.0.0.1", &httputil.HostTLSConfig{
 		ClientCertPath: pki.ClientCertFile,
 		ClientKeyPath:  pki.ClientKeyFile,
-		CABundlePath:   filepath.Join(pki.TmpDir, "server-ca.crt"),
+		CABundlePath:   pki.ServerCACertFile,
+	})
+	registry.Set("localhost", &httputil.HostTLSConfig{
+		CABundlePath: pki.ServerCACertFile,
 	})
 
-	tlsTransport := &httputil.StandardTransport{
-		InsecureSkipVerify: false,
-		HostTLS:            registry,
-	}
-	httpHandler.SetTLSTransport(tlsTransport)
-
-	detector := protocol.NewDetector(httpHandler)
-	listener := proxy.NewListener(proxy.ListenerConfig{
-		Addr:     "127.0.0.1:0",
-		Detector: detector,
-		Logger:   logger,
-	})
-
-	proxyCtx, proxyCancel := context.WithCancel(ctx)
+	listener, _, proxyCancel := startMTLSProxy(t, ctx, store, ca, registry)
 	defer proxyCancel()
-
-	go func() {
-		if err := listener.Start(proxyCtx); err != nil {
-			t.Logf("proxy listener error: %v", err)
-		}
-	}()
-
-	select {
-	case <-listener.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("proxy did not become ready")
-	}
 
 	client := httpsProxyClient(listener.Addr(), ca.Certificate())
 
-	// Request to mTLS host.
-	mtlsURL := fmt.Sprintf("https://localhost:%s/mtls", mtlsPort)
+	// Request to mTLS host via 127.0.0.1 — should present client cert.
+	mtlsURL := fmt.Sprintf("https://127.0.0.1:%s/mtls", mtlsPort)
 	resp1, err := client.Get(mtlsURL)
 	if err != nil {
 		t.Fatalf("GET mTLS host: %v", err)
@@ -597,7 +562,7 @@ func TestM21_MTLS_PerHostCertSwitching(t *testing.T) {
 		t.Errorf("mTLS host body = %q, want prefix %q", body1, "mtls-host:")
 	}
 
-	// Request to plain TLS host.
+	// Request to plain TLS host via localhost — should NOT present client cert.
 	tlsURL := fmt.Sprintf("https://localhost:%s/plain", tlsPort)
 	resp2, err := client.Get(tlsURL)
 	if err != nil {
@@ -646,9 +611,6 @@ func TestM21_MTLS_TLSVerifyControl(t *testing.T) {
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	issuer := cert.NewIssuer(ca)
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-
 	// Test: TLSVerify=false skips verification (should succeed without CA bundle).
 	tlsVerifyFalse := false
 	registry := httputil.NewHostTLSRegistry()
@@ -656,33 +618,8 @@ func TestM21_MTLS_TLSVerifyControl(t *testing.T) {
 		TLSVerify: &tlsVerifyFalse,
 	})
 
-	tlsTransport := &httputil.StandardTransport{
-		InsecureSkipVerify: false, // global is strict
-		HostTLS:            registry,
-	}
-	httpHandler.SetTLSTransport(tlsTransport)
-
-	detector := protocol.NewDetector(httpHandler)
-	listener := proxy.NewListener(proxy.ListenerConfig{
-		Addr:     "127.0.0.1:0",
-		Detector: detector,
-		Logger:   logger,
-	})
-
-	proxyCtx, proxyCancel := context.WithCancel(ctx)
+	listener, _, proxyCancel := startMTLSProxy(t, ctx, store, ca, registry)
 	defer proxyCancel()
-
-	go func() {
-		if err := listener.Start(proxyCtx); err != nil {
-			t.Logf("proxy listener error: %v", err)
-		}
-	}()
-
-	select {
-	case <-listener.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("proxy did not become ready")
-	}
 
 	client := httpsProxyClient(listener.Addr(), ca.Certificate())
 
@@ -1367,43 +1304,15 @@ func TestM21_Combined_MTLSFlowHARExport(t *testing.T) {
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	issuer := cert.NewIssuer(ca)
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-
 	registry := httputil.NewHostTLSRegistry()
 	registry.Set("localhost", &httputil.HostTLSConfig{
 		ClientCertPath: pki.ClientCertFile,
 		ClientKeyPath:  pki.ClientKeyFile,
-		CABundlePath:   filepath.Join(pki.TmpDir, "server-ca.crt"),
+		CABundlePath:   pki.ServerCACertFile,
 	})
 
-	tlsTransport := &httputil.StandardTransport{
-		InsecureSkipVerify: false,
-		HostTLS:            registry,
-	}
-	httpHandler.SetTLSTransport(tlsTransport)
-
-	detector := protocol.NewDetector(httpHandler)
-	proxyListener := proxy.NewListener(proxy.ListenerConfig{
-		Addr:     "127.0.0.1:0",
-		Detector: detector,
-		Logger:   logger,
-	})
-
-	proxyCtx, proxyCancel := context.WithCancel(ctx)
+	proxyListener, _, proxyCancel := startMTLSProxy(t, ctx, store, ca, registry)
 	defer proxyCancel()
-
-	go func() {
-		if err := proxyListener.Start(proxyCtx); err != nil {
-			t.Logf("proxy listener error: %v", err)
-		}
-	}()
-
-	select {
-	case <-proxyListener.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("proxy did not become ready")
-	}
 
 	client := httpsProxyClient(proxyListener.Addr(), ca.Certificate())
 
