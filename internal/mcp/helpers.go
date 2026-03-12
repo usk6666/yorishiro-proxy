@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -296,15 +297,16 @@ func (s *Server) checkSafetyInput(body []byte, rawURL string, headers http.Heade
 	return s.deps.safetyEngine.CheckInput(body, rawURL, headers)
 }
 
-// safetyViolationError formats a safety filter violation into an MCP error string.
+// safetyViolationError returns a generic error message for MCP clients when a safety
+// filter violation occurs. Details (rule ID, target, pattern) are logged server-side
+// to prevent leaking filter internals to the AI agent, which could enable bypass attempts.
 func safetyViolationError(v *safety.InputViolation) string {
-	return fmt.Sprintf(
-		"SafetyFilter blocked this operation: Destructive payload detected.\n"+
-			"Rule: %s\n"+
-			"Matched in: %s\n"+
-			"Pattern: %s\n\n"+
-			"This payload was classified as destructive and cannot be sent. "+
-			"If this is intentional, review the safety_filter configuration.",
-		v.RuleID, v.Target, v.RuleName,
+	slog.Warn("SafetyFilter violation",
+		"rule_id", v.RuleID,
+		"rule_name", v.RuleName,
+		"target", v.Target,
+		"matched_on", v.MatchedOn,
 	)
+	return "SafetyFilter blocked this operation: request blocked by safety policy. " +
+		"This payload was classified as destructive and cannot be sent."
 }

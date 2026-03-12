@@ -122,8 +122,9 @@ func TestSafetyFilter_Resend_BlocksDestructiveBody(t *testing.T) {
 	if !strings.Contains(textContent.Text, "SafetyFilter blocked") {
 		t.Errorf("error text = %q, want containing 'SafetyFilter blocked'", textContent.Text)
 	}
-	if !strings.Contains(textContent.Text, "destructive-sql:drop-table") {
-		t.Errorf("error text = %q, want containing rule ID", textContent.Text)
+	// Rule internals should not be exposed to the MCP client.
+	if strings.Contains(textContent.Text, "destructive-sql:drop-table") {
+		t.Errorf("error text should not contain rule ID: %q", textContent.Text)
 	}
 }
 
@@ -347,17 +348,20 @@ func TestSafetyFilter_ErrorFormat(t *testing.T) {
 	}
 	msg := safetyViolationError(v)
 
+	// The client-facing message should contain a generic blocking notice
+	// without leaking rule details (rule ID, pattern, target).
 	if !strings.Contains(msg, "SafetyFilter blocked this operation") {
 		t.Errorf("message missing 'SafetyFilter blocked this operation': %s", msg)
 	}
-	if !strings.Contains(msg, "destructive-sql:drop-table") {
-		t.Errorf("message missing rule ID: %s", msg)
+	if !strings.Contains(msg, "blocked by safety policy") {
+		t.Errorf("message missing 'blocked by safety policy': %s", msg)
 	}
-	if !strings.Contains(msg, "body") {
-		t.Errorf("message missing target: %s", msg)
+	// Rule internals must NOT be exposed to the MCP client.
+	if strings.Contains(msg, "destructive-sql:drop-table") {
+		t.Errorf("message should not contain rule ID: %s", msg)
 	}
-	if !strings.Contains(msg, "DROP TABLE pattern") {
-		t.Errorf("message missing rule name: %s", msg)
+	if strings.Contains(msg, "DROP TABLE pattern") {
+		t.Errorf("message should not contain rule name/pattern: %s", msg)
 	}
 }
 
