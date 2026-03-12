@@ -22,18 +22,75 @@ make build
 
 This produces the binary at `bin/yorishiro-proxy`.
 
-### Install with `go install`
+### Download from GitHub Releases
+
+Download the latest pre-built binary from the [GitHub Releases page](https://github.com/usk6666/yorishiro-proxy/releases/latest). Assets are named `yorishiro-proxy-{version}-{os}-{arch}` (e.g., `yorishiro-proxy-v1.0.0-linux-amd64`; Windows binaries have an `.exe` suffix).
+
+**macOS / Linux:**
 
 ```bash
-go install github.com/usk6666/yorishiro-proxy/cmd/yorishiro-proxy@latest
+# Example: download the latest release for Linux amd64
+curl -Lo yorishiro-proxy "https://github.com/usk6666/yorishiro-proxy/releases/latest/download/yorishiro-proxy-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+chmod +x yorishiro-proxy
+sudo mv yorishiro-proxy /usr/local/bin/
 ```
 
-The binary is placed in `$GOPATH/bin/yorishiro-proxy` (or `$HOME/go/bin/yorishiro-proxy` if `GOPATH` is not set).
+**Windows:**
+
+Download the `.exe` binary from the [Releases page](https://github.com/usk6666/yorishiro-proxy/releases/latest) and place it in a directory on your `PATH`.
 
 Verify the installation:
 
 ```bash
 yorishiro-proxy -h
+```
+
+### Quick Setup
+
+The `yorishiro-proxy install` command performs MCP configuration, CA certificate generation, and Skills installation in a single step:
+
+```bash
+yorishiro-proxy install
+```
+
+To also register the CA certificate in your OS trust store (requires `sudo`):
+
+```bash
+yorishiro-proxy install --trust
+```
+
+You can run individual setup targets as needed:
+
+| Command | Description |
+|---------|-------------|
+| `yorishiro-proxy install mcp` | Configure MCP server integration only |
+| `yorishiro-proxy install ca` | Generate the CA certificate only |
+| `yorishiro-proxy install skills` | Install Claude Code skills only |
+| `yorishiro-proxy install playwright` | Set up playwright-cli integration only |
+
+Additional flags:
+
+- `--interactive` -- launch a wizard that walks you through each step
+- `--user-scope` -- register MCP configuration in the user-level settings file (`~/.claude/settings.json`) instead of the project-level `.mcp.json`
+
+### Upgrading
+
+Update yorishiro-proxy to the latest release from GitHub:
+
+```bash
+yorishiro-proxy upgrade
+```
+
+To check for updates without installing:
+
+```bash
+yorishiro-proxy upgrade --check
+```
+
+After upgrading, update the installed skills to match the new version:
+
+```bash
+yorishiro-proxy install skills
 ```
 
 ## MCP Server Setup
@@ -58,7 +115,7 @@ Create `.mcp.json` with the following content:
 Replace `/path/to/bin/yorishiro-proxy` with the actual path to the binary. For example:
 
 - If built from source: `"/home/user/yorishiro-proxy/bin/yorishiro-proxy"`
-- If installed with `go install`: `"/home/user/go/bin/yorishiro-proxy"`
+- If downloaded from GitHub Releases: `"/usr/local/bin/yorishiro-proxy"`
 
 ### Configuration options
 
@@ -76,7 +133,7 @@ Common CLI flags to include in `args`:
 
 All flags also accept environment variables with the `YP_` prefix (e.g., `YP_INSECURE=true`, `YP_LOG_LEVEL=debug`). Priority: CLI flag > environment variable > config file > default value.
 
-> **Tip:** You can automate this configuration by running `yorishiro-proxy install` (or `yorishiro-proxy install mcp` for MCP config only).
+> **Tip:** You can automate this setup by running `yorishiro-proxy install` (see [Quick Setup](#quick-setup)).
 
 ### Verify the connection
 
@@ -99,6 +156,8 @@ After creating `.mcp.json`, restart Claude Code. You should see eleven MCP tools
 yorishiro-proxy performs HTTPS interception (MITM) by dynamically generating server certificates signed by its own CA. On first startup, the CA certificate is automatically generated and saved to `~/.yorishiro-proxy/ca/ca.crt`.
 
 To intercept HTTPS traffic, you must install this CA certificate in your operating system or browser trust store.
+
+> **Tip:** Running `yorishiro-proxy install ca --trust` generates the CA certificate and registers it in your OS trust store automatically. You can skip the manual steps below.
 
 ### Check the CA certificate path
 
