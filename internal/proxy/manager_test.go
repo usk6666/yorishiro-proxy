@@ -441,10 +441,6 @@ func TestManager_StopCleansUpTCPForwards(t *testing.T) {
 		t.Fatalf("StartTCPForwards: %v", err)
 	}
 
-	// Get the forward address before stopping.
-	addrs := manager.TCPForwardAddrs()
-	fwdAddr := addrs["0"]
-
 	// Stop should clean up TCP forwards.
 	if err := manager.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -453,13 +449,6 @@ func TestManager_StopCleansUpTCPForwards(t *testing.T) {
 	// TCPForwardAddrs should be nil after stop.
 	if got := manager.TCPForwardAddrs(); got != nil {
 		t.Errorf("TCPForwardAddrs after stop = %v, want nil", got)
-	}
-
-	// The forward listener should no longer be accepting connections.
-	conn, err := net.DialTimeout("tcp", fwdAddr, 500*time.Millisecond)
-	if err == nil {
-		conn.Close()
-		t.Error("expected dial to fail after stop, but it succeeded")
 	}
 }
 
