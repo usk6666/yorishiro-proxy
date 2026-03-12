@@ -75,6 +75,8 @@ type OutputMatch struct {
 	RuleID string
 	// Count is the number of times the pattern matched.
 	Count int
+	// Action is the action associated with the matched rule.
+	Action Action
 }
 
 // NewEngine compiles rules from the given configuration and returns an
@@ -188,10 +190,12 @@ func expandCustom(rc RuleConfig, index int) ([]Rule, error) {
 	}
 
 	targets := make([]Target, 0, len(rc.Targets))
+	var headerName string
 	for _, ts := range rc.Targets {
 		// Handle "header:Name" syntax.
 		base := ts
 		if strings.HasPrefix(strings.ToLower(ts), "header:") {
+			headerName = ts[len("header:"):]
 			base = "header"
 		}
 		t, err := ParseTarget(base)
@@ -214,6 +218,7 @@ func expandCustom(rc RuleConfig, index int) ([]Rule, error) {
 		Action:      action,
 		Replacement: rc.Replacement,
 		Category:    "custom",
+		HeaderName:  headerName,
 	}}, nil
 }
 
@@ -223,7 +228,7 @@ func (e *Engine) CheckInput(body []byte, rawURL string, headers http.Header) *In
 	for i := range e.inputRules {
 		r := &e.inputRules[i]
 		for _, target := range r.Targets {
-			matched, fragment := matchTarget(r.Pattern, target, body, rawURL, headers)
+			matched, fragment := matchTarget(r.Pattern, target, body, rawURL, headers, r.HeaderName)
 			if matched {
 				return &InputViolation{
 					RuleID:    r.ID,
@@ -238,7 +243,8 @@ func (e *Engine) CheckInput(body []byte, rawURL string, headers http.Header) *In
 }
 
 // matchTarget checks a compiled pattern against the specified target data.
-func matchTarget(re *regexp.Regexp, target Target, body []byte, rawURL string, headers http.Header) (bool, string) {
+// headerName is used with TargetHeader to restrict matching to a specific header.
+func matchTarget(re *regexp.Regexp, target Target, body []byte, rawURL string, headers http.Header, headerName string) (bool, string) {
 	switch target {
 	case TargetBody:
 		return matchBody(re, body)
@@ -247,6 +253,9 @@ func matchTarget(re *regexp.Regexp, target Target, body []byte, rawURL string, h
 	case TargetQuery:
 		return matchQuery(re, rawURL)
 	case TargetHeader:
+		if headerName != "" {
+			return matchNamedHeaderValues(re, headers, headerName)
+		}
 		return matchHeaderValues(re, headers)
 	case TargetHeaders:
 		return matchAllHeaders(re, headers)
@@ -266,11 +275,11 @@ func matchBody(re *regexp.Regexp, body []byte) (bool, string) {
 
 // matchString checks the pattern against a plain string.
 func matchString(re *regexp.Regexp, s string) (bool, string) {
-	m := re.FindString(s)
-	if m == "" {
+	loc := re.FindStringIndex(s)
+	if loc == nil {
 		return false, ""
 	}
-	return true, m
+	return true, s[loc[0]:loc[1]]
 }
 
 // matchQuery extracts the query string from a URL and checks the pattern.
@@ -289,6 +298,17 @@ func matchHeaderValues(re *regexp.Regexp, headers http.Header) (bool, string) {
 			if m := re.FindString(v); m != "" {
 				return true, m
 			}
+		}
+	}
+	return false, ""
+}
+
+// matchNamedHeaderValues checks the pattern against values of a specific header.
+func matchNamedHeaderValues(re *regexp.Regexp, headers http.Header, name string) (bool, string) {
+	values := headers.Values(name)
+	for _, v := range values {
+		if matched, fragment := matchString(re, v); matched {
+			return true, fragment
 		}
 	}
 	return false, ""
@@ -331,6 +351,7 @@ func (e *Engine) FilterOutput(data []byte) *OutputResult {
 		result.Matches = append(result.Matches, OutputMatch{
 			RuleID: r.ID,
 			Count:  len(locs),
+			Action: r.Action,
 		})
 
 		if r.Action == ActionMask {
@@ -352,46 +373,42 @@ func (e *Engine) FilterOutputHeaders(headers http.Header) (http.Header, []Output
 		r := &e.outputRules[i]
 
 		if hasTarget(r.Targets, TargetHeaders) {
-			// Match against all header values.
-			totalCount := 0
-			for name, values := range modified {
-				for j, v := range values {
-					locs := r.Pattern.FindAllStringIndex(v, -1)
-					if len(locs) == 0 {
-						continue
-					}
-					totalCount += len(locs)
-					if r.Action == ActionMask {
-						modified[name][j] = r.Pattern.ReplaceAllString(v, r.Replacement)
-					}
-				}
-			}
-			if totalCount > 0 {
-				matches = append(matches, OutputMatch{RuleID: r.ID, Count: totalCount})
+			if c := applyRuleToHeaders(r, modified, ""); c > 0 {
+				matches = append(matches, OutputMatch{RuleID: r.ID, Count: c, Action: r.Action})
 			}
 		}
 
 		if hasTarget(r.Targets, TargetHeader) {
-			totalCount := 0
-			for name, values := range modified {
-				for j, v := range values {
-					locs := r.Pattern.FindAllStringIndex(v, -1)
-					if len(locs) == 0 {
-						continue
-					}
-					totalCount += len(locs)
-					if r.Action == ActionMask {
-						modified[name][j] = r.Pattern.ReplaceAllString(v, r.Replacement)
-					}
-				}
-			}
-			if totalCount > 0 {
-				matches = append(matches, OutputMatch{RuleID: r.ID, Count: totalCount})
+			if c := applyRuleToHeaders(r, modified, r.HeaderName); c > 0 {
+				matches = append(matches, OutputMatch{RuleID: r.ID, Count: c, Action: r.Action})
 			}
 		}
 	}
 
 	return modified, matches
+}
+
+// applyRuleToHeaders applies a rule's pattern to the given headers and returns
+// the total match count. If filterName is non-empty, only the named header is
+// checked; otherwise all headers are checked.
+func applyRuleToHeaders(r *Rule, headers http.Header, filterName string) int {
+	totalCount := 0
+	for name, values := range headers {
+		if filterName != "" && !strings.EqualFold(name, filterName) {
+			continue
+		}
+		for j, v := range values {
+			locs := r.Pattern.FindAllStringIndex(v, -1)
+			if len(locs) == 0 {
+				continue
+			}
+			totalCount += len(locs)
+			if r.Action == ActionMask {
+				headers[name][j] = r.Pattern.ReplaceAllString(v, r.Replacement)
+			}
+		}
+	}
+	return totalCount
 }
 
 // hasTarget returns true if the given target is in the list.

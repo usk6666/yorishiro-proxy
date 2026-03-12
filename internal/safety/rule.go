@@ -122,4 +122,8 @@ type Rule struct {
 	Replacement string
 	// Category identifies the source: a preset name or "custom".
 	Category string
+	// HeaderName is the specific header name for TargetHeader rules
+	// (e.g. "Location" from the "header:Location" syntax). Empty means
+	// all headers are checked.
+	HeaderName string
 }

@@ -550,8 +550,99 @@ func TestNewEngine_HeaderColonTarget(t *testing.T) {
 	if len(e.InputRules()) != 1 {
 		t.Fatalf("expected 1 rule, got %d", len(e.InputRules()))
 	}
-	if e.InputRules()[0].Targets[0] != TargetHeader {
-		t.Errorf("target = %v, want TargetHeader", e.InputRules()[0].Targets[0])
+	r := e.InputRules()[0]
+	if r.Targets[0] != TargetHeader {
+		t.Errorf("target = %v, want TargetHeader", r.Targets[0])
+	}
+	if r.HeaderName != "Location" {
+		t.Errorf("HeaderName = %q, want %q", r.HeaderName, "Location")
+	}
+}
+
+func TestCheckInput_HeaderColonTarget_SpecificHeader(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "loc-evil", Pattern: `evil`, Targets: []string{"header:Location"}, Action: "block"},
+		},
+	})
+
+	// Should match when the specific header contains the pattern.
+	h := http.Header{}
+	h.Set("Location", "http://evil.com")
+	v := e.CheckInput(nil, "", h)
+	if v == nil {
+		t.Fatal("expected violation for Location header match")
+	}
+	if v.MatchedOn != "evil" {
+		t.Errorf("MatchedOn = %q, want %q", v.MatchedOn, "evil")
+	}
+
+	// Should NOT match when a different header contains the pattern.
+	h2 := http.Header{}
+	h2.Set("X-Other", "evil-value")
+	v2 := e.CheckInput(nil, "", h2)
+	if v2 != nil {
+		t.Errorf("expected nil for non-Location header, got %+v", v2)
+	}
+}
+
+func TestFilterOutputHeaders_SpecificHeader(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-loc",
+				Pattern:     `evil`,
+				Targets:     []string{"header:Location"},
+				Action:      "mask",
+				Replacement: "[SAFE]",
+			},
+		},
+	})
+
+	h := http.Header{}
+	h.Set("Location", "http://evil.com")
+	h.Set("X-Other", "also evil")
+	result, matches := e.FilterOutputHeaders(h)
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+	// Location should be masked.
+	if result.Get("Location") != "http://[SAFE].com" {
+		t.Errorf("Location = %q, want %q", result.Get("Location"), "http://[SAFE].com")
+	}
+	// X-Other should NOT be masked (rule targets only Location).
+	if result.Get("X-Other") != "also evil" {
+		t.Errorf("X-Other = %q, want %q", result.Get("X-Other"), "also evil")
+	}
+}
+
+func TestOutputMatch_ActionField(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{ID: "block-secret", Pattern: `secret`, Targets: []string{"body"}, Action: "block"},
+			{ID: "mask-token", Pattern: `token-\w+`, Targets: []string{"body"}, Action: "mask", Replacement: "[REDACTED]"},
+			{ID: "log-info", Pattern: `info`, Targets: []string{"body"}, Action: "log_only"},
+		},
+	})
+
+	result := e.FilterOutput([]byte("secret token-abc info"))
+	if len(result.Matches) != 3 {
+		t.Fatalf("expected 3 matches, got %d", len(result.Matches))
+	}
+	wantActions := map[string]Action{
+		"block-secret": ActionBlock,
+		"mask-token":   ActionMask,
+		"log-info":     ActionLogOnly,
+	}
+	for _, m := range result.Matches {
+		want, ok := wantActions[m.RuleID]
+		if !ok {
+			t.Errorf("unexpected match RuleID = %q", m.RuleID)
+			continue
+		}
+		if m.Action != want {
+			t.Errorf("match %q Action = %v, want %v", m.RuleID, m.Action, want)
+		}
 	}
 }
 
