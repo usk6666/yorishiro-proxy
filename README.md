@@ -197,7 +197,6 @@ Layer 4 TCP Listener
 
 - [Getting Started Guide](docs/getting-started.md) -- Detailed setup and usage walkthrough
 - [Plugin Development Guide](docs/plugins.md) -- Writing Starlark plugins to extend proxy behavior
-- [Roadmap](docs/roadmap.md) -- Milestone-based development plan and progress
 
 ## Contributing
 

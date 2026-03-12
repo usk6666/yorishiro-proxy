@@ -197,7 +197,6 @@ Layer 4 TCP リスナ
 
 - [Getting Started Guide](docs/getting-started.md) -- セットアップと使い方の詳細ウォークスルー
 - [Plugin Development Guide](docs/plugins.md) -- Starlark プラグインの開発ガイド
-- [Roadmap](docs/roadmap.md) -- マイルストーンベースの開発計画と進捗
 
 ## コントリビューション
 
