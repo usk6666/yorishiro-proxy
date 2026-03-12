@@ -10,6 +10,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // HandlerBase provides shared fields and setter methods for protocol handlers.
@@ -25,6 +26,7 @@ type HandlerBase struct {
 	RateLimiter     *RateLimiter
 	InterceptEngine *intercept.Engine
 	InterceptQueue  *intercept.Queue
+	SafetyEngine    *safety.Engine
 
 	// UpstreamMu protects UpstreamProxy for concurrent access.
 	UpstreamMu    sync.RWMutex
@@ -95,6 +97,23 @@ func (b *HandlerBase) SetInterceptEngine(engine *intercept.Engine) {
 // intercept rules. The queue must be set together with an intercept engine.
 func (b *HandlerBase) SetInterceptQueue(queue *intercept.Queue) {
 	b.InterceptQueue = queue
+}
+
+// SetSafetyEngine sets the safety filter engine used to detect destructive
+// payloads in incoming requests. When set, requests matching safety rules
+// are blocked (or logged) before reaching the upstream server.
+func (b *HandlerBase) SetSafetyEngine(engine *safety.Engine) {
+	b.SafetyEngine = engine
+}
+
+// CheckSafetyFilter evaluates the safety engine's input rules against
+// the request body, URL, and headers. Returns the first violation found,
+// or nil if no rules matched or the engine is not configured.
+func (b *HandlerBase) CheckSafetyFilter(body []byte, rawURL string, headers gohttp.Header) *safety.InputViolation {
+	if b.SafetyEngine == nil {
+		return nil
+	}
+	return b.SafetyEngine.CheckInput(body, rawURL, headers)
 }
 
 // SetUpstreamProxy configures the upstream proxy for outgoing connections.

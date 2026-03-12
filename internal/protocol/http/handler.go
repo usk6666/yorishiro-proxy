@@ -23,6 +23,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // maxRawCaptureSize limits the size of raw request/response bytes captured.
@@ -384,14 +385,14 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Target scope enforcement (before WebSocket — S-1: CWE-863).
 	if blocked, reason := h.checkTargetScope(req.URL); blocked {
 		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
-		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "target_scope", logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "target_scope", nil, logger)
 		return nil
 	}
 
 	// Rate limit enforcement (after target scope, before WebSocket).
 	if blocked := h.checkRateLimit(req.URL.Hostname()); blocked {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, logger)
 		return nil
 	}
 	if isWebSocketUpgrade(req) {
@@ -400,6 +401,20 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	bodyResult := readAndCaptureRequestBody(req, logger)
 	rawRequest := extractRawRequest(capture, captureStart, reader)
+
+	// Safety filter enforcement (after target scope + rate limit, before plugin hooks).
+	if violation := h.CheckSafetyFilter(bodyResult.recordBody, req.URL.String(), req.Header); violation != nil {
+		if h.safetyFilterAction(violation) == safety.ActionBlock {
+			h.writeSafetyFilterResponse(conn, violation, logger)
+			h.recordBlockedSession(ctx, req, bodyResult.recordBody, rawRequest, bodyResult.truncated, smuggling, start, connID, clientAddr, "safety_filter", violation, logger)
+			return nil
+		}
+		// log_only: log the violation but continue processing.
+		logger.Warn("safety filter violation (log_only)",
+			"rule_id", violation.RuleID, "rule_name", violation.RuleName,
+			"target", violation.Target.String(), "matched_on", violation.MatchedOn)
+	}
+
 	removeHopByHopHeaders(req.Header)
 
 	// Build plugin ConnInfo for hook data.
@@ -702,6 +717,35 @@ func (h *Handler) writeRateLimitResponse(conn net.Conn, logger *slog.Logger) {
 	logger.Info("request blocked by rate limit")
 }
 
+// writeSafetyFilterResponse writes a 403 Forbidden response indicating the
+// request was blocked by the safety filter.
+func (h *Handler) writeSafetyFilterResponse(conn net.Conn, violation *safety.InputViolation, logger *slog.Logger) {
+	body := fmt.Sprintf(`{"error":"blocked by safety filter","blocked_by":"safety_filter","rule":%q,"message":"Destructive payload detected: %s matched in request %s"}`,
+		violation.RuleID, violation.RuleName, violation.Target.String())
+	resp := fmt.Sprintf("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Blocked-By: yorishiro-proxy\r\nX-Block-Reason: safety_filter\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		len(body), body)
+	if _, err := conn.Write([]byte(resp)); err != nil {
+		logger.Debug("failed to write safety filter blocked response", "error", err)
+	}
+	logger.Info("request blocked by safety filter",
+		"rule_id", violation.RuleID, "rule_name", violation.RuleName,
+		"target", violation.Target.String(), "matched_on", violation.MatchedOn)
+}
+
+// safetyFilterAction looks up the action for the matched safety rule.
+// Returns the rule's action (block, mask, or log_only).
+func (h *Handler) safetyFilterAction(violation *safety.InputViolation) safety.Action {
+	if h.SafetyEngine == nil {
+		return safety.ActionBlock
+	}
+	for _, r := range h.SafetyEngine.InputRules() {
+		if r.ID == violation.RuleID {
+			return r.Action
+		}
+	}
+	return safety.ActionBlock
+}
+
 // writeBlockedResponse writes a 403 Forbidden response with a JSON body
 // indicating that the target was blocked by the target scope.
 func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, logger *slog.Logger) {
@@ -715,7 +759,8 @@ func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, log
 }
 
 // recordBlockedSession records a blocked request as a flow with the given blockedBy reason.
-func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr, blockedBy string, logger *slog.Logger) {
+// If violation is non-nil and blockedBy is "safety_filter", safety rule tags are added.
+func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
@@ -724,6 +769,14 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 	}
 
 	duration := time.Since(start)
+	tags := smugglingTags(smuggling)
+	if violation != nil {
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+		tags["safety_rule"] = violation.RuleID
+		tags["safety_target"] = violation.Target.String()
+	}
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "HTTP/1.x",
@@ -731,7 +784,7 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 		State:     "complete",
 		Timestamp: start,
 		Duration:  duration,
-		Tags:      smugglingTags(smuggling),
+		Tags:      tags,
 		BlockedBy: blockedBy,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
