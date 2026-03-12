@@ -1,0 +1,665 @@
+package safety
+
+import (
+	"net/http"
+	"testing"
+)
+
+func TestNewEngine_EmptyConfig(t *testing.T) {
+	e, err := NewEngine(Config{})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	if len(e.InputRules()) != 0 {
+		t.Errorf("expected 0 input rules, got %d", len(e.InputRules()))
+	}
+	if len(e.OutputRules()) != 0 {
+		t.Errorf("expected 0 output rules, got %d", len(e.OutputRules()))
+	}
+}
+
+func TestNewEngine_CustomRule(t *testing.T) {
+	cfg := Config{
+		InputRules: []RuleConfig{
+			{
+				ID:      "test-1",
+				Name:    "Test Rule",
+				Pattern: `(?i)\bDROP\b`,
+				Targets: []string{"body", "query"},
+				Action:  "block",
+			},
+		},
+	}
+	e, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	if len(e.InputRules()) != 1 {
+		t.Fatalf("expected 1 input rule, got %d", len(e.InputRules()))
+	}
+	r := e.InputRules()[0]
+	if r.ID != "test-1" {
+		t.Errorf("rule ID = %q, want %q", r.ID, "test-1")
+	}
+	if r.Category != "custom" {
+		t.Errorf("rule Category = %q, want %q", r.Category, "custom")
+	}
+	if len(r.Targets) != 2 {
+		t.Errorf("rule Targets = %d, want 2", len(r.Targets))
+	}
+}
+
+func TestNewEngine_PresetExpansion(t *testing.T) {
+	cfg := Config{
+		InputRules: []RuleConfig{
+			{Preset: "destructive-sql"},
+		},
+	}
+	e, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	if len(e.InputRules()) != 2 {
+		t.Fatalf("expected 2 input rules from preset, got %d", len(e.InputRules()))
+	}
+	for _, r := range e.InputRules() {
+		if r.Category != "destructive-sql" {
+			t.Errorf("rule %q category = %q, want %q", r.ID, r.Category, "destructive-sql")
+		}
+	}
+}
+
+func TestNewEngine_PresetReplacementOverride(t *testing.T) {
+	cfg := Config{
+		OutputRules: []RuleConfig{
+			{
+				Preset:      "sensitive-data",
+				Replacement: "[CUSTOM]",
+			},
+		},
+	}
+	e, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	if len(e.OutputRules()) != 1 {
+		t.Fatalf("expected 1 output rule, got %d", len(e.OutputRules()))
+	}
+	r := e.OutputRules()[0]
+	if r.Replacement != "[CUSTOM]" {
+		t.Errorf("replacement = %q, want %q", r.Replacement, "[CUSTOM]")
+	}
+}
+
+func TestNewEngine_Errors(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "invalid pattern",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "bad", Pattern: `(?P<`, Targets: []string{"body"}, Action: "block"},
+				},
+			},
+		},
+		{
+			name: "unknown preset",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{Preset: "nonexistent"},
+				},
+			},
+		},
+		{
+			name: "missing ID for custom rule",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{Pattern: `test`, Targets: []string{"body"}, Action: "block"},
+				},
+			},
+		},
+		{
+			name: "missing pattern for custom rule",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "r1", Targets: []string{"body"}, Action: "block"},
+				},
+			},
+		},
+		{
+			name: "missing action for custom rule",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "r1", Pattern: `test`, Targets: []string{"body"}},
+				},
+			},
+		},
+		{
+			name: "missing targets for custom rule",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "r1", Pattern: `test`, Action: "block"},
+				},
+			},
+		},
+		{
+			name: "invalid action",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "r1", Pattern: `test`, Targets: []string{"body"}, Action: "nuke"},
+				},
+			},
+		},
+		{
+			name: "invalid target",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "r1", Pattern: `test`, Targets: []string{"foobar"}, Action: "block"},
+				},
+			},
+		},
+		{
+			name: "pattern and preset mutually exclusive",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "r1", Pattern: `test`, Preset: "destructive-sql", Targets: []string{"body"}, Action: "block"},
+				},
+			},
+		},
+		{
+			name: "duplicate rule ID",
+			cfg: Config{
+				InputRules: []RuleConfig{
+					{ID: "dup", Pattern: `a`, Targets: []string{"body"}, Action: "block"},
+					{ID: "dup", Pattern: `b`, Targets: []string{"body"}, Action: "block"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewEngine(tt.cfg)
+			if err == nil {
+				t.Error("NewEngine() expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestCheckInput_BodyMatch(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "drop", Pattern: `(?i)\bDROP\s+TABLE\b`, Targets: []string{"body"}, Action: "block"},
+		},
+	})
+
+	tests := []struct {
+		name    string
+		body    []byte
+		wantNil bool
+	}{
+		{"matches DROP TABLE", []byte("SELECT 1; DROP TABLE users"), false},
+		{"case insensitive", []byte("drop table foo"), false},
+		{"no match", []byte("SELECT * FROM users"), true},
+		{"empty body", nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := e.CheckInput(tt.body, "", nil)
+			if tt.wantNil && v != nil {
+				t.Errorf("CheckInput() = %+v, want nil", v)
+			}
+			if !tt.wantNil && v == nil {
+				t.Error("CheckInput() = nil, want violation")
+			}
+			if !tt.wantNil && v != nil {
+				if v.RuleID != "drop" {
+					t.Errorf("violation RuleID = %q, want %q", v.RuleID, "drop")
+				}
+				if v.Target != TargetBody {
+					t.Errorf("violation Target = %v, want %v", v.Target, TargetBody)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckInput_URLMatch(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "admin", Pattern: `/admin`, Targets: []string{"url"}, Action: "block"},
+		},
+	})
+
+	v := e.CheckInput(nil, "http://example.com/admin/delete", nil)
+	if v == nil {
+		t.Fatal("expected violation for /admin URL")
+	}
+	if v.MatchedOn != "/admin" {
+		t.Errorf("MatchedOn = %q, want %q", v.MatchedOn, "/admin")
+	}
+}
+
+func TestCheckInput_QueryMatch(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "sqli", Pattern: `(?i)UNION\s+SELECT`, Targets: []string{"query"}, Action: "block"},
+		},
+	})
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantNil bool
+	}{
+		{"match in query", "http://example.com/search?q=1 UNION SELECT 1", false},
+		{"no query string", "http://example.com/search", true},
+		{"no match in query", "http://example.com/search?q=hello", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := e.CheckInput(nil, tt.rawURL, nil)
+			if tt.wantNil && v != nil {
+				t.Errorf("CheckInput() = %+v, want nil", v)
+			}
+			if !tt.wantNil && v == nil {
+				t.Error("CheckInput() = nil, want violation")
+			}
+		})
+	}
+}
+
+func TestCheckInput_HeaderMatch(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "evil-header", Pattern: `evil`, Targets: []string{"header"}, Action: "block"},
+		},
+	})
+
+	h := http.Header{}
+	h.Set("X-Custom", "this is evil")
+	v := e.CheckInput(nil, "", h)
+	if v == nil {
+		t.Fatal("expected violation for header match")
+	}
+	if v.MatchedOn != "evil" {
+		t.Errorf("MatchedOn = %q, want %q", v.MatchedOn, "evil")
+	}
+}
+
+func TestCheckInput_HeadersMatch(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "headers-check", Pattern: `X-Secret: token123`, Targets: []string{"headers"}, Action: "block"},
+		},
+	})
+
+	h := http.Header{}
+	h.Set("X-Secret", "token123")
+	v := e.CheckInput(nil, "", h)
+	if v == nil {
+		t.Fatal("expected violation for headers match")
+	}
+}
+
+func TestCheckInput_NoRules(t *testing.T) {
+	e := mustEngine(t, Config{})
+	v := e.CheckInput([]byte("DROP TABLE users"), "http://evil.com", nil)
+	if v != nil {
+		t.Errorf("expected nil with no rules, got %+v", v)
+	}
+}
+
+func TestCheckInput_FirstRuleWins(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "first", Pattern: `DROP`, Targets: []string{"body"}, Action: "block"},
+			{ID: "second", Pattern: `DROP`, Targets: []string{"body"}, Action: "log_only"},
+		},
+	})
+
+	v := e.CheckInput([]byte("DROP TABLE"), "", nil)
+	if v == nil {
+		t.Fatal("expected violation")
+	}
+	if v.RuleID != "first" {
+		t.Errorf("RuleID = %q, want %q", v.RuleID, "first")
+	}
+}
+
+func TestFilterOutput_Mask(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-secret",
+				Pattern:     `secret-\w+`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "[REDACTED]",
+			},
+		},
+	})
+
+	result := e.FilterOutput([]byte("token=secret-abc123 key=secret-xyz789"))
+	if !result.Masked {
+		t.Error("expected Masked to be true")
+	}
+	want := "token=[REDACTED] key=[REDACTED]"
+	if string(result.Data) != want {
+		t.Errorf("Data = %q, want %q", string(result.Data), want)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("expected 1 match entry, got %d", len(result.Matches))
+	}
+	if result.Matches[0].Count != 2 {
+		t.Errorf("match count = %d, want 2", result.Matches[0].Count)
+	}
+}
+
+func TestFilterOutput_LogOnly(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:      "log-secret",
+				Pattern: `secret`,
+				Targets: []string{"body"},
+				Action:  "log_only",
+			},
+		},
+	})
+
+	data := []byte("this is a secret")
+	result := e.FilterOutput(data)
+	if result.Masked {
+		t.Error("expected Masked to be false for log_only")
+	}
+	if string(result.Data) != string(data) {
+		t.Errorf("Data should be unchanged, got %q", string(result.Data))
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(result.Matches))
+	}
+}
+
+func TestFilterOutput_NoMatch(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-x",
+				Pattern:     `XXXX`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "Y",
+			},
+		},
+	})
+
+	result := e.FilterOutput([]byte("nothing here"))
+	if result.Masked {
+		t.Error("expected Masked to be false")
+	}
+	if len(result.Matches) != 0 {
+		t.Errorf("expected 0 matches, got %d", len(result.Matches))
+	}
+}
+
+func TestFilterOutput_NonBodyTargetIgnored(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "url-only",
+				Pattern:     `secret`,
+				Targets:     []string{"url"},
+				Action:      "mask",
+				Replacement: "[X]",
+			},
+		},
+	})
+
+	result := e.FilterOutput([]byte("secret data"))
+	if result.Masked {
+		t.Error("url-target rule should not apply to body output")
+	}
+}
+
+func TestFilterOutputHeaders_Mask(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-token",
+				Pattern:     `Bearer \w+`,
+				Targets:     []string{"headers"},
+				Action:      "mask",
+				Replacement: "Bearer [REDACTED]",
+			},
+		},
+	})
+
+	h := http.Header{}
+	h.Set("Authorization", "Bearer abc123")
+	result, matches := e.FilterOutputHeaders(h)
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+	if result.Get("Authorization") != "Bearer [REDACTED]" {
+		t.Errorf("Authorization = %q, want %q", result.Get("Authorization"), "Bearer [REDACTED]")
+	}
+}
+
+func TestFilterOutputHeaders_NoModifyOriginal(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-h",
+				Pattern:     `secret`,
+				Targets:     []string{"headers"},
+				Action:      "mask",
+				Replacement: "[X]",
+			},
+		},
+	})
+
+	h := http.Header{}
+	h.Set("X-Data", "secret")
+	_, _ = e.FilterOutputHeaders(h)
+	// Original should be unchanged.
+	if h.Get("X-Data") != "secret" {
+		t.Errorf("original header modified: got %q", h.Get("X-Data"))
+	}
+}
+
+func TestFilterOutput_CaptureGroupReplacement(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "partial-mask",
+				Pattern:     `(user=)\w+`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "${1}[REDACTED]",
+			},
+		},
+	})
+
+	result := e.FilterOutput([]byte("data: user=admin"))
+	want := "data: user=[REDACTED]"
+	if string(result.Data) != want {
+		t.Errorf("Data = %q, want %q", string(result.Data), want)
+	}
+}
+
+func TestCheckInput_WithPreset(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{Preset: "destructive-sql"},
+		},
+	})
+
+	tests := []struct {
+		name    string
+		body    string
+		wantNil bool
+	}{
+		{"DROP TABLE matches", "DROP TABLE users", false},
+		{"drop database matches", "drop database mydb", false},
+		{"TRUNCATE TABLE matches", "TRUNCATE TABLE logs", false},
+		{"SELECT is allowed", "SELECT * FROM users", true},
+		{"INSERT is allowed", "INSERT INTO users VALUES (1)", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := e.CheckInput([]byte(tt.body), "", nil)
+			if tt.wantNil && v != nil {
+				t.Errorf("CheckInput() = %+v, want nil", v)
+			}
+			if !tt.wantNil && v == nil {
+				t.Error("CheckInput() = nil, want violation")
+			}
+		})
+	}
+}
+
+func TestNewEngine_CustomRuleDefaultsNameToID(t *testing.T) {
+	e := mustEngine(t, Config{
+		InputRules: []RuleConfig{
+			{ID: "my-rule", Pattern: `test`, Targets: []string{"body"}, Action: "block"},
+		},
+	})
+	r := e.InputRules()[0]
+	if r.Name != "my-rule" {
+		t.Errorf("Name = %q, want %q", r.Name, "my-rule")
+	}
+}
+
+func TestNewEngine_HeaderColonTarget(t *testing.T) {
+	cfg := Config{
+		InputRules: []RuleConfig{
+			{ID: "loc", Pattern: `evil`, Targets: []string{"header:Location"}, Action: "block"},
+		},
+	}
+	e, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	if len(e.InputRules()) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(e.InputRules()))
+	}
+	if e.InputRules()[0].Targets[0] != TargetHeader {
+		t.Errorf("target = %v, want TargetHeader", e.InputRules()[0].Targets[0])
+	}
+}
+
+// mustEngine is a test helper that creates an Engine or fails the test.
+func mustEngine(t *testing.T, cfg Config) *Engine {
+	t.Helper()
+	e, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	return e
+}
+
+func TestParseTarget(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    Target
+		wantErr bool
+	}{
+		{"body", TargetBody, false},
+		{"BODY", TargetBody, false},
+		{"url", TargetURL, false},
+		{"query", TargetQuery, false},
+		{"header", TargetHeader, false},
+		{"headers", TargetHeaders, false},
+		{"unknown", 0, true},
+		{"", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseTarget(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseTarget(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseTarget(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseAction(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    Action
+		wantErr bool
+	}{
+		{"block", ActionBlock, false},
+		{"BLOCK", ActionBlock, false},
+		{"mask", ActionMask, false},
+		{"log_only", ActionLogOnly, false},
+		{"nuke", 0, true},
+		{"", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseAction(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseAction(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseAction(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTargetString(t *testing.T) {
+	if s := TargetBody.String(); s != "body" {
+		t.Errorf("TargetBody.String() = %q, want %q", s, "body")
+	}
+	if s := Target(99).String(); s != "Target(99)" {
+		t.Errorf("Target(99).String() = %q, want %q", s, "Target(99)")
+	}
+}
+
+func TestActionString(t *testing.T) {
+	if s := ActionBlock.String(); s != "block" {
+		t.Errorf("ActionBlock.String() = %q, want %q", s, "block")
+	}
+	if s := Action(99).String(); s != "Action(99)" {
+		t.Errorf("Action(99).String() = %q, want %q", s, "Action(99)")
+	}
+}
+
+func TestPresetNames(t *testing.T) {
+	names := PresetNames()
+	if len(names) < 2 {
+		t.Errorf("expected at least 2 presets, got %d", len(names))
+	}
+	found := make(map[string]bool)
+	for _, n := range names {
+		found[n] = true
+	}
+	if !found["destructive-sql"] {
+		t.Error("missing preset: destructive-sql")
+	}
+	if !found["sensitive-data"] {
+		t.Error("missing preset: sensitive-data")
+	}
+}
+
+func TestLookupPreset_NotFound(t *testing.T) {
+	if p := LookupPreset("nonexistent"); p != nil {
+		t.Errorf("LookupPreset(nonexistent) = %+v, want nil", p)
+	}
+}
