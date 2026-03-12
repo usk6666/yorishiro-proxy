@@ -37,17 +37,21 @@ No parameters required.
 Returns: fingerprint, subject, not_after, persisted, cert_path, install_hint.
 
 ### export_flows
-Export flows to JSONL format with optional filtering. Each line in the output is a complete JSON object containing a flow and its messages.
+Export flows to JSONL or HAR (HTTP Archive 1.2) format with optional filtering.
 
 **Parameters:**
-- **format** (string, optional): Export format. Currently only `"jsonl"` is supported (default: `"jsonl"`).
+- **format** (string, optional): Export format. `"jsonl"` (default) for JSONL or `"har"` for HAR 1.2.
 - **filter** (object, optional): Flow filter criteria:
   - **protocol** (string, optional): Filter by protocol (e.g. `"HTTPS"`, `"HTTP/1.x"`).
   - **url_pattern** (string, optional): Filter by URL substring.
   - **time_after** (string, optional): Include flows after this time (RFC3339 format).
   - **time_before** (string, optional): Include flows before this time (RFC3339 format).
 - **include_bodies** (boolean, optional): Include message body and raw_bytes in export (default: `true`). Set to `false` for metadata-only export.
-- **output_path** (string, optional): File path to write the export data. If not specified, data is returned inline in the MCP response.
+- **output_path** (string, optional for JSONL, **required for HAR**): File path to write the export data. JSONL supports inline output when omitted; HAR always requires a file path.
+
+**Format details:**
+- **JSONL**: Each line is a complete JSON object containing a flow and its messages. Supports inline and file output.
+- **HAR**: HTTP Archive 1.2 format. Single JSON object compatible with browser DevTools, Burp Suite, and OWASP ZAP. File output only. Raw TCP and gRPC flows are excluded. WebSocket flows include `_webSocketMessages` custom field. Binary bodies are base64-encoded with `content.encoding: "base64"`.
 
 Returns: exported_count, format, output_path (if file output), data (if inline output).
 
@@ -102,6 +106,33 @@ Returns: imported, skipped, errors, source.
     "format": "jsonl",
     "include_bodies": true,
     "output_path": "/tmp/export.jsonl"
+  }
+}
+```
+
+### Export flows to HAR file
+```json
+{
+  "action": "export_flows",
+  "params": {
+    "format": "har",
+    "include_bodies": true,
+    "output_path": "/tmp/export.har"
+  }
+}
+```
+
+### Export filtered flows to HAR
+```json
+{
+  "action": "export_flows",
+  "params": {
+    "format": "har",
+    "filter": {
+      "protocol": "HTTPS",
+      "url_pattern": "/api/"
+    },
+    "output_path": "/tmp/api-flows.har"
   }
 }
 ```

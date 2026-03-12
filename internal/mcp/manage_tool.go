@@ -38,7 +38,7 @@ type manageParams struct {
 	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)"`
 
 	// export_flows parameters
-	Format        string        `json:"format,omitempty" jsonschema:"export format (jsonl)"`
+	Format        string        `json:"format,omitempty" jsonschema:"export format: jsonl (default) or har (HTTP Archive 1.2)"`
 	Filter        *exportFilter `json:"filter,omitempty" jsonschema:"flow filter for export"`
 	IncludeBodies *bool         `json:"include_bodies,omitempty" jsonschema:"include message bodies in export (default: true)"`
 	OutputPath    string        `json:"output_path,omitempty" jsonschema:"file path to write export data"`
@@ -66,7 +66,7 @@ func (s *Server) registerManage() {
 		Description: "Manage flow data and CA certificates. " +
 			"Available actions: " +
 			"'delete_flows' deletes flows by ID, by age (older_than_days), by protocol, or all (confirm required); " +
-			"'export_flows' exports flows to JSONL format (optionally filtered, with or without bodies, to file or inline); " +
+			"'export_flows' exports flows to JSONL or HAR (HTTP Archive 1.2) format (optionally filtered, with or without bodies, to file or inline for JSONL, file-only for HAR); " +
 			"'import_flows' imports flows from a JSONL file (supports skip/replace on ID conflict); " +
 			"'regenerate_ca_cert' regenerates the CA certificate (auto-persist mode: saves to disk; ephemeral mode: in-memory only; explicit mode: error).",
 	}, s.handleManage)
@@ -270,13 +270,20 @@ func (s *Server) handleManageExportFlows(ctx context.Context, params manageParam
 	if format == "" {
 		format = "jsonl"
 	}
-	if format != "jsonl" {
-		return nil, fmt.Errorf("unsupported export format %q: only \"jsonl\" is supported", format)
+	if format != "jsonl" && format != "har" {
+		return nil, fmt.Errorf("unsupported export format %q: supported formats are \"jsonl\" and \"har\"", format)
 	}
 
 	opts, err := buildExportOptions(params)
 	if err != nil {
 		return nil, err
+	}
+
+	if format == "har" {
+		if params.OutputPath == "" {
+			return nil, fmt.Errorf("HAR export requires output_path: HAR is a single JSON object and cannot be returned inline")
+		}
+		return s.exportFlowsToHARFile(ctx, params.OutputPath, opts)
 	}
 
 	if params.OutputPath != "" {
@@ -320,17 +327,19 @@ func buildExportOptions(params manageParams) (flow.ExportOptions, error) {
 	return opts, nil
 }
 
-// exportFlowsToFile exports flows to a file at the given output path.
-func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
-	cleanPath, err := validateFilePath(outputPath)
+// writeToFileAtomic validates the output path and atomically writes content
+// via a temp file. The writeFn callback receives the temp file to write to and
+// returns the number of items written.
+func writeToFileAtomic(outputPath string, writeFn func(f *os.File) (int, error)) (cleanPath string, n int, err error) {
+	cleanPath, err = validateFilePath(outputPath)
 	if err != nil {
-		return nil, fmt.Errorf("invalid output_path: %w", err)
+		return "", 0, fmt.Errorf("invalid output_path: %w", err)
 	}
 
 	dir := filepath.Dir(cleanPath)
 	tmpFile, err := os.CreateTemp(dir, ".yorishiro-export-*.tmp")
 	if err != nil {
-		return nil, fmt.Errorf("create temp file for export: %w", err)
+		return "", 0, fmt.Errorf("create temp file for export: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	success := false
@@ -342,28 +351,44 @@ func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format strin
 	}()
 
 	if err := tmpFile.Chmod(0600); err != nil {
-		return nil, fmt.Errorf("set file permissions: %w", err)
+		return "", 0, fmt.Errorf("set file permissions: %w", err)
 	}
 
-	n, err := flow.ExportFlows(ctx, s.deps.store, tmpFile, opts)
+	n, err = writeFn(tmpFile)
 	if err != nil {
-		return nil, fmt.Errorf("export flows: %w", err)
+		return "", 0, err
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		return nil, fmt.Errorf("close temp file: %w", err)
+		return "", 0, fmt.Errorf("close temp file: %w", err)
 	}
 
 	if info, statErr := os.Lstat(cleanPath); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
+			return "", 0, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
 		}
 	}
 
 	if err := os.Rename(tmpPath, cleanPath); err != nil {
-		return nil, fmt.Errorf("rename temp file to output: %w", err)
+		return "", 0, fmt.Errorf("rename temp file to output: %w", err)
 	}
 	success = true
+
+	return cleanPath, n, nil
+}
+
+// exportFlowsToFile exports flows to a file at the given output path.
+func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
+	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
+		count, err := flow.ExportFlows(ctx, s.deps.store, f, opts)
+		if err != nil {
+			return 0, fmt.Errorf("export flows: %w", err)
+		}
+		return count, nil
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	return &executeExportFlowsResult{
 		ExportedCount: n,
@@ -385,6 +410,26 @@ func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow
 		ExportedCount: n,
 		Format:        format,
 		Data:          buf.String(),
+	}, nil
+}
+
+// exportFlowsToHARFile exports flows to a HAR file at the given output path.
+func (s *Server) exportFlowsToHARFile(ctx context.Context, outputPath string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
+	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
+		count, err := flow.ExportHAR(ctx, s.deps.store, f, opts, s.version)
+		if err != nil {
+			return 0, fmt.Errorf("export HAR: %w", err)
+		}
+		return count, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &executeExportFlowsResult{
+		ExportedCount: n,
+		Format:        "har",
+		OutputPath:    cleanPath,
 	}, nil
 }
 
