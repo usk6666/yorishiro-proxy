@@ -29,6 +29,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // http2Preface is the HTTP/2 connection preface sent by clients.
@@ -312,6 +313,16 @@ func (h *Handler) handleStream(
 		return
 	}
 
+	// Safety filter enforcement (after target scope + rate limit, before plugin hooks).
+	// NOTE (L-1): The safety filter is intentionally placed after the rate limiter.
+	// The filter requires the request body (read in readAndTruncateBody above).
+	// Placing it before the rate limiter would allow rate-limited clients to
+	// force body reads and safety checks on every request, increasing resource
+	// consumption under abuse.
+	if h.checkSafetyFilter(sc) {
+		return
+	}
+
 	if h.runClientPluginHook(sc) {
 		return
 	}
@@ -443,6 +454,41 @@ func (h *Handler) checkTargetScope(sc *streamContext) bool {
 	sc.logger.Info("HTTP/2 request blocked by target scope",
 		"host", sc.req.URL.Host, "reason", reason)
 	return true
+}
+
+// checkSafetyFilter enforces safety filter rules. Returns true if the request was blocked.
+// NOTE: HTTP/2 blocked flow recording is not implemented yet (consistent with checkTargetScope/checkRateLimit).
+func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
+	violation := h.CheckSafetyFilter(sc.reqBody, sc.req.URL.String(), sc.req.Header)
+	if violation == nil {
+		return false
+	}
+
+	action := h.SafetyFilterAction(violation)
+	if action != safety.ActionBlock {
+		// log_only: log the violation but continue processing.
+		sc.logger.Warn("safety filter violation (log_only)",
+			"rule_id", violation.RuleID, "rule_name", violation.RuleName,
+			"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
+		return false
+	}
+
+	writeSafetyFilterResponse(sc.w, violation)
+	sc.logger.Info("HTTP/2 request blocked by safety filter",
+		"rule_id", violation.RuleID, "rule_name", violation.RuleName,
+		"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
+	return true
+}
+
+// writeSafetyFilterResponse writes a 403 Forbidden response for safety filter violations.
+func writeSafetyFilterResponse(w gohttp.ResponseWriter, violation *safety.InputViolation) {
+	body := proxy.BuildSafetyFilterResponseBody(violation)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Blocked-By", "yorishiro-proxy")
+	w.Header().Set("X-Block-Reason", "safety_filter")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(gohttp.StatusForbidden)
+	w.Write(body)
 }
 
 // checkRateLimit enforces rate limits. Returns true if the request was blocked.
