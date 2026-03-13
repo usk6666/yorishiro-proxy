@@ -373,7 +373,7 @@ func TestMTLS_ProxyWithClientCert(t *testing.T) {
 	if fl.Protocol != "HTTPS" {
 		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
-	send, recv := getFlowMessages(t, ctx, store, fl.ID)
+	send, recv := pollFlowMessages(t, ctx, store, fl.ID)
 	if send == nil {
 		t.Fatal("send message not found")
 	}
