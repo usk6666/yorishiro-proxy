@@ -5,21 +5,20 @@ package flow_test
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // newTestStore creates a temporary SQLiteStore for testing.
 func newTestStore(t *testing.T) *flow.SQLiteStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	store, err := flow.NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -62,7 +61,7 @@ func TestCleaner_MaxFlows(t *testing.T) {
 		MaxFlows: 5,
 		Interval: 0, // no periodic cleanup; we test RunOnce
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 
 	deleted, err := cleaner.RunOnce(ctx)
@@ -117,7 +116,7 @@ func TestCleaner_MaxAge(t *testing.T) {
 		MaxAge:   1 * time.Hour,
 		Interval: 0,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 
 	deleted, err := cleaner.RunOnce(ctx)
@@ -156,7 +155,7 @@ func TestCleaner_MaxFlowsAndMaxAge_Combined(t *testing.T) {
 		MaxFlows: 5,
 		Interval: 0,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 
 	deleted, err := cleaner.RunOnce(ctx)
@@ -189,7 +188,7 @@ func TestCleaner_NoPolicyDeletesNothing(t *testing.T) {
 		// No MaxFlows, no MaxAge — nothing should be deleted.
 		Interval: 0,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 
 	deleted, err := cleaner.RunOnce(ctx)
@@ -222,7 +221,7 @@ func TestCleaner_StartStop_Lifecycle(t *testing.T) {
 		MaxFlows: 5,
 		Interval: 50 * time.Millisecond, // fast interval for testing
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 
 	// Start runs an immediate cleanup.
@@ -267,7 +266,7 @@ func TestCleaner_StartStop_ContextCancellation(t *testing.T) {
 		MaxFlows: 100,
 		Interval: 50 * time.Millisecond,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 
 	cleaner.Start(ctx)
@@ -296,7 +295,7 @@ func TestCleaner_PeriodicCleanup(t *testing.T) {
 		MaxFlows: 3,
 		Interval: 100 * time.Millisecond,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 	cleaner.Start(ctx)
 	defer cleaner.Stop()
@@ -334,7 +333,7 @@ func TestCleaner_ConcurrentRecordingAndCleanup(t *testing.T) {
 		MaxFlows: 10,
 		Interval: 50 * time.Millisecond,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 	cleaner.Start(ctx)
 	defer cleaner.Stop()
@@ -423,7 +422,7 @@ func TestCleaner_StartWithZeroInterval(t *testing.T) {
 		MaxFlows: 5,
 		Interval: 0,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
 	cleaner.Start(ctx)
 
