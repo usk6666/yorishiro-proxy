@@ -68,10 +68,13 @@ func TestSecurity_GetSafetyFilter_NotEnabled(t *testing.T) {
 	if len(got.InputRules) != 0 {
 		t.Errorf("expected 0 input rules, got %d", len(got.InputRules))
 	}
+	if len(got.OutputRules) != 0 {
+		t.Errorf("expected 0 output rules, got %d", len(got.OutputRules))
+	}
 }
 
 func TestSecurity_GetSafetyFilter_WithEngine(t *testing.T) {
-	// Create an engine with preset + custom rules.
+	// Create an engine with preset + custom rules for both input and output.
 	cfg := safety.Config{
 		InputRules: []safety.RuleConfig{
 			{Preset: "destructive-sql"},
@@ -82,6 +85,9 @@ func TestSecurity_GetSafetyFilter_WithEngine(t *testing.T) {
 				Targets: []string{"body"},
 				Action:  "block",
 			},
+		},
+		OutputRules: []safety.RuleConfig{
+			{Preset: "credit-card", Action: "mask"},
 		},
 	}
 	engine, err := safety.NewEngine(cfg)
@@ -147,6 +153,24 @@ func TestSecurity_GetSafetyFilter_WithEngine(t *testing.T) {
 	}
 	if !presetFound {
 		t.Error("destructive-sql preset rules not found in result")
+	}
+
+	// Check output rules are present (credit-card preset).
+	if len(got.OutputRules) == 0 {
+		t.Error("expected output rules from credit-card preset, got 0")
+	}
+	outputPresetFound := false
+	for _, r := range got.OutputRules {
+		if r.Category == "credit-card" {
+			outputPresetFound = true
+			if r.Action != "mask" {
+				t.Errorf("output rule action = %q, want %q", r.Action, "mask")
+			}
+			break
+		}
+	}
+	if !outputPresetFound {
+		t.Error("credit-card preset rules not found in output rules")
 	}
 }
 
