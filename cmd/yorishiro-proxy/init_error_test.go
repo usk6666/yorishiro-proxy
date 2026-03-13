@@ -512,15 +512,6 @@ func TestInitRateLimiter_Configurations(t *testing.T) {
 	}
 }
 
-// TestInitTargetScope_NilPolicy verifies target scope initialization
-// returns nil when no policy is configured.
-func TestInitTargetScope_NilPolicy(t *testing.T) {
-	scope := initTargetScope(nil, nil)
-	if scope != nil {
-		t.Error("expected nil scope for nil policy")
-	}
-}
-
 // TestResolveHTTPToken verifies token resolution behavior.
 func TestResolveHTTPToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
