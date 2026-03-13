@@ -370,6 +370,22 @@
   line-height: 1.5;
 }
 
+/* Hooks section */
+.resend-hooks-section {
+  margin-top: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-md);
+}
+
+.resend-hooks-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-sm) 0;
+}
+
 /* Resend page code styling */
 .resend-page code {
   padding: 2px var(--space-xs);

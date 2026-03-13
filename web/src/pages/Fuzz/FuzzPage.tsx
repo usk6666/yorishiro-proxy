@@ -13,9 +13,11 @@ import type {
   FuzzPayloadSet,
   FuzzPosition,
   FuzzStopCondition,
+  HooksInput,
   MacrosEntry,
   QueryFilter,
 } from "../../lib/mcp/types.js";
+import { HookConfigEditor } from "../../components/hooks/HookConfigEditor.js";
 import "./FuzzPage.css";
 
 // ---------------------------------------------------------------------------
@@ -587,8 +589,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
   const [stopLatencyMs, setStopLatencyMs] = useState("");
 
   // Hooks
-  const [preSendMacro, setPreSendMacro] = useState("");
-  const [postReceiveMacro, setPostReceiveMacro] = useState("");
+  const [hooksConfig, setHooksConfig] = useState<HooksInput>({});
 
   // --- Position management ---
   const addPosition = useCallback(() => {
@@ -708,17 +709,9 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
       if (statusCodes.length > 0) stopOn.status_codes = statusCodes;
     }
 
-    // Build hooks
-    let hooks: { pre_send?: { macro: string }; post_receive?: { macro: string } } | undefined;
-    if (preSendMacro.trim() || postReceiveMacro.trim()) {
-      hooks = {};
-      if (preSendMacro.trim()) {
-        hooks.pre_send = { macro: preSendMacro.trim() };
-      }
-      if (postReceiveMacro.trim()) {
-        hooks.post_receive = { macro: postReceiveMacro.trim() };
-      }
-    }
+    // Build hooks from the hook config editor state.
+    const hooks =
+      hooksConfig.pre_send || hooksConfig.post_receive ? hooksConfig : undefined;
 
     try {
       await fuzzAction({
@@ -759,8 +752,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
     stopErrorCount,
     stopStatusCodes,
     stopLatencyMs,
-    preSendMacro,
-    postReceiveMacro,
+    hooksConfig,
     fuzzAction,
     addToast,
     onCreated,
@@ -1096,38 +1088,11 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
       {/* Hooks */}
       <div className="fuzz-creator-section">
         <h3 className="fuzz-creator-section-title">Hooks (optional)</h3>
-        <div className="fuzz-position-fields">
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Pre-send Macro</label>
-            <select
-              className="fuzz-filter-select"
-              value={preSendMacro}
-              onChange={(e) => setPreSendMacro(e.target.value)}
-            >
-              <option value="">None</option>
-              {availableMacros.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Post-receive Macro</label>
-            <select
-              className="fuzz-filter-select"
-              value={postReceiveMacro}
-              onChange={(e) => setPostReceiveMacro(e.target.value)}
-            >
-              <option value="">None</option>
-              {availableMacros.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
+        <HookConfigEditor
+          macros={availableMacros}
+          hooks={hooksConfig}
+          onChange={setHooksConfig}
+        />
       </div>
 
       {/* Submit */}
