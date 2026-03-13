@@ -336,6 +336,87 @@ When SafetyFilter blocks an MCP tool operation (resend, fuzz, intercept modify_a
 
 - **MCP error response** with violation details
 
+## SafetyFilter (Output Filter)
+
+The Output Filter is a **Policy Layer** mechanism that prevents sensitive information (PII) from being exposed to AI agents. It inspects outgoing HTTP response bodies and headers against a set of regex rules and masks matching content before returning data to the AI agent.
+
+Raw data is always preserved in the Flow Store -- masking is applied only when data is returned to AI agents (via MCP tools or proxy responses).
+
+Output Filter rules are **immutable at runtime** -- they are defined in the configuration file and cannot be modified by AI agents.
+
+### How It Works
+
+1. **Proxy Layer**: Response body and headers are masked before returning to the client (HTTP/1.x, HTTPS CONNECT, HTTP/2)
+2. **MCP Tool Layer**: Query results, resend responses, fuzz results, intercept queue entries, compare diffs, and export data are masked before returning to the AI agent
+3. **Raw Data Preserved**: The Flow Store always contains the original unmasked data for human review via the Web UI
+
+### Output Rule Configuration
+
+Output rules are defined in the config file under `safety_filter.output`. Each rule can be a preset reference or a custom rule.
+
+#### PII Presets
+
+Built-in presets provide curated rule sets for common PII patterns:
+
+| Preset | Rules | Description |
+|--------|-------|-------------|
+| `credit-card` | 2 rules | Credit card numbers -- separated (1234-5678-9012-3456) and continuous (1234567890123456). Luhn validation is applied to the continuous format only |
+| `japan-my-number` | 1 rule | Japanese My Number (12-digit individual number) with check digit validation |
+| `email` | 1 rule | Email addresses (user@example.com) |
+| `japan-phone` | 2 rules | Japanese phone numbers -- mobile (090-1234-5678) and landline (03-1234-5678) |
+
+#### Validators
+
+Some presets use **Validator** functions for additional verification beyond regex matching, reducing false positives:
+
+- **credit-card (continuous)**: Luhn algorithm check -- only masks digit sequences that pass the Luhn checksum
+- **japan-my-number**: Check digit validation -- only masks 12-digit sequences with a valid My Number check digit
+
+Rules with Validators use a **slow path** (individual match validation) instead of the **fast path** (bulk `ReplaceAll`), but provide significantly better precision.
+
+#### Custom Output Rules
+
+Custom rules require `id`, `pattern`, and `targets` fields. The `action` and `replacement` fields are available via the programmatic API (`safety.Config`). In config files, the section-level `action` applies to all rules within that section (config file support is coming soon).
+
+```json
+{
+  "id": "custom-api-key",
+  "name": "API key pattern",
+  "pattern": "(sk-[a-zA-Z0-9]{32,})",
+  "targets": ["body"],
+  "action": "mask",
+  "replacement": "[MASKED:api_key]"
+}
+```
+
+### Output Filter Actions
+
+| Action | Description |
+|--------|-------------|
+| `mask` | Replace matched content with the replacement string. This is the primary action for output rules |
+| `log_only` | Log the match but return data unmodified. Useful for testing rules before enforcement |
+
+### Replacement Strings
+
+Replacement strings support regex capture group references:
+
+| Syntax | Description |
+|--------|-------------|
+| `[MASKED:credit_card]` | Static replacement (used by credit-card preset) |
+| `$1` | First capture group from the regex pattern |
+| `$2` | Second capture group |
+| `${name}` | Named capture group |
+
+### Output Filter Targets
+
+Output rules typically use `body` as the target. Header-level masking is also supported:
+
+| Target | Description |
+|--------|-------------|
+| `body` | Response body content |
+| `header` | Individual header values (use `header:Name` for a specific header) |
+| `headers` | All header values |
+
 ## Error Handling
 
 - **Policy boundary violation**: Setting agent allows outside policy scope returns an error with the offending hostname and current policy allows.
