@@ -122,6 +122,11 @@ type Rule struct {
 	// (e.g. "Location" from the "header:Location" syntax). Empty means
 	// all headers are checked.
 	HeaderName string
+	// Validator is an optional function that performs additional validation
+	// on a regex match. If non-nil, the match is only processed
+	// (masked/counted) when Validator returns true. This enables patterns
+	// like Luhn check for credit card numbers.
+	Validator func(match []byte) bool
 }
 
 // PresetRuleConfig defines a safety filter rule before regex compilation.

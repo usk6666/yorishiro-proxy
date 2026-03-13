@@ -764,3 +764,341 @@ func TestLookupPreset_NotFound_Engine(t *testing.T) {
 		t.Error("LookupPreset(nonexistent) expected error, got nil")
 	}
 }
+
+func TestFilterOutput_ValidatorAccepts(t *testing.T) {
+	e, err := NewEngine(Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "validated",
+				Pattern:     `\b\d{4}\b`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "[MASKED]",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	// Add validator: only mask even numbers.
+	e.outputRules[0].Validator = func(match []byte) bool {
+		last := match[len(match)-1]
+		return (last-'0')%2 == 0
+	}
+
+	result := e.FilterOutput([]byte("pin 1234 code 1357 id 2468"))
+	want := "pin [MASKED] code 1357 id [MASKED]"
+	if string(result.Data) != want {
+		t.Errorf("Data = %q, want %q", string(result.Data), want)
+	}
+	if !result.Masked {
+		t.Error("expected Masked to be true")
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("expected 1 match entry, got %d", len(result.Matches))
+	}
+	if result.Matches[0].Count != 2 {
+		t.Errorf("match count = %d, want 2", result.Matches[0].Count)
+	}
+}
+
+func TestFilterOutput_ValidatorRejectsAll(t *testing.T) {
+	e, err := NewEngine(Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "reject-all",
+				Pattern:     `\d+`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "[X]",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	e.outputRules[0].Validator = func(match []byte) bool {
+		return false // reject all matches
+	}
+
+	data := []byte("abc 123 def 456")
+	result := e.FilterOutput(data)
+	if result.Masked {
+		t.Error("expected Masked to be false when validator rejects all")
+	}
+	if string(result.Data) != string(data) {
+		t.Errorf("Data = %q, want unchanged %q", string(result.Data), string(data))
+	}
+	if len(result.Matches) != 0 {
+		t.Errorf("expected 0 matches, got %d", len(result.Matches))
+	}
+}
+
+func TestFilterOutput_ValidatorWithCaptureGroups(t *testing.T) {
+	e, err := NewEngine(Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "capture-validated",
+				Pattern:     `(\d{4})-(\d{4})`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "****-$2",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	// Only mask if the first group starts with "12".
+	e.outputRules[0].Validator = func(match []byte) bool {
+		return len(match) >= 2 && match[0] == '1' && match[1] == '2'
+	}
+
+	result := e.FilterOutput([]byte("card 1234-5678 alt 9876-5432"))
+	want := "card ****-5678 alt 9876-5432"
+	if string(result.Data) != want {
+		t.Errorf("Data = %q, want %q", string(result.Data), want)
+	}
+}
+
+func TestFilterOutput_ValidatorLogOnly(t *testing.T) {
+	e, err := NewEngine(Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:      "log-validated",
+				Pattern: `\b\d{3}\b`,
+				Targets: []string{"body"},
+				Action:  "log_only",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	// Only count numbers starting with "1".
+	e.outputRules[0].Validator = func(match []byte) bool {
+		return match[0] == '1'
+	}
+
+	data := []byte("values: 123 456 178")
+	result := e.FilterOutput(data)
+	if result.Masked {
+		t.Error("expected Masked to be false for log_only")
+	}
+	if string(result.Data) != string(data) {
+		t.Errorf("data should be unchanged")
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("expected 1 match entry, got %d", len(result.Matches))
+	}
+	if result.Matches[0].Count != 2 {
+		t.Errorf("count = %d, want 2", result.Matches[0].Count)
+	}
+}
+
+func TestFilterOutputHeaders_ValidatorAccepts(t *testing.T) {
+	e, err := NewEngine(Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "hdr-validated",
+				Pattern:     `\d{4}`,
+				Targets:     []string{"headers"},
+				Action:      "mask",
+				Replacement: "****",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	// Only mask numbers starting with "1".
+	e.outputRules[0].Validator = func(match []byte) bool {
+		return match[0] == '1'
+	}
+
+	h := http.Header{}
+	h.Set("X-Data", "id=1234 code=5678")
+	result, matches := e.FilterOutputHeaders(h)
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+	if matches[0].Count != 1 {
+		t.Errorf("count = %d, want 1", matches[0].Count)
+	}
+	got := result.Get("X-Data")
+	want := "id=**** code=5678"
+	if got != want {
+		t.Errorf("X-Data = %q, want %q", got, want)
+	}
+}
+
+func TestFilterOutputHeaders_ValidatorRejectsAll(t *testing.T) {
+	e, err := NewEngine(Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "hdr-reject",
+				Pattern:     `\d+`,
+				Targets:     []string{"headers"},
+				Action:      "mask",
+				Replacement: "[X]",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	e.outputRules[0].Validator = func(match []byte) bool {
+		return false
+	}
+
+	h := http.Header{}
+	h.Set("X-Val", "abc 123")
+	result, matches := e.FilterOutputHeaders(h)
+	if len(matches) != 0 {
+		t.Errorf("expected 0 matches, got %d", len(matches))
+	}
+	if result.Get("X-Val") != "abc 123" {
+		t.Errorf("header should be unchanged, got %q", result.Get("X-Val"))
+	}
+}
+
+func TestFilterOutputHeaders_ValidatorSpecificHeader(t *testing.T) {
+	e, err := NewEngine(Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "hdr-specific-validated",
+				Pattern:     `secret\d+`,
+				Targets:     []string{"header:X-Token"},
+				Action:      "mask",
+				Replacement: "[REDACTED]",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	// Only mask if the digit part is "1".
+	e.outputRules[0].Validator = func(match []byte) bool {
+		return len(match) > 6 && match[6] == '1'
+	}
+
+	h := http.Header{}
+	h.Set("X-Token", "secret1 secret2")
+	h.Set("X-Other", "secret1")
+	result, matches := e.FilterOutputHeaders(h)
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+	if matches[0].Count != 1 {
+		t.Errorf("count = %d, want 1", matches[0].Count)
+	}
+	if result.Get("X-Token") != "[REDACTED] secret2" {
+		t.Errorf("X-Token = %q, want %q", result.Get("X-Token"), "[REDACTED] secret2")
+	}
+	// X-Other should be untouched (rule targets only X-Token).
+	if result.Get("X-Other") != "secret1" {
+		t.Errorf("X-Other = %q, want %q", result.Get("X-Other"), "secret1")
+	}
+}
+
+func TestFilterOutput_MultipleRulesSequential(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-email",
+				Pattern:     `(\w+)@(\w+\.\w+)`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "$1@[MASKED]",
+			},
+			{
+				ID:          "mask-ssn",
+				Pattern:     `\d{3}-\d{2}-\d{4}`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "[SSN-REDACTED]",
+			},
+		},
+	})
+
+	result := e.FilterOutput([]byte("email: user@example.com ssn: 123-45-6789"))
+	want := "email: user@[MASKED] ssn: [SSN-REDACTED]"
+	if string(result.Data) != want {
+		t.Errorf("Data = %q, want %q", string(result.Data), want)
+	}
+	if !result.Masked {
+		t.Error("expected Masked to be true")
+	}
+	if len(result.Matches) != 2 {
+		t.Fatalf("expected 2 match entries, got %d", len(result.Matches))
+	}
+}
+
+func TestFilterOutput_BinaryDataSafe(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-bin",
+				Pattern:     `secret`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "[X]",
+			},
+		},
+	})
+
+	// Data with null bytes and non-UTF8 sequences.
+	data := []byte{0x00, 0xFF, 's', 'e', 'c', 'r', 'e', 't', 0x00, 0xFE}
+	result := e.FilterOutput(data)
+	if !result.Masked {
+		t.Error("expected Masked to be true")
+	}
+	want := []byte{0x00, 0xFF, '[', 'X', ']', 0x00, 0xFE}
+	if string(result.Data) != string(want) {
+		t.Errorf("Data = %v, want %v", result.Data, want)
+	}
+}
+
+func TestFilterOutput_EmptyData(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-any",
+				Pattern:     `\w+`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "[X]",
+			},
+		},
+	})
+
+	result := e.FilterOutput([]byte{})
+	if result.Masked {
+		t.Error("expected Masked to be false for empty data")
+	}
+	if len(result.Data) != 0 {
+		t.Errorf("expected empty data, got %q", string(result.Data))
+	}
+}
+
+func TestFilterOutput_NilData(t *testing.T) {
+	e := mustEngine(t, Config{
+		OutputRules: []RuleConfig{
+			{
+				ID:          "mask-nil",
+				Pattern:     `test`,
+				Targets:     []string{"body"},
+				Action:      "mask",
+				Replacement: "[X]",
+			},
+		},
+	})
+
+	result := e.FilterOutput(nil)
+	if result.Masked {
+		t.Error("expected Masked to be false for nil data")
+	}
+	if result.Data != nil {
+		t.Errorf("expected nil data, got %v", result.Data)
+	}
+}
