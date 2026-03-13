@@ -466,10 +466,15 @@ func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params
 		}
 	}
 
-	respBodyStr, respBodyEncoding := encodeBody(respBody)
+	// Apply SafetyFilter output masking before returning to AI agent.
+	// Raw data is already saved to the store above.
+	maskedBody := s.filterOutputBody(respBody)
+	maskedHeaders := s.filterOutputHeaders(resp.Header)
+
+	respBodyStr, respBodyEncoding := encodeBody(maskedBody)
 	return nil, &resendActionResult{
 		NewFlowID: prep.flow.ID, StatusCode: resp.StatusCode,
-		ResponseHeaders: copyHeaders(resp.Header), ResponseBody: respBodyStr,
+		ResponseHeaders: copyHeaders(maskedHeaders), ResponseBody: respBodyStr,
 		ResponseBodyEncoding: respBodyEncoding, DurationMs: duration.Milliseconds(),
 		Tag: params.Tag,
 	}, nil
@@ -776,9 +781,13 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		return nil, nil, err
 	}
 
+	// Apply SafetyFilter output masking before returning to AI agent.
+	// Raw data is already saved to the store above.
+	maskedResp := s.filterOutputBody(respData)
+
 	return nil, &resendRawResult{
 		NewFlowID:    newFlowID,
-		ResponseData: base64.StdEncoding.EncodeToString(respData),
+		ResponseData: base64.StdEncoding.EncodeToString(maskedResp),
 		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
 		Tag: params.Tag,
 	}, nil

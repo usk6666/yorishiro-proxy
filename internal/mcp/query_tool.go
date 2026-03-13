@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -478,20 +479,20 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		if cat.sendMsg.URL != nil {
 			urlStr = cat.sendMsg.URL.String()
 		}
-		reqHeaders = cat.sendMsg.Headers
-		reqBody = cat.sendMsg.Body
+		reqHeaders = map[string][]string(s.filterOutputHeaders(http.Header(cat.sendMsg.Headers)))
+		reqBody = s.filterOutputBody(cat.sendMsg.Body)
 		reqTruncated = cat.sendMsg.BodyTruncated
 		if len(cat.sendMsg.RawBytes) > 0 {
-			rawReqStr = base64.StdEncoding.EncodeToString(cat.sendMsg.RawBytes)
+			rawReqStr = base64.StdEncoding.EncodeToString(s.filterOutputBody(cat.sendMsg.RawBytes))
 		}
 	}
 	if cat.recvMsg != nil {
 		statusCode = cat.recvMsg.StatusCode
-		respHeaders = cat.recvMsg.Headers
-		respBody = cat.recvMsg.Body
+		respHeaders = map[string][]string(s.filterOutputHeaders(http.Header(cat.recvMsg.Headers)))
+		respBody = s.filterOutputBody(cat.recvMsg.Body)
 		respTruncated = cat.recvMsg.BodyTruncated
 		if len(cat.recvMsg.RawBytes) > 0 {
-			rawRespStr = base64.StdEncoding.EncodeToString(cat.recvMsg.RawBytes)
+			rawRespStr = base64.StdEncoding.EncodeToString(s.filterOutputBody(cat.recvMsg.RawBytes))
 		}
 	}
 
@@ -545,9 +546,14 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		OriginalResponse:      buildOriginalResponse(cat.originalRecvMsg),
 	}
 
+	// Apply output filter to original request/response variants.
+	s.filterOutputVariantRequest(result.OriginalRequest)
+	s.filterOutputVariantResponse(result.OriginalResponse)
+
 	// For streaming flows, include a message preview instead of full request/response.
 	if fl.FlowType != "unary" {
 		result.MessagePreview = buildMessagePreview(msgs)
+		s.filterOutputMessages(result.MessagePreview)
 	}
 
 	return nil, result, nil
@@ -682,6 +688,9 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 
 	pageMsgs := paginateMessages(allMsgs, input.Offset, input.Limit)
 	entries := convertMessagesToEntries(pageMsgs)
+
+	// Apply SafetyFilter output masking to message bodies and headers.
+	s.filterOutputMessages(entries)
 
 	result := &queryMessagesResult{
 		Messages: entries,
@@ -1076,6 +1085,9 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 			MatchedRules: item.MatchedRules,
 		})
 	}
+
+	// Apply SafetyFilter output masking to intercept queue bodies and headers.
+	s.filterOutputInterceptEntries(entries)
 
 	return nil, &queryInterceptQueueResult{
 		Items: entries,

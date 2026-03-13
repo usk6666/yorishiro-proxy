@@ -406,10 +406,13 @@ func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow
 		return nil, fmt.Errorf("export flows: %w", err)
 	}
 
+	// Apply output filter to the serialized export data.
+	maskedData := string(s.filterOutputBody(buf.Bytes()))
+
 	return &executeExportFlowsResult{
 		ExportedCount: n,
 		Format:        format,
-		Data:          buf.String(),
+		Data:          maskedData,
 	}, nil
 }
 

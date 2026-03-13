@@ -273,6 +273,11 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, err
 	}
 
+	// Apply SafetyFilter output masking before returning to AI agent.
+	// Raw data is already saved to the store above.
+	maskedRespData := s.filterOutputBody(respData)
+	result.ResponseData = base64.StdEncoding.EncodeToString(maskedRespData)
+
 	return nil, result, nil
 }
 
