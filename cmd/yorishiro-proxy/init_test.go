@@ -382,13 +382,6 @@ func TestInitHostTLSRegistry_EmptyConfig(t *testing.T) {
 func TestInitHostTLSRegistry_PerHostFromCLIConfig(t *testing.T) {
 	logger := testLogger(t)
 
-	// Create temp cert/key pair for per-host config.
-	dir := t.TempDir()
-	certPath := filepath.Join(dir, "client.crt")
-	keyPath := filepath.Join(dir, "client.key")
-	writeTestFile(t, certPath, "test-cert")
-	writeTestFile(t, keyPath, "test-key")
-
 	verify := true
 	cfg := &config.Config{
 		HostTLS: map[string]*config.HostTLSEntry{
@@ -444,6 +437,7 @@ func TestInitHostTLSRegistry_PerHostFromProxyConfig(t *testing.T) {
 func TestInitHostTLSRegistry_GlobalFromCLIConfig(t *testing.T) {
 	logger := testLogger(t)
 
+	// Placeholder content; Validate() only checks file existence, not PEM validity.
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "global.crt")
 	keyPath := filepath.Join(dir, "global.key")
@@ -585,9 +579,8 @@ def decode(s):
 		CodecPlugins: raw,
 	}
 
-	// Use a fresh registry to avoid polluting the default.
-	// The loadCodecPlugins function uses codec.DefaultRegistry(), so we
-	// verify after the call that the codec was registered.
+	// NOTE: Registers into global DefaultRegistry(); test codec names must be
+	// unique across test functions to avoid cross-test interference.
 	err = loadCodecPlugins(proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -651,6 +644,8 @@ def encode(s):
 		CodecPlugins: raw,
 	}
 
+	// NOTE: Registers into global DefaultRegistry(); test codec names must be
+	// unique across test functions to avoid cross-test interference.
 	err = loadCodecPlugins(proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
