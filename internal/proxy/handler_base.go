@@ -205,6 +205,32 @@ func (b *HandlerBase) TLSFingerprint() string {
 	return b.tlsFingerprintProfile
 }
 
+// ApplyOutputFilter applies the safety engine's output filter to the response
+// body and headers. If the engine is not configured or no rules match, the data
+// is returned unchanged. The caller is responsible for ensuring Content-Length
+// is recalculated when the masked body is written to the client (e.g. via
+// writeResponse / writeResponseToClient).
+func (b *HandlerBase) ApplyOutputFilter(body []byte, headers gohttp.Header, logger *slog.Logger) ([]byte, gohttp.Header) {
+	if b.SafetyEngine == nil {
+		return body, headers
+	}
+
+	bodyResult := b.SafetyEngine.FilterOutput(body)
+	maskedHeaders, headerMatches := b.SafetyEngine.FilterOutputHeaders(headers)
+
+	// Log matches for observability.
+	for _, m := range bodyResult.Matches {
+		logger.Info("output filter matched response body",
+			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
+	}
+	for _, m := range headerMatches {
+		logger.Info("output filter matched response header",
+			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
+	}
+
+	return bodyResult.Data, maskedHeaders
+}
+
 // ConnLogger returns the connection-scoped logger from context,
 // falling back to the handler's logger.
 func (b *HandlerBase) ConnLogger(ctx context.Context) *slog.Logger {
