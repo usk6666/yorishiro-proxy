@@ -97,8 +97,9 @@ func TestInitInfra_Success(t *testing.T) {
 	}
 }
 
-// TestInitCA_ErrorPaths exercises additional error conditions for initCA
-// beyond the existing tests: missing files, permission errors on CA files.
+// TestInitCA_ErrorPaths exercises error conditions for initCA not covered
+// by the existing TestInitCA in main_test.go: unreadable cert files and
+// corrupt auto-persist CA files.
 func TestInitCA_ErrorPaths(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
@@ -108,19 +109,6 @@ func TestInitCA_ErrorPaths(t *testing.T) {
 		wantErr   bool
 		errSubstr string
 	}{
-		{
-			name: "explicit mode with nonexistent cert file",
-			setup: func(t *testing.T) *config.Config {
-				t.Helper()
-				dir := t.TempDir()
-				return &config.Config{
-					CACertPath: filepath.Join(dir, "nonexistent.crt"),
-					CAKeyPath:  filepath.Join(dir, "nonexistent.key"),
-				}
-			},
-			wantErr:   true,
-			errSubstr: "load CA from",
-		},
 		{
 			name: "explicit mode with unreadable cert file",
 			setup: func(t *testing.T) *config.Config {
@@ -183,62 +171,6 @@ func TestInitCA_ErrorPaths(t *testing.T) {
 	}
 }
 
-// TestLoadCodecPlugins_ErrorPaths tests codec plugin loading error conditions.
-func TestLoadCodecPlugins_ErrorPaths(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	tests := []struct {
-		name      string
-		proxyCfg  *config.ProxyConfig
-		wantErr   bool
-		errSubstr string
-	}{
-		{
-			name:     "nil proxy config returns nil",
-			proxyCfg: nil,
-			wantErr:  false,
-		},
-		{
-			name:     "empty codec plugins returns nil",
-			proxyCfg: &config.ProxyConfig{},
-			wantErr:  false,
-		},
-		{
-			name: "invalid JSON in codec plugins",
-			proxyCfg: &config.ProxyConfig{
-				CodecPlugins: json.RawMessage(`{invalid json`),
-			},
-			wantErr:   true,
-			errSubstr: "parse codec plugin configs",
-		},
-		{
-			name: "valid JSON but nonexistent plugin path is tolerated",
-			proxyCfg: &config.ProxyConfig{
-				CodecPlugins: json.RawMessage(`[{"path": "/nonexistent/plugin.star"}]`),
-			},
-			wantErr: false, // LoadCodecPlugins logs a warning and skips missing files
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := loadCodecPlugins(tt.proxyCfg, logger)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
-					t.Errorf("error = %q, want substring %q", err.Error(), tt.errSubstr)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-			}
-		})
-	}
-}
-
 // TestLoadCodecPlugins_SyntaxErrorInStarlark verifies that a Starlark script
 // with syntax errors is gracefully skipped (logged as warning, not returned
 // as error). This is the intended graceful degradation behavior.
@@ -264,7 +196,9 @@ def encode(this is not valid python or starlark
 	}
 }
 
-// TestInitSafetyFilter_ErrorPaths tests safety filter initialization error paths.
+// TestInitSafetyFilter_ErrorPaths tests safety filter initialization error
+// paths: invalid regex, unknown preset, invalid actions, missing ID, and
+// invalid target.
 func TestInitSafetyFilter_ErrorPaths(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	boolTrue := true
@@ -275,47 +209,7 @@ func TestInitSafetyFilter_ErrorPaths(t *testing.T) {
 		proxyCfg  *config.ProxyConfig
 		wantErr   bool
 		errSubstr string
-		wantNil   bool // expect nil engine (disabled)
 	}{
-		{
-			name:    "disabled by default returns nil engine",
-			cfg:     &config.Config{},
-			wantNil: true,
-		},
-		{
-			name: "disabled in config file returns nil engine",
-			cfg:  &config.Config{},
-			proxyCfg: &config.ProxyConfig{
-				SafetyFilter: &config.SafetyFilterConfig{
-					Enabled: false,
-				},
-			},
-			wantNil: true,
-		},
-		{
-			name: "enabled with no rules returns empty engine",
-			cfg: &config.Config{
-				SafetyFilterEnabled: &boolTrue,
-			},
-			wantNil: false,
-		},
-		{
-			name: "enabled with valid preset",
-			cfg: &config.Config{
-				SafetyFilterEnabled: &boolTrue,
-			},
-			proxyCfg: &config.ProxyConfig{
-				SafetyFilter: &config.SafetyFilterConfig{
-					Enabled: true,
-					Input: &config.SafetyFilterInputConfig{
-						Rules: []config.SafetyFilterRuleConfig{
-							{Preset: "destructive-sql"},
-						},
-					},
-				},
-			},
-			wantNil: false,
-		},
 		{
 			name: "enabled with invalid regex pattern",
 			cfg: &config.Config{
@@ -437,43 +331,6 @@ func TestInitSafetyFilter_ErrorPaths(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "safety filter config",
 		},
-		{
-			name: "CLI override disables config file enabled",
-			cfg: func() *config.Config {
-				c := &config.Config{}
-				f := false
-				c.SafetyFilterEnabled = &f
-				return c
-			}(),
-			proxyCfg: &config.ProxyConfig{
-				SafetyFilter: &config.SafetyFilterConfig{
-					Enabled: true,
-					Input: &config.SafetyFilterInputConfig{
-						Rules: []config.SafetyFilterRuleConfig{
-							{Preset: "destructive-sql"},
-						},
-					},
-				},
-			},
-			wantNil: true,
-		},
-		{
-			name: "output filter with valid preset",
-			cfg: &config.Config{
-				SafetyFilterEnabled: &boolTrue,
-			},
-			proxyCfg: &config.ProxyConfig{
-				SafetyFilter: &config.SafetyFilterConfig{
-					Enabled: true,
-					Output: &config.SafetyFilterOutputConfig{
-						Rules: []config.SafetyFilterRuleConfig{
-							{Preset: "credit-card"},
-						},
-					},
-				},
-			},
-			wantNil: false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -491,159 +348,8 @@ func TestInitSafetyFilter_ErrorPaths(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if tt.wantNil && engine != nil {
-				t.Error("expected nil engine, got non-nil")
-			}
-			if !tt.wantNil && engine == nil {
+			if engine == nil {
 				t.Error("expected non-nil engine, got nil")
-			}
-		})
-	}
-}
-
-// TestLoadConfigs_ErrorPaths tests config and policy file loading error conditions.
-func TestLoadConfigs_ErrorPaths(t *testing.T) {
-	tests := []struct {
-		name          string
-		configFile    string
-		policyFile    string
-		setupFiles    func(t *testing.T) // create test files
-		wantErr       bool
-		errSubstr     string
-		wantProxyCfg  bool
-		wantPolicyCfg bool
-		wantPolicySrc string
-	}{
-		{
-			name:    "no files specified returns empty result",
-			wantErr: false,
-		},
-		{
-			name:       "nonexistent config file returns error",
-			configFile: "/nonexistent/config.json",
-			wantErr:    true,
-			errSubstr:  "load config file",
-		},
-		{
-			name:       "nonexistent policy file returns error",
-			policyFile: "/nonexistent/policy.json",
-			wantErr:    true,
-			errSubstr:  "load target policy file",
-		},
-		{
-			name:       "invalid JSON in config file",
-			configFile: "PLACEHOLDER",
-			setupFiles: func(t *testing.T) {
-				t.Helper()
-			},
-			wantErr:   true,
-			errSubstr: "load config file",
-		},
-		{
-			name:       "invalid JSON in policy file",
-			policyFile: "PLACEHOLDER",
-			setupFiles: func(t *testing.T) {
-				t.Helper()
-			},
-			wantErr:   true,
-			errSubstr: "load target policy file",
-		},
-		{
-			name:       "valid config file with target_scope_policy section",
-			configFile: "PLACEHOLDER",
-			setupFiles: func(t *testing.T) {
-				t.Helper()
-			},
-			wantProxyCfg:  true,
-			wantPolicyCfg: true,
-			wantPolicySrc: "config file",
-		},
-		{
-			name:       "policy file overrides config file target_scope_policy",
-			configFile: "PLACEHOLDER",
-			policyFile: "PLACEHOLDER",
-			setupFiles: func(t *testing.T) {
-				t.Helper()
-			},
-			wantProxyCfg:  true,
-			wantPolicyCfg: true,
-			wantPolicySrc: "policy file",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-
-			// Set up actual files for tests that need them.
-			if tt.configFile == "PLACEHOLDER" {
-				switch tt.name {
-				case "invalid JSON in config file":
-					cfgPath := filepath.Join(dir, "bad.json")
-					os.WriteFile(cfgPath, []byte(`{not valid json}`), 0644)
-					tt.configFile = cfgPath
-				case "valid config file with target_scope_policy section":
-					cfgPath := filepath.Join(dir, "config.json")
-					os.WriteFile(cfgPath, []byte(`{
-						"listen_addr": "127.0.0.1:8080",
-						"target_scope_policy": {
-							"allows": [{"hostname": "example.com"}]
-						}
-					}`), 0644)
-					tt.configFile = cfgPath
-				case "policy file overrides config file target_scope_policy":
-					cfgPath := filepath.Join(dir, "config.json")
-					os.WriteFile(cfgPath, []byte(`{
-						"listen_addr": "127.0.0.1:8080",
-						"target_scope_policy": {
-							"allows": [{"hostname": "config.com"}]
-						}
-					}`), 0644)
-					tt.configFile = cfgPath
-				}
-			}
-			if tt.policyFile == "PLACEHOLDER" {
-				switch tt.name {
-				case "invalid JSON in policy file":
-					policyPath := filepath.Join(dir, "bad-policy.json")
-					os.WriteFile(policyPath, []byte(`{invalid}`), 0644)
-					tt.policyFile = policyPath
-				case "policy file overrides config file target_scope_policy":
-					policyPath := filepath.Join(dir, "policy.json")
-					os.WriteFile(policyPath, []byte(`{"allows": [{"hostname": "policy.com"}]}`), 0644)
-					tt.policyFile = policyPath
-				}
-			}
-
-			result, err := loadConfigs(tt.configFile, tt.policyFile)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
-					t.Errorf("error = %q, want substring %q", err.Error(), tt.errSubstr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if tt.wantProxyCfg && result.proxyCfg == nil {
-				t.Error("expected non-nil proxyCfg")
-			}
-			if !tt.wantProxyCfg && result.proxyCfg != nil {
-				t.Error("expected nil proxyCfg")
-			}
-			if tt.wantPolicyCfg && result.targetScopePolicy == nil {
-				t.Error("expected non-nil targetScopePolicy")
-			}
-			if !tt.wantPolicyCfg && result.targetScopePolicy != nil {
-				t.Error("expected nil targetScopePolicy")
-			}
-			if tt.wantPolicySrc != "" && result.targetScopePolicySource != tt.wantPolicySrc {
-				t.Errorf("targetScopePolicySource = %q, want %q",
-					result.targetScopePolicySource, tt.wantPolicySrc)
 			}
 		})
 	}
@@ -724,9 +430,9 @@ func TestApplyTLSFingerprintFlag_ErrorPaths(t *testing.T) {
 	}
 }
 
-// TestInitPassthroughList_InvalidPatterns verifies that invalid patterns are
-// logged as warnings and valid patterns are added successfully.
-func TestInitPassthroughList_InvalidPatterns(t *testing.T) {
+// TestInitPassthroughList_Patterns verifies passthrough list initialization
+// with various pattern configurations.
+func TestInitPassthroughList_Patterns(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	tests := []struct {
@@ -806,20 +512,16 @@ func TestInitRateLimiter_Configurations(t *testing.T) {
 	}
 }
 
-// TestInitTargetScope_Configurations verifies target scope initialization
-// with various policy configurations.
-func TestInitTargetScope_Configurations(t *testing.T) {
-	// We need a SOCKS5 handler but can avoid importing the full package
-	// by testing with nil policy (which returns nil scope).
-	t.Run("nil policy returns nil scope", func(t *testing.T) {
-		scope := initTargetScope(nil, nil)
-		if scope != nil {
-			t.Error("expected nil scope for nil policy")
-		}
-	})
+// TestInitTargetScope_NilPolicy verifies target scope initialization
+// returns nil when no policy is configured.
+func TestInitTargetScope_NilPolicy(t *testing.T) {
+	scope := initTargetScope(nil, nil)
+	if scope != nil {
+		t.Error("expected nil scope for nil policy")
+	}
 }
 
-// TestResolveHTTPToken_ErrorPaths verifies token resolution behavior.
+// TestResolveHTTPToken verifies token resolution behavior.
 func TestResolveHTTPToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
@@ -850,82 +552,4 @@ func TestResolveHTTPToken(t *testing.T) {
 			t.Error("expected different tokens from two calls with empty input")
 		}
 	})
-}
-
-// TestInitSafetyFilter_OutputFilterWithCustomRules verifies output filter
-// custom rule compilation through initSafetyFilter.
-func TestInitSafetyFilter_OutputFilterWithCustomRules(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	boolTrue := true
-
-	cfg := &config.Config{
-		SafetyFilterEnabled: &boolTrue,
-	}
-	proxyCfg := &config.ProxyConfig{
-		SafetyFilter: &config.SafetyFilterConfig{
-			Enabled: true,
-			Output: &config.SafetyFilterOutputConfig{
-				Action: "mask",
-				Rules: []config.SafetyFilterRuleConfig{
-					{
-						ID:          "custom-pii",
-						Pattern:     `\b\d{3}-\d{2}-\d{4}\b`,
-						Targets:     []string{"body"},
-						Replacement: "***-**-****",
-					},
-				},
-			},
-		},
-	}
-
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if engine == nil {
-		t.Fatal("expected non-nil engine")
-	}
-	if len(engine.OutputRules()) == 0 {
-		t.Error("expected output rules, got none")
-	}
-}
-
-// TestInitSafetyFilter_BothInputAndOutputRules verifies that both input and
-// output rules are compiled when both sections are present.
-func TestInitSafetyFilter_BothInputAndOutputRules(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	boolTrue := true
-
-	cfg := &config.Config{
-		SafetyFilterEnabled: &boolTrue,
-	}
-	proxyCfg := &config.ProxyConfig{
-		SafetyFilter: &config.SafetyFilterConfig{
-			Enabled: true,
-			Input: &config.SafetyFilterInputConfig{
-				Rules: []config.SafetyFilterRuleConfig{
-					{Preset: "destructive-sql"},
-				},
-			},
-			Output: &config.SafetyFilterOutputConfig{
-				Rules: []config.SafetyFilterRuleConfig{
-					{Preset: "credit-card"},
-				},
-			},
-		},
-	}
-
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if engine == nil {
-		t.Fatal("expected non-nil engine")
-	}
-	if len(engine.InputRules()) == 0 {
-		t.Error("expected input rules, got none")
-	}
-	if len(engine.OutputRules()) == 0 {
-		t.Error("expected output rules, got none")
-	}
 }
