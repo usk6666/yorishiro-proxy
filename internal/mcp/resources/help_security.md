@@ -360,7 +360,7 @@ Built-in presets provide curated rule sets for common PII patterns:
 
 | Preset | Rules | Description |
 |--------|-------|-------------|
-| `credit-card` | 2 rules | Credit card numbers -- separated (1234-5678-9012-3456) and continuous (1234567890123456) with Luhn validation |
+| `credit-card` | 2 rules | Credit card numbers -- separated (1234-5678-9012-3456) and continuous (1234567890123456). Luhn validation is applied to the continuous format only |
 | `japan-my-number` | 1 rule | Japanese My Number (12-digit individual number) with check digit validation |
 | `email` | 1 rule | Email addresses (user@example.com) |
 | `japan-phone` | 2 rules | Japanese phone numbers -- mobile (090-1234-5678) and landline (03-1234-5678) |
@@ -376,7 +376,7 @@ Rules with Validators use a **slow path** (individual match validation) instead 
 
 #### Custom Output Rules
 
-Custom rules require `id`, `pattern`, `targets`, and `action` fields:
+Custom rules require `id`, `pattern`, and `targets` fields. The `action` and `replacement` fields are available via the programmatic API (`safety.Config`). In config files, the section-level `action` applies to all rules within that section (config file support is coming soon).
 
 ```json
 {

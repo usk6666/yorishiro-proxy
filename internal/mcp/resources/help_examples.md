@@ -290,6 +290,10 @@ Returns the list of compiled rules, their targets, actions, and whether SafetyFi
 
 ## Output Filter Configuration
 
+> **Note**: Output Filter の config ファイル経由での設定は今後対応予定です (Coming soon)。
+> 現在、Output Filter はプログラマティック API (`safety.Config`) のみサポートしています。
+> 以下の設定例は将来の config ファイルサポート時の参考として掲載しています。
+
 ### Enable PII masking with default presets
 Add the following to your config file (`-config config.json`):
 ```json
@@ -337,8 +341,13 @@ This masks credit card numbers, email addresses, phone numbers, and My Number in
 Input filter blocks destructive payloads; output filter masks PII in responses.
 
 ### Add custom output masking rules
+
+> **Note**: config ファイルでは per-rule の `action`/`replacement` フィールドは未対応です。
+> セクションレベルの `action` が全ルールに適用されます。
+> per-rule の `action`/`replacement` はプログラマティック API (`safety.Config`) で利用可能です。
+
 ```json
-// config.json
+// config.json (Coming soon)
 {
   "safety_filter": {
     "enabled": true,

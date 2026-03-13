@@ -38,7 +38,7 @@ internal/
   safety/                  # SafetyFilter エンジン (Input Filter + Output Filter)
     engine.go              # ルールコンパイル・CheckInput・FilterOutput
     rule.go                # Rule/Target/Action 型定義・Preset 構造
-    preset_input.go        # Input Filter プリセット (destructive-sql, destructive-os-command)
+    preset.go              # Input Filter プリセット (destructive-sql, destructive-os-command)
     preset_pii.go          # Output Filter PII プリセット (credit-card, japan-my-number, email, japan-phone)
   plugin/                  # Starlark プラグインエンジン・レジストリ
   flow/                    # リクエスト/レスポンス記録・フロー管理・HAR エクスポート
