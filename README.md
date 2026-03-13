@@ -46,7 +46,7 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 - **Upstream Proxy** -- Chain through HTTP or SOCKS5 proxies
 - **Streamable HTTP MCP** -- Multi-agent shared access with Bearer token authentication
 - **Comparer** -- Structural diff between two flows (status code, headers, body length, timing, JSON key-level diff)
-- **AI Safety** -- Rate limiting (global/per-host RPS) and diagnostic budgets (request count/duration limits) with two-layer Policy+Agent architecture
+- **AI Safety** -- SafetyFilter blocks destructive payloads (DROP TABLE, rm -rf, etc.) at the Policy Layer before they reach the target; rate limiting (global/per-host RPS) and diagnostic budgets (request count/duration limits) with two-layer Policy+Agent architecture
 - **Plugin System** -- Extend proxy behavior with [Starlark](https://github.com/google/starlark-go) scripts that hook into the request/response pipeline
 - **Web UI** -- Embedded React/Vite dashboard for visual inspection and interactive testing
 
@@ -127,7 +127,7 @@ All proxy operations are exposed through eleven MCP tools:
 | `macro` | Define and execute multi-step macro workflows with variable extraction, guards, and hooks |
 | `intercept` | Act on intercepted requests: release, modify and forward, or drop |
 | `manage` | Manage flow data (delete/export/import) and CA certificate regeneration |
-| `security` | Configure target scope rules, rate limits, and diagnostic budgets (Policy Layer + Agent Layer) |
+| `security` | Configure target scope rules, rate limits, diagnostic budgets, and SafetyFilter inspection (Policy Layer + Agent Layer) |
 | `plugin` | List, reload, enable, and disable Starlark plugins at runtime |
 
 ## Web UI

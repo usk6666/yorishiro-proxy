@@ -33,7 +33,7 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 | `fuzz` | ファジング (action: fuzz, fuzz_pause, fuzz_resume, fuzz_cancel) |
 | `macro` | マクロワークフロー (action: define_macro, run_macro, delete_macro) |
 | `intercept` | インターセプト操作。リクエスト/レスポンス両 phase 対応 (action: release, modify_and_forward, drop) |
-| `security` | ターゲットスコープ・レート制限・診断バジェット制御。Policy/Agent 2 層構造 (action: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits, set_budget, get_budget) |
+| `security` | ターゲットスコープ・レート制限・診断バジェット・SafetyFilter 制御。Policy/Agent 2 層構造 (action: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits, set_budget, get_budget, get_safety_filter) |
 | `plugin` | Starlark プラグイン管理 (action: list, reload, enable, disable) |
 
 ### MCP Resources
@@ -538,6 +538,55 @@ yorishiro-proxy のスコープ制御は 2 層構造:
 
 レート制限・バジェットも Policy/Agent 2 層構造。Agent Layer は Policy Layer 以下の制限のみ設定可能。バジェット超過時はプロキシが自動停止。
 
+### SafetyFilter（入力フィルタ）
+
+SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DROP TABLE、rm -rf 等）がターゲットに送信されることを防止する。AI エージェントからは変更不可で、設定ファイル (`config.json`) で定義する。
+
+#### プリセット選択の指針
+
+| プリセット | 用途 | 対象 |
+|-----------|------|------|
+| `destructive-sql` | SQL データベースを持つアプリケーション | DROP TABLE/DATABASE、TRUNCATE、無条件 DELETE/UPDATE 等 |
+| `destructive-os-command` | OS コマンドインジェクション検証時 | rm -rf、shutdown、mkfs、dd、format 等 |
+
+- Web アプリケーション診断: 両方のプリセットを有効化推奨
+- API のみの診断: 対象に応じてプリセットを選択
+- `log_only` モードで事前テスト後、`block` モードに切り替える運用を推奨
+
+#### カスタムルール追加
+
+プリセットに加え、アプリケーション固有のパターンをカスタムルールとして追加可能:
+
+```json
+{
+  "safety_filter": {
+    "enabled": true,
+    "input": {
+      "action": "block",
+      "rules": [
+        {"preset": "destructive-sql"},
+        {"preset": "destructive-os-command"},
+        {
+          "id": "custom-dangerous-api",
+          "name": "Dangerous API endpoint",
+          "pattern": "(?i)/api/v[0-9]+/(delete-all|reset|purge)",
+          "targets": ["url"]
+        }
+      ]
+    }
+  }
+}
+```
+
+#### 現在の設定確認
+
+```json
+// security
+{"action": "get_safety_filter"}
+```
+
+`get_safety_filter` は読み取り専用で、現在有効なルール一覧と `immutable: true` を返す。
+
 ### configure -- プロキシ設定変更
 
 実行中のプロキシ設定を動的に変更する。
@@ -640,6 +689,11 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   +-- レート制限・バジェット設定が必要?
   |     |
   |     +-- YES --> security set_rate_limits / set_budget
+  |     +-- NO --> 次へ
+  |
+  +-- SafetyFilter の設定確認が必要?
+  |     |
+  |     +-- YES --> security get_safety_filter で現在のルール確認
   |     +-- NO --> 次へ
   |
   +-- プロトコル固有の操作?
