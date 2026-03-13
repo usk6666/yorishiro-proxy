@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { HookConfig, HooksInput, MacrosEntry } from "../../lib/mcp/types.js";
 import { Button } from "../ui/Button.js";
 import { Input } from "../ui/Input.js";
@@ -86,6 +86,13 @@ export function HookConfigEditor({ macros, hooks, onChange }: HookConfigEditorPr
   const [postReceiveVars, setPostReceiveVars] = useState<VarEntry[]>(
     varsToEntries(hooks.post_receive?.vars),
   );
+
+  // Sync internal vars state when the hooks prop changes externally
+  // (e.g. when ResendPage resets hooks to {} on flow change).
+  useEffect(() => {
+    setPreSendVars(varsToEntries(hooks.pre_send?.vars));
+    setPostReceiveVars(varsToEntries(hooks.post_receive?.vars));
+  }, [hooks.pre_send?.vars, hooks.post_receive?.vars]);
 
   // --- Pre-send handlers ---
 
