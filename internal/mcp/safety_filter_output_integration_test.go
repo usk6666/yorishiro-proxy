@@ -9,7 +9,6 @@ import (
 	"net"
 	gohttp "net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -172,12 +171,9 @@ func TestOutputFilter_Proxy_AllHeadersMask(t *testing.T) {
 		fmt.Fprint(w, "ok")
 	})
 
-	engine := newOutputFilterEngine(t, []safety.RuleConfig{
-		{Preset: "email", Action: "mask", Targets: []string{"headers"}},
-	})
 	// The preset defines targets as body-only, but we need headers target.
 	// For "headers" target, we need a custom rule since presets define their own targets.
-	engine2 := newOutputFilterEngine(t, []safety.RuleConfig{
+	engine := newOutputFilterEngine(t, []safety.RuleConfig{
 		{
 			ID:          "email-headers",
 			Name:        "Email in all headers",
@@ -187,9 +183,8 @@ func TestOutputFilter_Proxy_AllHeadersMask(t *testing.T) {
 			Replacement: "[MASKED:email]",
 		},
 	})
-	_ = engine // unused, using engine2 with custom rule instead
 
-	env, _ := setupOutputFilterEnv(t, engine2)
+	env, _ := setupOutputFilterEnv(t, engine)
 
 	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
 		"listen_addr": "127.0.0.1:0",
@@ -1015,17 +1010,3 @@ func TestOutputFilter_MCP_RawDataPreserved(t *testing.T) {
 }
 
 // --- Helpers ---
-
-// newOutputFilterTestStore creates a new SQLite store for output filter tests.
-func newOutputFilterTestStore(t *testing.T) flow.Store {
-	t.Helper()
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "output_filter_test.db")
-	logger := testutil.DiscardLogger()
-	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
