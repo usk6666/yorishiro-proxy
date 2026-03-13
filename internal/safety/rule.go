@@ -126,6 +126,10 @@ type Rule struct {
 	// on a regex match. If non-nil, the match is only processed
 	// (masked/counted) when Validator returns true. This enables patterns
 	// like Luhn check for credit card numbers.
+	//
+	// Implementations must handle variable-length matches safely and must
+	// not index into the match slice without bounds checking, as the
+	// length of match depends on the actual matched content.
 	Validator func(match []byte) bool
 }
 

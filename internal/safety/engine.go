@@ -488,13 +488,13 @@ func applyRuleToHeaders(r *Rule, headers http.Header, filterName string) int {
 				}
 			} else {
 				// Slow path: validate each match.
-				count := replaceHeaderValidated(r, v)
+				count, replaced := replaceHeaderValidated(r, v)
 				if count == 0 {
 					continue
 				}
 				totalCount += count
 				if r.Action == ActionMask {
-					headers[name][j] = replaceHeaderStringValidated(r, v)
+					headers[name][j] = replaced
 				}
 			}
 		}
@@ -502,37 +502,38 @@ func applyRuleToHeaders(r *Rule, headers http.Header, filterName string) int {
 	return totalCount
 }
 
-// replaceHeaderValidated counts the number of validated matches in a header value.
-func replaceHeaderValidated(r *Rule, v string) int {
-	src := []byte(v)
-	locs := r.Pattern.FindAllIndex(src, -1)
-	count := 0
-	for _, loc := range locs {
-		if r.Validator(src[loc[0]:loc[1]]) {
-			count++
-		}
-	}
-	return count
-}
-
-// replaceHeaderStringValidated replaces only validated matches in a header value string.
-func replaceHeaderStringValidated(r *Rule, v string) string {
+// replaceHeaderValidated counts the number of validated matches in a header
+// value and returns the replaced string. The regex is executed only once.
+func replaceHeaderValidated(r *Rule, v string) (int, string) {
 	src := []byte(v)
 	locs := r.Pattern.FindAllSubmatchIndex(src, -1)
+	if len(locs) == 0 {
+		return 0, v
+	}
+
+	count := 0
 	replacement := []byte(r.Replacement)
 	buf := make([]byte, 0, len(src))
 	prev := 0
+
 	for _, loc := range locs {
 		matched := src[loc[0]:loc[1]]
 		if !r.Validator(matched) {
 			continue
 		}
-		buf = append(buf, src[prev:loc[0]]...)
-		buf = r.Pattern.Expand(buf, replacement, src, loc)
-		prev = loc[1]
+		count++
+		if r.Action == ActionMask {
+			buf = append(buf, src[prev:loc[0]]...)
+			buf = r.Pattern.Expand(buf, replacement, src, loc)
+			prev = loc[1]
+		}
 	}
-	buf = append(buf, src[prev:]...)
-	return string(buf)
+
+	if r.Action == ActionMask && count > 0 {
+		buf = append(buf, src[prev:]...)
+		return count, string(buf)
+	}
+	return count, v
 }
 
 // hasTarget returns true if the given target is in the list.
