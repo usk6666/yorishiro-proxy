@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"log/slog"
 	gohttp "net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // HandlerBase provides shared fields and setter methods for protocol handlers.
@@ -25,6 +27,10 @@ type HandlerBase struct {
 	RateLimiter     *RateLimiter
 	InterceptEngine *intercept.Engine
 	InterceptQueue  *intercept.Queue
+	// SafetyEngine is set once at initialization and read concurrently by
+	// handler goroutines. No mutex is needed because the field is never
+	// modified after the proxy starts accepting connections.
+	SafetyEngine *safety.Engine
 
 	// UpstreamMu protects UpstreamProxy for concurrent access.
 	UpstreamMu    sync.RWMutex
@@ -97,6 +103,64 @@ func (b *HandlerBase) SetInterceptQueue(queue *intercept.Queue) {
 	b.InterceptQueue = queue
 }
 
+// SetSafetyEngine sets the safety filter engine used to detect destructive
+// payloads in incoming requests. When set, requests matching safety rules
+// are blocked (or logged) before reaching the upstream server.
+func (b *HandlerBase) SetSafetyEngine(engine *safety.Engine) {
+	b.SafetyEngine = engine
+}
+
+// CheckSafetyFilter evaluates the safety engine's input rules against
+// the request body, URL, and headers. Returns the first violation found,
+// or nil if no rules matched or the engine is not configured.
+func (b *HandlerBase) CheckSafetyFilter(body []byte, rawURL string, headers gohttp.Header) *safety.InputViolation {
+	if b.SafetyEngine == nil {
+		return nil
+	}
+	return b.SafetyEngine.CheckInput(body, rawURL, headers)
+}
+
+// SafetyFilterAction looks up the action for the matched safety rule.
+// Returns the rule's action (block, mask, or log_only). Defaults to block
+// if the engine is nil or the rule is not found.
+func (b *HandlerBase) SafetyFilterAction(violation *safety.InputViolation) safety.Action {
+	if b.SafetyEngine == nil {
+		return safety.ActionBlock
+	}
+	for _, r := range b.SafetyEngine.InputRules() {
+		if r.ID == violation.RuleID {
+			return r.Action
+		}
+	}
+	return safety.ActionBlock
+}
+
+// safetyFilterResponseBody is the JSON structure for safety filter blocked responses.
+type safetyFilterResponseBody struct {
+	Error     string `json:"error"`
+	BlockedBy string `json:"blocked_by"`
+	Rule      string `json:"rule"`
+	Message   string `json:"message"`
+}
+
+// BuildSafetyFilterResponseBody constructs a JSON body for a safety filter
+// blocked response. It uses encoding/json to ensure all values are properly
+// escaped, preventing JSON injection via rule names or matched fragments.
+func BuildSafetyFilterResponseBody(violation *safety.InputViolation) []byte {
+	body := safetyFilterResponseBody{
+		Error:     "blocked by safety filter",
+		BlockedBy: "safety_filter",
+		Rule:      violation.RuleID,
+		Message:   "Destructive payload detected: " + violation.RuleName + " matched in request " + violation.Target.String(),
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		// Fallback: this should never happen since all fields are simple strings.
+		return []byte(`{"error":"blocked by safety filter","blocked_by":"safety_filter"}`)
+	}
+	return b
+}
+
 // SetUpstreamProxy configures the upstream proxy for outgoing connections.
 // Pass nil to disable the upstream proxy (direct connections).
 // This method is safe to call concurrently and updates both the transport's
@@ -145,4 +209,13 @@ func (b *HandlerBase) TLSFingerprint() string {
 // falling back to the handler's logger.
 func (b *HandlerBase) ConnLogger(ctx context.Context) *slog.Logger {
 	return LoggerFromContext(ctx, b.Logger)
+}
+
+// TruncateForLog truncates s to maxLen bytes for safe inclusion in log fields.
+// If s exceeds maxLen, it is truncated and "..." is appended to indicate truncation.
+func TruncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

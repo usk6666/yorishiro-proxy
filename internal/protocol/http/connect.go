@@ -18,6 +18,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // tlsMetadata holds TLS connection information extracted from the handshake.
@@ -385,6 +386,19 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	}
 	req.URL.Scheme = "https"
 
+	// Step 3.5: Safety filter enforcement (after body read, before hop-by-hop removal).
+	httpsURL := (&url.URL{Scheme: "https", Host: req.URL.Host, Path: req.URL.Path, RawQuery: req.URL.RawQuery}).String()
+	if violation := h.CheckSafetyFilter(bodyResult.recordBody, httpsURL, req.Header); violation != nil {
+		if h.SafetyFilterAction(violation) == safety.ActionBlock {
+			h.writeSafetyFilterResponse(conn, violation, logger)
+			h.recordBlockedHTTPSSession(ctx, req, bodyResult.recordBody, rawRequest, bodyResult.truncated, smuggling, start, connID, clientAddr, tlsMeta, "safety_filter", violation, logger)
+			return nil
+		}
+		logger.Warn("safety filter violation (log_only)",
+			"rule_id", violation.RuleID, "rule_name", violation.RuleName,
+			"target", violation.Target.String(), "matched_on", violation.MatchedOn)
+	}
+
 	// Remove hop-by-hop headers.
 	removeHopByHopHeaders(req.Header)
 
@@ -511,7 +525,7 @@ func (h *Handler) checkHTTPSScopeRewrite(ctx context.Context, conn net.Conn, con
 	}
 	req.URL.Scheme = "https"
 	h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
-	h.recordBlockedHTTPSSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, tlsMeta, logger)
+	h.recordBlockedHTTPSSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, tlsMeta, "target_scope", nil, logger)
 	return true
 }
 
@@ -626,8 +640,9 @@ func (h *Handler) dispatchOnTLSHandshake(ctx context.Context, serverName string,
 }
 
 // recordBlockedHTTPSSession records a blocked HTTPS request (inside MITM tunnel)
-// as a flow with BlockedBy="target_scope".
-func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, tlsMeta tlsMetadata, logger *slog.Logger) {
+// as a flow with the specified blockedBy reason. If violation is non-nil,
+// safety rule tags are added to the flow.
+func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, tlsMeta tlsMetadata, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
@@ -644,6 +659,14 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 	}
 
 	duration := time.Since(start)
+	tags := smugglingTags(smuggling)
+	if violation != nil {
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+		tags["safety_rule"] = violation.RuleID
+		tags["safety_target"] = violation.Target.String()
+	}
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "HTTPS",
@@ -651,8 +674,8 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 		State:     "complete",
 		Timestamp: start,
 		Duration:  duration,
-		Tags:      smugglingTags(smuggling),
-		BlockedBy: "target_scope",
+		Tags:      tags,
+		BlockedBy: blockedBy,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
 			TLSVersion: tlsMeta.Version,

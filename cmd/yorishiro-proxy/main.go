@@ -729,6 +729,8 @@ func buildMCPOptions(
 		mcp.WithRateLimiterSetter(proto.httpHandler),
 		mcp.WithRateLimiterSetter(proto.http2Handler),
 		mcp.WithRateLimiterSetter(proto.socks5Handler),
+		mcp.WithSafetyEngineSetter(proto.httpHandler),
+		mcp.WithSafetyEngineSetter(proto.http2Handler),
 	}
 
 	if proto.tlsTransport != nil {

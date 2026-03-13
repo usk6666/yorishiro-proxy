@@ -53,13 +53,14 @@ type deps struct {
 	targetScope           *proxy.TargetScope
 	rateLimiter           *proxy.RateLimiter
 	rateLimiterSetters    []rateLimiterSetter
+	safetyEngine          *safety.Engine
+	safetyEngineSetters   []safetyEngineSetter
 	budgetManager         *proxy.BudgetManager
 	pluginEngine          *plugin.Engine
 	socks5AuthSetter      socks5AuthSetter
 	tlsTransport          httputil.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
 	hostTLSRegistry       *httputil.HostTLSRegistry
-	safetyEngine          *safety.Engine
 }
 
 // Server wraps the MCP server and registers proxy-related tools.
@@ -103,6 +104,12 @@ type targetScopeSetter interface {
 // rate limiting (HTTP/1.x, HTTP/2, and SOCKS5 handlers).
 type rateLimiterSetter interface {
 	SetRateLimiter(rl *proxy.RateLimiter)
+}
+
+// safetyEngineSetter is implemented by protocol handlers that support
+// safety filter enforcement (HTTP/1.x and HTTP/2 handlers).
+type safetyEngineSetter interface {
+	SetSafetyEngine(engine *safety.Engine)
 }
 
 // tlsFingerprintSetter is implemented by protocol handlers that support
@@ -292,6 +299,24 @@ func WithRateLimiterSetter(setter rateLimiterSetter) ServerOption {
 	}
 }
 
+// WithSafetyEngine sets the SafetyFilter engine for the MCP server,
+// enabling input validation checks on resend, fuzz, intercept, and macro tools,
+// as well as rule inspection via the security tool's get_safety_filter action.
+func WithSafetyEngine(engine *safety.Engine) ServerOption {
+	return func(s *Server) {
+		s.deps.safetyEngine = engine
+	}
+}
+
+// WithSafetyEngineSetter registers a protocol handler that should be updated
+// when the safety engine is set. Call this for each handler that implements
+// the safetyEngineSetter interface (e.g., HTTP/1.x, HTTP/2).
+func WithSafetyEngineSetter(setter safetyEngineSetter) ServerOption {
+	return func(s *Server) {
+		s.deps.safetyEngineSetters = append(s.deps.safetyEngineSetters, setter)
+	}
+}
+
 // WithBudgetManager sets the budget manager for the MCP server,
 // enabling diagnostic session budget management via the security MCP tool.
 func WithBudgetManager(bm *proxy.BudgetManager) ServerOption {
@@ -331,15 +356,6 @@ func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
 func WithTLSTransport(t httputil.TLSTransport) ServerOption {
 	return func(s *Server) {
 		s.deps.tlsTransport = t
-	}
-}
-
-// WithSafetyEngine sets the SafetyFilter engine for the MCP server,
-// enabling input validation checks on resend, fuzz, intercept, and macro tools,
-// as well as rule inspection via the security tool's get_safety_filter action.
-func WithSafetyEngine(engine *safety.Engine) ServerOption {
-	return func(s *Server) {
-		s.deps.safetyEngine = engine
 	}
 }
 
@@ -393,6 +409,12 @@ func NewServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *prox
 	// Propagate rate limiter to all registered protocol handlers.
 	for _, setter := range s.deps.rateLimiterSetters {
 		setter.SetRateLimiter(s.deps.rateLimiter)
+	}
+	// Propagate safety engine to all registered protocol handlers.
+	if s.deps.safetyEngine != nil {
+		for _, setter := range s.deps.safetyEngineSetters {
+			setter.SetSafetyEngine(s.deps.safetyEngine)
+		}
 	}
 	// Initialize default BudgetManager if not provided via WithBudgetManager.
 	if s.deps.budgetManager == nil {
