@@ -4,8 +4,6 @@ package main
 
 import (
 	"encoding/json"
-	"log/slog"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,26 +11,12 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
-// e2eLogger returns a quiet logger for e2e test use.
-func e2eLogger(t *testing.T) *slog.Logger {
-	t.Helper()
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-}
-
-// writeE2EFile writes content to a file within the test temp dir.
-func writeE2EFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("write test file %s: %v", path, err)
-	}
-}
-
 // --- SafetyFilter Input: config file -> runtime ---
 
 func TestConfigE2E_SafetyFilter_InputPreset(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"input": {
@@ -50,7 +34,7 @@ func TestConfigE2E_SafetyFilter_InputPreset(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -77,7 +61,7 @@ func TestConfigE2E_SafetyFilter_InputPreset(t *testing.T) {
 func TestConfigE2E_SafetyFilter_InputCustomRule(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"input": {
@@ -100,7 +84,7 @@ func TestConfigE2E_SafetyFilter_InputCustomRule(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -126,7 +110,7 @@ func TestConfigE2E_SafetyFilter_InputCustomRule(t *testing.T) {
 func TestConfigE2E_SafetyFilter_OutputPreset(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"output": {
@@ -144,7 +128,7 @@ func TestConfigE2E_SafetyFilter_OutputPreset(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -171,7 +155,7 @@ func TestConfigE2E_SafetyFilter_OutputPreset(t *testing.T) {
 func TestConfigE2E_SafetyFilter_OutputCustomRule(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"output": {
@@ -195,7 +179,7 @@ func TestConfigE2E_SafetyFilter_OutputCustomRule(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -224,7 +208,7 @@ func TestConfigE2E_SafetyFilter_OutputCustomRule(t *testing.T) {
 func TestConfigE2E_SafetyFilter_InputAndOutput(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"input": {
@@ -247,7 +231,7 @@ func TestConfigE2E_SafetyFilter_InputAndOutput(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -269,7 +253,7 @@ func TestConfigE2E_SafetyFilter_InputAndOutput(t *testing.T) {
 func TestConfigE2E_SafetyFilter_CLIOverrideDisables(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"input": {
@@ -286,7 +270,7 @@ func TestConfigE2E_SafetyFilter_CLIOverrideDisables(t *testing.T) {
 	cfg := config.Default()
 	disabled := false
 	cfg.SafetyFilterEnabled = &disabled
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -301,7 +285,7 @@ func TestConfigE2E_SafetyFilter_CLIOverrideEnables(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
 	// Config file has safety_filter disabled or absent.
-	writeE2EFile(t, cfgPath, `{}`)
+	writeTestFile(t, cfgPath, `{}`)
 
 	proxyCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
@@ -311,7 +295,7 @@ func TestConfigE2E_SafetyFilter_CLIOverrideEnables(t *testing.T) {
 	cfg := config.Default()
 	enabled := true
 	cfg.SafetyFilterEnabled = &enabled
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -327,7 +311,7 @@ func TestConfigE2E_SafetyFilter_CLIOverrideEnables(t *testing.T) {
 func TestConfigE2E_SafetyFilter_OutputReplacementOverride(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"output": {
@@ -344,7 +328,7 @@ func TestConfigE2E_SafetyFilter_OutputReplacementOverride(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
@@ -365,7 +349,7 @@ func TestConfigE2E_SafetyFilter_OutputReplacementOverride(t *testing.T) {
 func TestConfigE2E_TargetScopePolicy_FromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"target_scope_policy": {
 			"allows": [
 				{"hostname": "*.target.com", "ports": [80, 443]},
@@ -423,7 +407,7 @@ func TestConfigE2E_TargetScopePolicy_FromConfigFile(t *testing.T) {
 func TestConfigE2E_TargetScopePolicy_FromPolicyFile(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
-	writeE2EFile(t, policyPath, `{
+	writeTestFile(t, policyPath, `{
 		"allows": [
 			{"hostname": "*.safe.com"}
 		],
@@ -472,7 +456,7 @@ func TestConfigE2E_TargetScopePolicy_PolicyFilePrecedence(t *testing.T) {
 
 	// Config file has one policy.
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"target_scope_policy": {
 			"allows": [{"hostname": "from-config.com"}]
 		}
@@ -480,7 +464,7 @@ func TestConfigE2E_TargetScopePolicy_PolicyFilePrecedence(t *testing.T) {
 
 	// Policy file has a different policy.
 	policyPath := filepath.Join(dir, "policy.json")
-	writeE2EFile(t, policyPath, `{
+	writeTestFile(t, policyPath, `{
 		"allows": [{"hostname": "from-policy.com"}]
 	}`)
 
@@ -509,7 +493,7 @@ func TestConfigE2E_TargetScopePolicy_PolicyFilePrecedence(t *testing.T) {
 func TestConfigE2E_TargetScopePolicy_WithPathAndSchemes(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"target_scope_policy": {
 			"allows": [
 				{
@@ -562,8 +546,8 @@ func TestConfigE2E_mTLS_GlobalFromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "client.crt")
 	keyPath := filepath.Join(dir, "client.key")
-	writeE2EFile(t, certPath, "test-cert-content")
-	writeE2EFile(t, keyPath, "test-key-content")
+	writeTestFile(t, certPath, "test-cert-content")
+	writeTestFile(t, keyPath, "test-key-content")
 
 	cfgPath := filepath.Join(dir, "config.json")
 	cfgData := map[string]interface{}{
@@ -574,7 +558,7 @@ func TestConfigE2E_mTLS_GlobalFromConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
 	}
-	writeE2EFile(t, cfgPath, string(raw))
+	writeTestFile(t, cfgPath, string(raw))
 
 	proxyCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
@@ -582,7 +566,7 @@ func TestConfigE2E_mTLS_GlobalFromConfigFile(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	reg, err := initHostTLSRegistry(cfg, proxyCfg, logger)
 	if err != nil {
@@ -603,8 +587,8 @@ func TestConfigE2E_mTLS_PerHostFromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	hostCert := filepath.Join(dir, "host.crt")
 	hostKey := filepath.Join(dir, "host.key")
-	writeE2EFile(t, hostCert, "host-cert")
-	writeE2EFile(t, hostKey, "host-key")
+	writeTestFile(t, hostCert, "host-cert")
+	writeTestFile(t, hostKey, "host-key")
 
 	cfgPath := filepath.Join(dir, "config.json")
 	cfgData := map[string]interface{}{
@@ -623,7 +607,7 @@ func TestConfigE2E_mTLS_PerHostFromConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
 	}
-	writeE2EFile(t, cfgPath, string(raw))
+	writeTestFile(t, cfgPath, string(raw))
 
 	proxyCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
@@ -631,7 +615,7 @@ func TestConfigE2E_mTLS_PerHostFromConfigFile(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	reg, err := initHostTLSRegistry(cfg, proxyCfg, logger)
 	if err != nil {
@@ -666,14 +650,14 @@ func TestConfigE2E_mTLS_CLIPrecedenceOverConfigFile(t *testing.T) {
 	// CLI cert paths.
 	cliCert := filepath.Join(dir, "cli.crt")
 	cliKey := filepath.Join(dir, "cli.key")
-	writeE2EFile(t, cliCert, "cli-cert")
-	writeE2EFile(t, cliKey, "cli-key")
+	writeTestFile(t, cliCert, "cli-cert")
+	writeTestFile(t, cliKey, "cli-key")
 
 	// Config file cert paths.
 	proxyCert := filepath.Join(dir, "proxy.crt")
 	proxyKey := filepath.Join(dir, "proxy.key")
-	writeE2EFile(t, proxyCert, "proxy-cert")
-	writeE2EFile(t, proxyKey, "proxy-key")
+	writeTestFile(t, proxyCert, "proxy-cert")
+	writeTestFile(t, proxyKey, "proxy-key")
 
 	cfgPath := filepath.Join(dir, "config.json")
 	cfgData := map[string]interface{}{
@@ -684,7 +668,7 @@ func TestConfigE2E_mTLS_CLIPrecedenceOverConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
 	}
-	writeE2EFile(t, cfgPath, string(raw))
+	writeTestFile(t, cfgPath, string(raw))
 
 	proxyCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
@@ -695,7 +679,7 @@ func TestConfigE2E_mTLS_CLIPrecedenceOverConfigFile(t *testing.T) {
 	cfg := config.Default()
 	cfg.ClientCertPath = cliCert
 	cfg.ClientKeyPath = cliKey
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	reg, err := initHostTLSRegistry(cfg, proxyCfg, logger)
 	if err != nil {
@@ -716,10 +700,10 @@ func TestConfigE2E_mTLS_GlobalWithPerHost(t *testing.T) {
 	globalKey := filepath.Join(dir, "global.key")
 	hostCert := filepath.Join(dir, "host.crt")
 	hostKey := filepath.Join(dir, "host.key")
-	writeE2EFile(t, globalCert, "global-cert")
-	writeE2EFile(t, globalKey, "global-key")
-	writeE2EFile(t, hostCert, "host-cert")
-	writeE2EFile(t, hostKey, "host-key")
+	writeTestFile(t, globalCert, "global-cert")
+	writeTestFile(t, globalKey, "global-key")
+	writeTestFile(t, hostCert, "host-cert")
+	writeTestFile(t, hostKey, "host-key")
 
 	cfgPath := filepath.Join(dir, "config.json")
 	cfgData := map[string]interface{}{
@@ -736,7 +720,7 @@ func TestConfigE2E_mTLS_GlobalWithPerHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
 	}
-	writeE2EFile(t, cfgPath, string(raw))
+	writeTestFile(t, cfgPath, string(raw))
 
 	proxyCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
@@ -744,7 +728,7 @@ func TestConfigE2E_mTLS_GlobalWithPerHost(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	reg, err := initHostTLSRegistry(cfg, proxyCfg, logger)
 	if err != nil {
@@ -780,7 +764,7 @@ func TestConfigE2E_mTLS_GlobalWithPerHost(t *testing.T) {
 func TestConfigE2E_SOCKS5Auth_PasswordFromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"socks5_auth": "password",
 		"socks5_username": "testuser",
 		"socks5_password": "testpass"
@@ -823,7 +807,7 @@ func TestConfigE2E_SOCKS5Auth_PasswordFromConfigFile(t *testing.T) {
 func TestConfigE2E_SOCKS5Auth_NoneByDefault(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{}`)
+	writeTestFile(t, cfgPath, `{}`)
 
 	proxyCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
@@ -838,7 +822,7 @@ func TestConfigE2E_SOCKS5Auth_NoneByDefault(t *testing.T) {
 func TestConfigE2E_SOCKS5Auth_PasswordButMissingCredentials(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"socks5_auth": "password"
 	}`)
 
@@ -866,8 +850,8 @@ func TestConfigE2E_CombinedSecurityConfig(t *testing.T) {
 	dir := t.TempDir()
 	cert := filepath.Join(dir, "client.crt")
 	key := filepath.Join(dir, "client.key")
-	writeE2EFile(t, cert, "cert-content")
-	writeE2EFile(t, key, "key-content")
+	writeTestFile(t, cert, "cert-content")
+	writeTestFile(t, key, "key-content")
 
 	cfgPath := filepath.Join(dir, "config.json")
 	cfgData := map[string]interface{}{
@@ -907,7 +891,7 @@ func TestConfigE2E_CombinedSecurityConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
 	}
-	writeE2EFile(t, cfgPath, string(raw))
+	writeTestFile(t, cfgPath, string(raw))
 
 	// Load config file.
 	result, err := loadConfigs(cfgPath, "")
@@ -917,7 +901,7 @@ func TestConfigE2E_CombinedSecurityConfig(t *testing.T) {
 	proxyCfg := result.proxyCfg
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	// Verify SafetyFilter.
 	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
@@ -985,7 +969,7 @@ func TestConfigE2E_CombinedSecurityConfig(t *testing.T) {
 func TestConfigE2E_SafetyFilter_InvalidPreset(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"input": {
@@ -1002,7 +986,7 @@ func TestConfigE2E_SafetyFilter_InvalidPreset(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	_, err = initSafetyFilter(cfg, proxyCfg, logger)
 	if err == nil {
@@ -1013,7 +997,7 @@ func TestConfigE2E_SafetyFilter_InvalidPreset(t *testing.T) {
 func TestConfigE2E_SafetyFilter_InvalidPattern(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"input": {
@@ -1034,7 +1018,7 @@ func TestConfigE2E_SafetyFilter_InvalidPattern(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	_, err = initSafetyFilter(cfg, proxyCfg, logger)
 	if err == nil {
@@ -1045,7 +1029,7 @@ func TestConfigE2E_SafetyFilter_InvalidPattern(t *testing.T) {
 func TestConfigE2E_SafetyFilter_InvalidAction(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	writeE2EFile(t, cfgPath, `{
+	writeTestFile(t, cfgPath, `{
 		"safety_filter": {
 			"enabled": true,
 			"input": {
@@ -1063,7 +1047,7 @@ func TestConfigE2E_SafetyFilter_InvalidAction(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	logger := e2eLogger(t)
+	logger := testLogger(t)
 
 	_, err = initSafetyFilter(cfg, proxyCfg, logger)
 	if err == nil {
