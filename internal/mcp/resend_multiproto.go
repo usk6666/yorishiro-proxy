@@ -70,6 +70,13 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		return nil, nil, err
 	}
 
+	// SafetyFilter input check: validate all send message bodies before replaying.
+	for _, msg := range sendMsgs {
+		if v := s.checkSafetyInput(msg.Body, "", nil); v != nil {
+			return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
+		}
+	}
+
 	useTLS, timeout := determineTLSAndTimeout(false, params)
 
 	totalBytesSent, respData, start, duration, err := s.replayAllMessages(ctx, targetAddr, useTLS, timeout, sendMsgs)
@@ -249,6 +256,11 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 	sendBody, err := resolveWebSocketBody(targetMsg, params)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// SafetyFilter input check: validate WebSocket message body before sending.
+	if v := s.checkSafetyInput(sendBody, "", nil); v != nil {
+		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
 	respData, start, duration, err := s.establishAndSend(ctx, targetAddr, useTLS, timeout, sendBody)

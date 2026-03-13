@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -96,7 +97,18 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		return nil, nil, err
 	}
 
-	if err := s.checkFuzzTargetScope(ctx, params.FlowID); err != nil {
+	// Load template flow and send messages once, shared between scope and safety checks.
+	templateFlow, templateSendMsgs, err := s.loadFuzzTemplate(ctx, params.FlowID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := s.checkFuzzTargetScopeWithData(templateFlow, templateSendMsgs); err != nil {
+		return nil, nil, err
+	}
+
+	// SafetyFilter input check: validate the template flow's body/URL/headers.
+	if err := s.checkFuzzSafetyInputWithData(templateSendMsgs); err != nil {
 		return nil, nil, err
 	}
 
@@ -117,6 +129,18 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		ts := s.deps.targetScope
 		cfg.TargetScopeChecker = func(u *url.URL) error {
 			return checkTargetScopeURLHelper(ts, u)
+		}
+	}
+
+	// Inject safety input checker to validate each expanded payload
+	// before sending, preventing destructive payloads via fuzz injection.
+	if s.deps.safetyEngine != nil {
+		se := s.deps.safetyEngine
+		cfg.SafetyInputChecker = func(body []byte, rawURL string, headers http.Header) error {
+			if v := se.CheckInput(body, rawURL, headers); v != nil {
+				return fmt.Errorf("%s", safetyViolationError(v))
+			}
+			return nil
 		}
 	}
 
@@ -145,27 +169,56 @@ func validateFuzzParams(params fuzzParams) error {
 	return nil
 }
 
-// checkFuzzTargetScope enforces the target scope on the template flow's URL.
+// loadFuzzTemplate loads the template flow and its send messages from the store.
+func (s *Server) loadFuzzTemplate(ctx context.Context, flowID string) (*flow.Flow, []*flow.Message, error) {
+	if s.deps.store == nil {
+		return nil, nil, fmt.Errorf("flow store is not initialized")
+	}
+	fl, err := s.deps.store.GetFlow(ctx, flowID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get template flow: %w", err)
+	}
+	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get send messages: %w", err)
+	}
+	return fl, sendMsgs, nil
+}
+
+// checkFuzzTargetScopeWithData enforces the target scope on pre-loaded template data.
 // If no target scope is configured, this is a no-op.
-func (s *Server) checkFuzzTargetScope(ctx context.Context, flowID string) error {
+func (s *Server) checkFuzzTargetScopeWithData(_ *flow.Flow, sendMsgs []*flow.Message) error {
 	if s.deps.targetScope == nil || !s.deps.targetScope.HasRules() {
 		return nil
-	}
-	if s.deps.store == nil {
-		return fmt.Errorf("flow store is not initialized")
-	}
-	templateSess, err := s.deps.store.GetFlow(ctx, flowID)
-	if err != nil {
-		return fmt.Errorf("get template flow for target scope check: %w", err)
-	}
-	sendMsgs, err := s.deps.store.GetMessages(ctx, templateSess.ID, flow.MessageListOptions{Direction: "send"})
-	if err != nil {
-		return fmt.Errorf("get send messages for target scope check: %w", err)
 	}
 	if len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 		if err := s.checkTargetScopeURL(sendMsgs[0].URL); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkFuzzSafetyInputWithData validates pre-loaded template send messages against
+// the safety filter engine. If no safety engine is configured, this is a no-op.
+func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Message) error {
+	if s.deps.safetyEngine == nil {
+		return nil
+	}
+	if len(sendMsgs) == 0 {
+		return nil
+	}
+	msg := sendMsgs[0]
+	var rawURL string
+	if msg.URL != nil {
+		rawURL = msg.URL.String()
+	}
+	var headers http.Header
+	if msg.Headers != nil {
+		headers = http.Header(msg.Headers)
+	}
+	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
+		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil
 }
