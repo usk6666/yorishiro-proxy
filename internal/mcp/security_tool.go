@@ -10,6 +10,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // securityInput is the typed input for the security tool.
@@ -775,19 +776,21 @@ func (s *Server) handleGetBudget() (*gomcp.CallToolResult, any, error) {
 
 // safetyFilterRuleResult describes a single SafetyFilter rule for display.
 type safetyFilterRuleResult struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Pattern  string   `json:"pattern"`
-	Targets  []string `json:"targets"`
-	Action   string   `json:"action"`
-	Category string   `json:"category"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Pattern     string   `json:"pattern"`
+	Targets     []string `json:"targets"`
+	Action      string   `json:"action"`
+	Replacement string   `json:"replacement,omitempty"`
+	Category    string   `json:"category"`
 }
 
 // getSafetyFilterResult is the structured output for get_safety_filter.
 type getSafetyFilterResult struct {
-	Enabled    bool                     `json:"enabled"`
-	InputRules []safetyFilterRuleResult `json:"input_rules"`
-	Immutable  bool                     `json:"immutable"`
+	Enabled     bool                     `json:"enabled"`
+	InputRules  []safetyFilterRuleResult `json:"input_rules"`
+	OutputRules []safetyFilterRuleResult `json:"output_rules"`
+	Immutable   bool                     `json:"immutable"`
 }
 
 // handleGetSafetyFilter returns the current SafetyFilter configuration.
@@ -796,32 +799,41 @@ type getSafetyFilterResult struct {
 func (s *Server) handleGetSafetyFilter() (*gomcp.CallToolResult, any, error) {
 	if s.deps.safetyEngine == nil {
 		return nil, &getSafetyFilterResult{
-			Enabled:    false,
-			InputRules: []safetyFilterRuleResult{},
-			Immutable:  true,
+			Enabled:     false,
+			InputRules:  []safetyFilterRuleResult{},
+			OutputRules: []safetyFilterRuleResult{},
+			Immutable:   true,
 		}, nil
 	}
 
-	inputRules := s.deps.safetyEngine.InputRules()
-	ruleResults := make([]safetyFilterRuleResult, 0, len(inputRules))
-	for _, r := range inputRules {
+	inputResults := convertRules(s.deps.safetyEngine.InputRules())
+	outputResults := convertRules(s.deps.safetyEngine.OutputRules())
+
+	return nil, &getSafetyFilterResult{
+		Enabled:     true,
+		InputRules:  inputResults,
+		OutputRules: outputResults,
+		Immutable:   true,
+	}, nil
+}
+
+// convertRules converts compiled safety rules to their display representation.
+func convertRules(rules []safety.Rule) []safetyFilterRuleResult {
+	results := make([]safetyFilterRuleResult, 0, len(rules))
+	for _, r := range rules {
 		targets := make([]string, 0, len(r.Targets))
 		for _, t := range r.Targets {
 			targets = append(targets, t.String())
 		}
-		ruleResults = append(ruleResults, safetyFilterRuleResult{
-			ID:       r.ID,
-			Name:     r.Name,
-			Pattern:  r.Pattern.String(),
-			Targets:  targets,
-			Action:   r.Action.String(),
-			Category: r.Category,
+		results = append(results, safetyFilterRuleResult{
+			ID:          r.ID,
+			Name:        r.Name,
+			Pattern:     r.Pattern.String(),
+			Targets:     targets,
+			Action:      r.Action.String(),
+			Replacement: r.Replacement,
+			Category:    r.Category,
 		})
 	}
-
-	return nil, &getSafetyFilterResult{
-		Enabled:    true,
-		InputRules: ruleResults,
-		Immutable:  true,
-	}, nil
+	return results
 }

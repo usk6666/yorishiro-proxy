@@ -1036,7 +1036,8 @@ export type SecurityAction =
   | "set_rate_limits"
   | "get_rate_limits"
   | "set_budget"
-  | "get_budget";
+  | "get_budget"
+  | "get_safety_filter";
 
 /** Target rule for security tool. */
 export interface TargetRule {
@@ -1159,6 +1160,29 @@ export interface SecurityGetBudgetResult {
   effective: BudgetConfig;
   request_count: number;
   stop_reason?: string;
+}
+
+// ---------------------------------------------------------------------------
+// security tool — get_safety_filter
+// ---------------------------------------------------------------------------
+
+/** A single SafetyFilter rule (input or output). */
+export interface SafetyFilterRule {
+  id: string;
+  name: string;
+  pattern: string;
+  targets: string[];
+  action: string;
+  replacement?: string;
+  category: string;
+}
+
+/** Result of get_safety_filter action. */
+export interface SafetyFilterResult {
+  enabled: boolean;
+  input_rules: SafetyFilterRule[];
+  output_rules: SafetyFilterRule[];
+  immutable: boolean;
 }
 
 // ---------------------------------------------------------------------------

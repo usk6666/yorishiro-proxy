@@ -8,6 +8,7 @@ import { Budget } from "./Budget.js";
 import { EnforcementMode } from "./EnforcementMode.js";
 import { PolicyLayer } from "./PolicyLayer.js";
 import { RateLimits } from "./RateLimits.js";
+import { SafetyFilter } from "./SafetyFilter.js";
 import "./SecurityPage.css";
 import { UrlTestTool } from "./UrlTestTool.js";
 
@@ -94,6 +95,8 @@ export function SecurityPage() {
         )}
 
         <UrlTestTool />
+
+        <SafetyFilter />
 
         <RateLimits />
 
