@@ -239,7 +239,7 @@ func TestIntegration_ProductionWiring_HTTPSMITM(t *testing.T) {
 		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
 
-	send, recv := getFlowMessages(t, ctx, store, fl.ID)
+	send, recv := pollFlowMessages(t, ctx, store, fl.ID)
 	if send == nil {
 		t.Fatal("send message not found")
 	}
@@ -645,17 +645,17 @@ func TestIntegration_ProductionWiring_AllSettersHTTPForward(t *testing.T) {
 	}
 
 	// Verify all flows were recorded.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP", Limit: 10}, len(tests))
+	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, len(tests))
 	if len(flows) != len(tests) {
 		t.Fatalf("expected %d flows, got %d", len(tests), len(flows))
 	}
 
 	// Verify each flow has proper messages.
 	for _, fl := range flows {
-		if fl.Protocol != "HTTP" {
-			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTP")
+		if fl.Protocol != "HTTP/1.x" {
+			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTP/1.x")
 		}
-		send, recv := getFlowMessages(t, ctx, store, fl.ID)
+		send, recv := pollFlowMessages(t, ctx, store, fl.ID)
 		if send == nil {
 			t.Error("send message not found")
 		}

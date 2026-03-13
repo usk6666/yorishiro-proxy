@@ -31,7 +31,7 @@ func pollFlows(t *testing.T, ctx context.Context, store flow.Store, opts flow.Li
 	return nil
 }
 
-// getFlowMessages retrieves send and receive messages for a flow.
+// getFlowMessages retrieves send and receive messages for a flow (single attempt).
 func getFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
 	t.Helper()
 	msgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
@@ -48,6 +48,19 @@ func getFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID
 			if recv == nil {
 				recv = m
 			}
+		}
+	}
+	return send, recv
+}
+
+// pollFlowMessages polls until both send and receive messages appear for a flow.
+func pollFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		send, recv = getFlowMessages(t, ctx, store, flowID)
+		if send != nil && recv != nil {
+			return send, recv
 		}
 	}
 	return send, recv
