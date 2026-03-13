@@ -46,7 +46,7 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 - **Upstream Proxy** -- Chain through HTTP or SOCKS5 proxies
 - **Streamable HTTP MCP** -- Multi-agent shared access with Bearer token authentication
 - **Comparer** -- Structural diff between two flows (status code, headers, body length, timing, JSON key-level diff)
-- **AI Safety** -- SafetyFilter blocks destructive payloads (DROP TABLE, rm -rf, etc.) at the Policy Layer before they reach the target; rate limiting (global/per-host RPS) and diagnostic budgets (request count/duration limits) with two-layer Policy+Agent architecture
+- **AI Safety** -- SafetyFilter blocks destructive payloads (DROP TABLE, rm -rf, etc.) at the Input Filter before they reach the target; Output Filter masks PII (credit card numbers, email addresses, phone numbers, etc.) in responses before returning to AI agents while preserving raw data in the flow store; rate limiting (global/per-host RPS) and diagnostic budgets (request count/duration limits) with two-layer Policy+Agent architecture
 - **Plugin System** -- Extend proxy behavior with [Starlark](https://github.com/google/starlark-go) scripts that hook into the request/response pipeline
 - **Web UI** -- Embedded React/Vite dashboard for visual inspection and interactive testing
 

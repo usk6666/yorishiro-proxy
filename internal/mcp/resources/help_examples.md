@@ -288,6 +288,113 @@ Review the proxy logs for `safety_filter` entries. Once satisfied, change `actio
 ```
 Returns the list of compiled rules, their targets, actions, and whether SafetyFilter is enabled. Rules are immutable at runtime.
 
+## Output Filter Configuration
+
+> **Note**: Output Filter の config ファイル経由での設定は今後対応予定です (Coming soon)。
+> 現在、Output Filter はプログラマティック API (`safety.Config`) のみサポートしています。
+> 以下の設定例は将来の config ファイルサポート時の参考として掲載しています。
+
+### Enable PII masking with default presets
+Add the following to your config file (`-config config.json`):
+```json
+// config.json
+{
+  "safety_filter": {
+    "enabled": true,
+    "output": {
+      "action": "mask",
+      "rules": [
+        {"preset": "credit-card"},
+        {"preset": "email"},
+        {"preset": "japan-phone"},
+        {"preset": "japan-my-number"}
+      ]
+    }
+  }
+}
+```
+This masks credit card numbers, email addresses, phone numbers, and My Number in response bodies before returning data to AI agents. Raw data is preserved in the Flow Store.
+
+### Combine input and output filters
+```json
+// config.json
+{
+  "safety_filter": {
+    "enabled": true,
+    "input": {
+      "action": "block",
+      "rules": [
+        {"preset": "destructive-sql"},
+        {"preset": "destructive-os-command"}
+      ]
+    },
+    "output": {
+      "action": "mask",
+      "rules": [
+        {"preset": "credit-card"},
+        {"preset": "email"}
+      ]
+    }
+  }
+}
+```
+Input filter blocks destructive payloads; output filter masks PII in responses.
+
+### Add custom output masking rules
+
+> **Note**: config ファイルでは per-rule の `action`/`replacement` フィールドは未対応です。
+> セクションレベルの `action` が全ルールに適用されます。
+> per-rule の `action`/`replacement` はプログラマティック API (`safety.Config`) で利用可能です。
+
+```json
+// config.json (Coming soon)
+{
+  "safety_filter": {
+    "enabled": true,
+    "output": {
+      "action": "mask",
+      "rules": [
+        {"preset": "credit-card"},
+        {"preset": "email"},
+        {
+          "id": "custom-api-key",
+          "name": "API key pattern",
+          "pattern": "sk-[a-zA-Z0-9]{32,}",
+          "targets": ["body"],
+          "replacement": "[MASKED:api_key]"
+        },
+        {
+          "id": "custom-ssn",
+          "name": "US Social Security Number",
+          "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+          "targets": ["body"],
+          "replacement": "[MASKED:ssn]"
+        }
+      ]
+    }
+  }
+}
+```
+
+### Test output rules with log_only mode
+Before enforcing masking, use `log_only` mode to observe what would be masked without modifying responses:
+```json
+// config.json
+{
+  "safety_filter": {
+    "enabled": true,
+    "output": {
+      "action": "log_only",
+      "rules": [
+        {"preset": "credit-card"},
+        {"preset": "email"}
+      ]
+    }
+  }
+}
+```
+Review the proxy logs for `safety_filter` entries. Once satisfied, change `action` to `"mask"` and restart.
+
 ## Flow Cleanup
 
 ### Delete old flows

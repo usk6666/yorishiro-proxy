@@ -35,6 +35,11 @@ internal/
       handler.go           # HTTP forward proxy ハンドラ
       connect.go           # CONNECT トンネル・HTTPS MITM
     httputil/              # HTTP 共通ユーティリティ (TLS トランスポート, ホスト別 TLS 設定, タイミング)
+  safety/                  # SafetyFilter エンジン (Input Filter + Output Filter)
+    engine.go              # ルールコンパイル・CheckInput・FilterOutput
+    rule.go                # Rule/Target/Action 型定義・Preset 構造
+    preset.go              # Input Filter プリセット (destructive-sql, destructive-os-command)
+    preset_pii.go          # Output Filter PII プリセット (credit-card, japan-my-number, email, japan-phone)
   plugin/                  # Starlark プラグインエンジン・レジストリ
   flow/                    # リクエスト/レスポンス記録・フロー管理・HAR エクスポート
   cert/                    # TLS 証明書生成・CA 管理
