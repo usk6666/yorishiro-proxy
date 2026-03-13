@@ -364,12 +364,22 @@ func (h *Handler) handleStream(
 
 	resp, fullRespBody = h.runResponsePluginHooks(sc, resp, fullRespBody)
 
+	// Save unmasked body for recording before output filter masks it.
+	// Deep copy to guard against future FilterOutput implementations that
+	// may modify the underlying array in place (S-2).
+	rawRespBody := make([]byte, len(fullRespBody))
+	copy(rawRespBody, fullRespBody)
+
+	// Output filter: mask sensitive data in response body and headers before
+	// sending to client. Raw (unmasked) data is preserved in Flow Store.
+	fullRespBody, resp.Header = h.ApplyOutputFilter(fullRespBody, resp.Header, sc.logger)
+
 	writeResponseToClient(sc, resp, fullRespBody)
 
 	duration := time.Since(sc.start)
 	tlsCertSubject := extractTLSCertSubject(resp)
 
-	h.recordStreamResponse(sc, isGRPC, sendResult, resp, fullRespBody, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs)
+	h.recordStreamResponse(sc, isGRPC, sendResult, resp, rawRespBody, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs)
 
 	logProtocol := "http/2"
 	if isGRPC {
