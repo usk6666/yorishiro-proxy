@@ -8,36 +8,48 @@ import (
 
 // ValidateSafetyFilterConfig validates the SafetyFilter configuration.
 // It checks that:
-//   - The action (if set) is "block" or "log_only"
+//   - The action (if set) is valid for the section type
 //   - Each rule has either preset or pattern set (not both)
 //   - Custom rules have required fields (id, pattern, targets)
 //   - Regex patterns compile successfully
 //   - Preset names are not empty
+//   - Target values are valid for the section type (input vs output)
 func ValidateSafetyFilterConfig(cfg *SafetyFilterConfig) error {
 	if cfg == nil {
 		return nil
 	}
 
-	if cfg.Input == nil {
-		return nil
+	if cfg.Input != nil {
+		// Validate input action.
+		if cfg.Input.Action != "" && cfg.Input.Action != "block" && cfg.Input.Action != "log_only" {
+			return fmt.Errorf("safety_filter.input.action: invalid value %q (must be \"block\" or \"log_only\")", cfg.Input.Action)
+		}
+
+		for i, rule := range cfg.Input.Rules {
+			if err := validateSafetyFilterRule(i, rule, validInputTargets, "safety_filter.input"); err != nil {
+				return err
+			}
+		}
 	}
 
-	// Validate action.
-	if cfg.Input.Action != "" && cfg.Input.Action != "block" && cfg.Input.Action != "log_only" {
-		return fmt.Errorf("safety_filter.input.action: invalid value %q (must be \"block\" or \"log_only\")", cfg.Input.Action)
-	}
+	if cfg.Output != nil {
+		// Validate output action.
+		if cfg.Output.Action != "" && cfg.Output.Action != "mask" && cfg.Output.Action != "log_only" {
+			return fmt.Errorf("safety_filter.output.action: invalid value %q (must be \"mask\" or \"log_only\")", cfg.Output.Action)
+		}
 
-	for i, rule := range cfg.Input.Rules {
-		if err := validateSafetyFilterRule(i, rule); err != nil {
-			return fmt.Errorf("safety_filter.input.rules[%d]: %w", i, err)
+		for i, rule := range cfg.Output.Rules {
+			if err := validateSafetyFilterRule(i, rule, validOutputTargets, "safety_filter.output"); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
-// validTargets lists the accepted target values for custom safety filter rules.
-var validTargets = map[string]bool{
+// validInputTargets lists the accepted target values for input filter rules.
+var validInputTargets = map[string]bool{
 	"body":    true,
 	"url":     true,
 	"query":   true,
@@ -45,16 +57,26 @@ var validTargets = map[string]bool{
 	"headers": true,
 }
 
+// validOutputTargets lists the accepted target values for output filter rules.
+// Output targets support "body", "headers" (all headers), and "header:<name>"
+// for specific header matching (e.g. "header:Set-Cookie").
+var validOutputTargets = map[string]bool{
+	"body":    true,
+	"headers": true,
+	// "header:*" is validated dynamically in isValidTarget.
+}
+
 // validateSafetyFilterRule validates a single rule config entry.
-func validateSafetyFilterRule(index int, rule SafetyFilterRuleConfig) error {
+// The section parameter is used for error message context (e.g. "safety_filter.input").
+func validateSafetyFilterRule(index int, rule SafetyFilterRuleConfig, targets map[string]bool, section string) error {
 	hasPreset := rule.Preset != ""
 	hasPattern := rule.Pattern != ""
 
 	if hasPreset && hasPattern {
-		return fmt.Errorf("rule[%d]: preset and pattern are mutually exclusive", index)
+		return fmt.Errorf("%s.rules[%d]: preset and pattern are mutually exclusive", section, index)
 	}
 	if !hasPreset && !hasPattern {
-		return fmt.Errorf("rule[%d]: either preset or pattern is required", index)
+		return fmt.Errorf("%s.rules[%d]: either preset or pattern is required", section, index)
 	}
 
 	if hasPreset {
@@ -65,23 +87,41 @@ func validateSafetyFilterRule(index int, rule SafetyFilterRuleConfig) error {
 
 	// Custom rule validation.
 	if rule.ID == "" {
-		return fmt.Errorf("rule[%d]: id is required for custom rules", index)
+		return fmt.Errorf("%s.rules[%d]: id is required for custom rules", section, index)
 	}
 	if len(rule.Targets) == 0 {
-		return fmt.Errorf("rule[%d]: at least one target is required for custom rules", index)
+		return fmt.Errorf("%s.rules[%d]: at least one target is required for custom rules", section, index)
 	}
 
 	// Validate target values.
 	for _, t := range rule.Targets {
-		if !validTargets[strings.ToLower(t)] {
-			return fmt.Errorf("rule[%d]: invalid target %q (must be one of: body, url, query, header, headers)", index, t)
+		if !isValidTarget(t, targets) {
+			return fmt.Errorf("%s.rules[%d]: invalid target %q", section, index, t)
 		}
 	}
 
 	// Validate regex compiles.
 	if _, err := regexp.Compile(rule.Pattern); err != nil {
-		return fmt.Errorf("rule[%d]: invalid pattern %q: %w", index, rule.Pattern, err)
+		return fmt.Errorf("%s.rules[%d]: invalid pattern %q: %w", section, index, rule.Pattern, err)
 	}
 
 	return nil
+}
+
+// isValidTarget checks whether t is a valid target for the given target set.
+// It handles the "header:<name>" syntax which is valid only for output targets.
+func isValidTarget(t string, targets map[string]bool) bool {
+	lower := strings.ToLower(t)
+	if targets[lower] {
+		return true
+	}
+	// Check for "header:<name>" pattern (e.g. "header:Set-Cookie").
+	// This syntax is only valid for output filter targets.
+	if strings.HasPrefix(lower, "header:") {
+		headerName := t[len("header:"):]
+		// The header name must be non-empty, and the targets map must be
+		// the output targets (which lacks the plain "header" key that input has).
+		return headerName != "" && !targets["header"]
+	}
+	return false
 }

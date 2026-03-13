@@ -848,29 +848,53 @@ func initSafetyFilter(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *
 
 	// Build safety.Config from the config file settings.
 	engineCfg := safety.Config{}
-	if sfCfg != nil && sfCfg.Input != nil {
+	if sfCfg != nil {
 		// Validate before building.
 		if err := config.ValidateSafetyFilterConfig(sfCfg); err != nil {
 			return nil, fmt.Errorf("safety filter config: %w", err)
 		}
 
-		for _, rule := range sfCfg.Input.Rules {
-			rc := safety.RuleConfig{
-				Preset:  rule.Preset,
-				ID:      rule.ID,
-				Name:    rule.Name,
-				Pattern: rule.Pattern,
-				Targets: rule.Targets,
-			}
+		if sfCfg.Input != nil {
+			for _, rule := range sfCfg.Input.Rules {
+				rc := safety.RuleConfig{
+					Preset:  rule.Preset,
+					ID:      rule.ID,
+					Name:    rule.Name,
+					Pattern: rule.Pattern,
+					Targets: rule.Targets,
+				}
 
-			// Set action: use section-level action if set, otherwise default to "block".
-			action := "block"
-			if sfCfg.Input.Action != "" {
-				action = sfCfg.Input.Action
-			}
-			rc.Action = action
+				// Set action: use section-level action if set, otherwise default to "block".
+				action := "block"
+				if sfCfg.Input.Action != "" {
+					action = sfCfg.Input.Action
+				}
+				rc.Action = action
 
-			engineCfg.InputRules = append(engineCfg.InputRules, rc)
+				engineCfg.InputRules = append(engineCfg.InputRules, rc)
+			}
+		}
+
+		if sfCfg.Output != nil {
+			for _, rule := range sfCfg.Output.Rules {
+				rc := safety.RuleConfig{
+					Preset:      rule.Preset,
+					ID:          rule.ID,
+					Name:        rule.Name,
+					Pattern:     rule.Pattern,
+					Targets:     rule.Targets,
+					Replacement: rule.Replacement,
+				}
+
+				// Set action: use section-level action if set, otherwise default to "mask".
+				action := "mask"
+				if sfCfg.Output.Action != "" {
+					action = sfCfg.Output.Action
+				}
+				rc.Action = action
+
+				engineCfg.OutputRules = append(engineCfg.OutputRules, rc)
+			}
 		}
 	}
 
