@@ -470,12 +470,15 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// The raw response captures the unmasked data for Flow Store.
 	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
 	// Save unmasked body for recording before output filter masks it.
-	rawRespBody := fullRespBody
+	// Deep copy to guard against future FilterOutput implementations that
+	// may modify the underlying array in place (S-2).
+	rawRespBody := make([]byte, len(fullRespBody))
+	copy(rawRespBody, fullRespBody)
 
 	// Output filter: mask sensitive data in response body and headers before
 	// sending to client. Raw (unmasked) data is preserved in Flow Store via
 	// rawResponse/rawRespBody above.
-	fullRespBody, fwd.resp.Header = h.applyOutputFilter(fullRespBody, fwd.resp.Header, logger)
+	fullRespBody, fwd.resp.Header = h.ApplyOutputFilter(fullRespBody, fwd.resp.Header, logger)
 
 	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
 		return err

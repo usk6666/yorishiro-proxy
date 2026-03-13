@@ -365,11 +365,14 @@ func (h *Handler) handleStream(
 	resp, fullRespBody = h.runResponsePluginHooks(sc, resp, fullRespBody)
 
 	// Save unmasked body for recording before output filter masks it.
-	rawRespBody := fullRespBody
+	// Deep copy to guard against future FilterOutput implementations that
+	// may modify the underlying array in place (S-2).
+	rawRespBody := make([]byte, len(fullRespBody))
+	copy(rawRespBody, fullRespBody)
 
 	// Output filter: mask sensitive data in response body and headers before
 	// sending to client. Raw (unmasked) data is preserved in Flow Store.
-	fullRespBody, resp.Header = h.applyOutputFilter(fullRespBody, resp.Header, sc.logger)
+	fullRespBody, resp.Header = h.ApplyOutputFilter(fullRespBody, resp.Header, sc.logger)
 
 	writeResponseToClient(sc, resp, fullRespBody)
 
@@ -496,29 +499,6 @@ func writeSafetyFilterResponse(w gohttp.ResponseWriter, violation *safety.InputV
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(gohttp.StatusForbidden)
 	w.Write(body)
-}
-
-// applyOutputFilter applies the safety engine's output filter to the response
-// body and headers. If the engine is not configured or no rules match, the data
-// is returned unchanged.
-func (h *Handler) applyOutputFilter(body []byte, headers gohttp.Header, logger *slog.Logger) ([]byte, gohttp.Header) {
-	if h.SafetyEngine == nil {
-		return body, headers
-	}
-
-	bodyResult := h.SafetyEngine.FilterOutput(body)
-	maskedHeaders, headerMatches := h.SafetyEngine.FilterOutputHeaders(headers)
-
-	for _, m := range bodyResult.Matches {
-		logger.Info("output filter matched response body",
-			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
-	}
-	for _, m := range headerMatches {
-		logger.Info("output filter matched response header",
-			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
-	}
-
-	return bodyResult.Data, maskedHeaders
 }
 
 // checkRateLimit enforces rate limits. Returns true if the request was blocked.
