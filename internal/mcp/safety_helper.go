@@ -80,6 +80,38 @@ func (s *Server) filterOutputInterceptEntries(entries []queryInterceptQueueEntry
 	}
 }
 
+// filterOutputVariantRequest applies SafetyFilter output masking to a queryVariantRequest.
+// If the variant is nil, this is a no-op.
+func (s *Server) filterOutputVariantRequest(v *queryVariantRequest) {
+	if v == nil {
+		return
+	}
+	bodyData := decodeEntryBody(v.Body, v.BodyEncoding)
+	maskedBody := s.filterOutputBody(bodyData)
+	v.Body, v.BodyEncoding = encodeBody(maskedBody)
+	if len(v.Headers) > 0 {
+		v.Headers = map[string][]string(
+			s.filterOutputHeaders(http.Header(v.Headers)),
+		)
+	}
+}
+
+// filterOutputVariantResponse applies SafetyFilter output masking to a queryVariantResponse.
+// If the variant is nil, this is a no-op.
+func (s *Server) filterOutputVariantResponse(v *queryVariantResponse) {
+	if v == nil {
+		return
+	}
+	bodyData := decodeEntryBody(v.Body, v.BodyEncoding)
+	maskedBody := s.filterOutputBody(bodyData)
+	v.Body, v.BodyEncoding = encodeBody(maskedBody)
+	if len(v.Headers) > 0 {
+		v.Headers = map[string][]string(
+			s.filterOutputHeaders(http.Header(v.Headers)),
+		)
+	}
+}
+
 // decodeEntryBody decodes a body string from its encoding format back to raw bytes.
 // For "base64" encoding, it Base64-decodes the string.
 // For "text" or any other encoding, it returns the string as bytes.

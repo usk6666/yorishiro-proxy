@@ -102,6 +102,14 @@ func (s *Server) handleCompare(ctx context.Context, params compareParams) (*gomc
 	}
 
 	result := buildCompareResult(flowA, flowB, recvA, recvB)
+
+	// Apply output filter to header diff values that may contain PII.
+	for key, diff := range result.HeadersChanged {
+		diff.A = string(s.filterOutputBody([]byte(diff.A)))
+		diff.B = string(s.filterOutputBody([]byte(diff.B)))
+		result.HeadersChanged[key] = diff
+	}
+
 	return nil, result, nil
 }
 
