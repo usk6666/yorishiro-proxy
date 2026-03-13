@@ -683,6 +683,9 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	pageMsgs := paginateMessages(allMsgs, input.Offset, input.Limit)
 	entries := convertMessagesToEntries(pageMsgs)
 
+	// Apply SafetyFilter output masking to message bodies and headers.
+	s.filterOutputMessages(entries)
+
 	result := &queryMessagesResult{
 		Messages: entries,
 		Count:    len(entries),
@@ -1076,6 +1079,9 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 			MatchedRules: item.MatchedRules,
 		})
 	}
+
+	// Apply SafetyFilter output masking to intercept queue bodies and headers.
+	s.filterOutputInterceptEntries(entries)
 
 	return nil, &queryInterceptQueueResult{
 		Items: entries,
