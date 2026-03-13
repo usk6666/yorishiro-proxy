@@ -488,11 +488,24 @@ type SafetyFilterConfig struct {
 
 	// Input configures input (request) filtering rules.
 	Input *SafetyFilterInputConfig `json:"input,omitempty"`
+
+	// Output configures output (response) filtering rules.
+	Output *SafetyFilterOutputConfig `json:"output,omitempty"`
 }
 
 // SafetyFilterInputConfig holds input filter rules configuration.
 type SafetyFilterInputConfig struct {
 	// Action is the default action for rules: "block" (default) or "log_only".
+	Action string `json:"action,omitempty"`
+
+	// Rules lists the filter rules to apply. Each rule is either a preset
+	// reference or a custom rule with a regex pattern.
+	Rules []SafetyFilterRuleConfig `json:"rules,omitempty"`
+}
+
+// SafetyFilterOutputConfig holds output filter rules configuration.
+type SafetyFilterOutputConfig struct {
+	// Action is the default action for rules: "mask" (default) or "log_only".
 	Action string `json:"action,omitempty"`
 
 	// Rules lists the filter rules to apply. Each rule is either a preset
@@ -518,10 +531,16 @@ type SafetyFilterRuleConfig struct {
 	// Pattern is a regular expression string. Mutually exclusive with Preset.
 	Pattern string `json:"pattern,omitempty"`
 
-	// Targets lists which parts of the request to inspect.
-	// Valid values: "body", "url", "query", "header", "headers".
+	// Targets lists which parts of the request/response to inspect.
+	// For input rules: "body", "url", "query", "header", "headers".
+	// For output rules: "body", "header:<name>" (specific header), "headers" (all headers).
 	// Required for custom rules; ignored for presets.
 	Targets []string `json:"targets,omitempty"`
+
+	// Replacement overrides the default replacement string for output filter
+	// preset rules. Ignored for input rules and custom rules (which use the
+	// section-level action). Only applicable when referencing an output preset.
+	Replacement string `json:"replacement,omitempty"`
 }
 
 // LoadFile reads and parses a JSON config file from the given path.
