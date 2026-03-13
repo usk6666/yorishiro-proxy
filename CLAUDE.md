@@ -113,6 +113,17 @@ GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 
 > **注意**: `/implement` は単一セッションでの単独実行を前提とする。複数 Issue を並行実装する場合は `/orchestrate` を使用すること。
 
+### 新機能マイルストーンの config 対応チェックリスト
+
+`/project plan` で新機能マイルストーンの Issue を分割する際、以下を必須確認項目とする。
+config 対応が暗黙の前提として漏れることを防ぐ。
+
+- [ ] `internal/config/` の config struct にフィールド追加が必要か
+- [ ] config バリデーション (`Validate()`) の追加・更新が必要か
+- [ ] init 系関数 (`cmd/yorishiro-proxy/main.go`) の変更が必要か
+- [ ] config → runtime パスの結合テストが必要か
+- [ ] 上記のいずれかに該当する場合、config 対応の Issue を明示的に起票する
+
 ## エージェント隔離戦略 (Worktree)
 
 サブエージェントによる並行作業での git 競合を防ぐため、以下のルールを適用する。

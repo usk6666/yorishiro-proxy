@@ -118,6 +118,14 @@ orchestrate の前提条件を整える最も重要なサブコマンド。
 N 件の Issue を作成し、M 件を更新しますか?
 ```
 
+### config 対応チェック
+
+Issue 分割の最終段階で、以下を確認する（CLAUDE.md「新機能マイルストーンの config 対応チェックリスト」参照）:
+
+- 新機能が config struct へのフィールド追加を必要とする場合、config 対応の Issue を明示的に含める
+- config バリデーション・init 関数の変更が必要な場合も同様
+- config → runtime パスの結合テスト Issue を含める
+
 ### 注意事項
 
 - Issue 作成前に必ずユーザーの承認を得ること
