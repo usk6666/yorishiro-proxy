@@ -33,61 +33,8 @@ import (
 // both active.
 func setupSafetyFilterEnv(t *testing.T, engine *safety.Engine, opts ...ServerOption) *testEnv {
 	t.Helper()
-	ctx := context.Background()
-
-	dbPath := filepath.Join(t.TempDir(), "safety_integration.db")
-	logger := testutil.DiscardLogger()
-	store, err := flow.NewSQLiteStore(ctx, dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-
-	ca := &cert.CA{}
-	if err := ca.Generate(); err != nil {
-		t.Fatalf("CA.Generate: %v", err)
-	}
-	issuer := cert.NewIssuer(ca)
-
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-	if engine != nil {
-		httpHandler.SetSafetyEngine(engine)
-	}
-	detector := protocol.NewDetector(httpHandler)
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
-
-	allOpts := []ServerOption{
-		WithSafetyEngine(engine),
-		WithSafetyEngineSetter(httpHandler),
-	}
-	allOpts = append(allOpts, opts...)
-
-	mcpServer := NewServer(ctx, ca, store, manager, allOpts...)
-
-	ct, st := gomcp.NewInMemoryTransports()
-	ss, err := mcpServer.server.Connect(ctx, st, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	t.Cleanup(func() { ss.Close() })
-
-	client := gomcp.NewClient(&gomcp.Implementation{
-		Name:    "safety-integration-test",
-		Version: "v0.0.1",
-	}, nil)
-
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	t.Cleanup(func() { cs.Close() })
-
-	return &testEnv{
-		cs:      cs,
-		store:   store,
-		manager: manager,
-	}
+	store := newSafetyTestStore(t)
+	return setupSafetyFilterEnvWithStore(t, store, engine, opts...)
 }
 
 // newDefaultSafetyEngine creates a safety engine with both destructive-sql and
@@ -284,7 +231,9 @@ func TestSafetyFilter_Proxy_FlowRecording(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Wait for flow to be persisted.
+	// Wait for asynchronous flow persistence to complete. The proxy handler
+	// saves flows in a background goroutine, so a short delay is needed before
+	// querying. This matches the established pattern in other integration tests.
 	time.Sleep(200 * time.Millisecond)
 
 	// Query flows filtered by blocked_by.
@@ -398,6 +347,7 @@ func TestSafetyFilter_MCP_ResendBlock(t *testing.T) {
 	resp.Body.Close()
 	client.CloseIdleConnections()
 
+	// Wait for asynchronous flow persistence (see comment in FlowRecording test).
 	time.Sleep(200 * time.Millisecond)
 
 	// Get the flow ID.
@@ -522,7 +472,8 @@ func TestSafetyFilter_MCP_FuzzExpandedPayloadBlock(t *testing.T) {
 		WithFuzzStore(fuzzStore),
 	)
 
-	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
+	// Proxy must be running for fuzz runner's HTTP client.
+	_ = callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
 		"listen_addr": "127.0.0.1:0",
 	})
 
@@ -561,8 +512,6 @@ func TestSafetyFilter_MCP_FuzzExpandedPayloadBlock(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage(recv): %v", err)
 	}
-
-	_ = startResult // proxy must be running for fuzz runner's HTTP client
 
 	// Start fuzz with payloads that include destructive and safe values.
 	// The fuzz job should start successfully because the template is safe.
@@ -616,6 +565,41 @@ func TestSafetyFilter_MCP_FuzzExpandedPayloadBlock(t *testing.T) {
 	// SafetyInputChecker, but the job itself should not be rejected.
 	if asyncResult.TotalRequests != 3 {
 		t.Errorf("total_requests = %d, want 3", asyncResult.TotalRequests)
+	}
+
+	// Poll the fuzz job until it completes and verify the skipped (error) count.
+	// The destructive payload "DROP TABLE users;" should be skipped, resulting
+	// in error_count >= 1.
+	var jobResult queryFuzzJobsResult
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		jobResult = callTool[queryFuzzJobsResult](t, env.cs, "query", map[string]any{
+			"resource": "fuzz_jobs",
+			"filter": map[string]any{
+				"status": "completed",
+			},
+		})
+		if jobResult.Count > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if jobResult.Count == 0 {
+		t.Fatal("fuzz job not found with status=completed after polling")
+	}
+	// Find the job matching our fuzz ID.
+	var foundJob *queryFuzzJobEntry
+	for i := range jobResult.Jobs {
+		if jobResult.Jobs[i].ID == asyncResult.FuzzID {
+			foundJob = &jobResult.Jobs[i]
+			break
+		}
+	}
+	if foundJob == nil {
+		t.Fatalf("fuzz job %s not found in completed jobs", asyncResult.FuzzID)
+	}
+	if foundJob.ErrorCount < 1 {
+		t.Errorf("error_count = %d, want >= 1 (destructive payload should be skipped)", foundJob.ErrorCount)
 	}
 }
 
