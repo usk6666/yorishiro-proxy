@@ -63,7 +63,7 @@ var validInputTargets = map[string]bool{
 var validOutputTargets = map[string]bool{
 	"body":    true,
 	"headers": true,
-	// "header:*" is validated dynamically in validateOutputTarget.
+	// "header:*" is validated dynamically in isValidTarget.
 }
 
 // validateSafetyFilterRule validates a single rule config entry.
