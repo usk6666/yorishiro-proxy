@@ -160,14 +160,21 @@ func expandPreset(rc RuleConfig) ([]Rule, error) {
 			return nil, fmt.Errorf("preset %q rule %q: invalid pattern: %w", rc.Preset, pr.ID, err)
 		}
 
+		// User-level replacement overrides preset default.
+		replacement := pr.Replacement
+		if rc.Replacement != "" {
+			replacement = rc.Replacement
+		}
+
 		rules = append(rules, Rule{
 			ID:          pr.ID,
 			Name:        pr.Name,
 			Pattern:     re,
 			Targets:     pr.Targets,
 			Action:      action,
-			Replacement: rc.Replacement,
+			Replacement: replacement,
 			Category:    preset.Name,
+			Validator:   pr.Validator,
 		})
 	}
 	return rules, nil

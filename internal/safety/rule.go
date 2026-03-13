@@ -141,6 +141,13 @@ type PresetRuleConfig struct {
 	Name    string
 	Pattern string // Regular expression pattern (uncompiled).
 	Targets []Target
+	// Replacement is the default replacement string for ActionMask.
+	// When a user-level RuleConfig also sets Replacement, the user value
+	// takes precedence (see expandPreset).
+	Replacement string
+	// Validator is an optional post-match validation function.
+	// See Rule.Validator for semantics.
+	Validator func(match []byte) bool
 }
 
 // Preset is a named collection of rule configurations that can be referenced

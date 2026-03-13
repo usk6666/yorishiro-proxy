@@ -743,18 +743,25 @@ func TestActionString(t *testing.T) {
 
 func TestPresetNames_Engine(t *testing.T) {
 	names := PresetNames()
-	if len(names) < 2 {
-		t.Errorf("expected at least 2 presets, got %d", len(names))
+	if len(names) < 6 {
+		t.Errorf("expected at least 6 presets, got %d", len(names))
 	}
 	found := make(map[string]bool)
 	for _, n := range names {
 		found[n] = true
 	}
-	if !found[PresetDestructiveSQL] {
-		t.Error("missing preset: destructive-sql")
+	required := []string{
+		PresetDestructiveSQL,
+		PresetDestructiveOSCommand,
+		PresetCreditCard,
+		PresetJapanMyNumber,
+		PresetEmail,
+		PresetJapanPhone,
 	}
-	if !found[PresetDestructiveOSCommand] {
-		t.Error("missing preset: destructive-os-command")
+	for _, name := range required {
+		if !found[name] {
+			t.Errorf("missing preset: %s", name)
+		}
 	}
 }
 
