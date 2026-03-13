@@ -49,10 +49,12 @@ const PAYLOAD_TYPES = [
 ];
 
 const POSITION_LOCATIONS = [
-  { value: "url", label: "URL" },
   { value: "header", label: "Header" },
-  { value: "body", label: "Body" },
-  { value: "json_body", label: "JSON Body" },
+  { value: "path", label: "Path" },
+  { value: "query", label: "Query" },
+  { value: "body_regex", label: "Body (Regex)" },
+  { value: "body_json", label: "Body (JSON)" },
+  { value: "cookie", label: "Cookie" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -524,7 +526,7 @@ function createEmptyPosition(): PositionFormEntry {
   return {
     key: crypto.randomUUID(),
     id: "",
-    location: "url",
+    location: "header",
     name: "",
     match: "",
     mode: "replace",
@@ -643,7 +645,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
         if (p.match.trim()) pos.match = p.match.trim();
         if (p.mode.trim()) pos.mode = p.mode.trim();
         if (p.payloadSet.trim()) pos.payload_set = p.payloadSet.trim();
-        if (p.location === "json_body" && p.jsonPath.trim()) {
+        if (p.location === "body_json" && p.jsonPath.trim()) {
           pos.json_path = p.jsonPath.trim();
         }
         return pos;
@@ -877,7 +879,7 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
                   }
                 />
               </div>
-              {pos.location === "json_body" && (
+              {pos.location === "body_json" && (
                 <div className="fuzz-creator-field">
                   <label className="fuzz-creator-label">JSON Path</label>
                   <Input
