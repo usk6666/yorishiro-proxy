@@ -245,8 +245,17 @@ func parseConnectHost(hostPort string) (string, error) {
 // so that clients can negotiate HTTP/2 over TLS.
 func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (*tls.Conn, error) {
 	tlsConfig := &tls.Config{
-		GetCertificate: h.issuer.GetCertificateForClientHello,
-		MinVersion:     tls.VersionTLS12,
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			name := hello.ServerName
+			// When the client connects to an IP address, SNI is not sent
+			// (RFC 6066), so ServerName is empty. Fall back to the hostname
+			// extracted from the CONNECT/tunnel authority.
+			if name == "" {
+				name = hostname
+			}
+			return h.issuer.GetCertificate(name)
+		},
+		MinVersion: tls.VersionTLS12,
 	}
 
 	// Advertise HTTP/2 and HTTP/1.1 via ALPN when an h2 handler is available.
