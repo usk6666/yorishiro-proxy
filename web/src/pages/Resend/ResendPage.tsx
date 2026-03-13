@@ -10,10 +10,13 @@ import { useResend, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   BodyPatch,
   FlowDetailResult,
+  HooksInput,
+  MacrosEntry,
   MessageEntry,
   MessagesResult,
   RawPatch,
 } from "../../lib/mcp/types.js";
+import { HookConfigEditor } from "../../components/hooks/HookConfigEditor.js";
 import { BodyPatchEditor } from "./BodyPatchEditor.js";
 import { ComparerView } from "./ComparerView.js";
 import { HeaderEditor } from "./HeaderEditor.js";
@@ -295,6 +298,16 @@ export function ResendPage() {
   const [tag, setTag] = useState("");
   const [dryRun, setDryRun] = useState(false);
 
+  // Hooks state.
+  const [hooks, setHooks] = useState<HooksInput>({});
+
+  // Fetch available macros for hook selection.
+  const { data: macrosData } = useQuery("macros");
+  const availableMacros: MacrosEntry[] = useMemo(
+    () => (macrosData as { macros?: MacrosEntry[] } | null)?.macros ?? [],
+    [macrosData],
+  );
+
   // UI state.
   const [requestTab, setRequestTab] = useState("headers");
   const [tcpRequestTab, setTcpRequestTab] = useState("messages");
@@ -337,6 +350,7 @@ export function ResendPage() {
 
     // Reset shared state.
     setTag("");
+    setHooks({});
     setHttpResponse(null);
     setTcpResponse(null);
     setRawResponse(null);
@@ -434,6 +448,10 @@ export function ResendPage() {
         .filter((h) => h.key.trim() !== "")
         .map((h) => ({ key: h.key.trim(), value: h.value }));
 
+      // Build hooks param if any hook is configured.
+      const hooksParam =
+        hooks.pre_send || hooks.post_receive ? hooks : undefined;
+
       try {
         const result = await resend<ResendResult>({
           action: "resend",
@@ -446,6 +464,7 @@ export function ResendPage() {
             body_patches: bodyPatches.length > 0 ? bodyPatches : undefined,
             dry_run: isDryRun,
             tag: tag || undefined,
+            hooks: hooksParam,
           },
         });
 
@@ -480,7 +499,7 @@ export function ResendPage() {
         });
       }
     },
-    [activeFlowId, method, url, headers, body, bodyPatches, tag, resend, addToast],
+    [activeFlowId, method, url, headers, body, bodyPatches, tag, hooks, resend, addToast],
   );
 
   /** Send HTTP raw resend request (raw mode). */
@@ -791,6 +810,18 @@ export function ResendPage() {
                     <BodyPatchEditor patches={bodyPatches} onChange={setBodyPatches} />
                   )}
                 </Tabs>
+
+                {/* Hooks configuration */}
+                {availableMacros.length > 0 && (
+                  <div className="resend-hooks-section">
+                    <h4 className="resend-hooks-title">Hooks (optional)</h4>
+                    <HookConfigEditor
+                      macros={availableMacros}
+                      hooks={hooks}
+                      onChange={setHooks}
+                    />
+                  </div>
+                )}
 
                 {/* Action buttons */}
                 <div className="resend-actions">

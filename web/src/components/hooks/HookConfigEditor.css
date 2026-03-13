@@ -1,0 +1,136 @@
+/**
+ * Styles for the HookConfigEditor component.
+ * Shared by Resend and Fuzz pages for macro hook configuration.
+ */
+
+.hook-config-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/* --- Section --- */
+
+.hook-config-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.hook-config-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.hook-config-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.hook-config-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--font-size-xs);
+  color: var(--accent-primary);
+  cursor: pointer;
+  text-decoration: underline;
+  font-family: inherit;
+}
+
+.hook-config-toggle:hover {
+  color: var(--accent-info);
+}
+
+/* --- Select --- */
+
+.hook-config-select {
+  height: 28px;
+  padding: 0 var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  width: 100%;
+}
+
+.hook-config-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+/* --- Details panel --- */
+
+.hook-config-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  margin-top: var(--space-xs);
+}
+
+.hook-config-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.hook-config-detail-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+/* --- Checkbox label --- */
+
+.hook-config-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.hook-config-checkbox-label input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+}
+
+/* --- Vars editor --- */
+
+.hook-vars-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.hook-vars-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.hook-var-row {
+  display: flex;
+  gap: var(--space-xs);
+  align-items: center;
+}
+
+.hook-var-row .input-wrapper {
+  flex: 1;
+}
+
+.hook-var-row .input-wrapper .input {
+  height: 24px;
+  font-size: var(--font-size-xs);
+}
