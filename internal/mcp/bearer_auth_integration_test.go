@@ -258,12 +258,6 @@ func TestBearerAuth_WebUI_NoAuthRequired(t *testing.T) {
 		t.Errorf("GET / without auth status = %d, want %d; body = %s",
 			resp.StatusCode, http.StatusOK, body)
 	}
-
-	// Verify the response contains WebUI content.
-	body, _ := io.ReadAll(resp.Body)
-	// Note: body may already be read above in error case; re-read is safe
-	// because io.ReadAll returns remaining bytes after any previous read.
-	_ = body // WebUI content check — the status code assertion is sufficient.
 }
 
 // mcpInitPayload is a valid MCP initialize request used across auth tests.
