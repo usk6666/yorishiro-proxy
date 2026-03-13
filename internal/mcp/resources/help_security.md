@@ -296,15 +296,14 @@ Built-in presets provide curated rule sets for common destructive patterns:
 
 #### Custom Rules
 
-Custom rules require `id`, `pattern`, `targets`, and `action` fields:
+Custom rules require `id`, `pattern`, and `targets` fields. The action is inherited from the section-level `input.action` setting:
 
 ```json
 {
   "id": "custom-api",
   "name": "Dangerous API endpoint",
   "pattern": "(?i)/api/v[0-9]+/(delete-all|reset)",
-  "targets": ["url"],
-  "action": "block"
+  "targets": ["url"]
 }
 ```
 
@@ -331,7 +330,7 @@ When SafetyFilter blocks a request at the proxy layer:
 
 - **Status**: `403 Forbidden`
 - **Header**: `X-Block-Reason: safety_filter`
-- **Body**: JSON object with violation details (rule ID, matched content)
+- **Body**: JSON object with violation details (rule ID, rule name, and match location)
 
 When SafetyFilter blocks an MCP tool operation (resend, fuzz, intercept modify_and_forward, macro):
 

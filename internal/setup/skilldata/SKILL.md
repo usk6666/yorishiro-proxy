@@ -570,8 +570,7 @@ SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DR
           "id": "custom-dangerous-api",
           "name": "Dangerous API endpoint",
           "pattern": "(?i)/api/v[0-9]+/(delete-all|reset|purge)",
-          "targets": ["url"],
-          "action": "block"
+          "targets": ["url"]
         }
       ]
     }

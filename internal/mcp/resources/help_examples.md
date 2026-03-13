@@ -248,15 +248,13 @@ This blocks destructive SQL statements (DROP TABLE, TRUNCATE, etc.) and OS comma
           "id": "custom-dangerous-api",
           "name": "Dangerous API endpoint",
           "pattern": "(?i)/api/v[0-9]+/(delete-all|reset|purge)",
-          "targets": ["url"],
-          "action": "block"
+          "targets": ["url"]
         },
         {
           "id": "custom-header-injection",
           "name": "Header injection pattern",
           "pattern": "(?i)(\\r\\n|%0d%0a)",
-          "targets": ["headers"],
-          "action": "block"
+          "targets": ["headers"]
         }
       ]
     }
