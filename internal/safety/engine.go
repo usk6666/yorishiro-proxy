@@ -346,7 +346,8 @@ func matchAllHeaders(re *regexp.Regexp, headers http.Header) (bool, string) {
 
 // FilterOutput applies all output rules with ActionMask to the given data,
 // replacing matched patterns. Rules with ActionBlock or ActionLogOnly are
-// recorded in matches but do not modify data.
+// recorded in matches but do not modify data. When a rule has a Validator,
+// only matches for which Validator returns true are processed.
 func (e *Engine) FilterOutput(data []byte) *OutputResult {
 	result := &OutputResult{
 		Data: data,
@@ -359,24 +360,84 @@ func (e *Engine) FilterOutput(data []byte) *OutputResult {
 			continue
 		}
 
-		locs := r.Pattern.FindAllIndex(result.Data, -1)
-		if len(locs) == 0 {
-			continue
-		}
-
-		result.Matches = append(result.Matches, OutputMatch{
-			RuleID: r.ID,
-			Count:  len(locs),
-			Action: r.Action,
-		})
-
-		if r.Action == ActionMask {
-			result.Data = r.Pattern.ReplaceAll(result.Data, []byte(r.Replacement))
-			result.Masked = true
+		if r.Validator == nil {
+			// Fast path: no validator, use bulk operations.
+			locs := r.Pattern.FindAllIndex(result.Data, -1)
+			if len(locs) == 0 {
+				continue
+			}
+			result.Matches = append(result.Matches, OutputMatch{
+				RuleID: r.ID,
+				Count:  len(locs),
+				Action: r.Action,
+			})
+			if r.Action == ActionMask {
+				result.Data = r.Pattern.ReplaceAll(result.Data, []byte(r.Replacement))
+				result.Masked = true
+			}
+		} else {
+			// Slow path: validate each match individually and build
+			// the result by manual replacement.
+			count := replaceValidated(r, &result.Data)
+			if count == 0 {
+				continue
+			}
+			result.Matches = append(result.Matches, OutputMatch{
+				RuleID: r.ID,
+				Count:  count,
+				Action: r.Action,
+			})
+			if r.Action == ActionMask {
+				result.Masked = true
+			}
 		}
 	}
 
 	return result
+}
+
+// replaceValidated finds all matches of the rule's pattern in *data, calls the
+// rule's Validator for each match, and (for ActionMask) replaces only validated
+// matches. It returns the number of validated matches. When the action is not
+// ActionMask, no replacement is performed but validated matches are still counted.
+func replaceValidated(r *Rule, data *[]byte) int {
+	src := *data
+	locs := r.Pattern.FindAllSubmatchIndex(src, -1)
+	if len(locs) == 0 {
+		return 0
+	}
+
+	validCount := 0
+	replacement := []byte(r.Replacement)
+
+	// When masking, build a new buffer with validated matches replaced.
+	// We track the write position in src and append segments.
+	var buf []byte
+	if r.Action == ActionMask {
+		buf = make([]byte, 0, len(src))
+	}
+	prev := 0
+
+	for _, loc := range locs {
+		matchStart, matchEnd := loc[0], loc[1]
+		matched := src[matchStart:matchEnd]
+		if !r.Validator(matched) {
+			continue
+		}
+		validCount++
+		if r.Action == ActionMask {
+			buf = append(buf, src[prev:matchStart]...)
+			buf = r.Pattern.Expand(buf, replacement, src, loc)
+			prev = matchEnd
+		}
+	}
+
+	if r.Action == ActionMask && validCount > 0 {
+		buf = append(buf, src[prev:]...)
+		*data = buf
+	}
+
+	return validCount
 }
 
 // FilterOutputHeaders applies output rules with TargetHeader or TargetHeaders
@@ -406,7 +467,8 @@ func (e *Engine) FilterOutputHeaders(headers http.Header) (http.Header, []Output
 
 // applyRuleToHeaders applies a rule's pattern to the given headers and returns
 // the total match count. If filterName is non-empty, only the named header is
-// checked; otherwise all headers are checked.
+// checked; otherwise all headers are checked. When the rule has a Validator,
+// only matches for which Validator returns true are counted and replaced.
 func applyRuleToHeaders(r *Rule, headers http.Header, filterName string) int {
 	totalCount := 0
 	for name, values := range headers {
@@ -414,17 +476,64 @@ func applyRuleToHeaders(r *Rule, headers http.Header, filterName string) int {
 			continue
 		}
 		for j, v := range values {
-			locs := r.Pattern.FindAllStringIndex(v, -1)
-			if len(locs) == 0 {
-				continue
-			}
-			totalCount += len(locs)
-			if r.Action == ActionMask {
-				headers[name][j] = r.Pattern.ReplaceAllString(v, r.Replacement)
+			if r.Validator == nil {
+				// Fast path: no validator.
+				locs := r.Pattern.FindAllStringIndex(v, -1)
+				if len(locs) == 0 {
+					continue
+				}
+				totalCount += len(locs)
+				if r.Action == ActionMask {
+					headers[name][j] = r.Pattern.ReplaceAllString(v, r.Replacement)
+				}
+			} else {
+				// Slow path: validate each match.
+				count, replaced := replaceHeaderValidated(r, v)
+				if count == 0 {
+					continue
+				}
+				totalCount += count
+				if r.Action == ActionMask {
+					headers[name][j] = replaced
+				}
 			}
 		}
 	}
 	return totalCount
+}
+
+// replaceHeaderValidated counts the number of validated matches in a header
+// value and returns the replaced string. The regex is executed only once.
+func replaceHeaderValidated(r *Rule, v string) (int, string) {
+	src := []byte(v)
+	locs := r.Pattern.FindAllSubmatchIndex(src, -1)
+	if len(locs) == 0 {
+		return 0, v
+	}
+
+	count := 0
+	replacement := []byte(r.Replacement)
+	buf := make([]byte, 0, len(src))
+	prev := 0
+
+	for _, loc := range locs {
+		matched := src[loc[0]:loc[1]]
+		if !r.Validator(matched) {
+			continue
+		}
+		count++
+		if r.Action == ActionMask {
+			buf = append(buf, src[prev:loc[0]]...)
+			buf = r.Pattern.Expand(buf, replacement, src, loc)
+			prev = loc[1]
+		}
+	}
+
+	if r.Action == ActionMask && count > 0 {
+		buf = append(buf, src[prev:]...)
+		return count, string(buf)
+	}
+	return count, v
 }
 
 // hasTarget returns true if the given target is in the list.
