@@ -242,6 +242,101 @@ Response:
 - **request_count**: Number of requests made so far.
 - **stop_reason**: Non-empty when the budget has been exhausted (e.g. `"max_total_requests exceeded"`, `"max_duration exceeded"`).
 
+## SafetyFilter (Input Filter)
+
+SafetyFilter is a **Policy Layer** mechanism that prevents destructive payloads from being sent to target systems. It inspects outgoing HTTP requests (body, URL, query string, headers) against a set of regex rules and blocks or logs matches before the request reaches the target.
+
+SafetyFilter rules are **immutable at runtime** — they are defined in the configuration file and cannot be modified by AI agents. This ensures that safety boundaries remain enforced regardless of agent behavior.
+
+### `get_safety_filter`
+
+Returns the current SafetyFilter configuration and compiled rules (read-only).
+
+```json
+{
+  "action": "get_safety_filter"
+}
+```
+
+Response:
+
+```json
+{
+  "enabled": true,
+  "input_rules": [
+    {
+      "id": "destructive-sql:drop",
+      "name": "DROP statement",
+      "pattern": "(compiled regex)",
+      "targets": ["body", "url", "query"],
+      "action": "block",
+      "category": "destructive-sql"
+    }
+  ],
+  "immutable": true
+}
+```
+
+- **enabled**: Whether SafetyFilter is active.
+- **input_rules**: List of compiled input filter rules currently in effect.
+- **immutable**: Always `true` — SafetyFilter rules cannot be changed at runtime.
+
+### Rule Configuration
+
+Rules are defined in the config file under `safety_filter.input`. Each rule can be a preset reference or a custom rule.
+
+#### Presets
+
+Built-in presets provide curated rule sets for common destructive patterns:
+
+| Preset | Rules | Description |
+|--------|-------|-------------|
+| `destructive-sql` | 6 rules | DROP TABLE/DATABASE/INDEX/VIEW/SCHEMA, TRUNCATE TABLE, DELETE without WHERE, UPDATE WHERE 1=1, ALTER TABLE DROP, xp_ stored procedures |
+| `destructive-os-command` | 5 rules | rm -rf, shutdown/reboot/halt/poweroff, mkfs, dd if=, Windows format |
+
+#### Custom Rules
+
+Custom rules require `id`, `pattern`, `targets`, and `action` fields:
+
+```json
+{
+  "id": "custom-api",
+  "name": "Dangerous API endpoint",
+  "pattern": "(?i)/api/v[0-9]+/(delete-all|reset)",
+  "targets": ["url"],
+  "action": "block"
+}
+```
+
+### Targets
+
+| Target | Description |
+|--------|-------------|
+| `body` | Request body content |
+| `url` | Full URL string |
+| `query` | Query string portion of the URL |
+| `header` | Individual header values (use `header:Name` for a specific header) |
+| `headers` | All header values concatenated |
+
+### Actions
+
+| Action | Description |
+|--------|-------------|
+| `block` | Reject the request with 403 status. The response includes `X-Block-Reason: safety_filter` header and a JSON body with violation details |
+| `log_only` | Log the match but allow the request through. Useful for testing rules before enforcement |
+
+### Blocked Response Format
+
+When SafetyFilter blocks a request at the proxy layer:
+
+- **Status**: `403 Forbidden`
+- **Header**: `X-Block-Reason: safety_filter`
+- **Body**: JSON object with violation details (rule ID, matched content)
+
+When SafetyFilter blocks an MCP tool operation (resend, fuzz, intercept modify_and_forward, macro):
+
+- **MCP error response** with violation details
+
 ## Error Handling
 
 - **Policy boundary violation**: Setting agent allows outside policy scope returns an error with the offending hostname and current policy allows.

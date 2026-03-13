@@ -212,6 +212,84 @@ socks5 127.0.0.1 1080 proxyuser proxypass
 }
 ```
 
+## SafetyFilter Configuration
+
+### Enable default presets
+Add the following to your config file (`-config config.json`):
+```json
+// config.json
+{
+  "safety_filter": {
+    "enabled": true,
+    "input": {
+      "action": "block",
+      "rules": [
+        {"preset": "destructive-sql"},
+        {"preset": "destructive-os-command"}
+      ]
+    }
+  }
+}
+```
+This blocks destructive SQL statements (DROP TABLE, TRUNCATE, etc.) and OS commands (rm -rf, shutdown, etc.) before they reach the target.
+
+### Add custom rules
+```json
+// config.json
+{
+  "safety_filter": {
+    "enabled": true,
+    "input": {
+      "action": "block",
+      "rules": [
+        {"preset": "destructive-sql"},
+        {"preset": "destructive-os-command"},
+        {
+          "id": "custom-dangerous-api",
+          "name": "Dangerous API endpoint",
+          "pattern": "(?i)/api/v[0-9]+/(delete-all|reset|purge)",
+          "targets": ["url"],
+          "action": "block"
+        },
+        {
+          "id": "custom-header-injection",
+          "name": "Header injection pattern",
+          "pattern": "(?i)(\\r\\n|%0d%0a)",
+          "targets": ["headers"],
+          "action": "block"
+        }
+      ]
+    }
+  }
+}
+```
+
+### Test rules with log_only mode
+Before enforcing rules, use `log_only` mode to observe what would be blocked without interrupting traffic:
+```json
+// config.json
+{
+  "safety_filter": {
+    "enabled": true,
+    "input": {
+      "action": "log_only",
+      "rules": [
+        {"preset": "destructive-sql"},
+        {"preset": "destructive-os-command"}
+      ]
+    }
+  }
+}
+```
+Review the proxy logs for `safety_filter` entries. Once satisfied, change `action` to `"block"` and restart.
+
+### Verify active rules at runtime
+```json
+// security
+{"action": "get_safety_filter"}
+```
+Returns the list of compiled rules, their targets, actions, and whether SafetyFilter is enabled. Rules are immutable at runtime.
+
 ## Flow Cleanup
 
 ### Delete old flows
