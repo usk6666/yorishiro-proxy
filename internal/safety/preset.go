@@ -140,12 +140,14 @@ func CompilePreset(p Preset, action Action) ([]Rule, error) {
 			return nil, fmt.Errorf("compile rule %s: %w", rc.ID, err)
 		}
 		rules = append(rules, Rule{
-			ID:       rc.ID,
-			Name:     rc.Name,
-			Pattern:  re,
-			Targets:  rc.Targets,
-			Action:   action,
-			Category: p.Name,
+			ID:          rc.ID,
+			Name:        rc.Name,
+			Pattern:     re,
+			Targets:     rc.Targets,
+			Action:      action,
+			Replacement: rc.Replacement,
+			Category:    p.Name,
+			Validator:   rc.Validator,
 		})
 	}
 	return rules, nil

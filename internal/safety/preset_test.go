@@ -182,15 +182,22 @@ func TestLookupPreset(t *testing.T) {
 
 func TestPresetNames(t *testing.T) {
 	names := PresetNames()
-	if len(names) != 2 {
-		t.Fatalf("expected 2 presets, got %d", len(names))
+	if len(names) != 6 {
+		t.Fatalf("expected 6 presets, got %d: %v", len(names), names)
 	}
 	// Should be sorted alphabetically.
-	if names[0] != PresetDestructiveOSCommand {
-		t.Errorf("names[0] = %q, want %q", names[0], PresetDestructiveOSCommand)
+	want := []string{
+		PresetCreditCard,
+		PresetDestructiveOSCommand,
+		PresetDestructiveSQL,
+		PresetEmail,
+		PresetJapanMyNumber,
+		PresetJapanPhone,
 	}
-	if names[1] != PresetDestructiveSQL {
-		t.Errorf("names[1] = %q, want %q", names[1], PresetDestructiveSQL)
+	for i, w := range want {
+		if names[i] != w {
+			t.Errorf("names[%d] = %q, want %q", i, names[i], w)
+		}
 	}
 }
 
