@@ -46,7 +46,7 @@ Yorishiro Proxy は [MCP (Model Context Protocol)](https://modelcontextprotocol.
 - **上流プロキシ** -- HTTP または SOCKS5 プロキシ経由のチェーン接続
 - **Streamable HTTP MCP** -- Bearer トークン認証によるマルチエージェント共有アクセス
 - **Comparer** -- 2 フロー間の構造化 diff（ステータスコード、ヘッダ、ボディ長、タイミング、JSON キーレベル diff）
-- **AI Safety** -- レート制限（グローバル/ホスト別 RPS）と診断バジェット（リクエスト数/時間制限）による 2 層 Policy+Agent アーキテクチャ
+- **AI Safety** -- SafetyFilter が破壊的ペイロード（DROP TABLE、rm -rf 等）を Policy Layer でブロック。レート制限（グローバル/ホスト別 RPS）と診断バジェット（リクエスト数/時間制限）による 2 層 Policy+Agent アーキテクチャ
 - **プラグインシステム** -- [Starlark](https://github.com/google/starlark-go) スクリプトでプロキシのリクエスト/レスポンスパイプラインを拡張
 - **Web UI** -- ビジュアル確認とインタラクティブテストのための組み込み React/Vite ダッシュボード
 
