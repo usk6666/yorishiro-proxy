@@ -171,6 +171,12 @@ export interface ConfigureSOCKS5Auth {
   listener_name?: string;
 }
 
+/** mTLS client certificate configuration. */
+export interface ConfigureClientCert {
+  cert_path: string;
+  key_path: string;
+}
+
 /** Parameters for the configure tool. */
 export interface ConfigureParams {
   operation?: "merge" | "replace";
@@ -185,6 +191,7 @@ export interface ConfigureParams {
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
   request_timeout_ms?: number | null;
+  client_cert?: ConfigureClientCert;
 }
 
 /** Response from the configure tool. */
@@ -218,6 +225,11 @@ export interface ConfigureResult {
   max_connections?: number;
   peek_timeout_ms?: number;
   request_timeout_ms?: number;
+  client_cert?: {
+    cert_path?: string;
+    key_path?: string;
+    status: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +424,10 @@ export interface ConfigResult {
   socks5_auth?: {
     method: string;
     username?: string;
+  };
+  client_cert?: {
+    cert_path: string;
+    key_path: string;
   };
 }
 
