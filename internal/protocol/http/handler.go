@@ -513,7 +513,15 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 
 	// Serialize raw response for recording. This is done after plugin/intercept
 	// so that any modifications are reflected in the recorded bytes.
+	// The raw response captures the unmasked data for Flow Store.
 	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
+	// Save unmasked body for recording before output filter masks it.
+	rawRespBody := fullRespBody
+
+	// Output filter: mask sensitive data in response body and headers before
+	// sending to client. Raw (unmasked) data is preserved in Flow Store via
+	// rawResponse/rawRespBody above.
+	fullRespBody, fwd.resp.Header = h.applyOutputFilter(fullRespBody, fwd.resp.Header, logger)
 
 	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
 		return err
@@ -522,6 +530,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Progressive recording: record receive (response + session completion).
 	// Uses variant-aware recording to capture both original and modified
 	// versions when intercept changed the response.
+	// NOTE: respBody uses rawRespBody (unmasked) so Flow Store has raw data.
 	duration := time.Since(start)
 	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 	h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
@@ -530,7 +539,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		serverAddr:  fwd.serverAddr,
 		resp:        fwd.resp,
 		rawResponse: rawResponse,
-		respBody:    fullRespBody,
+		respBody:    rawRespBody,
 		sendMs:      sendMs,
 		waitMs:      waitMs,
 		receiveMs:   receiveMs,

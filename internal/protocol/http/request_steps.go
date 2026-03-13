@@ -260,6 +260,31 @@ func applyResponseModifications(resp *gohttp.Response, action intercept.Intercep
 	return httputil.ApplyResponseModifications(resp, action, body)
 }
 
+// applyOutputFilter applies the safety engine's output filter to the response
+// body and headers. If the engine is not configured or no rules match, the data
+// is returned unchanged. When masking occurs, Content-Length is recalculated to
+// reflect the new body size.
+func (h *Handler) applyOutputFilter(body []byte, headers gohttp.Header, logger *slog.Logger) ([]byte, gohttp.Header) {
+	if h.SafetyEngine == nil {
+		return body, headers
+	}
+
+	bodyResult := h.SafetyEngine.FilterOutput(body)
+	maskedHeaders, headerMatches := h.SafetyEngine.FilterOutputHeaders(headers)
+
+	// Log matches for observability.
+	for _, m := range bodyResult.Matches {
+		logger.Info("output filter matched response body",
+			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
+	}
+	for _, m := range headerMatches {
+		logger.Info("output filter matched response header",
+			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
+	}
+
+	return bodyResult.Data, maskedHeaders
+}
+
 // requestSnapshot holds a copy of the request headers and body taken before
 // intercept/transform processing. It is used to detect whether modifications
 // occurred and, if so, to record the original (unmodified) version as a
