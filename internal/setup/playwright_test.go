@@ -78,12 +78,22 @@ func TestWritePlaywrightConfig_NewFile(t *testing.T) {
 		t.Errorf("browserName = %q, want %q", browserName, "chromium")
 	}
 
-	// Check launchOptions.proxy.
+	// Check launchOptions.
 	var launchOptions map[string]json.RawMessage
 	if err := json.Unmarshal(browser["launchOptions"], &launchOptions); err != nil {
 		t.Fatalf("parse launchOptions: %v", err)
 	}
 
+	// Check launchOptions.channel defaults to "chromium".
+	var channel string
+	if err := json.Unmarshal(launchOptions["channel"], &channel); err != nil {
+		t.Fatalf("parse channel: %v", err)
+	}
+	if channel != "chromium" {
+		t.Errorf("launchOptions.channel = %q, want %q", channel, "chromium")
+	}
+
+	// Check launchOptions.proxy.
 	var proxyConfig map[string]string
 	if err := json.Unmarshal(launchOptions["proxy"], &proxyConfig); err != nil {
 		t.Fatalf("parse proxy: %v", err)
@@ -229,6 +239,64 @@ func TestWritePlaywrightConfig_BothHTTPSOption(t *testing.T) {
 	}
 	if !ignoreHTTPS {
 		t.Error("expected ignoreHTTPSErrors to be true with PlaywrightHTTPSBoth")
+	}
+}
+
+func TestWritePlaywrightConfig_ExistingChannel_Preserved(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
+
+	// Create existing config with a custom channel.
+	playwrightDir := filepath.Join(dir, ".playwright")
+	if err := os.MkdirAll(playwrightDir, 0755); err != nil {
+		t.Fatalf("create .playwright dir: %v", err)
+	}
+
+	configPath := PlaywrightConfigPath(dir)
+	existing := `{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "channel": "chrome"
+    }
+  }
+}
+`
+	if err := os.WriteFile(configPath, []byte(existing), 0644); err != nil {
+		t.Fatalf("write existing: %v", err)
+	}
+
+	_, err := WritePlaywrightConfig(dir, "127.0.0.1:8080", PlaywrightHTTPSSkip, now)
+	if err != nil {
+		t.Fatalf("WritePlaywrightConfig() error: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+
+	var browser map[string]json.RawMessage
+	if err := json.Unmarshal(cfg["browser"], &browser); err != nil {
+		t.Fatalf("parse browser: %v", err)
+	}
+
+	var launchOptions map[string]json.RawMessage
+	if err := json.Unmarshal(browser["launchOptions"], &launchOptions); err != nil {
+		t.Fatalf("parse launchOptions: %v", err)
+	}
+
+	var channel string
+	if err := json.Unmarshal(launchOptions["channel"], &channel); err != nil {
+		t.Fatalf("parse channel: %v", err)
+	}
+	if channel != "chrome" {
+		t.Errorf("launchOptions.channel = %q, want %q (should preserve existing)", channel, "chrome")
 	}
 }
 

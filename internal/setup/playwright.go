@@ -132,6 +132,11 @@ func applyProxySettings(browser map[string]json.RawMessage, listenAddr string) e
 		return fmt.Errorf("parse launchOptions: %w", err)
 	}
 
+	// Set channel if not already set (similar to browserName default).
+	if _, ok := launchOptions["channel"]; !ok {
+		launchOptions["channel"] = json.RawMessage(`"chromium"`)
+	}
+
 	proxyServer := fmt.Sprintf("http://%s", listenAddr)
 	proxyConfig := map[string]string{"server": proxyServer}
 	proxyJSON, _ := json.Marshal(proxyConfig)
