@@ -262,8 +262,9 @@ func applyResponseModifications(resp *gohttp.Response, action intercept.Intercep
 
 // applyOutputFilter applies the safety engine's output filter to the response
 // body and headers. If the engine is not configured or no rules match, the data
-// is returned unchanged. When masking occurs, Content-Length is recalculated to
-// reflect the new body size.
+// is returned unchanged. The caller is responsible for ensuring Content-Length
+// is recalculated when the masked body is written to the client (e.g. via
+// writeResponse / writeResponseToClient).
 func (h *Handler) applyOutputFilter(body []byte, headers gohttp.Header, logger *slog.Logger) ([]byte, gohttp.Header) {
 	if h.SafetyEngine == nil {
 		return body, headers

@@ -465,7 +465,17 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Step 7: Read response, write to client, and record flow.
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
 	receiveEnd := time.Now()
+
+	// Serialize raw response for recording before output filter masks it.
+	// The raw response captures the unmasked data for Flow Store.
 	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
+	// Save unmasked body for recording before output filter masks it.
+	rawRespBody := fullRespBody
+
+	// Output filter: mask sensitive data in response body and headers before
+	// sending to client. Raw (unmasked) data is preserved in Flow Store via
+	// rawResponse/rawRespBody above.
+	fullRespBody, fwd.resp.Header = h.applyOutputFilter(fullRespBody, fwd.resp.Header, logger)
 
 	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
 		return err
@@ -473,6 +483,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	// Progressive recording: record receive (response + session completion).
 	// Update ConnInfo with server-side TLS certificate info now that we have it.
+	// NOTE: respBody uses rawRespBody (unmasked) so Flow Store has raw data.
 	duration := time.Since(start)
 	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 	var tlsCertSubject string
@@ -486,7 +497,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		tlsServerCertSubject: tlsCertSubject,
 		resp:                 fwd.resp,
 		rawResponse:          rawResponse,
-		respBody:             fullRespBody,
+		respBody:             rawRespBody,
 		sendMs:               sendMs,
 		waitMs:               waitMs,
 		receiveMs:            receiveMs,
