@@ -14,6 +14,13 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
+// sseMaxStreamDuration is the maximum duration an SSE stream can remain open.
+// This is a safety net to prevent indefinite resource consumption if the
+// upstream server never closes the connection. The value is intentionally
+// long (24 hours) to accommodate legitimate long-lived SSE streams while
+// still providing a resource consumption bound.
+const sseMaxStreamDuration = 24 * time.Hour
+
 // isSSEResponse checks if the HTTP response is a Server-Sent Events stream
 // by examining the Content-Type header. SSE responses use the MIME type
 // "text/event-stream" as defined in the HTML Living Standard.
@@ -63,12 +70,19 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 		return fmt.Errorf("write SSE response headers: %w", err)
 	}
 
+	// Warn if PII output filter rules are configured but will not apply to SSE.
+	h.warnSSEOutputFilterBypass(logger)
+
 	logger.Info("SSE stream started", "method", req.Method, "url", req.URL.String())
+
+	// Apply maximum stream duration to prevent indefinite resource consumption.
+	streamCtx, streamCancel := context.WithTimeout(ctx, sseMaxStreamDuration)
+	defer streamCancel()
 
 	// Stream the response body from upstream to client.
 	// This blocks until the upstream closes the connection or the context
 	// is cancelled.
-	streamErr := streamSSEBody(ctx, conn, fwd.resp.Body)
+	streamErr := streamSSEBody(streamCtx, conn, fwd.resp.Body)
 
 	// Record the receive phase (response headers only, no body).
 	duration := time.Since(start)
@@ -98,10 +112,17 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *go
 		return fmt.Errorf("write SSE response headers: %w", err)
 	}
 
+	// Warn if PII output filter rules are configured but will not apply to SSE.
+	h.warnSSEOutputFilterBypass(logger)
+
 	logger.Info("SSE stream started (TLS)", "method", req.Method, "url", req.URL.String())
 
+	// Apply maximum stream duration to prevent indefinite resource consumption.
+	streamCtx, streamCancel := context.WithTimeout(ctx, sseMaxStreamDuration)
+	defer streamCancel()
+
 	// Stream the response body from upstream to client.
-	streamErr := streamSSEBody(ctx, conn, fwd.resp.Body)
+	streamErr := streamSSEBody(streamCtx, conn, fwd.resp.Body)
 
 	// Record the receive phase (response headers only, no body).
 	// Include TLS certificate info from the upstream connection.
@@ -162,9 +183,24 @@ func streamSSEBody(ctx context.Context, dst net.Conn, src io.Reader) error {
 
 	_, err := io.Copy(dst, src)
 	if ctx.Err() != nil {
+		// Reset the write deadline so the connection can be reused
+		// for keep-alive if applicable.
+		dst.SetWriteDeadline(time.Time{})
 		return ctx.Err()
 	}
 	return err
+}
+
+// warnSSEOutputFilterBypass logs a warning if the safety engine has output
+// filter rules configured, since SSE streams bypass PII masking.
+func (h *Handler) warnSSEOutputFilterBypass(logger *slog.Logger) {
+	if h.SafetyEngine == nil {
+		return
+	}
+	if len(h.SafetyEngine.OutputRules()) > 0 {
+		logger.Warn("SSE stream bypasses output filter (PII masking not applied)",
+			"output_rule_count", len(h.SafetyEngine.OutputRules()))
+	}
 }
 
 // recordSSEReceive records the receive phase for an SSE flow. The response is
