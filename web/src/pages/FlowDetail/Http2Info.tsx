@@ -22,7 +22,7 @@ export interface Http2InfoProps {
 }
 
 export interface Http2PseudoHeadersProps {
-  headers: Record<string, string[]> | undefined;
+  headers: Record<string, string[]> | null | undefined;
   type: "request" | "response";
 }
 
@@ -79,7 +79,7 @@ export function isPseudoHeader(name: string): boolean {
 
 /** Extract pseudo-headers from a header map. */
 function extractPseudoHeaders(
-  headers: Record<string, string[]> | undefined,
+  headers: Record<string, string[]> | null | undefined,
   pseudoNames: string[],
 ): [string, string][] {
   if (!headers) return [];
@@ -99,8 +99,8 @@ function extractPseudoHeaders(
 
 /** Filter out pseudo-headers from a header map, returning only regular headers. */
 export function filterRegularHeaders(
-  headers: Record<string, string[]> | undefined,
-): Record<string, string[]> | undefined {
+  headers: Record<string, string[]> | null | undefined,
+): Record<string, string[]> | null | undefined {
   if (!headers) return headers;
 
   const filtered: Record<string, string[]> = {};
