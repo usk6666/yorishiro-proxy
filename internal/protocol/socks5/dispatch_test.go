@@ -12,11 +12,14 @@ import (
 	gohttp "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // mockTunnelHandler implements TunnelHandler for testing.
@@ -601,5 +604,294 @@ func TestNewPostHandshakeDispatch_InvalidTarget_TLS(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid target") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- Mock FlowWriter for dispatch tests ---
+
+type dispatchMockStore struct {
+	mu       sync.Mutex
+	flows    []*flow.Flow
+	updates  []dispatchFlowUpdate
+	messages []*flow.Message
+}
+
+type dispatchFlowUpdate struct {
+	ID     string
+	Update flow.FlowUpdate
+}
+
+func (m *dispatchMockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s.ID == "" {
+		s.ID = fmt.Sprintf("flow-%d", len(m.flows)+1)
+	}
+	cp := *s
+	m.flows = append(m.flows, &cp)
+	return nil
+}
+
+func (m *dispatchMockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updates = append(m.updates, dispatchFlowUpdate{ID: id, Update: update})
+	return nil
+}
+
+func (m *dispatchMockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages = append(m.messages, msg)
+	return nil
+}
+
+func (m *dispatchMockStore) getFlows() []*flow.Flow {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*flow.Flow, len(m.flows))
+	copy(out, m.flows)
+	return out
+}
+
+func (m *dispatchMockStore) getUpdates() []dispatchFlowUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]dispatchFlowUpdate, len(m.updates))
+	copy(out, m.updates)
+	return out
+}
+
+func (m *dispatchMockStore) getMessages() []*flow.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*flow.Message, len(m.messages))
+	copy(out, m.messages)
+	return out
+}
+
+// --- Raw TCP flow recording tests ---
+
+func TestNewPostHandshakeDispatch_RawTCPRelay_FlowRecording(t *testing.T) {
+	store := &dispatchMockStore{}
+
+	cfg := DispatchConfig{
+		Logger:     slog.Default(),
+		FlowWriter: store,
+	}
+	dispatch := NewPostHandshakeDispatch(cfg)
+
+	clientConn, serverConn := net.Pipe()
+	upstreamClient, upstreamServer := net.Pipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- dispatch(ctx, serverConn, upstreamServer, "db.example.com:5432")
+	}()
+
+	// Send non-TLS, non-HTTP data.
+	testData := []byte{0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f}
+	clientConn.Write(testData)
+
+	// Read on upstream side.
+	buf := make([]byte, len(testData))
+	upstreamClient.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := upstreamClient.Read(buf)
+	if err != nil {
+		t.Fatalf("upstream read: %v", err)
+	}
+	if !bytes.Equal(buf[:n], testData) {
+		t.Fatalf("expected %v, got %v", testData, buf[:n])
+	}
+
+	// Send reply from upstream.
+	replyData := []byte("reply-data")
+	upstreamClient.Write(replyData)
+
+	replyBuf := make([]byte, len(replyData))
+	clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err = clientConn.Read(replyBuf)
+	if err != nil {
+		t.Fatalf("client read: %v", err)
+	}
+	if !bytes.Equal(replyBuf[:n], replyData) {
+		t.Fatalf("expected %v, got %v", replyData, replyBuf[:n])
+	}
+
+	clientConn.Close()
+	upstreamClient.Close()
+	<-errCh
+
+	// Verify a flow was created.
+	flows := store.getFlows()
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(flows))
+	}
+	fl := flows[0]
+	if fl.Protocol != "SOCKS5+TCP" {
+		t.Errorf("expected protocol SOCKS5+TCP, got %q", fl.Protocol)
+	}
+	if fl.FlowType != "bidirectional" {
+		t.Errorf("expected flow type bidirectional, got %q", fl.FlowType)
+	}
+	if fl.ConnInfo == nil || fl.ConnInfo.ServerAddr != "db.example.com:5432" {
+		t.Errorf("expected server addr db.example.com:5432, got %v", fl.ConnInfo)
+	}
+
+	// Verify messages were recorded.
+	msgs := store.getMessages()
+	if len(msgs) < 2 {
+		t.Fatalf("expected at least 2 messages, got %d", len(msgs))
+	}
+
+	// Verify flow was updated to complete.
+	updates := store.getUpdates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 update, got %d", len(updates))
+	}
+	if updates[0].Update.State != "complete" {
+		t.Errorf("expected state complete, got %q", updates[0].Update.State)
+	}
+}
+
+func TestNewPostHandshakeDispatch_RawTCPRelay_SOCKS5Metadata(t *testing.T) {
+	store := &dispatchMockStore{}
+
+	cfg := DispatchConfig{
+		Logger:     slog.Default(),
+		FlowWriter: store,
+	}
+	dispatch := NewPostHandshakeDispatch(cfg)
+
+	clientConn, serverConn := net.Pipe()
+	upstreamClient, upstreamServer := net.Pipe()
+
+	// Set SOCKS5 metadata in context.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ctx = proxy.ContextWithSOCKS5AuthMethod(ctx, "username_password")
+	ctx = proxy.ContextWithSOCKS5Target(ctx, "db.example.com:5432")
+	ctx = proxy.ContextWithSOCKS5AuthUser(ctx, "testuser")
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- dispatch(ctx, serverConn, upstreamServer, "db.example.com:5432")
+	}()
+
+	// Send raw TCP data.
+	clientConn.Write([]byte{0x01, 0x02, 0x03})
+
+	buf := make([]byte, 10)
+	upstreamClient.SetReadDeadline(time.Now().Add(3 * time.Second))
+	upstreamClient.Read(buf)
+
+	clientConn.Close()
+	upstreamClient.Close()
+	<-errCh
+
+	// Verify SOCKS5 metadata in flow tags.
+	flows := store.getFlows()
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(flows))
+	}
+	fl := flows[0]
+	if fl.Tags == nil {
+		t.Fatal("expected tags to be set")
+	}
+	if fl.Tags["socks5_auth_method"] != "username_password" {
+		t.Errorf("expected auth method username_password, got %q", fl.Tags["socks5_auth_method"])
+	}
+	if fl.Tags["socks5_auth_user"] != "testuser" {
+		t.Errorf("expected auth user testuser, got %q", fl.Tags["socks5_auth_user"])
+	}
+	if fl.Tags["socks5_target"] != "db.example.com:5432" {
+		t.Errorf("expected target db.example.com:5432, got %q", fl.Tags["socks5_target"])
+	}
+}
+
+func TestNewPostHandshakeDispatch_RawTCPRelay_NilFlowWriter(t *testing.T) {
+	// When FlowWriter is nil, should still relay data (backward compatibility).
+	cfg := DispatchConfig{
+		Logger:     slog.Default(),
+		FlowWriter: nil,
+	}
+	dispatch := NewPostHandshakeDispatch(cfg)
+
+	clientConn, serverConn := net.Pipe()
+	upstreamClient, upstreamServer := net.Pipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- dispatch(ctx, serverConn, upstreamServer, "db.example.com:5432")
+	}()
+
+	// Data should still flow.
+	testData := []byte{0x00, 0x01, 0x02, 0x03}
+	clientConn.Write(testData)
+
+	buf := make([]byte, len(testData))
+	upstreamClient.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := upstreamClient.Read(buf)
+	if err != nil {
+		t.Fatalf("upstream read: %v", err)
+	}
+	if !bytes.Equal(buf[:n], testData) {
+		t.Fatalf("expected %v, got %v", testData, buf[:n])
+	}
+
+	clientConn.Close()
+	upstreamClient.Close()
+	<-errCh
+}
+
+func TestNewPostHandshakeDispatch_TLSPassthrough_NoFlowRecording(t *testing.T) {
+	// TLS passthrough should NOT create a flow record (uses standaloneRelay).
+	store := &dispatchMockStore{}
+
+	tunnel := &mockTunnelHandler{
+		isPassthroughFunc: func(hostname string) bool {
+			return true
+		},
+	}
+
+	cfg := DispatchConfig{
+		TunnelHandler: tunnel,
+		Logger:        slog.Default(),
+		FlowWriter:    store,
+	}
+	dispatch := NewPostHandshakeDispatch(cfg)
+
+	clientConn, serverConn := net.Pipe()
+	upstreamClient, upstreamServer := net.Pipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- dispatch(ctx, serverConn, upstreamServer, "passthrough.example.com:443")
+	}()
+
+	// Send TLS ClientHello.
+	clientConn.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x05})
+
+	buf := make([]byte, 10)
+	upstreamClient.SetReadDeadline(time.Now().Add(3 * time.Second))
+	upstreamClient.Read(buf)
+
+	clientConn.Close()
+	upstreamClient.Close()
+	<-errCh
+
+	// Verify no flow was created (passthrough uses standaloneRelay).
+	flows := store.getFlows()
+	if len(flows) != 0 {
+		t.Fatalf("expected 0 flows for TLS passthrough, got %d", len(flows))
 	}
 }

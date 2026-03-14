@@ -7,6 +7,9 @@ import (
 	"net"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	prototcp "github.com/usk6666/yorishiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -44,6 +47,14 @@ type DispatchConfig struct {
 
 	// Logger is the structured logger for dispatch operations.
 	Logger *slog.Logger
+
+	// FlowWriter records raw TCP flows. If nil, flow recording is skipped
+	// for the raw TCP relay path.
+	FlowWriter flow.FlowWriter
+
+	// PluginEngine dispatches per-chunk plugin hooks for the raw TCP relay
+	// path. If nil, plugin hooks are skipped.
+	PluginEngine *plugin.Engine
 }
 
 // isTLSClientHello checks if the peeked bytes begin with a TLS ClientHello.
@@ -93,9 +104,9 @@ func NewPostHandshakeDispatch(cfg DispatchConfig) PostHandshakeFunc {
 			}
 		}
 
-		// 3. Other → raw TCP relay.
+		// 3. Other → raw TCP relay with flow recording + plugin hooks.
 		logger.Info("socks5 raw TCP relay", "target", target)
-		return relayConns(ctx, peekConn, upstreamConn)
+		return relayRawTCP(ctx, peekConn, upstreamConn, target, cfg, logger)
 	}
 }
 
@@ -142,7 +153,92 @@ func handleHTTPPath(ctx context.Context, clientConn net.Conn, upstreamConn net.C
 	return cfg.HTTPDetector.Handle(ctx, clientConn)
 }
 
+// relayRawTCP performs a bidirectional relay for non-TLS, non-HTTP traffic
+// through a SOCKS5 tunnel. It creates a flow record, runs the relay with
+// per-chunk recording and plugin hook dispatch, then updates the flow state.
+func relayRawTCP(ctx context.Context, clientConn, upstreamConn net.Conn, target string, cfg DispatchConfig, logger *slog.Logger) error {
+	// If no FlowWriter is configured, fall back to the simple relay.
+	if cfg.FlowWriter == nil {
+		return relayConns(ctx, clientConn, upstreamConn)
+	}
+
+	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+
+	// Build SOCKS5 metadata tags from context.
+	tags := make(map[string]string)
+	if authMethod := proxy.SOCKS5AuthMethodFromContext(ctx); authMethod != "" {
+		tags["socks5_auth_method"] = authMethod
+	}
+	if authUser := proxy.SOCKS5AuthUserFromContext(ctx); authUser != "" {
+		tags["socks5_auth_user"] = authUser
+	}
+	if socks5Target := proxy.SOCKS5TargetFromContext(ctx); socks5Target != "" {
+		tags["socks5_target"] = socks5Target
+	}
+
+	// Create flow record.
+	start := time.Now()
+	fl := &flow.Flow{
+		ConnID:    connID,
+		Protocol:  "SOCKS5+TCP",
+		FlowType:  "bidirectional",
+		State:     "active",
+		Timestamp: start,
+		Tags:      tags,
+		ConnInfo: &flow.ConnectionInfo{
+			ClientAddr: clientAddr,
+			ServerAddr: target,
+		},
+	}
+
+	if err := cfg.FlowWriter.SaveFlow(ctx, fl); err != nil {
+		logger.Error("socks5 raw TCP flow save failed", "error", err)
+		// Continue relaying even if recording fails.
+	}
+
+	// Build plugin ConnInfo.
+	var pluginConnInfo *plugin.ConnInfo
+	if fl.ConnInfo != nil {
+		pluginConnInfo = &plugin.ConnInfo{
+			ClientAddr: fl.ConnInfo.ClientAddr,
+			ServerAddr: fl.ConnInfo.ServerAddr,
+		}
+	}
+
+	// Run the recording relay.
+	relayErr := prototcp.RunRelay(ctx, clientConn, upstreamConn, prototcp.RelayConfig{
+		Store:        cfg.FlowWriter,
+		FlowID:       fl.ID,
+		Logger:       logger,
+		PluginEngine: cfg.PluginEngine,
+		ConnInfo:     pluginConnInfo,
+		Target:       target,
+	})
+
+	// Update flow state.
+	duration := time.Since(start)
+	state := "complete"
+	if relayErr != nil && ctx.Err() == nil {
+		state = "error"
+	}
+	if err := cfg.FlowWriter.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{
+		State:    state,
+		Duration: duration,
+	}); err != nil {
+		logger.Error("socks5 raw TCP flow update failed", "error", err)
+	}
+
+	logger.Info("socks5 raw TCP relay closed", "target", target, "duration_ms", duration.Milliseconds())
+
+	if relayErr != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return relayErr
+}
+
 // relayConns performs a bidirectional data relay between two connections.
+// Used for TLS passthrough and fallback paths where flow recording is not needed.
 func relayConns(ctx context.Context, client, upstream net.Conn) error {
 	return standaloneRelay(ctx, client, upstream)
 }

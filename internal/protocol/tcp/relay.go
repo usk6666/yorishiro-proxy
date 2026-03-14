@@ -18,6 +18,38 @@ import (
 // 32 KB balances memory usage and throughput for typical TCP traffic.
 const relayBufSize = 32 * 1024
 
+// RelayConfig holds the parameters for RunRelay.
+type RelayConfig struct {
+	// Store is the flow writer for recording messages. May be nil to skip recording.
+	Store flow.FlowWriter
+	// FlowID is the ID of the flow to record messages against.
+	FlowID string
+	// Logger is the structured logger.
+	Logger *slog.Logger
+	// PluginEngine dispatches per-chunk hooks. May be nil to skip hooks.
+	PluginEngine *plugin.Engine
+	// ConnInfo holds connection metadata for plugin hooks. May be nil.
+	ConnInfo *plugin.ConnInfo
+	// Target is the upstream target address (used in plugin hook data).
+	Target string
+}
+
+// RunRelay performs a bidirectional relay between client and upstream,
+// recording each chunk as a flow message and dispatching plugin hooks.
+// This is the exported entry point used by both the TCP handler and
+// the SOCKS5 raw TCP dispatch path.
+func RunRelay(ctx context.Context, client, upstream net.Conn, cfg RelayConfig) error {
+	r := &relay{
+		store:        cfg.Store,
+		flowID:       cfg.FlowID,
+		logger:       cfg.Logger,
+		pluginEngine: cfg.PluginEngine,
+		connInfo:     cfg.ConnInfo,
+		target:       cfg.Target,
+	}
+	return r.run(ctx, client, upstream)
+}
+
 // relay copies data bidirectionally between a client and an upstream
 // connection, recording each chunk as a message in the flow store.
 type relay struct {
