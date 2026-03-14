@@ -195,8 +195,7 @@ Layer 4 TCP Listener
 
 ## Documentation
 
-- [Getting Started Guide](docs/getting-started.md) -- Detailed setup and usage walkthrough
-- [Plugin Development Guide](docs/plugins.md) -- Writing Starlark plugins to extend proxy behavior
+Full documentation is available at **[usk6666.github.io/yorishiro-proxy-docs](https://usk6666.github.io/yorishiro-proxy-docs/)**.
 
 ## Contributing
 
