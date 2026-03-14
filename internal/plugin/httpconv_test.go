@@ -421,6 +421,97 @@ func TestApplyHTTPResponseChanges_NegativeStatusCode(t *testing.T) {
 	}
 }
 
+func TestHTTPResponseToMap_Trailers(t *testing.T) {
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"application/grpc"}},
+		Trailer:    gohttp.Header{"Grpc-Status": {"0"}, "Grpc-Message": {"OK"}},
+	}
+	req, _ := gohttp.NewRequest("POST", "http://example.com/grpc.Service/Method", nil)
+	body := []byte("grpc-body")
+
+	m := HTTPResponseToMap(resp, body, req, nil, "h2")
+
+	trailers, ok := m["trailers"].(map[string]any)
+	if !ok {
+		t.Fatal("trailers should be map[string]any")
+	}
+	grpcStatus, ok := trailers["Grpc-Status"].([]any)
+	if !ok || len(grpcStatus) == 0 || grpcStatus[0] != "0" {
+		t.Errorf("trailers[Grpc-Status] = %v, want [0]", trailers["Grpc-Status"])
+	}
+	grpcMsg, ok := trailers["Grpc-Message"].([]any)
+	if !ok || len(grpcMsg) == 0 || grpcMsg[0] != "OK" {
+		t.Errorf("trailers[Grpc-Message] = %v, want [OK]", trailers["Grpc-Message"])
+	}
+}
+
+func TestHTTPResponseToMap_NilTrailers(t *testing.T) {
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{},
+		Trailer:    nil,
+	}
+	m := HTTPResponseToMap(resp, nil, nil, nil, "HTTP/1.x")
+
+	trailers, ok := m["trailers"].(map[string]any)
+	if !ok {
+		t.Fatal("trailers should be map[string]any even when nil")
+	}
+	if len(trailers) != 0 {
+		t.Errorf("trailers should be empty map, got %v", trailers)
+	}
+}
+
+func TestApplyHTTPResponseChanges_Trailers(t *testing.T) {
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{},
+		Trailer:    gohttp.Header{"Grpc-Status": {"0"}},
+	}
+
+	data := map[string]any{
+		"trailers": map[string]any{
+			"Grpc-Status":  []any{"13"},
+			"Grpc-Message": []any{"internal error"},
+		},
+	}
+
+	resp, _, err := ApplyHTTPResponseChanges(resp, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := resp.Trailer.Get("Grpc-Status"); got != "13" {
+		t.Errorf("Grpc-Status = %q, want %q", got, "13")
+	}
+	if got := resp.Trailer.Get("Grpc-Message"); got != "internal error" {
+		t.Errorf("Grpc-Message = %q, want %q", got, "internal error")
+	}
+}
+
+func TestApplyHTTPResponseChanges_TrailersNotPresent(t *testing.T) {
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{},
+		Trailer:    gohttp.Header{"Original": {"yes"}},
+	}
+
+	// data without trailers key — should not modify existing trailers.
+	data := map[string]any{
+		"status_code": 200,
+	}
+
+	resp, _, err := ApplyHTTPResponseChanges(resp, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := resp.Trailer.Get("Original"); got != "yes" {
+		t.Errorf("Original trailer = %q, want %q (should be preserved)", got, "yes")
+	}
+}
+
 func TestBuildRespondResponse_InvalidStatusCode(t *testing.T) {
 	tests := []struct {
 		name       string

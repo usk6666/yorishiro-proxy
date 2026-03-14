@@ -370,9 +370,13 @@ func (h *Handler) handleStream(
 	rawRespBody := make([]byte, len(fullRespBody))
 	copy(rawRespBody, fullRespBody)
 
-	// Output filter: mask sensitive data in response body and headers before
-	// sending to client. Raw (unmasked) data is preserved in Flow Store.
+	// Output filter: mask sensitive data in response body, headers, and
+	// trailers before sending to client. Raw (unmasked) data is preserved
+	// in Flow Store. Trailers (e.g. grpc-message) may contain PII.
 	fullRespBody, resp.Header = h.ApplyOutputFilter(fullRespBody, resp.Header, sc.logger)
+	if len(resp.Trailer) > 0 {
+		resp.Trailer = h.ApplyOutputFilterHeaders(resp.Trailer, sc.logger)
+	}
 
 	writeResponseToClient(sc, resp, fullRespBody)
 
@@ -723,8 +727,23 @@ func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *gohttp.Respons
 	return resp, fullRespBody
 }
 
-// writeResponseToClient writes the HTTP response headers and body to the client.
+// writeResponseToClient writes the HTTP response headers, body, and trailers
+// to the client. For HTTP/2, trailers are sent as a HEADERS frame with
+// END_STREAM after the body. Go's net/http server handles this automatically
+// when trailer keys are declared via the "Trailer" header before WriteHeader,
+// and trailer values are set on the ResponseWriter's Header after the body
+// is written.
 func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte) {
+	// Declare trailer keys before WriteHeader so Go's HTTP/2 server knows to
+	// send them as a trailing HEADERS frame.
+	var trailerKeys []string
+	for key := range resp.Trailer {
+		trailerKeys = append(trailerKeys, key)
+	}
+	if len(trailerKeys) > 0 {
+		sc.w.Header().Set("Trailer", strings.Join(trailerKeys, ", "))
+	}
+
 	for key, vals := range resp.Header {
 		for _, val := range vals {
 			sc.w.Header().Add(key, val)
@@ -734,6 +753,14 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 	if len(body) > 0 {
 		if _, err := sc.w.Write(body); err != nil {
 			sc.logger.Debug("HTTP/2 failed to write response body", "error", err)
+		}
+	}
+
+	// Set trailer values after body write. Go's HTTP/2 server sends these as
+	// a HEADERS(END_STREAM) frame when the handler returns.
+	for key, vals := range resp.Trailer {
+		for _, val := range vals {
+			sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
 		}
 	}
 }
