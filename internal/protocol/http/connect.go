@@ -475,9 +475,11 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// streaming mode. SSE responses are long-lived streams that would
 	// block forever in readResponseBody's io.ReadAll. Skip output filter,
 	// safety filter, intercept, and plugin hooks for SSE streams.
+	// The send phase is already recorded via sendResult above; pass it
+	// directly to avoid duplicate flow recording.
 	if isSSEResponse(fwd.resp) {
-		sp.tags = addSSETags(sp.tags)
-		return h.handleSSEStreamTLS(ctx, conn, req, fwd, start, sp, &snap, logger)
+		sendResult.tags = addSSETags(sendResult.tags)
+		return h.handleSSEStreamTLS(ctx, conn, req, fwd, start, sendResult, logger)
 	}
 
 	// Step 7: Read response, write to client, and record flow.

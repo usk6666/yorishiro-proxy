@@ -226,7 +226,7 @@ func TestStreamSSEBody(t *testing.T) {
 	})
 }
 
-// mockFlowStore is a minimal flow store for testing SSE recording.
+// sseTestFlowStore is a minimal flow store for testing SSE recording.
 type sseTestFlowStore struct {
 	flows    []*flow.Flow
 	messages []*flow.Message

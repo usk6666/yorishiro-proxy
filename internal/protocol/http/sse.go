@@ -46,10 +46,17 @@ func addSSETags(tags map[string]string) map[string]string {
 //
 // The flow is recorded with metadata only (request + response headers, no body)
 // and tagged with streaming_type=sse for identification.
-func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sp sendRecordParams, snap *requestSnapshot, logger *slog.Logger) error {
-	// Record send (request) before streaming begins.
-	sendResult := h.recordSendWithVariant(ctx, sp, snap, logger)
-
+//
+// NOTE: The following processing steps are intentionally skipped for SSE streams
+// because they require the full response body to be buffered in memory:
+//   - Plugin hooks: on_receive_from_server, on_before_send_to_client
+//   - Response intercept (modify/drop)
+//   - Response auto-transform rules
+//   - Output filter (PII masking)
+//
+// The sendResult parameter is the result from the already-recorded send phase;
+// this function must NOT call recordSendWithVariant again.
+func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
 	// Write the response headers to the client.
 	if err := writeSSEResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
@@ -79,10 +86,12 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 // handleSSEStreamTLS handles SSE responses in the HTTPS MITM path. It uses
 // the same streaming approach as handleSSEStream but includes TLS certificate
 // information in the flow recording.
-func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sp sendRecordParams, snap *requestSnapshot, logger *slog.Logger) error {
-	// Record send (request) before streaming begins.
-	sendResult := h.recordSendWithVariant(ctx, sp, snap, logger)
-
+//
+// See handleSSEStream for details on skipped processing steps.
+//
+// The sendResult parameter is the result from the already-recorded send phase;
+// this function must NOT call recordSendWithVariant again.
+func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
 	// Write the response headers to the client.
 	if err := writeSSEResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
