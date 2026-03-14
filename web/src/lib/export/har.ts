@@ -263,7 +263,7 @@ function mapHttpVersion(protocol: string): string {
  * Flatten the multi-value headers map into a flat array of {name, value} pairs.
  */
 function flattenHeaders(
-  headers?: Record<string, string[]>,
+  headers?: Record<string, string[]> | null,
 ): HarHeader[] {
   if (!headers) return [];
   const result: HarHeader[] = [];
@@ -291,7 +291,7 @@ function parseQueryString(url?: string): HarQueryParam[] {
 }
 
 /** Extract the Content-Type value from a headers map. */
-function getContentType(headers?: Record<string, string[]>): string {
+function getContentType(headers?: Record<string, string[]> | null): string {
   if (!headers) return "";
   for (const [name, values] of Object.entries(headers)) {
     if (name.toLowerCase() === "content-type" && values.length > 0) {
@@ -302,7 +302,7 @@ function getContentType(headers?: Record<string, string[]>): string {
 }
 
 /** Extract the Location header for redirect URL. */
-function getRedirectURL(headers?: Record<string, string[]>): string {
+function getRedirectURL(headers?: Record<string, string[]> | null): string {
   if (!headers) return "";
   for (const [name, values] of Object.entries(headers)) {
     if (name.toLowerCase() === "location" && values.length > 0) {

@@ -5,7 +5,7 @@
 import "./FlowDetailPage.css";
 
 export interface HeadersTableProps {
-  headers: Record<string, string[]> | undefined;
+  headers: Record<string, string[]> | null | undefined;
 }
 
 export function HeadersTable({ headers }: HeadersTableProps) {
@@ -24,7 +24,7 @@ export function HeadersTable({ headers }: HeadersTableProps) {
         </thead>
         <tbody>
           {Object.entries(headers).map(([key, values]) =>
-            values.map((value, idx) => (
+            values?.map((value, idx) => (
               <tr key={`${key}-${idx}`}>
                 <td className="sd-header-key">{key}</td>
                 <td className="sd-header-value">{value}</td>
