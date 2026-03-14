@@ -158,6 +158,15 @@
   white-space: nowrap;
 }
 
+.flows-sortable-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.flows-sortable-header:hover {
+  color: var(--accent-primary);
+}
+
 .flows-cell-timestamp {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);

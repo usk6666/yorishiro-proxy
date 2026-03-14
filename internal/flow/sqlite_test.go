@@ -1628,3 +1628,76 @@ func TestSQLiteStore_FlowTiming_ListFlows(t *testing.T) {
 		t.Errorf("ReceiveMs = %v, want 22", got.ReceiveMs)
 	}
 }
+
+func Test_flowOrderClause(t *testing.T) {
+	tests := []struct {
+		name   string
+		sortBy string
+		want   string
+	}{
+		{name: "empty defaults to timestamp", sortBy: "", want: " ORDER BY s.timestamp DESC"},
+		{name: "timestamp", sortBy: "timestamp", want: " ORDER BY s.timestamp DESC"},
+		{name: "duration_ms", sortBy: "duration_ms", want: " ORDER BY s.duration_ms DESC"},
+		{name: "invalid falls back to timestamp", sortBy: "invalid_field", want: " ORDER BY s.timestamp DESC"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := flowOrderClause(tt.sortBy)
+			if got != tt.want {
+				t.Errorf("flowOrderClause(%q) = %q, want %q", tt.sortBy, got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_ListFlows_SortByDuration(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Create 3 flows with different durations: 300ms, 100ms, 200ms.
+	durations := []time.Duration{300 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+	for i, dur := range durations {
+		fl := &Flow{
+			Protocol:  "HTTP/1.x",
+			FlowType:  "unary",
+			State:     "complete",
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+			Duration:  dur,
+		}
+		if err := store.SaveFlow(ctx, fl); err != nil {
+			t.Fatalf("SaveFlow: %v", err)
+		}
+	}
+
+	// Default sort (timestamp DESC): order should be flow[2], flow[1], flow[0].
+	defaultFlows, err := store.ListFlows(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("ListFlows default: %v", err)
+	}
+	if len(defaultFlows) != 3 {
+		t.Fatalf("expected 3 flows, got %d", len(defaultFlows))
+	}
+	// Most recent timestamp first.
+	if defaultFlows[0].Duration != 200*time.Millisecond {
+		t.Errorf("default sort: first flow duration = %v, want 200ms", defaultFlows[0].Duration)
+	}
+
+	// Sort by duration_ms DESC: order should be 300ms, 200ms, 100ms.
+	sorted, err := store.ListFlows(ctx, ListOptions{SortBy: "duration_ms"})
+	if err != nil {
+		t.Fatalf("ListFlows sort by duration: %v", err)
+	}
+	if len(sorted) != 3 {
+		t.Fatalf("expected 3 flows, got %d", len(sorted))
+	}
+	if sorted[0].Duration != 300*time.Millisecond {
+		t.Errorf("duration sort: first = %v, want 300ms", sorted[0].Duration)
+	}
+	if sorted[1].Duration != 200*time.Millisecond {
+		t.Errorf("duration sort: second = %v, want 200ms", sorted[1].Duration)
+	}
+	if sorted[2].Duration != 100*time.Millisecond {
+		t.Errorf("duration sort: third = %v, want 100ms", sorted[2].Duration)
+	}
+}

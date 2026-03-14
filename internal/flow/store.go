@@ -126,6 +126,10 @@ type ListOptions struct {
 	// Host filters flows by host. Matches against the server_addr column
 	// or the host portion of the URL in send messages.
 	Host string
+	// SortBy specifies the field to sort results by.
+	// Valid values: "timestamp", "duration_ms".
+	// Default (empty): "timestamp".
+	SortBy string
 	// Limit is the maximum number of flows to return.
 	Limit int
 	// Offset is the number of flows to skip for pagination.
