@@ -4,6 +4,7 @@ import { useQuery } from "../../lib/mcp/hooks.js";
 import { AutoTransformRules } from "./AutoTransformRules.js";
 import { CACertPanel } from "./CACertPanel.js";
 import { CaptureScope } from "./CaptureScope.js";
+import { ClientCertificate } from "./ClientCertificate.js";
 import { ConnectionSettings } from "./ConnectionSettings.js";
 import { InterceptRules } from "./InterceptRules.js";
 import { PluginPanel } from "./PluginPanel.js";
@@ -24,6 +25,7 @@ const TABS = [
   { id: "transform", label: "Auto-Transform" },
   { id: "socks5-auth", label: "SOCKS5 Auth" },
   { id: "tls-fingerprint", label: "TLS Fingerprint" },
+  { id: "client-cert", label: "Client Certificate" },
   { id: "connection", label: "Connection" },
   { id: "ca-cert", label: "CA Certificate" },
   { id: "plugins", label: "Plugins" },
@@ -138,6 +140,16 @@ export function SettingsPage() {
         }
         if (!statusData) return null;
         return <TlsFingerprint status={statusData} onRefresh={handleRefresh} />;
+
+      case "client-cert":
+        if (configLoading && !configData) {
+          return <div className="settings-loading"><Spinner size="md" /></div>;
+        }
+        if (configError) {
+          return <div className="settings-error">Error loading config: {configError.message}</div>;
+        }
+        if (!configData) return null;
+        return <ClientCertificate config={configData} onRefresh={handleRefresh} />;
 
       case "connection":
         if (statusLoading && !statusData) {
