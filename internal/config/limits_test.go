@@ -53,6 +53,27 @@ func TestLimits_MaxImportScannerBuffer(t *testing.T) {
 	}
 }
 
+func TestLimits_MaxSSEEventSize(t *testing.T) {
+	const expected = 1 << 20 // 1 MB
+	if MaxSSEEventSize != expected {
+		t.Errorf("MaxSSEEventSize = %d, want %d", MaxSSEEventSize, expected)
+	}
+}
+
+func TestLimits_MaxSSEEventsPerStream(t *testing.T) {
+	const expected = 10000
+	if MaxSSEEventsPerStream != expected {
+		t.Errorf("MaxSSEEventsPerStream = %d, want %d", MaxSSEEventsPerStream, expected)
+	}
+}
+
+func TestLimits_MaxSSERecordPayloadSize(t *testing.T) {
+	const expected = 254 << 20 // 254 MB
+	if MaxSSERecordPayloadSize != expected {
+		t.Errorf("MaxSSERecordPayloadSize = %d, want %d", MaxSSERecordPayloadSize, expected)
+	}
+}
+
 func TestLimits_Consistency(t *testing.T) {
 	// MaxImportScannerBuffer must be larger than base64-encoded MaxBodySize.
 	// base64 expands data by ~4/3, so 254 MB * 4/3 ≈ 339 MB.

@@ -111,6 +111,9 @@ type Message struct {
 type FlowUpdate struct {
 	// State sets the flow state (e.g., "complete", "error").
 	State string
+	// FlowType overrides the flow type (e.g., "stream" for SSE).
+	// Only applied when non-empty.
+	FlowType string
 	// Duration sets the flow duration.
 	Duration time.Duration
 	// Tags replaces the flow tags.
