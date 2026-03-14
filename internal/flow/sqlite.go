@@ -384,12 +384,27 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 	return clause, args
 }
 
+// validFlowSortColumns maps allowed SortBy values to SQL column expressions.
+var validFlowSortColumns = map[string]string{
+	"timestamp":   "s.timestamp",
+	"duration_ms": "s.duration_ms",
+}
+
+// flowOrderClause returns the ORDER BY clause for flow list queries.
+// Invalid or empty sortBy values fall back to timestamp descending.
+func flowOrderClause(sortBy string) string {
+	if col, ok := validFlowSortColumns[sortBy]; ok {
+		return " ORDER BY " + col + " DESC"
+	}
+	return " ORDER BY s.timestamp DESC"
+}
+
 // ListFlows returns flows matching the given options.
 func (s *SQLiteStore) ListFlows(ctx context.Context, opts ListOptions) ([]*Flow, error) {
 	whereClause, args := buildFlowWhereClause(opts)
 
 	query := "SELECT " + flowColumns + " FROM flows s" + whereClause
-	query += " ORDER BY s.timestamp DESC"
+	query += flowOrderClause(opts.SortBy)
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)

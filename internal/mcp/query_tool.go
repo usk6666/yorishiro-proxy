@@ -35,7 +35,7 @@ type queryInput struct {
 	// If empty, all fields are returned.
 	Fields []string `json:"fields,omitempty" jsonschema:"list of field names to include in the response"`
 
-	// SortBy specifies the field to sort results by (used by fuzz_results).
+	// SortBy specifies the field to sort results by (used by flows and fuzz_results).
 	SortBy string `json:"sort_by,omitempty" jsonschema:"field name to sort results by"`
 
 	// Limit is the maximum number of items to return (default 50, max 1000).
@@ -99,7 +99,7 @@ func (s *Server) registerQuery() {
 			"When intercept/transform modifies a request, the flow contains variant messages: original (seq=0, variant=original) and modified (seq=1, variant=modified). " +
 			"Similarly, when intercept modifies a response, the flow contains variant receive messages with original_response in the flow detail. " +
 			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
-			"The 'sort_by' parameter sorts fuzz_results by the specified field. " +
+			"The 'sort_by' parameter sorts flows (timestamp, duration_ms) and fuzz_results by the specified field. " +
 			"Results are paginated with limit/offset for flows, messages, fuzz_jobs, and fuzz_results resources. " +
 			"fuzz_results include aggregate statistics (status_code_distribution, body_length, timing_ms with min/max/median/stddev) and outlier detection (by_status_code, by_body_length, by_timing). " +
 			"'intercept_queue' returns currently blocked requests and responses (with phase field) waiting for release/modify_and_forward/drop actions. " +
@@ -179,6 +179,7 @@ func buildFlowListOptions(input queryInput) flow.ListOptions {
 	opts := flow.ListOptions{
 		Limit:  limit,
 		Offset: input.Offset,
+		SortBy: input.SortBy,
 	}
 	if input.Filter != nil {
 		opts.Protocol = input.Filter.Protocol
