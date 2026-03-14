@@ -489,6 +489,17 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 	defer fwd.resp.Body.Close()
 
+	// SSE detection: if the response is text/event-stream, switch to
+	// streaming mode. SSE responses are long-lived streams that would
+	// block forever in readResponseBody's io.ReadAll. Skip output filter,
+	// safety filter, intercept, and plugin hooks for SSE streams.
+	// The send phase is already recorded via sendResult above; pass it
+	// directly to avoid duplicate flow recording.
+	if isSSEResponse(fwd.resp) {
+		sendResult.tags = addSSETags(sendResult.tags)
+		return h.handleSSEStream(ctx, conn, req, fwd, start, sendResult, logger)
+	}
+
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
 	receiveEnd := time.Now()
 

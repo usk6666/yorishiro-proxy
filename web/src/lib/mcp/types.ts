@@ -291,6 +291,7 @@ export interface FlowEntry {
   message_count: number;
   blocked_by?: string;
   protocol_summary?: Record<string, string>;
+  tags?: Record<string, string>;
   timestamp: string;
   duration_ms: number;
 }

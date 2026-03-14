@@ -764,6 +764,9 @@ export function FlowsPage() {
                       <Badge variant={protocolVariant(flow.protocol)}>
                         {flow.protocol}
                       </Badge>
+                      {flow.tags?.streaming_type === "sse" && (
+                        <Badge variant="warning">SSE</Badge>
+                      )}
                     </td>
                     <td>
                       <Badge variant={stateVariant(flow.state)}>

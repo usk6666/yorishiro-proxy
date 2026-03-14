@@ -155,6 +155,7 @@ type queryFlowsEntry struct {
 	MessageCount    int               `json:"message_count"`
 	BlockedBy       string            `json:"blocked_by,omitempty"`
 	ProtocolSummary map[string]string `json:"protocol_summary,omitempty"`
+	Tags            map[string]string `json:"tags,omitempty"`
 	Timestamp       string            `json:"timestamp"`
 	DurationMs      int64             `json:"duration_ms"`
 	SendMs          *int64            `json:"send_ms,omitempty"`
@@ -262,6 +263,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			MessageCount:    len(msgs),
 			BlockedBy:       fl.BlockedBy,
 			ProtocolSummary: summary,
+			Tags:            fl.Tags,
 			Timestamp:       fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			DurationMs:      fl.Duration.Milliseconds(),
 			SendMs:          fl.SendMs,
