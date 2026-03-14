@@ -149,6 +149,9 @@ export function FlowsPage() {
   const [pageSize, setPageSize] = useState<number>(50);
   const [offset, setOffset] = useState(0);
 
+  // --- Sorting state ---
+  const [sortBy, setSortBy] = useState<string>("");
+
   // --- Polling state ---
   const [pollInterval, setPollInterval] = useState<number>(2000);
 
@@ -196,6 +199,7 @@ export function FlowsPage() {
   const { data, loading, error, refetch } = useQuery("flows", {
     pollInterval,
     filter,
+    sortBy: sortBy || undefined,
     limit: pageSize,
     offset,
   });
@@ -208,12 +212,12 @@ export function FlowsPage() {
   // re-execute the query. This effect ensures an explicit refetch fires.
   const prevFilterKey = useRef("");
   useEffect(() => {
-    const key = JSON.stringify({ filter, limit: pageSize, offset });
+    const key = JSON.stringify({ filter, sortBy, limit: pageSize, offset });
     if (prevFilterKey.current && prevFilterKey.current !== key) {
       refetch();
     }
     prevFilterKey.current = key;
-  }, [filter, pageSize, offset, refetch]);
+  }, [filter, sortBy, pageSize, offset, refetch]);
 
   // Reset offset and selection when debounced text filters change
   const prevTextFilterKey = useRef("");
@@ -428,6 +432,16 @@ export function FlowsPage() {
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       const newSize = parseInt(e.target.value, 10);
       setPageSize(newSize);
+      setOffset(0);
+      setSelectedIds(new Set());
+    },
+    [],
+  );
+
+  // --- Sorting ---
+  const handleSort = useCallback(
+    (field: string) => {
+      setSortBy((prev) => (prev === field ? "" : field));
       setOffset(0);
       setSelectedIds(new Set());
     },
@@ -672,8 +686,18 @@ export function FlowsPage() {
                   <th>URL</th>
                   <th>Status</th>
                   <th>Messages</th>
-                  <th>Duration</th>
-                  <th>Time</th>
+                  <th
+                    className="flows-sortable-header"
+                    onClick={() => handleSort("duration_ms")}
+                  >
+                    Duration {sortBy === "duration_ms" ? "\u25BC" : ""}
+                  </th>
+                  <th
+                    className="flows-sortable-header"
+                    onClick={() => handleSort("timestamp")}
+                  >
+                    Time {sortBy === "timestamp" ? "\u25BC" : ""}
+                  </th>
                 </tr>
               </thead>
               <tbody>
