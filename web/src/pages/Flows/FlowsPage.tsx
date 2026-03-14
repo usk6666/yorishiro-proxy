@@ -7,6 +7,7 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { useToast } from "../../components/ui/Toast.js";
+import { buildHarFromList, downloadHar } from "../../lib/export/har.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 import type { FlowEntry, ManageImportFlowsResult, QueryFilter } from "../../lib/mcp/types.js";
 import "./FlowsPage.css";
@@ -355,8 +356,8 @@ export function FlowsPage() {
     }
   }, [selectedIds, showDialog, manage, addToast, refetch]);
 
-  // --- Export flows ---
-  const handleExport = useCallback(async () => {
+  // --- Export flows (JSONL via backend) ---
+  const handleExportJsonl = useCallback(async () => {
     try {
       await manage({
         action: "export_flows",
@@ -370,6 +371,31 @@ export function FlowsPage() {
       });
     }
   }, [manage, addToast]);
+
+  // --- Export flows (HAR) ---
+  const handleExportHar = useCallback(() => {
+    const targetFlows = selectedIds.size > 0
+      ? flows.filter((f) => selectedIds.has(f.id))
+      : flows;
+    if (targetFlows.length === 0) {
+      addToast({ type: "warning", message: "No flows to export" });
+      return;
+    }
+    try {
+      const har = buildHarFromList(targetFlows);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      downloadHar(har, `flows-${timestamp}.har`);
+      addToast({
+        type: "success",
+        message: `HAR file downloaded (${targetFlows.length} flow(s))`,
+      });
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `HAR export failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [flows, selectedIds, addToast]);
 
   // --- Import flows ---
   const handleImportOpen = useCallback(() => {
@@ -470,10 +496,17 @@ export function FlowsPage() {
           <Button
             variant="secondary"
             size="sm"
-            onClick={handleExport}
+            onClick={handleExportJsonl}
             disabled={executeLoading}
           >
-            Export
+            Export JSONL
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleExportHar}
+          >
+            Export HAR
           </Button>
           <Button
             variant="secondary"
@@ -608,6 +641,13 @@ export function FlowsPage() {
         <div className="flows-bulk-bar">
           <span className="flows-bulk-count">{selectedIds.size}</span>
           <span>selected</span>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleExportHar}
+          >
+            Export HAR
+          </Button>
           <Button
             variant="danger"
             size="sm"
