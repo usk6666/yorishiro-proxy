@@ -502,14 +502,10 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	// Raw TCP fallback handler: must be last since Detect() always returns true.
 	tcpHandler := prototcp.NewHandler(store, nil, logger)
 
-	// Build SOCKS5 handler with post-handshake dispatch for TLS MITM / HTTP / TCP.
+	// Build SOCKS5 handler. Post-handshake dispatch is set after plugin
+	// engine initialization so that the dispatch closure can capture the
+	// plugin engine (which may be nil until then).
 	socks5Handler := protosocks5.NewHandler(logger)
-	socks5Dispatch := protosocks5.NewPostHandshakeDispatch(protosocks5.DispatchConfig{
-		TunnelHandler: httpHandler,
-		HTTPDetector:  httpHandler,
-		Logger:        logger,
-	})
-	socks5Handler.SetPostHandshake(socks5Dispatch)
 
 	// Build SOCKS5 auth adapter for MCP tool control.
 	socks5Adapter := newSOCKS5AuthAdapter(socks5Handler)
@@ -550,6 +546,17 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		socks5Handler.SetPluginEngine(pluginEngine)
 		logger.Info("plugins loaded", "count", pluginEngine.PluginCount())
 	}
+
+	// Build SOCKS5 post-handshake dispatch after plugin engine initialization
+	// so the raw TCP relay path can use flow recording and plugin hooks.
+	socks5Dispatch := protosocks5.NewPostHandshakeDispatch(protosocks5.DispatchConfig{
+		TunnelHandler: httpHandler,
+		HTTPDetector:  httpHandler,
+		Logger:        logger,
+		FlowWriter:    store,
+		PluginEngine:  pluginEngine,
+	})
+	socks5Handler.SetPostHandshake(socks5Dispatch)
 
 	// Register handlers in priority order: h2c -> HTTP/1.x -> SOCKS5 -> raw TCP fallback.
 	detector := protocol.NewDetector(http2Handler, httpHandler, socks5Handler, tcpHandler)
