@@ -35,7 +35,7 @@ type queryInput struct {
 	// If empty, all fields are returned.
 	Fields []string `json:"fields,omitempty" jsonschema:"list of field names to include in the response"`
 
-	// SortBy specifies the field to sort results by (used by fuzz_results).
+	// SortBy specifies the field to sort results by (used by flows and fuzz_results).
 	SortBy string `json:"sort_by,omitempty" jsonschema:"field name to sort results by"`
 
 	// Limit is the maximum number of items to return (default 50, max 1000).
