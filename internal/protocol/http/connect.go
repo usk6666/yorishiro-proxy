@@ -473,8 +473,9 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	// SSE detection: if the response is text/event-stream, switch to
 	// streaming mode. SSE responses are long-lived streams that would
-	// block forever in readResponseBody's io.ReadAll. Skip output filter,
-	// safety filter, intercept, and plugin hooks for SSE streams.
+	// block forever in readResponseBody's io.ReadAll. Intercept is applied
+	// at the header level (no body). Output filter and auto-transform
+	// rules are skipped for SSE streams.
 	// The send phase is already recorded via sendResult above; pass it
 	// directly to avoid duplicate flow recording.
 	if isSSEResponse(fwd.resp) {

@@ -15,6 +15,9 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // sseMaxStreamDuration is the maximum duration an SSE stream can remain open.
@@ -50,6 +53,15 @@ func addSSETags(tags map[string]string) map[string]string {
 	return tags
 }
 
+// sseHookContext holds the plugin hook context for SSE stream processing.
+// This carries the plugin ConnInfo and transaction context through to the
+// SSE handler so that on_receive_from_server and on_before_send_to_client
+// hooks can be dispatched at the header level.
+type sseHookContext struct {
+	connInfo *plugin.ConnInfo
+	txCtx    map[string]any
+}
+
 // handleSSEStream handles Server-Sent Events responses by writing the response
 // headers to the client and then streaming events from upstream, forwarding
 // each to the client while recording them as flow.Message entries.
@@ -58,16 +70,38 @@ func addSSETags(tags map[string]string) map[string]string {
 // separate flow.Message with direction="receive". This follows the same
 // progressive recording pattern used by WebSocket frame recording.
 //
+// Before writing response headers, this function applies:
+//   - Plugin hook: on_receive_from_server (header-level, no body)
+//   - Response intercept check (header-level, DROP or RELEASE)
+//   - Plugin hook: on_before_send_to_client (header-level, no body)
+//
 // NOTE: The following processing steps are intentionally skipped for SSE streams
 // because they require the full response body to be buffered in memory:
-//   - Plugin hooks: on_receive_from_server, on_before_send_to_client
-//   - Response intercept (modify/drop)
 //   - Response auto-transform rules
 //   - Output filter (PII masking)
 //
 // The sendResult parameter is the result from the already-recorded send phase;
 // this function must NOT call recordSendWithVariant again.
-func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
+func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, hookCtx *sseHookContext, logger *slog.Logger) error {
+	// Plugin hook: on_receive_from_server — header-level dispatch for SSE.
+	// Body is nil since the SSE body is a stream that cannot be buffered.
+	if hookCtx != nil {
+		fwd.resp, _ = h.dispatchOnReceiveFromServer(ctx, fwd.resp, nil, req, hookCtx.connInfo, hookCtx.txCtx, logger)
+	}
+
+	// Response intercept: check if the SSE response matches any intercept
+	// rules at the header level. For SSE, only DROP and RELEASE are meaningful;
+	// MODIFY is not supported since the body is a stream.
+	if dropped := h.applySSEIntercept(ctx, conn, req, fwd.resp, logger); dropped {
+		return nil
+	}
+
+	// Plugin hook: on_before_send_to_client — header-level dispatch for SSE.
+	// Body is nil since the SSE body is a stream that cannot be buffered.
+	if hookCtx != nil {
+		fwd.resp, _ = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, nil, req, hookCtx.connInfo, hookCtx.txCtx, logger)
+	}
+
 	// Write the response headers to the client.
 	if err := writeSSEResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
@@ -111,11 +145,20 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 // the same streaming approach as handleSSEStream but includes TLS certificate
 // information in the flow recording.
 //
+// Before writing response headers, this function applies:
+//   - Response intercept check (header-level, DROP or RELEASE)
+//
 // See handleSSEStream for details on skipped processing steps.
 //
 // The sendResult parameter is the result from the already-recorded send phase;
 // this function must NOT call recordSendWithVariant again.
 func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
+	// Response intercept: check if the SSE response matches any intercept
+	// rules at the header level. Same as handleSSEStream.
+	if dropped := h.applySSEIntercept(ctx, conn, req, fwd.resp, logger); dropped {
+		return nil
+	}
+
 	// Write the response headers to the client.
 	if err := writeSSEResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
@@ -289,6 +332,73 @@ func (h *Handler) warnSSEOutputFilterBypass(logger *slog.Logger) {
 	if len(h.SafetyEngine.OutputRules()) > 0 {
 		logger.Warn("SSE stream bypasses output filter (PII masking not applied)",
 			"output_rule_count", len(h.SafetyEngine.OutputRules()))
+	}
+}
+
+// applySSEIntercept checks if the SSE response matches any intercept rules at
+// the header level. For SSE streams, only DROP and RELEASE are meaningful since
+// the response body is a stream that cannot be buffered for modification.
+// Returns true if the response was dropped (caller should return early).
+func (h *Handler) applySSEIntercept(ctx context.Context, conn net.Conn, req *gohttp.Request, resp *gohttp.Response, logger *slog.Logger) bool {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
+		return false
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	if len(matchedRules) == 0 {
+		return false
+	}
+
+	logger.Info("SSE response intercepted (header-level)",
+		"method", req.Method,
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"matched_rules", matchedRules)
+
+	// Enqueue with nil body since SSE body is a stream.
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		req.Method, req.URL, resp.StatusCode, resp.Header, nil, matchedRules,
+	)
+	defer h.InterceptQueue.Remove(id)
+
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	var action intercept.InterceptAction
+	select {
+	case action = <-actionCh:
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			logger.Info("intercepted SSE response cancelled (proxy shutdown)", "id", id)
+			action = intercept.InterceptAction{Type: intercept.ActionDrop}
+		} else {
+			logger.Info("intercepted SSE response timed out", "id", id, "behavior", string(behavior))
+			switch behavior {
+			case intercept.TimeoutAutoDrop:
+				action = intercept.InterceptAction{Type: intercept.ActionDrop}
+			default:
+				action = intercept.InterceptAction{Type: intercept.ActionRelease}
+			}
+		}
+	}
+
+	switch action.Type {
+	case intercept.ActionDrop:
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		logger.Info("intercepted SSE response dropped",
+			"method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
+		return true
+	case intercept.ActionModifyAndForward:
+		// ModifyAndForward is not supported for SSE streams since the body
+		// is a stream. Treat as release and log a warning.
+		logger.Warn("SSE response intercept modify_and_forward not supported, releasing",
+			"method", req.Method, "url", req.URL.String())
+		return false
+	default:
+		// ActionRelease or unknown: continue with normal processing.
+		return false
 	}
 }
 
