@@ -69,6 +69,7 @@ func HTTPRequestToMap(req *gohttp.Request, body []byte, connInfo *ConnInfo, prot
 // The resulting map contains the following keys:
 //   - status_code: HTTP status code (int)
 //   - headers: map of header name to list of values (map[string]any with []any values)
+//   - trailers: map of trailer name to list of values (map[string]any with []any values)
 //   - body: response body bytes ([]byte)
 //   - conn_info: connection metadata (map[string]any)
 //   - protocol: protocol identifier (string)
@@ -81,6 +82,7 @@ func HTTPResponseToMap(resp *gohttp.Response, body []byte, req *gohttp.Request, 
 	m := map[string]any{
 		"status_code": resp.StatusCode,
 		"headers":     headersToMap(resp.Header),
+		"trailers":    headersToMap(resp.Trailer),
 		"body":        body,
 		"protocol":    protocol,
 	}
@@ -217,6 +219,13 @@ func ApplyHTTPResponseChanges(resp *gohttp.Response, data map[string]any) (*goht
 		newHeaders := mapToHeaders(v)
 		if newHeaders != nil {
 			resp.Header = newHeaders
+		}
+	}
+
+	if v, ok := data["trailers"]; ok {
+		newTrailers := mapToHeaders(v)
+		if newTrailers != nil {
+			resp.Trailer = newTrailers
 		}
 	}
 

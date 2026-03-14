@@ -231,6 +231,23 @@ func (b *HandlerBase) ApplyOutputFilter(body []byte, headers gohttp.Header, logg
 	return bodyResult.Data, maskedHeaders
 }
 
+// ApplyOutputFilterHeaders applies the safety engine's output filter to HTTP
+// headers (typically trailers). If the engine is not configured or no rules
+// match, the headers are returned unchanged. This is separated from
+// ApplyOutputFilter to allow independent filtering of response trailers.
+func (b *HandlerBase) ApplyOutputFilterHeaders(headers gohttp.Header, logger *slog.Logger) gohttp.Header {
+	if b.SafetyEngine == nil {
+		return headers
+	}
+
+	masked, matches := b.SafetyEngine.FilterOutputHeaders(headers)
+	for _, m := range matches {
+		logger.Info("output filter matched trailer",
+			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
+	}
+	return masked
+}
+
 // ConnLogger returns the connection-scoped logger from context,
 // falling back to the handler's logger.
 func (b *HandlerBase) ConnLogger(ctx context.Context) *slog.Logger {
