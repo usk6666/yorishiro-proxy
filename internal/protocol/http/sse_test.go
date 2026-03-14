@@ -9,6 +9,7 @@ import (
 	"net"
 	gohttp "net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,9 +197,6 @@ func TestStreamSSEBody(t *testing.T) {
 		defer client.Close()
 		defer server.Close()
 
-		// Use a pipe reader as the source. When we close the write side,
-		// the read will unblock. This simulates resp.Body closing when
-		// the upstream connection drops.
 		pr, pw := io.Pipe()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -208,8 +206,6 @@ func TestStreamSSEBody(t *testing.T) {
 			errCh <- streamSSEBody(ctx, server, pr)
 		}()
 
-		// Cancel context after a short delay, then close the pipe to
-		// unblock the read.
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 		pw.Close()
@@ -217,7 +213,6 @@ func TestStreamSSEBody(t *testing.T) {
 		select {
 		case err := <-errCh:
 			if err != nil && err != context.Canceled && err != io.EOF {
-				// The stream may return a write deadline error, which is acceptable.
 				t.Logf("streamSSEBody returned: %v (expected context.Canceled, EOF, or deadline error)", err)
 			}
 		case <-time.After(5 * time.Second):
@@ -280,9 +275,8 @@ func TestRecordSSEReceive(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 	start := time.Now()
-	duration := 100 * time.Millisecond
 
-	h.recordSSEReceive(ctx, sendResult, fwd, start, duration, "", logger)
+	h.recordSSEReceive(ctx, sendResult, fwd, start, "", logger)
 
 	// Verify flow update.
 	if len(store.updates) != 1 {
@@ -292,8 +286,11 @@ func TestRecordSSEReceive(t *testing.T) {
 	if update.flowID != "flow-1" {
 		t.Errorf("update flowID = %q, want %q", update.flowID, "flow-1")
 	}
-	if update.update.State != "complete" {
-		t.Errorf("update State = %q, want %q", update.update.State, "complete")
+	if update.update.State != "active" {
+		t.Errorf("update State = %q, want %q", update.update.State, "active")
+	}
+	if update.update.FlowType != "stream" {
+		t.Errorf("update FlowType = %q, want %q", update.update.FlowType, "stream")
 	}
 	if update.update.Tags["streaming_type"] != "sse" {
 		t.Errorf("update Tags[streaming_type] = %q, want %q", update.update.Tags["streaming_type"], "sse")
@@ -320,10 +317,13 @@ func TestRecordSSEReceive(t *testing.T) {
 		t.Errorf("message StatusCode = %d, want %d", msg.StatusCode, 200)
 	}
 	if msg.Body != nil {
-		t.Errorf("message Body should be nil for SSE, got %v", msg.Body)
+		t.Errorf("message Body should be nil for SSE headers, got %v", msg.Body)
 	}
 	if ct := gohttp.Header(msg.Headers).Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("message Content-Type = %q, want %q", ct, "text/event-stream")
+	}
+	if msg.Metadata["sse_type"] != "headers" {
+		t.Errorf("message Metadata[sse_type] = %q, want %q", msg.Metadata["sse_type"], "headers")
 	}
 }
 
@@ -336,7 +336,7 @@ func TestRecordSSEReceive_NilSendResult(t *testing.T) {
 	fwd := &forwardResult{resp: resp}
 
 	// Should be a no-op when sendResult is nil.
-	h.recordSSEReceive(context.Background(), nil, fwd, time.Now(), time.Second, "", testutil.DiscardLogger())
+	h.recordSSEReceive(context.Background(), nil, fwd, time.Now(), "", testutil.DiscardLogger())
 
 	if len(store.updates) != 0 {
 		t.Errorf("expected 0 updates for nil sendResult, got %d", len(store.updates))
@@ -366,12 +366,339 @@ func TestRecordSSEReceive_TLSCertSubject(t *testing.T) {
 		serverAddr: "example.com:443",
 	}
 
-	h.recordSSEReceive(context.Background(), sendResult, fwd, time.Now(), time.Second, "CN=example.com", testutil.DiscardLogger())
+	h.recordSSEReceive(context.Background(), sendResult, fwd, time.Now(), "CN=example.com", testutil.DiscardLogger())
 
 	if len(store.updates) != 1 {
 		t.Fatalf("expected 1 flow update, got %d", len(store.updates))
 	}
 	if store.updates[0].update.TLSServerCertSubject != "CN=example.com" {
 		t.Errorf("TLSServerCertSubject = %q, want %q", store.updates[0].update.TLSServerCertSubject, "CN=example.com")
+	}
+}
+
+func TestRecordSSEEvent(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	event := &SSEEvent{
+		EventType: "message",
+		Data:      "hello world",
+		ID:        "42",
+		Retry:     "5000",
+		RawBytes:  []byte("event: message\nid: 42\nretry: 5000\ndata: hello world\n\n"),
+	}
+
+	var seq atomic.Int64
+	seq.Store(2) // Start after headers message
+
+	h.recordSSEEvent(context.Background(), "flow-1", event, &seq, testutil.DiscardLogger())
+
+	if len(store.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(store.messages))
+	}
+
+	msg := store.messages[0]
+	if msg.FlowID != "flow-1" {
+		t.Errorf("FlowID = %q, want %q", msg.FlowID, "flow-1")
+	}
+	if msg.Sequence != 2 {
+		t.Errorf("Sequence = %d, want %d", msg.Sequence, 2)
+	}
+	if msg.Direction != "receive" {
+		t.Errorf("Direction = %q, want %q", msg.Direction, "receive")
+	}
+	if string(msg.Body) != "hello world" {
+		t.Errorf("Body = %q, want %q", string(msg.Body), "hello world")
+	}
+	if msg.RawBytes == nil {
+		t.Error("RawBytes should not be nil")
+	}
+	if msg.Metadata["sse_type"] != "event" {
+		t.Errorf("Metadata[sse_type] = %q, want %q", msg.Metadata["sse_type"], "event")
+	}
+	if msg.Metadata["sse_event"] != "message" {
+		t.Errorf("Metadata[sse_event] = %q, want %q", msg.Metadata["sse_event"], "message")
+	}
+	if msg.Metadata["sse_id"] != "42" {
+		t.Errorf("Metadata[sse_id] = %q, want %q", msg.Metadata["sse_id"], "42")
+	}
+	if msg.Metadata["sse_retry"] != "5000" {
+		t.Errorf("Metadata[sse_retry] = %q, want %q", msg.Metadata["sse_retry"], "5000")
+	}
+}
+
+func TestRecordSSEEvent_NoOptionalFields(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	event := &SSEEvent{
+		Data:     "simple data",
+		RawBytes: []byte("data: simple data\n\n"),
+	}
+
+	var seq atomic.Int64
+	seq.Store(1)
+
+	h.recordSSEEvent(context.Background(), "flow-2", event, &seq, testutil.DiscardLogger())
+
+	if len(store.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(store.messages))
+	}
+
+	msg := store.messages[0]
+	if _, ok := msg.Metadata["sse_event"]; ok {
+		t.Error("sse_event should not be present when EventType is empty")
+	}
+	if _, ok := msg.Metadata["sse_id"]; ok {
+		t.Error("sse_id should not be present when ID is empty")
+	}
+	if _, ok := msg.Metadata["sse_retry"]; ok {
+		t.Error("sse_retry should not be present when Retry is empty")
+	}
+}
+
+func TestRecordSSEEvent_NilStore(t *testing.T) {
+	h := &Handler{} // No store set
+
+	event := &SSEEvent{Data: "test", RawBytes: []byte("data: test\n\n")}
+	var seq atomic.Int64
+
+	// Should not panic with nil store.
+	h.recordSSEEvent(context.Background(), "flow-1", event, &seq, testutil.DiscardLogger())
+}
+
+func TestRecordSSEEvent_SequenceIncrement(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	var seq atomic.Int64
+	seq.Store(2) // Start after headers
+
+	for i := 0; i < 3; i++ {
+		event := &SSEEvent{
+			Data:     fmt.Sprintf("event %d", i),
+			RawBytes: []byte(fmt.Sprintf("data: event %d\n\n", i)),
+		}
+		h.recordSSEEvent(context.Background(), "flow-1", event, &seq, testutil.DiscardLogger())
+	}
+
+	if len(store.messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(store.messages))
+	}
+
+	for i, msg := range store.messages {
+		wantSeq := i + 2
+		if msg.Sequence != wantSeq {
+			t.Errorf("message[%d].Sequence = %d, want %d", i, msg.Sequence, wantSeq)
+		}
+	}
+}
+
+func TestCompleteSSEFlow(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	sendResult := &sendRecordResult{
+		flowID:       "flow-1",
+		tags:         map[string]string{"existing": "tag"},
+		recvSequence: 1,
+	}
+
+	resp := &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}}
+	fwd := &forwardResult{
+		resp:       resp,
+		serverAddr: "example.com:443",
+	}
+
+	var eventSeq atomic.Int64
+	eventSeq.Store(5) // Simulates 3 events recorded (seq 2, 3, 4)
+
+	h.completeSSEFlow(context.Background(), sendResult, fwd, 5*time.Second, "CN=example.com", &eventSeq, testutil.DiscardLogger())
+
+	if len(store.updates) != 1 {
+		t.Fatalf("expected 1 update, got %d", len(store.updates))
+	}
+
+	update := store.updates[0]
+	if update.update.State != "complete" {
+		t.Errorf("State = %q, want %q", update.update.State, "complete")
+	}
+	if update.update.Duration != 5*time.Second {
+		t.Errorf("Duration = %v, want %v", update.update.Duration, 5*time.Second)
+	}
+	if update.update.ServerAddr != "example.com:443" {
+		t.Errorf("ServerAddr = %q, want %q", update.update.ServerAddr, "example.com:443")
+	}
+	if update.update.TLSServerCertSubject != "CN=example.com" {
+		t.Errorf("TLSServerCertSubject = %q, want %q", update.update.TLSServerCertSubject, "CN=example.com")
+	}
+	if update.update.Tags["sse_events_recorded"] != "3" {
+		t.Errorf("Tags[sse_events_recorded] = %q, want %q", update.update.Tags["sse_events_recorded"], "3")
+	}
+	if update.update.Tags["streaming_type"] != "sse" {
+		t.Errorf("Tags[streaming_type] = %q, want %q", update.update.Tags["streaming_type"], "sse")
+	}
+	if update.update.Tags["existing"] != "tag" {
+		t.Errorf("Tags[existing] = %q, want %q", update.update.Tags["existing"], "tag")
+	}
+}
+
+func TestCompleteSSEFlow_NoEvents(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	sendResult := &sendRecordResult{
+		flowID:       "flow-1",
+		recvSequence: 1,
+	}
+
+	resp := &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}}
+	fwd := &forwardResult{resp: resp}
+
+	var eventSeq atomic.Int64
+	eventSeq.Store(2) // Only the headers message, no events
+
+	h.completeSSEFlow(context.Background(), sendResult, fwd, time.Second, "", &eventSeq, testutil.DiscardLogger())
+
+	if len(store.updates) != 1 {
+		t.Fatalf("expected 1 update, got %d", len(store.updates))
+	}
+
+	// No sse_events_recorded tag when 0 events.
+	if _, ok := store.updates[0].update.Tags["sse_events_recorded"]; ok {
+		t.Error("sse_events_recorded tag should not be present when 0 events")
+	}
+}
+
+func TestStreamSSEEvents_RecordsEvents(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	input := "data: hello\n\nevent: update\ndata: world\n\n"
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var seq atomic.Int64
+	seq.Store(2)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, testutil.DiscardLogger())
+		server.Close()
+	}()
+
+	// Read from client side to verify forwarding.
+	var buf bytes.Buffer
+	io.Copy(&buf, client)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("streamSSEEvents failed: %v", err)
+	}
+
+	// Verify events were forwarded.
+	if buf.String() != input {
+		t.Errorf("forwarded data = %q, want %q", buf.String(), input)
+	}
+
+	// Verify events were recorded.
+	if len(store.messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(store.messages))
+	}
+
+	msg0 := store.messages[0]
+	if string(msg0.Body) != "hello" {
+		t.Errorf("message[0].Body = %q, want %q", string(msg0.Body), "hello")
+	}
+	if msg0.Sequence != 2 {
+		t.Errorf("message[0].Sequence = %d, want %d", msg0.Sequence, 2)
+	}
+	if msg0.Metadata["sse_type"] != "event" {
+		t.Errorf("message[0].Metadata[sse_type] = %q, want %q", msg0.Metadata["sse_type"], "event")
+	}
+
+	msg1 := store.messages[1]
+	if string(msg1.Body) != "world" {
+		t.Errorf("message[1].Body = %q, want %q", string(msg1.Body), "world")
+	}
+	if msg1.Sequence != 3 {
+		t.Errorf("message[1].Sequence = %d, want %d", msg1.Sequence, 3)
+	}
+	if msg1.Metadata["sse_event"] != "update" {
+		t.Errorf("message[1].Metadata[sse_event] = %q, want %q", msg1.Metadata["sse_event"], "update")
+	}
+}
+
+func TestStreamSSEEvents_ContextCancellation(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	pr, pw := io.Pipe()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var seq atomic.Int64
+	seq.Store(1)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.streamSSEEvents(ctx, server, pr, "flow-1", &seq, testutil.DiscardLogger())
+	}()
+
+	// Send one event then cancel.
+	pw.Write([]byte("data: before cancel\n\n"))
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	pw.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Logf("streamSSEEvents returned: %v (expected context.Canceled or nil)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamSSEEvents did not return after context cancellation")
+	}
+}
+
+func TestStreamSSEEvents_EmptyStream(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var seq atomic.Int64
+	seq.Store(1)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(""), "flow-1", &seq, testutil.DiscardLogger())
+		server.Close()
+	}()
+
+	var buf bytes.Buffer
+	io.Copy(&buf, client)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("streamSSEEvents on empty stream failed: %v", err)
+	}
+
+	if len(store.messages) != 0 {
+		t.Errorf("expected 0 messages for empty stream, got %d", len(store.messages))
 	}
 }

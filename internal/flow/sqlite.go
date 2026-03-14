@@ -197,6 +197,10 @@ func (s *SQLiteStore) UpdateFlow(ctx context.Context, id string, update FlowUpda
 			sets = append(sets, "state = ?")
 			args = append(args, update.State)
 		}
+		if update.FlowType != "" {
+			sets = append(sets, "flow_type = ?")
+			args = append(args, update.FlowType)
+		}
 		if update.Duration != 0 {
 			sets = append(sets, "duration_ms = ?")
 			args = append(args, update.Duration.Milliseconds())

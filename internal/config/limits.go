@@ -57,4 +57,18 @@ const (
 	// JSONL import scanner. A 254 MB body base64-encodes to ~339 MB, so
 	// 350 MB provides adequate headroom for a full JSONL line.
 	MaxImportScannerBuffer = 350 * 1024 * 1024 // 350 MB
+
+	// MaxSSEEventSize limits the maximum raw byte size of a single SSE event.
+	// This prevents memory exhaustion from maliciously large events (CWE-400).
+	MaxSSEEventSize = 1 << 20 // 1 MB
+
+	// MaxSSEEventsPerStream limits the number of SSE events recorded per
+	// stream. Once exceeded, events are still forwarded to the client but
+	// no longer recorded to the flow store. This prevents unbounded DB growth
+	// from very long-lived SSE streams.
+	MaxSSEEventsPerStream = 10000
+
+	// MaxSSERecordPayloadSize limits the body size recorded per SSE event
+	// message. Events exceeding this size are truncated in the flow store.
+	MaxSSERecordPayloadSize = 254 << 20 // 254 MB
 )

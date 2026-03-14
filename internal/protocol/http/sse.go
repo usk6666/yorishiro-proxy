@@ -8,9 +8,12 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
@@ -48,11 +51,12 @@ func addSSETags(tags map[string]string) map[string]string {
 }
 
 // handleSSEStream handles Server-Sent Events responses by writing the response
-// headers to the client and then streaming the body using io.Copy. This avoids
-// the store-and-forward buffering that would cause SSE connections to hang.
+// headers to the client and then streaming events from upstream, forwarding
+// each to the client while recording them as flow.Message entries.
 //
-// The flow is recorded with metadata only (request + response headers, no body)
-// and tagged with streaming_type=sse for identification.
+// Each SSE event is parsed, forwarded to the client, and recorded as a
+// separate flow.Message with direction="receive". This follows the same
+// progressive recording pattern used by WebSocket frame recording.
 //
 // NOTE: The following processing steps are intentionally skipped for SSE streams
 // because they require the full response body to be buffered in memory:
@@ -75,18 +79,24 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 
 	logger.Info("SSE stream started", "method", req.Method, "url", req.URL.String())
 
+	// Record the initial receive message (response headers) and update flow
+	// type to "stream" for SSE event-level recording.
+	h.recordSSEReceive(ctx, sendResult, fwd, start, "", logger)
+
 	// Apply maximum stream duration to prevent indefinite resource consumption.
 	streamCtx, streamCancel := context.WithTimeout(ctx, sseMaxStreamDuration)
 	defer streamCancel()
 
-	// Stream the response body from upstream to client.
-	// This blocks until the upstream closes the connection or the context
-	// is cancelled.
-	streamErr := streamSSEBody(streamCtx, conn, fwd.resp.Body)
+	// Stream and record SSE events from upstream to client.
+	var eventSeq atomic.Int64
+	// Start event sequence after the receive header message.
+	eventSeq.Store(int64(sendResult.recvSequence) + 1)
 
-	// Record the receive phase (response headers only, no body).
+	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, logger)
+
+	// Update flow to complete state with final duration.
 	duration := time.Since(start)
-	h.recordSSEReceive(ctx, sendResult, fwd, start, duration, "", logger)
+	h.completeSSEFlow(ctx, sendResult, fwd, duration, "", &eventSeq, logger)
 
 	if streamErr != nil && ctx.Err() == nil {
 		logger.Debug("SSE stream ended", "method", req.Method, "url", req.URL.String(), "error", streamErr)
@@ -117,21 +127,29 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *go
 
 	logger.Info("SSE stream started (TLS)", "method", req.Method, "url", req.URL.String())
 
-	// Apply maximum stream duration to prevent indefinite resource consumption.
-	streamCtx, streamCancel := context.WithTimeout(ctx, sseMaxStreamDuration)
-	defer streamCancel()
-
-	// Stream the response body from upstream to client.
-	streamErr := streamSSEBody(streamCtx, conn, fwd.resp.Body)
-
-	// Record the receive phase (response headers only, no body).
-	// Include TLS certificate info from the upstream connection.
-	duration := time.Since(start)
+	// Extract TLS certificate info from the upstream connection.
 	var tlsCertSubject string
 	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
 		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
 	}
-	h.recordSSEReceive(ctx, sendResult, fwd, start, duration, tlsCertSubject, logger)
+
+	// Record the initial receive message (response headers) and update flow
+	// type to "stream" for SSE event-level recording.
+	h.recordSSEReceive(ctx, sendResult, fwd, start, tlsCertSubject, logger)
+
+	// Apply maximum stream duration to prevent indefinite resource consumption.
+	streamCtx, streamCancel := context.WithTimeout(ctx, sseMaxStreamDuration)
+	defer streamCancel()
+
+	// Stream and record SSE events from upstream to client.
+	var eventSeq atomic.Int64
+	eventSeq.Store(int64(sendResult.recvSequence) + 1)
+
+	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, logger)
+
+	// Update flow to complete state with final duration.
+	duration := time.Since(start)
+	h.completeSSEFlow(ctx, sendResult, fwd, duration, tlsCertSubject, &eventSeq, logger)
 
 	if streamErr != nil && ctx.Err() == nil {
 		logger.Debug("SSE stream ended (TLS)", "method", req.Method, "url", req.URL.String(), "error", streamErr)
@@ -165,9 +183,80 @@ func writeSSEResponseHeaders(conn net.Conn, resp *gohttp.Response) error {
 	return w.Flush()
 }
 
+// streamSSEEvents reads SSE events from src, forwards each event's raw bytes
+// to the client connection, and records each event as a flow.Message.
+// It respects context cancellation by setting a write deadline on the connection.
+//
+// Events are parsed using the SSE parser. Each event is first forwarded to the
+// client, then recorded to the flow store. Recording stops after
+// config.MaxSSEEventsPerStream events to prevent unbounded DB growth, but
+// forwarding continues.
+func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Reader, flowID string, seq *atomic.Int64, logger *slog.Logger) error {
+	// Watch for context cancellation and interrupt blocking reads.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			dst.SetWriteDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	parser := NewSSEParser(src, config.MaxSSEEventSize)
+	var eventCount int
+	var recordingDisabled bool
+
+	for {
+		select {
+		case <-ctx.Done():
+			dst.SetWriteDeadline(time.Time{})
+			return ctx.Err()
+		default:
+		}
+
+		event, err := parser.Next()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			if ctx.Err() != nil {
+				dst.SetWriteDeadline(time.Time{})
+				return ctx.Err()
+			}
+			return fmt.Errorf("SSE parse: %w", err)
+		}
+
+		// Forward the raw event bytes to the client.
+		if _, writeErr := dst.Write(event.RawBytes); writeErr != nil {
+			if ctx.Err() != nil {
+				dst.SetWriteDeadline(time.Time{})
+				return ctx.Err()
+			}
+			return fmt.Errorf("SSE write to client: %w", writeErr)
+		}
+
+		// Record the event as a flow message.
+		eventCount++
+		if !recordingDisabled {
+			if eventCount > config.MaxSSEEventsPerStream {
+				logger.Info("SSE event recording limit reached, forwarding only",
+					"flow_id", flowID,
+					"limit", config.MaxSSEEventsPerStream)
+				recordingDisabled = true
+			} else {
+				h.recordSSEEvent(ctx, flowID, event, seq, logger)
+			}
+		}
+	}
+}
+
 // streamSSEBody copies the SSE body from upstream to the client connection.
 // It respects context cancellation by closing the done channel which triggers
 // the context watcher to set a read deadline on the connection.
+//
+// Deprecated: This function is retained for backward compatibility with existing
+// tests. Production code uses streamSSEEvents for event-level recording.
 func streamSSEBody(ctx context.Context, dst net.Conn, src io.Reader) error {
 	// Watch for context cancellation and interrupt blocking reads.
 	done := make(chan struct{})
@@ -203,10 +292,11 @@ func (h *Handler) warnSSEOutputFilterBypass(logger *slog.Logger) {
 	}
 }
 
-// recordSSEReceive records the receive phase for an SSE flow. The response is
-// recorded with headers only (no body) since SSE streams are not buffered.
+// recordSSEReceive records the initial receive phase for an SSE flow.
+// This records the response headers as the first receive message and updates
+// the flow type to "stream" to indicate event-level recording.
 // The tlsCertSubject is empty for non-TLS connections.
-func (h *Handler) recordSSEReceive(ctx context.Context, sendResult *sendRecordResult, fwd *forwardResult, start time.Time, duration time.Duration, tlsCertSubject string, logger *slog.Logger) {
+func (h *Handler) recordSSEReceive(ctx context.Context, sendResult *sendRecordResult, fwd *forwardResult, start time.Time, tlsCertSubject string, logger *slog.Logger) {
 	if sendResult == nil || h.Store == nil {
 		return
 	}
@@ -222,10 +312,12 @@ func (h *Handler) recordSSEReceive(ctx context.Context, sendResult *sendRecordRe
 	}
 	tags = addSSETags(tags)
 
-	// Update flow with SSE tags, duration, and completion state.
+	// Update flow with SSE tags and stream flow type. State remains "active"
+	// since events are still being recorded. Duration and completion state
+	// are set by completeSSEFlow when the stream ends.
 	update := flow.FlowUpdate{
-		State:                "complete",
-		Duration:             duration,
+		State:                "active",
+		FlowType:             "stream",
 		ServerAddr:           fwd.serverAddr,
 		TLSServerCertSubject: tlsCertSubject,
 		Tags:                 tags,
@@ -242,8 +334,94 @@ func (h *Handler) recordSSEReceive(ctx context.Context, sendResult *sendRecordRe
 		Timestamp:  start,
 		StatusCode: fwd.resp.StatusCode,
 		Headers:    fwd.resp.Header,
+		Metadata: map[string]string{
+			"sse_type": "headers",
+		},
 	}
 	if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
 		logger.Error("SSE receive message save failed", "error", err)
+	}
+}
+
+// completeSSEFlow updates the SSE flow to "complete" state with the final
+// duration and event count.
+func (h *Handler) completeSSEFlow(ctx context.Context, sendResult *sendRecordResult, fwd *forwardResult, duration time.Duration, tlsCertSubject string, eventSeq *atomic.Int64, logger *slog.Logger) {
+	if sendResult == nil || h.Store == nil {
+		return
+	}
+
+	// Merge SSE tags with existing tags from the send phase.
+	tags := make(map[string]string)
+	for k, v := range sendResult.tags {
+		tags[k] = v
+	}
+	tags = addSSETags(tags)
+
+	// Calculate the number of events recorded.
+	// eventSeq starts at recvSequence+1, so the count is currentSeq - (recvSequence+1).
+	eventsRecorded := int(eventSeq.Load()) - sendResult.recvSequence - 1
+	if eventsRecorded > 0 {
+		tags["sse_events_recorded"] = strconv.Itoa(eventsRecorded)
+	}
+
+	update := flow.FlowUpdate{
+		State:                "complete",
+		Duration:             duration,
+		ServerAddr:           fwd.serverAddr,
+		TLSServerCertSubject: tlsCertSubject,
+		Tags:                 tags,
+	}
+	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+		logger.Error("SSE flow completion failed", "error", err)
+	}
+}
+
+// recordSSEEvent records a single SSE event as a flow.Message with
+// direction="receive". The event data is stored in the message Body,
+// and event metadata (type, id, retry) is stored in Metadata.
+func (h *Handler) recordSSEEvent(ctx context.Context, flowID string, event *SSEEvent, seq *atomic.Int64, logger *slog.Logger) {
+	if h.Store == nil {
+		return
+	}
+
+	msgSeq := int(seq.Add(1) - 1)
+
+	metadata := map[string]string{
+		"sse_type": "event",
+	}
+	if event.EventType != "" {
+		metadata["sse_event"] = event.EventType
+	}
+	if event.ID != "" {
+		metadata["sse_id"] = event.ID
+	}
+	if event.Retry != "" {
+		metadata["sse_retry"] = event.Retry
+	}
+
+	body := []byte(event.Data)
+	truncated := false
+	if len(body) > config.MaxSSERecordPayloadSize {
+		body = body[:config.MaxSSERecordPayloadSize]
+		truncated = true
+	}
+
+	msg := &flow.Message{
+		FlowID:        flowID,
+		Sequence:      msgSeq,
+		Direction:     "receive",
+		Timestamp:     time.Now(),
+		Body:          body,
+		RawBytes:      event.RawBytes,
+		BodyTruncated: truncated,
+		Metadata:      metadata,
+	}
+
+	if err := h.Store.AppendMessage(ctx, msg); err != nil {
+		logger.Error("SSE event message save failed",
+			"flow_id", flowID,
+			"sequence", msgSeq,
+			"error", err,
+		)
 	}
 }
