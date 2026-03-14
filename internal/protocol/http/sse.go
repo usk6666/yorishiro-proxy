@@ -3,6 +3,7 @@ package http
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // sseMaxStreamDuration is the maximum duration an SSE stream can remain open.
@@ -58,12 +60,16 @@ func addSSETags(tags map[string]string) map[string]string {
 // separate flow.Message with direction="receive". This follows the same
 // progressive recording pattern used by WebSocket frame recording.
 //
+// Output filter (PII masking) is applied per-event to the SSE data field
+// before forwarding to the client. If a block-action rule matches, the
+// stream is terminated. Flow recording always stores the original (unfiltered)
+// event data.
+//
 // NOTE: The following processing steps are intentionally skipped for SSE streams
 // because they require the full response body to be buffered in memory:
 //   - Plugin hooks: on_receive_from_server, on_before_send_to_client
 //   - Response intercept (modify/drop)
 //   - Response auto-transform rules
-//   - Output filter (PII masking)
 //
 // The sendResult parameter is the result from the already-recorded send phase;
 // this function must NOT call recordSendWithVariant again.
@@ -73,9 +79,6 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 		h.recordSendError(ctx, sendResult, start, err, logger)
 		return fmt.Errorf("write SSE response headers: %w", err)
 	}
-
-	// Warn if PII output filter rules are configured but will not apply to SSE.
-	h.warnSSEOutputFilterBypass(logger)
 
 	logger.Info("SSE stream started", "method", req.Method, "url", req.URL.String())
 
@@ -111,7 +114,8 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 // the same streaming approach as handleSSEStream but includes TLS certificate
 // information in the flow recording.
 //
-// See handleSSEStream for details on skipped processing steps.
+// See handleSSEStream for details on output filter application and skipped
+// processing steps.
 //
 // The sendResult parameter is the result from the already-recorded send phase;
 // this function must NOT call recordSendWithVariant again.
@@ -121,9 +125,6 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *go
 		h.recordSendError(ctx, sendResult, start, err, logger)
 		return fmt.Errorf("write SSE response headers: %w", err)
 	}
-
-	// Warn if PII output filter rules are configured but will not apply to SSE.
-	h.warnSSEOutputFilterBypass(logger)
 
 	logger.Info("SSE stream started (TLS)", "method", req.Method, "url", req.URL.String())
 
@@ -183,14 +184,26 @@ func writeSSEResponseHeaders(conn net.Conn, resp *gohttp.Response) error {
 	return w.Flush()
 }
 
+// errSSEOutputFilterBlocked is returned when an output filter rule with
+// action=block matches an SSE event's data, causing the stream to be
+// terminated.
+var errSSEOutputFilterBlocked = errors.New("SSE stream blocked by output filter")
+
 // streamSSEEvents reads SSE events from src, forwards each event's raw bytes
 // to the client connection, and records each event as a flow.Message.
 // It respects context cancellation by setting a write deadline on the connection.
 //
-// Events are parsed using the SSE parser. Each event is first forwarded to the
-// client, then recorded to the flow store. Recording stops after
-// config.MaxSSEEventsPerStream events to prevent unbounded DB growth, but
-// forwarding continues.
+// Events are parsed using the SSE parser. Before forwarding to the client,
+// output filter rules are applied to the event data:
+//   - action=mask: The event data is masked and the event is reconstructed
+//     with filtered data before forwarding. Flow recording stores the
+//     original (unfiltered) data.
+//   - action=block: The stream is immediately terminated.
+//   - action=log_only: A log entry is emitted but the event is forwarded
+//     unchanged.
+//
+// Recording stops after config.MaxSSEEventsPerStream events to prevent
+// unbounded DB growth, but forwarding (with filtering) continues.
 func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Reader, flowID string, seq *atomic.Int64, logger *slog.Logger) error {
 	// Watch for context cancellation and interrupt blocking reads.
 	done := make(chan struct{})
@@ -227,8 +240,17 @@ func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Read
 			return fmt.Errorf("SSE parse: %w", err)
 		}
 
-		// Forward the raw event bytes to the client.
-		if _, writeErr := dst.Write(event.RawBytes); writeErr != nil {
+		// Apply output filter to the event data before forwarding.
+		sendBytes, blocked := h.applySSEOutputFilter(event, logger)
+		if blocked {
+			logger.Warn("SSE stream terminated by output filter (action=block)",
+				"flow_id", flowID,
+				"event_type", event.EventType)
+			return errSSEOutputFilterBlocked
+		}
+
+		// Forward the (possibly filtered) event bytes to the client.
+		if _, writeErr := dst.Write(sendBytes); writeErr != nil {
 			if ctx.Err() != nil {
 				dst.SetWriteDeadline(time.Time{})
 				return ctx.Err()
@@ -236,7 +258,7 @@ func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Read
 			return fmt.Errorf("SSE write to client: %w", writeErr)
 		}
 
-		// Record the event as a flow message.
+		// Record the event as a flow message (always with original data).
 		eventCount++
 		if !recordingDisabled {
 			if eventCount > config.MaxSSEEventsPerStream {
@@ -280,16 +302,44 @@ func streamSSEBody(ctx context.Context, dst net.Conn, src io.Reader) error {
 	return err
 }
 
-// warnSSEOutputFilterBypass logs a warning if the safety engine has output
-// filter rules configured, since SSE streams bypass PII masking.
-func (h *Handler) warnSSEOutputFilterBypass(logger *slog.Logger) {
-	if h.SafetyEngine == nil {
-		return
+// applySSEOutputFilter applies the safety engine's output filter rules to an
+// SSE event's Data field. It returns the bytes to send to the client and
+// whether a block-action rule was matched.
+//
+// When no safety engine is configured or no rules match, the original
+// event.RawBytes are returned unchanged. When a mask-action rule matches,
+// the event is reconstructed with masked data. When a block-action rule
+// matches, blocked is true and the returned bytes are nil.
+func (h *Handler) applySSEOutputFilter(event *SSEEvent, logger *slog.Logger) (sendBytes []byte, blocked bool) {
+	if h.SafetyEngine == nil || len(h.SafetyEngine.OutputRules()) == 0 {
+		return event.RawBytes, false
 	}
-	if len(h.SafetyEngine.OutputRules()) > 0 {
-		logger.Warn("SSE stream bypasses output filter (PII masking not applied)",
-			"output_rule_count", len(h.SafetyEngine.OutputRules()))
+
+	result := h.SafetyEngine.FilterOutput([]byte(event.Data))
+
+	// Log matches for observability.
+	for _, m := range result.Matches {
+		logger.Info("SSE output filter matched event data",
+			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String(),
+			"event_type", event.EventType)
+
+		if m.Action == safety.ActionBlock {
+			return nil, true
+		}
 	}
+
+	// If data was masked, reconstruct the event with filtered data.
+	if result.Masked {
+		filtered := &SSEEvent{
+			EventType: event.EventType,
+			Data:      string(result.Data),
+			ID:        event.ID,
+			Retry:     event.Retry,
+		}
+		return []byte(filtered.String()), false
+	}
+
+	return event.RawBytes, false
 }
 
 // recordSSEReceive records the initial receive phase for an SSE flow.
