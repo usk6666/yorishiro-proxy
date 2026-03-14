@@ -148,15 +148,14 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	}
 
 	// Run bidirectional relay with recording.
-	r := &relay{
-		store:        h.store,
-		flowID:       fl.ID,
-		logger:       logger,
-		pluginEngine: h.pluginEngine,
-		connInfo:     pluginConnInfo,
-		target:       target,
-	}
-	relayErr := r.run(ctx, conn, upstream)
+	relayErr := RunRelay(ctx, conn, upstream, RelayConfig{
+		Store:        h.store,
+		FlowID:       fl.ID,
+		Logger:       logger,
+		PluginEngine: h.pluginEngine,
+		ConnInfo:     pluginConnInfo,
+		Target:       target,
+	})
 
 	// Update flow state to complete.
 	duration := time.Since(start)
