@@ -796,12 +796,18 @@ export function FlowDetailPage() {
                 <HeadersTable headers={displayRespHeaders} />
               )}
               {responseTab === "body" && (
-                <BodyViewer
-                  body={flowData.response_body}
-                  encoding={flowData.response_body_encoding}
-                  truncated={flowData.response_body_truncated}
-                  headers={flowData.response_headers}
-                />
+                flowData.tags?.streaming_type === "sse" ? (
+                  <div className="sd-no-response">
+                    SSE (Server-Sent Events) streaming response. The response body was streamed directly to the client and was not recorded.
+                  </div>
+                ) : (
+                  <BodyViewer
+                    body={flowData.response_body}
+                    encoding={flowData.response_body_encoding}
+                    truncated={flowData.response_body_truncated}
+                    headers={flowData.response_headers}
+                  />
+                )
               )}
             </Tabs>
           ) : (
