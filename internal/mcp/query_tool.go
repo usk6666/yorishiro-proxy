@@ -499,6 +499,14 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		}
 	}
 
+	// Ensure headers are never nil to avoid null in JSON serialization.
+	if reqHeaders == nil {
+		reqHeaders = map[string][]string{}
+	}
+	if respHeaders == nil {
+		respHeaders = map[string][]string{}
+	}
+
 	reqBodyStr, reqEncoding := encodeBody(reqBody)
 	respBodyStr, respEncoding := encodeBody(respBody)
 

@@ -420,6 +420,104 @@ func TestQuery_Session_NilStore(t *testing.T) {
 	}
 }
 
+func TestQuery_Session_NilHeaders_ReturnsEmptyMap(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a flow with only a send message (no receive message),
+	// simulating a gRPC flow interrupted before receiving a response.
+	fl := &flow.Flow{
+		ID:        "nil-headers",
+		ConnID:    "conn-nil-headers",
+		Protocol:  "gRPC",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	parsedURL, _ := url.Parse("https://example.com/grpc.Service/Method")
+	sendMsg := &flow.Message{
+		ID:        "nil-headers-send",
+		FlowID:    "nil-headers",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "POST",
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
+		Body:      []byte("request"),
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage(send): %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+	result := callQuery(t, cs, queryInput{
+		Resource: "flow",
+		ID:       "nil-headers",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryFlowResult
+	unmarshalQueryResult(t, result, &out)
+
+	// response_headers must be an empty map, not null.
+	if out.ResponseHeaders == nil {
+		t.Error("response_headers is nil, want empty map")
+	}
+	if len(out.ResponseHeaders) != 0 {
+		t.Errorf("response_headers has %d entries, want 0", len(out.ResponseHeaders))
+	}
+	// request_headers should be populated from the send message.
+	if out.RequestHeaders == nil {
+		t.Error("request_headers is nil, want non-nil map")
+	}
+}
+
+func TestQuery_Session_NoMessages_ReturnsEmptyHeaders(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a flow with no messages at all.
+	fl := &flow.Flow{
+		ID:        "no-msgs",
+		ConnID:    "conn-no-msgs",
+		Protocol:  "HTTP",
+		FlowType:  "unary",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+	result := callQuery(t, cs, queryInput{
+		Resource: "flow",
+		ID:       "no-msgs",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryFlowResult
+	unmarshalQueryResult(t, result, &out)
+
+	// Both headers must be empty maps, not null.
+	if out.RequestHeaders == nil {
+		t.Error("request_headers is nil, want empty map")
+	}
+	if out.ResponseHeaders == nil {
+		t.Error("response_headers is nil, want empty map")
+	}
+}
+
 // --- Test: messages resource ---
 
 func TestQuery_Messages_Success(t *testing.T) {

@@ -219,7 +219,7 @@ export function MessageList({
                   <tbody>
                     {Object.entries(expandedMessage.headers).map(
                       ([key, values]) =>
-                        values.map((value, idx) => (
+                        values?.map((value, idx) => (
                           <tr key={`${key}-${idx}`}>
                             <td className="sd-header-key">{key}</td>
                             <td className="sd-header-value">{value}</td>

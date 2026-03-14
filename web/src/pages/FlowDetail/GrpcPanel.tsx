@@ -236,8 +236,8 @@ function GrpcMetadataTable({
   requestHeaders,
   responseHeaders,
 }: {
-  requestHeaders: Record<string, string[]> | undefined;
-  responseHeaders: Record<string, string[]> | undefined;
+  requestHeaders: Record<string, string[]> | null | undefined;
+  responseHeaders: Record<string, string[]> | null | undefined;
 }) {
   const requestMetadata = useMemo(() => {
     if (!requestHeaders) return [];
