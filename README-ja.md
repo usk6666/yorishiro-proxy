@@ -195,8 +195,7 @@ Layer 4 TCP リスナ
 
 ## ドキュメント
 
-- [Getting Started Guide](docs/getting-started.md) -- セットアップと使い方の詳細ウォークスルー
-- [Plugin Development Guide](docs/plugins.md) -- Starlark プラグインの開発ガイド
+ドキュメントは **[usk6666.github.io/yorishiro-proxy-docs](https://usk6666.github.io/yorishiro-proxy-docs/)** で公開しています。
 
 ## コントリビューション
 
