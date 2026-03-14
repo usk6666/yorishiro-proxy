@@ -364,11 +364,12 @@ func (h *Handler) handleStream(
 
 	resp, fullRespBody = h.runResponsePluginHooks(sc, resp, fullRespBody)
 
-	// Save unmasked body for recording before output filter masks it.
-	// Deep copy to guard against future FilterOutput implementations that
-	// may modify the underlying array in place (S-2).
+	// Save unmasked body and trailers for recording before output filter
+	// masks them. Deep copy to guard against future FilterOutput
+	// implementations that may modify the underlying data in place (S-2).
 	rawRespBody := make([]byte, len(fullRespBody))
 	copy(rawRespBody, fullRespBody)
+	rawTrailers := cloneHeaders(resp.Trailer)
 
 	// Output filter: mask sensitive data in response body, headers, and
 	// trailers before sending to client. Raw (unmasked) data is preserved
@@ -383,7 +384,7 @@ func (h *Handler) handleStream(
 	duration := time.Since(sc.start)
 	tlsCertSubject := extractTLSCertSubject(resp)
 
-	h.recordStreamResponse(sc, isGRPC, sendResult, resp, rawRespBody, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs)
+	h.recordStreamResponse(sc, isGRPC, sendResult, resp, rawRespBody, rawTrailers, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs)
 
 	logProtocol := "http/2"
 	if isGRPC {
@@ -775,9 +776,9 @@ func extractTLSCertSubject(resp *gohttp.Response) string {
 }
 
 // recordStreamResponse records the receive phase for HTTP/2 or gRPC flows.
-func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64) {
+func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, rawTrailers gohttp.Header, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64) {
 	if isGRPC {
-		h.recordGRPCFlow(sc, resp, fullRespBody, serverAddr, duration, tlsCertSubject)
+		h.recordGRPCFlow(sc, resp, fullRespBody, rawTrailers, serverAddr, duration, tlsCertSubject)
 	} else {
 		h.recordReceiveWithVariant(sc.ctx, sendResult, receiveRecordParams{
 			start:                sc.start,
@@ -794,14 +795,14 @@ func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResul
 }
 
 // recordGRPCFlow records a gRPC session via the gRPC handler.
-func (h *Handler) recordGRPCFlow(sc *streamContext, resp *gohttp.Response, fullRespBody []byte, serverAddr string, duration time.Duration, tlsCertSubject string) {
+func (h *Handler) recordGRPCFlow(sc *streamContext, resp *gohttp.Response, fullRespBody []byte, rawTrailers gohttp.Header, serverAddr string, duration time.Duration, tlsCertSubject string) {
 	if !h.shouldCapture(sc.req.Method, sc.reqURL) {
 		return
 	}
 	var trailers map[string][]string
-	if resp.Trailer != nil {
-		trailers = make(map[string][]string, len(resp.Trailer))
-		for k, vals := range resp.Trailer {
+	if rawTrailers != nil {
+		trailers = make(map[string][]string, len(rawTrailers))
+		for k, vals := range rawTrailers {
 			trailers[k] = vals
 		}
 	}
@@ -827,6 +828,22 @@ func (h *Handler) recordGRPCFlow(sc *streamContext, resp *gohttp.Response, fullR
 	if err := h.grpcHandler.RecordSession(sc.ctx, info); err != nil {
 		sc.logger.Error("gRPC flow recording failed", "error", err)
 	}
+}
+
+// cloneHeaders creates a deep copy of an http.Header map. Returns nil if the
+// input is nil. Each value slice is independently copied so that mutations to
+// the returned header do not affect the original.
+func cloneHeaders(h gohttp.Header) gohttp.Header {
+	if h == nil {
+		return nil
+	}
+	clone := make(gohttp.Header, len(h))
+	for k, vals := range h {
+		cp := make([]string, len(vals))
+		copy(cp, vals)
+		clone[k] = cp
+	}
+	return clone
 }
 
 // cloneURL creates a shallow copy of a URL suitable for recording/forwarding.
