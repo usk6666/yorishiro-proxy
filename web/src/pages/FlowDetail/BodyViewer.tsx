@@ -23,7 +23,7 @@ export interface BodyViewerProps {
   body: string;
   encoding: string;
   truncated: boolean;
-  headers?: Record<string, string[]>;
+  headers?: Record<string, string[]> | null;
 }
 
 type ViewMode = "raw" | "pretty" | "hex" | "preview";
@@ -33,7 +33,7 @@ type ViewMode = "raw" | "pretty" | "hex" | "preview";
 // ---------------------------------------------------------------------------
 
 /** Extract Content-Type from headers (case-insensitive). */
-function getContentType(headers?: Record<string, string[]>): string {
+function getContentType(headers?: Record<string, string[]> | null): string {
   if (!headers) return "";
   for (const [key, values] of Object.entries(headers)) {
     if (key.toLowerCase() === "content-type" && values.length > 0) {

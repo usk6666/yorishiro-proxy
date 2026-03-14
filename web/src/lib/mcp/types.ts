@@ -345,11 +345,11 @@ export interface FlowDetailResult {
   state: string;
   method: string;
   url: string;
-  request_headers: Record<string, string[]>;
+  request_headers: Record<string, string[]> | null;
   request_body: string;
   request_body_encoding: string;
   response_status_code: number;
-  response_headers: Record<string, string[]>;
+  response_headers: Record<string, string[]> | null;
   response_body: string;
   response_body_encoding: string;
   request_body_truncated: boolean;
