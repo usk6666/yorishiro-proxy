@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	gohttp "net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -209,12 +210,26 @@ func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Respo
 		trailerKeys = append(trailerKeys, key)
 	}
 	grpcTrailerKeys := []string{"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"}
-	trailerKeys = append(trailerKeys, grpcTrailerKeys...)
+	for _, gk := range grpcTrailerKeys {
+		found := false
+		for _, tk := range trailerKeys {
+			if strings.EqualFold(tk, gk) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			trailerKeys = append(trailerKeys, gk)
+		}
+	}
 	if len(trailerKeys) > 0 {
 		sc.w.Header().Set("Trailer", joinTrailerKeys(trailerKeys))
 	}
 
 	for key, vals := range resp.Header {
+		if strings.EqualFold(key, "Trailer") {
+			continue
+		}
 		for _, val := range vals {
 			sc.w.Header().Add(key, val)
 		}
