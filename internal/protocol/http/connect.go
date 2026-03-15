@@ -92,8 +92,224 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 		return fmt.Errorf("write CONNECT 200: %w", err)
 	}
 
-	// Delegate to the shared TLS MITM path.
-	return h.HandleTunnelMITM(ctx, conn, connectAuthority)
+	// Peek the first bytes from the client to detect whether this is a TLS
+	// ClientHello or plaintext HTTP. SOCKS5 has equivalent logic in its
+	// post-handshake dispatch (isTLSClientHello in socks5/dispatch.go).
+	peekConn := proxy.NewPeekConn(conn)
+	peek, peekErr := peekConn.Peek(2)
+	if peekErr != nil {
+		// Client closed or errored before sending data; nothing to do.
+		logger.Debug("CONNECT tunnel peek failed", "host", connectAuthority, "error", peekErr)
+		return nil
+	}
+
+	// TLS ClientHello starts with ContentType 0x16 (handshake) followed by
+	// protocol version 0x03 (SSL/TLS).
+	if peek[0] == 0x16 && peek[1] == 0x03 {
+		// TLS path: delegate to the shared TLS MITM handler.
+		return h.HandleTunnelMITM(ctx, peekConn, connectAuthority)
+	}
+
+	// Non-TLS (plaintext) path: handle as plain HTTP inside the CONNECT
+	// tunnel. This supports ws:// WebSocket upgrades and plain HTTP requests
+	// sent through CONNECT tunnels to non-TLS ports (e.g. CONNECT host:80).
+	logger.Info("CONNECT tunnel plaintext HTTP detected", "host", connectAuthority)
+	return h.handlePlaintextCONNECT(ctx, peekConn, connectAuthority)
+}
+
+// handlePlaintextCONNECT processes plaintext HTTP requests inside a CONNECT
+// tunnel. This handles the case where a client sends CONNECT host:port followed
+// by plaintext HTTP (not TLS), e.g. ws:// WebSocket upgrades via CONNECT to
+// port 80. The method reads HTTP requests in a loop (supporting keep-alive)
+// and dispatches each to the appropriate handler (WebSocket upgrade or normal
+// HTTP forwarding).
+func (h *Handler) handlePlaintextCONNECT(ctx context.Context, conn net.Conn, connectAuthority string) error {
+	capture := &captureReader{r: conn}
+	reader := bufio.NewReader(capture)
+
+	// Watch for context cancellation and interrupt blocking reads.
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
+	go func() {
+		<-connCtx.Done()
+		conn.SetReadDeadline(time.Now())
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Set read deadline for request header reading (Slowloris protection).
+		if timeout := h.effectiveRequestTimeout(); timeout > 0 {
+			conn.SetReadDeadline(time.Now().Add(timeout))
+		}
+
+		captureStart := capture.buf.Len()
+
+		smuggling := checkRequestSmuggling(reader, h.Logger)
+
+		req, err := gohttp.ReadRequest(reader)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("read plaintext CONNECT request: %w", err)
+		}
+
+		logSmugglingWarnings(h.Logger, smuggling, req)
+
+		// Reset deadline after successful read.
+		conn.SetReadDeadline(time.Time{})
+
+		// Ensure absolute URL with http scheme for forward proxying.
+		if req.URL.Host == "" {
+			req.URL.Host = connectAuthority
+		}
+		if req.URL.Scheme == "" {
+			req.URL.Scheme = "http"
+		}
+
+		// WebSocket upgrade: delegate to the plaintext WebSocket handler.
+		if isWebSocketUpgrade(req) {
+			return h.handleWebSocket(ctx, conn, req)
+		}
+
+		// Normal HTTP request inside the CONNECT tunnel.
+		if err := h.handlePlaintextCONNECTRequest(ctx, conn, connectAuthority, req, smuggling, capture, captureStart, reader); err != nil {
+			return err
+		}
+
+		if req.Close {
+			return nil
+		}
+	}
+}
+
+// handlePlaintextCONNECTRequest forwards a single plaintext HTTP request from
+// inside a CONNECT tunnel to the upstream server, records the flow, and writes
+// the response back to the client.
+func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+	start := time.Now()
+	logger := h.connLogger(ctx)
+	connID := proxy.ConnIDFromContext(ctx)
+	clientAddr := proxy.ClientAddrFromContext(ctx)
+
+	// Target scope enforcement.
+	if blocked, reason := h.checkTargetScope(req.URL); blocked {
+		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "target_scope", nil, logger)
+		return nil
+	}
+
+	// Rate limit enforcement.
+	if blocked := h.checkRateLimit(req.URL.Hostname()); blocked {
+		h.writeRateLimitResponse(conn, logger)
+		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, logger)
+		return nil
+	}
+
+	// Read request body + capture raw bytes.
+	bodyResult := readAndCaptureRequestBody(req, logger)
+	rawRequest := extractRawRequest(capture, captureStart, reader)
+
+	// Safety filter enforcement.
+	if violation := h.CheckSafetyFilter(bodyResult.recordBody, req.URL.String(), req.Header); violation != nil {
+		if h.SafetyFilterAction(violation) == safety.ActionBlock {
+			h.writeSafetyFilterResponse(conn, violation, logger)
+			h.recordBlockedSession(ctx, req, bodyResult.recordBody, rawRequest, bodyResult.truncated, smuggling, start, connID, clientAddr, "safety_filter", violation, logger)
+			return nil
+		}
+		logger.Warn("safety filter violation (log_only)",
+			"rule_id", violation.RuleID, "rule_name", violation.RuleName,
+			"target", violation.Target.String(), "matched_on", violation.MatchedOn)
+	}
+
+	removeHopByHopHeaders(req.Header)
+
+	// Build send record params for progressive recording.
+	sp := sendRecordParams{
+		connID:       connID,
+		clientAddr:   clientAddr,
+		protocol:     "HTTP/1.x",
+		start:        start,
+		tags:         smugglingTags(smuggling),
+		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},
+		req:          req,
+		reqURL:       req.URL,
+		reqBody:      bodyResult.recordBody,
+		rawRequest:   rawRequest,
+		reqTruncated: bodyResult.truncated,
+	}
+
+	// Snapshot + Intercept check + modifications.
+	snap := snapshotRequest(req.Header, bodyResult.recordBody)
+
+	var dropped bool
+	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
+	if dropped {
+		sp.reqBody = bodyResult.recordBody
+		h.recordInterceptDrop(ctx, sp, logger)
+		return nil
+	}
+
+	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+	sp.reqBody = bodyResult.recordBody
+
+	// Progressive recording: record send before forwarding.
+	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
+
+	// Forward upstream.
+	sendStart := time.Now()
+	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
+	if err != nil {
+		h.recordSendError(ctx, sendResult, start, err, logger)
+		return err
+	}
+	defer fwd.resp.Body.Close()
+
+	// SSE detection.
+	if isSSEResponse(fwd.resp) {
+		sendResult.tags = addSSETags(sendResult.tags)
+		return h.handleSSEStream(ctx, conn, req, fwd, start, sendResult, nil, logger)
+	}
+
+	// Read response, write to client, and record flow.
+	fullRespBody := h.readResponseBody(fwd.resp, logger)
+	receiveEnd := time.Now()
+
+	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
+	rawRespBody := make([]byte, len(fullRespBody))
+	copy(rawRespBody, fullRespBody)
+
+	fullRespBody, fwd.resp.Header = h.ApplyOutputFilter(fullRespBody, fwd.resp.Header, logger)
+
+	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
+		return err
+	}
+
+	duration := time.Since(start)
+	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
+	h.recordReceive(ctx, sendResult, receiveRecordParams{
+		start:       start,
+		duration:    duration,
+		serverAddr:  fwd.serverAddr,
+		resp:        fwd.resp,
+		rawResponse: rawResponse,
+		respBody:    rawRespBody,
+		sendMs:      sendMs,
+		waitMs:      waitMs,
+		receiveMs:   receiveMs,
+	}, logger)
+
+	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
+
+	return nil
 }
 
 // HandleTunnelMITM performs TLS MITM on a tunneled connection. It performs a
