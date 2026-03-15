@@ -194,7 +194,9 @@ func (c *Conn) ApplyPeerSettings(params []frame.Setting) error {
 
 	// If INITIAL_WINDOW_SIZE changed, adjust all active streams' send windows.
 	if c.peerSettings.InitialWindowSize != oldInitialWindowSize {
-		c.streams.UpdateInitialSendWindow(int32(c.peerSettings.InitialWindowSize))
+		if err := c.streams.UpdateInitialSendWindow(int32(c.peerSettings.InitialWindowSize)); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -215,6 +217,7 @@ func (c *Conn) LocalSettingsAcked() bool {
 }
 
 // Streams returns the stream map for direct stream state operations.
+// The returned StreamMap has its own synchronization independent of Conn.mu.
 func (c *Conn) Streams() *StreamMap {
 	return c.streams
 }

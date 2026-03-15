@@ -322,7 +322,9 @@ func TestStreamMap_UpdateInitialSendWindow(t *testing.T) {
 	sm.GetOrCreate(5)
 
 	// Update initial window size (increase by 1000)
-	sm.UpdateInitialSendWindow(66535)
+	if err := sm.UpdateInitialSendWindow(66535); err != nil {
+		t.Fatalf("UpdateInitialSendWindow error: %v", err)
+	}
 
 	s1 := sm.Get(1)
 	if s1.SendWindow != 66535 {
@@ -339,6 +341,33 @@ func TestStreamMap_UpdateInitialSendWindow(t *testing.T) {
 	// Stream 5 is idle, should NOT be adjusted.
 	if s5.SendWindow != 65535 {
 		t.Errorf("stream 5 send window = %d, want 65535 (unchanged)", s5.SendWindow)
+	}
+}
+
+func TestStreamMap_UpdateInitialSendWindow_Overflow(t *testing.T) {
+	// Start with a moderate initial window, then increment a stream's window
+	// close to the maximum, then trigger overflow via SETTINGS change.
+	sm := NewStreamMap(65535, 65535)
+
+	// Create an active stream
+	if err := sm.Transition(1, EventSendHeaders); err != nil {
+		t.Fatal(err)
+	}
+
+	// Manually push the stream's send window near the maximum
+	s := sm.Get(1)
+	s.SendWindow = maxWindowSize - 5
+
+	// Try to update initial window size with a delta that would overflow the stream.
+	// New initial = 65535 + 10 = 65545, delta = 10, new stream window = (maxWindowSize-5) + 10 > maxWindowSize
+	err := sm.UpdateInitialSendWindow(65545)
+	if err == nil {
+		t.Fatal("expected error on window overflow")
+	}
+
+	// Verify the stream window was NOT changed (pre-check should prevent partial application)
+	if s.SendWindow != maxWindowSize-5 {
+		t.Errorf("stream send window = %d, want %d (unchanged after failed update)", s.SendWindow, maxWindowSize-5)
 	}
 }
 

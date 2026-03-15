@@ -144,18 +144,33 @@ func (sm *StreamMap) Transition(id uint32, event StreamEvent) error {
 // UpdateInitialSendWindow adjusts all open/half-closed streams' send windows
 // when the peer's SETTINGS_INITIAL_WINDOW_SIZE changes.
 // Per RFC 9113 Section 6.9.2, the difference is applied to all active streams.
-func (sm *StreamMap) UpdateInitialSendWindow(newSize int32) {
+// Returns an error if any stream's window would overflow the maximum (2^31-1).
+func (sm *StreamMap) UpdateInitialSendWindow(newSize int32) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	delta := newSize - sm.initialSendWindow
-	sm.initialSendWindow = newSize
 
+	// Pre-check: verify no active stream would overflow before applying changes.
+	for _, s := range sm.streams {
+		if s.State == StateOpen || s.State == StateHalfClosedLocal || s.State == StateHalfClosedRemote {
+			newWindow := int64(s.SendWindow) + int64(delta)
+			if newWindow > maxWindowSize {
+				return &ConnError{
+					Code:   ErrCodeFlowControl,
+					Reason: fmt.Sprintf("SETTINGS_INITIAL_WINDOW_SIZE change would overflow stream %d send window: current=%d, delta=%d, max=%d", s.ID, s.SendWindow, delta, maxWindowSize),
+				}
+			}
+		}
+	}
+
+	sm.initialSendWindow = newSize
 	for _, s := range sm.streams {
 		if s.State == StateOpen || s.State == StateHalfClosedLocal || s.State == StateHalfClosedRemote {
 			s.SendWindow += delta
 		}
 	}
+	return nil
 }
 
 // SetInitialRecvWindow updates the initial receive window size for new streams.
