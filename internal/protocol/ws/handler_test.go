@@ -875,6 +875,176 @@ func TestHandleUpgrade_MultipleMessages(t *testing.T) {
 	}
 }
 
+func TestHandleUpgrade_UpgradeRequestResponseRecorded(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	clientConn, clientEnd := net.Pipe()
+	upstreamConn, upstreamEnd := net.Pipe()
+	defer clientConn.Close()
+	defer clientEnd.Close()
+	defer upstreamConn.Close()
+	defer upstreamEnd.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := gohttp.NewRequest("GET", "ws://example.com/chat", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+
+	respHeader := gohttp.Header{}
+	respHeader.Set("Upgrade", "websocket")
+	respHeader.Set("Connection", "Upgrade")
+	respHeader.Set("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+	resp := &gohttp.Response{
+		StatusCode: 101,
+		Header:     respHeader,
+	}
+
+	connInfo := &flow.ConnectionInfo{
+		ClientAddr: "10.0.0.1:12345",
+		ServerAddr: "93.184.216.34:80",
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-upgrade", "10.0.0.1:12345", connInfo)
+	}()
+
+	// Send a text frame then close to finish the relay.
+	go func() {
+		frame := &Frame{
+			Fin:     true,
+			Opcode:  OpcodeText,
+			Masked:  true,
+			MaskKey: [4]byte{0x01, 0x02, 0x03, 0x04},
+			Payload: []byte("test"),
+		}
+		WriteFrame(clientEnd, frame)
+	}()
+
+	// Read the text frame on upstream side.
+	ReadFrame(upstreamEnd)
+
+	// Send close from upstream.
+	closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Payload: []byte{0x03, 0xE8}}
+	go func() {
+		WriteFrame(upstreamEnd, closeFrame)
+	}()
+
+	ReadFrame(clientEnd)
+	clientEnd.Close()
+	upstreamEnd.Close()
+
+	select {
+	case <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler timeout")
+	}
+
+	messages := store.Messages()
+
+	// Find the upgrade request message (sequence=0, direction="send").
+	var upgradeReqMsg *flow.Message
+	for _, msg := range messages {
+		if msg.Sequence == 0 && msg.Direction == "send" {
+			upgradeReqMsg = msg
+			break
+		}
+	}
+	if upgradeReqMsg == nil {
+		t.Fatal("upgrade request message (sequence=0, direction=send) not found")
+	}
+	if upgradeReqMsg.Method != "GET" {
+		t.Errorf("upgrade request Method = %q, want %q", upgradeReqMsg.Method, "GET")
+	}
+	if upgradeReqMsg.URL == nil {
+		t.Fatal("upgrade request URL is nil")
+	}
+	if upgradeReqMsg.URL.String() != "ws://example.com/chat" {
+		t.Errorf("upgrade request URL = %q, want %q", upgradeReqMsg.URL.String(), "ws://example.com/chat")
+	}
+	reqHeaders := gohttp.Header(upgradeReqMsg.Headers)
+	if reqHeaders.Get("Upgrade") != "websocket" {
+		t.Errorf("upgrade request Upgrade header = %q, want %q", reqHeaders.Get("Upgrade"), "websocket")
+	}
+	if reqHeaders.Get("Sec-WebSocket-Key") != "dGhlIHNhbXBsZSBub25jZQ==" {
+		t.Errorf("upgrade request Sec-WebSocket-Key = %q, want %q",
+			reqHeaders.Get("Sec-WebSocket-Key"), "dGhlIHNhbXBsZSBub25jZQ==")
+	}
+
+	// Find the upgrade response message (sequence=1, direction="receive").
+	var upgradeRespMsg *flow.Message
+	for _, msg := range messages {
+		if msg.Sequence == 1 && msg.Direction == "receive" {
+			upgradeRespMsg = msg
+			break
+		}
+	}
+	if upgradeRespMsg == nil {
+		t.Fatal("upgrade response message (sequence=1, direction=receive) not found")
+	}
+	if upgradeRespMsg.StatusCode != 101 {
+		t.Errorf("upgrade response StatusCode = %d, want %d", upgradeRespMsg.StatusCode, 101)
+	}
+	respHeaders := gohttp.Header(upgradeRespMsg.Headers)
+	if respHeaders.Get("Sec-WebSocket-Accept") != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
+		t.Errorf("upgrade response Sec-WebSocket-Accept = %q, want %q",
+			respHeaders.Get("Sec-WebSocket-Accept"), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+	}
+
+	// Verify data frame sequences start at 2.
+	for _, msg := range messages {
+		if msg.Sequence == 0 || msg.Sequence == 1 {
+			continue // Upgrade messages.
+		}
+		if msg.Sequence < 2 {
+			t.Errorf("data frame sequence = %d, want >= 2", msg.Sequence)
+		}
+	}
+}
+
+func TestHandleUpgrade_UpgradeRecordedWithNilStore(t *testing.T) {
+	// Handler should work without a store — no panic on upgrade recording.
+	handler := NewHandler(nil, testutil.DiscardLogger())
+
+	clientConn, clientEnd := net.Pipe()
+	upstreamConn, upstreamEnd := net.Pipe()
+	defer clientConn.Close()
+	defer clientEnd.Close()
+	defer upstreamConn.Close()
+	defer upstreamEnd.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
+	resp := &gohttp.Response{StatusCode: 101}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-nil", "127.0.0.1:1111", nil)
+	}()
+
+	// Close immediately.
+	closeFrame := &Frame{Fin: true, Opcode: OpcodeClose, Masked: true, MaskKey: [4]byte{0x01, 0x02, 0x03, 0x04}, Payload: []byte{0x03, 0xE8}}
+	go func() {
+		WriteFrame(clientEnd, closeFrame)
+	}()
+	ReadFrame(upstreamEnd)
+	upstreamEnd.Close()
+
+	select {
+	case <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler timeout")
+	}
+	// No panic means success.
+}
+
 func TestHandleUpgrade_ConnectionDrop(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
