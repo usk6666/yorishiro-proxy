@@ -301,6 +301,10 @@ func (h *Handler) handleStream(
 		start:            time.Now(),
 	}
 
+	if h.tryHandleGRPCStream(sc) {
+		return
+	}
+
 	h.readAndTruncateBody(sc)
 	h.resolveSchemeAndHost(sc)
 	h.buildStreamRecordParams(sc)
