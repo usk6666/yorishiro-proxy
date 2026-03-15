@@ -289,9 +289,9 @@ func TestClassifyFlowType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyFlowType(tt.reqFrames, tt.respFrames)
+			got := ClassifyFlowType(tt.reqFrames, tt.respFrames)
 			if got != tt.want {
-				t.Errorf("classifyFlowType(%d, %d) = %q, want %q", tt.reqFrames, tt.respFrames, got, tt.want)
+				t.Errorf("ClassifyFlowType(%d, %d) = %q, want %q", tt.reqFrames, tt.respFrames, got, tt.want)
 			}
 		})
 	}
@@ -1002,9 +1002,9 @@ func TestExtractGRPCStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractGRPCStatus(tt.trailers, tt.headers)
+			got := ExtractGRPCStatus(tt.trailers, tt.headers)
 			if got != tt.want {
-				t.Errorf("extractGRPCStatus() = %q, want %q", got, tt.want)
+				t.Errorf("ExtractGRPCStatus() = %q, want %q", got, tt.want)
 			}
 		})
 	}

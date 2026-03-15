@@ -51,6 +51,9 @@ func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpd
 			if update.State != "" {
 				s.State = update.State
 			}
+			if update.FlowType != "" {
+				s.FlowType = update.FlowType
+			}
 			if update.Duration != 0 {
 				s.Duration = update.Duration
 			}

@@ -74,6 +74,13 @@ func TestLimits_MaxSSERecordPayloadSize(t *testing.T) {
 	}
 }
 
+func TestLimits_MaxGRPCMessagesPerStream(t *testing.T) {
+	const expected = 10000
+	if MaxGRPCMessagesPerStream != expected {
+		t.Errorf("MaxGRPCMessagesPerStream = %d, want %d", MaxGRPCMessagesPerStream, expected)
+	}
+}
+
 func TestLimits_Consistency(t *testing.T) {
 	// MaxImportScannerBuffer must be larger than base64-encoded MaxBodySize.
 	// base64 expands data by ~4/3, so 254 MB * 4/3 ≈ 339 MB.

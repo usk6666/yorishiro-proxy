@@ -71,4 +71,10 @@ const (
 	// MaxSSERecordPayloadSize limits the body size recorded per SSE event
 	// message. Events exceeding this size are truncated in the flow store.
 	MaxSSERecordPayloadSize = 254 << 20 // 254 MB
+
+	// MaxGRPCMessagesPerStream limits the number of gRPC messages recorded
+	// per stream. Once exceeded, messages are still forwarded to the client
+	// but no longer recorded to the flow store. This prevents unbounded DB
+	// growth from very long-lived gRPC streams.
+	MaxGRPCMessagesPerStream = 10000
 )

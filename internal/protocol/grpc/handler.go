@@ -134,11 +134,11 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	}
 
 	// Determine session type based on frame counts.
-	sessionType := classifyFlowType(len(reqFrames), len(respFrames))
+	sessionType := ClassifyFlowType(len(reqFrames), len(respFrames))
 
 	// Extract grpc-status from trailers or response headers.
-	grpcStatus := extractGRPCStatus(info.Trailers, info.ResponseHeaders)
-	grpcMessage := extractGRPCMessage(info.Trailers, info.ResponseHeaders)
+	grpcStatus := ExtractGRPCStatus(info.Trailers, info.ResponseHeaders)
+	grpcMessage := ExtractGRPCMessage(info.Trailers, info.ResponseHeaders)
 	grpcEncoding := extractHeader(info.RequestHeaders, "grpc-encoding")
 
 	// Save flow.
@@ -518,8 +518,8 @@ func flattenHeaders(headers map[string][]string) map[string]any {
 	return result
 }
 
-// classifyFlowType determines the gRPC session type based on frame counts.
-func classifyFlowType(reqFrames, respFrames int) string {
+// ClassifyFlowType determines the gRPC session type based on frame counts.
+func ClassifyFlowType(reqFrames, respFrames int) string {
 	if reqFrames <= 1 && respFrames <= 1 {
 		return "unary"
 	}
@@ -567,18 +567,18 @@ func buildReceiveMetadata(service, method, grpcStatus, grpcMessage, grpcEncoding
 	return meta
 }
 
-// extractGRPCStatus extracts the grpc-status value from trailers or response headers.
+// ExtractGRPCStatus extracts the grpc-status value from trailers or response headers.
 // gRPC typically sends grpc-status in trailers, but it may appear in headers
 // for Trailers-Only responses.
-func extractGRPCStatus(trailers, headers map[string][]string) string {
+func ExtractGRPCStatus(trailers, headers map[string][]string) string {
 	if v := extractHeader(trailers, "grpc-status"); v != "" {
 		return v
 	}
 	return extractHeader(headers, "grpc-status")
 }
 
-// extractGRPCMessage extracts the grpc-message value from trailers or response headers.
-func extractGRPCMessage(trailers, headers map[string][]string) string {
+// ExtractGRPCMessage extracts the grpc-message value from trailers or response headers.
+func ExtractGRPCMessage(trailers, headers map[string][]string) string {
 	if v := extractHeader(trailers, "grpc-message"); v != "" {
 		return v
 	}
