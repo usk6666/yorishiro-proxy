@@ -123,9 +123,13 @@ func TestApplySSEIntercept_Drop(t *testing.T) {
 	}
 
 	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
-	info := <-itemCh
-	if info.body != nil {
-		t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
 	}
 }
 
@@ -178,9 +182,13 @@ func TestApplySSEIntercept_Release(t *testing.T) {
 	}
 
 	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
-	info := <-itemCh
-	if info.body != nil {
-		t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
 	}
 }
 
@@ -233,9 +241,13 @@ func TestApplySSEIntercept_ModifyAndForward_TreatedAsRelease(t *testing.T) {
 	}
 
 	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
-	info := <-itemCh
-	if info.body != nil {
-		t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
 	}
 }
 
@@ -334,13 +346,15 @@ func TestApplySSEIntercept_EnqueuesWithNilBody(t *testing.T) {
 	defer server.Close()
 
 	// Verify the enqueued item has nil body.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
 	go func() {
 		for i := 0; i < 50; i++ {
 			items := queue.List()
 			if len(items) > 0 {
-				if items[0].Body != nil {
-					// Can't use t.Error from goroutine easily, but we can still resolve.
-				}
+				itemCh <- itemInfo{body: items[0].Body}
 				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
 				return
 			}
@@ -350,9 +364,15 @@ func TestApplySSEIntercept_EnqueuesWithNilBody(t *testing.T) {
 
 	h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
 
-	// Verify the enqueued item had the correct phase and nil body.
-	// We can't easily inspect the item after it's removed, but the test
-	// passing without panic confirms the nil body path works.
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
+	}
 }
 
 func TestSSEHookContext_NilAllowed(t *testing.T) {

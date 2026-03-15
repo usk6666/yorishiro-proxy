@@ -99,6 +99,8 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 	// rules at the header level. For SSE, only DROP and RELEASE are meaningful;
 	// MODIFY is not supported since the body is a stream.
 	if dropped := h.applySSEIntercept(ctx, conn, req, fwd.resp, logger); dropped {
+		// Update flow to complete state so it does not remain "active" forever.
+		h.completeSSEFlowOnDrop(ctx, sendResult, fwd, start, "", logger)
 		return nil
 	}
 
@@ -157,9 +159,17 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 // The sendResult parameter is the result from the already-recorded send phase;
 // this function must NOT call recordSendWithVariant again.
 func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
+	// Extract TLS certificate info from the upstream connection.
+	var tlsCertSubject string
+	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
+		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
+	}
+
 	// Response intercept: check if the SSE response matches any intercept
 	// rules at the header level. Same as handleSSEStream.
 	if dropped := h.applySSEIntercept(ctx, conn, req, fwd.resp, logger); dropped {
+		// Update flow to complete state so it does not remain "active" forever.
+		h.completeSSEFlowOnDrop(ctx, sendResult, fwd, start, tlsCertSubject, logger)
 		return nil
 	}
 
@@ -170,12 +180,6 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *go
 	}
 
 	logger.Info("SSE stream started (TLS)", "method", req.Method, "url", req.URL.String())
-
-	// Extract TLS certificate info from the upstream connection.
-	var tlsCertSubject string
-	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
-		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
-	}
 
 	// Record the initial receive message (response headers) and update flow
 	// type to "stream" for SSE event-level recording.
@@ -533,6 +537,35 @@ func (h *Handler) completeSSEFlow(ctx context.Context, sendResult *sendRecordRes
 	}
 	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("SSE flow completion failed", "error", err)
+	}
+}
+
+// completeSSEFlowOnDrop updates the SSE flow to "complete" state when the
+// response was intercepted and dropped. This prevents flows from remaining
+// in "active" state indefinitely after a DROP action.
+func (h *Handler) completeSSEFlowOnDrop(ctx context.Context, sendResult *sendRecordResult, fwd *forwardResult, start time.Time, tlsCertSubject string, logger *slog.Logger) {
+	if sendResult == nil || h.Store == nil {
+		return
+	}
+
+	duration := time.Since(start)
+
+	tags := make(map[string]string)
+	for k, v := range sendResult.tags {
+		tags[k] = v
+	}
+	tags = addSSETags(tags)
+	tags["intercept_action"] = "drop"
+
+	update := flow.FlowUpdate{
+		State:                "complete",
+		Duration:             duration,
+		ServerAddr:           fwd.serverAddr,
+		TLSServerCertSubject: tlsCertSubject,
+		Tags:                 tags,
+	}
+	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+		logger.Error("SSE flow completion after drop failed", "error", err)
 	}
 }
 
