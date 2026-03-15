@@ -301,6 +301,16 @@ func (h *Handler) handleStream(
 		start:            time.Now(),
 	}
 
+	// gRPC streaming path: bypass full-body buffering to avoid deadlocks
+	// with bidirectional streaming. The gRPC streaming handler uses io.Pipe
+	// to stream request/response bodies concurrently.
+	if isGRPCStream(h, sc) {
+		h.resolveSchemeAndHost(sc)
+		logGRPCStreamBypass(sc.logger, sc.req.URL.String())
+		h.handleGRPCStream(sc)
+		return
+	}
+
 	h.readAndTruncateBody(sc)
 	h.resolveSchemeAndHost(sc)
 	h.buildStreamRecordParams(sc)
