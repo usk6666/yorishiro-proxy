@@ -486,6 +486,7 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	http2Handler.SetInterceptEngine(deps.interceptEngine)
 	http2Handler.SetInterceptQueue(deps.interceptQueue)
 	http2Handler.SetDetector(fpDetector)
+	http2Handler.SetTransformPipeline(deps.pipeline)
 
 	// Build gRPC handler and attach to the HTTP/2 handler for gRPC-specific recording.
 	grpcHandler := protogrpc.NewHandler(store, logger)

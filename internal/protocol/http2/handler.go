@@ -29,6 +29,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -62,6 +63,10 @@ type Handler struct {
 	// detector performs technology stack detection on HTTP responses.
 	// If nil, fingerprinting is skipped.
 	detector *fingerprint.Detector
+
+	// transformPipeline applies auto-transform rules to request and response
+	// bodies. If nil, no auto-transform rules are applied.
+	transformPipeline *rules.Pipeline
 }
 
 // NewHandler creates a new HTTP/2 handler with flow recording.
@@ -148,6 +153,17 @@ func (h *Handler) SetDetector(d *fingerprint.Detector) {
 // Detector returns the handler's current fingerprint detector, or nil.
 func (h *Handler) Detector() *fingerprint.Detector {
 	return h.detector
+}
+
+// SetTransformPipeline sets the auto-transform rule pipeline used to
+// modify request and response bodies passing through the HTTP/2 handler.
+func (h *Handler) SetTransformPipeline(pipeline *rules.Pipeline) {
+	h.transformPipeline = pipeline
+}
+
+// TransformPipeline returns the handler's current transform pipeline, or nil.
+func (h *Handler) TransformPipeline() *rules.Pipeline {
+	return h.transformPipeline
 }
 
 // Name returns the protocol name for h2c (cleartext HTTP/2).
