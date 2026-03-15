@@ -35,13 +35,19 @@ type grpcStreamState struct {
 	// Used for decompression/recompression of frames during subsystem processing.
 	grpcEncoding string
 
-	// Plugin context for the gRPC stream, shared across all hooks.
+	// Plugin context for the gRPC stream.
 	pluginConnInfo *plugin.ConnInfo
-	txCtx          map[string]any
+
+	// txCtxMu protects txCtx from concurrent access by request/response goroutines.
+	txCtxMu sync.Mutex
+	txCtx   map[string]any
 
 	// reqBlocked is set to true if a request frame was blocked by a subsystem
 	// (safety filter or plugin drop). When true, the stream is terminated.
 	reqBlocked bool
+
+	// respBlocked is set to true if a response frame was blocked by output filter.
+	respBlocked bool
 }
 
 // handleGRPCStream proxies a gRPC stream using io.Pipe-based bidirectional
@@ -82,6 +88,13 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 
 	resp, ok := h.sendGRPCUpstream(sc, outReq, &reqWg)
 	if !ok {
+		// Check if the request was blocked by a subsystem.
+		state.mu.Lock()
+		blocked := state.reqBlocked
+		state.mu.Unlock()
+		if blocked {
+			writeGRPCStatus(sc.w, gohttp.StatusOK, 7, "request blocked by safety filter") // PERMISSION_DENIED
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -92,11 +105,17 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 	h.writeGRPCResponseHeaders(sc, resp)
 	h.streamGRPCResponseBody(sc, state, resp)
 
-	// Apply output filter to trailers before writing to client.
-	if len(resp.Trailer) > 0 {
-		resp.Trailer = h.ApplyOutputFilterHeaders(resp.Trailer, sc.logger)
+	// Skip trailers if response was blocked — we already wrote an error status.
+	state.mu.Lock()
+	blocked := state.respBlocked
+	state.mu.Unlock()
+	if !blocked {
+		// Apply output filter to trailers before writing to client.
+		if len(resp.Trailer) > 0 {
+			resp.Trailer = h.ApplyOutputFilterHeaders(resp.Trailer, sc.logger)
+		}
+		h.writeGRPCTrailers(sc, resp)
 	}
-	h.writeGRPCTrailers(sc, resp)
 
 	reqWg.Wait()
 
@@ -223,9 +242,12 @@ func (h *Handler) streamGRPCRequestBody(sc *streamContext, state *grpcStreamStat
 // frames through subsystems and writes processed bytes to the pipe writer.
 func (h *Handler) newGRPCRequestSubsystemBuf(sc *streamContext, state *grpcStreamState, pw *io.PipeWriter) *protogrpc.FrameBuffer {
 	return protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
+		// Lock txCtx for thread-safe plugin hook access.
+		state.txCtxMu.Lock()
 		wireBytes, stop := h.processGRPCRequestFrame(
 			sc, raw, frame.Compressed, frame.Payload,
 			state.grpcEncoding, state.pluginConnInfo, state.txCtx)
+		state.txCtxMu.Unlock()
 		if stop {
 			state.mu.Lock()
 			state.reqBlocked = true
@@ -357,10 +379,9 @@ func (h *Handler) streamGRPCResponseBody(sc *streamContext, state *grpcStreamSta
 	hasSubsystems := h.SafetyEngine != nil || h.pluginEngine != nil || h.transformPipeline != nil
 
 	var subsystemBuf *protogrpc.FrameBuffer
-	var respBlocked bool
 
 	if hasSubsystems {
-		subsystemBuf = h.newGRPCResponseSubsystemBuf(sc, state, resp, flusher, &respBlocked)
+		subsystemBuf = h.newGRPCResponseSubsystemBuf(sc, state, resp, flusher)
 	}
 
 	buf := make([]byte, 32*1024)
@@ -370,7 +391,7 @@ func (h *Handler) streamGRPCResponseBody(sc *streamContext, state *grpcStreamSta
 			if fbErr := state.respFrameBuf.Write(buf[:n]); fbErr != nil {
 				sc.logger.Warn("gRPC response frame buffer error", "error", fbErr)
 			}
-			if done := h.forwardGRPCResponseChunk(sc, subsystemBuf, flusher, buf[:n], hasSubsystems, &respBlocked); done {
+			if done := h.forwardGRPCResponseChunk(sc, state, subsystemBuf, flusher, buf[:n], hasSubsystems); done {
 				break
 			}
 		}
@@ -385,14 +406,19 @@ func (h *Handler) streamGRPCResponseBody(sc *streamContext, state *grpcStreamSta
 
 // newGRPCResponseSubsystemBuf creates a FrameBuffer that processes response
 // frames through subsystems and writes processed bytes to the client.
-func (h *Handler) newGRPCResponseSubsystemBuf(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, flusher gohttp.Flusher, respBlocked *bool) *protogrpc.FrameBuffer {
+func (h *Handler) newGRPCResponseSubsystemBuf(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, flusher gohttp.Flusher) *protogrpc.FrameBuffer {
 	respEncoding := resp.Header.Get("Grpc-Encoding")
 	return protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
+		// Lock txCtx for thread-safe plugin hook access.
+		state.txCtxMu.Lock()
 		wireBytes, blocked := h.processGRPCResponseFrame(
 			sc, raw, frame.Compressed, frame.Payload,
 			respEncoding, resp, state.pluginConnInfo, state.txCtx)
+		state.txCtxMu.Unlock()
 		if blocked {
-			*respBlocked = true
+			state.mu.Lock()
+			state.respBlocked = true
+			state.mu.Unlock()
 			return fmt.Errorf("gRPC response frame blocked by output filter")
 		}
 		if _, err := sc.w.Write(wireBytes); err != nil {
@@ -408,7 +434,7 @@ func (h *Handler) newGRPCResponseSubsystemBuf(sc *streamContext, state *grpcStre
 // forwardGRPCResponseChunk forwards a chunk of response data. If subsystems
 // are enabled, the chunk is processed through the subsystem buffer. Otherwise
 // it is written directly to the client. Returns true if the stream should stop.
-func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, subsystemBuf *protogrpc.FrameBuffer, flusher gohttp.Flusher, chunk []byte, hasSubsystems bool, respBlocked *bool) bool {
+func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamState, subsystemBuf *protogrpc.FrameBuffer, flusher gohttp.Flusher, chunk []byte, hasSubsystems bool) bool {
 	if !hasSubsystems {
 		if _, writeErr := sc.w.Write(chunk); writeErr != nil {
 			sc.logger.Debug("gRPC failed to write response to client", "error", writeErr)
@@ -421,8 +447,13 @@ func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, subsystemBuf *prot
 	}
 
 	if fbErr := subsystemBuf.Write(chunk); fbErr != nil {
-		if *respBlocked {
+		state.mu.Lock()
+		blocked := state.respBlocked
+		state.mu.Unlock()
+		if blocked {
 			sc.logger.Warn("gRPC response stream terminated by output filter")
+			// Write gRPC error status to client so they know why the stream stopped.
+			writeGRPCStatus(sc.w, gohttp.StatusOK, 13, "response blocked by output filter") // INTERNAL
 			return true
 		}
 		sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
@@ -579,21 +610,19 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 
 	// Intercept check at header level for gRPC streaming requests.
 	// Body-level intercept is not supported since the body is streamed.
+	// interceptRequest internally calls MatchRequestRules, so we call it directly.
 	if h.InterceptEngine != nil && h.InterceptQueue != nil {
-		matchedRules := h.InterceptEngine.MatchRequestRules(sc.req.Method, sc.req.URL, sc.req.Header)
-		if len(matchedRules) > 0 {
-			action, intercepted := h.interceptRequest(sc.ctx, sc.req, nil, sc.logger)
-			if intercepted {
-				switch action.Type {
-				case intercept.ActionDrop:
-					writeGRPCStatus(sc.w, gohttp.StatusOK, 10, "intercepted request dropped") // ABORTED
-					sc.logger.Info("intercepted gRPC request dropped",
-						"method", sc.req.Method, "url", sc.reqURL.String())
-					return true
-				case intercept.ActionModifyAndForward:
-					sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
-						"method", sc.req.Method, "url", sc.reqURL.String())
-				}
+		action, intercepted := h.interceptRequest(sc.ctx, sc.req, nil, sc.logger)
+		if intercepted {
+			switch action.Type {
+			case intercept.ActionDrop:
+				writeGRPCStatus(sc.w, gohttp.StatusOK, 10, "intercepted request dropped") // ABORTED
+				sc.logger.Info("intercepted gRPC request dropped",
+					"method", sc.req.Method, "url", sc.reqURL.String())
+				return true
+			case intercept.ActionModifyAndForward:
+				sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
+					"method", sc.req.Method, "url", sc.reqURL.String())
 			}
 		}
 	}
