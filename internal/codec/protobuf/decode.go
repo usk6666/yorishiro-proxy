@@ -98,26 +98,8 @@ func decodeFieldsWithDepth(data []byte, depth int) (*orderedMap, error) {
 				return nil, fmt.Errorf("field %d: length %d exceeds remaining %d", fieldNumber, length, r.remaining())
 			}
 			raw := r.readBytes(int(length))
-
-			// Heuristic type inference (same priority as PacketProxy):
-			// 1. UTF-8 printable string
-			// 2. Embedded protobuf message
-			// 3. Packed repeated varints
-			// 4. Raw bytes (hex)
-			if isPrintableUTF8(raw) {
-				key := formatKey(fieldNumber, ordinal, "String")
-				m.set(key, string(raw))
-			} else if sub, err := decodeFieldsWithDepth(raw, depth+1); err == nil {
-				key := formatKey(fieldNumber, ordinal, "embedded message")
-				m.set(key, sub)
-			} else if validateRepeatedStrictly(raw) {
-				list := decodeRepeated(raw)
-				key := formatKey(fieldNumber, ordinal, "repeated")
-				m.set(key, list)
-			} else {
-				key := formatKey(fieldNumber, ordinal, "bytes")
-				m.set(key, encodeHexColon(raw))
-			}
+			key, val := decodeLengthDelimited(raw, fieldNumber, ordinal, depth)
+			m.set(key, val)
 
 		default:
 			return nil, fmt.Errorf("unsupported wire type %d", wt)
@@ -125,6 +107,25 @@ func decodeFieldsWithDepth(data []byte, depth int) (*orderedMap, error) {
 		ordinal++
 	}
 	return m, nil
+}
+
+// decodeLengthDelimited applies heuristic type inference to a length-delimited
+// protobuf field (same priority as PacketProxy):
+//  1. UTF-8 printable string
+//  2. Embedded protobuf message (recursive)
+//  3. Packed repeated varints
+//  4. Raw bytes (hex)
+func decodeLengthDelimited(raw []byte, fieldNumber uint64, ordinal, depth int) (string, any) {
+	if isPrintableUTF8(raw) {
+		return formatKey(fieldNumber, ordinal, "String"), string(raw)
+	}
+	if sub, err := decodeFieldsWithDepth(raw, depth+1); err == nil {
+		return formatKey(fieldNumber, ordinal, "embedded message"), sub
+	}
+	if validateRepeatedStrictly(raw) {
+		return formatKey(fieldNumber, ordinal, "repeated"), decodeRepeated(raw)
+	}
+	return formatKey(fieldNumber, ordinal, "bytes"), encodeHexColon(raw)
 }
 
 // formatKey creates the JSON key in "NNNN:OOOO:type" format.
