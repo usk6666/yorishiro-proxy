@@ -66,9 +66,11 @@ type sseHookContext struct {
 
 // sseStreamContext carries all context needed for event-level processing
 // within the SSE event loop (streamSSEEvents). It holds the original HTTP
-// request (for intercept rule matching), the plugin hook context (for
-// per-event plugin dispatch), and the destination connection (for error
-// responses on intercept drop).
+// request (for intercept rule matching) and the plugin hook context (for
+// per-event plugin dispatch).
+//
+// The conn field is reserved for future use (e.g., writing error responses
+// on intercept drop). Currently unused.
 type sseStreamContext struct {
 	req     *gohttp.Request
 	hookCtx *sseHookContext
@@ -164,6 +166,12 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 //
 // Before writing response headers, this function applies:
 //   - Response intercept check (header-level, DROP or RELEASE)
+//
+// Note: Per-event plugin hooks (on_receive_from_server, on_before_send_to_client)
+// are NOT dispatched in the TLS path because hookCtx is not propagated from the
+// CONNECT tunnel handler. Event-level intercept and variant tracking still work.
+// This is a known limitation; extending plugin hooks to the TLS SSE path requires
+// plumbing ConnInfo through the CONNECT handler.
 //
 // See handleSSEStream for details on output filter application and skipped
 // processing steps.
