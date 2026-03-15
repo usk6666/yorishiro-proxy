@@ -200,6 +200,14 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 
+	// Host header mismatch check: if the Host header differs from the
+	// CONNECT authority, re-check target scope against the Host header to
+	// prevent scope bypass via Host header manipulation (similar to
+	// checkHTTPSScopeRewrite for HTTPS).
+	if blocked := h.checkPlaintextScopeRewrite(ctx, conn, connectHost, req, smuggling, start, connID, clientAddr, logger); blocked {
+		return nil
+	}
+
 	// Target scope enforcement.
 	if blocked, reason := h.checkTargetScope(req.URL); blocked {
 		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
@@ -236,9 +244,9 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	sp := sendRecordParams{
 		connID:       connID,
 		clientAddr:   clientAddr,
-		protocol:     "HTTP/1.x",
+		protocol:     socks5Protocol(ctx, "HTTP/1.x"),
 		start:        start,
-		tags:         smugglingTags(smuggling),
+		tags:         mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},
 		req:          req,
 		reqURL:       req.URL,
@@ -259,6 +267,11 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	}
 
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+	// Update sp fields after intercept/transform: req and reqURL may have
+	// changed (e.g. override_url), so the recorded flow must reflect the
+	// post-intercept state.
+	sp.req = req
+	sp.reqURL = req.URL
 	sp.reqBody = bodyResult.recordBody
 
 	// Progressive recording: record send before forwarding.
@@ -778,6 +791,39 @@ func (h *Handler) checkHTTPSScopeRewrite(ctx context.Context, conn net.Conn, con
 	req.URL.Scheme = "https"
 	h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
 	h.recordBlockedHTTPSSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, tlsMeta, "target_scope", nil, logger)
+	return true
+}
+
+// checkPlaintextScopeRewrite re-checks the target scope when the Host header
+// inside a plaintext CONNECT tunnel differs from the CONNECT authority. This
+// prevents scope bypass via Host header manipulation (CWE-20). Returns true
+// if the request was blocked.
+func (h *Handler) checkPlaintextScopeRewrite(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, smuggling *smugglingFlags, start time.Time, connID, clientAddr string, logger *slog.Logger) bool {
+	requestHost := req.Host
+	if requestHost == "" && req.URL.Host != "" {
+		requestHost = req.URL.Host
+	}
+	if requestHost == "" || strings.EqualFold(requestHost, connectHost) {
+		return false
+	}
+
+	checkURL := &url.URL{
+		Scheme: "http",
+		Host:   requestHost,
+		Path:   req.URL.Path,
+	}
+	blocked, reason := h.checkTargetScope(checkURL)
+	if !blocked {
+		return false
+	}
+
+	// Set req.URL fields before recording so the flow has the full URL.
+	if req.URL.Host == "" {
+		req.URL.Host = requestHost
+	}
+	req.URL.Scheme = "http"
+	h.writeBlockedResponse(conn, checkURL.Hostname(), reason, logger)
+	h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "target_scope", nil, logger)
 	return true
 }
 
