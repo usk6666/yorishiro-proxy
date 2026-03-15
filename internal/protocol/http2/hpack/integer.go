@@ -9,8 +9,10 @@ import (
 // allowed value (to prevent denial-of-service via huge allocations).
 var ErrIntegerOverflow = errors.New("hpack: integer overflow")
 
-// maxInteger is the maximum integer value we accept during decoding
-// to prevent excessive memory allocation.
+// maxInteger is the maximum integer value we accept during decoding.
+// This prevents denial-of-service attacks where crafted integers are
+// used as string lengths or table sizes, causing excessive resource
+// consumption.
 const maxInteger = 1<<32 - 1
 
 // encodeInteger encodes an integer I using the prefix-coded representation

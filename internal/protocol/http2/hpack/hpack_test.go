@@ -3,6 +3,7 @@ package hpack
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -964,6 +965,69 @@ func TestRoundTrip_EmptyNameValue(t *testing.T) {
 		t.Fatalf("Decode() error = %v", err)
 	}
 	assertHeaders(t, "empty-value", decoded, headers)
+}
+
+// --- Resource Limit Tests ---
+
+func TestDecoder_HeaderListSizeLimit(t *testing.T) {
+	dec := NewDecoder(4096)
+	dec.SetMaxHeaderListSize(100) // very small limit
+
+	// Build a header block with multiple fields that exceed 100 bytes total.
+	enc := NewEncoder(4096, false)
+	headers := []HeaderField{
+		{Name: "x-header-1", Value: "value-1"}, // size = 10+7+32 = 49
+		{Name: "x-header-2", Value: "value-2"}, // size = 10+7+32 = 49; total = 98
+		{Name: "x-header-3", Value: "value-3"}, // size = 10+7+32 = 49; total = 147 > 100
+	}
+	data := enc.Encode(headers)
+	_, err := dec.Decode(data)
+	if err == nil {
+		t.Error("expected error for header list size exceeding limit")
+	}
+	if !errors.Is(err, ErrHeaderListTooLarge) {
+		t.Errorf("expected ErrHeaderListTooLarge, got: %v", err)
+	}
+}
+
+func TestDecoder_StringLengthLimit(t *testing.T) {
+	dec := NewDecoder(4096)
+	dec.SetMaxStringLength(10) // very small limit
+
+	// Build a literal header with a value longer than 10 bytes.
+	var data []byte
+	data = append(data, 0x40) // literal with incremental indexing, new name
+	data = encodeInteger(data, 0x00, 7, 3)
+	data = append(data, "foo"...)
+	data = encodeInteger(data, 0x00, 7, 20) // value length = 20 > limit of 10
+	data = append(data, "01234567890123456789"...)
+
+	_, err := dec.Decode(data)
+	if err == nil {
+		t.Error("expected error for string length exceeding limit")
+	}
+	if !errors.Is(err, ErrStringTooLong) {
+		t.Errorf("expected ErrStringTooLong, got: %v", err)
+	}
+}
+
+func TestHuffman_InvalidPadding(t *testing.T) {
+	// Valid Huffman encoding of "a" is 0x03 (5 bits: 00011) padded with
+	// 3 bits of 1s = 0001 1111 = 0x1f. If we change padding to 0s,
+	// it should be rejected.
+	validEncoded := huffmanEncode(nil, []byte("a"))
+	// Verify valid encoding works.
+	_, err := huffmanDecode(nil, validEncoded)
+	if err != nil {
+		t.Fatalf("valid encoding failed: %v", err)
+	}
+
+	// Create invalid padding: "a" (00011) + 000 instead of 111
+	invalidPadding := []byte{0x18} // 00011 000 — padding bits are 0s, not 1s
+	_, err = huffmanDecode(nil, invalidPadding)
+	if err == nil {
+		t.Error("expected error for non-EOS padding bits")
+	}
 }
 
 // --- Helpers ---

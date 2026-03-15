@@ -50,6 +50,11 @@ func huffmanEncodedLen(src []byte) int {
 func huffmanDecode(dst, src []byte) ([]byte, error) {
 	var bits uint64
 	var nbits uint8
+	// paddingBits tracks the number of bits consumed since the last emitted
+	// symbol. At the end, these are the padding bits that must be validated.
+	var paddingBits uint8
+	// allOnePadding tracks whether all padding bits so far are 1.
+	allOnePadding := true
 	node := &huffmanTree
 	for _, b := range src {
 		bits = bits<<8 | uint64(b)
@@ -60,7 +65,9 @@ func huffmanDecode(dst, src []byte) ([]byte, error) {
 			idx := (bits >> nbits) & 0x0f
 			for i := 3; i >= 0; i-- {
 				bit := (idx >> uint(i)) & 1
+				paddingBits++
 				if bit == 0 {
+					allOnePadding = false
 					node = node.left
 				} else {
 					node = node.right
@@ -74,6 +81,8 @@ func huffmanDecode(dst, src []byte) ([]byte, error) {
 					}
 					dst = append(dst, byte(node.sym))
 					node = &huffmanTree
+					paddingBits = 0
+					allOnePadding = true
 				}
 			}
 		}
@@ -82,7 +91,9 @@ func huffmanDecode(dst, src []byte) ([]byte, error) {
 	for nbits > 0 {
 		nbits--
 		bit := (bits >> nbits) & 1
+		paddingBits++
 		if bit == 0 {
+			allOnePadding = false
 			node = node.left
 		} else {
 			node = node.right
@@ -96,14 +107,20 @@ func huffmanDecode(dst, src []byte) ([]byte, error) {
 			}
 			dst = append(dst, byte(node.sym))
 			node = &huffmanTree
+			paddingBits = 0
+			allOnePadding = true
 		}
 	}
-	// Verify that remaining bits are all 1s (EOS padding).
+	// Validate EOS padding per RFC 7541 Section 5.2:
+	// - Padding MUST consist of the most-significant bits of EOS (all 1s).
+	// - Padding of more than 7 bits MUST be treated as a decoding error.
 	if node != &huffmanTree {
-		// Check that we're on a path of all 1s up to 7 bits.
-		// The padding must consist of the most-significant bits of EOS.
-		// If node is not root, the bits consumed so far must be valid padding.
-		// We accept it as long as we haven't consumed more than 7 padding bits.
+		if paddingBits > 7 {
+			return nil, ErrInvalidHuffman
+		}
+		if !allOnePadding {
+			return nil, ErrInvalidHuffman
+		}
 	}
 	return dst, nil
 }

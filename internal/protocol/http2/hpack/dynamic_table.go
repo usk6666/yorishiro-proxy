@@ -53,6 +53,9 @@ func (dt *DynamicTable) Add(hf HeaderField) {
 	}
 	dt.entries = append(dt.entries, HeaderField{})
 	copy(dt.entries[1:], dt.entries[:len(dt.entries)-1])
+	// Sensitive is intentionally not stored in the dynamic table.
+	// The dynamic table is shared state; sensitivity is a per-encoding
+	// property, not a property of the table entry (RFC 7541 Section 7.1.3).
 	dt.entries[0] = HeaderField{Name: hf.Name, Value: hf.Value}
 	dt.size += s
 	dt.inserted++

@@ -5,24 +5,58 @@ import (
 	"fmt"
 )
 
+// defaultMaxHeaderListSize is the default maximum total size of decoded
+// header fields per header block (in bytes, using RFC 7540 Section 6.5.2
+// calculation: name length + value length + 32 per field). This prevents
+// resource exhaustion from attacker-controlled header blocks.
+const defaultMaxHeaderListSize = 64 * 1024 // 64 KB
+
+// defaultMaxStringLength is the maximum length of a single decoded string
+// literal (header name or value). This prevents excessive memory allocation
+// from crafted string length fields.
+const defaultMaxStringLength = 16 * 1024 // 16 KB
+
 // Decoder decodes HPACK-encoded header blocks.
 type Decoder struct {
-	dynTable       *DynamicTable
-	maxTableSize   uint32 // maximum dynamic table size allowed by SETTINGS
-	pendingMaxSize int64  // pending table size update (-1 = none)
+	dynTable          *DynamicTable
+	maxTableSize      uint32 // maximum dynamic table size allowed by SETTINGS
+	pendingMaxSize    int64  // pending table size update (-1 = none)
+	maxHeaderListSize uint32 // maximum total header list size in bytes
+	maxStringLength   uint32 // maximum decoded string length
 }
 
 // ErrIndexOutOfRange is returned when a header field index exceeds the
 // combined static + dynamic table size.
 var ErrIndexOutOfRange = errors.New("hpack: index out of range")
 
+// ErrHeaderListTooLarge is returned when the total size of decoded header
+// fields exceeds maxHeaderListSize.
+var ErrHeaderListTooLarge = errors.New("hpack: header list size exceeds limit")
+
+// ErrStringTooLong is returned when a decoded string literal exceeds
+// maxStringLength.
+var ErrStringTooLong = errors.New("hpack: string length exceeds limit")
+
 // NewDecoder creates a new Decoder with the given maximum dynamic table size.
 func NewDecoder(maxTableSize uint32) *Decoder {
 	return &Decoder{
-		dynTable:       NewDynamicTable(maxTableSize),
-		maxTableSize:   maxTableSize,
-		pendingMaxSize: -1,
+		dynTable:          NewDynamicTable(maxTableSize),
+		maxTableSize:      maxTableSize,
+		pendingMaxSize:    -1,
+		maxHeaderListSize: defaultMaxHeaderListSize,
+		maxStringLength:   defaultMaxStringLength,
 	}
+}
+
+// SetMaxHeaderListSize sets the maximum total size of decoded header fields
+// per header block (using RFC 7540 Section 6.5.2 calculation).
+func (d *Decoder) SetMaxHeaderListSize(maxSize uint32) {
+	d.maxHeaderListSize = maxSize
+}
+
+// SetMaxStringLength sets the maximum length of a single decoded string literal.
+func (d *Decoder) SetMaxStringLength(maxLen uint32) {
+	d.maxStringLength = maxLen
 }
 
 // DynamicTable returns the decoder's dynamic table for inspection.
@@ -42,12 +76,17 @@ func (d *Decoder) SetMaxTableSize(maxSize uint32) {
 // as specified by the encoded instructions.
 func (d *Decoder) Decode(data []byte) ([]HeaderField, error) {
 	var headers []HeaderField
+	var totalSize uint32
 	for len(data) > 0 {
 		hf, rest, err := d.decodeField(data)
 		if err != nil {
 			return nil, err
 		}
 		if hf != nil {
+			totalSize += hf.Size()
+			if totalSize > d.maxHeaderListSize {
+				return nil, fmt.Errorf("%w: %d bytes", ErrHeaderListTooLarge, totalSize)
+			}
 			headers = append(headers, *hf)
 		}
 		data = rest
@@ -192,6 +231,9 @@ func (d *Decoder) decodeString(data []byte) (string, []byte, error) {
 		return "", nil, fmt.Errorf("hpack: string length: %w", err)
 	}
 	data = data[consumed:]
+	if length > uint64(d.maxStringLength) {
+		return "", nil, fmt.Errorf("%w: %d bytes", ErrStringTooLong, length)
+	}
 	if uint64(len(data)) < length {
 		return "", nil, fmt.Errorf("hpack: string data truncated: need %d, have %d", length, len(data))
 	}
