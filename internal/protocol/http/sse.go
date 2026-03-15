@@ -68,13 +68,9 @@ type sseHookContext struct {
 // within the SSE event loop (streamSSEEvents). It holds the original HTTP
 // request (for intercept rule matching) and the plugin hook context (for
 // per-event plugin dispatch).
-//
-// The conn field is reserved for future use (e.g., writing error responses
-// on intercept drop). Currently unused.
 type sseStreamContext struct {
 	req     *gohttp.Request
 	hookCtx *sseHookContext
-	conn    net.Conn
 }
 
 // handleSSEStream handles Server-Sent Events responses by writing the response
@@ -144,7 +140,7 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 	// Start event sequence after the receive header message.
 	eventSeq.Store(int64(sendResult.recvSequence) + 1)
 
-	sseCtx := &sseStreamContext{req: req, hookCtx: hookCtx, conn: conn}
+	sseCtx := &sseStreamContext{req: req, hookCtx: hookCtx}
 	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, sseCtx, logger)
 
 	// Update flow to complete state with final duration.
@@ -213,7 +209,7 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *go
 	var eventSeq atomic.Int64
 	eventSeq.Store(int64(sendResult.recvSequence) + 1)
 
-	sseCtx := &sseStreamContext{req: req, conn: conn}
+	sseCtx := &sseStreamContext{req: req}
 	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, sseCtx, logger)
 
 	// Update flow to complete state with final duration.
@@ -458,11 +454,38 @@ func applyHTTPResponseToSSEEvent(original *SSEEvent, resp *gohttp.Response, body
 	}
 
 	newEvent := &SSEEvent{
-		EventType: resp.Header.Get("X-SSE-Event"),
-		Data:      string(body),
-		ID:        resp.Header.Get("X-SSE-Id"),
-		Retry:     resp.Header.Get("X-SSE-Retry"),
+		EventType: original.EventType,
+		Data:      original.Data,
+		ID:        original.ID,
+		Retry:     original.Retry,
 		RawBytes:  original.RawBytes,
+	}
+
+	// Update fields only when the plugin actually set them.
+	// body=nil means "no change"; header key absent means "no change".
+	if body != nil {
+		newEvent.Data = string(body)
+	}
+	if vals, ok := resp.Header["X-Sse-Event"]; ok {
+		if len(vals) > 0 {
+			newEvent.EventType = vals[0]
+		} else {
+			newEvent.EventType = ""
+		}
+	}
+	if vals, ok := resp.Header["X-Sse-Id"]; ok {
+		if len(vals) > 0 {
+			newEvent.ID = vals[0]
+		} else {
+			newEvent.ID = ""
+		}
+	}
+	if vals, ok := resp.Header["X-Sse-Retry"]; ok {
+		if len(vals) > 0 {
+			newEvent.Retry = vals[0]
+		} else {
+			newEvent.Retry = ""
+		}
 	}
 
 	// Regenerate RawBytes if the event content changed.
@@ -500,6 +523,12 @@ func (h *Handler) applySSEEventIntercept(ctx context.Context, event *SSEEvent, f
 	matchHeaders.Set("Content-Type", "text/event-stream")
 	if event.EventType != "" {
 		matchHeaders.Set("X-SSE-Event", event.EventType)
+	}
+	if event.ID != "" {
+		matchHeaders.Set("X-SSE-Id", event.ID)
+	}
+	if event.Retry != "" {
+		matchHeaders.Set("X-SSE-Retry", event.Retry)
 	}
 
 	matchedRules := h.InterceptEngine.MatchResponseRules(200, matchHeaders)

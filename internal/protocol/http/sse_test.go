@@ -2161,16 +2161,16 @@ func TestStreamSSEEvents_WithIntercept_Drop(t *testing.T) {
 	seq.Store(2)
 
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req, conn: server}
+	sseCtx := &sseStreamContext{req: req}
 
 	// Drop the second event, release the first and third.
-	var eventNum int
+	var eventNum atomic.Int32
 	go func() {
 		for {
 			items := queue.List()
 			if len(items) > 0 {
-				eventNum++
-				if eventNum == 2 {
+				n := eventNum.Add(1)
+				if n == 2 {
 					queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionDrop})
 				} else {
 					queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
@@ -2180,7 +2180,7 @@ func TestStreamSSEEvents_WithIntercept_Drop(t *testing.T) {
 			} else {
 				time.Sleep(2 * time.Millisecond)
 			}
-			if eventNum >= 3 {
+			if eventNum.Load() >= 3 {
 				return
 			}
 		}
@@ -2239,7 +2239,7 @@ func TestStreamSSEEvents_WithIntercept_ModifyAndForward(t *testing.T) {
 	seq.Store(2)
 
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req, conn: server}
+	sseCtx := &sseStreamContext{req: req}
 
 	newBody := "modified"
 	go func() {
