@@ -429,6 +429,298 @@ func TestOutputFilter_InterceptQueue_MasksBody(t *testing.T) {
 	}
 }
 
+// setupTestSessionWithInterceptAndSafety creates an MCP client session with both
+// an intercept queue and an output-masking safety engine.
+func setupTestSessionWithInterceptAndSafety(t *testing.T, queue *intercept.Queue, engine *safety.Engine) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	s := NewServer(ctx, nil, nil, nil, WithInterceptQueue(queue), WithSafetyEngine(engine))
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+func TestOutputFilter_InterceptRelease_MasksBody(t *testing.T) {
+	engine := newOutputMaskingSafetyEngine(t)
+	queue := intercept.NewQueue()
+	u, _ := url.Parse("http://example.com/api")
+
+	id, actionCh := queue.Enqueue(
+		"POST",
+		u,
+		http.Header{
+			"Content-Type": {"application/json"},
+			"X-Api-Key":    {"sk-interceptedkey12345"},
+		},
+		[]byte(`{"contact":"intercepted@email.com"}`),
+		[]string{"rule-1"},
+	)
+
+	cs := setupTestSessionWithInterceptAndSafety(t, queue, engine)
+
+	done := make(chan struct{})
+	var resultText string
+	go func() {
+		defer close(done)
+		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name:      "intercept",
+			Arguments: outputMustMarshalArgs(t, interceptInput{Action: "release", Params: interceptParams{InterceptID: id}}),
+		})
+		if err != nil {
+			t.Errorf("CallTool error: %v", err)
+			return
+		}
+		if result.IsError {
+			t.Errorf("unexpected error: %v", result.Content)
+			return
+		}
+		resultText = outputTextContent(result)
+	}()
+
+	select {
+	case action := <-actionCh:
+		if action.Type != intercept.ActionRelease {
+			t.Errorf("expected ActionRelease, got %v", action.Type)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for action")
+	}
+
+	<-done
+
+	// Body should be masked.
+	if strings.Contains(resultText, "intercepted@email.com") {
+		t.Error("intercept release body should not contain unmasked email")
+	}
+	if !strings.Contains(resultText, "[EMAIL_REDACTED]") {
+		t.Error("intercept release body should contain [EMAIL_REDACTED] mask")
+	}
+
+	// Headers should be masked.
+	if strings.Contains(resultText, "sk-interceptedkey12345") {
+		t.Error("intercept release headers should not contain unmasked API key")
+	}
+	if !strings.Contains(resultText, "[API_KEY_REDACTED]") {
+		t.Error("intercept release headers should contain [API_KEY_REDACTED] mask")
+	}
+
+	// Verify phase and method are returned.
+	if !strings.Contains(resultText, `"phase":"request"`) {
+		t.Error("intercept release should include phase field")
+	}
+	if !strings.Contains(resultText, `"method":"POST"`) {
+		t.Error("intercept release should include method field")
+	}
+}
+
+func TestOutputFilter_InterceptDrop_MasksBody(t *testing.T) {
+	engine := newOutputMaskingSafetyEngine(t)
+	queue := intercept.NewQueue()
+
+	id, actionCh := queue.EnqueueResponse(
+		"GET",
+		nil,
+		200,
+		http.Header{
+			"Content-Type": {"application/json"},
+			"X-Token":      {"sk-responseapikey12345"},
+		},
+		[]byte(`{"email":"victim@secret.com","data":"ok"}`),
+		[]string{"rule-pii"},
+	)
+
+	cs := setupTestSessionWithInterceptAndSafety(t, queue, engine)
+
+	done := make(chan struct{})
+	var resultText string
+	go func() {
+		defer close(done)
+		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name:      "intercept",
+			Arguments: outputMustMarshalArgs(t, interceptInput{Action: "drop", Params: interceptParams{InterceptID: id}}),
+		})
+		if err != nil {
+			t.Errorf("CallTool error: %v", err)
+			return
+		}
+		if result.IsError {
+			t.Errorf("unexpected error: %v", result.Content)
+			return
+		}
+		resultText = outputTextContent(result)
+	}()
+
+	select {
+	case action := <-actionCh:
+		if action.Type != intercept.ActionDrop {
+			t.Errorf("expected ActionDrop, got %v", action.Type)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for action")
+	}
+
+	<-done
+
+	// Body should be masked.
+	if strings.Contains(resultText, "victim@secret.com") {
+		t.Error("intercept drop body should not contain unmasked email")
+	}
+	if !strings.Contains(resultText, "[EMAIL_REDACTED]") {
+		t.Error("intercept drop body should contain [EMAIL_REDACTED] mask")
+	}
+
+	// Headers should be masked.
+	if strings.Contains(resultText, "sk-responseapikey12345") {
+		t.Error("intercept drop headers should not contain unmasked API key")
+	}
+
+	// Verify response phase fields.
+	if !strings.Contains(resultText, `"phase":"response"`) {
+		t.Error("intercept drop should include response phase")
+	}
+	if !strings.Contains(resultText, `"status_code":200`) {
+		t.Error("intercept drop should include status_code for response phase")
+	}
+}
+
+func TestOutputFilter_InterceptModifyAndForward_MasksBody(t *testing.T) {
+	engine := newOutputMaskingSafetyEngine(t)
+	queue := intercept.NewQueue()
+	u, _ := url.Parse("http://example.com/api/data")
+
+	id, actionCh := queue.Enqueue(
+		"POST",
+		u,
+		http.Header{
+			"Content-Type":  {"application/json"},
+			"Authorization": {"Bearer sk-secretapikey123456"},
+		},
+		[]byte(`{"user":"agent@internal.com"}`),
+		[]string{"rule-auth"},
+	)
+
+	cs := setupTestSessionWithInterceptAndSafety(t, queue, engine)
+
+	done := make(chan struct{})
+	var resultText string
+	go func() {
+		defer close(done)
+		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name: "intercept",
+			Arguments: outputMustMarshalArgs(t, interceptInput{
+				Action: "modify_and_forward",
+				Params: interceptParams{
+					InterceptID:    id,
+					OverrideMethod: "PUT",
+				},
+			}),
+		})
+		if err != nil {
+			t.Errorf("CallTool error: %v", err)
+			return
+		}
+		if result.IsError {
+			t.Errorf("unexpected error: %v", result.Content)
+			return
+		}
+		resultText = outputTextContent(result)
+	}()
+
+	select {
+	case action := <-actionCh:
+		if action.Type != intercept.ActionModifyAndForward {
+			t.Errorf("expected ActionModifyAndForward, got %v", action.Type)
+		}
+		if action.OverrideMethod != "PUT" {
+			t.Errorf("expected method PUT, got %q", action.OverrideMethod)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for action")
+	}
+
+	<-done
+
+	// Body should be masked.
+	if strings.Contains(resultText, "agent@internal.com") {
+		t.Error("intercept modify_and_forward body should not contain unmasked email")
+	}
+	if !strings.Contains(resultText, "[EMAIL_REDACTED]") {
+		t.Error("intercept modify_and_forward body should contain [EMAIL_REDACTED] mask")
+	}
+
+	// Headers should be masked.
+	if strings.Contains(resultText, "sk-secretapikey123456") {
+		t.Error("intercept modify_and_forward headers should not contain unmasked API key")
+	}
+	if !strings.Contains(resultText, "[API_KEY_REDACTED]") {
+		t.Error("intercept modify_and_forward headers should contain [API_KEY_REDACTED] mask")
+	}
+}
+
+func TestOutputFilter_InterceptRelease_NoEngine_PassesThrough(t *testing.T) {
+	queue := intercept.NewQueue()
+
+	id, actionCh := queue.Enqueue(
+		"GET",
+		nil,
+		nil,
+		[]byte(`{"email":"visible@example.com"}`),
+		nil,
+	)
+
+	cs := setupTestSessionWithInterceptQueue(t, queue)
+
+	done := make(chan struct{})
+	var resultText string
+	go func() {
+		defer close(done)
+		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name:      "intercept",
+			Arguments: outputMustMarshalArgs(t, interceptInput{Action: "release", Params: interceptParams{InterceptID: id}}),
+		})
+		if err != nil {
+			t.Errorf("CallTool error: %v", err)
+			return
+		}
+		if result.IsError {
+			t.Errorf("unexpected error: %v", result.Content)
+			return
+		}
+		resultText = outputTextContent(result)
+	}()
+
+	select {
+	case <-actionCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for action")
+	}
+
+	<-done
+
+	// Without safety engine, email should be visible.
+	if !strings.Contains(resultText, "visible@example.com") {
+		t.Error("without safety engine, email should be visible in intercept release output")
+	}
+}
+
 func TestOutputFilter_NoEngine_PassesThrough(t *testing.T) {
 	store := newTestStore(t)
 
