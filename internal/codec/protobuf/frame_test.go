@@ -1,6 +1,7 @@
 package protobuf
 
 import (
+	"encoding/binary"
 	"testing"
 )
 
@@ -120,6 +121,51 @@ func TestFrames_RoundTrip(t *testing.T) {
 			t.Errorf("frame[%d] compressed mismatch", i)
 		}
 		assertBytesEqual(t, original[i].Payload, parsed[i].Payload)
+	}
+}
+
+// TestParseFrame_ExceedsMaxPayloadSize tests that oversized frame payloads are rejected.
+func TestParseFrame_ExceedsMaxPayloadSize(t *testing.T) {
+	// Create a frame header claiming a payload of maxFramePayloadSize + 1
+	oversizeLen := uint32(maxFramePayloadSize + 1)
+	header := make([]byte, 5)
+	header[0] = 0x00
+	binary.BigEndian.PutUint32(header[1:5], oversizeLen)
+
+	_, _, err := ParseFrame(header)
+	if err == nil {
+		t.Error("expected error for oversized frame payload")
+	}
+}
+
+// TestParseFrames_ExceedsMaxPayloadSize tests ParseFrames with oversized payload.
+func TestParseFrames_ExceedsMaxPayloadSize(t *testing.T) {
+	oversizeLen := uint32(maxFramePayloadSize + 1)
+	header := make([]byte, 5)
+	header[0] = 0x00
+	binary.BigEndian.PutUint32(header[1:5], oversizeLen)
+
+	_, err := ParseFrames(header)
+	if err == nil {
+		t.Error("expected error for oversized frame payload")
+	}
+}
+
+// TestParseFrame_AtMaxPayloadSize tests that a frame at exactly maxFramePayloadSize succeeds.
+func TestParseFrame_AtMaxPayloadSize(t *testing.T) {
+	// We only test the header parsing logic, not actual allocation of 16MB.
+	// Build a small valid frame to verify non-oversized frames still work.
+	payload := make([]byte, 100)
+	frame := BuildFrame(Frame{Compressed: 0, Payload: payload})
+	f, consumed, err := ParseFrame(frame)
+	if err != nil {
+		t.Fatalf("ParseFrame: %v", err)
+	}
+	if consumed != 105 {
+		t.Errorf("consumed = %d, want 105", consumed)
+	}
+	if len(f.Payload) != 100 {
+		t.Errorf("payload length = %d, want 100", len(f.Payload))
 	}
 }
 

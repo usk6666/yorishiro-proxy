@@ -23,10 +23,14 @@ const (
 	wire32Bit wireType = 5
 )
 
+// maxRecursionDepth limits the nesting depth of embedded protobuf messages.
+// This prevents stack overflow from maliciously crafted deeply nested structures (CWE-674).
+const maxRecursionDepth = 64
+
 // Decode converts protobuf binary data to a JSON string.
 // The JSON uses sorted keys in the format "field_number:ordinal:type".
 func Decode(data []byte) (string, error) {
-	fields, err := decodeFields(data)
+	fields, err := decodeFieldsWithDepth(data, 0)
 	if err != nil {
 		return "", fmt.Errorf("protobuf decode: %w", err)
 	}
@@ -38,7 +42,17 @@ func Decode(data []byte) (string, error) {
 }
 
 // decodeFields parses protobuf binary into an ordered map (sorted by ordinal).
+// It is a convenience wrapper that starts recursion at depth 0.
 func decodeFields(data []byte) (*orderedMap, error) {
+	return decodeFieldsWithDepth(data, 0)
+}
+
+// decodeFieldsWithDepth parses protobuf binary with recursion depth tracking.
+// Returns an error if depth exceeds maxRecursionDepth.
+func decodeFieldsWithDepth(data []byte, depth int) (*orderedMap, error) {
+	if depth > maxRecursionDepth {
+		return nil, fmt.Errorf("recursion depth %d exceeds maximum %d", depth, maxRecursionDepth)
+	}
 	r := &reader{data: data}
 	m := newOrderedMap()
 	ordinal := 0
@@ -99,7 +113,7 @@ func decodeFields(data []byte) (*orderedMap, error) {
 			if isPrintableUTF8(raw) {
 				key := formatKey(fieldNumber, ordinal, "String")
 				m.set(key, string(raw))
-			} else if sub, err := decodeFields(raw); err == nil {
+			} else if sub, err := decodeFieldsWithDepth(raw, depth+1); err == nil {
 				key := formatKey(fieldNumber, ordinal, "embedded message")
 				m.set(key, sub)
 			} else if validateRepeatedStrictly(raw) {

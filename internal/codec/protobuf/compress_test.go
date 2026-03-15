@@ -113,6 +113,88 @@ func TestCompress_LargePayload(t *testing.T) {
 	}
 }
 
+// TestDecompress_BombProtection tests that decompression is limited to maxDecompressedSize.
+func TestDecompress_BombProtection(t *testing.T) {
+	// Create data slightly over the limit
+	oversize := make([]byte, maxDecompressedSize+1)
+	for i := range oversize {
+		oversize[i] = 'A'
+	}
+
+	// Test gzip
+	t.Run("gzip", func(t *testing.T) {
+		compressed, err := Compress(oversize, "gzip")
+		if err != nil {
+			t.Fatalf("Compress: %v", err)
+		}
+		_, err = Decompress(compressed, "gzip")
+		if err == nil {
+			t.Error("expected error for oversized decompressed data")
+		}
+	})
+
+	// Test deflate
+	t.Run("deflate", func(t *testing.T) {
+		compressed, err := Compress(oversize, "deflate")
+		if err != nil {
+			t.Fatalf("Compress: %v", err)
+		}
+		_, err = Decompress(compressed, "deflate")
+		if err == nil {
+			t.Error("expected error for oversized decompressed data")
+		}
+	})
+
+	// Test snappy
+	t.Run("snappy", func(t *testing.T) {
+		compressed, err := Compress(oversize, "snappy")
+		if err != nil {
+			t.Fatalf("Compress: %v", err)
+		}
+		_, err = Decompress(compressed, "snappy")
+		if err == nil {
+			t.Error("expected error for oversized decompressed data")
+		}
+	})
+
+	// Test zstd
+	t.Run("zstd", func(t *testing.T) {
+		compressed, err := Compress(oversize, "zstd")
+		if err != nil {
+			t.Fatalf("Compress: %v", err)
+		}
+		_, err = Decompress(compressed, "zstd")
+		if err == nil {
+			t.Error("expected error for oversized decompressed data")
+		}
+	})
+}
+
+// TestDecompress_AtLimit tests that data exactly at the limit succeeds.
+func TestDecompress_AtLimit(t *testing.T) {
+	atLimit := make([]byte, maxDecompressedSize)
+	for i := range atLimit {
+		atLimit[i] = 'B'
+	}
+
+	algorithms := []string{"gzip", "deflate", "snappy", "zstd"}
+	for _, alg := range algorithms {
+		t.Run(alg, func(t *testing.T) {
+			compressed, err := Compress(atLimit, alg)
+			if err != nil {
+				t.Fatalf("Compress: %v", err)
+			}
+			decompressed, err := Decompress(compressed, alg)
+			if err != nil {
+				t.Fatalf("Decompress: %v", err)
+			}
+			if len(decompressed) != maxDecompressedSize {
+				t.Errorf("expected %d bytes, got %d", maxDecompressedSize, len(decompressed))
+			}
+		})
+	}
+}
+
 // TestCompress_GzipActuallyCompresses verifies gzip produces smaller output for repetitive data.
 func TestCompress_GzipActuallyCompresses(t *testing.T) {
 	data := make([]byte, 1024)

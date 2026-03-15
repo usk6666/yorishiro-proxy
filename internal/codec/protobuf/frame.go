@@ -5,6 +5,11 @@ import (
 	"fmt"
 )
 
+// maxFramePayloadSize is the maximum allowed gRPC frame payload size (16 MB).
+// This matches the gRPC default maximum message size and prevents excessive
+// memory allocation from malicious frame headers (CWE-770).
+const maxFramePayloadSize = 16 * 1024 * 1024
+
 // Frame represents a single gRPC frame with a 5-byte header:
 // [compressed:1 byte][length:4 bytes big-endian][payload]
 type Frame struct {
@@ -29,6 +34,10 @@ func ParseFrames(data []byte) ([]Frame, error) {
 		compressed := data[offset]
 		length := binary.BigEndian.Uint32(data[offset+1 : offset+5])
 		offset += 5
+
+		if length > maxFramePayloadSize {
+			return nil, fmt.Errorf("grpc frame: payload size %d exceeds maximum %d at offset %d", length, maxFramePayloadSize, offset-5)
+		}
 
 		if uint32(len(data)-offset) < length {
 			return nil, fmt.Errorf("grpc frame: payload truncated at offset %d: need %d bytes, have %d", offset, length, len(data)-offset)
@@ -56,6 +65,10 @@ func ParseFrame(data []byte) (Frame, int, error) {
 
 	compressed := data[0]
 	length := binary.BigEndian.Uint32(data[1:5])
+
+	if length > maxFramePayloadSize {
+		return Frame{}, 0, fmt.Errorf("grpc frame: payload size %d exceeds maximum %d", length, maxFramePayloadSize)
+	}
 
 	total := 5 + int(length)
 	if len(data) < total {

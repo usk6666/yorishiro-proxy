@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -265,7 +266,12 @@ func parseJSONNumber(n json.Number) (uint64, error) {
 	if err == nil {
 		return uint64(i), nil
 	}
-	// May be a large positive number > int64 max. Try float64.
+	// May be a large positive number > int64 max. Try uint64 first for precision.
+	u, uErr := strconv.ParseUint(s, 10, 64)
+	if uErr == nil {
+		return u, nil
+	}
+	// Fall back to float64 for non-integer or unusual formats.
 	f, err := n.Float64()
 	if err != nil {
 		return 0, fmt.Errorf("parse number %q: %w", s, err)

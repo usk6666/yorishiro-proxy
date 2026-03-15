@@ -122,6 +122,32 @@ func TestEncode_EmbeddedMessage(t *testing.T) {
 	assertBytesEqual(t, result, result2)
 }
 
+// TestParseJSONNumber_LargeUint64 tests that large uint64 values are parsed precisely.
+func TestParseJSONNumber_LargeUint64(t *testing.T) {
+	tests := []struct {
+		name string
+		num  json.Number
+		want uint64
+	}{
+		{"max_uint64", json.Number("18446744073709551615"), 18446744073709551615},
+		{"large_uint64", json.Number("18446744073709551614"), 18446744073709551614},
+		{"above_int64_max", json.Number("9223372036854775808"), 9223372036854775808},
+		{"normal", json.Number("42"), 42},
+		{"negative", json.Number("-1"), ^uint64(0)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseJSONNumber(tt.num)
+			if err != nil {
+				t.Fatalf("parseJSONNumber(%q): %v", tt.num, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseJSONNumber(%q) = %d, want %d", tt.num, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestParseKeyParts tests key parsing.
 func TestParseKeyParts(t *testing.T) {
 	tests := []struct {

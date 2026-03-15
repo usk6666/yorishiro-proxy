@@ -284,6 +284,61 @@ func TestValidateRepeatedStrictly(t *testing.T) {
 	}
 }
 
+// TestDecode_RecursionDepthLimit tests that deeply nested messages stop recursive decoding.
+func TestDecode_RecursionDepthLimit(t *testing.T) {
+	// decodeFieldsWithDepth should return error when depth exceeds maxRecursionDepth.
+	// The top-level Decode heuristic treats the error as "not an embedded message"
+	// and falls back to bytes/repeated, so Decode itself won't error.
+	// We test the internal function directly.
+	inner := []byte{0x08, 0x01} // field 1 = 1 (varint)
+	_, err := decodeFieldsWithDepth(inner, maxRecursionDepth+1)
+	if err == nil {
+		t.Error("expected error for depth exceeding maxRecursionDepth")
+	}
+}
+
+// TestDecode_RecursionWithinLimit tests that nesting within limit succeeds.
+func TestDecode_RecursionWithinLimit(t *testing.T) {
+	// Build a message nested to 10 levels - should succeed.
+	inner := []byte{0x08, 0x01} // field 1 = 1 (varint)
+	for i := 0; i < 10; i++ {
+		var w writer
+		w.writeVarint((1 << 3) | uint64(wireLengthDelimited))
+		w.writeVarint(uint64(len(inner)))
+		w.buf = append(w.buf, inner...)
+		inner = w.buf
+	}
+
+	_, err := Decode(inner)
+	if err != nil {
+		t.Errorf("unexpected error for nested message within limit: %v", err)
+	}
+}
+
+// TestDecode_DeepNestingFallsBackToBytes tests that exceeding recursion depth
+// causes the decoder to treat the payload as bytes instead of embedded message.
+func TestDecode_DeepNestingFallsBackToBytes(t *testing.T) {
+	// Build a deeply nested message that exceeds maxRecursionDepth.
+	inner := []byte{0x08, 0x01} // field 1 = 1 (varint)
+	for i := 0; i < maxRecursionDepth+5; i++ {
+		var w writer
+		w.writeVarint((1 << 3) | uint64(wireLengthDelimited))
+		w.writeVarint(uint64(len(inner)))
+		w.buf = append(w.buf, inner...)
+		inner = w.buf
+	}
+
+	// Should not panic (stack overflow) and should decode successfully
+	// by falling back to bytes/repeated for deep levels.
+	jsonStr, err := Decode(inner)
+	if err != nil {
+		t.Fatalf("Decode should not error (fallback to bytes): %v", err)
+	}
+	if jsonStr == "" {
+		t.Error("expected non-empty JSON output")
+	}
+}
+
 // TestDecode_JSONStructure verifies the JSON key format.
 func TestDecode_JSONStructure(t *testing.T) {
 	// Simple varint: field 1 = 150

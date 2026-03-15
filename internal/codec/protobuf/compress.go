@@ -11,6 +11,14 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// maxDecompressedSize is the maximum allowed size of decompressed data (16 MB).
+// This prevents decompression bomb attacks (CWE-409) where a small compressed
+// payload expands to consume excessive memory.
+const maxDecompressedSize = 16 * 1024 * 1024
+
+// ErrDecompressedSizeExceeded is returned when decompressed data exceeds maxDecompressedSize.
+var ErrDecompressedSizeExceeded = fmt.Errorf("protobuf: decompressed size exceeds limit (%d bytes)", maxDecompressedSize)
+
 // ErrUnknownCompression is returned when the grpc-encoding value is not recognized.
 var ErrUnknownCompression = fmt.Errorf("protobuf: unknown compression algorithm")
 
@@ -60,9 +68,13 @@ func decompressGzip(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("gzip decompress: %w", err)
 	}
 	defer r.Close()
-	out, err := io.ReadAll(r)
+	limited := &io.LimitedReader{R: r, N: maxDecompressedSize + 1}
+	out, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("gzip decompress read: %w", err)
+	}
+	if len(out) > maxDecompressedSize {
+		return nil, ErrDecompressedSizeExceeded
 	}
 	return out, nil
 }
@@ -82,9 +94,13 @@ func compressGzip(data []byte) ([]byte, error) {
 func decompressDeflate(data []byte) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(data))
 	defer r.Close()
-	out, err := io.ReadAll(r)
+	limited := &io.LimitedReader{R: r, N: maxDecompressedSize + 1}
+	out, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("deflate decompress: %w", err)
+	}
+	if len(out) > maxDecompressedSize {
+		return nil, ErrDecompressedSizeExceeded
 	}
 	return out, nil
 }
@@ -105,6 +121,13 @@ func compressDeflate(data []byte) ([]byte, error) {
 }
 
 func decompressSnappy(data []byte) ([]byte, error) {
+	decodedLen, err := snappy.DecodedLen(data)
+	if err != nil {
+		return nil, fmt.Errorf("snappy decompress: %w", err)
+	}
+	if decodedLen > maxDecompressedSize {
+		return nil, ErrDecompressedSizeExceeded
+	}
 	out, err := snappy.Decode(nil, data)
 	if err != nil {
 		return nil, fmt.Errorf("snappy decompress: %w", err)
@@ -117,14 +140,18 @@ func compressSnappy(data []byte) ([]byte, error) {
 }
 
 func decompressZstd(data []byte) ([]byte, error) {
-	r, err := zstd.NewReader(bytes.NewReader(data))
+	r, err := zstd.NewReader(bytes.NewReader(data), zstd.WithDecoderMaxMemory(maxDecompressedSize))
 	if err != nil {
 		return nil, fmt.Errorf("zstd decompress init: %w", err)
 	}
 	defer r.Close()
-	out, err := io.ReadAll(r)
+	limited := &io.LimitedReader{R: r, N: maxDecompressedSize + 1}
+	out, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("zstd decompress read: %w", err)
+	}
+	if len(out) > maxDecompressedSize {
+		return nil, ErrDecompressedSizeExceeded
 	}
 	return out, nil
 }
