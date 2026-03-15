@@ -64,10 +64,27 @@ func (s *Server) registerIntercept() {
 }
 
 // executeInterceptResult is the structured output of intercept queue actions.
+// It includes the intercepted item's data (with output filter applied) so the AI
+// can see what it acted upon without a separate query call.
 type executeInterceptResult struct {
 	InterceptID string `json:"intercept_id"`
 	Action      string `json:"action"`
 	Status      string `json:"status"`
+
+	// Phase indicates whether this was a "request" or "response" intercept.
+	Phase string `json:"phase"`
+	// Method is the HTTP method.
+	Method string `json:"method"`
+	// URL is the request URL.
+	URL string `json:"url,omitempty"`
+	// StatusCode is the HTTP status code (only set for response phase).
+	StatusCode int `json:"status_code,omitempty"`
+	// Headers are the request/response headers (output-filtered).
+	Headers map[string][]string `json:"headers"`
+	// BodyEncoding indicates the encoding of the body ("text" or "base64").
+	BodyEncoding string `json:"body_encoding"`
+	// Body is the request/response body (output-filtered, as text or Base64).
+	Body string `json:"body"`
 }
 
 // handleInterceptTool routes the intercept tool invocation to the appropriate action handler.
@@ -86,6 +103,39 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 	}
 }
 
+// buildInterceptResult creates an executeInterceptResult from an intercepted item,
+// applying output filtering to the body and headers before returning to the AI.
+func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action, status string) *executeInterceptResult {
+	// Apply output filter to body.
+	filteredBody := s.filterOutputBody(item.Body)
+	bodyStr, bodyEncoding := encodeBody(filteredBody)
+
+	// Apply output filter to headers.
+	filteredHeaders := s.filterOutputHeaders(item.Headers)
+	headers := make(map[string][]string)
+	for k, vs := range filteredHeaders {
+		headers[k] = vs
+	}
+
+	var urlStr string
+	if item.URL != nil {
+		urlStr = item.URL.String()
+	}
+
+	return &executeInterceptResult{
+		InterceptID:  item.ID,
+		Action:       action,
+		Status:       status,
+		Phase:        string(item.Phase),
+		Method:       item.Method,
+		URL:          urlStr,
+		StatusCode:   item.StatusCode,
+		Headers:      headers,
+		BodyEncoding: bodyEncoding,
+		Body:         bodyStr,
+	}
+}
+
 // handleInterceptRelease handles the release action.
 func (s *Server) handleInterceptRelease(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
 	if s.deps.interceptQueue == nil {
@@ -95,6 +145,12 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 		return nil, nil, fmt.Errorf("intercept_id is required for release action")
 	}
 
+	// Fetch the intercepted item before responding (Respond removes it from the queue).
+	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("release: %w", err)
+	}
+
 	action := intercept.InterceptAction{
 		Type: intercept.ActionRelease,
 	}
@@ -102,11 +158,7 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 		return nil, nil, fmt.Errorf("release: %w", err)
 	}
 
-	return nil, &executeInterceptResult{
-		InterceptID: params.InterceptID,
-		Action:      "release",
-		Status:      "released",
-	}, nil
+	return nil, s.buildInterceptResult(item, "release", "released"), nil
 }
 
 // handleInterceptModifyAndForward handles the modify_and_forward action.
@@ -160,15 +212,17 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 		OverrideResponseBody:    params.OverrideResponseBody,
 	}
 
+	// Fetch the intercepted item before responding (Respond removes it from the queue).
+	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
 	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
 
-	return nil, &executeInterceptResult{
-		InterceptID: params.InterceptID,
-		Action:      "modify_and_forward",
-		Status:      "forwarded",
-	}, nil
+	return nil, s.buildInterceptResult(item, "modify_and_forward", "forwarded"), nil
 }
 
 // handleInterceptDrop handles the drop action.
@@ -180,6 +234,12 @@ func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) 
 		return nil, nil, fmt.Errorf("intercept_id is required for drop action")
 	}
 
+	// Fetch the intercepted item before responding (Respond removes it from the queue).
+	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("drop: %w", err)
+	}
+
 	action := intercept.InterceptAction{
 		Type: intercept.ActionDrop,
 	}
@@ -187,9 +247,5 @@ func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) 
 		return nil, nil, fmt.Errorf("drop: %w", err)
 	}
 
-	return nil, &executeInterceptResult{
-		InterceptID: params.InterceptID,
-		Action:      "drop",
-		Status:      "dropped",
-	}, nil
+	return nil, s.buildInterceptResult(item, "drop", "dropped"), nil
 }
