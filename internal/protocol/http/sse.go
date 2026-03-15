@@ -58,10 +58,19 @@ func addSSETags(tags map[string]string) map[string]string {
 // sseHookContext holds the plugin hook context for SSE stream processing.
 // This carries the plugin ConnInfo and transaction context through to the
 // SSE handler so that on_receive_from_server and on_before_send_to_client
-// hooks can be dispatched at the header level.
+// hooks can be dispatched at the header level and per-event level.
 type sseHookContext struct {
 	connInfo *plugin.ConnInfo
 	txCtx    map[string]any
+}
+
+// sseStreamContext carries all context needed for event-level processing
+// within the SSE event loop (streamSSEEvents). It holds the original HTTP
+// request (for intercept rule matching) and the plugin hook context (for
+// per-event plugin dispatch).
+type sseStreamContext struct {
+	req     *gohttp.Request
+	hookCtx *sseHookContext
 }
 
 // handleSSEStream handles Server-Sent Events responses by writing the response
@@ -131,7 +140,8 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 	// Start event sequence after the receive header message.
 	eventSeq.Store(int64(sendResult.recvSequence) + 1)
 
-	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, logger)
+	sseCtx := &sseStreamContext{req: req, hookCtx: hookCtx}
+	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, sseCtx, logger)
 
 	// Update flow to complete state with final duration.
 	duration := time.Since(start)
@@ -152,6 +162,12 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 //
 // Before writing response headers, this function applies:
 //   - Response intercept check (header-level, DROP or RELEASE)
+//
+// Note: Per-event plugin hooks (on_receive_from_server, on_before_send_to_client)
+// are NOT dispatched in the TLS path because hookCtx is not propagated from the
+// CONNECT tunnel handler. Event-level intercept and variant tracking still work.
+// This is a known limitation; extending plugin hooks to the TLS SSE path requires
+// plumbing ConnInfo through the CONNECT handler.
 //
 // See handleSSEStream for details on output filter application and skipped
 // processing steps.
@@ -193,7 +209,8 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *go
 	var eventSeq atomic.Int64
 	eventSeq.Store(int64(sendResult.recvSequence) + 1)
 
-	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, logger)
+	sseCtx := &sseStreamContext{req: req}
+	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, sseCtx, logger)
 
 	// Update flow to complete state with final duration.
 	duration := time.Since(start)
@@ -236,22 +253,28 @@ func writeSSEResponseHeaders(conn net.Conn, resp *gohttp.Response) error {
 // terminated.
 var errSSEOutputFilterBlocked = errors.New("SSE stream blocked by output filter")
 
-// streamSSEEvents reads SSE events from src, forwards each event's raw bytes
-// to the client connection, and records each event as a flow.Message.
+// streamSSEEvents reads SSE events from src, processes each event through
+// the intercept / plugin / output-filter pipeline, and forwards it to the
+// client connection. Each event is also recorded as a flow.Message.
 // It respects context cancellation by setting a write deadline on the connection.
 //
-// Events are parsed using the SSE parser. Before forwarding to the client,
-// output filter rules are applied to the event data:
-//   - action=mask: The event data is masked and the event is reconstructed
-//     with filtered data before forwarding. Flow recording stores the
-//     original (unfiltered) data.
-//   - action=block: The stream is immediately terminated.
-//   - action=log_only: A log entry is emitted but the event is forwarded
-//     unchanged.
+// Processing order for each event:
+//  1. parser.Next() — parse event
+//  2. on_receive_from_server plugin hook — event received
+//  3. Snapshot (for variant tracking)
+//  4. Intercept check → hold → AI decision → release/drop/modify
+//  5. on_before_send_to_client plugin hook — before forwarding
+//  6. Record event (raw data + variant if modified)
+//  7. Output filter (PII masking) — applied to data sent to client
+//  8. Forward to client
+//
+// The sseCtx parameter carries the original HTTP request (for intercept rule
+// matching), plugin hook context, and the destination connection. It may be
+// nil, in which case intercept and plugin hooks are skipped.
 //
 // Recording stops after config.MaxSSEEventsPerStream events to prevent
 // unbounded DB growth, but forwarding (with filtering) continues.
-func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Reader, flowID string, seq *atomic.Int64, logger *slog.Logger) error {
+func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Reader, flowID string, seq *atomic.Int64, sseCtx *sseStreamContext, logger *slog.Logger) error {
 	// Watch for context cancellation and interrupt blocking reads.
 	done := make(chan struct{})
 	defer close(done)
@@ -287,25 +310,27 @@ func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Read
 			return fmt.Errorf("SSE parse: %w", err)
 		}
 
-		// Apply output filter to the event data before forwarding.
-		sendBytes, blocked := h.applySSEOutputFilter(event, logger)
-		if blocked {
-			logger.Warn("SSE stream terminated by output filter (action=block)",
+		// Step 1: Plugin hook — on_receive_from_server (event-level).
+		event = h.dispatchSSEOnReceiveFromServer(ctx, event, sseCtx, logger)
+
+		// Step 2: Snapshot for variant tracking (before intercept/plugin modifications).
+		snap := snapshotSSEEvent(event)
+
+		// Step 3: Intercept check — hold → AI decision → release/drop/modify.
+		event, dropped := h.applySSEEventIntercept(ctx, event, flowID, sseCtx, logger)
+		if dropped {
+			// Event was dropped. Skip forwarding and recording, continue to next event.
+			logger.Info("SSE event dropped by intercept",
 				"flow_id", flowID,
-				"event_type", event.EventType)
-			return errSSEOutputFilterBlocked
+				"event_type", snap.eventType)
+			continue
 		}
 
-		// Forward the (possibly filtered) event bytes to the client.
-		if _, writeErr := dst.Write(sendBytes); writeErr != nil {
-			if ctx.Err() != nil {
-				dst.SetWriteDeadline(time.Time{})
-				return ctx.Err()
-			}
-			return fmt.Errorf("SSE write to client: %w", writeErr)
-		}
+		// Step 4: Plugin hook — on_before_send_to_client (event-level).
+		event = h.dispatchSSEOnBeforeSendToClient(ctx, event, sseCtx, logger)
 
-		// Record the event as a flow message (always with original data).
+		// Step 5: Record the event as a flow message (always with original data).
+		// If the event was modified by intercept or plugin, record both versions.
 		eventCount++
 		if !recordingDisabled {
 			if eventCount > config.MaxSSEEventsPerStream {
@@ -314,9 +339,368 @@ func (h *Handler) streamSSEEvents(ctx context.Context, dst net.Conn, src io.Read
 					"limit", config.MaxSSEEventsPerStream)
 				recordingDisabled = true
 			} else {
-				h.recordSSEEvent(ctx, flowID, event, seq, logger)
+				h.recordSSEEventWithVariant(ctx, flowID, event, &snap, seq, logger)
 			}
 		}
+
+		// Step 6: Apply output filter to the event data before forwarding.
+		sendBytes, blocked := h.applySSEOutputFilter(event, logger)
+		if blocked {
+			logger.Warn("SSE stream terminated by output filter (action=block)",
+				"flow_id", flowID,
+				"event_type", event.EventType)
+			return errSSEOutputFilterBlocked
+		}
+
+		// Step 7: Forward the (possibly filtered) event bytes to the client.
+		if _, writeErr := dst.Write(sendBytes); writeErr != nil {
+			if ctx.Err() != nil {
+				dst.SetWriteDeadline(time.Time{})
+				return ctx.Err()
+			}
+			return fmt.Errorf("SSE write to client: %w", writeErr)
+		}
+	}
+}
+
+// sseEventSnapshot holds a copy of SSE event data before intercept/plugin
+// processing, used for variant tracking.
+type sseEventSnapshot struct {
+	eventType string
+	data      string
+	id        string
+	retry     string
+}
+
+// snapshotSSEEvent creates a snapshot of the SSE event for variant tracking.
+func snapshotSSEEvent(event *SSEEvent) sseEventSnapshot {
+	return sseEventSnapshot{
+		eventType: event.EventType,
+		data:      event.Data,
+		id:        event.ID,
+		retry:     event.Retry,
+	}
+}
+
+// sseEventModified reports whether the SSE event was changed relative to the
+// snapshot taken before intercept/plugin processing.
+func sseEventModified(snap sseEventSnapshot, event *SSEEvent) bool {
+	return snap.eventType != event.EventType ||
+		snap.data != event.Data ||
+		snap.id != event.ID ||
+		snap.retry != event.Retry
+}
+
+// dispatchSSEOnReceiveFromServer dispatches the on_receive_from_server plugin
+// hook for a single SSE event. The event data is passed as the response body,
+// and event metadata (event type, id, retry) is passed as headers.
+// Returns the (possibly modified) event.
+func (h *Handler) dispatchSSEOnReceiveFromServer(ctx context.Context, event *SSEEvent, sseCtx *sseStreamContext, logger *slog.Logger) *SSEEvent {
+	if h.pluginEngine == nil || sseCtx == nil || sseCtx.hookCtx == nil {
+		return event
+	}
+
+	resp, body := sseEventToHTTPResponse(event)
+	resp, body = h.dispatchOnReceiveFromServer(ctx, resp, body, sseCtx.req, sseCtx.hookCtx.connInfo, sseCtx.hookCtx.txCtx, logger)
+	return applyHTTPResponseToSSEEvent(event, resp, body)
+}
+
+// dispatchSSEOnBeforeSendToClient dispatches the on_before_send_to_client plugin
+// hook for a single SSE event. Same mapping as dispatchSSEOnReceiveFromServer.
+// Returns the (possibly modified) event.
+func (h *Handler) dispatchSSEOnBeforeSendToClient(ctx context.Context, event *SSEEvent, sseCtx *sseStreamContext, logger *slog.Logger) *SSEEvent {
+	if h.pluginEngine == nil || sseCtx == nil || sseCtx.hookCtx == nil {
+		return event
+	}
+
+	resp, body := sseEventToHTTPResponse(event)
+	resp, body = h.dispatchOnBeforeSendToClient(ctx, resp, body, sseCtx.req, sseCtx.hookCtx.connInfo, sseCtx.hookCtx.txCtx, logger)
+	return applyHTTPResponseToSSEEvent(event, resp, body)
+}
+
+// sseEventToHTTPResponse converts an SSE event into a synthetic HTTP response
+// suitable for passing to plugin hooks. The event data is the response body,
+// and event metadata (event type, id, retry) is encoded as pseudo-headers
+// with an "X-SSE-" prefix.
+func sseEventToHTTPResponse(event *SSEEvent) (*gohttp.Response, []byte) {
+	headers := gohttp.Header{}
+	headers.Set("Content-Type", "text/event-stream")
+	if event.EventType != "" {
+		headers.Set("X-SSE-Event", event.EventType)
+	}
+	if event.ID != "" {
+		headers.Set("X-SSE-Id", event.ID)
+	}
+	if event.Retry != "" {
+		headers.Set("X-SSE-Retry", event.Retry)
+	}
+
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     headers,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+	}
+	return resp, []byte(event.Data)
+}
+
+// applyHTTPResponseToSSEEvent applies changes from a plugin-modified HTTP
+// response back to the SSE event. If the response body or metadata headers
+// changed, the event is updated accordingly. RawBytes is regenerated for the
+// modified event.
+func applyHTTPResponseToSSEEvent(original *SSEEvent, resp *gohttp.Response, body []byte) *SSEEvent {
+	if resp == nil {
+		return original
+	}
+
+	newEvent := &SSEEvent{
+		EventType: original.EventType,
+		Data:      original.Data,
+		ID:        original.ID,
+		Retry:     original.Retry,
+		RawBytes:  original.RawBytes,
+	}
+
+	// Update fields only when the plugin actually set them.
+	// body=nil means "no change"; header key absent means "no change".
+	if body != nil {
+		newEvent.Data = string(body)
+	}
+	if vals, ok := resp.Header["X-Sse-Event"]; ok {
+		if len(vals) > 0 {
+			newEvent.EventType = vals[0]
+		} else {
+			newEvent.EventType = ""
+		}
+	}
+	if vals, ok := resp.Header["X-Sse-Id"]; ok {
+		if len(vals) > 0 {
+			newEvent.ID = vals[0]
+		} else {
+			newEvent.ID = ""
+		}
+	}
+	if vals, ok := resp.Header["X-Sse-Retry"]; ok {
+		if len(vals) > 0 {
+			newEvent.Retry = vals[0]
+		} else {
+			newEvent.Retry = ""
+		}
+	}
+
+	// Regenerate RawBytes if the event content changed.
+	if newEvent.EventType != original.EventType ||
+		newEvent.Data != original.Data ||
+		newEvent.ID != original.ID ||
+		newEvent.Retry != original.Retry {
+		newEvent.RawBytes = []byte(newEvent.String())
+	}
+
+	return newEvent
+}
+
+// applySSEEventIntercept checks if the SSE event matches any intercept rules
+// and, if so, enqueues it for AI agent review. The event data is sent as the
+// response body, and event metadata is encoded as headers.
+//
+// For SSE events, all three actions are supported:
+//   - Release: event is forwarded unchanged
+//   - Drop: event is skipped (not forwarded to client)
+//   - ModifyAndForward: event fields are updated from the action's response
+//     modification fields
+//
+// Returns the (possibly modified) event and true if dropped.
+func (h *Handler) applySSEEventIntercept(ctx context.Context, event *SSEEvent, flowID string, sseCtx *sseStreamContext, logger *slog.Logger) (*SSEEvent, bool) {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil || sseCtx == nil || sseCtx.req == nil {
+		return event, false
+	}
+
+	// Build synthetic response headers for rule matching.
+	// We use the real response headers (Content-Type: text/event-stream) plus
+	// SSE metadata for matching. The intercept rules match on response status
+	// code and headers.
+	matchHeaders := gohttp.Header{}
+	matchHeaders.Set("Content-Type", "text/event-stream")
+	if event.EventType != "" {
+		matchHeaders.Set("X-SSE-Event", event.EventType)
+	}
+	if event.ID != "" {
+		matchHeaders.Set("X-SSE-Id", event.ID)
+	}
+	if event.Retry != "" {
+		matchHeaders.Set("X-SSE-Retry", event.Retry)
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(200, matchHeaders)
+	if len(matchedRules) == 0 {
+		return event, false
+	}
+
+	logger.Info("SSE event intercepted",
+		"flow_id", flowID,
+		"event_type", event.EventType,
+		"matched_rules", matchedRules)
+
+	// Build the body to enqueue. For intercept display, apply output filter
+	// so the AI sees masked data (USK-368 pattern).
+	eventBody := []byte(event.Data)
+	filteredBody := h.filterSSEEventBodyForIntercept(eventBody, logger)
+
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		sseCtx.req.Method, sseCtx.req.URL, 200, matchHeaders, filteredBody, matchedRules,
+	)
+	defer h.InterceptQueue.Remove(id)
+
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	var action intercept.InterceptAction
+	select {
+	case action = <-actionCh:
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			logger.Info("intercepted SSE event cancelled (proxy shutdown)", "id", id)
+			action = intercept.InterceptAction{Type: intercept.ActionDrop}
+		} else {
+			logger.Info("intercepted SSE event timed out", "id", id, "behavior", string(behavior))
+			switch behavior {
+			case intercept.TimeoutAutoDrop:
+				action = intercept.InterceptAction{Type: intercept.ActionDrop}
+			default:
+				action = intercept.InterceptAction{Type: intercept.ActionRelease}
+			}
+		}
+	}
+
+	switch action.Type {
+	case intercept.ActionDrop:
+		return event, true
+	case intercept.ActionModifyAndForward:
+		modified := applySSEEventModifications(event, action)
+		return modified, false
+	default:
+		// ActionRelease or unknown: continue with original event.
+		return event, false
+	}
+}
+
+// filterSSEEventBodyForIntercept applies the safety engine's output filter to
+// the event body for display in the intercept queue. This ensures the AI sees
+// masked data (USK-368 pattern). Returns the filtered body, or the original
+// body if no filter is configured.
+func (h *Handler) filterSSEEventBodyForIntercept(body []byte, logger *slog.Logger) []byte {
+	if h.SafetyEngine == nil || len(h.SafetyEngine.OutputRules()) == 0 {
+		return body
+	}
+
+	result := h.SafetyEngine.FilterOutput(body)
+	if result.Masked {
+		return result.Data
+	}
+	return body
+}
+
+// applySSEEventModifications applies modify_and_forward modifications from an
+// intercept action to an SSE event. It uses the response modification fields:
+//   - OverrideResponseBody: replaces the event Data
+//   - OverrideResponseHeaders: can set X-SSE-Event, X-SSE-Id, X-SSE-Retry
+//   - AddResponseHeaders: same as override for SSE pseudo-headers
+//
+// Returns a new SSEEvent with the modifications applied.
+func applySSEEventModifications(event *SSEEvent, action intercept.InterceptAction) *SSEEvent {
+	modified := &SSEEvent{
+		EventType: event.EventType,
+		Data:      event.Data,
+		ID:        event.ID,
+		Retry:     event.Retry,
+	}
+
+	// Apply body override.
+	if action.OverrideResponseBody != nil {
+		modified.Data = *action.OverrideResponseBody
+	}
+
+	// Apply header overrides for SSE metadata.
+	for key, val := range action.OverrideResponseHeaders {
+		switch gohttp.CanonicalHeaderKey(key) {
+		case "X-Sse-Event":
+			modified.EventType = val
+		case "X-Sse-Id":
+			modified.ID = val
+		case "X-Sse-Retry":
+			modified.Retry = val
+		}
+	}
+
+	// Apply added headers for SSE metadata.
+	for key, val := range action.AddResponseHeaders {
+		switch gohttp.CanonicalHeaderKey(key) {
+		case "X-Sse-Event":
+			modified.EventType = val
+		case "X-Sse-Id":
+			modified.ID = val
+		case "X-Sse-Retry":
+			modified.Retry = val
+		}
+	}
+
+	// Regenerate RawBytes for the modified event.
+	modified.RawBytes = []byte(modified.String())
+	return modified
+}
+
+// recordSSEEventWithVariant records a single SSE event as a flow.Message,
+// including variant tracking if the event was modified by intercept or plugin.
+// When the event was modified, two messages are recorded:
+//   - Sequence N:   original (variant="original") with the snapshot data
+//   - Sequence N+1: modified (variant="modified") with the current event data
+//
+// When no modification occurred, a single message is recorded without variant
+// metadata (same as the original recordSSEEvent behavior).
+func (h *Handler) recordSSEEventWithVariant(ctx context.Context, flowID string, event *SSEEvent, snap *sseEventSnapshot, seq *atomic.Int64, logger *slog.Logger) {
+	if h.Store == nil {
+		return
+	}
+
+	modified := snap != nil && sseEventModified(*snap, event)
+
+	if modified {
+		// Record the original (unmodified) event.
+		origEvent := &SSEEvent{
+			EventType: snap.eventType,
+			Data:      snap.data,
+			ID:        snap.id,
+			Retry:     snap.retry,
+		}
+		origEvent.RawBytes = []byte(origEvent.String())
+
+		origSeq := int(seq.Add(1) - 1)
+		origMsg := buildSSEEventMessage(flowID, origSeq, origEvent)
+		origMsg.Metadata["variant"] = "original"
+		if err := h.Store.AppendMessage(ctx, origMsg); err != nil {
+			logger.Error("SSE original event message save failed",
+				"flow_id", flowID,
+				"sequence", origSeq,
+				"error", err,
+			)
+		}
+
+		// Record the modified event.
+		modSeq := int(seq.Add(1) - 1)
+		modMsg := buildSSEEventMessage(flowID, modSeq, event)
+		modMsg.Metadata["variant"] = "modified"
+		if err := h.Store.AppendMessage(ctx, modMsg); err != nil {
+			logger.Error("SSE modified event message save failed",
+				"flow_id", flowID,
+				"sequence", modSeq,
+				"error", err,
+			)
+		}
+	} else {
+		// No modification: single event message without variant metadata.
+		h.recordSSEEvent(ctx, flowID, event, seq, logger)
 	}
 }
 
@@ -569,16 +953,10 @@ func (h *Handler) completeSSEFlowOnDrop(ctx context.Context, sendResult *sendRec
 	}
 }
 
-// recordSSEEvent records a single SSE event as a flow.Message with
-// direction="receive". The event data is stored in the message Body,
-// and event metadata (type, id, retry) is stored in Metadata.
-func (h *Handler) recordSSEEvent(ctx context.Context, flowID string, event *SSEEvent, seq *atomic.Int64, logger *slog.Logger) {
-	if h.Store == nil {
-		return
-	}
-
-	msgSeq := int(seq.Add(1) - 1)
-
+// buildSSEEventMessage constructs a flow.Message for a single SSE event.
+// The event data is stored in the message Body, and event metadata (type, id,
+// retry) is stored in Metadata. Body is truncated to MaxSSERecordPayloadSize.
+func buildSSEEventMessage(flowID string, msgSeq int, event *SSEEvent) *flow.Message {
 	metadata := map[string]string{
 		"sse_type": "event",
 	}
@@ -599,7 +977,7 @@ func (h *Handler) recordSSEEvent(ctx context.Context, flowID string, event *SSEE
 		truncated = true
 	}
 
-	msg := &flow.Message{
+	return &flow.Message{
 		FlowID:        flowID,
 		Sequence:      msgSeq,
 		Direction:     "receive",
@@ -609,6 +987,18 @@ func (h *Handler) recordSSEEvent(ctx context.Context, flowID string, event *SSEE
 		BodyTruncated: truncated,
 		Metadata:      metadata,
 	}
+}
+
+// recordSSEEvent records a single SSE event as a flow.Message with
+// direction="receive". The event data is stored in the message Body,
+// and event metadata (type, id, retry) is stored in Metadata.
+func (h *Handler) recordSSEEvent(ctx context.Context, flowID string, event *SSEEvent, seq *atomic.Int64, logger *slog.Logger) {
+	if h.Store == nil {
+		return
+	}
+
+	msgSeq := int(seq.Add(1) - 1)
+	msg := buildSSEEventMessage(flowID, msgSeq, event)
 
 	if err := h.Store.AppendMessage(ctx, msg); err != nil {
 		logger.Error("SSE event message save failed",

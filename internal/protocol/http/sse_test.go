@@ -1008,7 +1008,7 @@ func TestStreamSSEEvents_RecordsEvents(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, testutil.DiscardLogger())
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, nil, testutil.DiscardLogger())
 		server.Close()
 	}()
 
@@ -1071,7 +1071,7 @@ func TestStreamSSEEvents_ContextCancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- h.streamSSEEvents(ctx, server, pr, "flow-1", &seq, testutil.DiscardLogger())
+		errCh <- h.streamSSEEvents(ctx, server, pr, "flow-1", &seq, nil, testutil.DiscardLogger())
 	}()
 
 	// Send one event then cancel.
@@ -1104,7 +1104,7 @@ func TestStreamSSEEvents_EmptyStream(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(""), "flow-1", &seq, testutil.DiscardLogger())
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(""), "flow-1", &seq, nil, testutil.DiscardLogger())
 		server.Close()
 	}()
 
@@ -1360,7 +1360,7 @@ func TestStreamSSEEvents_WithOutputFilter_Mask(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, testutil.DiscardLogger())
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, nil, testutil.DiscardLogger())
 		server.Close()
 	}()
 
@@ -1421,7 +1421,7 @@ func TestStreamSSEEvents_WithOutputFilter_Block(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, testutil.DiscardLogger())
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, nil, testutil.DiscardLogger())
 		server.Close()
 	}()
 
@@ -1445,8 +1445,924 @@ func TestStreamSSEEvents_WithOutputFilter_Block(t *testing.T) {
 		t.Error("client should not have received events after block")
 	}
 
-	// Only the first event should have been recorded.
+	// Both the safe event and the blocked event should be recorded. Recording
+	// happens before the output filter (raw data is preserved for forensics),
+	// so the blocked event is recorded before the stream is terminated.
+	if len(store.messages) != 2 {
+		t.Fatalf("expected 2 recorded messages (including blocked event), got %d", len(store.messages))
+	}
+	if string(store.messages[0].Body) != "safe data" {
+		t.Errorf("message[0].Body = %q, want %q", string(store.messages[0].Body), "safe data")
+	}
+	if string(store.messages[1].Body) != "BLOCKED_PAYLOAD here" {
+		t.Errorf("message[1].Body = %q, want %q", string(store.messages[1].Body), "BLOCKED_PAYLOAD here")
+	}
+}
+
+// --- SSE Event-Level Intercept Tests ---
+
+func TestApplySSEEventIntercept_NoEngine(t *testing.T) {
+	h := &Handler{}
+	event := &SSEEvent{Data: "hello", RawBytes: []byte("data: hello\n\n")}
+
+	got, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", nil, testutil.DiscardLogger())
+	if dropped {
+		t.Error("expected dropped=false with no engine")
+	}
+	if got.Data != event.Data {
+		t.Errorf("event data = %q, want %q", got.Data, event.Data)
+	}
+}
+
+func TestApplySSEEventIntercept_NilContext(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "r1",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	event := &SSEEvent{Data: "hello", RawBytes: []byte("data: hello\n\n")}
+
+	// nil sseCtx should skip intercept.
+	got, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", nil, testutil.DiscardLogger())
+	if dropped {
+		t.Error("expected dropped=false with nil sseCtx")
+	}
+	if got.Data != event.Data {
+		t.Errorf("event data = %q, want %q", got.Data, event.Data)
+	}
+}
+
+func TestApplySSEEventIntercept_NoMatchingRules(t *testing.T) {
+	engine := intercept.NewEngine()
+	// Add request-only rule that won't match responses.
+	engine.AddRule(intercept.Rule{
+		ID:        "req-only",
+		Enabled:   true,
+		Direction: intercept.DirectionRequest,
+	})
+
+	queue := intercept.NewQueue()
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	event := &SSEEvent{Data: "hello", RawBytes: []byte("data: hello\n\n")}
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	got, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
+	if dropped {
+		t.Error("expected dropped=false when no rules match")
+	}
+	if got.Data != event.Data {
+		t.Errorf("event data = %q, want %q", got.Data, event.Data)
+	}
+}
+
+func TestApplySSEEventIntercept_Drop(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "drop-event",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	event := &SSEEvent{Data: "drop me", RawBytes: []byte("data: drop me\n\n")}
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	// Resolve with DROP action in a goroutine.
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionDrop})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	_, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
+	if !dropped {
+		t.Error("expected dropped=true when DROP action is received")
+	}
+}
+
+func TestApplySSEEventIntercept_Release(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "release-event",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	event := &SSEEvent{Data: "keep me", RawBytes: []byte("data: keep me\n\n")}
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	got, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
+	if dropped {
+		t.Error("expected dropped=false when RELEASE action is received")
+	}
+	if got.Data != event.Data {
+		t.Errorf("event data = %q, want %q", got.Data, event.Data)
+	}
+}
+
+func TestApplySSEEventIntercept_ModifyAndForward(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "modify-event",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	event := &SSEEvent{
+		EventType: "original-type",
+		Data:      "original data",
+		ID:        "1",
+		RawBytes:  []byte("event: original-type\nid: 1\ndata: original data\n\n"),
+	}
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	newBody := "modified data"
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				queue.Respond(items[0].ID, intercept.InterceptAction{
+					Type:                    intercept.ActionModifyAndForward,
+					OverrideResponseBody:    &newBody,
+					OverrideResponseHeaders: map[string]string{"X-SSE-Event": "modified-type"},
+				})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	got, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
+	if dropped {
+		t.Error("expected dropped=false for ModifyAndForward")
+	}
+	if got.Data != "modified data" {
+		t.Errorf("event Data = %q, want %q", got.Data, "modified data")
+	}
+	if got.EventType != "modified-type" {
+		t.Errorf("event EventType = %q, want %q", got.EventType, "modified-type")
+	}
+	// ID should be unchanged since we didn't override it.
+	if got.ID != "1" {
+		t.Errorf("event ID = %q, want %q", got.ID, "1")
+	}
+}
+
+func TestApplySSEEventIntercept_Timeout_AutoRelease(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "timeout-event",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(50 * time.Millisecond)
+	queue.SetTimeoutBehavior(intercept.TimeoutAutoRelease)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	event := &SSEEvent{Data: "timeout me", RawBytes: []byte("data: timeout me\n\n")}
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	// Don't resolve — let it timeout with auto_release.
+	_, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
+	if dropped {
+		t.Error("expected dropped=false on timeout with auto_release")
+	}
+}
+
+func TestApplySSEEventIntercept_Timeout_AutoDrop(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "timeout-drop-event",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(50 * time.Millisecond)
+	queue.SetTimeoutBehavior(intercept.TimeoutAutoDrop)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	event := &SSEEvent{Data: "timeout drop", RawBytes: []byte("data: timeout drop\n\n")}
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	// Don't resolve — let it timeout with auto_drop.
+	_, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
+	if !dropped {
+		t.Error("expected dropped=true on timeout with auto_drop")
+	}
+}
+
+func TestApplySSEEventIntercept_OutputFilterAppliedToEnqueuedBody(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "filter-check",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	safetyEngine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:          "mask-secret",
+			Name:        "Mask Secret",
+			Pattern:     `SECRET-\d+`,
+			Targets:     []string{"body"},
+			Action:      "mask",
+			Replacement: "[MASKED]",
+		},
+	})
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+	h.SafetyEngine = safetyEngine
+
+	event := &SSEEvent{Data: "token SECRET-123", RawBytes: []byte("data: token SECRET-123\n\n")}
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	// Capture the enqueued item's body.
+	bodyCh := make(chan []byte, 1)
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				bodyCh <- items[0].Body
+				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
+
+	select {
+	case body := <-bodyCh:
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "SECRET-123") {
+			t.Error("enqueued body should have SECRET masked")
+		}
+		if !strings.Contains(bodyStr, "[MASKED]") {
+			t.Errorf("enqueued body should contain [MASKED], got %q", bodyStr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
+	}
+}
+
+// --- SSE Event Modifications Tests ---
+
+func TestApplySSEEventModifications(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     *SSEEvent
+		action    intercept.InterceptAction
+		wantData  string
+		wantType  string
+		wantID    string
+		wantRetry string
+	}{
+		{
+			name:  "override body only",
+			event: &SSEEvent{EventType: "msg", Data: "original", ID: "1"},
+			action: intercept.InterceptAction{
+				Type:                 intercept.ActionModifyAndForward,
+				OverrideResponseBody: strPtr("new data"),
+			},
+			wantData: "new data",
+			wantType: "msg",
+			wantID:   "1",
+		},
+		{
+			name:  "override event type via headers",
+			event: &SSEEvent{EventType: "old", Data: "data"},
+			action: intercept.InterceptAction{
+				Type:                    intercept.ActionModifyAndForward,
+				OverrideResponseHeaders: map[string]string{"X-SSE-Event": "new-type"},
+			},
+			wantData: "data",
+			wantType: "new-type",
+		},
+		{
+			name:  "override ID and retry via add headers",
+			event: &SSEEvent{Data: "data", ID: "old-id"},
+			action: intercept.InterceptAction{
+				Type:               intercept.ActionModifyAndForward,
+				AddResponseHeaders: map[string]string{"X-SSE-Id": "new-id", "X-SSE-Retry": "3000"},
+			},
+			wantData:  "data",
+			wantID:    "new-id",
+			wantRetry: "3000",
+		},
+		{
+			name:  "override everything",
+			event: &SSEEvent{EventType: "a", Data: "b", ID: "c", Retry: "1000"},
+			action: intercept.InterceptAction{
+				Type:                    intercept.ActionModifyAndForward,
+				OverrideResponseBody:    strPtr("new-body"),
+				OverrideResponseHeaders: map[string]string{"X-SSE-Event": "x", "X-SSE-Id": "y", "X-SSE-Retry": "2000"},
+			},
+			wantData:  "new-body",
+			wantType:  "x",
+			wantID:    "y",
+			wantRetry: "2000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applySSEEventModifications(tt.event, tt.action)
+			if got.Data != tt.wantData {
+				t.Errorf("Data = %q, want %q", got.Data, tt.wantData)
+			}
+			if got.EventType != tt.wantType {
+				t.Errorf("EventType = %q, want %q", got.EventType, tt.wantType)
+			}
+			if got.ID != tt.wantID {
+				t.Errorf("ID = %q, want %q", got.ID, tt.wantID)
+			}
+			if got.Retry != tt.wantRetry {
+				t.Errorf("Retry = %q, want %q", got.Retry, tt.wantRetry)
+			}
+			// RawBytes should be regenerated.
+			if got.RawBytes == nil {
+				t.Error("RawBytes should not be nil")
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// --- SSE Event Snapshot / Variant Tests ---
+
+func TestSnapshotSSEEvent(t *testing.T) {
+	event := &SSEEvent{
+		EventType: "msg",
+		Data:      "hello",
+		ID:        "42",
+		Retry:     "5000",
+	}
+
+	snap := snapshotSSEEvent(event)
+	if snap.eventType != "msg" || snap.data != "hello" || snap.id != "42" || snap.retry != "5000" {
+		t.Errorf("snapshot does not match event: %+v", snap)
+	}
+}
+
+func TestSSEEventModified(t *testing.T) {
+	tests := []struct {
+		name  string
+		snap  sseEventSnapshot
+		event *SSEEvent
+		want  bool
+	}{
+		{
+			name:  "identical",
+			snap:  sseEventSnapshot{eventType: "msg", data: "hello", id: "1"},
+			event: &SSEEvent{EventType: "msg", Data: "hello", ID: "1"},
+			want:  false,
+		},
+		{
+			name:  "data changed",
+			snap:  sseEventSnapshot{data: "original"},
+			event: &SSEEvent{Data: "modified"},
+			want:  true,
+		},
+		{
+			name:  "event type changed",
+			snap:  sseEventSnapshot{eventType: "old"},
+			event: &SSEEvent{EventType: "new"},
+			want:  true,
+		},
+		{
+			name:  "id changed",
+			snap:  sseEventSnapshot{id: "1"},
+			event: &SSEEvent{ID: "2"},
+			want:  true,
+		},
+		{
+			name:  "retry changed",
+			snap:  sseEventSnapshot{retry: "1000"},
+			event: &SSEEvent{Retry: "2000"},
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sseEventModified(tt.snap, tt.event)
+			if got != tt.want {
+				t.Errorf("sseEventModified() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRecordSSEEventWithVariant_NoModification(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	event := &SSEEvent{
+		EventType: "msg",
+		Data:      "hello",
+		ID:        "1",
+		RawBytes:  []byte("event: msg\nid: 1\ndata: hello\n\n"),
+	}
+	snap := snapshotSSEEvent(event)
+
+	var seq atomic.Int64
+	seq.Store(2)
+
+	h.recordSSEEventWithVariant(context.Background(), "flow-1", event, &snap, &seq, testutil.DiscardLogger())
+
+	// No modification: single message without variant metadata.
 	if len(store.messages) != 1 {
-		t.Fatalf("expected 1 recorded message before block, got %d", len(store.messages))
+		t.Fatalf("expected 1 message, got %d", len(store.messages))
+	}
+	msg := store.messages[0]
+	if _, ok := msg.Metadata["variant"]; ok {
+		t.Error("variant metadata should not be set for unmodified event")
+	}
+	if msg.Sequence != 2 {
+		t.Errorf("Sequence = %d, want 2", msg.Sequence)
+	}
+}
+
+func TestRecordSSEEventWithVariant_Modified(t *testing.T) {
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	snap := sseEventSnapshot{
+		eventType: "original-type",
+		data:      "original data",
+		id:        "1",
+	}
+
+	modifiedEvent := &SSEEvent{
+		EventType: "modified-type",
+		Data:      "modified data",
+		ID:        "1",
+		RawBytes:  []byte("event: modified-type\nid: 1\ndata: modified data\n\n"),
+	}
+
+	var seq atomic.Int64
+	seq.Store(2)
+
+	h.recordSSEEventWithVariant(context.Background(), "flow-1", modifiedEvent, &snap, &seq, testutil.DiscardLogger())
+
+	// Modified: two messages with variant metadata.
+	if len(store.messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(store.messages))
+	}
+
+	// First message: original variant.
+	orig := store.messages[0]
+	if orig.Metadata["variant"] != "original" {
+		t.Errorf("message[0] variant = %q, want %q", orig.Metadata["variant"], "original")
+	}
+	if string(orig.Body) != "original data" {
+		t.Errorf("message[0] Body = %q, want %q", string(orig.Body), "original data")
+	}
+	if orig.Metadata["sse_event"] != "original-type" {
+		t.Errorf("message[0] sse_event = %q, want %q", orig.Metadata["sse_event"], "original-type")
+	}
+	if orig.Sequence != 2 {
+		t.Errorf("message[0] Sequence = %d, want 2", orig.Sequence)
+	}
+
+	// Second message: modified variant.
+	mod := store.messages[1]
+	if mod.Metadata["variant"] != "modified" {
+		t.Errorf("message[1] variant = %q, want %q", mod.Metadata["variant"], "modified")
+	}
+	if string(mod.Body) != "modified data" {
+		t.Errorf("message[1] Body = %q, want %q", string(mod.Body), "modified data")
+	}
+	if mod.Metadata["sse_event"] != "modified-type" {
+		t.Errorf("message[1] sse_event = %q, want %q", mod.Metadata["sse_event"], "modified-type")
+	}
+	if mod.Sequence != 3 {
+		t.Errorf("message[1] Sequence = %d, want 3", mod.Sequence)
+	}
+}
+
+func TestRecordSSEEventWithVariant_NilStore(t *testing.T) {
+	h := &Handler{} // No store
+
+	event := &SSEEvent{Data: "test", RawBytes: []byte("data: test\n\n")}
+	snap := snapshotSSEEvent(event)
+
+	var seq atomic.Int64
+
+	// Should not panic.
+	h.recordSSEEventWithVariant(context.Background(), "flow-1", event, &snap, &seq, testutil.DiscardLogger())
+}
+
+// --- SSE Event-Level Plugin Hook Tests ---
+
+func TestSSEEventToHTTPResponse(t *testing.T) {
+	event := &SSEEvent{
+		EventType: "notification",
+		Data:      "hello world",
+		ID:        "42",
+		Retry:     "5000",
+	}
+
+	resp, body := sseEventToHTTPResponse(event)
+
+	if string(body) != "hello world" {
+		t.Errorf("body = %q, want %q", string(body), "hello world")
+	}
+	if resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want %q", resp.Header.Get("Content-Type"), "text/event-stream")
+	}
+	if resp.Header.Get("X-SSE-Event") != "notification" {
+		t.Errorf("X-SSE-Event = %q, want %q", resp.Header.Get("X-SSE-Event"), "notification")
+	}
+	if resp.Header.Get("X-SSE-Id") != "42" {
+		t.Errorf("X-SSE-Id = %q, want %q", resp.Header.Get("X-SSE-Id"), "42")
+	}
+	if resp.Header.Get("X-SSE-Retry") != "5000" {
+		t.Errorf("X-SSE-Retry = %q, want %q", resp.Header.Get("X-SSE-Retry"), "5000")
+	}
+}
+
+func TestApplyHTTPResponseToSSEEvent_NoChange(t *testing.T) {
+	original := &SSEEvent{
+		EventType: "msg",
+		Data:      "hello",
+		ID:        "1",
+		RawBytes:  []byte("event: msg\nid: 1\ndata: hello\n\n"),
+	}
+
+	resp, body := sseEventToHTTPResponse(original)
+	got := applyHTTPResponseToSSEEvent(original, resp, body)
+
+	// No change: RawBytes should be the original.
+	if string(got.RawBytes) != string(original.RawBytes) {
+		t.Errorf("RawBytes should be unchanged, got %q", string(got.RawBytes))
+	}
+}
+
+func TestApplyHTTPResponseToSSEEvent_Changed(t *testing.T) {
+	original := &SSEEvent{
+		EventType: "msg",
+		Data:      "hello",
+		ID:        "1",
+		RawBytes:  []byte("event: msg\nid: 1\ndata: hello\n\n"),
+	}
+
+	respHeaders := gohttp.Header{}
+	respHeaders.Set("X-SSE-Event", "new-type")
+	respHeaders.Set("X-SSE-Id", "1")
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     respHeaders,
+	}
+	body := []byte("new data")
+
+	got := applyHTTPResponseToSSEEvent(original, resp, body)
+
+	if got.EventType != "new-type" {
+		t.Errorf("EventType = %q, want %q", got.EventType, "new-type")
+	}
+	if got.Data != "new data" {
+		t.Errorf("Data = %q, want %q", got.Data, "new data")
+	}
+	// RawBytes should be regenerated since content changed.
+	if strings.Contains(string(got.RawBytes), "hello") {
+		t.Error("RawBytes should be regenerated for modified event")
+	}
+}
+
+func TestApplyHTTPResponseToSSEEvent_NilResponse(t *testing.T) {
+	original := &SSEEvent{Data: "hello", RawBytes: []byte("data: hello\n\n")}
+
+	got := applyHTTPResponseToSSEEvent(original, nil, nil)
+	if got != original {
+		t.Error("nil response should return original event")
+	}
+}
+
+func TestDispatchSSEOnReceiveFromServer_NilPlugin(t *testing.T) {
+	h := &Handler{} // No plugin engine
+
+	event := &SSEEvent{Data: "hello", RawBytes: []byte("data: hello\n\n")}
+	got := h.dispatchSSEOnReceiveFromServer(context.Background(), event, nil, testutil.DiscardLogger())
+
+	if got.Data != event.Data {
+		t.Errorf("event should be unchanged, got %q", got.Data)
+	}
+}
+
+func TestDispatchSSEOnBeforeSendToClient_NilPlugin(t *testing.T) {
+	h := &Handler{} // No plugin engine
+
+	event := &SSEEvent{Data: "hello", RawBytes: []byte("data: hello\n\n")}
+	got := h.dispatchSSEOnBeforeSendToClient(context.Background(), event, nil, testutil.DiscardLogger())
+
+	if got.Data != event.Data {
+		t.Errorf("event should be unchanged, got %q", got.Data)
+	}
+}
+
+// --- Integration: streamSSEEvents with intercept ---
+
+func TestStreamSSEEvents_WithIntercept_Drop(t *testing.T) {
+	store := &sseTestFlowStore{}
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "drop-events",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.Store = store
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	input := "data: event1\n\ndata: event2\n\ndata: event3\n\n"
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var seq atomic.Int64
+	seq.Store(2)
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	// Drop the second event, release the first and third.
+	var eventNum atomic.Int32
+	go func() {
+		for {
+			items := queue.List()
+			if len(items) > 0 {
+				n := eventNum.Add(1)
+				if n == 2 {
+					queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionDrop})
+				} else {
+					queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
+				}
+				// Wait briefly for the item to be removed.
+				time.Sleep(5 * time.Millisecond)
+			} else {
+				time.Sleep(2 * time.Millisecond)
+			}
+			if eventNum.Load() >= 3 {
+				return
+			}
+		}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, sseCtx, testutil.DiscardLogger())
+		server.Close()
+	}()
+
+	var buf bytes.Buffer
+	io.Copy(&buf, client)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("streamSSEEvents failed: %v", err)
+	}
+
+	output := buf.String()
+	// event1 and event3 should be forwarded, event2 should be dropped.
+	if !strings.Contains(output, "event1") {
+		t.Errorf("output should contain event1, got %q", output)
+	}
+	if strings.Contains(output, "event2") {
+		t.Errorf("output should not contain event2 (dropped), got %q", output)
+	}
+	if !strings.Contains(output, "event3") {
+		t.Errorf("output should contain event3, got %q", output)
+	}
+}
+
+func TestStreamSSEEvents_WithIntercept_ModifyAndForward(t *testing.T) {
+	store := &sseTestFlowStore{}
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "modify-events",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.Store = store
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	input := "data: original\n\n"
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var seq atomic.Int64
+	seq.Store(2)
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	sseCtx := &sseStreamContext{req: req}
+
+	newBody := "modified"
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				queue.Respond(items[0].ID, intercept.InterceptAction{
+					Type:                 intercept.ActionModifyAndForward,
+					OverrideResponseBody: &newBody,
+				})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, sseCtx, testutil.DiscardLogger())
+		server.Close()
+	}()
+
+	var buf bytes.Buffer
+	io.Copy(&buf, client)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("streamSSEEvents failed: %v", err)
+	}
+
+	output := buf.String()
+	// Client should receive modified data.
+	if strings.Contains(output, "original") {
+		t.Errorf("output should not contain original data, got %q", output)
+	}
+	if !strings.Contains(output, "modified") {
+		t.Errorf("output should contain modified data, got %q", output)
+	}
+
+	// Recording should have both original and modified variants.
+	if len(store.messages) != 2 {
+		t.Fatalf("expected 2 messages (variant pair), got %d", len(store.messages))
+	}
+	if store.messages[0].Metadata["variant"] != "original" {
+		t.Errorf("message[0] variant = %q, want %q", store.messages[0].Metadata["variant"], "original")
+	}
+	if string(store.messages[0].Body) != "original" {
+		t.Errorf("message[0] Body = %q, want %q", string(store.messages[0].Body), "original")
+	}
+	if store.messages[1].Metadata["variant"] != "modified" {
+		t.Errorf("message[1] variant = %q, want %q", store.messages[1].Metadata["variant"], "modified")
+	}
+	if string(store.messages[1].Body) != "modified" {
+		t.Errorf("message[1] Body = %q, want %q", string(store.messages[1].Body), "modified")
+	}
+}
+
+func TestFilterSSEEventBodyForIntercept_NoEngine(t *testing.T) {
+	h := &Handler{}
+	body := []byte("SECRET-123")
+	got := h.filterSSEEventBodyForIntercept(body, testutil.DiscardLogger())
+	if string(got) != string(body) {
+		t.Errorf("got %q, want %q", string(got), string(body))
+	}
+}
+
+func TestFilterSSEEventBodyForIntercept_WithMask(t *testing.T) {
+	safetyEngine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:          "mask-secret",
+			Name:        "Mask Secret",
+			Pattern:     `SECRET-\d+`,
+			Targets:     []string{"body"},
+			Action:      "mask",
+			Replacement: "[MASKED]",
+		},
+	})
+
+	h := &Handler{}
+	h.SafetyEngine = safetyEngine
+
+	body := []byte("token SECRET-123")
+	got := h.filterSSEEventBodyForIntercept(body, testutil.DiscardLogger())
+	if strings.Contains(string(got), "SECRET-123") {
+		t.Error("expected SECRET to be masked")
+	}
+	if !strings.Contains(string(got), "[MASKED]") {
+		t.Errorf("expected [MASKED] in output, got %q", string(got))
+	}
+}
+
+func TestBuildSSEEventMessage(t *testing.T) {
+	event := &SSEEvent{
+		EventType: "msg",
+		Data:      "hello",
+		ID:        "1",
+		Retry:     "5000",
+		RawBytes:  []byte("event: msg\nid: 1\nretry: 5000\ndata: hello\n\n"),
+	}
+
+	msg := buildSSEEventMessage("flow-1", 3, event)
+
+	if msg.FlowID != "flow-1" {
+		t.Errorf("FlowID = %q, want %q", msg.FlowID, "flow-1")
+	}
+	if msg.Sequence != 3 {
+		t.Errorf("Sequence = %d, want 3", msg.Sequence)
+	}
+	if msg.Direction != "receive" {
+		t.Errorf("Direction = %q, want %q", msg.Direction, "receive")
+	}
+	if string(msg.Body) != "hello" {
+		t.Errorf("Body = %q, want %q", string(msg.Body), "hello")
+	}
+	if msg.Metadata["sse_type"] != "event" {
+		t.Errorf("Metadata[sse_type] = %q, want %q", msg.Metadata["sse_type"], "event")
+	}
+	if msg.Metadata["sse_event"] != "msg" {
+		t.Errorf("Metadata[sse_event] = %q, want %q", msg.Metadata["sse_event"], "msg")
+	}
+	if msg.Metadata["sse_id"] != "1" {
+		t.Errorf("Metadata[sse_id] = %q, want %q", msg.Metadata["sse_id"], "1")
+	}
+	if msg.Metadata["sse_retry"] != "5000" {
+		t.Errorf("Metadata[sse_retry] = %q, want %q", msg.Metadata["sse_retry"], "5000")
 	}
 }
