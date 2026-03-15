@@ -8,15 +8,431 @@ import (
 	"io"
 	"net"
 	gohttp "net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
+
+func TestApplySSEIntercept_NoEngine(t *testing.T) {
+	h := &Handler{}
+	// No InterceptEngine or InterceptQueue set.
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	if dropped {
+		t.Error("applySSEIntercept should return false when no intercept engine is set")
+	}
+}
+
+func TestApplySSEIntercept_NoMatchingRules(t *testing.T) {
+	engine := intercept.NewEngine()
+	// Add a request-only rule that won't match responses.
+	engine.AddRule(intercept.Rule{
+		ID:        "req-only",
+		Enabled:   true,
+		Direction: intercept.DirectionRequest,
+	})
+
+	queue := intercept.NewQueue()
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	if dropped {
+		t.Error("applySSEIntercept should return false when no rules match")
+	}
+}
+
+func TestApplySSEIntercept_Drop(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "drop-sse",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	// Drain client side so WriteHTTPError doesn't block on net.Pipe().
+	go io.Copy(io.Discard, client)
+
+	// Resolve the intercepted item with DROP action in a goroutine.
+	// Capture the enqueued item's body to verify it is nil.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
+	go func() {
+		// Wait for the item to appear in the queue.
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				itemCh <- itemInfo{body: items[0].Body}
+				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionDrop})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	if !dropped {
+		t.Error("applySSEIntercept should return true when DROP action is received")
+	}
+
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
+	}
+}
+
+func TestApplySSEIntercept_Release(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "release-sse",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	// Resolve the intercepted item with RELEASE action in a goroutine.
+	// Capture the enqueued item's body to verify it is nil.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				itemCh <- itemInfo{body: items[0].Body}
+				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	if dropped {
+		t.Error("applySSEIntercept should return false when RELEASE action is received")
+	}
+
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
+	}
+}
+
+func TestApplySSEIntercept_ModifyAndForward_TreatedAsRelease(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "modify-sse",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	// Resolve with ModifyAndForward, which should be treated as release for SSE.
+	// Capture the enqueued item's body to verify it is nil.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				itemCh <- itemInfo{body: items[0].Body}
+				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionModifyAndForward})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	if dropped {
+		t.Error("applySSEIntercept should return false for ModifyAndForward (treated as release)")
+	}
+
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
+	}
+}
+
+func TestApplySSEIntercept_Timeout_AutoRelease(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "timeout-sse",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(50 * time.Millisecond)
+	queue.SetTimeoutBehavior(intercept.TimeoutAutoRelease)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	// Don't resolve — let it timeout with auto_release.
+	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	if dropped {
+		t.Error("applySSEIntercept should return false on timeout with auto_release")
+	}
+}
+
+func TestApplySSEIntercept_Timeout_AutoDrop(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "timeout-drop-sse",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(50 * time.Millisecond)
+	queue.SetTimeoutBehavior(intercept.TimeoutAutoDrop)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	// Drain client side so WriteHTTPError doesn't block on net.Pipe().
+	go io.Copy(io.Discard, client)
+
+	// Don't resolve — let it timeout with auto_drop.
+	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	if !dropped {
+		t.Error("applySSEIntercept should return true on timeout with auto_drop")
+	}
+}
+
+func TestApplySSEIntercept_EnqueuesWithNilBody(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.AddRule(intercept.Rule{
+		ID:        "check-nil-body",
+		Enabled:   true,
+		Direction: intercept.DirectionResponse,
+	})
+
+	queue := intercept.NewQueue()
+	queue.SetTimeout(100 * time.Millisecond)
+
+	h := &Handler{}
+	h.InterceptEngine = engine
+	h.InterceptQueue = queue
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	// Verify the enqueued item has nil body.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
+	go func() {
+		for i := 0; i < 50; i++ {
+			items := queue.List()
+			if len(items) > 0 {
+				itemCh <- itemInfo{body: items[0].Body}
+				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	select {
+	case info := <-itemCh:
+		if info.body != nil {
+			t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for intercept queue item")
+	}
+}
+
+func TestSSEHookContext_NilAllowed(t *testing.T) {
+	// Verify that handleSSEStream works when hookCtx is nil (no plugin engine).
+	store := &sseTestFlowStore{}
+	h := &Handler{}
+	h.Store = store
+
+	input := "data: hello\n\n"
+	client, server := net.Pipe()
+	defer client.Close()
+
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     gohttp.Header{"Content-Type": {"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(input)),
+	}
+
+	fwd := &forwardResult{
+		resp:       resp,
+		serverAddr: "127.0.0.1:8080",
+	}
+
+	sendResult := &sendRecordResult{
+		flowID:       "flow-1",
+		recvSequence: 1,
+	}
+
+	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.handleSSEStream(context.Background(), server, req, fwd, time.Now(), sendResult, nil, testutil.DiscardLogger())
+		server.Close()
+	}()
+
+	// Read response from client side.
+	reader := bufio.NewReader(client)
+	readResp, err := gohttp.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("ReadResponse failed: %v", err)
+	}
+
+	// Read SSE body.
+	body, _ := io.ReadAll(readResp.Body)
+	readResp.Body.Close()
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("handleSSEStream failed: %v", err)
+	}
+
+	if string(body) != input {
+		t.Errorf("body = %q, want %q", string(body), input)
+	}
+	if readResp.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", readResp.StatusCode)
+	}
+}
 
 func TestIsSSEResponse(t *testing.T) {
 	tests := []struct {
