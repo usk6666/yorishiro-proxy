@@ -1030,6 +1030,90 @@ func TestHuffman_InvalidPadding(t *testing.T) {
 	}
 }
 
+func TestHuffman_PaddingOver7Bits(t *testing.T) {
+	// RFC 7541 §5.2: padding of more than 7 bits MUST be treated as error.
+	// Construct a byte sequence where the last symbol ends far from a byte
+	// boundary, leaving >= 8 bits of padding.
+	// Use a 5-bit symbol "0" (code 0x00, 5 bits) in 2 bytes = 16 bits.
+	// 5 bits symbol + 11 bits padding = invalid (>7 bits padding).
+	data := []byte{0x07, 0xff} // "0" = 00000, then 11 bits of 1s
+	_, err := huffmanDecode(nil, data)
+	if err == nil {
+		t.Error("expected error for padding exceeding 7 bits")
+	}
+}
+
+func TestHuffman_TruncatedSymbol(t *testing.T) {
+	// Two bytes that form an incomplete Huffman code.
+	// The bit pattern walks deep into the tree but the last bit (0) prevents
+	// it from being valid all-ones EOS padding, resulting in a non-EOS padding error.
+	data := []byte{0xff, 0xfe} // 1111 1111 1111 1110
+	_, err := huffmanDecode(nil, data)
+	if err == nil {
+		t.Error("expected error for truncated Huffman symbol")
+	}
+}
+
+func TestHuffman_ExplicitEOSSymbol(t *testing.T) {
+	// EOS symbol (256) is 0x3fffffff, 30 bits. It MUST NOT appear in encoded
+	// data; it is only valid as padding bits.
+	// Encode 4 bytes (32 bits): 30-bit EOS + 2 bits of 1-padding.
+	// 0x3fffffff = 0011 1111 1111 1111 1111 1111 1111 1111
+	// Shifted into 32 bits: 0011 1111 1111 1111 1111 1111 1111 1111 11 (+ 2 pad bits)
+	// As 4 bytes: EOS(30 bits) << 2 | 0x03
+	// = 0xFF 0xFF 0xFF 0xFF
+	data := []byte{0xff, 0xff, 0xff, 0xff}
+	_, err := huffmanDecode(nil, data)
+	if err == nil {
+		t.Error("expected error for explicit EOS symbol in Huffman data")
+	}
+}
+
+func TestDecoder_TableSizeUpdate_AfterHeaderField(t *testing.T) {
+	// RFC 7541 §4.2: dynamic table size update MUST occur at the beginning
+	// of a header block. A size update after a header field is an error.
+	dec := NewDecoder(4096)
+
+	// First: an indexed header field (:method GET = index 2).
+	var data []byte
+	data = encodeInteger(data, 0x80, 7, 2)
+	// Then: a dynamic table size update to 256.
+	data = encodeInteger(data, 0x20, 5, 256)
+
+	_, err := dec.Decode(data)
+	if err == nil {
+		t.Error("expected error for table size update after header field")
+	}
+	if err != nil && !strings.Contains(err.Error(), "after header field") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestDecoder_IntegerContinuationLimit(t *testing.T) {
+	// Craft a malicious integer with many 0x80 continuation bytes.
+	// This should be rejected to prevent CPU exhaustion.
+	data := make([]byte, 50)
+	data[0] = 0x7f // max prefix for 7-bit = 127, triggers continuation
+	for i := 1; i < 49; i++ {
+		data[i] = 0x80 // continuation byte with value 0
+	}
+	data[49] = 0x00 // termination
+
+	dec := NewDecoder(4096)
+	// Wrap in indexed header field format (0x80 prefix).
+	malicious := make([]byte, 50)
+	malicious[0] = 0xff // indexed field, 7-bit prefix max = 127
+	for i := 1; i < 49; i++ {
+		malicious[i] = 0x80
+	}
+	malicious[49] = 0x00
+
+	_, err := dec.Decode(malicious)
+	if err == nil {
+		t.Error("expected error for excessive continuation bytes")
+	}
+}
+
 // --- Helpers ---
 
 func mustDecodeHex(s string) []byte {

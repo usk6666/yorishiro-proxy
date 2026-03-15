@@ -20,7 +20,6 @@ const defaultMaxStringLength = 16 * 1024 // 16 KB
 type Decoder struct {
 	dynTable          *DynamicTable
 	maxTableSize      uint32 // maximum dynamic table size allowed by SETTINGS
-	pendingMaxSize    int64  // pending table size update (-1 = none)
 	maxHeaderListSize uint32 // maximum total header list size in bytes
 	maxStringLength   uint32 // maximum decoded string length
 }
@@ -42,7 +41,6 @@ func NewDecoder(maxTableSize uint32) *Decoder {
 	return &Decoder{
 		dynTable:          NewDynamicTable(maxTableSize),
 		maxTableSize:      maxTableSize,
-		pendingMaxSize:    -1,
 		maxHeaderListSize: defaultMaxHeaderListSize,
 		maxStringLength:   defaultMaxStringLength,
 	}
@@ -77,12 +75,21 @@ func (d *Decoder) SetMaxTableSize(maxSize uint32) {
 func (d *Decoder) Decode(data []byte) ([]HeaderField, error) {
 	var headers []HeaderField
 	var totalSize uint32
+	sawHeader := false
 	for len(data) > 0 {
+		// RFC 7541 §4.2: dynamic table size updates MUST occur at the
+		// beginning of the first header block following a change.
+		if len(data) > 0 && data[0]&0xe0 == 0x20 {
+			if sawHeader {
+				return nil, fmt.Errorf("hpack: dynamic table size update after header field")
+			}
+		}
 		hf, rest, err := d.decodeField(data)
 		if err != nil {
 			return nil, err
 		}
 		if hf != nil {
+			sawHeader = true
 			totalSize += hf.Size()
 			if totalSize > d.maxHeaderListSize {
 				return nil, fmt.Errorf("%w: %d bytes", ErrHeaderListTooLarge, totalSize)

@@ -15,6 +15,11 @@ var ErrIntegerOverflow = errors.New("hpack: integer overflow")
 // consumption.
 const maxInteger = 1<<32 - 1
 
+// maxContinuationBytes is the maximum number of continuation bytes allowed
+// in an HPACK integer encoding. This prevents CPU exhaustion from crafted
+// inputs with excessive 0x80 continuation bytes.
+const maxContinuationBytes = 10
+
 // encodeInteger encodes an integer I using the prefix-coded representation
 // described in RFC 7541 Section 5.1. The n least significant bits of the
 // first byte are used for the prefix; the remaining high bits of the first
@@ -48,7 +53,7 @@ func decodeInteger(src []byte, n uint8) (uint64, int, error) {
 		return value, 1, nil
 	}
 	var m uint64
-	for i := 1; ; i++ {
+	for i := 1; i <= maxContinuationBytes; i++ {
 		if i >= len(src) {
 			return 0, 0, fmt.Errorf("hpack: truncated integer")
 		}
@@ -65,4 +70,5 @@ func decodeInteger(src []byte, n uint8) (uint64, int, error) {
 			return 0, 0, ErrIntegerOverflow
 		}
 	}
+	return 0, 0, fmt.Errorf("hpack: integer overflow: too many continuation bytes")
 }
