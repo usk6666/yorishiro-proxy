@@ -7,9 +7,9 @@ import (
 	gohttp "net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -21,14 +21,15 @@ type grpcStreamState struct {
 	reqFrameBuf  *protogrpc.FrameBuffer
 	respFrameBuf *protogrpc.FrameBuffer
 
-	mu               sync.Mutex
-	reqFrames        []*protogrpc.Frame
-	reqRawBytes      []byte
-	reqRawTruncated  bool
-	respFrames       []*protogrpc.Frame
-	respRawBytes     []byte
-	respRawTruncated bool
+	// recorder handles progressive flow recording (frame-by-frame).
+	recorder *grpcProgressiveRecorder
 
+	// reqFrameCount and respFrameCount track total frames for flow type
+	// classification at completion time.
+	reqFrameCount  atomic.Int64
+	respFrameCount atomic.Int64
+
+	mu           sync.Mutex
 	reqStreamErr error
 
 	// grpcEncoding is the grpc-encoding header value from the request.
@@ -60,17 +61,17 @@ type grpcStreamState struct {
 //	Client --> Read+Write --> Pipe Writer --> Upstream
 //	                |
 //	                v
-//	         FrameBuffer (request recording)
+//	         FrameBuffer (progressive recording)
 //
 //	Upstream --> Read+Write+Flush --> Client
 //	     |
 //	     v
-//	FrameBuffer (response recording)
+//	FrameBuffer (progressive recording)
 //
 // This function is called from handleStream when gRPC Content-Type is detected.
-// Recording of individual frames is delegated to the callback-based FrameBuffer
-// which provides a channel/callback interface for downstream consumers
-// (USK-364/USK-365).
+// Each gRPC frame is recorded progressively as it arrives via the
+// grpcProgressiveRecorder, allowing the flow to be visible in State="active"
+// before the stream completes.
 func (h *Handler) handleGRPCStream(sc *streamContext) {
 	state := h.initGRPCStreamState(sc)
 
@@ -122,13 +123,9 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 	h.finalizeGRPCStream(sc, state, resp)
 }
 
-// initGRPCStreamState creates the frame buffers and state for a gRPC stream.
-// Raw bytes are capped at config.MaxBodySize to prevent unbounded memory
-// growth during long-lived streaming connections.
-//
-// The request frame callback integrates subsystem processing: each complete
-// gRPC frame is decoded, passed through safety filter / plugin hooks /
-// auto-transform, and optionally re-encoded before forwarding.
+// initGRPCStreamState creates the frame buffers, progressive recorder,
+// and state for a gRPC stream. The flow is created immediately with
+// State="active" so it is visible before the stream completes.
 func (h *Handler) initGRPCStreamState(sc *streamContext) *grpcStreamState {
 	state := &grpcStreamState{
 		grpcEncoding: sc.req.Header.Get("Grpc-Encoding"),
@@ -140,41 +137,27 @@ func (h *Handler) initGRPCStreamState(sc *streamContext) *grpcStreamState {
 		},
 		txCtx: plugin.NewTxCtx(),
 	}
-	maxRaw := int(config.MaxBodySize)
 
-	state.reqFrameBuf = protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
-		state.mu.Lock()
-		defer state.mu.Unlock()
-		state.reqFrames = append(state.reqFrames, frame)
-		if !state.reqRawTruncated {
-			if len(state.reqRawBytes)+len(raw) > maxRaw {
-				remaining := maxRaw - len(state.reqRawBytes)
-				if remaining > 0 {
-					state.reqRawBytes = append(state.reqRawBytes, raw[:remaining]...)
-				}
-				state.reqRawTruncated = true
-			} else {
-				state.reqRawBytes = append(state.reqRawBytes, raw...)
-			}
-		}
+	// Initialize progressive recorder — creates the flow with State="active".
+	state.recorder = h.initGRPCFlow(sc.ctx, sc)
+
+	// Use a context that survives the full stream lifetime for recording.
+	recCtx := sc.ctx
+
+	state.reqFrameBuf = protogrpc.NewFrameBuffer(func(_ []byte, frame *protogrpc.Frame) error {
+		state.reqFrameCount.Add(1)
+
+		// Progressive recording: record each request frame immediately.
+		// Raw bytes are not accumulated; each frame is persisted individually.
+		state.recorder.recordFrame(recCtx, frame, "client_to_server")
 		return nil
 	})
 
-	state.respFrameBuf = protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
-		state.mu.Lock()
-		defer state.mu.Unlock()
-		state.respFrames = append(state.respFrames, frame)
-		if !state.respRawTruncated {
-			if len(state.respRawBytes)+len(raw) > maxRaw {
-				remaining := maxRaw - len(state.respRawBytes)
-				if remaining > 0 {
-					state.respRawBytes = append(state.respRawBytes, raw[:remaining]...)
-				}
-				state.respRawTruncated = true
-			} else {
-				state.respRawBytes = append(state.respRawBytes, raw...)
-			}
-		}
+	state.respFrameBuf = protogrpc.NewFrameBuffer(func(_ []byte, frame *protogrpc.Frame) error {
+		state.respFrameCount.Add(1)
+
+		// Progressive recording: record each response frame immediately.
+		state.recorder.recordFrame(recCtx, frame, "server_to_client")
 		return nil
 	})
 
@@ -200,8 +183,13 @@ func (h *Handler) initGRPCStreamState(sc *streamContext) *grpcStreamState {
 func (h *Handler) streamGRPCRequestBody(sc *streamContext, state *grpcStreamState, pw *io.PipeWriter, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer func() {
-		if state.reqStreamErr != nil {
-			pw.CloseWithError(state.reqStreamErr)
+		// Propagate the actual error to the pipe reader so the upstream
+		// request sees the real cause rather than io.ErrClosedPipe.
+		state.mu.Lock()
+		reqErr := state.reqStreamErr
+		state.mu.Unlock()
+		if reqErr != nil {
+			pw.CloseWithError(reqErr)
 		} else {
 			pw.Close()
 		}
@@ -225,13 +213,17 @@ func (h *Handler) streamGRPCRequestBody(sc *streamContext, state *grpcStreamStat
 				sc.logger.Warn("gRPC request frame buffer error", "error", fbErr)
 			}
 			if err := h.forwardGRPCRequestChunk(sc, state, pw, subsystemBuf, buf[:n], hasSubsystems); err != nil {
+				state.mu.Lock()
 				state.reqStreamErr = err
+				state.mu.Unlock()
 				return
 			}
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
+				state.mu.Lock()
 				state.reqStreamErr = readErr
+				state.mu.Unlock()
 			}
 			return
 		}
@@ -362,7 +354,8 @@ func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Respo
 
 // streamGRPCResponseBody reads the response body from upstream and streams
 // it to the client, while processing each gRPC frame through response-side
-// subsystems (plugin hooks, auto-transform, output filter).
+// subsystems (plugin hooks, auto-transform, output filter) and tapping bytes
+// into the FrameBuffer for progressive recording.
 //
 // For each complete response frame, the subsystem pipeline is applied:
 //   - protobuf decode to JSON
@@ -478,10 +471,14 @@ func (h *Handler) writeGRPCTrailers(sc *streamContext, resp *gohttp.Response) {
 }
 
 // finalizeGRPCStream logs stream completion, flushes incomplete frames,
-// records the flow, and logs the final status.
+// completes the progressive recording, and logs the final status.
 func (h *Handler) finalizeGRPCStream(sc *streamContext, state *grpcStreamState, resp *gohttp.Response) {
-	if state.reqStreamErr != nil {
-		sc.logger.Debug("gRPC request stream error", "error", state.reqStreamErr)
+	state.mu.Lock()
+	reqStreamErr := state.reqStreamErr
+	state.mu.Unlock()
+
+	if reqStreamErr != nil {
+		sc.logger.Debug("gRPC request stream error", "error", reqStreamErr)
 	}
 
 	if remaining := state.reqFrameBuf.Flush(); remaining != nil {
@@ -493,83 +490,20 @@ func (h *Handler) finalizeGRPCStream(sc *streamContext, state *grpcStreamState, 
 			"remaining_bytes", len(remaining))
 	}
 
-	state.mu.Lock()
-	reqFrames := state.reqFrames
-	reqRawBytes := state.reqRawBytes
-	respFrames := state.respFrames
-	respRawBytes := state.respRawBytes
-	state.mu.Unlock()
-
+	reqFrames := int(state.reqFrameCount.Load())
+	respFrames := int(state.respFrameCount.Load())
 	duration := time.Since(sc.start)
-	h.recordGRPCStreamFlow(sc, resp, reqFrames, reqRawBytes, respFrames, respRawBytes, duration)
+
+	// Complete the progressive recording flow.
+	state.recorder.completeFlow(sc.ctx, resp, reqFrames, respFrames, duration)
 
 	sc.logger.Info("grpc streaming request",
 		"method", sc.req.Method,
 		"url", sc.reqURL.String(),
 		"status", resp.StatusCode,
-		"req_frames", len(reqFrames),
-		"resp_frames", len(respFrames),
+		"req_frames", reqFrames,
+		"resp_frames", respFrames,
 		"duration_ms", duration.Milliseconds())
-}
-
-// recordGRPCStreamFlow records the gRPC streaming flow using the frames
-// collected by FrameBuffers during streaming.
-func (h *Handler) recordGRPCStreamFlow(
-	sc *streamContext,
-	resp *gohttp.Response,
-	reqFrames []*protogrpc.Frame,
-	reqRawBytes []byte,
-	respFrames []*protogrpc.Frame,
-	respRawBytes []byte,
-	duration time.Duration,
-) {
-	if h.grpcHandler == nil {
-		return
-	}
-	if !h.shouldCapture(sc.req.Method, sc.reqURL) {
-		return
-	}
-
-	tlsCertSubject := extractTLSCertSubject(resp)
-
-	var trailers map[string][]string
-	if resp.Trailer != nil {
-		trailers = make(map[string][]string, len(resp.Trailer))
-		for k, vals := range resp.Trailer {
-			trailers[k] = vals
-		}
-	}
-
-	var reqBody, respBody []byte
-	if len(reqRawBytes) > 0 {
-		reqBody = reqRawBytes
-	}
-	if len(respRawBytes) > 0 {
-		respBody = respRawBytes
-	}
-
-	info := &protogrpc.StreamInfo{
-		ConnID:               sc.connID,
-		ClientAddr:           sc.clientAddr,
-		ServerAddr:           "", // Will be populated by future timing integration (USK-365).
-		Method:               sc.req.Method,
-		URL:                  sc.reqURL,
-		RequestHeaders:       sc.req.Header,
-		ResponseHeaders:      resp.Header,
-		Trailers:             trailers,
-		RequestBody:          reqBody,
-		ResponseBody:         respBody,
-		StatusCode:           resp.StatusCode,
-		Start:                sc.start,
-		Duration:             duration,
-		TLSVersion:           sc.tlsMeta.Version,
-		TLSCipher:            sc.tlsMeta.CipherSuite,
-		TLSALPN:              sc.tlsMeta.ALPN,
-		TLSServerCertSubject: tlsCertSubject,
-	}
-	if err := h.grpcHandler.RecordSession(sc.ctx, info); err != nil {
-		sc.logger.Error("gRPC streaming flow recording failed", "error", err)
-	}
 }
 
 // joinTrailerKeys joins trailer key names with ", " for the Trailer header.
