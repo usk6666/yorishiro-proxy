@@ -136,16 +136,15 @@ func (r *grpcProgressiveRecorder) recordFrame(ctx context.Context, frame *protog
 		return
 	}
 
-	count := r.messageCount.Add(1)
-	if count > int64(config.MaxGRPCMessagesPerStream) {
-		if count == int64(config.MaxGRPCMessagesPerStream)+1 {
+	if r.messageCount.Load() >= int64(config.MaxGRPCMessagesPerStream) {
+		if !r.recordingDisabled.Swap(true) {
 			r.logger.Info("gRPC message recording limit reached, forwarding only",
 				"flow_id", r.flowID,
 				"limit", config.MaxGRPCMessagesPerStream)
-			r.recordingDisabled.Store(true)
 		}
 		return
 	}
+	r.messageCount.Add(1)
 
 	seq := int(r.seq.Add(1) - 1)
 
