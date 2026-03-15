@@ -8,7 +8,10 @@ import (
 // TestParseFrame_Single tests parsing a single gRPC frame.
 func TestParseFrame_Single(t *testing.T) {
 	payload := []byte("hello")
-	frame := BuildFrame(Frame{Compressed: 0, Payload: payload})
+	frame, err := BuildFrame(Frame{Compressed: 0, Payload: payload})
+	if err != nil {
+		t.Fatalf("BuildFrame: %v", err)
+	}
 
 	f, consumed, err := ParseFrame(frame)
 	if err != nil {
@@ -26,7 +29,10 @@ func TestParseFrame_Single(t *testing.T) {
 // TestParseFrame_Compressed tests parsing a compressed frame.
 func TestParseFrame_Compressed(t *testing.T) {
 	payload := []byte{0x01, 0x02, 0x03}
-	frame := BuildFrame(Frame{Compressed: 1, Payload: payload})
+	frame, err := BuildFrame(Frame{Compressed: 1, Payload: payload})
+	if err != nil {
+		t.Fatalf("BuildFrame: %v", err)
+	}
 
 	f, _, err := ParseFrame(frame)
 	if err != nil {
@@ -45,7 +51,10 @@ func TestParseFrames_Multiple(t *testing.T) {
 		{Compressed: 0, Payload: []byte("msg2")},
 		{Compressed: 1, Payload: []byte("msg3")},
 	}
-	data := BuildFrames(frames)
+	data, err := BuildFrames(frames)
+	if err != nil {
+		t.Fatalf("BuildFrames: %v", err)
+	}
 
 	parsed, err := ParseFrames(data)
 	if err != nil {
@@ -93,7 +102,10 @@ func TestParseFrame_TruncatedPayload(t *testing.T) {
 
 // TestBuildFrame_EmptyPayload tests building a frame with empty payload.
 func TestBuildFrame_EmptyPayload(t *testing.T) {
-	frame := BuildFrame(Frame{Compressed: 0, Payload: []byte{}})
+	frame, err := BuildFrame(Frame{Compressed: 0, Payload: []byte{}})
+	if err != nil {
+		t.Fatalf("BuildFrame: %v", err)
+	}
 	if len(frame) != 5 {
 		t.Fatalf("expected 5 bytes, got %d", len(frame))
 	}
@@ -108,7 +120,10 @@ func TestFrames_RoundTrip(t *testing.T) {
 		{Compressed: 0, Payload: hexToBytes(t, "089601")},
 		{Compressed: 1, Payload: hexToBytes(t, "120774657374696e67")},
 	}
-	data := BuildFrames(original)
+	data, err := BuildFrames(original)
+	if err != nil {
+		t.Fatalf("BuildFrames: %v", err)
+	}
 	parsed, err := ParseFrames(data)
 	if err != nil {
 		t.Fatalf("ParseFrames: %v", err)
@@ -151,12 +166,33 @@ func TestParseFrames_ExceedsMaxPayloadSize(t *testing.T) {
 	}
 }
 
+// TestParseFrame_InvalidCompressedFlag tests that compressed flag > 1 is rejected.
+func TestParseFrame_InvalidCompressedFlag(t *testing.T) {
+	data := []byte{0x02, 0x00, 0x00, 0x00, 0x01, 0x00}
+	_, _, err := ParseFrame(data)
+	if err == nil {
+		t.Error("expected error for invalid compressed flag 2")
+	}
+}
+
+// TestParseFrames_InvalidCompressedFlag tests that ParseFrames rejects compressed flag > 1.
+func TestParseFrames_InvalidCompressedFlag(t *testing.T) {
+	data := []byte{0x03, 0x00, 0x00, 0x00, 0x01, 0x00}
+	_, err := ParseFrames(data)
+	if err == nil {
+		t.Error("expected error for invalid compressed flag 3")
+	}
+}
+
 // TestParseFrame_AtMaxPayloadSize tests that a frame at exactly maxFramePayloadSize succeeds.
 func TestParseFrame_AtMaxPayloadSize(t *testing.T) {
-	// We only test the header parsing logic, not actual allocation of 16MB.
+	// We only test the header parsing logic, not actual allocation of 254MB.
 	// Build a small valid frame to verify non-oversized frames still work.
 	payload := make([]byte, 100)
-	frame := BuildFrame(Frame{Compressed: 0, Payload: payload})
+	frame, err := BuildFrame(Frame{Compressed: 0, Payload: payload})
+	if err != nil {
+		t.Fatalf("BuildFrame: %v", err)
+	}
 	f, consumed, err := ParseFrame(frame)
 	if err != nil {
 		t.Fatalf("ParseFrame: %v", err)
@@ -173,7 +209,10 @@ func TestParseFrame_AtMaxPayloadSize(t *testing.T) {
 func TestParseFrames_ProtobufPayload(t *testing.T) {
 	// Build a frame with protobuf payload: field 1 = "test message"
 	payload := hexToBytes(t, "0a0c74657374206d657373616765")
-	frame := BuildFrame(Frame{Compressed: 0, Payload: payload})
+	frame, err := BuildFrame(Frame{Compressed: 0, Payload: payload})
+	if err != nil {
+		t.Fatalf("BuildFrame: %v", err)
+	}
 
 	f, _, err := ParseFrame(frame)
 	if err != nil {

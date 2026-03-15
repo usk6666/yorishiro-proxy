@@ -136,6 +136,9 @@ func encode32BitField(w *writer, fieldNumber uint64, e fieldEntry) error {
 	if err != nil {
 		return fmt.Errorf("field %q: %w", e.key, err)
 	}
+	if v > math.MaxUint32 {
+		return fmt.Errorf("field %q: value %d exceeds uint32 range", e.key, v)
+	}
 	w.writeFixed32(uint32(v))
 	return nil
 }
@@ -219,7 +222,14 @@ func parseKeyParts(key string) []string {
 }
 
 // parseHex parses a hex string to uint64.
+// Returns an error if the string is empty or longer than 16 hex digits (would overflow uint64).
 func parseHex(s string) (uint64, error) {
+	if len(s) == 0 {
+		return 0, fmt.Errorf("empty hex string")
+	}
+	if len(s) > 16 {
+		return 0, fmt.Errorf("hex string %q too long (max 16 digits for uint64)", s)
+	}
 	var v uint64
 	for _, c := range s {
 		v <<= 4
@@ -271,15 +281,11 @@ func parseJSONNumber(n json.Number) (uint64, error) {
 	if uErr == nil {
 		return u, nil
 	}
-	// Fall back to float64 for non-integer or unusual formats.
-	f, err := n.Float64()
-	if err != nil {
-		return 0, fmt.Errorf("parse number %q: %w", s, err)
+	// Reject non-integer values (e.g., "1.9") to avoid silent truncation.
+	if strings.Contains(s, ".") {
+		return 0, fmt.Errorf("parse number %q: non-integer values are not supported in protobuf wire format", s)
 	}
-	if f < 0 || f > math.MaxUint64 {
-		return 0, fmt.Errorf("number %q out of uint64 range", s)
-	}
-	return uint64(f), nil
+	return 0, fmt.Errorf("parse number %q: %w", s, uErr)
 }
 
 // decodeHexColon parses colon-separated hex (e.g. "01:02:0a") back to bytes.

@@ -3,12 +3,14 @@ package protobuf
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
-// maxFramePayloadSize is the maximum allowed gRPC frame payload size (16 MB).
-// This matches the gRPC default maximum message size and prevents excessive
-// memory allocation from malicious frame headers (CWE-770).
-const maxFramePayloadSize = 16 * 1024 * 1024
+// maxFramePayloadSize is the maximum allowed gRPC frame payload size (254 MB).
+// This matches config.MaxGRPCMessageSize (internal/config/limits.go) and the
+// existing gRPC frame parser (internal/protocol/grpc/frame.go).
+// Any change to config.MaxGRPCMessageSize should be reflected here.
+const maxFramePayloadSize = 254 << 20 // 254 MB
 
 // Frame represents a single gRPC frame with a 5-byte header:
 // [compressed:1 byte][length:4 bytes big-endian][payload]
@@ -32,6 +34,9 @@ func ParseFrames(data []byte) ([]Frame, error) {
 		}
 
 		compressed := data[offset]
+		if compressed > 1 {
+			return nil, fmt.Errorf("grpc frame: invalid compressed flag %d at offset %d (must be 0 or 1)", compressed, offset)
+		}
 		length := binary.BigEndian.Uint32(data[offset+1 : offset+5])
 		offset += 5
 
@@ -64,6 +69,9 @@ func ParseFrame(data []byte) (Frame, int, error) {
 	}
 
 	compressed := data[0]
+	if compressed > 1 {
+		return Frame{}, 0, fmt.Errorf("grpc frame: invalid compressed flag %d (must be 0 or 1)", compressed)
+	}
 	length := binary.BigEndian.Uint32(data[1:5])
 
 	if length > maxFramePayloadSize {
@@ -85,23 +93,32 @@ func ParseFrame(data []byte) (Frame, int, error) {
 }
 
 // BuildFrame serializes a single gRPC frame to wire format.
-func BuildFrame(f Frame) []byte {
+// Returns an error if the payload size exceeds math.MaxUint32 (the gRPC
+// length field is a 4-byte big-endian uint32).
+func BuildFrame(f Frame) ([]byte, error) {
+	if len(f.Payload) > math.MaxUint32 {
+		return nil, fmt.Errorf("grpc frame: payload size %d exceeds maximum uint32", len(f.Payload))
+	}
 	buf := make([]byte, 5+len(f.Payload))
 	buf[0] = f.Compressed
 	binary.BigEndian.PutUint32(buf[1:5], uint32(len(f.Payload)))
 	copy(buf[5:], f.Payload)
-	return buf
+	return buf, nil
 }
 
 // BuildFrames serializes multiple gRPC frames to wire format.
-func BuildFrames(frames []Frame) []byte {
+func BuildFrames(frames []Frame) ([]byte, error) {
 	var total int
 	for _, f := range frames {
 		total += 5 + len(f.Payload)
 	}
 	buf := make([]byte, 0, total)
-	for _, f := range frames {
-		buf = append(buf, BuildFrame(f)...)
+	for i, f := range frames {
+		b, err := BuildFrame(f)
+		if err != nil {
+			return nil, fmt.Errorf("frame[%d]: %w", i, err)
+		}
+		buf = append(buf, b...)
 	}
-	return buf
+	return buf, nil
 }

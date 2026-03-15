@@ -41,12 +41,6 @@ func Decode(data []byte) (string, error) {
 	return string(b), nil
 }
 
-// decodeFields parses protobuf binary into an ordered map (sorted by ordinal).
-// It is a convenience wrapper that starts recursion at depth 0.
-func decodeFields(data []byte) (*orderedMap, error) {
-	return decodeFieldsWithDepth(data, 0)
-}
-
 // decodeFieldsWithDepth parses protobuf binary with recursion depth tracking.
 // Returns an error if depth exceeds maxRecursionDepth.
 func decodeFieldsWithDepth(data []byte, depth int) (*orderedMap, error) {

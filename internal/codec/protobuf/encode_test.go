@@ -181,6 +181,41 @@ func TestParseKeyParts(t *testing.T) {
 	}
 }
 
+// TestEncode_32BitOverflow tests that 32-bit fields reject values exceeding uint32.
+func TestEncode_32BitOverflow(t *testing.T) {
+	// Value 4294967296 = math.MaxUint32 + 1
+	jsonStr := `{"0001:0000:32-bit": 4294967296}`
+	_, err := Encode(jsonStr)
+	if err == nil {
+		t.Error("expected error for 32-bit value exceeding uint32 range")
+	}
+}
+
+// TestParseJSONNumber_NonInteger tests that non-integer values are rejected.
+func TestParseJSONNumber_NonInteger(t *testing.T) {
+	_, err := parseJSONNumber(json.Number("1.9"))
+	if err == nil {
+		t.Error("expected error for non-integer JSON number")
+	}
+}
+
+// TestParseHex_Overflow tests that overly long hex strings are rejected.
+func TestParseHex_Overflow(t *testing.T) {
+	// 17 hex digits would overflow uint64
+	_, err := parseHex("12345678901234567")
+	if err == nil {
+		t.Error("expected error for hex string exceeding 16 digits")
+	}
+}
+
+// TestParseHex_Empty tests that empty hex strings are rejected.
+func TestParseHex_Empty(t *testing.T) {
+	_, err := parseHex("")
+	if err == nil {
+		t.Error("expected error for empty hex string")
+	}
+}
+
 // TestParseHex tests hex parsing.
 func TestParseHex(t *testing.T) {
 	tests := []struct {

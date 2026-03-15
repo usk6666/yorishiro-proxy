@@ -11,10 +11,12 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// maxDecompressedSize is the maximum allowed size of decompressed data (16 MB).
-// This prevents decompression bomb attacks (CWE-409) where a small compressed
-// payload expands to consume excessive memory.
-const maxDecompressedSize = 16 * 1024 * 1024
+// maxDecompressedSize is the maximum allowed size of decompressed data (254 MB).
+// This matches config.MaxGRPCMessageSize (internal/config/limits.go) and prevents
+// decompression bomb attacks (CWE-409) where a small compressed payload expands
+// to consume excessive memory.
+// Any change to config.MaxGRPCMessageSize should be reflected here.
+const maxDecompressedSize = 254 << 20 // 254 MB
 
 // ErrDecompressedSizeExceeded is returned when decompressed data exceeds maxDecompressedSize.
 var ErrDecompressedSizeExceeded = fmt.Errorf("protobuf: decompressed size exceeds limit (%d bytes)", maxDecompressedSize)
