@@ -99,11 +99,17 @@ func TestApplySSEIntercept_Drop(t *testing.T) {
 	go io.Copy(io.Discard, client)
 
 	// Resolve the intercepted item with DROP action in a goroutine.
+	// Capture the enqueued item's body to verify it is nil.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
 	go func() {
 		// Wait for the item to appear in the queue.
 		for i := 0; i < 50; i++ {
 			items := queue.List()
 			if len(items) > 0 {
+				itemCh <- itemInfo{body: items[0].Body}
 				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionDrop})
 				return
 			}
@@ -114,6 +120,12 @@ func TestApplySSEIntercept_Drop(t *testing.T) {
 	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
 	if !dropped {
 		t.Error("applySSEIntercept should return true when DROP action is received")
+	}
+
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	info := <-itemCh
+	if info.body != nil {
+		t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
 	}
 }
 
@@ -143,10 +155,16 @@ func TestApplySSEIntercept_Release(t *testing.T) {
 	defer server.Close()
 
 	// Resolve the intercepted item with RELEASE action in a goroutine.
+	// Capture the enqueued item's body to verify it is nil.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
 	go func() {
 		for i := 0; i < 50; i++ {
 			items := queue.List()
 			if len(items) > 0 {
+				itemCh <- itemInfo{body: items[0].Body}
 				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionRelease})
 				return
 			}
@@ -157,6 +175,12 @@ func TestApplySSEIntercept_Release(t *testing.T) {
 	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
 	if dropped {
 		t.Error("applySSEIntercept should return false when RELEASE action is received")
+	}
+
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	info := <-itemCh
+	if info.body != nil {
+		t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
 	}
 }
 
@@ -186,10 +210,16 @@ func TestApplySSEIntercept_ModifyAndForward_TreatedAsRelease(t *testing.T) {
 	defer server.Close()
 
 	// Resolve with ModifyAndForward, which should be treated as release for SSE.
+	// Capture the enqueued item's body to verify it is nil.
+	type itemInfo struct {
+		body []byte
+	}
+	itemCh := make(chan itemInfo, 1)
 	go func() {
 		for i := 0; i < 50; i++ {
 			items := queue.List()
 			if len(items) > 0 {
+				itemCh <- itemInfo{body: items[0].Body}
 				queue.Respond(items[0].ID, intercept.InterceptAction{Type: intercept.ActionModifyAndForward})
 				return
 			}
@@ -200,6 +230,12 @@ func TestApplySSEIntercept_ModifyAndForward_TreatedAsRelease(t *testing.T) {
 	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
 	if dropped {
 		t.Error("applySSEIntercept should return false for ModifyAndForward (treated as release)")
+	}
+
+	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
+	info := <-itemCh
+	if info.body != nil {
+		t.Errorf("enqueued item body should be nil for SSE intercept, got %v", info.body)
 	}
 }
 
