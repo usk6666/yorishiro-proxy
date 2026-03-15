@@ -301,25 +301,7 @@ func (h *Handler) handleStream(
 		start:            time.Now(),
 	}
 
-	// gRPC streaming path: bypass full-body buffering to avoid deadlocks
-	// with bidirectional streaming. The gRPC streaming handler uses io.Pipe
-	// to stream request/response bodies concurrently.
-	// NOTE: Safety filter, intercept, and plugin hooks are not yet supported
-	// for the streaming path. These require body access which is not available
-	// before streaming begins. TODO(USK-362): Add streaming-compatible
-	// safety/intercept/plugin support in a follow-up issue.
-	if isGRPCStream(h, sc) {
-		h.resolveSchemeAndHost(sc)
-
-		if h.checkTargetScope(sc) {
-			return
-		}
-		if h.checkRateLimit(sc) {
-			return
-		}
-
-		logGRPCStreamBypass(sc.logger, sc.req.URL.String())
-		h.handleGRPCStream(sc)
+	if h.tryHandleGRPCStream(sc) {
 		return
 	}
 

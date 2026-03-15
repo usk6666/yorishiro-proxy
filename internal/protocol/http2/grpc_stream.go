@@ -3,7 +3,6 @@ package http2
 import (
 	"bytes"
 	"io"
-	"log/slog"
 	gohttp "net/http"
 	"sync"
 	"time"
@@ -371,16 +370,28 @@ func joinTrailerKeys(keys []string) string {
 	return buf.String()
 }
 
-// isGRPCStream reports whether the request should use the streaming gRPC
-// transport path. Currently all gRPC requests use streaming to avoid the
-// full-body-buffering deadlock.
-func isGRPCStream(h *Handler, sc *streamContext) bool {
-	return h.grpcHandler != nil && isGRPCContentType(sc.req.Header.Get("Content-Type"))
-}
+// tryHandleGRPCStream checks whether the request is a gRPC stream and, if so,
+// handles it via the streaming transport path. Returns true if handled.
+//
+// The gRPC streaming path bypasses full-body buffering to avoid deadlocks
+// with bidirectional streaming. Safety filter, intercept, and plugin hooks
+// are not yet supported for the streaming path (TODO: USK-365).
+func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
+	if h.grpcHandler == nil || !isGRPCContentType(sc.req.Header.Get("Content-Type")) {
+		return false
+	}
 
-// logGRPCStreamBypass logs that the gRPC streaming path is being used,
-// noting which processing steps are bypassed.
-func logGRPCStreamBypass(logger *slog.Logger, url string) {
-	logger.Debug("gRPC stream: bypassing full-body buffering, intercept, and plugin hooks",
-		"url", url)
+	h.resolveSchemeAndHost(sc)
+
+	if h.checkTargetScope(sc) {
+		return true
+	}
+	if h.checkRateLimit(sc) {
+		return true
+	}
+
+	sc.logger.Debug("gRPC stream: bypassing full-body buffering, intercept, and plugin hooks",
+		"url", sc.req.URL.String())
+	h.handleGRPCStream(sc)
+	return true
 }
