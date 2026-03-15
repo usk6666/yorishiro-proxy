@@ -17,7 +17,7 @@
   <a href="README.md">English</a>
 </p>
 
-> **Beta** — マイナーバージョン間で API や設定に破壊的変更が入る可能性があります。
+> **Beta** — yorishiro-proxy は開発中です. APIs, configuration formats, and protocol など、マイナーバージョン間でも変更される可能性があります。Non-HTTP/HTTPS プロトコル (gRPC, WebSocket, Raw TCP, SOCKS5など) も実験的な機能提供段階です。
 
 ---
 

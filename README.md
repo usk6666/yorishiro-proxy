@@ -17,7 +17,7 @@
   <a href="README-ja.md">日本語</a>
 </p>
 
-> **Beta** — APIs and configuration may change between minor versions.
+> **Beta** — yorishiro-proxy is under active development. APIs, configuration formats, and protocol behavior may change between minor versions. Non-HTTP/HTTPS protocols (gRPC, WebSocket, Raw TCP, SOCKS5) are at an earlier stage of maturity and may have known limitations.
 
 ---
 
