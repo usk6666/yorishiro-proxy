@@ -16,6 +16,9 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -52,6 +55,15 @@ func addSSETags(tags map[string]string) map[string]string {
 	return tags
 }
 
+// sseHookContext holds the plugin hook context for SSE stream processing.
+// This carries the plugin ConnInfo and transaction context through to the
+// SSE handler so that on_receive_from_server and on_before_send_to_client
+// hooks can be dispatched at the header level.
+type sseHookContext struct {
+	connInfo *plugin.ConnInfo
+	txCtx    map[string]any
+}
+
 // handleSSEStream handles Server-Sent Events responses by writing the response
 // headers to the client and then streaming events from upstream, forwarding
 // each to the client while recording them as flow.Message entries.
@@ -60,6 +72,11 @@ func addSSETags(tags map[string]string) map[string]string {
 // separate flow.Message with direction="receive". This follows the same
 // progressive recording pattern used by WebSocket frame recording.
 //
+// Before writing response headers, this function applies:
+//   - Plugin hook: on_receive_from_server (header-level, no body)
+//   - Response intercept check (header-level, DROP or RELEASE)
+//   - Plugin hook: on_before_send_to_client (header-level, no body)
+//
 // Output filter (PII masking) is applied per-event to the SSE data field
 // before forwarding to the client. If a block-action rule matches, the
 // stream is terminated. Flow recording always stores the original (unfiltered)
@@ -67,13 +84,32 @@ func addSSETags(tags map[string]string) map[string]string {
 //
 // NOTE: The following processing steps are intentionally skipped for SSE streams
 // because they require the full response body to be buffered in memory:
-//   - Plugin hooks: on_receive_from_server, on_before_send_to_client
-//   - Response intercept (modify/drop)
 //   - Response auto-transform rules
 //
 // The sendResult parameter is the result from the already-recorded send phase;
 // this function must NOT call recordSendWithVariant again.
-func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
+func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, hookCtx *sseHookContext, logger *slog.Logger) error {
+	// Plugin hook: on_receive_from_server — header-level dispatch for SSE.
+	// Body is nil since the SSE body is a stream that cannot be buffered.
+	if hookCtx != nil {
+		fwd.resp, _ = h.dispatchOnReceiveFromServer(ctx, fwd.resp, nil, req, hookCtx.connInfo, hookCtx.txCtx, logger)
+	}
+
+	// Response intercept: check if the SSE response matches any intercept
+	// rules at the header level. For SSE, only DROP and RELEASE are meaningful;
+	// MODIFY is not supported since the body is a stream.
+	if dropped := h.applySSEIntercept(ctx, conn, req, fwd.resp, logger); dropped {
+		// Update flow to complete state so it does not remain "active" forever.
+		h.completeSSEFlowOnDrop(ctx, sendResult, fwd, start, "", logger)
+		return nil
+	}
+
+	// Plugin hook: on_before_send_to_client — header-level dispatch for SSE.
+	// Body is nil since the SSE body is a stream that cannot be buffered.
+	if hookCtx != nil {
+		fwd.resp, _ = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, nil, req, hookCtx.connInfo, hookCtx.txCtx, logger)
+	}
+
 	// Write the response headers to the client.
 	if err := writeSSEResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
@@ -114,12 +150,29 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *gohtt
 // the same streaming approach as handleSSEStream but includes TLS certificate
 // information in the flow recording.
 //
+// Before writing response headers, this function applies:
+//   - Response intercept check (header-level, DROP or RELEASE)
+//
 // See handleSSEStream for details on output filter application and skipped
 // processing steps.
 //
 // The sendResult parameter is the result from the already-recorded send phase;
 // this function must NOT call recordSendWithVariant again.
 func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *gohttp.Request, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
+	// Extract TLS certificate info from the upstream connection.
+	var tlsCertSubject string
+	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
+		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
+	}
+
+	// Response intercept: check if the SSE response matches any intercept
+	// rules at the header level. Same as handleSSEStream.
+	if dropped := h.applySSEIntercept(ctx, conn, req, fwd.resp, logger); dropped {
+		// Update flow to complete state so it does not remain "active" forever.
+		h.completeSSEFlowOnDrop(ctx, sendResult, fwd, start, tlsCertSubject, logger)
+		return nil
+	}
+
 	// Write the response headers to the client.
 	if err := writeSSEResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
@@ -127,12 +180,6 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *go
 	}
 
 	logger.Info("SSE stream started (TLS)", "method", req.Method, "url", req.URL.String())
-
-	// Extract TLS certificate info from the upstream connection.
-	var tlsCertSubject string
-	if fwd.resp.TLS != nil && len(fwd.resp.TLS.PeerCertificates) > 0 {
-		tlsCertSubject = fwd.resp.TLS.PeerCertificates[0].Subject.String()
-	}
 
 	// Record the initial receive message (response headers) and update flow
 	// type to "stream" for SSE event-level recording.
@@ -342,6 +389,73 @@ func (h *Handler) applySSEOutputFilter(event *SSEEvent, logger *slog.Logger) (se
 	return event.RawBytes, false
 }
 
+// applySSEIntercept checks if the SSE response matches any intercept rules at
+// the header level. For SSE streams, only DROP and RELEASE are meaningful since
+// the response body is a stream that cannot be buffered for modification.
+// Returns true if the response was dropped (caller should return early).
+func (h *Handler) applySSEIntercept(ctx context.Context, conn net.Conn, req *gohttp.Request, resp *gohttp.Response, logger *slog.Logger) bool {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
+		return false
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	if len(matchedRules) == 0 {
+		return false
+	}
+
+	logger.Info("SSE response intercepted (header-level)",
+		"method", req.Method,
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"matched_rules", matchedRules)
+
+	// Enqueue with nil body since SSE body is a stream.
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		req.Method, req.URL, resp.StatusCode, resp.Header, nil, matchedRules,
+	)
+	defer h.InterceptQueue.Remove(id)
+
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	var action intercept.InterceptAction
+	select {
+	case action = <-actionCh:
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			logger.Info("intercepted SSE response cancelled (proxy shutdown)", "id", id)
+			action = intercept.InterceptAction{Type: intercept.ActionDrop}
+		} else {
+			logger.Info("intercepted SSE response timed out", "id", id, "behavior", string(behavior))
+			switch behavior {
+			case intercept.TimeoutAutoDrop:
+				action = intercept.InterceptAction{Type: intercept.ActionDrop}
+			default:
+				action = intercept.InterceptAction{Type: intercept.ActionRelease}
+			}
+		}
+	}
+
+	switch action.Type {
+	case intercept.ActionDrop:
+		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		logger.Info("intercepted SSE response dropped",
+			"method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
+		return true
+	case intercept.ActionModifyAndForward:
+		// ModifyAndForward is not supported for SSE streams since the body
+		// is a stream. Treat as release and log a warning.
+		logger.Warn("SSE response intercept modify_and_forward not supported, releasing",
+			"method", req.Method, "url", req.URL.String())
+		return false
+	default:
+		// ActionRelease or unknown: continue with normal processing.
+		return false
+	}
+}
+
 // recordSSEReceive records the initial receive phase for an SSE flow.
 // This records the response headers as the first receive message and updates
 // the flow type to "stream" to indicate event-level recording.
@@ -423,6 +537,35 @@ func (h *Handler) completeSSEFlow(ctx context.Context, sendResult *sendRecordRes
 	}
 	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("SSE flow completion failed", "error", err)
+	}
+}
+
+// completeSSEFlowOnDrop updates the SSE flow to "complete" state when the
+// response was intercepted and dropped. This prevents flows from remaining
+// in "active" state indefinitely after a DROP action.
+func (h *Handler) completeSSEFlowOnDrop(ctx context.Context, sendResult *sendRecordResult, fwd *forwardResult, start time.Time, tlsCertSubject string, logger *slog.Logger) {
+	if sendResult == nil || h.Store == nil {
+		return
+	}
+
+	duration := time.Since(start)
+
+	tags := make(map[string]string)
+	for k, v := range sendResult.tags {
+		tags[k] = v
+	}
+	tags = addSSETags(tags)
+	tags["intercept_action"] = "drop"
+
+	update := flow.FlowUpdate{
+		State:                "complete",
+		Duration:             duration,
+		ServerAddr:           fwd.serverAddr,
+		TLSServerCertSubject: tlsCertSubject,
+		Tags:                 tags,
+	}
+	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+		logger.Error("SSE flow completion after drop failed", "error", err)
 	}
 }
 
