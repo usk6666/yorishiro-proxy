@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 )
 
@@ -17,11 +18,13 @@ type grpcStreamState struct {
 	reqFrameBuf  *protogrpc.FrameBuffer
 	respFrameBuf *protogrpc.FrameBuffer
 
-	mu           sync.Mutex
-	reqFrames    []*protogrpc.Frame
-	reqRawBytes  []byte
-	respFrames   []*protogrpc.Frame
-	respRawBytes []byte
+	mu               sync.Mutex
+	reqFrames        []*protogrpc.Frame
+	reqRawBytes      []byte
+	reqRawTruncated  bool
+	respFrames       []*protogrpc.Frame
+	respRawBytes     []byte
+	respRawTruncated bool
 
 	reqStreamErr error
 }
@@ -78,14 +81,27 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 }
 
 // initGRPCStreamState creates the frame buffers and state for a gRPC stream.
+// Raw bytes are capped at config.MaxBodySize to prevent unbounded memory
+// growth during long-lived streaming connections.
 func (h *Handler) initGRPCStreamState() *grpcStreamState {
 	state := &grpcStreamState{}
+	maxRaw := int(config.MaxBodySize)
 
 	state.reqFrameBuf = protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		state.reqFrames = append(state.reqFrames, frame)
-		state.reqRawBytes = append(state.reqRawBytes, raw...)
+		if !state.reqRawTruncated {
+			if len(state.reqRawBytes)+len(raw) > maxRaw {
+				remaining := maxRaw - len(state.reqRawBytes)
+				if remaining > 0 {
+					state.reqRawBytes = append(state.reqRawBytes, raw[:remaining]...)
+				}
+				state.reqRawTruncated = true
+			} else {
+				state.reqRawBytes = append(state.reqRawBytes, raw...)
+			}
+		}
 		return nil
 	})
 
@@ -93,7 +109,17 @@ func (h *Handler) initGRPCStreamState() *grpcStreamState {
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		state.respFrames = append(state.respFrames, frame)
-		state.respRawBytes = append(state.respRawBytes, raw...)
+		if !state.respRawTruncated {
+			if len(state.respRawBytes)+len(raw) > maxRaw {
+				remaining := maxRaw - len(state.respRawBytes)
+				if remaining > 0 {
+					state.respRawBytes = append(state.respRawBytes, raw[:remaining]...)
+				}
+				state.respRawTruncated = true
+			} else {
+				state.respRawBytes = append(state.respRawBytes, raw...)
+			}
+		}
 		return nil
 	})
 
@@ -105,7 +131,15 @@ func (h *Handler) initGRPCStreamState() *grpcStreamState {
 // FrameBuffer for frame reassembly.
 func (h *Handler) streamGRPCRequestBody(sc *streamContext, state *grpcStreamState, pw *io.PipeWriter, wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer pw.Close()
+	defer func() {
+		// Propagate the actual error to the pipe reader so the upstream
+		// request sees the real cause rather than io.ErrClosedPipe.
+		if state.reqStreamErr != nil {
+			pw.CloseWithError(state.reqStreamErr)
+		} else {
+			pw.Close()
+		}
+	}()
 
 	buf := make([]byte, 32*1024)
 	for {
@@ -151,11 +185,12 @@ func (h *Handler) buildGRPCOutboundRequest(sc *streamContext, pr *io.PipeReader)
 // Returns the response and true on success, or nil and false on failure.
 // On failure, it waits for the request goroutine to finish.
 func (h *Handler) sendGRPCUpstream(sc *streamContext, outReq *gohttp.Request, reqWg *sync.WaitGroup) (*gohttp.Response, bool) {
-	h.tlsMu.RLock()
+	// Use the same lock pattern as roundTripWithTrace: only UpstreamMu is
+	// needed to protect Transport.Proxy from concurrent SetUpstreamProxy.
+	// tlsMu protects DialTLSContext setup which is configured before requests.
 	h.UpstreamMu.RLock()
 	resp, err := h.Transport.RoundTrip(outReq)
 	h.UpstreamMu.RUnlock()
-	h.tlsMu.RUnlock()
 
 	if err != nil {
 		sc.logger.Error("gRPC upstream request failed",

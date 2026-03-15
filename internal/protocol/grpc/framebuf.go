@@ -47,6 +47,17 @@ func (fb *FrameBuffer) Write(data []byte) error {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 
+	// Reject writes that would grow the buffer beyond one maximum gRPC
+	// frame (header + payload). This prevents a malicious sender from
+	// forcing unbounded memory growth with a slow-drip large frame.
+	maxBufSize := frameHeaderSize + int(config.MaxGRPCMessageSize)
+	if len(fb.buf)+len(data) > maxBufSize {
+		err := fmt.Errorf("grpc frame buffer overflow: %d + %d > %d",
+			len(fb.buf), len(data), maxBufSize)
+		fb.buf = nil
+		return err
+	}
+
 	fb.buf = append(fb.buf, data...)
 
 	for {
