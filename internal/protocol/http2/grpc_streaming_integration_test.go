@@ -5,6 +5,7 @@ package http2_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -14,8 +15,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"crypto/tls"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -937,19 +936,25 @@ func TestIntegration_GRPC_OutputFilter_PII_Mask(t *testing.T) {
 	}
 
 	// Parse the response frame and verify SSN is masked.
-	if len(body) > 5 {
-		respFrames, parseErr := protogrpc.ReadAllFrames(body)
-		if parseErr == nil && len(respFrames) > 0 {
-			decoded, decErr := protobuf.Decode(respFrames[0].Payload)
-			if decErr == nil {
-				if strings.Contains(decoded, "123-45-6789") {
-					t.Errorf("SSN was not masked in gRPC response: %s", decoded)
-				}
-				if !strings.Contains(decoded, "***-**-****") {
-					t.Errorf("expected masked SSN in response: %s", decoded)
-				}
-			}
-		}
+	if len(body) <= 5 {
+		t.Fatalf("response body too short for verification: %d bytes", len(body))
+	}
+	respFrames, parseErr := protogrpc.ReadAllFrames(body)
+	if parseErr != nil {
+		t.Fatalf("parse response frames: %v", parseErr)
+	}
+	if len(respFrames) == 0 {
+		t.Fatal("no response frames found")
+	}
+	decoded, decErr := protobuf.Decode(respFrames[0].Payload)
+	if decErr != nil {
+		t.Fatalf("protobuf decode: %v", decErr)
+	}
+	if strings.Contains(decoded, "123-45-6789") {
+		t.Errorf("SSN was not masked in gRPC response: %s", decoded)
+	}
+	if !strings.Contains(decoded, "***-**-****") {
+		t.Errorf("expected masked SSN in response: %s", decoded)
 	}
 }
 
@@ -1019,19 +1024,25 @@ func TestIntegration_GRPC_PluginHooks_BodyModification(t *testing.T) {
 	}
 
 	// The upstream echoed the (modified) request body. Verify transformation.
-	if len(body) > 5 {
-		respFrames, parseErr := protogrpc.ReadAllFrames(body)
-		if parseErr == nil && len(respFrames) > 0 {
-			decoded, decErr := protobuf.Decode(respFrames[0].Payload)
-			if decErr == nil {
-				if strings.Contains(decoded, "original-token") {
-					t.Errorf("plugin did not modify body: %s", decoded)
-				}
-				if !strings.Contains(decoded, "MODIFIED-TOKEN") {
-					t.Errorf("expected modified token in response: %s", decoded)
-				}
-			}
-		}
+	if len(body) <= 5 {
+		t.Fatalf("response body too short for verification: %d bytes", len(body))
+	}
+	respFrames, parseErr := protogrpc.ReadAllFrames(body)
+	if parseErr != nil {
+		t.Fatalf("parse response frames: %v", parseErr)
+	}
+	if len(respFrames) == 0 {
+		t.Fatal("no response frames found")
+	}
+	decoded, decErr := protobuf.Decode(respFrames[0].Payload)
+	if decErr != nil {
+		t.Fatalf("protobuf decode: %v", decErr)
+	}
+	if strings.Contains(decoded, "original-token") {
+		t.Errorf("plugin did not modify body: %s", decoded)
+	}
+	if !strings.Contains(decoded, "MODIFIED-TOKEN") {
+		t.Errorf("expected modified token in response: %s", decoded)
 	}
 }
 
@@ -1132,14 +1143,22 @@ func TestIntegration_GRPC_Intercept_Hold_Release(t *testing.T) {
 	}
 
 	// Verify echoed data came through.
-	if len(body) > 5 {
-		respFrames, _ := protogrpc.ReadAllFrames(body)
-		if len(respFrames) > 0 {
-			decoded, _ := protobuf.Decode(respFrames[0].Payload)
-			if !strings.Contains(decoded, "intercepted-data") {
-				t.Errorf("expected original data after release: %s", decoded)
-			}
-		}
+	if len(body) <= 5 {
+		t.Fatalf("response body too short for verification: %d bytes", len(body))
+	}
+	respFrames, parseErr := protogrpc.ReadAllFrames(body)
+	if parseErr != nil {
+		t.Fatalf("parse response frames: %v", parseErr)
+	}
+	if len(respFrames) == 0 {
+		t.Fatal("no response frames found")
+	}
+	decoded, decErr := protobuf.Decode(respFrames[0].Payload)
+	if decErr != nil {
+		t.Fatalf("protobuf decode: %v", decErr)
+	}
+	if !strings.Contains(decoded, "intercepted-data") {
+		t.Errorf("expected original data after release: %s", decoded)
 	}
 }
 
@@ -1206,19 +1225,25 @@ func TestIntegration_GRPC_AutoTransform_BodyReplace(t *testing.T) {
 	}
 
 	// Verify the echoed response contains transformed data.
-	if len(body) > 5 {
-		respFrames, parseErr := protogrpc.ReadAllFrames(body)
-		if parseErr == nil && len(respFrames) > 0 {
-			decoded, decErr := protobuf.Decode(respFrames[0].Payload)
-			if decErr == nil {
-				if strings.Contains(decoded, "old-secret") {
-					t.Errorf("auto-transform not applied: %s", decoded)
-				}
-				if !strings.Contains(decoded, "NEW-SECRET") {
-					t.Errorf("expected transformed value: %s", decoded)
-				}
-			}
-		}
+	if len(body) <= 5 {
+		t.Fatalf("response body too short for verification: %d bytes", len(body))
+	}
+	respFrames, parseErr := protogrpc.ReadAllFrames(body)
+	if parseErr != nil {
+		t.Fatalf("parse response frames: %v", parseErr)
+	}
+	if len(respFrames) == 0 {
+		t.Fatal("no response frames found")
+	}
+	decoded, decErr := protobuf.Decode(respFrames[0].Payload)
+	if decErr != nil {
+		t.Fatalf("protobuf decode: %v", decErr)
+	}
+	if strings.Contains(decoded, "old-secret") {
+		t.Errorf("auto-transform not applied: %s", decoded)
+	}
+	if !strings.Contains(decoded, "NEW-SECRET") {
+		t.Errorf("expected transformed value: %s", decoded)
 	}
 }
 
