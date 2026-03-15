@@ -82,6 +82,14 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 		"url", upgradeReq.URL.String(),
 	)
 
+	// Record the Upgrade request as the first message (sequence=0, direction="send").
+	// This mirrors the error path in recordWebSocketError so that WebSocket flows
+	// have the URL, Method, and Headers available for search and resend.
+	h.recordUpgradeRequest(ctx, fl.ID, upgradeReq, start)
+
+	// Record the Upgrade response as the second message (sequence=1, direction="receive").
+	h.recordUpgradeResponse(ctx, fl.ID, upgradeResp, start)
+
 	// Run bidirectional frame relay.
 	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq, connInfo)
 
@@ -108,6 +116,52 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	return err
 }
 
+// recordUpgradeRequest records the HTTP Upgrade request as a send message
+// (sequence=0) so that the flow contains URL, Method, and Headers for search
+// and resend. This matches the format used by recordWebSocketError in the
+// HTTP handler's error path.
+func (h *Handler) recordUpgradeRequest(ctx context.Context, flowID string, req *gohttp.Request, start time.Time) {
+	if h.store == nil {
+		return
+	}
+
+	msg := &flow.Message{
+		FlowID:    flowID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: start,
+		Method:    req.Method,
+		URL:       req.URL,
+		Headers:   req.Header,
+	}
+	if err := h.store.AppendMessage(ctx, msg); err != nil {
+		h.logger.Error("websocket upgrade request message save failed",
+			"flow_id", flowID, "error", err)
+	}
+}
+
+// recordUpgradeResponse records the HTTP 101 Switching Protocols response as a
+// receive message (sequence=1) so that the flow contains the response status
+// code and headers.
+func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp *gohttp.Response, start time.Time) {
+	if h.store == nil {
+		return
+	}
+
+	msg := &flow.Message{
+		FlowID:     flowID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  start,
+		StatusCode: resp.StatusCode,
+		Headers:    resp.Header,
+	}
+	if err := h.store.AppendMessage(ctx, msg); err != nil {
+		h.logger.Error("websocket upgrade response message save failed",
+			"flow_id", flowID, "error", err)
+	}
+}
+
 // relayFrames runs two goroutines to relay WebSocket frames bidirectionally
 // between the client and upstream server. Each frame is recorded to the
 // flow store. The relay stops when a Close frame is received, a connection
@@ -124,6 +178,9 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	}()
 
 	var seq atomic.Int64
+	// Data frame sequences start at 2 because sequence 0 and 1 are reserved
+	// for the Upgrade request and response messages recorded in HandleUpgrade.
+	seq.Store(2)
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
