@@ -772,22 +772,24 @@ func TestWriteGRPCStatus(t *testing.T) {
 	}
 }
 
-func TestWriteGRPCBlockResponse(t *testing.T) {
-	w := httptest.NewRecorder()
-	violation := &safety.InputViolation{
-		RuleID:   "test-rule",
-		RuleName: "Test Rule",
+func TestPercentEncodeGRPCMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{name: "ascii_only", msg: "permission denied", want: "permission denied"},
+		{name: "with_colon", msg: "blocked: rule", want: "blocked%3A rule"},
+		{name: "empty", msg: "", want: ""},
+		{name: "unreserved", msg: "abc-_.~", want: "abc-_.~"},
 	}
-	writeGRPCBlockResponse(w, violation)
-	resp := w.Result()
-	if resp.StatusCode != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
-	}
-	if got := resp.Header.Get("Grpc-Status"); got != "7" {
-		t.Errorf("Grpc-Status = %q, want %q", got, "7")
-	}
-	if got := resp.Header.Get("X-Blocked-By"); got != "yorishiro-proxy" {
-		t.Errorf("X-Blocked-By = %q, want %q", got, "yorishiro-proxy")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := percentEncodeGRPCMessage(tt.msg)
+			if got != tt.want {
+				t.Errorf("percentEncodeGRPCMessage(%q) = %q, want %q", tt.msg, got, tt.want)
+			}
+		})
 	}
 }
 

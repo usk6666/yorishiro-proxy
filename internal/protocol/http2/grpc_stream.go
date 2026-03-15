@@ -13,7 +13,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // grpcStreamState holds the mutable state accumulated during gRPC stream
@@ -610,22 +609,29 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 
 // writeGRPCStatus writes a gRPC error response with the given status code
 // and message. This is used when subsystems block a gRPC stream.
+// The message is percent-encoded per the gRPC specification for grpc-message.
 func writeGRPCStatus(w gohttp.ResponseWriter, httpStatus int, grpcStatus int, message string) {
 	w.Header().Set("Content-Type", "application/grpc")
 	w.Header().Set("Grpc-Status", fmt.Sprintf("%d", grpcStatus))
-	w.Header().Set("Grpc-Message", message)
+	w.Header().Set("Grpc-Message", percentEncodeGRPCMessage(message))
 	w.WriteHeader(httpStatus)
 }
 
-// writeGRPCBlockResponse writes a gRPC PERMISSION_DENIED response for
-// safety filter violations on gRPC streams. The violation details are
-// included in the grpc-message trailer.
-func writeGRPCBlockResponse(w gohttp.ResponseWriter, violation *safety.InputViolation) {
-	msg := fmt.Sprintf("blocked by safety filter: %s", violation.RuleName)
-	w.Header().Set("Content-Type", "application/grpc")
-	w.Header().Set("Grpc-Status", "7") // PERMISSION_DENIED
-	w.Header().Set("Grpc-Message", msg)
-	w.Header().Set("X-Blocked-By", "yorishiro-proxy")
-	w.Header().Set("X-Block-Reason", "safety_filter")
-	w.WriteHeader(gohttp.StatusOK)
+// percentEncodeGRPCMessage percent-encodes a gRPC status message per the
+// gRPC wire format specification. Only unreserved characters (RFC 3986)
+// and space are passed through; all others are percent-encoded.
+func percentEncodeGRPCMessage(msg string) string {
+	var buf bytes.Buffer
+	for i := 0; i < len(msg); i++ {
+		c := msg[i]
+		switch {
+		case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'):
+			buf.WriteByte(c)
+		case c == '-' || c == '_' || c == '.' || c == '~' || c == ' ':
+			buf.WriteByte(c)
+		default:
+			fmt.Fprintf(&buf, "%%%02X", c)
+		}
+	}
+	return buf.String()
 }
