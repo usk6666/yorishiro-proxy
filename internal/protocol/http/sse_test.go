@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -700,5 +701,336 @@ func TestStreamSSEEvents_EmptyStream(t *testing.T) {
 
 	if len(store.messages) != 0 {
 		t.Errorf("expected 0 messages for empty stream, got %d", len(store.messages))
+	}
+}
+
+// newTestSafetyEngine creates a safety engine with the given output rules
+// for testing. It panics on error since test setup failures should abort.
+func newTestSafetyEngine(t *testing.T, outputRules []safety.RuleConfig) *safety.Engine {
+	t.Helper()
+	engine, err := safety.NewEngine(safety.Config{
+		OutputRules: outputRules,
+	})
+	if err != nil {
+		t.Fatalf("failed to create safety engine: %v", err)
+	}
+	return engine
+}
+
+func TestApplySSEOutputFilter_NilEngine(t *testing.T) {
+	h := &Handler{}
+	event := &SSEEvent{
+		Data:     "hello world",
+		RawBytes: []byte("data: hello world\n\n"),
+	}
+
+	sendBytes, blocked := h.applySSEOutputFilter(event, testutil.DiscardLogger())
+	if blocked {
+		t.Error("expected blocked=false with nil engine")
+	}
+	if string(sendBytes) != string(event.RawBytes) {
+		t.Errorf("sendBytes = %q, want %q", string(sendBytes), string(event.RawBytes))
+	}
+}
+
+func TestApplySSEOutputFilter_NoRules(t *testing.T) {
+	engine := newTestSafetyEngine(t, nil)
+	h := &Handler{}
+	h.SafetyEngine = engine
+
+	event := &SSEEvent{
+		Data:     "hello world",
+		RawBytes: []byte("data: hello world\n\n"),
+	}
+
+	sendBytes, blocked := h.applySSEOutputFilter(event, testutil.DiscardLogger())
+	if blocked {
+		t.Error("expected blocked=false with no rules")
+	}
+	if string(sendBytes) != string(event.RawBytes) {
+		t.Errorf("sendBytes = %q, want %q", string(sendBytes), string(event.RawBytes))
+	}
+}
+
+func TestApplySSEOutputFilter_MaskAction(t *testing.T) {
+	engine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:          "mask-secret",
+			Name:        "Mask Secret",
+			Pattern:     `SECRET-\d+`,
+			Targets:     []string{"body"},
+			Action:      "mask",
+			Replacement: "[MASKED]",
+		},
+	})
+
+	h := &Handler{}
+	h.SafetyEngine = engine
+
+	event := &SSEEvent{
+		EventType: "message",
+		Data:      "token is SECRET-12345",
+		ID:        "1",
+		RawBytes:  []byte("event: message\nid: 1\ndata: token is SECRET-12345\n\n"),
+	}
+
+	sendBytes, blocked := h.applySSEOutputFilter(event, testutil.DiscardLogger())
+	if blocked {
+		t.Error("expected blocked=false for mask action")
+	}
+
+	// Verify the sent bytes contain masked data.
+	sent := string(sendBytes)
+	if strings.Contains(sent, "SECRET-12345") {
+		t.Error("sendBytes should not contain unmasked secret")
+	}
+	if !strings.Contains(sent, "[MASKED]") {
+		t.Errorf("sendBytes should contain [MASKED], got %q", sent)
+	}
+	// Verify the event structure is preserved (event type, id).
+	if !strings.Contains(sent, "event: message") {
+		t.Errorf("sendBytes should preserve event type, got %q", sent)
+	}
+	if !strings.Contains(sent, "id: 1") {
+		t.Errorf("sendBytes should preserve event id, got %q", sent)
+	}
+}
+
+func TestApplySSEOutputFilter_BlockAction(t *testing.T) {
+	engine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:      "block-dangerous",
+			Name:    "Block Dangerous",
+			Pattern: `DANGEROUS`,
+			Targets: []string{"body"},
+			Action:  "block",
+		},
+	})
+
+	h := &Handler{}
+	h.SafetyEngine = engine
+
+	event := &SSEEvent{
+		Data:     "payload contains DANGEROUS content",
+		RawBytes: []byte("data: payload contains DANGEROUS content\n\n"),
+	}
+
+	sendBytes, blocked := h.applySSEOutputFilter(event, testutil.DiscardLogger())
+	if !blocked {
+		t.Error("expected blocked=true for block action")
+	}
+	if sendBytes != nil {
+		t.Errorf("sendBytes should be nil when blocked, got %q", string(sendBytes))
+	}
+}
+
+func TestApplySSEOutputFilter_LogOnlyAction(t *testing.T) {
+	engine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:      "log-pii",
+			Name:    "Log PII",
+			Pattern: `user@example\.com`,
+			Targets: []string{"body"},
+			Action:  "log_only",
+		},
+	})
+
+	h := &Handler{}
+	h.SafetyEngine = engine
+
+	event := &SSEEvent{
+		Data:     "contact user@example.com",
+		RawBytes: []byte("data: contact user@example.com\n\n"),
+	}
+
+	sendBytes, blocked := h.applySSEOutputFilter(event, testutil.DiscardLogger())
+	if blocked {
+		t.Error("expected blocked=false for log_only action")
+	}
+	// log_only should forward original bytes unchanged.
+	if string(sendBytes) != string(event.RawBytes) {
+		t.Errorf("sendBytes = %q, want %q", string(sendBytes), string(event.RawBytes))
+	}
+}
+
+func TestApplySSEOutputFilter_NoMatch(t *testing.T) {
+	engine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:          "mask-ssn",
+			Name:        "Mask SSN",
+			Pattern:     `\d{3}-\d{2}-\d{4}`,
+			Targets:     []string{"body"},
+			Action:      "mask",
+			Replacement: "[SSN]",
+		},
+	})
+
+	h := &Handler{}
+	h.SafetyEngine = engine
+
+	event := &SSEEvent{
+		Data:     "no sensitive data here",
+		RawBytes: []byte("data: no sensitive data here\n\n"),
+	}
+
+	sendBytes, blocked := h.applySSEOutputFilter(event, testutil.DiscardLogger())
+	if blocked {
+		t.Error("expected blocked=false when no match")
+	}
+	if string(sendBytes) != string(event.RawBytes) {
+		t.Errorf("sendBytes = %q, want %q (should be unchanged)", string(sendBytes), string(event.RawBytes))
+	}
+}
+
+func TestApplySSEOutputFilter_MultilineData(t *testing.T) {
+	engine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:          "mask-token",
+			Name:        "Mask Token",
+			Pattern:     `tok_[a-zA-Z0-9]+`,
+			Targets:     []string{"body"},
+			Action:      "mask",
+			Replacement: "[TOKEN]",
+		},
+	})
+
+	h := &Handler{}
+	h.SafetyEngine = engine
+
+	event := &SSEEvent{
+		Data:     "line1 tok_abc123\nline2 tok_def456",
+		RawBytes: []byte("data: line1 tok_abc123\ndata: line2 tok_def456\n\n"),
+	}
+
+	sendBytes, blocked := h.applySSEOutputFilter(event, testutil.DiscardLogger())
+	if blocked {
+		t.Error("expected blocked=false")
+	}
+
+	sent := string(sendBytes)
+	if strings.Contains(sent, "tok_abc123") || strings.Contains(sent, "tok_def456") {
+		t.Errorf("sendBytes should not contain unmasked tokens, got %q", sent)
+	}
+	if !strings.Contains(sent, "[TOKEN]") {
+		t.Errorf("sendBytes should contain [TOKEN], got %q", sent)
+	}
+}
+
+func TestStreamSSEEvents_WithOutputFilter_Mask(t *testing.T) {
+	store := &sseTestFlowStore{}
+	engine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:          "mask-secret",
+			Name:        "Mask Secret",
+			Pattern:     `SECRET-\d+`,
+			Targets:     []string{"body"},
+			Action:      "mask",
+			Replacement: "[MASKED]",
+		},
+	})
+
+	h := &Handler{}
+	h.Store = store
+	h.SafetyEngine = engine
+
+	input := "data: has SECRET-999\n\ndata: clean data\n\n"
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var seq atomic.Int64
+	seq.Store(2)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, testutil.DiscardLogger())
+		server.Close()
+	}()
+
+	var buf bytes.Buffer
+	io.Copy(&buf, client)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("streamSSEEvents failed: %v", err)
+	}
+
+	// Verify the client received masked data.
+	output := buf.String()
+	if strings.Contains(output, "SECRET-999") {
+		t.Error("client received unmasked secret data")
+	}
+	if !strings.Contains(output, "[MASKED]") {
+		t.Errorf("client should receive masked data, got %q", output)
+	}
+	// Second event should pass through unchanged.
+	if !strings.Contains(output, "clean data") {
+		t.Errorf("client should receive clean data, got %q", output)
+	}
+
+	// Verify flow recording stores original (unfiltered) data.
+	if len(store.messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(store.messages))
+	}
+	if string(store.messages[0].Body) != "has SECRET-999" {
+		t.Errorf("recorded body should be original data, got %q", string(store.messages[0].Body))
+	}
+}
+
+func TestStreamSSEEvents_WithOutputFilter_Block(t *testing.T) {
+	store := &sseTestFlowStore{}
+	engine := newTestSafetyEngine(t, []safety.RuleConfig{
+		{
+			ID:      "block-dangerous",
+			Name:    "Block Dangerous",
+			Pattern: `BLOCKED_PAYLOAD`,
+			Targets: []string{"body"},
+			Action:  "block",
+		},
+	})
+
+	h := &Handler{}
+	h.Store = store
+	h.SafetyEngine = engine
+
+	// First event is clean, second triggers block.
+	input := "data: safe data\n\ndata: BLOCKED_PAYLOAD here\n\ndata: after block\n\n"
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var seq atomic.Int64
+	seq.Store(2)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.streamSSEEvents(context.Background(), server, strings.NewReader(input), "flow-1", &seq, testutil.DiscardLogger())
+		server.Close()
+	}()
+
+	var buf bytes.Buffer
+	io.Copy(&buf, client)
+
+	err := <-errCh
+	if err != errSSEOutputFilterBlocked {
+		t.Fatalf("expected errSSEOutputFilterBlocked, got %v", err)
+	}
+
+	// Only the first (safe) event should have been forwarded.
+	output := buf.String()
+	if !strings.Contains(output, "safe data") {
+		t.Errorf("client should have received safe event, got %q", output)
+	}
+	if strings.Contains(output, "BLOCKED_PAYLOAD") {
+		t.Error("client should not have received blocked event")
+	}
+	if strings.Contains(output, "after block") {
+		t.Error("client should not have received events after block")
+	}
+
+	// Only the first event should have been recorded.
+	if len(store.messages) != 1 {
+		t.Fatalf("expected 1 recorded message before block, got %d", len(store.messages))
 	}
 }
