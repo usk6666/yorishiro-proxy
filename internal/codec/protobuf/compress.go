@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/golang/snappy"
+	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -121,14 +121,14 @@ func compressDeflate(data []byte) ([]byte, error) {
 }
 
 func decompressSnappy(data []byte) ([]byte, error) {
-	decodedLen, err := snappy.DecodedLen(data)
+	decodedLen, err := s2.DecodedLen(data)
 	if err != nil {
 		return nil, fmt.Errorf("snappy decompress: %w", err)
 	}
 	if decodedLen > maxDecompressedSize {
 		return nil, ErrDecompressedSizeExceeded
 	}
-	out, err := snappy.Decode(nil, data)
+	out, err := s2.Decode(nil, data)
 	if err != nil {
 		return nil, fmt.Errorf("snappy decompress: %w", err)
 	}
@@ -136,7 +136,7 @@ func decompressSnappy(data []byte) ([]byte, error) {
 }
 
 func compressSnappy(data []byte) ([]byte, error) {
-	return snappy.Encode(nil, data), nil
+	return s2.EncodeSnappy(nil, data), nil
 }
 
 func decompressZstd(data []byte) ([]byte, error) {
