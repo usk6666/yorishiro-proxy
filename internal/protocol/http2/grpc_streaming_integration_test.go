@@ -114,8 +114,9 @@ func startGRPCProxy(
 	proxyCtx, proxyCancel := context.WithCancel(ctx)
 
 	go func() {
-		if err := listener.Start(proxyCtx); err != nil {
-			t.Logf("proxy listener error: %v", err)
+		if err := listener.Start(proxyCtx); err != nil && proxyCtx.Err() == nil {
+			// Only log if the error is not from context cancellation.
+			logger.Info("proxy listener error", "error", err)
 		}
 	}()
 
@@ -136,7 +137,7 @@ func newH2CClient(proxyAddr string) *gohttp.Client {
 		Transport: &http2.Transport{
 			AllowHTTP: true,
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-				return net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, proxyAddr)
 			},
 		},
 		Timeout: 15 * time.Second,
@@ -692,7 +693,6 @@ func TestIntegration_GRPC_ProgressiveRecording_ActiveThenComplete(t *testing.T) 
 		t.Fatal("no active gRPC flow found during streaming")
 	}
 	if activeFlow.State != "active" {
-		close(proceed)
 		t.Errorf("flow state = %q, want %q during streaming", activeFlow.State, "active")
 	}
 
