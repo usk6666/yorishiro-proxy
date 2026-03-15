@@ -46,16 +46,60 @@ func huffmanEncodedLen(src []byte) int {
 	return int((bits + 7) / 8)
 }
 
+// huffmanDecodeState holds mutable state for Huffman decoding.
+type huffmanDecodeState struct {
+	node          *huffmanTreeNode
+	paddingBits   uint8
+	allOnePadding bool
+}
+
+// walkBit advances the Huffman tree by one bit. It returns the decoded byte
+// and true if a symbol was emitted, or 0 and false otherwise.
+// It returns an error if the tree walk reaches a nil node or the EOS symbol.
+func (s *huffmanDecodeState) walkBit(bit uint64) (byte, bool, error) {
+	s.paddingBits++
+	if bit == 0 {
+		s.allOnePadding = false
+		s.node = s.node.left
+	} else {
+		s.node = s.node.right
+	}
+	if s.node == nil {
+		return 0, false, ErrInvalidHuffman
+	}
+	if s.node.sym != 0 || s.node.leaf {
+		if s.node.sym == 256 {
+			return 0, false, ErrInvalidHuffman
+		}
+		sym := byte(s.node.sym)
+		s.node = &huffmanTree
+		s.paddingBits = 0
+		s.allOnePadding = true
+		return sym, true, nil
+	}
+	return 0, false, nil
+}
+
+// validatePadding checks EOS padding per RFC 7541 Section 5.2:
+// - Padding MUST consist of the most-significant bits of EOS (all 1s).
+// - Padding of more than 7 bits MUST be treated as a decoding error.
+func (s *huffmanDecodeState) validatePadding() error {
+	if s.node != &huffmanTree {
+		if s.paddingBits > 7 || !s.allOnePadding {
+			return ErrInvalidHuffman
+		}
+	}
+	return nil
+}
+
 // huffmanDecode decodes Huffman-coded data from src.
 func huffmanDecode(dst, src []byte) ([]byte, error) {
 	var bits uint64
 	var nbits uint8
-	// paddingBits tracks the number of bits consumed since the last emitted
-	// symbol. At the end, these are the padding bits that must be validated.
-	var paddingBits uint8
-	// allOnePadding tracks whether all padding bits so far are 1.
-	allOnePadding := true
-	node := &huffmanTree
+	state := huffmanDecodeState{
+		node:          &huffmanTree,
+		allOnePadding: true,
+	}
 	for _, b := range src {
 		bits = bits<<8 | uint64(b)
 		nbits += 8
@@ -64,25 +108,12 @@ func huffmanDecode(dst, src []byte) ([]byte, error) {
 			nbits -= 4
 			idx := (bits >> nbits) & 0x0f
 			for i := 3; i >= 0; i-- {
-				bit := (idx >> uint(i)) & 1
-				paddingBits++
-				if bit == 0 {
-					allOnePadding = false
-					node = node.left
-				} else {
-					node = node.right
+				sym, emitted, err := state.walkBit((idx >> uint(i)) & 1)
+				if err != nil {
+					return nil, err
 				}
-				if node == nil {
-					return nil, ErrInvalidHuffman
-				}
-				if node.sym != 0 || node.leaf {
-					if node.sym == 256 {
-						return nil, ErrInvalidHuffman
-					}
-					dst = append(dst, byte(node.sym))
-					node = &huffmanTree
-					paddingBits = 0
-					allOnePadding = true
+				if emitted {
+					dst = append(dst, sym)
 				}
 			}
 		}
@@ -90,37 +121,16 @@ func huffmanDecode(dst, src []byte) ([]byte, error) {
 	// Process remaining bits.
 	for nbits > 0 {
 		nbits--
-		bit := (bits >> nbits) & 1
-		paddingBits++
-		if bit == 0 {
-			allOnePadding = false
-			node = node.left
-		} else {
-			node = node.right
+		sym, emitted, err := state.walkBit((bits >> nbits) & 1)
+		if err != nil {
+			return nil, err
 		}
-		if node == nil {
-			return nil, ErrInvalidHuffman
-		}
-		if node.sym != 0 || node.leaf {
-			if node.sym == 256 {
-				return nil, ErrInvalidHuffman
-			}
-			dst = append(dst, byte(node.sym))
-			node = &huffmanTree
-			paddingBits = 0
-			allOnePadding = true
+		if emitted {
+			dst = append(dst, sym)
 		}
 	}
-	// Validate EOS padding per RFC 7541 Section 5.2:
-	// - Padding MUST consist of the most-significant bits of EOS (all 1s).
-	// - Padding of more than 7 bits MUST be treated as a decoding error.
-	if node != &huffmanTree {
-		if paddingBits > 7 {
-			return nil, ErrInvalidHuffman
-		}
-		if !allOnePadding {
-			return nil, ErrInvalidHuffman
-		}
+	if err := state.validatePadding(); err != nil {
+		return nil, err
 	}
 	return dst, nil
 }
