@@ -69,6 +69,39 @@ func TestWriter_WriteFrame_UsesRawBytes(t *testing.T) {
 	}
 }
 
+func TestWriter_WriteFrame_RawBytesHeaderMismatch(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	payload := []byte("hello")
+	// Build RawBytes with a mismatched length field (claims 10 bytes but payload is 5).
+	badHdr := Header{Length: 10, Type: TypeData, StreamID: 1}
+	rawBytes := badHdr.AppendTo(nil)
+	rawBytes = append(rawBytes, payload...) // len = HeaderSize + 5, but header says 10
+
+	err := w.WriteFrame(&Frame{
+		Header:   Header{Length: uint32(len(payload)), Type: TypeData, StreamID: 1},
+		Payload:  payload,
+		RawBytes: rawBytes,
+	})
+	if err != nil {
+		t.Fatalf("WriteFrame() error: %v", err)
+	}
+
+	// Should have fallen through to serialization, so verify the written frame is valid.
+	r := NewReader(&buf)
+	f, err := r.ReadFrame()
+	if err != nil {
+		t.Fatalf("ReadFrame() error: %v", err)
+	}
+	if f.Header.Length != uint32(len(payload)) {
+		t.Errorf("Length = %d, want %d", f.Header.Length, len(payload))
+	}
+	if !bytes.Equal(f.Payload, payload) {
+		t.Errorf("Payload = %q, want %q", f.Payload, payload)
+	}
+}
+
 func TestWriter_WriteFrame_SerializesWithoutRawBytes(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)

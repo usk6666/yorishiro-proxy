@@ -53,11 +53,19 @@ func (wr *Writer) WriteFrame(f *Frame) error {
 
 	// Use raw bytes if available and consistent.
 	if len(f.RawBytes) == HeaderSize+len(f.Payload) {
-		_, err := wr.w.Write(f.RawBytes)
-		if err != nil {
-			return fmt.Errorf("write frame: %w", err)
+		// Validate that the length field encoded in RawBytes matches len(Payload).
+		rawLength := uint32(f.RawBytes[0])<<16 | uint32(f.RawBytes[1])<<8 | uint32(f.RawBytes[2])
+		if rawLength != uint32(len(f.Payload)) {
+			// Header/payload mismatch — fall through to serialize from struct fields.
+		} else if rawLength > wr.maxFrameSize {
+			return fmt.Errorf("write frame: payload length %d exceeds max frame size %d", rawLength, wr.maxFrameSize)
+		} else {
+			_, err := wr.w.Write(f.RawBytes)
+			if err != nil {
+				return fmt.Errorf("write frame: %w", err)
+			}
+			return nil
 		}
-		return nil
 	}
 
 	// Serialize header + payload.

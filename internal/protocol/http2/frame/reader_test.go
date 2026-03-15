@@ -129,15 +129,27 @@ func TestReader_ReadFrame(t *testing.T) {
 		}
 	})
 
-	t.Run("partial payload returns error", func(t *testing.T) {
+	t.Run("partial payload returns ErrUnexpectedEOF", func(t *testing.T) {
 		hdr := Header{Length: 10, Type: TypeData, StreamID: 1}
 		buf := hdr.AppendTo(nil)
 		buf = append(buf, []byte("short")...) // only 5 of 10 bytes
 
 		r := NewReader(bytes.NewReader(buf))
 		_, err := r.ReadFrame()
-		if err == nil {
-			t.Error("ReadFrame() should return error for truncated payload")
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("ReadFrame() error = %v, want io.ErrUnexpectedEOF", err)
+		}
+	})
+
+	t.Run("payload EOF at zero bytes returns ErrUnexpectedEOF", func(t *testing.T) {
+		// Header says 5 bytes payload but no payload bytes follow.
+		hdr := Header{Length: 5, Type: TypeData, StreamID: 1}
+		buf := hdr.AppendTo(nil)
+
+		r := NewReader(bytes.NewReader(buf))
+		_, err := r.ReadFrame()
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("ReadFrame() error = %v, want io.ErrUnexpectedEOF", err)
 		}
 	})
 

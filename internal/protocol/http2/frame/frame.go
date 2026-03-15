@@ -115,7 +115,7 @@ type Header struct {
 }
 
 // ParseHeader parses a 9-byte frame header.
-// The input must be exactly HeaderSize bytes.
+// The input must be at least HeaderSize bytes; only the first 9 are used.
 func ParseHeader(buf []byte) (Header, error) {
 	if len(buf) < HeaderSize {
 		return Header{}, fmt.Errorf("parse frame header: buffer too short (%d < %d)", len(buf), HeaderSize)

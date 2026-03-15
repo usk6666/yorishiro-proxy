@@ -9,4 +9,9 @@
 //   - Each frame retains its raw bytes for L4 recording
 //   - Frame size limits (SETTINGS_MAX_FRAME_SIZE) are enforced on read
 //   - No external dependencies beyond the Go standard library
+//
+// The codec enforces per-frame size limits but does not manage
+// connection-level resource constraints. Callers are responsible for
+// enforcing connection-level limits such as total bytes read/written,
+// maximum number of frames, and read/write timeouts.
 package frame

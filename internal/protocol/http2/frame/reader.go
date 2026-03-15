@@ -49,6 +49,10 @@ func (rd *Reader) MaxFrameSize() uint32 {
 // If the underlying reader returns io.EOF before any bytes are read,
 // ReadFrame returns io.EOF. If EOF occurs mid-frame, it returns
 // io.ErrUnexpectedEOF (wrapped).
+//
+// After a frame size error, the reader is in an unrecoverable state
+// (the header has been consumed but the payload remains unread) and
+// the connection should be closed.
 func (rd *Reader) ReadFrame() (*Frame, error) {
 	// Read the 9-byte header.
 	_, err := io.ReadFull(rd.r, rd.headerBuf[:])
@@ -77,8 +81,8 @@ func (rd *Reader) ReadFrame() (*Frame, error) {
 	if hdr.Length > 0 {
 		_, err = io.ReadFull(rd.r, raw[HeaderSize:])
 		if err != nil {
-			if err == io.ErrUnexpectedEOF {
-				return nil, fmt.Errorf("read frame payload: %w", io.ErrUnexpectedEOF)
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
 			}
 			return nil, fmt.Errorf("read frame payload: %w", err)
 		}
