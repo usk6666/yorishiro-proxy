@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 )
 
@@ -87,7 +86,6 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 // State="active" so it is visible before the stream completes.
 func (h *Handler) initGRPCStreamState(sc *streamContext) *grpcStreamState {
 	state := &grpcStreamState{}
-	maxRaw := int(config.MaxBodySize)
 
 	// Initialize progressive recorder — creates the flow with State="active".
 	state.recorder = h.initGRPCFlow(sc.ctx, sc)
@@ -95,27 +93,20 @@ func (h *Handler) initGRPCStreamState(sc *streamContext) *grpcStreamState {
 	// Use a context that survives the full stream lifetime for recording.
 	recCtx := sc.ctx
 
-	state.reqFrameBuf = protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
+	state.reqFrameBuf = protogrpc.NewFrameBuffer(func(_ []byte, frame *protogrpc.Frame) error {
 		state.reqFrameCount.Add(1)
 
 		// Progressive recording: record each request frame immediately.
+		// Raw bytes are not accumulated; each frame is persisted individually.
 		state.recorder.recordFrame(recCtx, frame, "client_to_server")
-
-		// Still accumulate raw bytes for backward compatibility with the
-		// grpcHandler.RecordSession path (used by plugin hooks).
-		_ = raw
-		_ = maxRaw
 		return nil
 	})
 
-	state.respFrameBuf = protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
+	state.respFrameBuf = protogrpc.NewFrameBuffer(func(_ []byte, frame *protogrpc.Frame) error {
 		state.respFrameCount.Add(1)
 
 		// Progressive recording: record each response frame immediately.
 		state.recorder.recordFrame(recCtx, frame, "server_to_client")
-
-		_ = raw
-		_ = maxRaw
 		return nil
 	})
 
