@@ -19,6 +19,75 @@ import (
 
 // --- Unit tests ---
 
+func TestInferFlowUseTLS(t *testing.T) {
+	tests := []struct {
+		name string
+		fl   *flow.Flow
+		want bool
+	}{
+		{
+			name: "HTTP/2 with TLS version in ConnInfo",
+			fl: &flow.Flow{
+				Protocol: "HTTP/2",
+				ConnInfo: &flow.ConnectionInfo{TLSVersion: "TLS 1.3", TLSALPN: "h2"},
+			},
+			want: true,
+		},
+		{
+			name: "HTTP/2 with ALPN h2 only",
+			fl: &flow.Flow{
+				Protocol: "HTTP/2",
+				ConnInfo: &flow.ConnectionInfo{TLSALPN: "h2"},
+			},
+			want: true,
+		},
+		{
+			name: "HTTP/2 h2c with empty ConnInfo TLS fields",
+			fl: &flow.Flow{
+				Protocol: "HTTP/2",
+				ConnInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:12345", ServerAddr: "127.0.0.1:8080"},
+			},
+			want: false,
+		},
+		{
+			name: "HTTP/2 without ConnInfo falls back to protocol",
+			fl:   &flow.Flow{Protocol: "HTTP/2"},
+			want: false,
+		},
+		{
+			name: "HTTPS without ConnInfo falls back to protocol",
+			fl:   &flow.Flow{Protocol: "HTTPS"},
+			want: true,
+		},
+		{
+			name: "gRPC without ConnInfo",
+			fl:   &flow.Flow{Protocol: "gRPC"},
+			want: false,
+		},
+		{
+			name: "gRPC with TLS ConnInfo",
+			fl: &flow.Flow{
+				Protocol: "gRPC",
+				ConnInfo: &flow.ConnectionInfo{TLSVersion: "TLS 1.3"},
+			},
+			want: true,
+		},
+		{
+			name: "HTTP/1.x without ConnInfo",
+			fl:   &flow.Flow{Protocol: "HTTP/1.x"},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := inferFlowUseTLS(tt.fl)
+			if got != tt.want {
+				t.Errorf("inferFlowUseTLS() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsHTTP2Protocol(t *testing.T) {
 	tests := []struct {
 		protocol string
@@ -1007,6 +1076,125 @@ func TestResendRawH2_OverrideRawBase64(t *testing.T) {
 		t.Error("expected non-empty NewFlowID")
 	}
 	if rawResult.ResponseSize == 0 {
+		t.Error("expected non-zero ResponseSize")
+	}
+}
+
+// TestResendRawH2_H2CInferTLS tests that h2c flows (HTTP/2 over cleartext) correctly
+// infer useTLS=false from ConnInfo when use_tls is not explicitly specified.
+// This prevents the bug where h2c flows would default to TLS and fail to connect.
+func TestResendRawH2_H2CInferTLS(t *testing.T) {
+	// Start an HTTP/2 echo server (no TLS).
+	echoAddr, cleanup := newH2EchoServer(t)
+	defer cleanup()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Build raw HTTP/2 frames.
+	encoder := hpack.NewEncoder(4096, true)
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":authority", Value: echoAddr},
+		{Name: ":path", Value: "/h2c-test"},
+	}
+	fragment := encoder.Encode(headers)
+
+	var rawBuf bytes.Buffer
+	w := frame.NewWriter(&rawBuf)
+	if err := w.WriteHeaders(1, true, true, fragment); err != nil {
+		t.Fatalf("WriteHeaders: %v", err)
+	}
+	rawBytes := rawBuf.Bytes()
+
+	parsedURL, _ := url.Parse("http://" + echoAddr + "/h2c-test")
+	fl := &flow.Flow{
+		Protocol:  "HTTP/2",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+		// ConnInfo with no TLS fields → h2c.
+		ConnInfo: &flow.ConnectionInfo{
+			ClientAddr: "127.0.0.1:54321",
+			ServerAddr: echoAddr,
+		},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	sendMsg := &flow.Message{
+		FlowID:    fl.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       parsedURL,
+		RawBytes:  rawBytes,
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Set up MCP server — do NOT set use_tls; let the server infer from ConnInfo.
+	s := NewServer(ctx, nil, store, nil)
+	s.deps.rawReplayDialer = &testDialer{}
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer ss.Close()
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	// Call resend_raw without use_tls — should infer h2c from ConnInfo.
+	result, err := cs.CallTool(ctx, &gomcp.CallToolParams{
+		Name: "resend",
+		Arguments: map[string]any{
+			"action": "resend_raw",
+			"params": map[string]any{
+				"flow_id":     fl.ID,
+				"target_addr": echoAddr,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		var errText string
+		for _, c := range result.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				errText = tc.Text
+			}
+		}
+		t.Fatalf("resend_raw h2c returned error: %s", errText)
+	}
+
+	var h2cResult resendRawResult
+	for _, c := range result.Content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			if err := json.Unmarshal([]byte(tc.Text), &h2cResult); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+		}
+	}
+
+	if h2cResult.NewFlowID == "" {
+		t.Error("expected non-empty NewFlowID")
+	}
+	if h2cResult.ResponseSize == 0 {
 		t.Error("expected non-zero ResponseSize")
 	}
 }

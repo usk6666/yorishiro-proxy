@@ -32,6 +32,22 @@ func isHTTP2Protocol(protocol string) bool {
 	return protocol == "HTTP/2" || protocol == "gRPC"
 }
 
+// inferFlowUseTLS returns true if the flow was originally captured over a TLS
+// connection. It inspects the flow's ConnInfo for TLS metadata. When ConnInfo is
+// nil (e.g., resend-created flows without connection info) or has no TLS fields,
+// it falls back to checking the Protocol field ("HTTPS" implies TLS).
+func inferFlowUseTLS(fl *flow.Flow) bool {
+	if fl.ConnInfo != nil {
+		if fl.ConnInfo.TLSVersion != "" || fl.ConnInfo.TLSALPN == "h2" {
+			return true
+		}
+		// ConnInfo is present but has no TLS fields → cleartext.
+		return false
+	}
+	// No ConnInfo available; fall back to protocol name.
+	return fl.Protocol == "HTTPS"
+}
+
 // buildAndSendRawH2 establishes an HTTP/2 connection, performs the connection
 // preface and SETTINGS exchange, sends the raw frame bytes, and reads back
 // response frames. This is the HTTP/2 equivalent of buildAndSendRaw.
@@ -57,8 +73,10 @@ func (s *Server) buildAndSendRawH2(ctx context.Context, fl *flow.Flow, params re
 	}
 	defer conn.Close()
 
-	// HTTP/2 requires TLS with ALPN "h2". Use upgradeTLSH2 to enforce this.
-	useTLS := true
+	// Determine whether to use TLS. If the caller explicitly set use_tls, honour it.
+	// Otherwise infer from the flow's connection metadata: if TLS was negotiated
+	// on the original connection the flow is TLS-based; if not, it is h2c (cleartext HTTP/2).
+	useTLS := inferFlowUseTLS(fl)
 	if params.UseTLS != nil {
 		useTLS = *params.UseTLS
 	}
