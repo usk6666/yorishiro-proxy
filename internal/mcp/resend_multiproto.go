@@ -78,7 +78,11 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 
 	// SafetyFilter input check: validate all send message bodies before replaying.
 	for _, msg := range sendMsgs {
-		if v := s.checkSafetyInput(msg.Body, "", nil); v != nil {
+		data := msg.Body
+		if len(data) == 0 {
+			data = msg.RawBytes
+		}
+		if v := s.checkSafetyInput(data, "", nil); v != nil {
 			return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 		}
 	}
@@ -149,8 +153,12 @@ func (s *Server) replayAllMessages(ctx context.Context, targetAddr string, useTL
 
 	totalBytesSent := 0
 	for _, msg := range sendMsgs {
-		if len(msg.Body) > 0 {
-			n, err := conn.Write(msg.Body)
+		data := msg.Body
+		if len(data) == 0 {
+			data = msg.RawBytes
+		}
+		if len(data) > 0 {
+			n, err := conn.Write(data)
 			if err != nil {
 				return totalBytesSent, nil, start, 0, fmt.Errorf("send message seq=%d: %w", msg.Sequence, err)
 			}
@@ -185,10 +193,14 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 
 	seq := 0
 	for _, msg := range sendMsgs {
-		if len(msg.Body) > 0 {
+		data := msg.Body
+		if len(data) == 0 {
+			data = msg.RawBytes
+		}
+		if len(data) > 0 {
 			if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 				FlowID: newFl.ID, Sequence: seq, Direction: "send",
-				Timestamp: start, Body: msg.Body,
+				Timestamp: start, RawBytes: data,
 			}); err != nil {
 				return nil, fmt.Errorf("save replay_raw send message: %w", err)
 			}
@@ -199,7 +211,7 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 	if len(respData) > 0 {
 		if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 			FlowID: newFl.ID, Sequence: seq, Direction: "receive",
-			Timestamp: start.Add(duration), Body: respData,
+			Timestamp: start.Add(duration), RawBytes: respData,
 		}); err != nil {
 			return nil, fmt.Errorf("save replay_raw receive message: %w", err)
 		}
