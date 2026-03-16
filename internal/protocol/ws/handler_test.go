@@ -672,10 +672,19 @@ func TestHandleUpgrade_NormalCloseStateComplete(t *testing.T) {
 					Payload: closePayload,
 				}
 				go func() {
-					WriteFrame(clientEnd, closeFrame)
+					if err := WriteFrame(clientEnd, closeFrame); err != nil {
+						t.Errorf("WriteFrame(Close) failed: %v", err)
+					}
 				}()
 				// Upstream receives close, then close connections.
-				ReadFrame(upstreamEnd)
+				upstreamEnd.SetReadDeadline(time.Now().Add(5 * time.Second))
+				respFrame, err := ReadFrame(upstreamEnd)
+				if err != nil {
+					t.Fatalf("ReadFrame(Close response) failed: %v", err)
+				}
+				if respFrame.Opcode != OpcodeClose {
+					t.Errorf("expected Close frame response, got opcode=%d", respFrame.Opcode)
+				}
 				upstreamEnd.Close()
 				clientEnd.Close()
 			} else {
@@ -686,10 +695,19 @@ func TestHandleUpgrade_NormalCloseStateComplete(t *testing.T) {
 					Payload: closePayload,
 				}
 				go func() {
-					WriteFrame(upstreamEnd, closeFrame)
+					if err := WriteFrame(upstreamEnd, closeFrame); err != nil {
+						t.Errorf("WriteFrame(Close) failed: %v", err)
+					}
 				}()
 				// Client receives close, then close connections.
-				ReadFrame(clientEnd)
+				clientEnd.SetReadDeadline(time.Now().Add(5 * time.Second))
+				respFrame, err := ReadFrame(clientEnd)
+				if err != nil {
+					t.Fatalf("ReadFrame(Close response) failed: %v", err)
+				}
+				if respFrame.Opcode != OpcodeClose {
+					t.Errorf("expected Close frame response, got opcode=%d", respFrame.Opcode)
+				}
 				clientEnd.Close()
 				upstreamEnd.Close()
 			}
@@ -719,7 +737,9 @@ func TestHandleUpgrade_ConnectionDropStateError(t *testing.T) {
 	clientConn, clientEnd := net.Pipe()
 	upstreamConn, upstreamEnd := net.Pipe()
 	defer clientConn.Close()
+	defer clientEnd.Close()
 	defer upstreamConn.Close()
+	defer upstreamEnd.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

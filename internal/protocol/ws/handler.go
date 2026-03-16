@@ -342,9 +342,11 @@ func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flow
 	}
 
 	if frame.IsControl() {
-		h.recordControlFrame(ctx, frame, flowID, direction, seq, start)
 		if frame.Opcode == OpcodeClose {
 			closeReceived.Store(true)
+		}
+		h.recordControlFrame(ctx, frame, flowID, direction, seq, start)
+		if frame.Opcode == OpcodeClose {
 			return true, nil
 		}
 		return false, nil
