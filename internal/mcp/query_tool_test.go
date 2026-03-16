@@ -14,6 +14,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // setupQueryTestSession creates an MCP client session for query tool tests.
@@ -825,6 +826,93 @@ func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
 		if out.TLSPassthrough.Patterns[1] != "pinned.example.com" {
 			t.Errorf("patterns[1] = %q, want pinned.example.com", out.TLSPassthrough.Patterns[1])
 		}
+	}
+}
+
+func TestQuery_Config_WithManagerFields(t *testing.T) {
+	store := newTestStore(t)
+	logger := testutil.DiscardLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	ctx := context.Background()
+	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	// Set non-default values so we can verify them.
+	manager.SetMaxConnections(512)
+	manager.SetPeekTimeout(5 * time.Second)
+
+	ca := newTestCA(t)
+	s := NewServer(ctx, ca, store, manager)
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.MaxConnections != 512 {
+		t.Errorf("max_connections = %d, want 512", out.MaxConnections)
+	}
+	if out.PeekTimeoutMs != 5000 {
+		t.Errorf("peek_timeout_ms = %d, want 5000", out.PeekTimeoutMs)
+	}
+	// request_timeout_ms should have the default value (60000) when no handler is registered.
+	if out.RequestTimeoutMs != 60000 {
+		t.Errorf("request_timeout_ms = %d, want 60000", out.RequestTimeoutMs)
+	}
+	if out.TLSFingerprint != "chrome" {
+		t.Errorf("tls_fingerprint = %q, want %q", out.TLSFingerprint, "chrome")
+	}
+}
+
+func TestQuery_Config_DefaultManagerValues(t *testing.T) {
+	// When manager is nil, max_connections and peek_timeout_ms should be zero.
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.MaxConnections != 0 {
+		t.Errorf("max_connections = %d, want 0 (no manager)", out.MaxConnections)
+	}
+	if out.PeekTimeoutMs != 0 {
+		t.Errorf("peek_timeout_ms = %d, want 0 (no manager)", out.PeekTimeoutMs)
+	}
+	// request_timeout_ms should still have the default.
+	if out.RequestTimeoutMs != 60000 {
+		t.Errorf("request_timeout_ms = %d, want 60000", out.RequestTimeoutMs)
+	}
+	if out.TLSFingerprint != "chrome" {
+		t.Errorf("tls_fingerprint = %q, want %q", out.TLSFingerprint, "chrome")
 	}
 }
 
