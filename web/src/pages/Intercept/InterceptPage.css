@@ -322,3 +322,80 @@
   color: var(--text-muted);
   font-size: var(--font-size-sm);
 }
+
+/* Structured / Raw view mode selector */
+.intercept-view-mode-selector {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-right: var(--space-sm);
+}
+
+/* Shared mode toggle button (used by view-mode and raw-mode selectors) */
+.intercept-mode-btn {
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border: none;
+  border-right: 1px solid var(--border-default);
+  cursor: pointer;
+  transition: color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.intercept-mode-btn:last-child {
+  border-right: none;
+}
+
+.intercept-mode-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-secondary);
+}
+
+.intercept-mode-btn--active {
+  color: var(--text-primary);
+  background-color: var(--bg-tertiary);
+}
+
+/* Raw bytes editor sub-mode selector */
+.intercept-raw-mode-selector {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-bottom: var(--space-sm);
+  width: fit-content;
+}
+
+/* Raw bytes size hint */
+.intercept-raw-size {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* Raw bytes parse error */
+.intercept-raw-error {
+  padding: var(--space-xs) var(--space-sm);
+  margin-bottom: var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--accent-danger);
+  background-color: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.2);
+  border-radius: var(--radius-sm);
+}
+
+/* Hex editor textarea */
+.intercept-raw-hex-editor {
+  white-space: pre;
+  word-break: normal;
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+  min-height: 300px;
+}

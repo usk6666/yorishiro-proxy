@@ -951,3 +951,11 @@
   font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
+
+/* --- Raw bytes viewer --- */
+
+.sd-raw-bytes-viewer {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-sm);
+}
