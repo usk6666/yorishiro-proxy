@@ -49,6 +49,11 @@ type Handler struct {
 	// when SetTLSTransport is called while requests are in flight.
 	tlsMu sync.RWMutex
 
+	// h2Transport is the custom HTTP/2 frame-engine transport used for raw mode
+	// forwarding. When nil, raw mode forwarding is not available and the proxy
+	// falls back to structured mode.
+	h2Transport *Transport
+
 	// grpcHandler processes gRPC flow recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
 	grpcHandler *protogrpc.Handler
@@ -120,6 +125,18 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 
 		return tlsConn, nil
 	}
+}
+
+// SetH2Transport sets the custom HTTP/2 frame-engine transport used for raw
+// mode intercept forwarding. When set, raw mode release/modify_and_forward
+// actions can send edited frame bytes directly to the upstream server.
+func (h *Handler) SetH2Transport(t *Transport) {
+	h.h2Transport = t
+}
+
+// H2Transport returns the handler's custom HTTP/2 transport, or nil.
+func (h *Handler) H2Transport() *Transport {
+	return h.h2Transport
 }
 
 // SetGRPCHandler sets the gRPC handler used for gRPC-specific flow recording.
@@ -265,6 +282,11 @@ type streamContext struct {
 	// is integrated into the handler's upstream forwarding path.
 	respRawFrames [][]byte
 
+	// interceptRawAction holds the intercept action when raw mode is active.
+	// Non-nil indicates raw forwarding should be used instead of standard
+	// http.Transport.RoundTrip. Set by handleRequestIntercept.
+	interceptRawAction *intercept.InterceptAction
+
 	// Plugin state shared across hooks for this stream.
 	pluginConnInfo *plugin.ConnInfo
 	txCtx          map[string]any
@@ -334,6 +356,13 @@ func (h *Handler) handleStream(
 
 	outReq, ok = h.handleRequestIntercept(sc, outReq, &snap)
 	if !ok {
+		return
+	}
+
+	// Raw mode forwarding: bypass L7 transforms, plugins, and standard
+	// transport. Send edited raw frames directly to the upstream.
+	if sc.interceptRawAction != nil {
+		h.handleRawForward(sc, &snap)
 		return
 	}
 
@@ -598,10 +627,37 @@ func (h *Handler) buildOutboundRequest(sc *streamContext) (*gohttp.Request, bool
 // handleRequestIntercept processes request interception. Returns the (possibly
 // modified) outbound request and false if the request was dropped/blocked.
 func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Request, snap *requestSnapshot) (*gohttp.Request, bool) {
-	action, intercepted := h.interceptRequest(sc.ctx, sc.req, sc.srp.reqBody, sc.logger)
+	action, intercepted := h.interceptRequest(sc.ctx, sc.req, sc.srp.reqBody, sc.reqRawFrames, sc.logger)
 	if !intercepted {
 		return outReq, true
 	}
+
+	// Raw mode: the action contains raw bytes to forward directly.
+	if action.IsRawMode() {
+		sc.interceptRawAction = &action
+		switch action.Type {
+		case intercept.ActionRelease:
+			// Raw release: forward original raw frames as-is to upstream.
+			// The raw bytes are the original captured frames.
+			sc.interceptRawAction.RawOverride = joinRawFrames(sc.reqRawFrames)
+			return outReq, true
+		case intercept.ActionModifyAndForward:
+			// Raw modify_and_forward: forward the edited raw bytes.
+			return outReq, true
+		case intercept.ActionDrop:
+			h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
+			sc.w.WriteHeader(gohttp.StatusBadGateway)
+			sc.logger.Info("intercepted HTTP/2 request dropped (raw mode)",
+				"method", sc.req.Method, "url", sc.reqURL.String())
+			return nil, false
+		default:
+			sc.logger.Error("HTTP/2 raw intercept: unknown action type",
+				"action_type", action.Type)
+			sc.w.WriteHeader(gohttp.StatusBadGateway)
+			return nil, false
+		}
+	}
+
 	switch action.Type {
 	case intercept.ActionDrop:
 		h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
@@ -938,7 +994,10 @@ func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 // if so, enqueues it for AI agent review. It blocks until the agent responds
 // or the timeout expires. Returns the action and true if intercepted, or a
 // zero-value action and false if not intercepted.
-func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+//
+// rawFrames are the raw HTTP/2 frame bytes for this request. They are attached
+// to the enqueued item so that AI agents can inspect and edit them in raw mode.
+func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, body []byte, rawFrames [][]byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
 	}
@@ -952,6 +1011,13 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 
 	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
 	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
+
+	// Attach raw frame bytes to the enqueued item so AI agents can view/edit them.
+	if joined := joinRawFrames(rawFrames); len(joined) > 0 {
+		if err := h.InterceptQueue.SetRawBytes(id, joined); err != nil {
+			logger.Warn("HTTP/2 intercept: failed to set raw bytes", "id", id, "error", err)
+		}
+	}
 
 	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)

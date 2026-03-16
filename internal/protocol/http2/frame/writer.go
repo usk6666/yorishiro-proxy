@@ -85,6 +85,23 @@ func (wr *Writer) WriteFrame(f *Frame) error {
 	return nil
 }
 
+// WriteRawBytes writes raw bytes directly to the underlying writer without
+// any frame-level validation or size checks. This is used for raw mode
+// forwarding where the caller provides pre-formed HTTP/2 frame bytes
+// (e.g., from an intercepted request that was edited at the byte level).
+//
+// The caller is responsible for ensuring the bytes form valid HTTP/2 frames.
+func (wr *Writer) WriteRawBytes(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	_, err := wr.w.Write(data)
+	if err != nil {
+		return fmt.Errorf("write raw bytes: %w", err)
+	}
+	return nil
+}
+
 // WriteData writes a DATA frame with the given payload.
 func (wr *Writer) WriteData(streamID uint32, endStream bool, data []byte) error {
 	var flags Flags

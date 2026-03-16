@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +84,43 @@ func (t *Transport) RoundTrip(ctx context.Context, req *gohttp.Request) (*RoundT
 		// Remove broken connections from pool.
 		t.removeConn(host, tc)
 		return nil, fmt.Errorf("transport round trip: %w", err)
+	}
+	return result, nil
+}
+
+// SendRawFrames writes pre-formed HTTP/2 frame bytes to the upstream server
+// and waits for the response. This is used for raw mode intercept forwarding
+// where the AI agent has edited the raw frame bytes directly.
+//
+// The rawBytes are written to the upstream connection after allocating a stream
+// ID and rewriting stream IDs in the raw frames. The response is read via the
+// normal frame read loop.
+//
+// HPACK note: Since raw bytes may contain HEADERS frames with HPACK-encoded
+// header blocks, the upstream HPACK decoder state may become inconsistent with
+// the encoder state used by the client. The transport's HPACK encoder is NOT
+// used for raw frames — they are forwarded as-is. This is intentional: raw
+// mode is a diagnostic tool where the operator accepts responsibility for
+// protocol-level consequences.
+func (t *Transport) SendRawFrames(ctx context.Context, req *gohttp.Request, rawBytes []byte) (*RoundTripResult, error) {
+	host := req.URL.Host
+	if !strings.Contains(host, ":") {
+		if req.URL.Scheme == "https" {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
+	}
+
+	tc, err := t.getOrDialConn(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("transport send raw frames: %w", err)
+	}
+
+	result, err := tc.sendRawFrames(ctx, rawBytes)
+	if err != nil {
+		t.removeConn(host, tc)
+		return nil, fmt.Errorf("transport send raw frames: %w", err)
 	}
 	return result, nil
 }
@@ -684,6 +722,84 @@ func (tc *transportConn) writeDataFrames(ctx context.Context, streamID uint32, b
 	}
 
 	return nil
+}
+
+// sendRawFrames writes pre-formed frame bytes to the upstream and waits for the
+// response. Stream IDs in the raw frames are rewritten to the allocated stream
+// ID for this connection.
+func (tc *transportConn) sendRawFrames(ctx context.Context, rawBytes []byte) (*RoundTripResult, error) {
+	if tc.conn.IsClosed() {
+		return nil, fmt.Errorf("connection closed")
+	}
+	if received, _, _ := tc.conn.GoAwayReceived(); received {
+		return nil, fmt.Errorf("connection received GOAWAY")
+	}
+
+	streamID := tc.allocStreamID()
+
+	// Rewrite stream IDs in the raw frames to the allocated stream ID.
+	rewritten, hasEndStream, err := rewriteRawFrameStreamIDs(rawBytes, streamID)
+	if err != nil {
+		return nil, fmt.Errorf("rewrite stream IDs: %w", err)
+	}
+
+	if !hasEndStream {
+		return nil, fmt.Errorf("raw frames must contain END_STREAM flag to complete the request")
+	}
+
+	ss := &streamState{
+		done:        make(chan streamResult, 1),
+		headersDone: make(chan struct{}),
+	}
+
+	tc.streamsMu.Lock()
+	tc.streams[streamID] = ss
+	tc.streamsMu.Unlock()
+
+	defer func() {
+		tc.streamsMu.Lock()
+		delete(tc.streams, streamID)
+		tc.streamsMu.Unlock()
+	}()
+
+	// Transition to open state.
+	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
+
+	// Write the raw frames directly.
+	tc.writeMu.Lock()
+	err = tc.writer.WriteRawBytes(rewritten)
+	tc.writeMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("write raw frames: %w", err)
+	}
+
+	// If the raw frames contained END_STREAM, transition the stream state.
+	if hasEndStream {
+		tc.conn.Streams().Transition(streamID, EventSendEndStream) //nolint:errcheck
+	}
+
+	// Wait for response.
+	select {
+	case <-ctx.Done():
+		tc.sendReset(streamID, ErrCodeCancel)
+		return nil, ctx.Err()
+	case result := <-ss.done:
+		if result.err != nil {
+			return nil, result.err
+		}
+	}
+
+	// Build response.
+	resp, err := tc.buildResponse(&gohttp.Request{URL: &url.URL{}}, ss)
+	if err != nil {
+		return nil, fmt.Errorf("build response for raw stream %d: %w", streamID, err)
+	}
+
+	return &RoundTripResult{
+		Response:   resp,
+		ServerAddr: tc.netConn.RemoteAddr().String(),
+		RawFrames:  ss.rawFrames,
+	}, nil
 }
 
 // sendReset sends a RST_STREAM frame for the given stream asynchronously.
