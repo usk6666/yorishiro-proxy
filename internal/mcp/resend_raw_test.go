@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/frame"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 )
 
 // --- resend_raw with patches tests ---
@@ -457,53 +460,114 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 // --- override_raw_base64 tests ---
 
 func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
-	store := newTestStore(t)
-	addr, cleanup := newRawEchoServer(t)
+	// Start an HTTP/2 echo server (no TLS).
+	echoAddr, cleanup := newH2EchoServer(t)
 	defer cleanup()
 
-	host, port, _ := net.SplitHostPort(addr)
-	u, _ := url.Parse("http://" + host + ":" + port + "/test")
+	store := newTestStore(t)
+	ctx := context.Background()
 
-	// Create a flow with NO RawBytes (e.g. HTTP/2 or gRPC flow).
-	entry := saveTestEntry(t, store,
-		&flow.Flow{
-			Protocol:  "HTTP/2",
-			Timestamp: time.Now(),
-			Duration:  100 * time.Millisecond,
-		},
-		&flow.Message{
-			Sequence:  0,
-			Direction: "send",
-			Timestamp: time.Now(),
-			Method:    "GET",
-			URL:       u,
-			Headers:   map[string][]string{},
-			RawBytes:  nil, // No raw bytes stored for HTTP/2
-		},
-		&flow.Message{
-			Sequence:   1,
-			Direction:  "receive",
-			Timestamp:  time.Now(),
-			StatusCode: 200,
-			Headers:    map[string][]string{},
-			Body:       []byte("ok"),
-		},
-	)
+	u, _ := url.Parse("https://" + echoAddr + "/test")
 
-	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
+	// Create a flow with NO RawBytes — the test verifies that
+	// override_raw_base64 can supply raw bytes when the original flow has none.
+	fl := &flow.Flow{
+		Protocol:  "HTTP/2",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	sendMsg := &flow.Message{
+		FlowID:    fl.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       u,
+		Headers:   map[string][]string{},
+		RawBytes:  nil, // No raw bytes stored
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	recvMsg := &flow.Message{
+		FlowID:     fl.ID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		Body:       []byte("ok"),
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
 
-	// Should succeed because override_raw_base64 provides the raw bytes.
-	replacement := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
-	result := executeCallTool(t, cs, map[string]any{
-		"action": "resend_raw",
-		"params": map[string]any{
-			"flow_id":             entry.Session.ID,
-			"target_addr":         addr,
-			"override_raw_base64": base64.StdEncoding.EncodeToString(replacement),
+	// Build override H2 HEADERS frame bytes.
+	encoder := hpack.NewEncoder(4096, true)
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: echoAddr},
+		{Name: ":path", Value: "/test"},
+	}
+	fragment := encoder.Encode(headers)
+	var rawBuf bytes.Buffer
+	w := frame.NewWriter(&rawBuf)
+	if err := w.WriteHeaders(1, true, true, fragment); err != nil {
+		t.Fatalf("WriteHeaders: %v", err)
+	}
+	overrideB64 := base64.StdEncoding.EncodeToString(rawBuf.Bytes())
+
+	// Set up MCP server with a testDialer (no TLS).
+	s := NewServer(ctx, nil, store, nil)
+	s.deps.rawReplayDialer = &testDialer{}
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer ss.Close()
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	// Should succeed because override_raw_base64 provides the raw H2 frame bytes.
+	result, err := cs.CallTool(ctx, &gomcp.CallToolParams{
+		Name: "resend",
+		Arguments: map[string]any{
+			"action": "resend_raw",
+			"params": map[string]any{
+				"flow_id":             fl.ID,
+				"target_addr":         echoAddr,
+				"use_tls":             false,
+				"override_raw_base64": overrideB64,
+			},
 		},
 	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
 	if result.IsError {
-		t.Fatalf("expected success with override_raw_base64, got error: %v", result.Content)
+		var errText string
+		for _, c := range result.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				errText = tc.Text
+			}
+		}
+		t.Fatalf("expected success with override_raw_base64, got error: %s", errText)
 	}
 
 	var out resendRawResult

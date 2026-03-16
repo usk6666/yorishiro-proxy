@@ -768,11 +768,31 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		return nil, nil, err
 	}
 
-	if err := s.checkRawTargetScope(fl, targetAddr); err != nil {
+	// Determine useTLS for scope checking and connection establishment.
+	// For HTTP/2 flows, infer from flow TLS metadata; for others, use protocol name.
+	useTLS := fl.Protocol == "HTTPS"
+	if isHTTP2Protocol(fl.Protocol) {
+		useTLS = inferFlowUseTLS(fl)
+	}
+	if params.UseTLS != nil {
+		useTLS = *params.UseTLS
+	}
+
+	if err := s.checkRawTargetScope(fl, targetAddr, useTLS); err != nil {
 		return nil, nil, err
 	}
 
-	respData, start, duration, err := s.buildAndSendRaw(ctx, fl, params, targetAddr, rawBytes)
+	// Route to the appropriate raw send implementation based on protocol.
+	// HTTP/2 and gRPC flows require an HTTP/2 connection handshake before
+	// sending the raw frames; all other protocols use plain TCP/TLS.
+	var respData []byte
+	var start time.Time
+	var duration time.Duration
+	if isHTTP2Protocol(fl.Protocol) {
+		respData, start, duration, err = s.buildAndSendRawH2(ctx, fl, params, targetAddr, rawBytes)
+	} else {
+		respData, start, duration, err = s.buildAndSendRaw(ctx, fl, params, targetAddr, rawBytes)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -832,9 +852,11 @@ func (s *Server) loadRawResendFlow(ctx context.Context, params resendParams) (*f
 }
 
 // checkRawTargetScope checks target scope for a raw resend target address.
-func (s *Server) checkRawTargetScope(fl *flow.Flow, targetAddr string) error {
+// useTLS indicates whether the connection will use TLS, which determines the
+// scheme used for scope matching. For HTTP/2 flows this may be false (h2c).
+func (s *Server) checkRawTargetScope(fl *flow.Flow, targetAddr string, useTLS bool) error {
 	scheme := ""
-	if fl.Protocol == "HTTPS" {
+	if fl.Protocol == "HTTPS" || useTLS {
 		scheme = "https"
 	}
 	return s.checkTargetScopeAddr(scheme, targetAddr)
