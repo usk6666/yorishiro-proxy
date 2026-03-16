@@ -16,6 +16,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // Handler manages a WebSocket connection relay between client and upstream.
@@ -25,6 +26,7 @@ type Handler struct {
 	store        flow.FlowWriter
 	logger       *slog.Logger
 	pluginEngine *plugin.Engine
+	safetyEngine *safety.Engine
 }
 
 // NewHandler creates a new WebSocket relay handler.
@@ -39,6 +41,12 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 // WebSocket frame relay. If engine is nil, plugin hooks are skipped.
 func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
 	h.pluginEngine = engine
+}
+
+// SetSafetyEngine sets the safety filter engine for checking WebSocket
+// text frames. If engine is nil, safety filtering is skipped.
+func (h *Handler) SetSafetyEngine(engine *safety.Engine) {
+	h.safetyEngine = engine
 }
 
 // HandleUpgrade processes a WebSocket upgrade request. It forwards the upgrade
@@ -275,6 +283,14 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			}
 		}
 
+		// Safety filter: apply to text frames only (opcode 0x1).
+		// Binary frames are skipped because safety rules target human-readable text.
+		safetyMeta, rawPayload, blocked := h.applySafetyToFrame(frame, direction, upgradeReq, flowID)
+		if blocked {
+			h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, flowID, direction, seq, start, safetyMeta)
+			continue
+		}
+
 		if err := forwardFrame(dst, frame, direction); err != nil {
 			return err
 		}
@@ -287,7 +303,13 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			continue
 		}
 
-		if err := h.handleDataFrame(ctx, dst, frame, &frag, flowID, direction, seq, start); err != nil {
+		// For output-filtered frames, record the raw (unmasked) payload.
+		recordPayload := frame.Payload
+		if rawPayload != nil {
+			recordPayload = rawPayload
+		}
+
+		if err := h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, &frag, flowID, direction, seq, start, safetyMeta); err != nil {
 			return err
 		}
 	}
@@ -340,19 +362,21 @@ func forwardFrame(dst net.Conn, frame *Frame, direction string) error {
 	return nil
 }
 
-// handleDataFrame processes a data frame for fragment assembly and recording.
-// Returns an error if the message size limit was exceeded.
-func (h *Handler) handleDataFrame(ctx context.Context, dst net.Conn, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time) error {
+// handleDataFrameWithPayload processes a data frame for fragment assembly and recording,
+// using recordPayload for the flow store (which may differ from frame.Payload when the
+// output filter has masked the forwarded payload but raw data should be recorded).
+func (h *Handler) handleDataFrameWithPayload(ctx context.Context, dst net.Conn, frame *Frame, recordPayload []byte, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) error {
 	if frame.Opcode != OpcodeContinuation {
-		h.handleNewDataFrame(ctx, frame, frag, flowID, direction, seq, start)
+		h.handleNewDataFrameWithPayload(ctx, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta)
 		return nil
 	}
 	return h.handleContinuationFrame(ctx, dst, frame, frag, flowID, direction, seq, start)
 }
 
-// handleNewDataFrame processes a non-continuation data frame, starting a new
-// message or recording a single unfragmented message.
-func (h *Handler) handleNewDataFrame(ctx context.Context, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time) {
+// handleNewDataFrameWithPayload processes a non-continuation data frame, using
+// recordPayload for recording (may differ from frame.Payload when output filter
+// has masked the forwarded data).
+func (h *Handler) handleNewDataFrameWithPayload(ctx context.Context, frame *Frame, recordPayload []byte, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) {
 	if frag.active {
 		h.logger.Warn("websocket protocol violation: new data frame while fragment pending",
 			"flow_id", flowID, "direction", direction)
@@ -360,11 +384,11 @@ func (h *Handler) handleNewDataFrame(ctx context.Context, frame *Frame, frag *fr
 		frag.active = false
 	}
 	if frame.Fin {
-		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, flowID, direction, seq, start)
+		h.recordDataMessage(ctx, frame.Opcode, recordPayload, frame.Masked, flowID, direction, seq, start, safetyMeta)
 	} else {
 		frag.opcode = frame.Opcode
-		frag.buf = make([]byte, len(frame.Payload))
-		copy(frag.buf, frame.Payload)
+		frag.buf = make([]byte, len(recordPayload))
+		copy(frag.buf, recordPayload)
 		frag.active = true
 	}
 }
@@ -382,7 +406,7 @@ func (h *Handler) handleContinuationFrame(ctx context.Context, dst net.Conn, fra
 	}
 	frag.buf = append(frag.buf, frame.Payload...)
 	if frame.Fin {
-		h.recordDataMessage(ctx, frag.opcode, frag.buf, frame.Masked, flowID, direction, seq, start)
+		h.recordDataMessage(ctx, frag.opcode, frag.buf, frame.Masked, flowID, direction, seq, start, nil)
 		frag.buf = nil
 		frag.active = false
 	}
@@ -506,25 +530,152 @@ func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame
 	return false
 }
 
+// applySafetyToFrame applies the safety filter to a data frame if applicable.
+// It only processes non-control text frames (opcode 0x1).
+// Returns:
+//   - safetyMeta: metadata about the safety filter match (nil if no match)
+//   - rawPayload: the original unmasked payload for recording (nil unless output filter masked)
+//   - blocked: true if the frame should be dropped (not forwarded)
+func (h *Handler) applySafetyToFrame(frame *Frame, direction string, upgradeReq *gohttp.Request, flowID string) (*safetyMetadata, []byte, bool) {
+	if h.safetyEngine == nil || frame.IsControl() || frame.Opcode != OpcodeText {
+		return nil, nil, false
+	}
+
+	if direction == "send" {
+		meta := h.applySafetyInputFilter(frame, upgradeReq, flowID)
+		if meta != nil && meta.blocked {
+			return meta, nil, true
+		}
+		return meta, nil, false
+	}
+
+	// Receive direction: preserve raw payload for recording,
+	// then mask the frame payload for forwarding to client.
+	rawPayload := make([]byte, len(frame.Payload))
+	copy(rawPayload, frame.Payload)
+	h.applySafetyOutputFilter(frame, flowID)
+	// Only return rawPayload if the payload was actually modified by masking.
+	if len(rawPayload) == len(frame.Payload) && string(rawPayload) == string(frame.Payload) {
+		return nil, nil, false
+	}
+	return nil, rawPayload, false
+}
+
+// safetyMetadata holds safety filter results for a WebSocket frame.
+type safetyMetadata struct {
+	blocked   bool   // true if the frame was blocked (ActionBlock)
+	logOnly   bool   // true if the frame matched a log_only rule
+	ruleID    string // matched rule ID (e.g. "destructive-sql:drop")
+	matchedOn string // the text fragment that triggered the match
+}
+
+// applySafetyInputFilter runs CheckInput on a text frame payload in the send direction.
+func (h *Handler) applySafetyInputFilter(frame *Frame, upgradeReq *gohttp.Request, flowID string) *safetyMetadata {
+	var upgradeURL string
+	if upgradeReq != nil && upgradeReq.URL != nil {
+		upgradeURL = upgradeReq.URL.String()
+	}
+
+	violation := h.safetyEngine.CheckInput(frame.Payload, upgradeURL, nil)
+	if violation == nil {
+		return nil
+	}
+
+	// Determine the action for this rule.
+	action := safety.ActionBlock
+	for _, r := range h.safetyEngine.InputRules() {
+		if r.ID == violation.RuleID {
+			action = r.Action
+			break
+		}
+	}
+
+	meta := &safetyMetadata{
+		ruleID:    violation.RuleID,
+		matchedOn: violation.MatchedOn,
+	}
+
+	if action == safety.ActionLogOnly {
+		meta.logOnly = true
+		h.logger.Warn("websocket safety filter violation (log_only)",
+			"flow_id", flowID,
+			"rule_id", violation.RuleID,
+			"matched_on", truncateForLog(violation.MatchedOn, 256),
+		)
+	} else {
+		meta.blocked = true
+		h.logger.Warn("websocket frame blocked by safety filter",
+			"flow_id", flowID,
+			"rule_id", violation.RuleID,
+			"matched_on", truncateForLog(violation.MatchedOn, 256),
+		)
+	}
+
+	return meta
+}
+
+// applySafetyOutputFilter runs FilterOutput on a text frame payload in the receive direction.
+// If masking occurs, the frame payload is replaced with masked data.
+// The caller is responsible for preserving the raw (unmasked) data for recording.
+func (h *Handler) applySafetyOutputFilter(frame *Frame, flowID string) *safetyMetadata {
+	result := h.safetyEngine.FilterOutput(frame.Payload)
+	if !result.Masked {
+		return nil
+	}
+
+	h.logger.Debug("websocket frame masked by output filter",
+		"flow_id", flowID,
+		"match_count", len(result.Matches),
+	)
+
+	// Replace the frame payload with the masked version.
+	// The caller must capture raw payload before calling this if it needs to record raw data.
+	frame.Payload = result.Data
+	return nil // no metadata needed; output filter does not produce block/log metadata
+}
+
+// truncateForLog truncates a string for logging purposes.
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // recordDataMessage records a complete WebSocket data message (text or binary)
-// to the flow store.
-func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, flowID, direction string, seq *atomic.Int64, start time.Time) {
+// to the flow store. If safetyMeta is non-nil, safety filter metadata is
+// attached to the recorded message.
+func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) {
 	if h.store == nil {
 		return
 	}
 
 	msgSeq := int(seq.Add(1) - 1)
 
+	metadata := map[string]string{
+		"opcode": strconv.Itoa(int(opcode)),
+		"fin":    "true",
+		"masked": strconv.FormatBool(masked),
+	}
+
+	// Attach safety filter metadata if present.
+	if safetyMeta != nil {
+		if safetyMeta.blocked {
+			metadata["safety_blocked"] = "true"
+		}
+		if safetyMeta.logOnly {
+			metadata["safety_logged"] = "true"
+		}
+		metadata["safety_rule_id"] = safetyMeta.ruleID
+		metadata["safety_matched_on"] = safetyMeta.matchedOn
+	}
+
 	msg := &flow.Message{
 		FlowID:    flowID,
 		Sequence:  msgSeq,
 		Direction: direction,
 		Timestamp: time.Now(),
-		Metadata: map[string]string{
-			"opcode": strconv.Itoa(int(opcode)),
-			"fin":    "true",
-			"masked": strconv.FormatBool(masked),
-		},
+		Metadata:  metadata,
 	}
 
 	recordPayload := payload
