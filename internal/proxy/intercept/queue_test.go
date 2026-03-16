@@ -456,6 +456,173 @@ func TestQueue_MaxItemsResumesAfterRemoval(t *testing.T) {
 	}
 }
 
+func TestQueue_SetRawBytes(t *testing.T) {
+	q := NewQueue()
+	id, _ := q.Enqueue("GET", nil, nil, nil, nil)
+
+	rawBytes := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	if err := q.SetRawBytes(id, rawBytes); err != nil {
+		t.Fatalf("SetRawBytes returned error: %v", err)
+	}
+
+	item, err := q.Get(id)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if string(item.RawBytes) != string(rawBytes) {
+		t.Errorf("expected raw bytes %q, got %q", rawBytes, item.RawBytes)
+	}
+}
+
+func TestQueue_SetRawBytes_DeepCopy(t *testing.T) {
+	q := NewQueue()
+	id, _ := q.Enqueue("GET", nil, nil, nil, nil)
+
+	rawBytes := []byte("original raw bytes")
+	if err := q.SetRawBytes(id, rawBytes); err != nil {
+		t.Fatalf("SetRawBytes returned error: %v", err)
+	}
+
+	// Modify the original after setting.
+	rawBytes[0] = 'X'
+
+	item, _ := q.Get(id)
+	if item.RawBytes[0] != 'o' {
+		t.Error("SetRawBytes should deep-copy the raw bytes")
+	}
+}
+
+func TestQueue_SetRawBytes_NotFound(t *testing.T) {
+	q := NewQueue()
+	err := q.SetRawBytes("nonexistent", []byte("data"))
+	if err == nil {
+		t.Fatal("expected error for nonexistent ID")
+	}
+}
+
+func TestQueue_SetRawBytes_Nil(t *testing.T) {
+	q := NewQueue()
+	id, _ := q.Enqueue("GET", nil, nil, nil, nil)
+
+	if err := q.SetRawBytes(id, nil); err != nil {
+		t.Fatalf("SetRawBytes with nil returned error: %v", err)
+	}
+
+	item, _ := q.Get(id)
+	if item.RawBytes != nil {
+		t.Errorf("expected nil raw bytes, got %v", item.RawBytes)
+	}
+}
+
+func TestQueue_SetRawBytes_Empty(t *testing.T) {
+	q := NewQueue()
+	id, _ := q.Enqueue("GET", nil, nil, nil, nil)
+
+	if err := q.SetRawBytes(id, []byte{}); err != nil {
+		t.Fatalf("SetRawBytes with empty returned error: %v", err)
+	}
+
+	item, _ := q.Get(id)
+	if item.RawBytes != nil {
+		t.Errorf("expected nil raw bytes for empty input, got %v", item.RawBytes)
+	}
+}
+
+func TestInterceptAction_IsRawMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode ReleaseMode
+		want bool
+	}{
+		{name: "raw", mode: ModeRaw, want: true},
+		{name: "structured", mode: ModeStructured, want: false},
+		{name: "empty", mode: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := InterceptAction{Mode: tt.mode}
+			if got := a.IsRawMode(); got != tt.want {
+				t.Errorf("IsRawMode() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInterceptAction_EffectiveMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode ReleaseMode
+		want ReleaseMode
+	}{
+		{name: "raw", mode: ModeRaw, want: ModeRaw},
+		{name: "structured", mode: ModeStructured, want: ModeStructured},
+		{name: "empty defaults to structured", mode: "", want: ModeStructured},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := InterceptAction{Mode: tt.mode}
+			if got := a.EffectiveMode(); got != tt.want {
+				t.Errorf("EffectiveMode() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateRawOverride(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "empty", size: 0, wantErr: false},
+		{name: "small", size: 1024, wantErr: false},
+		{name: "at limit", size: MaxRawBytesSize, wantErr: false},
+		{name: "over limit", size: MaxRawBytesSize + 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := make([]byte, tt.size)
+			err := ValidateRawOverride(data)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateRawOverride() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestQueue_RespondWithRawMode(t *testing.T) {
+	q := NewQueue()
+	id, actionCh := q.Enqueue("GET", nil, nil, nil, nil)
+
+	rawOverride := []byte("raw data to send")
+	action := InterceptAction{
+		Type:        ActionModifyAndForward,
+		Mode:        ModeRaw,
+		RawOverride: rawOverride,
+	}
+
+	go func() {
+		if err := q.Respond(id, action); err != nil {
+			t.Errorf("Respond returned error: %v", err)
+		}
+	}()
+
+	select {
+	case received := <-actionCh:
+		if received.Type != ActionModifyAndForward {
+			t.Errorf("expected ActionModifyAndForward, got %v", received.Type)
+		}
+		if !received.IsRawMode() {
+			t.Error("expected raw mode")
+		}
+		if string(received.RawOverride) != "raw data to send" {
+			t.Errorf("expected raw override %q, got %q", "raw data to send", received.RawOverride)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for action")
+	}
+}
+
 func TestQueue_MaxItemsConcurrent(t *testing.T) {
 	q := NewQueue()
 	q.SetMaxItems(10)

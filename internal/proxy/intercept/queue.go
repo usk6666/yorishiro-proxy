@@ -50,13 +50,41 @@ const (
 	PhaseResponse InterceptPhase = "response"
 )
 
+// ReleaseMode specifies whether the release/modify_and_forward action uses
+// structured (L7) modifications or raw bytes forwarding.
+type ReleaseMode string
+
+const (
+	// ModeStructured uses the traditional L7 structured modifications
+	// (override_method, override_headers, override_body, etc.).
+	// This is the default mode for backward compatibility.
+	ModeStructured ReleaseMode = "structured"
+	// ModeRaw sends raw bytes directly to the upstream connection,
+	// bypassing L7 serialization. The raw bytes are forwarded as-is.
+	ModeRaw ReleaseMode = "raw"
+)
+
+// MaxRawBytesSize is the maximum allowed size for raw bytes in an intercept
+// action. This prevents memory exhaustion from excessively large payloads
+// (CWE-770). 10 MiB is generous for most HTTP traffic while preventing abuse.
+const MaxRawBytesSize = 10 * 1024 * 1024 // 10 MiB
+
 // InterceptAction represents the action to take on an intercepted request or response,
 // including optional modification parameters for modify_and_forward.
 type InterceptAction struct {
 	// Type is the action type (release, modify_and_forward, or drop).
 	Type ActionType
 
-	// --- Request modification fields (modify_and_forward, phase=request) ---
+	// Mode specifies the forwarding mode: "structured" (default) or "raw".
+	// When Mode is "raw", all L7 modification fields are ignored and
+	// RawOverride is sent directly to the upstream connection.
+	Mode ReleaseMode
+
+	// RawOverride contains the raw bytes to send when Mode is "raw".
+	// This bypasses L7 serialization and is written directly to the connection.
+	RawOverride []byte
+
+	// --- Request modification fields (modify_and_forward, phase=request, mode=structured) ---
 
 	// OverrideMethod overrides the HTTP method (modify_and_forward only).
 	OverrideMethod string
@@ -73,7 +101,7 @@ type InterceptAction struct {
 	// OverrideBodyBase64 replaces the body with Base64-decoded content (modify_and_forward only).
 	OverrideBodyBase64 *string
 
-	// --- Response modification fields (modify_and_forward, phase=response) ---
+	// --- Response modification fields (modify_and_forward, phase=response, mode=structured) ---
 
 	// OverrideStatus overrides the HTTP status code (response modify_and_forward only).
 	OverrideStatus int
@@ -108,6 +136,12 @@ type InterceptedRequest struct {
 	Timestamp time.Time
 	// MatchedRules lists the IDs of the rules that matched.
 	MatchedRules []string
+
+	// RawBytes holds the raw bytes of the intercepted request or response,
+	// captured before L7 parsing. This allows AI agents to view and edit
+	// the exact bytes on the wire. May be nil if raw capture is not available
+	// for the protocol or connection.
+	RawBytes []byte
 
 	// actionCh receives the action to perform on this intercepted item.
 	// It is buffered with capacity 1 to prevent goroutine leaks on timeout.
@@ -391,9 +425,52 @@ func (q *Queue) Remove(id string) {
 	q.mu.Unlock()
 }
 
+// SetRawBytes attaches raw bytes to an already-enqueued intercepted item.
+// This is used by protocol handlers that capture raw bytes after enqueuing
+// the L7-parsed request. Returns an error if the item is not found.
+func (q *Queue) SetRawBytes(id string, rawBytes []byte) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	item, ok := q.items[id]
+	if !ok {
+		return fmt.Errorf("intercepted request %q not found", id)
+	}
+
+	if len(rawBytes) > 0 {
+		cp := make([]byte, len(rawBytes))
+		copy(cp, rawBytes)
+		item.RawBytes = cp
+	}
+	return nil
+}
+
 // Clear removes all requests from the queue.
 func (q *Queue) Clear() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.items = make(map[string]*InterceptedRequest)
+}
+
+// IsRawMode returns true if the action specifies raw byte forwarding mode.
+func (a InterceptAction) IsRawMode() bool {
+	return a.Mode == ModeRaw
+}
+
+// EffectiveMode returns the release mode, defaulting to ModeStructured
+// when Mode is empty (backward compatibility).
+func (a InterceptAction) EffectiveMode() ReleaseMode {
+	if a.Mode == "" {
+		return ModeStructured
+	}
+	return a.Mode
+}
+
+// ValidateRawOverride checks that the raw override bytes are within
+// the allowed size limit. Returns an error if the payload exceeds MaxRawBytesSize.
+func ValidateRawOverride(raw []byte) error {
+	if len(raw) > MaxRawBytesSize {
+		return fmt.Errorf("raw bytes size %d exceeds maximum %d", len(raw), MaxRawBytesSize)
+	}
+	return nil
 }
