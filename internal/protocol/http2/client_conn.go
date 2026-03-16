@@ -168,11 +168,13 @@ func (cc *clientConn) readClientSettings() error {
 	if _, err := cc.h2conn.HandleSettings(f); err != nil {
 		return fmt.Errorf("apply client settings: %w", err)
 	}
-	// Update reader's max frame size based on client's setting for our local limit.
+	// Peer's MAX_FRAME_SIZE is the maximum frame size the peer can receive,
+	// so it limits what we can send (Writer). Our own MAX_FRAME_SIZE (local
+	// settings) limits what we accept (Reader), and defaults to 16384.
 	peerSettings := cc.h2conn.PeerSettings()
 	if peerSettings.MaxFrameSize > frame.DefaultMaxFrameSize {
-		if err := cc.reader.SetMaxFrameSize(peerSettings.MaxFrameSize); err != nil {
-			cc.logger.Warn("failed to set reader max frame size", "error", err)
+		if err := cc.writer.SetMaxFrameSize(peerSettings.MaxFrameSize); err != nil {
+			cc.logger.Warn("failed to set writer max frame size", "error", err)
 		}
 	}
 	// Send SETTINGS ACK.
@@ -353,6 +355,14 @@ func (cc *clientConn) handleContinuationFrame(f *frame.Frame) error {
 	}
 
 	sr := cc.pendingStreams[cc.headerStreamID]
+	if sr == nil {
+		// Stream was reset during header block assembly.
+		cc.headerStreamID = 0
+		return &ConnError{
+			Code:   ErrCodeProtocol,
+			Reason: fmt.Sprintf("CONTINUATION for reset stream %d", cc.headerStreamID),
+		}
+	}
 	fragment, err := f.ContinuationFragment()
 	if err != nil {
 		return &ConnError{
@@ -527,6 +537,10 @@ func (cc *clientConn) handleRSTStreamFrame(f *frame.Frame) error {
 	if cc.decodedHeaders != nil {
 		delete(cc.decodedHeaders, streamID)
 	}
+	// If we were in the middle of a header block for this stream, clear it.
+	if cc.headerStreamID == streamID {
+		cc.headerStreamID = 0
+	}
 	cc.logger.Debug("received RST_STREAM",
 		"stream_id", streamID,
 		"error_code", ErrCodeString(errCode))
@@ -679,17 +693,19 @@ func isConnectionClosed(err error) bool {
 }
 
 // frameResponseWriter implements http.ResponseWriter by writing HTTP/2 frames
-// back to the client connection.
+// back to the client connection. Write() sends DATA frames immediately
+// (chunked to peer's MaxFrameSize) to support gRPC streaming.
 type frameResponseWriter struct {
 	cc       *clientConn
 	streamID uint32
 
-	mu          sync.Mutex
-	wroteHeader bool
-	statusCode  int
-	headers     gohttp.Header
-	trailers    gohttp.Header
-	bodyBuf     bytes.Buffer
+	mu           sync.Mutex
+	wroteHeader  bool
+	headersSent  bool // true after HEADERS frame has been sent to the wire
+	statusCode   int
+	headers      gohttp.Header
+	trailers     gohttp.Header
+	bytesWritten int // total body bytes written via Write()
 }
 
 // newFrameResponseWriter creates a new frameResponseWriter for the given stream.
@@ -708,6 +724,8 @@ func (rw *frameResponseWriter) Header() gohttp.Header {
 
 // Write writes the data to the connection as part of an HTTP reply body.
 // If WriteHeader has not yet been called, Write calls WriteHeader(200).
+// Data is sent immediately as DATA frames chunked to peer's MaxFrameSize,
+// which is required for gRPC streaming to work correctly.
 func (rw *frameResponseWriter) Write(data []byte) (int, error) {
 	rw.mu.Lock()
 	if !rw.wroteHeader {
@@ -717,8 +735,12 @@ func (rw *frameResponseWriter) Write(data []byte) (int, error) {
 	}
 	rw.mu.Unlock()
 
-	rw.bodyBuf.Write(data)
-	return len(data), nil
+	// Ensure HEADERS frame has been sent before any DATA frames.
+	if err := rw.ensureHeadersSent(); err != nil {
+		return 0, err
+	}
+
+	return rw.writeDataChunked(data)
 }
 
 // WriteHeader sends an HTTP response header with the provided status code.
@@ -732,25 +754,131 @@ func (rw *frameResponseWriter) WriteHeader(statusCode int) {
 	rw.statusCode = statusCode
 }
 
-// Flush implements http.Flusher.
+// Flush implements http.Flusher. It ensures the HEADERS frame has been sent.
 func (rw *frameResponseWriter) Flush() {
-	// No-op: we flush everything in finish().
+	rw.mu.Lock()
+	if !rw.wroteHeader {
+		rw.mu.Unlock()
+		rw.WriteHeader(gohttp.StatusOK)
+	} else {
+		rw.mu.Unlock()
+	}
+	rw.ensureHeadersSent()
 }
 
-// finish writes the response HEADERS and DATA frames to the client.
-// This is called after the handler returns.
+// ensureHeadersSent sends the response HEADERS frame if not yet sent.
+// This is called before the first DATA frame and on Flush().
+func (rw *frameResponseWriter) ensureHeadersSent() error {
+	rw.mu.Lock()
+	if rw.headersSent {
+		rw.mu.Unlock()
+		return nil
+	}
+	rw.headersSent = true
+	statusCode := rw.statusCode
+	respHeaders := rw.headers.Clone()
+	rw.mu.Unlock()
+
+	var hpackFields []hpack.HeaderField
+	hpackFields = append(hpackFields, hpack.HeaderField{
+		Name:  ":status",
+		Value: fmt.Sprintf("%d", statusCode),
+	})
+	for key, vals := range respHeaders {
+		if strings.HasPrefix(key, gohttp.TrailerPrefix) {
+			continue // trailer-prefixed headers are handled in finish()
+		}
+		for _, val := range vals {
+			hpackFields = append(hpackFields, hpack.HeaderField{
+				Name:  strings.ToLower(key),
+				Value: val,
+			})
+		}
+	}
+
+	cc := rw.cc
+	cc.writeMu.Lock()
+	encoded := cc.encoder.Encode(hpackFields)
+	err := cc.writer.WriteHeaders(rw.streamID, false, true, encoded)
+	cc.writeMu.Unlock()
+	if err != nil {
+		cc.logger.Debug("failed to write response HEADERS", "stream_id", rw.streamID, "error", err)
+	}
+	return err
+}
+
+// writeDataChunked sends data as DATA frames, chunking to the peer's
+// MaxFrameSize to comply with HTTP/2 frame size limits.
+func (rw *frameResponseWriter) writeDataChunked(p []byte) (int, error) {
+	cc := rw.cc
+	maxSize := int(cc.h2conn.PeerSettings().MaxFrameSize)
+	written := 0
+
+	for len(p) > 0 {
+		chunk := p
+		if len(chunk) > maxSize {
+			chunk = p[:maxSize]
+		}
+		cc.writeMu.Lock()
+		err := cc.writer.WriteData(rw.streamID, false, chunk)
+		cc.writeMu.Unlock()
+		if err != nil {
+			return written, err
+		}
+		written += len(chunk)
+		p = p[len(chunk):]
+	}
+
+	rw.mu.Lock()
+	rw.bytesWritten += written
+	rw.mu.Unlock()
+
+	return written, nil
+}
+
+// finish sends the end-of-stream marker after the handler returns.
+// If HEADERS were already sent (via Write/Flush), it sends either an
+// empty DATA(END_STREAM) or trailer HEADERS(END_STREAM). If HEADERS
+// were never sent (no body written), it sends HEADERS(END_STREAM).
 func (rw *frameResponseWriter) finish() {
 	rw.mu.Lock()
 	if !rw.wroteHeader {
 		rw.statusCode = gohttp.StatusOK
 		rw.wroteHeader = true
 	}
-	statusCode := rw.statusCode
+	headersSent := rw.headersSent
 	respHeaders := rw.headers.Clone()
-	bodyData := rw.bodyBuf.Bytes()
 	rw.mu.Unlock()
 
-	// Check for trailers.
+	// Collect trailers from the header map.
+	rw.collectTrailers(respHeaders)
+	hasTrailers := len(rw.trailers) > 0
+
+	cc := rw.cc
+
+	if !headersSent {
+		// No Write() or Flush() was called — send HEADERS with END_STREAM.
+		rw.finishWithHeaders(respHeaders, hasTrailers)
+	} else if hasTrailers {
+		// HEADERS already sent; send trailers as HEADERS(END_STREAM).
+		rw.finishWithTrailers()
+	} else {
+		// HEADERS already sent, no trailers; send empty DATA(END_STREAM).
+		cc.writeMu.Lock()
+		if err := cc.writer.WriteData(rw.streamID, true, nil); err != nil {
+			cc.writeMu.Unlock()
+			cc.logger.Debug("failed to write end-stream DATA", "stream_id", rw.streamID, "error", err)
+			return
+		}
+		cc.writeMu.Unlock()
+	}
+
+	// Transition stream state.
+	cc.h2conn.Streams().Transition(rw.streamID, EventSendEndStream)
+}
+
+// collectTrailers extracts trailer headers from the response header map.
+func (rw *frameResponseWriter) collectTrailers(respHeaders gohttp.Header) {
 	trailerKeyStr := respHeaders.Get("Trailer")
 	if trailerKeyStr != "" {
 		respHeaders.Del("Trailer")
@@ -763,7 +891,6 @@ func (rw *frameResponseWriter) finish() {
 			}
 		}
 	}
-	// Also collect any Trailer-prefixed headers not declared in the Trailer header.
 	for key, vals := range respHeaders {
 		if strings.HasPrefix(key, gohttp.TrailerPrefix) {
 			realKey := strings.TrimPrefix(key, gohttp.TrailerPrefix)
@@ -776,14 +903,20 @@ func (rw *frameResponseWriter) finish() {
 			respHeaders.Del(key)
 		}
 	}
+}
 
-	// Build HPACK-encoded response headers.
+// finishWithHeaders sends a single HEADERS frame (possibly with END_STREAM)
+// when no body was written via Write().
+func (rw *frameResponseWriter) finishWithHeaders(respHeaders gohttp.Header, hasTrailers bool) {
 	var hpackFields []hpack.HeaderField
 	hpackFields = append(hpackFields, hpack.HeaderField{
 		Name:  ":status",
-		Value: fmt.Sprintf("%d", statusCode),
+		Value: fmt.Sprintf("%d", rw.statusCode),
 	})
 	for key, vals := range respHeaders {
+		if strings.HasPrefix(key, gohttp.TrailerPrefix) {
+			continue
+		}
 		for _, val := range vals {
 			hpackFields = append(hpackFields, hpack.HeaderField{
 				Name:  strings.ToLower(key),
@@ -794,47 +927,39 @@ func (rw *frameResponseWriter) finish() {
 
 	cc := rw.cc
 	cc.writeMu.Lock()
-
 	encoded := cc.encoder.Encode(hpackFields)
-	hasBody := len(bodyData) > 0
-	hasTrailers := len(rw.trailers) > 0
-	endStream := !hasBody && !hasTrailers
-
+	endStream := !hasTrailers
 	if err := cc.writer.WriteHeaders(rw.streamID, endStream, true, encoded); err != nil {
 		cc.writeMu.Unlock()
 		cc.logger.Debug("failed to write response HEADERS", "stream_id", rw.streamID, "error", err)
 		return
 	}
-
-	if hasBody {
-		endStream = !hasTrailers
-		if err := cc.writer.WriteData(rw.streamID, endStream, bodyData); err != nil {
-			cc.writeMu.Unlock()
-			cc.logger.Debug("failed to write response DATA", "stream_id", rw.streamID, "error", err)
-			return
-		}
-	}
-
-	if hasTrailers {
-		var trailerFields []hpack.HeaderField
-		for key, vals := range rw.trailers {
-			for _, val := range vals {
-				trailerFields = append(trailerFields, hpack.HeaderField{
-					Name:  strings.ToLower(key),
-					Value: val,
-				})
-			}
-		}
-		trailerEncoded := cc.encoder.Encode(trailerFields)
-		if err := cc.writer.WriteHeaders(rw.streamID, true, true, trailerEncoded); err != nil {
-			cc.writeMu.Unlock()
-			cc.logger.Debug("failed to write response trailers", "stream_id", rw.streamID, "error", err)
-			return
-		}
-	}
-
 	cc.writeMu.Unlock()
 
-	// Transition stream state.
-	cc.h2conn.Streams().Transition(rw.streamID, EventSendEndStream)
+	if hasTrailers {
+		rw.finishWithTrailers()
+	}
+}
+
+// finishWithTrailers sends trailers as a HEADERS frame with END_STREAM.
+func (rw *frameResponseWriter) finishWithTrailers() {
+	var trailerFields []hpack.HeaderField
+	for key, vals := range rw.trailers {
+		for _, val := range vals {
+			trailerFields = append(trailerFields, hpack.HeaderField{
+				Name:  strings.ToLower(key),
+				Value: val,
+			})
+		}
+	}
+
+	cc := rw.cc
+	cc.writeMu.Lock()
+	trailerEncoded := cc.encoder.Encode(trailerFields)
+	if err := cc.writer.WriteHeaders(rw.streamID, true, true, trailerEncoded); err != nil {
+		cc.writeMu.Unlock()
+		cc.logger.Debug("failed to write response trailers", "stream_id", rw.streamID, "error", err)
+		return
+	}
+	cc.writeMu.Unlock()
 }

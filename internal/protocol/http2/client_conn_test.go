@@ -256,7 +256,15 @@ func TestFrameResponseWriter_WriteHeader(t *testing.T) {
 }
 
 func TestFrameResponseWriter_WriteImplicitHeader(t *testing.T) {
-	cc := newClientConn(context.Background(), nil, testutil.DiscardLogger(), nil)
+	// Use a pipe so Write() can send frames without nil-pointer panic.
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	// Drain the client side in background to prevent blocking.
+	go io.Copy(io.Discard, client)
+
+	cc := newClientConn(context.Background(), server, testutil.DiscardLogger(), nil)
 	rw := newFrameResponseWriter(cc, 1)
 
 	// Write without explicit WriteHeader should default to 200.
@@ -268,6 +276,9 @@ func TestFrameResponseWriter_WriteImplicitHeader(t *testing.T) {
 	}
 	if rw.statusCode != 200 {
 		t.Errorf("statusCode = %d, want 200", rw.statusCode)
+	}
+	if !rw.headersSent {
+		t.Error("headersSent should be true after Write")
 	}
 	rw.mu.Unlock()
 }
@@ -532,9 +543,10 @@ func TestClientConn_POSTWithBody(t *testing.T) {
 	tc.writer.WriteData(1, true, body)
 
 	// Read response frames. The server may send WINDOW_UPDATE frames before
-	// the response HEADERS due to flow control replenishment.
+	// the response HEADERS due to flow control replenishment. DATA may arrive
+	// in multiple frames (Write sends immediately, finish sends END_STREAM).
 	var status string
-	var respBodyData string
+	var respBodyBuf bytes.Buffer
 	gotEndStream := false
 	for !gotEndStream {
 		f, err := tc.reader.ReadFrame()
@@ -557,7 +569,7 @@ func TestClientConn_POSTWithBody(t *testing.T) {
 			}
 		case frame.TypeData:
 			data, _ := f.DataPayload()
-			respBodyData = string(data)
+			respBodyBuf.Write(data)
 			if f.Header.Flags.Has(frame.FlagEndStream) {
 				gotEndStream = true
 			}
@@ -569,8 +581,8 @@ func TestClientConn_POSTWithBody(t *testing.T) {
 	if status != "201" {
 		t.Errorf(":status = %q, want %q", status, "201")
 	}
-	if respBodyData != "created" {
-		t.Errorf("response body = %q, want %q", respBodyData, "created")
+	if respBodyBuf.String() != "created" {
+		t.Errorf("response body = %q, want %q", respBodyBuf.String(), "created")
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -788,4 +800,151 @@ func TestClientConn_WindowUpdate(t *testing.T) {
 	if f.Header.Type != frame.TypeHeaders {
 		t.Fatalf("expected HEADERS, got %s", f.Header.Type)
 	}
+}
+
+// TestClientConn_WriteChunking tests that large response bodies are chunked
+// into DATA frames respecting the peer's MaxFrameSize.
+func TestClientConn_WriteChunking(t *testing.T) {
+	// Create a body larger than the default MaxFrameSize (16384).
+	bodySize := frame.DefaultMaxFrameSize + 1000
+	largeBody := make([]byte, bodySize)
+	for i := range largeBody {
+		largeBody[i] = byte(i % 256)
+	}
+
+	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(gohttp.StatusOK)
+		w.Write(largeBody)
+	}
+
+	tc := newH2CTestConn(t, handler)
+	defer tc.close(t)
+
+	// Send a GET request.
+	headerBlock := tc.encoder.Encode([]hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/large"},
+	})
+	tc.writer.WriteHeaders(1, true, true, headerBlock)
+
+	// Read response frames: expect HEADERS + multiple DATA frames.
+	var respBody bytes.Buffer
+	dataFrameCount := 0
+	gotEndStream := false
+	for !gotEndStream {
+		f, err := tc.reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("read response frame: %v", err)
+		}
+		switch f.Header.Type {
+		case frame.TypeHeaders:
+			if f.Header.Flags.Has(frame.FlagEndStream) {
+				gotEndStream = true
+			}
+		case frame.TypeData:
+			data, _ := f.DataPayload()
+			if len(data) > 0 {
+				dataFrameCount++
+			}
+			// Each non-empty DATA frame payload must not exceed MaxFrameSize.
+			if len(data) > int(frame.DefaultMaxFrameSize) {
+				t.Errorf("DATA frame payload %d exceeds MaxFrameSize %d",
+					len(data), frame.DefaultMaxFrameSize)
+			}
+			respBody.Write(data)
+			if f.Header.Flags.Has(frame.FlagEndStream) {
+				gotEndStream = true
+			}
+		case frame.TypeWindowUpdate:
+			continue
+		default:
+			t.Fatalf("unexpected frame type: %s", f.Header.Type)
+		}
+	}
+
+	// Body was larger than one frame, so we expect at least 2 DATA frames.
+	if dataFrameCount < 2 {
+		t.Errorf("expected at least 2 DATA frames for chunking, got %d", dataFrameCount)
+	}
+
+	if respBody.Len() != bodySize {
+		t.Errorf("response body size = %d, want %d", respBody.Len(), bodySize)
+	}
+	if !bytes.Equal(respBody.Bytes(), largeBody) {
+		t.Error("response body content mismatch")
+	}
+}
+
+// TestClientConn_StreamingFlush tests that Flush() sends HEADERS immediately,
+// supporting gRPC-style streaming where Write+Flush cycles send data progressively.
+func TestClientConn_StreamingFlush(t *testing.T) {
+	ready := make(chan struct{})
+	done := make(chan struct{})
+
+	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		w.WriteHeader(gohttp.StatusOK)
+		w.(gohttp.Flusher).Flush()
+
+		// Signal that first flush is done.
+		close(ready)
+
+		// Write some data.
+		w.Write([]byte("chunk1"))
+		w.(gohttp.Flusher).Flush()
+
+		w.Write([]byte("chunk2"))
+		w.(gohttp.Flusher).Flush()
+
+		<-done
+	}
+
+	tc := newH2CTestConn(t, handler)
+	defer tc.close(t)
+
+	// Send a request.
+	headerBlock := tc.encoder.Encode([]hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/stream"},
+		{Name: "content-type", Value: "application/grpc"},
+	})
+	tc.writer.WriteHeaders(1, true, true, headerBlock)
+
+	// Wait for handler to flush headers.
+	<-ready
+
+	// Read HEADERS frame — should arrive before handler returns.
+	f, err := tc.reader.ReadFrame()
+	if err != nil {
+		t.Fatalf("read HEADERS: %v", err)
+	}
+	if f.Header.Type != frame.TypeHeaders {
+		t.Fatalf("expected HEADERS, got %s", f.Header.Type)
+	}
+
+	// Read DATA frames for chunk1 and chunk2.
+	var body bytes.Buffer
+	for i := 0; i < 2; i++ {
+		f, err = tc.reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("read DATA frame %d: %v", i, err)
+		}
+		if f.Header.Type != frame.TypeData {
+			t.Fatalf("expected DATA, got %s", f.Header.Type)
+		}
+		data, _ := f.DataPayload()
+		body.Write(data)
+	}
+
+	if body.String() != "chunk1chunk2" {
+		t.Errorf("streamed body = %q, want %q", body.String(), "chunk1chunk2")
+	}
+
+	// Let handler finish.
+	close(done)
 }
