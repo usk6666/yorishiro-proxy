@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -287,7 +288,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 		// Binary frames are skipped because safety rules target human-readable text.
 		safetyMeta, rawPayload, blocked := h.applySafetyToFrame(frame, direction, upgradeReq, flowID)
 		if blocked {
-			h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, flowID, direction, seq, start, safetyMeta)
+			h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
 			continue
 		}
 
@@ -384,7 +385,7 @@ func (h *Handler) handleNewDataFrameWithPayload(ctx context.Context, frame *Fram
 		frag.active = false
 	}
 	if frame.Fin {
-		h.recordDataMessage(ctx, frame.Opcode, recordPayload, frame.Masked, flowID, direction, seq, start, safetyMeta)
+		h.recordDataMessage(ctx, frame.Opcode, recordPayload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
 	} else {
 		frag.opcode = frame.Opcode
 		frag.buf = make([]byte, len(recordPayload))
@@ -406,7 +407,7 @@ func (h *Handler) handleContinuationFrame(ctx context.Context, dst net.Conn, fra
 	}
 	frag.buf = append(frag.buf, frame.Payload...)
 	if frame.Fin {
-		h.recordDataMessage(ctx, frag.opcode, frag.buf, frame.Masked, flowID, direction, seq, start, nil)
+		h.recordDataMessage(ctx, frag.opcode, frag.buf, frame.Masked, frame.Fin, flowID, direction, seq, start, nil)
 		frag.buf = nil
 		frag.active = false
 	}
@@ -555,7 +556,7 @@ func (h *Handler) applySafetyToFrame(frame *Frame, direction string, upgradeReq 
 	copy(rawPayload, frame.Payload)
 	h.applySafetyOutputFilter(frame, flowID)
 	// Only return rawPayload if the payload was actually modified by masking.
-	if len(rawPayload) == len(frame.Payload) && string(rawPayload) == string(frame.Payload) {
+	if bytes.Equal(rawPayload, frame.Payload) {
 		return nil, nil, false
 	}
 	return nil, rawPayload, false
@@ -617,10 +618,10 @@ func (h *Handler) applySafetyInputFilter(frame *Frame, upgradeReq *gohttp.Reques
 // applySafetyOutputFilter runs FilterOutput on a text frame payload in the receive direction.
 // If masking occurs, the frame payload is replaced with masked data.
 // The caller is responsible for preserving the raw (unmasked) data for recording.
-func (h *Handler) applySafetyOutputFilter(frame *Frame, flowID string) *safetyMetadata {
+func (h *Handler) applySafetyOutputFilter(frame *Frame, flowID string) {
 	result := h.safetyEngine.FilterOutput(frame.Payload)
 	if !result.Masked {
-		return nil
+		return
 	}
 
 	h.logger.Debug("websocket frame masked by output filter",
@@ -631,7 +632,6 @@ func (h *Handler) applySafetyOutputFilter(frame *Frame, flowID string) *safetyMe
 	// Replace the frame payload with the masked version.
 	// The caller must capture raw payload before calling this if it needs to record raw data.
 	frame.Payload = result.Data
-	return nil // no metadata needed; output filter does not produce block/log metadata
 }
 
 // truncateForLog truncates a string for logging purposes.
@@ -645,7 +645,7 @@ func truncateForLog(s string, maxLen int) string {
 // recordDataMessage records a complete WebSocket data message (text or binary)
 // to the flow store. If safetyMeta is non-nil, safety filter metadata is
 // attached to the recorded message.
-func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) {
+func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, fin bool, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) {
 	if h.store == nil {
 		return
 	}
@@ -654,7 +654,7 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 
 	metadata := map[string]string{
 		"opcode": strconv.Itoa(int(opcode)),
-		"fin":    "true",
+		"fin":    strconv.FormatBool(fin),
 		"masked": strconv.FormatBool(masked),
 	}
 

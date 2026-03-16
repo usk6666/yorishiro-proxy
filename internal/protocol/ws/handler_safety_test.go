@@ -422,8 +422,8 @@ func TestSafetyFilter_NoEngine_PassesThrough(t *testing.T) {
 
 func TestSafetyFilter_FragmentedTextFrame(t *testing.T) {
 	// Safety filter is applied per-frame, so each fragment is checked individually.
-	// This test verifies that a fragmented text message where each fragment
-	// independently contains malicious content is handled correctly.
+	// This test verifies that a fragmented text message passes through when
+	// individual fragments do not match any safety rule.
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
 	handler.SetSafetyEngine(newBlockEngine(t, `DROP\s+TABLE`))
