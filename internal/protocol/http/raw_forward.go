@@ -132,7 +132,7 @@ func readRawResponse(conn net.Conn) (rawResponse []byte, resp *gohttp.Response, 
 	if parseErr != nil {
 		// If parsing fails, read whatever is available as raw bytes.
 		// This can happen with intentionally malformed responses.
-		remaining, _ := io.ReadAll(reader)
+		remaining, _ := io.ReadAll(io.LimitReader(reader, int64(maxRawCaptureSize)))
 		rawResponse = capture.Bytes()
 		if len(remaining) > 0 && len(rawResponse) == 0 {
 			rawResponse = remaining

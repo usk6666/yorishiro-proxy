@@ -79,7 +79,7 @@ func extractRawRequest(capture *captureReader, captureStart int, reader *bufio.R
 // selected (IsRaw == true), the caller must bypass net/http.Transport and
 // write RawBytes directly to the upstream connection.
 type interceptResult struct {
-	// Req is the (possibly modified) request. Nil when raw mode is used.
+	// Req is the (possibly modified) request.
 	Req *gohttp.Request
 	// RecordBody is the body bytes for flow recording.
 	RecordBody []byte
