@@ -245,6 +245,168 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 	}
 }
 
+func TestExecuteMultiProto_TCPReplay_RawBytesOnly(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	addr, cleanup := newRawEchoServer(t)
+	t.Cleanup(cleanup)
+
+	fl := &flow.Flow{
+		ID:        "tcp-rawbytes",
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: addr},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	// Store data in RawBytes only (Body is nil), which is how TCP relay records messages.
+	sendMsg := &flow.Message{
+		ID:        "tcp-rawbytes-send",
+		FlowID:    "tcp-rawbytes",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		RawBytes:  []byte("GET /raw HTTP/1.1\r\nHost: test\r\n\r\n"),
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMultiProtoExecSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "tcp_replay",
+		"params": map[string]any{
+			"flow_id": "tcp-rawbytes",
+		},
+	})
+	if result.IsError {
+		for _, c := range result.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				t.Fatalf("expected success but got error: %s", tc.Text)
+			}
+		}
+		t.Fatalf("expected success but got error: %v", result.Content)
+	}
+
+	wantData := "GET /raw HTTP/1.1\r\nHost: test\r\n\r\n"
+	var out resendReplayRawResult
+	unmarshalExecMultiProtoResult(t, result, &out)
+
+	if out.NewFlowID == "" {
+		t.Error("new_flow_id should not be empty")
+	}
+	if out.MessagesSent != 1 {
+		t.Errorf("messages_sent = %d, want 1", out.MessagesSent)
+	}
+	if out.TotalBytesSent != len(wantData) {
+		t.Errorf("total_bytes_sent = %d, want %d", out.TotalBytesSent, len(wantData))
+	}
+	if out.TotalBytesReceived == 0 {
+		t.Error("total_bytes_received should be > 0")
+	}
+
+	// Verify that the replayed flow records messages using RawBytes.
+	replayMsgs, err := store.GetMessages(ctx, out.NewFlowID, flow.MessageListOptions{})
+	if err != nil {
+		t.Fatalf("GetMessages for replay flow: %v", err)
+	}
+	if len(replayMsgs) < 1 {
+		t.Fatalf("expected at least 1 message in replay flow, got %d", len(replayMsgs))
+	}
+	// The send message should have RawBytes set (not Body).
+	sendReplay := replayMsgs[0]
+	if sendReplay.Direction != "send" {
+		t.Errorf("first replay message direction = %q, want send", sendReplay.Direction)
+	}
+	if len(sendReplay.RawBytes) == 0 {
+		t.Error("replay send message RawBytes should not be empty")
+	}
+	if string(sendReplay.RawBytes) != wantData {
+		t.Errorf("replay send message RawBytes = %q, want %q", sendReplay.RawBytes, wantData)
+	}
+	if len(sendReplay.Body) != 0 {
+		t.Errorf("replay send message Body should be empty for TCP, got %d bytes", len(sendReplay.Body))
+	}
+	// Verify that the receive message also uses RawBytes.
+	if len(replayMsgs) >= 2 {
+		recvReplay := replayMsgs[1]
+		if recvReplay.Direction != "receive" {
+			t.Errorf("second replay message direction = %q, want receive", recvReplay.Direction)
+		}
+		if len(recvReplay.RawBytes) == 0 {
+			t.Error("replay receive message RawBytes should not be empty")
+		}
+		if len(recvReplay.Body) != 0 {
+			t.Errorf("replay receive message Body should be empty for TCP, got %d bytes", len(recvReplay.Body))
+		}
+	}
+}
+
+func TestExecuteMultiProto_TCPReplay_BodyPreferredOverRawBytes(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	addr, cleanup := newRawEchoServer(t)
+	t.Cleanup(cleanup)
+
+	fl := &flow.Flow{
+		ID:        "tcp-both",
+		Protocol:  "TCP",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: addr},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	// When both Body and RawBytes are set, Body should take priority.
+	bodyData := "GET /body HTTP/1.1\r\nHost: body\r\n\r\n"
+	sendMsg := &flow.Message{
+		ID:        "tcp-both-send",
+		FlowID:    "tcp-both",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Body:      []byte(bodyData),
+		RawBytes:  []byte("GET /raw HTTP/1.1\r\nHost: raw\r\n\r\n"),
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMultiProtoExecSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "tcp_replay",
+		"params": map[string]any{
+			"flow_id": "tcp-both",
+		},
+	})
+	if result.IsError {
+		for _, c := range result.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				t.Fatalf("expected success but got error: %s", tc.Text)
+			}
+		}
+		t.Fatalf("expected success but got error: %v", result.Content)
+	}
+
+	var out resendReplayRawResult
+	unmarshalExecMultiProtoResult(t, result, &out)
+
+	if out.TotalBytesSent != len(bodyData) {
+		t.Errorf("total_bytes_sent = %d, want %d (Body should be preferred)", out.TotalBytesSent, len(bodyData))
+	}
+}
+
 func TestExecuteMultiProto_TCPReplay_NilStore(t *testing.T) {
 	cs := setupMultiProtoExecSession(t, nil)
 
