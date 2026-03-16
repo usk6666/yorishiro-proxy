@@ -209,7 +209,7 @@ func (h *Handler) HandleH2(ctx context.Context, tlsConn *tls.Conn, connectAuthor
 // stream to the upstream server and recording sessions.
 //
 // It uses the custom frame engine (clientConn) to handle HTTP/2 frames
-// directly, using the custom frame engine.
+// directly.
 func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthority string, tlsMeta tlsMetadata) error {
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
@@ -420,7 +420,7 @@ func (h *Handler) resolveSchemeAndHost(sc *streamContext) {
 	if sc.req.URL.Host == "" {
 		sc.req.URL.Host = host
 	}
-	if sc.req.URL.Scheme == "" {
+	if sc.req.URL.Scheme == "" || sc.connectAuthority != "" {
 		sc.req.URL.Scheme = scheme
 	}
 	sc.reqURL = cloneURL(sc.req.URL)

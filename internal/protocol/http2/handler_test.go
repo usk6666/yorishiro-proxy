@@ -208,10 +208,14 @@ func newH2CClientForAddr(addr string) *gohttp.Client {
 	}
 	return &gohttp.Client{
 		Transport: &gohttp.Transport{
-			Protocols: protos,
+			Protocols:   protos,
 			DialContext: dial,
-			// DialTLSContext returns a plain TCP conn so https:// URLs
-			// are sent over the cleartext h2c connection to the proxy.
+			// DialTLSContext intentionally returns a plain TCP connection.
+			// This is a test-only workaround: some tests send https:// URLs
+			// through the h2c proxy to verify that the proxy correctly records
+			// the scheme as "https" when connectAuthority is set. The standard
+			// net/http.Transport would refuse to send https:// over a non-TLS
+			// connection, so we override DialTLSContext to bypass that check.
 			DialTLSContext: func(ctx context.Context, network, a string) (net.Conn, error) {
 				return dial(ctx, network, a)
 			},
