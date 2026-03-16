@@ -440,9 +440,12 @@ func TestIsGRPCTrailerKey(t *testing.T) {
 }
 
 // TestHandleGRPCStream_TrailersOnly verifies that a gRPC Trailers-Only
-// response (single HEADERS frame with END_STREAM containing grpc-status)
-// is correctly proxied. This is the scenario where Go's http2.Transport
-// places grpc-status into resp.Header instead of resp.Trailer.
+// response is correctly proxied. In a Trailers-Only response, the upstream
+// returns grpc-status as a regular header with no body. This produces the
+// same resp.Header/resp.Trailer state as a real HTTP/2 Trailers-Only frame
+// (where Go's http2.Transport merges all fields into resp.Header and leaves
+// resp.Trailer empty), so an HTTP/1.1 upstream is sufficient to exercise
+// the proxy's isGRPCTrailersOnly detection and fallback trailer extraction.
 func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -468,8 +471,9 @@ func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Upstream sends a Trailers-Only response: gRPC status in headers
-			// with no body. Go's http2.Transport will merge these into resp.Header.
+			// Upstream sets grpc-status as a regular header with no body.
+			// This simulates the Trailers-Only state: resp.Header contains
+			// grpc-status and resp.Trailer is empty.
 			upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 				io.Copy(io.Discard, r.Body)
 				w.Header().Set("Content-Type", "application/grpc")
@@ -534,7 +538,8 @@ func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
 
 // TestHandleGRPCStream_NormalTrailers verifies that a normal gRPC response
 // (with body and proper trailers) still works correctly after the
-// Trailers-Only fix.
+// Trailers-Only fix. This is a regression test ensuring the fallback path
+// does not interfere with responses that have resp.Trailer populated.
 func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 	respPayload := []byte("normal-response")
 
@@ -544,8 +549,10 @@ func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 		w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write(protogrpc.EncodeFrame(false, respPayload))
-		w.Header().Set("Grpc-Status", "0")
-		w.Header().Set("Grpc-Message", "")
+		// Use TrailerPrefix to set trailer values after the body, following
+		// Go's net/http convention (see trailer_test.go for the same pattern).
+		w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "0")
+		w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", "OK")
 	}))
 	defer upstream.Close()
 
@@ -571,6 +578,7 @@ func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
+	// Must read body fully before trailers are available.
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read response body: %v", err)
@@ -590,5 +598,22 @@ func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 	}
 	if string(frames[0].Payload) != string(respPayload) {
 		t.Errorf("response payload = %q, want %q", frames[0].Payload, respPayload)
+	}
+
+	// Verify trailers are delivered to the client (the main regression check).
+	grpcStatus := resp.Trailer.Get("Grpc-Status")
+	if grpcStatus == "" {
+		grpcStatus = resp.Header.Get(gohttp.TrailerPrefix + "Grpc-Status")
+	}
+	if grpcStatus != "0" {
+		t.Errorf("Grpc-Status trailer = %q, want %q (trailer=%v)", grpcStatus, "0", resp.Trailer)
+	}
+
+	grpcMsg := resp.Trailer.Get("Grpc-Message")
+	if grpcMsg == "" {
+		grpcMsg = resp.Header.Get(gohttp.TrailerPrefix + "Grpc-Message")
+	}
+	if grpcMsg != "OK" {
+		t.Errorf("Grpc-Message trailer = %q, want %q", grpcMsg, "OK")
 	}
 }
