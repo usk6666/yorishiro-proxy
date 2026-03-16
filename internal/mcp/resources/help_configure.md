@@ -111,6 +111,10 @@ Each intercept rule has:
   - **path_pattern** (string): Regex for URL path matching.
   - **methods** (array of strings): HTTP method whitelist.
   - **header_match** (object): Header name to regex mapping (AND logic).
+  - **upgrade_url_pattern** (string): Regex for WebSocket upgrade URL matching (WebSocket rules only).
+  - **flow_id** (string): WebSocket flow ID to intercept (WebSocket rules only).
+
+Note: WebSocket conditions (`upgrade_url_pattern`, `flow_id`) are exclusive to WebSocket intercept rules and must not be combined with HTTP conditions (`host_pattern`, `path_pattern`, `methods`, `header_match`).
 
 ## Usage Examples
 
@@ -207,6 +211,32 @@ Each intercept rule has:
 {
   "intercept_rules": {
     "remove": ["admin-api"]
+  }
+}
+```
+
+### Add WebSocket intercept rules (merge)
+```json
+{
+  "intercept_rules": {
+    "add": [
+      {
+        "id": "ws-chat",
+        "enabled": true,
+        "direction": "both",
+        "conditions": {
+          "upgrade_url_pattern": "/ws/chat.*"
+        }
+      },
+      {
+        "id": "ws-specific-flow",
+        "enabled": true,
+        "direction": "both",
+        "conditions": {
+          "flow_id": "abc-123-def"
+        }
+      }
+    ]
   }
 }
 ```

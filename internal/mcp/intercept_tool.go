@@ -64,13 +64,14 @@ var availableInterceptActions = []string{"release", "modify_and_forward", "drop"
 func (s *Server) registerIntercept() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "intercept",
-		Description: "Act on intercepted requests or responses in the intercept queue. " +
-			"Items have a 'phase' field: 'request' (pre-send) or 'response' (post-receive). " +
+		Description: "Act on intercepted requests, responses, or WebSocket frames in the intercept queue. " +
+			"Items have a 'phase' field: 'request' (pre-send), 'response' (post-receive), or 'websocket_frame' (WebSocket frame). " +
 			"Available actions: " +
 			"'release' forwards the intercepted item as-is (requires intercept_id); " +
 			"'modify_and_forward' forwards with mutations — use request params (override_method, override_url, override_headers, add_headers, remove_headers, override_body) for request phase, " +
-			"response params (override_status, override_response_headers, add_response_headers, remove_response_headers, override_response_body) for response phase (requires intercept_id); " +
-			"'drop' discards the item returning 502 to the client (requires intercept_id). " +
+			"response params (override_status, override_response_headers, add_response_headers, remove_response_headers, override_response_body) for response phase, " +
+			"override_body for websocket_frame phase to modify the payload (requires intercept_id); " +
+			"'drop' discards the item returning 502 to the client or dropping the WebSocket frame (requires intercept_id). " +
 			"Mode: 'mode' selects forwarding mode — 'structured' (default, L7 modifications) or 'raw' (bypass L7, send raw_override_base64 directly). " +
 			"Raw mode requires raw_override_base64 for modify_and_forward; release with raw mode forwards original raw bytes as-is.",
 	}, s.handleInterceptTool)
@@ -84,19 +85,21 @@ type executeInterceptResult struct {
 	Action      string `json:"action"`
 	Status      string `json:"status"`
 
-	// Phase indicates whether this was a "request" or "response" intercept.
+	// Phase indicates whether this was a "request", "response", or "websocket_frame" intercept.
 	Phase string `json:"phase"`
-	// Method is the HTTP method.
-	Method string `json:"method"`
-	// URL is the request URL.
+	// Protocol is the protocol type: "http" or "websocket".
+	Protocol string `json:"protocol"`
+	// Method is the HTTP method (HTTP only).
+	Method string `json:"method,omitempty"`
+	// URL is the request URL (HTTP only).
 	URL string `json:"url,omitempty"`
 	// StatusCode is the HTTP status code (only set for response phase).
 	StatusCode int `json:"status_code,omitempty"`
-	// Headers are the request/response headers (output-filtered).
-	Headers map[string][]string `json:"headers"`
-	// BodyEncoding indicates the encoding of the body ("text" or "base64").
+	// Headers are the request/response headers (output-filtered, HTTP only).
+	Headers map[string][]string `json:"headers,omitempty"`
+	// BodyEncoding indicates the encoding of the body/payload ("text" or "base64").
 	BodyEncoding string `json:"body_encoding"`
-	// Body is the request/response body (output-filtered, as text or Base64).
+	// Body is the request/response body or WebSocket payload (output-filtered, as text or Base64).
 	Body string `json:"body"`
 
 	// RawBytesAvailable indicates whether raw bytes are available for this item.
@@ -108,6 +111,19 @@ type executeInterceptResult struct {
 	// RawBytes is the raw captured bytes (output-filtered, as text or Base64).
 	// Only populated when raw bytes are available.
 	RawBytes string `json:"raw_bytes,omitempty"`
+
+	// --- WebSocket frame metadata (phase=websocket_frame only) ---
+
+	// Opcode is the WebSocket frame opcode name (e.g. "Text", "Binary").
+	Opcode string `json:"opcode,omitempty"`
+	// Direction is the frame direction: "client_to_server" or "server_to_client".
+	Direction string `json:"direction,omitempty"`
+	// FlowID is the WebSocket flow ID this frame belongs to.
+	FlowID string `json:"flow_id,omitempty"`
+	// UpgradeURL is the URL from the original WebSocket upgrade request.
+	UpgradeURL string `json:"upgrade_url,omitempty"`
+	// Sequence is the frame sequence number within the WebSocket connection.
+	Sequence int64 `json:"sequence,omitempty"`
 }
 
 // handleInterceptTool routes the intercept tool invocation to the appropriate action handler.
@@ -133,29 +149,36 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 	filteredBody := s.filterOutputBody(item.Body)
 	bodyStr, bodyEncoding := encodeBody(filteredBody)
 
-	// Apply output filter to headers.
-	filteredHeaders := s.filterOutputHeaders(item.Headers)
-	headers := make(map[string][]string)
-	for k, vs := range filteredHeaders {
-		headers[k] = vs
-	}
-
-	var urlStr string
-	if item.URL != nil {
-		urlStr = item.URL.String()
-	}
-
 	result := &executeInterceptResult{
 		InterceptID:  item.ID,
 		Action:       action,
 		Status:       status,
 		Phase:        string(item.Phase),
-		Method:       item.Method,
-		URL:          urlStr,
-		StatusCode:   item.StatusCode,
-		Headers:      headers,
 		BodyEncoding: bodyEncoding,
 		Body:         bodyStr,
+	}
+
+	if item.Phase == intercept.PhaseWebSocketFrame {
+		result.Protocol = "websocket"
+		result.Opcode = wsOpcodeNameFromInt(item.WSOpcode)
+		result.Direction = item.WSDirection
+		result.FlowID = item.WSFlowID
+		result.UpgradeURL = item.WSUpgradeURL
+		result.Sequence = item.WSSequence
+	} else {
+		result.Protocol = "http"
+		result.Method = item.Method
+		result.StatusCode = item.StatusCode
+		if item.URL != nil {
+			result.URL = item.URL.String()
+		}
+		// Apply output filter to headers.
+		filteredHeaders := s.filterOutputHeaders(item.Headers)
+		headers := make(map[string][]string)
+		for k, vs := range filteredHeaders {
+			headers[k] = vs
+		}
+		result.Headers = headers
 	}
 
 	// Include raw bytes if available.

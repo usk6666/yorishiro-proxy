@@ -114,23 +114,13 @@ func buildTCPSummary(msgs []*flow.Message) map[string]string {
 }
 
 // wsOpcodeLabel returns a human-readable label for a WebSocket opcode string.
+// It delegates to wsOpcodeNameFromInt to avoid duplicate opcode mappings.
 func wsOpcodeLabel(opcode string) string {
-	switch opcode {
-	case "1":
-		return "Text"
-	case "2":
-		return "Binary"
-	case "8":
-		return "Close"
-	case "9":
-		return "Ping"
-	case "10":
-		return "Pong"
-	case "0":
-		return "Continuation"
-	default:
+	n, err := strconv.Atoi(opcode)
+	if err != nil {
 		return fmt.Sprintf("Unknown(%s)", opcode)
 	}
+	return wsOpcodeNameFromInt(n)
 }
 
 // grpcStatusLabels maps gRPC status code strings to their human-readable labels.
@@ -157,4 +147,24 @@ var grpcStatusLabels = map[string]string{
 // grpcStatusLabel returns a human-readable label for a gRPC status code string.
 func grpcStatusLabel(status string) string {
 	return grpcStatusLabels[status]
+}
+
+// wsOpcodeNameFromInt returns a human-readable label for a WebSocket opcode integer.
+func wsOpcodeNameFromInt(opcode int) string {
+	switch opcode {
+	case 0:
+		return "Continuation"
+	case 1:
+		return "Text"
+	case 2:
+		return "Binary"
+	case 8:
+		return "Close"
+	case 9:
+		return "Ping"
+	case 10:
+		return "Pong"
+	default:
+		return fmt.Sprintf("Unknown(%d)", opcode)
+	}
 }
