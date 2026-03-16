@@ -337,6 +337,8 @@ func (h *Handler) handleStream(
 		return
 	}
 
+	h.applyRequestTransform(sc, outReq)
+
 	outReq = h.runServerPluginHook(sc, outReq)
 
 	isGRPC := h.grpcHandler != nil && isGRPCContentType(sc.req.Header.Get("Content-Type"))
@@ -350,6 +352,8 @@ func (h *Handler) handleStream(
 	if !ok {
 		return
 	}
+
+	fwd.resp.Header, fwd.respBody = h.applyResponseTransform(fwd.resp, fwd.respBody)
 
 	respSnap := snapshotResponse(fwd.resp.StatusCode, fwd.resp.Header, fwd.respBody)
 
@@ -635,6 +639,35 @@ func (h *Handler) applyRequestInterceptMods(sc *streamContext, outReq *gohttp.Re
 	}
 	sc.srp.req = outReq
 	return outReq, true
+}
+
+// applyRequestTransform applies auto-transform rules to the outbound request
+// headers and body. If no transform pipeline is configured, this is a no-op.
+// The method mirrors the HTTP/1.x applyTransform pattern: it modifies the
+// outbound request's headers, body, and content length in place, and updates
+// the streamContext's reqBody and srp for recording.
+func (h *Handler) applyRequestTransform(sc *streamContext, outReq *gohttp.Request) {
+	if h.transformPipeline == nil {
+		return
+	}
+	// Use sc.srp.reqBody as input (reflects intercept overrides).
+	outReq.Header, sc.reqBody = h.transformPipeline.TransformRequest(outReq.Method, outReq.URL, outReq.Header, sc.srp.reqBody)
+	outReq.Body = io.NopCloser(bytes.NewReader(sc.reqBody))
+	outReq.ContentLength = int64(len(sc.reqBody))
+	sc.srp.reqBody = sc.reqBody
+	sc.srp.req = outReq // Ensure recording reflects transform changes.
+}
+
+// applyResponseTransform applies auto-transform rules to the upstream response
+// headers and body. If no transform pipeline is configured, the original
+// headers and body are returned unchanged. This mirrors the HTTP/1.x
+// readResponseBody pattern where response transforms are applied immediately
+// after reading the response body.
+func (h *Handler) applyResponseTransform(resp *gohttp.Response, body []byte) (gohttp.Header, []byte) {
+	if h.transformPipeline == nil {
+		return resp.Header, body
+	}
+	return h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, body)
 }
 
 // runServerPluginHook dispatches the on_before_send_to_server hook.
