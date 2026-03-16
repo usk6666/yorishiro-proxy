@@ -183,18 +183,35 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	// Merge config file defaults for fields not explicitly provided by the caller.
 	s.applyProxyDefaults(&input)
 
-	if err := s.applyProxyStartSettings(&input); err != nil {
-		return nil, nil, err
-	}
-
 	// Resolve listener name (default: "default").
 	listenerName := input.Name
 	if listenerName == "" {
 		listenerName = proxy.DefaultListenerName
 	}
 
+	// Validate the listen address before attempting to start.
+	if input.ListenAddr != "" {
+		if err := validateLoopbackAddr(input.ListenAddr); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Start the listener BEFORE resetting/applying settings.
+	// This ensures a failed start (already running, bind error) does not
+	// clear the active configuration (USK-407).
 	if err := s.deps.manager.StartNamed(s.deps.appCtx, listenerName, input.ListenAddr); err != nil {
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
+	}
+
+	// Reset all settings to defaults, then apply the new configuration.
+	// This is done after StartNamed succeeds to be atomic with listener start.
+	// If settings application fails, stop the listener to avoid leaving a
+	// running proxy with invalid/default-only configuration.
+	s.resetSettingsToDefaults()
+
+	if err := s.applyProxyStartSettings(&input); err != nil {
+		s.deps.manager.StopNamed(ctx, listenerName)
+		return nil, nil, err
 	}
 
 	if err := s.startTCPForwards(ctx, listenerName, input.TCPForwards); err != nil {
@@ -214,8 +231,8 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 }
 
 // resetSettingsToDefaults resets all proxy configuration to default values.
-// This is called at the beginning of proxy_start to ensure a clean state,
-// preventing settings from a previous session from leaking into the new one.
+// This is called in handleProxyStart after StartNamed succeeds, ensuring a
+// clean state without risk of clearing active configuration on start failure.
 func (s *Server) resetSettingsToDefaults() {
 	// Reset capture scope to empty (capture all).
 	if s.deps.scope != nil {
@@ -276,11 +293,11 @@ func (s *Server) resetSettingsToDefaults() {
 // scope, TLS passthrough, intercept rules, auto-transform, TCP forwards,
 // protocols, SOCKS5 auth, and connection limits/timeouts.
 //
-// Before applying the new settings, all configuration is reset to defaults to
-// ensure proxy_start always produces a clean state regardless of prior sessions.
+// NOTE: resetSettingsToDefaults() is intentionally NOT called here. The caller
+// (handleProxyStart) is responsible for calling it after StartNamed() succeeds,
+// so that a failed start (e.g. already running, bind error) does not clear the
+// active configuration.
 func (s *Server) applyProxyStartSettings(input *proxyStartInput) error {
-	s.resetSettingsToDefaults()
-
 	if err := s.applyProxyStartPipeline(input); err != nil {
 		return err
 	}
