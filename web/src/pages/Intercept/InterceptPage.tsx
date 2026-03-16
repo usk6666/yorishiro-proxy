@@ -240,13 +240,13 @@ export function InterceptPage() {
               {hasRawBytes && (
                 <div className="intercept-view-mode-selector">
                   <button
-                    className={`intercept-view-mode-btn ${detailViewMode === "structured" ? "intercept-view-mode-btn--active" : ""}`}
+                    className={`intercept-mode-btn ${detailViewMode === "structured" ? "intercept-mode-btn--active" : ""}`}
                     onClick={() => setDetailViewMode("structured")}
                   >
                     Structured
                   </button>
                   <button
-                    className={`intercept-view-mode-btn ${detailViewMode === "raw" ? "intercept-view-mode-btn--active" : ""}`}
+                    className={`intercept-mode-btn ${detailViewMode === "raw" ? "intercept-mode-btn--active" : ""}`}
                     onClick={() => setDetailViewMode("raw")}
                   >
                     Raw

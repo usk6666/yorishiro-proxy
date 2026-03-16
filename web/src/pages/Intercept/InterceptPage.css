@@ -333,7 +333,8 @@
   margin-right: var(--space-sm);
 }
 
-.intercept-view-mode-btn {
+/* Shared mode toggle button (used by view-mode and raw-mode selectors) */
+.intercept-mode-btn {
   padding: var(--space-xs) var(--space-sm);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -345,16 +346,16 @@
   transition: color var(--transition-fast), background-color var(--transition-fast);
 }
 
-.intercept-view-mode-btn:last-child {
+.intercept-mode-btn:last-child {
   border-right: none;
 }
 
-.intercept-view-mode-btn:hover {
+.intercept-mode-btn:hover {
   color: var(--text-primary);
   background-color: var(--bg-secondary);
 }
 
-.intercept-view-mode-btn--active {
+.intercept-mode-btn--active {
   color: var(--text-primary);
   background-color: var(--bg-tertiary);
 }
@@ -368,32 +369,6 @@
   overflow: hidden;
   margin-bottom: var(--space-sm);
   width: fit-content;
-}
-
-.intercept-raw-mode-btn {
-  padding: var(--space-xs) var(--space-sm);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
-  color: var(--text-secondary);
-  background: var(--bg-primary);
-  border: none;
-  border-right: 1px solid var(--border-default);
-  cursor: pointer;
-  transition: color var(--transition-fast), background-color var(--transition-fast);
-}
-
-.intercept-raw-mode-btn:last-child {
-  border-right: none;
-}
-
-.intercept-raw-mode-btn:hover {
-  color: var(--text-primary);
-  background-color: var(--bg-secondary);
-}
-
-.intercept-raw-mode-btn--active {
-  color: var(--text-primary);
-  background-color: var(--bg-tertiary);
 }
 
 /* Raw bytes size hint */

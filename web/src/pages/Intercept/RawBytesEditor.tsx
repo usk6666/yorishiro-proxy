@@ -6,9 +6,23 @@
  * - Text: plain text editing of the raw bytes
  *
  * Input/output is Base64-encoded raw bytes.
+ *
+ * Editing uses a "draft" pattern: the textarea value is local state that is
+ * only synchronised back to the parent on blur. This avoids cursor-jump and
+ * mid-edit reformatting issues that occur with fully-controlled hex input.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import {
+  type RawViewMode,
+  bytesToText,
+  decodeBase64,
+  encodeBase64,
+  formatHexDump,
+  HEX_DUMP_EDITOR_MAX,
+  HEX_DUMP_EDITOR_WARN,
+} from "../../lib/rawBytes";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -23,62 +37,9 @@ interface RawBytesEditorProps {
   size?: number;
 }
 
-type RawViewMode = "hex" | "text";
-
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers (editor-only)
 // ---------------------------------------------------------------------------
-
-/** Decode Base64 to Uint8Array. */
-function decodeBase64(b64: string): Uint8Array {
-  try {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-  } catch {
-    return new Uint8Array(0);
-  }
-}
-
-/** Encode Uint8Array to Base64. */
-function encodeBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-/** Format bytes as hex dump string. */
-function formatHexDump(bytes: Uint8Array): string {
-  const lines: string[] = [];
-
-  for (let offset = 0; offset < bytes.length; offset += 16) {
-    const hexParts: string[] = [];
-    const asciiParts: string[] = [];
-
-    for (let i = 0; i < 16; i++) {
-      if (offset + i < bytes.length) {
-        const byte = bytes[offset + i];
-        hexParts.push(byte.toString(16).padStart(2, "0"));
-        asciiParts.push(byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : ".");
-      } else {
-        hexParts.push("  ");
-        asciiParts.push(" ");
-      }
-    }
-
-    const offsetStr = offset.toString(16).padStart(8, "0");
-    const hex = hexParts.slice(0, 8).join(" ") + "  " + hexParts.slice(8).join(" ");
-    const ascii = asciiParts.join("");
-    lines.push(`${offsetStr}  ${hex}  |${ascii}|`);
-  }
-
-  return lines.join("\n");
-}
 
 /** Parse hex dump back to bytes. Extracts hex values from the middle column. */
 function parseHexDump(text: string): Uint8Array | null {
@@ -107,11 +68,6 @@ function parseHexDump(text: string): Uint8Array | null {
   return new Uint8Array(byteValues);
 }
 
-/** Decode bytes to text (UTF-8 with replacement for invalid chars). */
-function bytesToText(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-}
-
 /** Encode text to bytes (UTF-8). */
 function textToBytes(text: string): Uint8Array {
   return new TextEncoder().encode(text);
@@ -125,31 +81,76 @@ export function RawBytesEditor({ rawBytes, onChange, size }: RawBytesEditorProps
   const [viewMode, setViewMode] = useState<RawViewMode>("hex");
   const [parseError, setParseError] = useState<string | null>(null);
 
+  // Draft state -- local textarea values that are NOT re-derived on every keystroke.
+  const [draftHex, setDraftHex] = useState("");
+  const [draftText, setDraftText] = useState("");
+
+  // Track the last rawBytes value we synchronised FROM so we can detect
+  // external changes (e.g. switching to a different intercept item).
+  const lastSyncedRef = useRef(rawBytes);
+
   const bytes = useMemo(() => decodeBase64(rawBytes), [rawBytes]);
-  const hexDump = useMemo(() => formatHexDump(bytes), [bytes]);
-  const textContent = useMemo(() => bytesToText(bytes), [bytes]);
 
-  const handleHexChange = useCallback(
-    (value: string) => {
-      const parsed = parseHexDump(value);
-      if (parsed) {
-        setParseError(null);
-        onChange(encodeBase64(parsed));
-      } else {
-        setParseError("Invalid hex dump format");
-      }
-    },
-    [onChange],
-  );
+  // Derive whether hex mode should be limited / disabled based on byte length.
+  const hexDisabled = bytes.length > HEX_DUMP_EDITOR_MAX;
+  const hexWarning =
+    bytes.length > HEX_DUMP_EDITOR_WARN && bytes.length <= HEX_DUMP_EDITOR_MAX;
 
-  const handleTextChange = useCallback(
-    (value: string) => {
+  // Synchronise drafts when rawBytes changes externally.
+  useEffect(() => {
+    if (rawBytes !== lastSyncedRef.current) {
+      lastSyncedRef.current = rawBytes;
+      const newBytes = decodeBase64(rawBytes);
+      setDraftHex(formatHexDump(newBytes));
+      setDraftText(bytesToText(newBytes));
       setParseError(null);
-      const newBytes = textToBytes(value);
-      onChange(encodeBase64(newBytes));
-    },
-    [onChange],
-  );
+    }
+  }, [rawBytes]);
+
+  // Initial population of drafts on mount.
+  useEffect(() => {
+    const initBytes = decodeBase64(rawBytes);
+    setDraftHex(formatHexDump(initBytes));
+    setDraftText(bytesToText(initBytes));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Hex mode handlers ---
+
+  const handleHexInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setDraftHex(e.target.value);
+  }, []);
+
+  const handleHexBlur = useCallback(() => {
+    const parsed = parseHexDump(draftHex);
+    if (parsed) {
+      setParseError(null);
+      const newBase64 = encodeBase64(parsed);
+      lastSyncedRef.current = newBase64;
+      onChange(newBase64);
+      // Re-format the draft to a clean hex dump so it looks tidy after blur.
+      setDraftHex(formatHexDump(parsed));
+      setDraftText(bytesToText(parsed));
+    } else {
+      setParseError("Invalid hex dump format");
+    }
+  }, [draftHex, onChange]);
+
+  // --- Text mode handlers ---
+
+  const handleTextInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setDraftText(e.target.value);
+  }, []);
+
+  const handleTextBlur = useCallback(() => {
+    setParseError(null);
+    const newBytes = textToBytes(draftText);
+    const newBase64 = encodeBase64(newBytes);
+    lastSyncedRef.current = newBase64;
+    onChange(newBase64);
+    // Keep hex draft in sync so switching modes shows the latest data.
+    setDraftHex(formatHexDump(newBytes));
+  }, [draftText, onChange]);
 
   return (
     <div className="intercept-section">
@@ -163,13 +164,13 @@ export function RawBytesEditor({ rawBytes, onChange, size }: RawBytesEditorProps
       {/* Sub-mode selector */}
       <div className="intercept-raw-mode-selector">
         <button
-          className={`intercept-raw-mode-btn ${viewMode === "hex" ? "intercept-raw-mode-btn--active" : ""}`}
+          className={`intercept-mode-btn ${viewMode === "hex" ? "intercept-mode-btn--active" : ""}`}
           onClick={() => setViewMode("hex")}
         >
           Hex
         </button>
         <button
-          className={`intercept-raw-mode-btn ${viewMode === "text" ? "intercept-raw-mode-btn--active" : ""}`}
+          className={`intercept-mode-btn ${viewMode === "text" ? "intercept-mode-btn--active" : ""}`}
           onClick={() => setViewMode("text")}
         >
           Text
@@ -180,19 +181,32 @@ export function RawBytesEditor({ rawBytes, onChange, size }: RawBytesEditorProps
         <div className="intercept-raw-error">{parseError}</div>
       )}
 
-      {viewMode === "hex" ? (
+      {hexWarning && viewMode === "hex" && (
+        <div className="intercept-raw-error">
+          Large payload ({Math.round(bytes.length / 1024)} KB). Hex editing may be slow.
+        </div>
+      )}
+
+      {hexDisabled && viewMode === "hex" ? (
+        <div className="intercept-raw-error">
+          Payload too large for hex editing ({Math.round(bytes.length / 1024)} KB &gt; {Math.round(HEX_DUMP_EDITOR_MAX / 1024)} KB).
+          Please use Text mode instead.
+        </div>
+      ) : viewMode === "hex" ? (
         <textarea
           className="intercept-body-editor intercept-raw-hex-editor"
-          value={hexDump}
-          onChange={(e) => handleHexChange(e.target.value)}
+          value={draftHex}
+          onChange={handleHexInput}
+          onBlur={handleHexBlur}
           spellCheck={false}
           placeholder="No raw bytes available"
         />
       ) : (
         <textarea
           className="intercept-body-editor"
-          value={textContent}
-          onChange={(e) => handleTextChange(e.target.value)}
+          value={draftText}
+          onChange={handleTextInput}
+          onBlur={handleTextBlur}
           spellCheck={false}
           placeholder="No raw bytes available"
         />
