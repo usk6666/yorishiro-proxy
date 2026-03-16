@@ -2,6 +2,7 @@ package http
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -687,20 +689,42 @@ func TestRawForward_VariantRecording(t *testing.T) {
 		t.Fatal("expected at least one message to be recorded")
 	}
 
-	// Check that we have send and receive messages.
-	var hasSend, hasReceive bool
+	// Collect send and receive messages separately.
+	var sendMsgs, recvMsgs []*flow.Message
 	for _, msg := range store.messages {
 		switch msg.Direction {
 		case "send":
-			hasSend = true
+			sendMsgs = append(sendMsgs, msg)
 		case "receive":
-			hasReceive = true
+			recvMsgs = append(recvMsgs, msg)
 		}
 	}
-	if !hasSend {
-		t.Error("expected send message to be recorded")
+
+	// Verify exactly 2 send messages (original + modified variants).
+	if len(sendMsgs) != 2 {
+		t.Fatalf("expected 2 send messages (original + modified), got %d", len(sendMsgs))
 	}
-	if !hasReceive {
-		t.Error("expected receive message to be recorded")
+	if len(recvMsgs) == 0 {
+		t.Fatal("expected at least one receive message")
+	}
+
+	// Verify variant metadata on send messages.
+	orig := sendMsgs[0]
+	mod := sendMsgs[1]
+
+	if got := orig.Metadata["variant"]; got != "original" {
+		t.Errorf("first send message variant = %q, want %q", got, "original")
+	}
+	if got := mod.Metadata["variant"]; got != "modified" {
+		t.Errorf("second send message variant = %q, want %q", got, "modified")
+	}
+
+	// Verify RawBytes: original should have the original raw bytes,
+	// modified should have the modified raw bytes.
+	if !bytes.Equal(orig.RawBytes, []byte(originalRaw)) {
+		t.Errorf("original send RawBytes = %q, want %q", orig.RawBytes, originalRaw)
+	}
+	if !bytes.Equal(mod.RawBytes, []byte(modifiedRaw)) {
+		t.Errorf("modified send RawBytes = %q, want %q", mod.RawBytes, modifiedRaw)
 	}
 }

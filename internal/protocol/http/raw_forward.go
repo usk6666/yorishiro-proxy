@@ -212,10 +212,12 @@ func (h *Handler) handleRawForward(ctx context.Context, conn net.Conn, req *goht
 // original and modified raw bytes as variant messages.
 func (h *Handler) recordRawSend(ctx context.Context, sp sendRecordParams, iResult interceptResult, snap *requestSnapshot, logger *slog.Logger) *sendRecordResult {
 	if iResult.OriginalRawBytes != nil {
-		// modify_and_forward+raw: record with the modified raw bytes.
-		// The variant recording will produce original (snap) and modified
-		// variants. Override rawRequest in sp with the modified raw bytes
-		// so the modified send message reflects what was actually sent.
+		// modify_and_forward+raw: force variant recording because the
+		// modification happened at the raw bytes level, not the parsed
+		// HTTP level. requestModified() compares parsed headers/body which
+		// are unchanged, so we must signal the variant explicitly.
+		sp.rawVariant = true
+		sp.originalRawBytes = iResult.OriginalRawBytes
 		sp.rawRequest = iResult.RawBytes
 		return h.recordSendWithVariant(ctx, sp, snap, logger)
 	}
