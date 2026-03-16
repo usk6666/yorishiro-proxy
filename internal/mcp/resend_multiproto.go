@@ -325,6 +325,9 @@ func resolveWebSocketOpcode(msg *flow.Message) byte {
 	if err != nil {
 		return ws.OpcodeText
 	}
+	if v < 0 || v > 255 {
+		return ws.OpcodeText
+	}
 	return byte(v)
 }
 
@@ -365,7 +368,7 @@ func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr strin
 	}
 
 	// Step 1: Perform HTTP Upgrade handshake.
-	upgradeResp, bufReader, err := performUpgradeHandshake(conn, upgradeMsg)
+	upgradeResp, bufReader, err := performUpgradeHandshake(conn, upgradeMsg, targetAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +379,8 @@ func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr strin
 	}
 
 	// Step 3: Read the first response frame from the server.
-	respPayload, respOpcode, err := readWebSocketResponseFrame(bufReader)
+	// Pass conn as writer so Pong replies can be sent for Ping frames (RFC 6455).
+	respPayload, respOpcode, err := readWebSocketResponseFrame(bufReader, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -395,8 +399,9 @@ func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr strin
 
 // performUpgradeHandshake sends an HTTP Upgrade request and reads the 101 response.
 // It returns the response and a buffered reader wrapping the connection for
-// subsequent WebSocket frame reads.
-func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message) (*gohttp.Response, *bufio.Reader, error) {
+// subsequent WebSocket frame reads. When targetAddr differs from the original URL host,
+// the Host header and httpReq.Host are updated to match the target.
+func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr string) (*gohttp.Response, *bufio.Reader, error) {
 	reqURL := upgradeMsg.URL
 	if reqURL == nil {
 		return nil, nil, fmt.Errorf("upgrade request message has no URL")
@@ -420,6 +425,13 @@ func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message) (*gohttp.R
 				httpReq.Header.Add(k, v)
 			}
 		}
+	}
+
+	// When target_addr differs from the original URL host, update
+	// Host header and httpReq.Host so virtual-hosting servers accept the request.
+	if targetAddr != "" && targetAddr != reqURL.Host {
+		httpReq.Host = targetAddr
+		httpReq.Header.Set("Host", targetAddr)
 	}
 
 	// Ensure required WebSocket headers are present.
@@ -472,9 +484,16 @@ func generateWebSocketKey() string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
+// maxWebSocketResendPayload is the maximum payload size for WebSocket resend frames.
+// Matches the read-side limit (maxFramePayloadSize = 16MB) to prevent OOM during masking.
+const maxWebSocketResendPayload = 16 << 20 // 16MB
+
 // sendWebSocketFrame sends a single WebSocket frame with the given payload and opcode.
 // Client-to-server frames must be masked per RFC 6455 Section 5.3.
 func sendWebSocketFrame(w io.Writer, payload []byte, opcode byte) error {
+	if len(payload) > maxWebSocketResendPayload {
+		return fmt.Errorf("WebSocket resend payload too large: %d bytes exceeds limit of %d bytes", len(payload), maxWebSocketResendPayload)
+	}
 	var maskKey [4]byte
 	if _, err := rand.Read(maskKey[:]); err != nil {
 		return fmt.Errorf("generate mask key: %w", err)
@@ -494,8 +513,9 @@ func sendWebSocketFrame(w io.Writer, payload []byte, opcode byte) error {
 }
 
 // readWebSocketResponseFrame reads the first data frame from the server,
-// skipping control frames (Ping/Pong). Returns the payload and opcode.
-func readWebSocketResponseFrame(r io.Reader) ([]byte, byte, error) {
+// handling control frames per RFC 6455. Ping frames receive an automatic Pong reply
+// using the provided writer. Returns the payload and opcode of the first data frame.
+func readWebSocketResponseFrame(r io.Reader, w io.Writer) ([]byte, byte, error) {
 	for {
 		frame, err := ws.ReadFrame(r)
 		if err != nil {
@@ -507,7 +527,20 @@ func readWebSocketResponseFrame(r io.Reader) ([]byte, byte, error) {
 			return frame.Payload, frame.Opcode, nil
 		}
 
-		// Skip Ping/Pong control frames.
+		// Reply to Ping with Pong per RFC 6455 Section 5.5.3.
+		if frame.Opcode == ws.OpcodePing {
+			pong := &ws.Frame{
+				Fin:     true,
+				Opcode:  ws.OpcodePong,
+				Payload: frame.Payload,
+			}
+			if err := ws.WriteFrame(w, pong); err != nil {
+				return nil, 0, fmt.Errorf("send Pong reply: %w", err)
+			}
+			continue
+		}
+
+		// Skip other control frames (Pong).
 		if frame.IsControl() {
 			continue
 		}
@@ -611,10 +644,12 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 	}
 
 	// seq=0: Upgrade request (send).
+	// Copy headers to avoid aliasing the original message's map.
+	upgradeHeaders := copyHeadersMap(upgradeMsg.Headers)
 	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 		FlowID: newFl.ID, Sequence: 0, Direction: "send",
 		Timestamp: wr.start, Method: upgradeMsg.Method, URL: upgradeMsg.URL,
-		Headers: upgradeMsg.Headers,
+		Headers: upgradeHeaders,
 	}); err != nil {
 		return nil, fmt.Errorf("save WebSocket resend upgrade request: %w", err)
 	}
@@ -630,9 +665,11 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 	}
 
 	// seq=2: Sent data frame.
+	// Copy metadata to avoid aliasing the original message's map.
+	sendMetadata := copyMetadataMap(targetMsg.Metadata)
 	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 		FlowID: newFl.ID, Sequence: 2, Direction: "send",
-		Timestamp: wr.start, Body: wr.sendBody, Metadata: targetMsg.Metadata,
+		Timestamp: wr.start, Body: wr.sendBody, Metadata: sendMetadata,
 	}); err != nil {
 		return nil, fmt.Errorf("save WebSocket resend send message: %w", err)
 	}
@@ -682,4 +719,30 @@ func classifyWebSocketPayload(payload []byte, opcode byte) ([]byte, []byte) {
 		return payload, nil
 	}
 	return nil, payload
+}
+
+// copyHeadersMap creates a deep copy of a headers map to prevent cross-flow aliasing.
+func copyHeadersMap(src map[string][]string) map[string][]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string][]string, len(src))
+	for k, vs := range src {
+		cp := make([]string, len(vs))
+		copy(cp, vs)
+		dst[k] = cp
+	}
+	return dst
+}
+
+// copyMetadataMap creates a copy of a metadata map to prevent cross-flow aliasing.
+func copyMetadataMap(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

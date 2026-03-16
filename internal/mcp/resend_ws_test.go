@@ -352,7 +352,7 @@ func TestWebSocketResend_BinaryFrame(t *testing.T) {
 	}
 
 	// Upgrade request.
-	store.AppendMessage(ctx, &flow.Message{
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-binary-1", Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
 		Headers: map[string][]string{
@@ -362,21 +362,27 @@ func TestWebSocketResend_BinaryFrame(t *testing.T) {
 			"Sec-Websocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
 			"Host":                  {fmt.Sprintf("%s:%s", host, port)},
 		},
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade request): %v", err)
+	}
 
 	// Upgrade response.
-	store.AppendMessage(ctx, &flow.Message{
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-binary-1", Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 101,
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade response): %v", err)
+	}
 
 	// Binary data frame with opcode=2.
 	binaryPayload := []byte{0x00, 0x01, 0x02, 0x03}
-	store.AppendMessage(ctx, &flow.Message{
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-binary-1", Sequence: 2, Direction: "send",
 		Timestamp: time.Now().UTC(), Body: binaryPayload,
 		Metadata: map[string]string{"opcode": "2", "fin": "true", "masked": "true"},
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage(binary data): %v", err)
+	}
 
 	cs := setupWSResendSession(t, store)
 
@@ -403,7 +409,10 @@ func TestWebSocketResend_BinaryFrame(t *testing.T) {
 	}
 
 	// Verify the received frame is stored in RawBytes (binary), not Body.
-	msgs, _ := store.GetMessages(ctx, out.NewFlowID, flow.MessageListOptions{})
+	msgs, err := store.GetMessages(ctx, out.NewFlowID, flow.MessageListOptions{})
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
 	if len(msgs) < 4 {
 		t.Fatalf("expected 4 messages, got %d", len(msgs))
 	}
@@ -429,14 +438,18 @@ func TestWebSocketResend_NoUpgradeMessage(t *testing.T) {
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	store.SaveFlow(ctx, fl)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
 
 	// Only a data frame at seq=2 (no upgrade request at seq=0).
-	store.AppendMessage(ctx, &flow.Message{
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-no-upgrade", Sequence: 2, Direction: "send",
 		Timestamp: time.Now().UTC(), Body: []byte("hello"),
 		Metadata: map[string]string{"opcode": "1"},
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
 
 	cs := setupWSResendSession(t, store)
 
@@ -469,9 +482,11 @@ func TestWebSocketResend_TargetAddrFromURL(t *testing.T) {
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 	}
-	store.SaveFlow(ctx, fl)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
 
-	store.AppendMessage(ctx, &flow.Message{
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-url-resolve", Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
 		Headers: map[string][]string{
@@ -481,16 +496,22 @@ func TestWebSocketResend_TargetAddrFromURL(t *testing.T) {
 			"Sec-Websocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
 			"Host":                  {wsURL.Host},
 		},
-	})
-	store.AppendMessage(ctx, &flow.Message{
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade request): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-url-resolve", Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 101,
-	})
-	store.AppendMessage(ctx, &flow.Message{
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade response): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-url-resolve", Sequence: 2, Direction: "send",
 		Timestamp: time.Now().UTC(), Body: []byte("url resolved"),
 		Metadata: map[string]string{"opcode": "1"},
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
 
 	cs := setupWSResendSession(t, store)
 
@@ -508,7 +529,10 @@ func TestWebSocketResend_TargetAddrFromURL(t *testing.T) {
 	var out resendWebSocketResult
 	unmarshalExecMultiProtoResult(t, result, &out)
 
-	respBytes, _ := base64.StdEncoding.DecodeString(out.ResponseData)
+	respBytes, err := base64.StdEncoding.DecodeString(out.ResponseData)
+	if err != nil {
+		t.Fatalf("decode response_data: %v", err)
+	}
 	if string(respBytes) != "url resolved" {
 		t.Errorf("response = %q, want %q", string(respBytes), "url resolved")
 	}
@@ -530,9 +554,11 @@ func TestWebSocketResend_ExplicitTargetAddr(t *testing.T) {
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "original-host:9999"},
 	}
-	store.SaveFlow(ctx, fl)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
 
-	store.AppendMessage(ctx, &flow.Message{
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-explicit-addr", Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
 		Headers: map[string][]string{
@@ -542,16 +568,22 @@ func TestWebSocketResend_ExplicitTargetAddr(t *testing.T) {
 			"Sec-Websocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
 			"Host":                  {"original-host:9999"},
 		},
-	})
-	store.AppendMessage(ctx, &flow.Message{
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade request): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-explicit-addr", Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 101,
-	})
-	store.AppendMessage(ctx, &flow.Message{
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade response): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-explicit-addr", Sequence: 2, Direction: "send",
 		Timestamp: time.Now().UTC(), Body: []byte("redirected"),
 		Metadata: map[string]string{"opcode": "1"},
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
 
 	cs := setupWSResendSession(t, store)
 
@@ -571,7 +603,10 @@ func TestWebSocketResend_ExplicitTargetAddr(t *testing.T) {
 	var out resendWebSocketResult
 	unmarshalExecMultiProtoResult(t, result, &out)
 
-	respBytes, _ := base64.StdEncoding.DecodeString(out.ResponseData)
+	respBytes, err := base64.StdEncoding.DecodeString(out.ResponseData)
+	if err != nil {
+		t.Fatalf("decode response_data: %v", err)
+	}
 	if string(respBytes) != "redirected" {
 		t.Errorf("response = %q, want %q", string(respBytes), "redirected")
 	}
@@ -656,13 +691,17 @@ func TestFindUpgradeRequestMessage_NotFound(t *testing.T) {
 		ID: "ws-no-seq0", Protocol: "WebSocket", FlowType: "bidirectional",
 		State: "complete", Timestamp: time.Now().UTC(),
 	}
-	store.SaveFlow(ctx, fl)
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
 
 	// Only a receive message at seq=0.
-	store.AppendMessage(ctx, &flow.Message{
+	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: "ws-no-seq0", Sequence: 0, Direction: "receive",
 		Timestamp: time.Now().UTC(),
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
 
 	_, err := findUpgradeRequestMessage(ctx, store, "ws-no-seq0")
 	if err == nil {
