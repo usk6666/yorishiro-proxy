@@ -86,6 +86,8 @@ func NewStreamMap(initialSendWindow, initialRecvWindow int32) *StreamMap {
 }
 
 // Get returns the stream with the given ID, or nil if not found.
+// The returned *Stream is not protected by StreamMap's mutex. Callers must ensure
+// that concurrent modifications to Stream fields are synchronized externally.
 func (sm *StreamMap) Get(id uint32) *Stream {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -223,8 +225,11 @@ func (sm *StreamMap) SetLastPeerStreamID(id uint32) {
 }
 
 // ConsumeSendWindow decrements the send window of the given stream by n bytes.
-// Returns an error if the window would go below zero.
+// Returns an error if n is not positive or the window would go below zero.
 func (sm *StreamMap) ConsumeSendWindow(id uint32, n int32) error {
+	if n <= 0 {
+		return fmt.Errorf("consume send window: n must be positive, got %d", n)
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	s, ok := sm.streams[id]
@@ -247,8 +252,11 @@ func (sm *StreamMap) ConsumeSendWindow(id uint32, n int32) error {
 }
 
 // ConsumeRecvWindow decrements the receive window of the given stream by n bytes.
-// Returns an error if the window would go below zero.
+// Returns an error if n is not positive or the window would go below zero.
 func (sm *StreamMap) ConsumeRecvWindow(id uint32, n int32) error {
+	if n <= 0 {
+		return fmt.Errorf("consume recv window: n must be positive, got %d", n)
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	s, ok := sm.streams[id]

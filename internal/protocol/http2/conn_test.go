@@ -259,6 +259,34 @@ func TestConn_ConnectionFlowControl(t *testing.T) {
 	}
 }
 
+func TestConn_ConnectionFlowControl_NegativeAndZero(t *testing.T) {
+	c := NewConn()
+
+	// Zero value should be rejected.
+	if err := c.ConsumeSendWindow(0); err == nil {
+		t.Error("expected error for ConsumeSendWindow with n=0")
+	}
+	if err := c.ConsumeRecvWindow(0); err == nil {
+		t.Error("expected error for ConsumeRecvWindow with n=0")
+	}
+
+	// Negative value should be rejected.
+	if err := c.ConsumeSendWindow(-1); err == nil {
+		t.Error("expected error for ConsumeSendWindow with n=-1")
+	}
+	if err := c.ConsumeRecvWindow(-1); err == nil {
+		t.Error("expected error for ConsumeRecvWindow with n=-1")
+	}
+
+	// Verify windows are unchanged.
+	if got := c.SendWindow(); got != 65535 {
+		t.Errorf("SendWindow = %d, want 65535 (unchanged)", got)
+	}
+	if got := c.RecvWindow(); got != 65535 {
+		t.Errorf("RecvWindow = %d, want 65535 (unchanged)", got)
+	}
+}
+
 func TestConn_ConnectionFlowControl_Exhausted(t *testing.T) {
 	c := NewConn()
 
@@ -623,7 +651,9 @@ func TestConn_SetLocalSettings(t *testing.T) {
 	newSettings := DefaultSettings()
 	newSettings.InitialWindowSize = 32768
 	newSettings.MaxFrameSize = 32768
-	c.SetLocalSettings(newSettings)
+	if err := c.SetLocalSettings(newSettings); err != nil {
+		t.Fatalf("SetLocalSettings error: %v", err)
+	}
 
 	got := c.LocalSettings()
 	if got.InitialWindowSize != 32768 {
@@ -631,6 +661,75 @@ func TestConn_SetLocalSettings(t *testing.T) {
 	}
 	if got.MaxFrameSize != 32768 {
 		t.Errorf("MaxFrameSize = %d, want 32768", got.MaxFrameSize)
+	}
+}
+
+func TestConn_SetLocalSettings_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(s *Settings)
+		wantErr bool
+	}{
+		{
+			name: "InitialWindowSize exceeds max",
+			modify: func(s *Settings) {
+				s.InitialWindowSize = maxWindowSize + 1
+			},
+			wantErr: true,
+		},
+		{
+			name: "MaxFrameSize too small",
+			modify: func(s *Settings) {
+				s.MaxFrameSize = frame.DefaultMaxFrameSize - 1
+			},
+			wantErr: true,
+		},
+		{
+			name: "MaxFrameSize too large",
+			modify: func(s *Settings) {
+				s.MaxFrameSize = frame.MaxAllowedFrameSize + 1
+			},
+			wantErr: true,
+		},
+		{
+			name:    "valid settings",
+			modify:  func(s *Settings) {},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConn()
+			settings := DefaultSettings()
+			tt.modify(&settings)
+			err := c.SetLocalSettings(settings)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("SetLocalSettings() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if _, ok := err.(*ConnError); !ok {
+					t.Errorf("expected *ConnError, got %T", err)
+				}
+			}
+		})
+	}
+}
+
+func TestConn_HandleRSTStream_IdleStream(t *testing.T) {
+	c := NewConn()
+
+	// RST_STREAM on an idle (never-seen) stream should be a connection error.
+	rstFrame := makeRSTStreamFrame(99, ErrCodeCancel)
+	_, err := c.HandleRSTStream(rstFrame)
+	if err == nil {
+		t.Fatal("expected error for RST_STREAM on idle stream")
+	}
+	ce, ok := err.(*ConnError)
+	if !ok {
+		t.Fatalf("expected *ConnError, got %T", err)
+	}
+	if ce.Code != ErrCodeProtocol {
+		t.Errorf("error code = %d, want %d (PROTOCOL_ERROR)", ce.Code, ErrCodeProtocol)
 	}
 }
 

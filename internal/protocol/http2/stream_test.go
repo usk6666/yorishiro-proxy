@@ -241,6 +241,36 @@ func TestStreamMap_FlowControl(t *testing.T) {
 	}
 }
 
+func TestStreamMap_FlowControl_NegativeAndZero(t *testing.T) {
+	sm := NewStreamMap(65535, 65535)
+	sm.GetOrCreate(1)
+
+	// Zero value should be rejected.
+	if err := sm.ConsumeSendWindow(1, 0); err == nil {
+		t.Error("expected error for ConsumeSendWindow with n=0")
+	}
+	if err := sm.ConsumeRecvWindow(1, 0); err == nil {
+		t.Error("expected error for ConsumeRecvWindow with n=0")
+	}
+
+	// Negative value should be rejected.
+	if err := sm.ConsumeSendWindow(1, -1); err == nil {
+		t.Error("expected error for ConsumeSendWindow with n=-1")
+	}
+	if err := sm.ConsumeRecvWindow(1, -1); err == nil {
+		t.Error("expected error for ConsumeRecvWindow with n=-1")
+	}
+
+	// Verify windows are unchanged.
+	s := sm.Get(1)
+	if s.SendWindow != 65535 {
+		t.Errorf("send window = %d, want 65535 (unchanged)", s.SendWindow)
+	}
+	if s.RecvWindow != 65535 {
+		t.Errorf("recv window = %d, want 65535 (unchanged)", s.RecvWindow)
+	}
+}
+
 func TestStreamMap_FlowControl_Exhausted(t *testing.T) {
 	sm := NewStreamMap(100, 100)
 	sm.GetOrCreate(1)

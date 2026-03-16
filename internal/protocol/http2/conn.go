@@ -173,11 +173,26 @@ func (c *Conn) PeerSettings() Settings {
 // SetLocalSettings updates the local settings. This should be called
 // before sending the SETTINGS frame. The settings take effect locally
 // immediately for new streams.
-func (c *Conn) SetLocalSettings(settings Settings) {
+// Returns an error if InitialWindowSize exceeds the maximum (2^31-1)
+// or MaxFrameSize is outside the RFC 9113 allowed range.
+func (c *Conn) SetLocalSettings(settings Settings) error {
+	if settings.InitialWindowSize > maxWindowSize {
+		return &ConnError{
+			Code:   ErrCodeFlowControl,
+			Reason: fmt.Sprintf("initial window size %d exceeds maximum %d", settings.InitialWindowSize, maxWindowSize),
+		}
+	}
+	if settings.MaxFrameSize < frame.DefaultMaxFrameSize || settings.MaxFrameSize > frame.MaxAllowedFrameSize {
+		return &ConnError{
+			Code:   ErrCodeProtocol,
+			Reason: fmt.Sprintf("max frame size %d out of range [%d, %d]", settings.MaxFrameSize, frame.DefaultMaxFrameSize, frame.MaxAllowedFrameSize),
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.localSettings = settings
 	c.streams.SetInitialRecvWindow(int32(settings.InitialWindowSize))
+	return nil
 }
 
 // ApplyPeerSettings applies settings received from the peer in a SETTINGS frame.
@@ -237,8 +252,11 @@ func (c *Conn) RecvWindow() int32 {
 }
 
 // ConsumeSendWindow decrements the connection-level send window by n bytes.
-// Returns an error if the window would go below zero.
+// Returns an error if n is not positive or the window would go below zero.
 func (c *Conn) ConsumeSendWindow(n int32) error {
+	if n <= 0 {
+		return fmt.Errorf("consume send window: n must be positive, got %d", n)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.sendWindow < n {
@@ -252,8 +270,11 @@ func (c *Conn) ConsumeSendWindow(n int32) error {
 }
 
 // ConsumeRecvWindow decrements the connection-level receive window by n bytes.
-// Returns an error if the window would go below zero.
+// Returns an error if n is not positive or the window would go below zero.
 func (c *Conn) ConsumeRecvWindow(n int32) error {
+	if n <= 0 {
+		return fmt.Errorf("consume recv window: n must be positive, got %d", n)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.recvWindow < n {
@@ -415,13 +436,19 @@ func (c *Conn) HandleRSTStream(f *frame.Frame) (uint32, error) {
 		}
 	}
 
+	// RST_STREAM on an idle (unknown) stream is a connection error per RFC 9113 Section 6.4.
+	stream := c.streams.Get(f.Header.StreamID)
+	if stream == nil {
+		return 0, &ConnError{
+			Code:   ErrCodeProtocol,
+			Reason: fmt.Sprintf("RST_STREAM on idle stream %d", f.Header.StreamID),
+		}
+	}
+
 	if transErr := c.streams.Transition(f.Header.StreamID, EventRecvRST); transErr != nil {
 		// Per RFC 9113, RST_STREAM on a closed stream should be ignored
-		// to handle race conditions. We only error on truly invalid states.
-		// For idle streams, it's a protocol error.
-		s := c.streams.Get(f.Header.StreamID)
-		if s != nil && s.State == StateClosed {
-			// Already closed, ignore.
+		// to handle race conditions.
+		if stream.State == StateClosed {
 			return errCode, nil
 		}
 		return 0, transErr
