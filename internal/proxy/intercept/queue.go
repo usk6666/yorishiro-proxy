@@ -48,6 +48,8 @@ const (
 	PhaseRequest InterceptPhase = "request"
 	// PhaseResponse indicates the intercepted item is a response (post-receive).
 	PhaseResponse InterceptPhase = "response"
+	// PhaseWebSocketFrame indicates the intercepted item is a WebSocket frame.
+	PhaseWebSocketFrame InterceptPhase = "websocket_frame"
 )
 
 // ReleaseMode specifies whether the release/modify_and_forward action uses
@@ -142,6 +144,19 @@ type InterceptedRequest struct {
 	// the exact bytes on the wire. May be nil if raw capture is not available
 	// for the protocol or connection.
 	RawBytes []byte
+
+	// --- WebSocket frame metadata (phase=websocket_frame only) ---
+
+	// WSOpcode is the WebSocket frame opcode (e.g. 0x1 for text, 0x2 for binary).
+	WSOpcode int
+	// WSDirection is the frame direction: "client_to_server" or "server_to_client".
+	WSDirection string
+	// WSFlowID is the WebSocket flow ID this frame belongs to.
+	WSFlowID string
+	// WSUpgradeURL is the URL from the original WebSocket upgrade request.
+	WSUpgradeURL string
+	// WSSequence is the frame sequence number within the WebSocket connection.
+	WSSequence int64
 
 	// actionCh receives the action to perform on this intercepted item.
 	// It is buffered with capacity 1 to prevent goroutine leaks on timeout.
@@ -348,6 +363,65 @@ func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, 
 		StatusCode:   statusCode,
 		Timestamp:    time.Now(),
 		MatchedRules: rulesCopy,
+		actionCh:     actionCh,
+	}
+
+	q.mu.Lock()
+	if q.maxItems > 0 && len(q.items) >= q.maxItems {
+		q.mu.Unlock()
+		actionCh <- InterceptAction{Type: ActionRelease}
+		return id, actionCh
+	}
+	q.items[id] = item
+	q.mu.Unlock()
+
+	return id, actionCh
+}
+
+// EnqueueWebSocketFrame adds a new intercepted WebSocket frame to the queue
+// and returns its ID along with a channel that will receive the action to perform.
+// The caller should block on the returned channel until an action is received.
+//
+// If the queue has reached its maxItems limit, the frame is immediately
+// auto-released.
+func (q *Queue) EnqueueWebSocketFrame(opcode int, direction, flowID, upgradeURL string, sequence int64, payload []byte, matchedRules []string) (string, <-chan InterceptAction) {
+	id := uuid.New().String()
+	actionCh := make(chan InterceptAction, 1)
+
+	// Check queue capacity under lock.
+	q.mu.Lock()
+	if q.maxItems > 0 && len(q.items) >= q.maxItems {
+		q.mu.Unlock()
+		actionCh <- InterceptAction{Type: ActionRelease}
+		return id, actionCh
+	}
+	q.mu.Unlock()
+
+	// Copy payload.
+	var payloadCopy []byte
+	if len(payload) > 0 {
+		payloadCopy = make([]byte, len(payload))
+		copy(payloadCopy, payload)
+	}
+
+	// Copy matched rules.
+	var rulesCopy []string
+	if len(matchedRules) > 0 {
+		rulesCopy = make([]string, len(matchedRules))
+		copy(rulesCopy, matchedRules)
+	}
+
+	item := &InterceptedRequest{
+		ID:           id,
+		Phase:        PhaseWebSocketFrame,
+		Body:         payloadCopy,
+		Timestamp:    time.Now(),
+		MatchedRules: rulesCopy,
+		WSOpcode:     opcode,
+		WSDirection:  direction,
+		WSFlowID:     flowID,
+		WSUpgradeURL: upgradeURL,
+		WSSequence:   sequence,
 		actionCh:     actionCh,
 	}
 

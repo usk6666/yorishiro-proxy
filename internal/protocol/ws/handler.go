@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -24,10 +25,12 @@ import (
 // It is not a ProtocolHandler — it is invoked from the HTTP handler when
 // an Upgrade: websocket request is detected.
 type Handler struct {
-	store        flow.FlowWriter
-	logger       *slog.Logger
-	pluginEngine *plugin.Engine
-	safetyEngine *safety.Engine
+	store           flow.FlowWriter
+	logger          *slog.Logger
+	pluginEngine    *plugin.Engine
+	safetyEngine    *safety.Engine
+	interceptEngine *intercept.Engine
+	interceptQueue  *intercept.Queue
 }
 
 // NewHandler creates a new WebSocket relay handler.
@@ -48,6 +51,18 @@ func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
 // text frames. If engine is nil, safety filtering is skipped.
 func (h *Handler) SetSafetyEngine(engine *safety.Engine) {
 	h.safetyEngine = engine
+}
+
+// SetInterceptEngine sets the intercept rule engine used to determine which
+// WebSocket frames should be intercepted.
+func (h *Handler) SetInterceptEngine(engine *intercept.Engine) {
+	h.interceptEngine = engine
+}
+
+// SetInterceptQueue sets the intercept queue used to hold WebSocket frames
+// that match intercept rules.
+func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
+	h.interceptQueue = queue
 }
 
 // HandleUpgrade processes a WebSocket upgrade request. It forwards the upgrade
@@ -301,6 +316,13 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			}
 			h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
 			continue
+		}
+
+		// Intercept check: evaluate intercept rules for data frames.
+		if !frame.IsControl() {
+			if intercepted := h.interceptFrame(ctx, frame, flowID, direction, hooks.direction, seq, start, dst, &frag, safetyMeta, rawPayload, upgradeReq); intercepted {
+				continue
+			}
 		}
 
 		if err := forwardFrame(dst, frame, direction); err != nil {
@@ -668,6 +690,109 @@ func (h *Handler) applySafetyOutputFilter(frame *Frame, flowID string) {
 	// Replace the frame payload with the masked version.
 	// The caller must capture raw payload before calling this if it needs to record raw data.
 	frame.Payload = result.Data
+}
+
+// interceptFrame checks whether the frame matches any intercept rules and,
+// if so, enqueues it and waits for an action from the AI agent. Returns true
+// if the frame was consumed by the intercept logic (forwarded, modified, or dropped)
+// and should not be processed further by the caller.
+//
+// Because relayDirection runs a sequential read loop per direction, the relay
+// is naturally blocked while waiting for the intercept action. Same-direction
+// frames cannot arrive during the hold because the reader goroutine is blocked.
+// The reverse direction runs in a separate goroutine and is unaffected.
+func (h *Handler) interceptFrame(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, safetyMeta *safetyMetadata, rawPayload []byte, upgradeReq *gohttp.Request) bool {
+	if h.interceptEngine == nil || h.interceptQueue == nil {
+		return false
+	}
+
+	var upgradeURL string
+	if upgradeReq != nil && upgradeReq.URL != nil {
+		upgradeURL = upgradeReq.URL.String()
+	}
+
+	matchedRules := h.interceptEngine.MatchWebSocketFrameRules(upgradeURL, wsDirection, flowID)
+	if len(matchedRules) == 0 {
+		return false
+	}
+
+	h.logger.Info("websocket frame intercepted",
+		"flow_id", flowID,
+		"direction", direction,
+		"opcode", OpcodeString(frame.Opcode),
+		"matched_rules", matchedRules,
+	)
+
+	frameSeq := seq.Load()
+	id, actionCh := h.interceptQueue.EnqueueWebSocketFrame(
+		int(frame.Opcode), wsDirection, flowID, upgradeURL, frameSeq, frame.Payload, matchedRules,
+	)
+	defer h.interceptQueue.Remove(id)
+
+	// Wait for action with timeout.
+	timeout := h.interceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	var action intercept.InterceptAction
+	select {
+	case action = <-actionCh:
+		// Action received.
+	case <-timeoutCtx.Done():
+		if ctx.Err() != nil {
+			// Proxy shutting down — drop.
+			h.logger.Info("intercepted websocket frame cancelled (proxy shutdown)", "id", id)
+			return true
+		}
+		behavior := h.interceptQueue.TimeoutBehaviorValue()
+		h.logger.Info("intercepted websocket frame timed out", "id", id, "behavior", string(behavior))
+		switch behavior {
+		case intercept.TimeoutAutoDrop:
+			action = intercept.InterceptAction{Type: intercept.ActionDrop}
+		default:
+			action = intercept.InterceptAction{Type: intercept.ActionRelease}
+		}
+	}
+
+	// Apply the action.
+	switch action.Type {
+	case intercept.ActionDrop:
+		h.logger.Debug("intercepted websocket frame dropped", "flow_id", flowID, "id", id)
+		// Frame is dropped — do not forward. Record it though.
+		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
+
+	case intercept.ActionModifyAndForward:
+		// Apply payload modification.
+		modifiedPayload := frame.Payload
+		if action.OverrideBody != nil {
+			modifiedPayload = []byte(*action.OverrideBody)
+		}
+		frame.Payload = modifiedPayload
+
+		if err := forwardFrame(dst, frame, direction); err != nil {
+			h.logger.Error("forward modified intercepted frame failed", "flow_id", flowID, "error", err)
+			return true
+		}
+		recordPayload := frame.Payload
+		if rawPayload != nil {
+			recordPayload = rawPayload
+		}
+		h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta)
+
+	default:
+		// ActionRelease — forward as-is.
+		if err := forwardFrame(dst, frame, direction); err != nil {
+			h.logger.Error("forward released intercepted frame failed", "flow_id", flowID, "error", err)
+			return true
+		}
+		recordPayload := frame.Payload
+		if rawPayload != nil {
+			recordPayload = rawPayload
+		}
+		h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta)
+	}
+
+	return true
 }
 
 // truncateForLog truncates a string for logging purposes.
