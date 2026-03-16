@@ -97,6 +97,13 @@ func (pl *PassthroughList) List() []string {
 	return result
 }
 
+// Clear removes all patterns from the passthrough list.
+func (pl *PassthroughList) Clear() {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	pl.patterns = make(map[string]struct{})
+}
+
 // Len returns the number of patterns in the passthrough list.
 func (pl *PassthroughList) Len() int {
 	pl.mu.RLock()
