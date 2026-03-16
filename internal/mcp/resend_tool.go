@@ -772,7 +772,17 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		return nil, nil, err
 	}
 
-	respData, start, duration, err := s.buildAndSendRaw(ctx, fl, params, targetAddr, rawBytes)
+	// Route to the appropriate raw send implementation based on protocol.
+	// HTTP/2 and gRPC flows require an HTTP/2 connection handshake before
+	// sending the raw frames; all other protocols use plain TCP/TLS.
+	var respData []byte
+	var start time.Time
+	var duration time.Duration
+	if isHTTP2Protocol(fl.Protocol) {
+		respData, start, duration, err = s.buildAndSendRawH2(ctx, fl, params, targetAddr, rawBytes)
+	} else {
+		respData, start, duration, err = s.buildAndSendRaw(ctx, fl, params, targetAddr, rawBytes)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -834,7 +844,7 @@ func (s *Server) loadRawResendFlow(ctx context.Context, params resendParams) (*f
 // checkRawTargetScope checks target scope for a raw resend target address.
 func (s *Server) checkRawTargetScope(fl *flow.Flow, targetAddr string) error {
 	scheme := ""
-	if fl.Protocol == "HTTPS" {
+	if fl.Protocol == "HTTPS" || isHTTP2Protocol(fl.Protocol) {
 		scheme = "https"
 	}
 	return s.checkTargetScopeAddr(scheme, targetAddr)
