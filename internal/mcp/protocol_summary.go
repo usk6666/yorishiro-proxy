@@ -158,3 +158,23 @@ var grpcStatusLabels = map[string]string{
 func grpcStatusLabel(status string) string {
 	return grpcStatusLabels[status]
 }
+
+// wsOpcodeNameFromInt returns a human-readable label for a WebSocket opcode integer.
+func wsOpcodeNameFromInt(opcode int) string {
+	switch opcode {
+	case 0:
+		return "Continuation"
+	case 1:
+		return "Text"
+	case 2:
+		return "Binary"
+	case 8:
+		return "Close"
+	case 9:
+		return "Ping"
+	case 10:
+		return "Pong"
+	default:
+		return fmt.Sprintf("Unknown(%d)", opcode)
+	}
+}
