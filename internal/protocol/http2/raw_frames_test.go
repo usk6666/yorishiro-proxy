@@ -160,3 +160,53 @@ func TestRawFramesFromContext_NoValue(t *testing.T) {
 		t.Errorf("expected nil, got %v", got)
 	}
 }
+
+func TestJoinRawFrames_TruncatesAtMaxSize(t *testing.T) {
+	// Create two frames that together exceed maxRawCaptureSize.
+	half := maxRawCaptureSize/2 + 1
+	frame1 := make([]byte, half)
+	frame2 := make([]byte, half)
+	for i := range frame1 {
+		frame1[i] = 0xAA
+	}
+	for i := range frame2 {
+		frame2[i] = 0xBB
+	}
+
+	result := joinRawFrames([][]byte{frame1, frame2})
+	if len(result) != maxRawCaptureSize {
+		t.Errorf("joinRawFrames len = %d, want %d", len(result), maxRawCaptureSize)
+	}
+	// First frame should be fully included.
+	if result[0] != 0xAA {
+		t.Error("expected first frame bytes preserved")
+	}
+	// Second frame should be partially included.
+	if result[half] != 0xBB {
+		t.Error("expected second frame bytes partially included")
+	}
+}
+
+func TestJoinRawFrames_ExactlyAtMaxSize(t *testing.T) {
+	frame := make([]byte, maxRawCaptureSize)
+	result := joinRawFrames([][]byte{frame})
+	if len(result) != maxRawCaptureSize {
+		t.Errorf("joinRawFrames len = %d, want %d", len(result), maxRawCaptureSize)
+	}
+}
+
+func TestBuildFrameMetadata_TruncatedFlag(t *testing.T) {
+	// Frames exceeding maxRawCaptureSize should set h2_truncated.
+	oversized := [][]byte{make([]byte, maxRawCaptureSize+1)}
+	result := buildFrameMetadata(oversized, nil)
+	if result["h2_truncated"] != "true" {
+		t.Errorf("h2_truncated = %q, want %q", result["h2_truncated"], "true")
+	}
+
+	// Frames within limit should NOT set h2_truncated.
+	small := [][]byte{make([]byte, 100)}
+	result2 := buildFrameMetadata(small, nil)
+	if _, ok := result2["h2_truncated"]; ok {
+		t.Error("h2_truncated should not be set for small frames")
+	}
+}
