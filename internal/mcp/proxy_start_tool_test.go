@@ -11,6 +11,8 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -591,7 +593,8 @@ func TestProxyStart_WithoutCaptureScope(t *testing.T) {
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	scope := proxy.NewCaptureScope()
-	// Pre-set some rules to verify omitting capture_scope does not modify them.
+	// Pre-set some rules to verify that proxy_start resets them when
+	// capture_scope is omitted (USK-407: proxy_start resets all settings).
 	scope.SetRules(
 		[]proxy.ScopeRule{{Hostname: "existing.com"}},
 		nil,
@@ -599,7 +602,8 @@ func TestProxyStart_WithoutCaptureScope(t *testing.T) {
 
 	cs := setupProxyStartTestSession(t, manager, scope, nil)
 
-	// Omit capture_scope entirely — existing rules should remain unchanged.
+	// Omit capture_scope entirely — existing rules should be cleared
+	// because proxy_start resets all settings to defaults.
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
 	})
@@ -611,11 +615,8 @@ func TestProxyStart_WithoutCaptureScope(t *testing.T) {
 	}
 
 	includes, _ := scope.Rules()
-	if len(includes) != 1 {
-		t.Errorf("scope includes = %d, want 1 (omitted scope should not clear existing)", len(includes))
-	}
-	if len(includes) > 0 && includes[0].Hostname != "existing.com" {
-		t.Errorf("scope includes[0].hostname = %q, want %q", includes[0].Hostname, "existing.com")
+	if len(includes) != 0 {
+		t.Errorf("scope includes = %d, want 0 (proxy_start should reset scope to default)", len(includes))
 	}
 }
 
@@ -1698,5 +1699,361 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 	}
 	if pl.Contains("default-pinned.com") {
 		t.Error("default-pinned.com from config should not be applied when caller specifies passthrough")
+	}
+}
+
+// TestProxyStart_ResetsSettingsOnRestart verifies that proxy_stop → proxy_start
+// resets all configuration to defaults when the new proxy_start omits parameters.
+// This is the regression test for USK-407.
+func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
+	logger := testutil.DiscardLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+
+	cs := setupProxyStartTestSessionWithOptions(t, manager, scope, pl)
+
+	// Step 1: Start proxy with capture_scope and tls_passthrough configured.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"capture_scope": map[string]any{
+			"includes": []any{
+				map[string]any{"hostname": "example.com"},
+			},
+		},
+		"tls_passthrough": []any{"pinned.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool (first start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on first start: %v", result.Content)
+	}
+
+	// Verify settings were applied.
+	if scope.IsEmpty() {
+		t.Fatal("expected capture scope to be non-empty after first start")
+	}
+	if pl.Len() == 0 {
+		t.Fatal("expected passthrough list to be non-empty after first start")
+	}
+
+	// Step 2: Stop the proxy.
+	stopResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_stop",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (proxy_stop): %v", err)
+	}
+	if stopResult.IsError {
+		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
+	}
+
+	// Step 3: Restart proxy without capture_scope or tls_passthrough.
+	result, err = callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (second start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on second start: %v", result.Content)
+	}
+
+	// Step 4: Verify all settings were reset to defaults.
+	if !scope.IsEmpty() {
+		t.Error("capture scope should be empty (reset to default) after restart without capture_scope")
+	}
+	if pl.Len() != 0 {
+		t.Errorf("passthrough list length = %d, want 0 (reset to default) after restart without tls_passthrough", pl.Len())
+	}
+}
+
+// TestProxyStart_ResetsInterceptAndTransformOnRestart verifies that intercept rules
+// and auto-transform rules are cleared on proxy_start.
+func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
+	logger := testutil.DiscardLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	scope := proxy.NewCaptureScope()
+	pl := proxy.NewPassthroughList()
+	interceptEng := intercept.NewEngine()
+	transformPipe := rules.NewPipeline()
+
+	cs := setupProxyStartTestSessionWithOptions(t, manager, scope, pl,
+		WithInterceptEngine(interceptEng),
+		WithTransformPipeline(transformPipe),
+	)
+
+	// Step 1: Start proxy with intercept rules and transform rules.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"intercept_rules": []any{
+			map[string]any{
+				"id":        "rule-1",
+				"enabled":   true,
+				"direction": "request",
+				"conditions": map[string]any{
+					"host_pattern": ".*\\.example\\.com",
+				},
+			},
+		},
+		"auto_transform": []any{
+			map[string]any{
+				"id":        "transform-1",
+				"enabled":   true,
+				"priority":  1,
+				"direction": "request",
+				"conditions": map[string]any{
+					"url_pattern": ".*\\.example\\.com",
+				},
+				"action": map[string]any{
+					"type":   "add_header",
+					"header": "X-Test",
+					"value":  "1",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool (first start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on first start: %v", result.Content)
+	}
+
+	// Verify rules were applied.
+	if interceptEng.Len() == 0 {
+		t.Fatal("expected intercept engine to have rules after first start")
+	}
+	if transformPipe.Len() == 0 {
+		t.Fatal("expected transform pipeline to have rules after first start")
+	}
+
+	// Step 2: Stop and restart without rules.
+	stopResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_stop",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (proxy_stop): %v", err)
+	}
+	if stopResult.IsError {
+		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
+	}
+
+	result, err = callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (second start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on second start: %v", result.Content)
+	}
+
+	// Verify rules were cleared.
+	if interceptEng.Len() != 0 {
+		t.Errorf("intercept engine rule count = %d, want 0 after restart", interceptEng.Len())
+	}
+	if transformPipe.Len() != 0 {
+		t.Errorf("transform pipeline rule count = %d, want 0 after restart", transformPipe.Len())
+	}
+}
+
+// TestProxyStart_ResetsLimitsAndTimeoutsOnRestart verifies that connection limits
+// and timeouts are reset to defaults when proxy_start omits them.
+func TestProxyStart_ResetsLimitsAndTimeoutsOnRestart(t *testing.T) {
+	logger := testutil.DiscardLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	mockTimeout := &mockRequestTimeoutSetter{}
+
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+		WithRequestTimeoutSetters(mockTimeout),
+	)
+
+	// Step 1: Start proxy with custom limits.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":        "127.0.0.1:0",
+		"max_connections":    256,
+		"peek_timeout_ms":    5000,
+		"request_timeout_ms": 10000,
+	})
+	if err != nil {
+		t.Fatalf("CallTool (first start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on first start: %v", result.Content)
+	}
+
+	// Verify custom values were set.
+	if got := manager.MaxConnections(); got != 256 {
+		t.Errorf("max_connections after first start = %d, want 256", got)
+	}
+	if got := mockTimeout.timeout; got != 10*time.Second {
+		t.Errorf("request_timeout after first start = %v, want 10s", got)
+	}
+
+	// Step 2: Stop and restart without limits.
+	stopResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_stop",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (proxy_stop): %v", err)
+	}
+	if stopResult.IsError {
+		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
+	}
+
+	result, err = callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (second start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on second start: %v", result.Content)
+	}
+
+	// Verify defaults were restored.
+	if got := manager.MaxConnections(); got != 128 {
+		t.Errorf("max_connections after restart = %d, want 128 (default)", got)
+	}
+	if got := manager.PeekTimeout(); got != 30*time.Second {
+		t.Errorf("peek_timeout after restart = %v, want 30s (default)", got)
+	}
+	if got := mockTimeout.timeout; got != 60*time.Second {
+		t.Errorf("request_timeout after restart = %v, want 60s (default)", got)
+	}
+}
+
+// TestProxyStart_ResetsTLSFingerprintOnRestart verifies that TLS fingerprint
+// is reset to "chrome" (default) when proxy_start omits tls_fingerprint.
+func TestProxyStart_ResetsTLSFingerprintOnRestart(t *testing.T) {
+	logger := testutil.DiscardLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	mockFP := &mockTLSFingerprintSetter{}
+
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+		WithTLSFingerprintSetter(mockFP),
+	)
+
+	// Step 1: Start proxy with custom fingerprint.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"tls_fingerprint": "firefox",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (first start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on first start: %v", result.Content)
+	}
+	if mockFP.profile != "firefox" {
+		t.Errorf("tls_fingerprint after first start = %q, want %q", mockFP.profile, "firefox")
+	}
+
+	// Step 2: Stop and restart without fingerprint.
+	stopResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_stop",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (proxy_stop): %v", err)
+	}
+	if stopResult.IsError {
+		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
+	}
+
+	result, err = callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (second start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on second start: %v", result.Content)
+	}
+
+	// Verify fingerprint was reset to default.
+	if mockFP.profile != "chrome" {
+		t.Errorf("tls_fingerprint after restart = %q, want %q (default)", mockFP.profile, "chrome")
+	}
+}
+
+// TestProxyStart_ResetsProtocolsOnRestart verifies that enabled protocols
+// are reset to all (nil) when proxy_start omits the protocols parameter.
+func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
+	logger := testutil.DiscardLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	t.Cleanup(func() { manager.Stop(context.Background()) })
+
+	// Use a Server directly to inspect deps.
+	ctx := context.Background()
+	scope := proxy.NewCaptureScope()
+	s := NewServer(ctx, nil, nil, manager, WithCaptureScope(scope))
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	// Step 1: Start proxy with specific protocols.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"protocols":   []any{"HTTP/1.x", "HTTPS"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool (first start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on first start: %v", result.Content)
+	}
+	if len(s.deps.enabledProtocols) != 2 {
+		t.Fatalf("enabled protocols count after first start = %d, want 2", len(s.deps.enabledProtocols))
+	}
+
+	// Step 2: Stop and restart without protocols.
+	stopResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_stop",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (proxy_stop): %v", err)
+	}
+	if stopResult.IsError {
+		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
+	}
+
+	result, err = callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (second start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on second start: %v", result.Content)
+	}
+
+	// Verify protocols were reset to nil (all protocols).
+	if s.deps.enabledProtocols != nil {
+		t.Errorf("enabled protocols after restart = %v, want nil (all protocols)", s.deps.enabledProtocols)
 	}
 }

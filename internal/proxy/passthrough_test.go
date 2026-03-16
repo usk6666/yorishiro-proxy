@@ -365,3 +365,50 @@ func TestNormalizePattern(t *testing.T) {
 		})
 	}
 }
+
+func TestPassthroughList_Clear(t *testing.T) {
+	pl := NewPassthroughList()
+	pl.Add("example.com")
+	pl.Add("*.test.com")
+
+	if pl.Len() != 2 {
+		t.Fatalf("Len() before Clear = %d, want 2", pl.Len())
+	}
+
+	pl.Clear()
+
+	if pl.Len() != 0 {
+		t.Errorf("Len() after Clear = %d, want 0", pl.Len())
+	}
+	if pl.Contains("example.com") {
+		t.Error("Contains(example.com) after Clear = true, want false")
+	}
+	if pl.Contains("foo.test.com") {
+		t.Error("Contains(foo.test.com) after Clear = true, want false")
+	}
+}
+
+func TestPassthroughList_ClearEmpty(t *testing.T) {
+	pl := NewPassthroughList()
+	pl.Clear() // should not panic
+	if pl.Len() != 0 {
+		t.Errorf("Len() after Clear on empty = %d, want 0", pl.Len())
+	}
+}
+
+func TestPassthroughList_ClearThenAdd(t *testing.T) {
+	pl := NewPassthroughList()
+	pl.Add("old.com")
+	pl.Clear()
+	pl.Add("new.com")
+
+	if pl.Len() != 1 {
+		t.Errorf("Len() = %d, want 1", pl.Len())
+	}
+	if !pl.Contains("new.com") {
+		t.Error("Contains(new.com) = false, want true")
+	}
+	if pl.Contains("old.com") {
+		t.Error("Contains(old.com) = true, want false")
+	}
+}
