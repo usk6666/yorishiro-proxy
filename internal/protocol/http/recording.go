@@ -162,7 +162,17 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	if modified {
 		// Inject Host into the snapshot headers (the snapshot was taken from
 		// req.Header which does not contain Host per Go's net/http design).
-		origHeaders := snap.headers.Clone()
+		// Defensive nil guard: if snap is nil (rawVariant with no snapshot),
+		// fall back to current request headers/body.
+		var origHeaders gohttp.Header
+		var origBody []byte
+		if snap != nil {
+			origHeaders = snap.headers.Clone()
+			origBody = snap.body
+		} else {
+			origHeaders = requestHeaders(p.req)
+			origBody = p.reqBody
+		}
 		if p.req.Host != "" {
 			origHeaders["Host"] = []string{p.req.Host}
 		}
@@ -186,7 +196,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Method:        p.req.Method,
 			URL:           reqURL,
 			Headers:       origHeaders,
-			Body:          snap.body,
+			Body:          origBody,
 			RawBytes:      origRawBytes,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "original"},
