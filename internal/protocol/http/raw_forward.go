@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // rawForwardResult holds the result of raw forwarding to the upstream server.
@@ -132,7 +133,7 @@ func readRawResponse(conn net.Conn) (rawResponse []byte, resp *gohttp.Response, 
 	if parseErr != nil {
 		// If parsing fails, read whatever is available as raw bytes.
 		// This can happen with intentionally malformed responses.
-		remaining, _ := io.ReadAll(io.LimitReader(reader, int64(maxRawCaptureSize)))
+		remaining, _ := io.ReadAll(io.LimitReader(reader, int64(intercept.MaxRawBytesSize)))
 		rawResponse = capture.Bytes()
 		if len(remaining) > 0 && len(rawResponse) == 0 {
 			rawResponse = remaining
