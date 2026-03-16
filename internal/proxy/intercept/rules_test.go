@@ -426,6 +426,12 @@ func TestMatchesRequest_HeaderMatch(t *testing.T) {
 			headers:     http.Header{"Content-Type": {"anything"}},
 			want:        true,
 		},
+		{
+			name:        "empty pattern value matches all header values",
+			headerMatch: map[string]string{"Content-Type": ""},
+			headers:     http.Header{"Content-Type": {"anything"}},
+			want:        true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -795,7 +801,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 		name       string
 		conditions Conditions
 		upgradeURL string
-		direction  string
 		flowID     string
 		want       bool
 	}{
@@ -803,7 +808,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "upgrade URL pattern matches",
 			conditions: Conditions{UpgradeURLPattern: "/ws/chat.*"},
 			upgradeURL: "/ws/chat/room1",
-			direction:  "client_to_server",
 			flowID:     "f1",
 			want:       true,
 		},
@@ -811,7 +815,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "upgrade URL pattern does not match",
 			conditions: Conditions{UpgradeURLPattern: "/ws/chat.*"},
 			upgradeURL: "/ws/events/stream",
-			direction:  "client_to_server",
 			flowID:     "f1",
 			want:       false,
 		},
@@ -819,7 +822,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "flow ID matches",
 			conditions: Conditions{FlowID: "flow-123"},
 			upgradeURL: "/ws/any",
-			direction:  "server_to_client",
 			flowID:     "flow-123",
 			want:       true,
 		},
@@ -827,7 +829,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "flow ID does not match",
 			conditions: Conditions{FlowID: "flow-123"},
 			upgradeURL: "/ws/any",
-			direction:  "server_to_client",
 			flowID:     "flow-456",
 			want:       false,
 		},
@@ -835,7 +836,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "both conditions match",
 			conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-123"},
 			upgradeURL: "/ws/chat",
-			direction:  "client_to_server",
 			flowID:     "flow-123",
 			want:       true,
 		},
@@ -843,7 +843,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "upgrade URL matches but flow ID does not",
 			conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-123"},
 			upgradeURL: "/ws/chat",
-			direction:  "client_to_server",
 			flowID:     "flow-999",
 			want:       false,
 		},
@@ -851,7 +850,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "empty conditions match all",
 			conditions: Conditions{},
 			upgradeURL: "/ws/anything",
-			direction:  "client_to_server",
 			flowID:     "any-flow",
 			want:       true,
 		},
@@ -859,7 +857,6 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			name:       "empty upgrade URL against pattern",
 			conditions: Conditions{UpgradeURLPattern: "/ws/.*"},
 			upgradeURL: "",
-			direction:  "client_to_server",
 			flowID:     "f1",
 			want:       false,
 		},

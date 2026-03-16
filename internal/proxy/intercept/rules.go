@@ -167,9 +167,16 @@ func compileRule(r Rule) (*compiledRule, error) {
 	if len(r.Conditions.HeaderMatch) > 0 {
 		cr.headerMatchRes = make(map[string]*regexp.Regexp, len(r.Conditions.HeaderMatch))
 		for name, pattern := range r.Conditions.HeaderMatch {
-			re, err := compileRegexPattern(pattern, fmt.Sprintf("header_match pattern for %q", name))
-			if err != nil {
-				return nil, err
+			var re *regexp.Regexp
+			if pattern == "" {
+				// Empty pattern matches everything (same as regexp.Compile("")).
+				re = regexp.MustCompile("")
+			} else {
+				var err error
+				re, err = compileRegexPattern(pattern, fmt.Sprintf("header_match pattern for %q", name))
+				if err != nil {
+					return nil, err
+				}
 			}
 			// Store with canonical header name for consistent lookup.
 			cr.headerMatchRes[http.CanonicalHeaderKey(name)] = re
@@ -285,8 +292,7 @@ func (cr *compiledRule) isWebSocketRule() bool {
 
 // matchesWebSocketFrame evaluates whether the compiled rule matches the given
 // WebSocket frame parameters. upgradeURL is the URL of the original WebSocket
-// upgrade request, direction is "client_to_server" or "server_to_client",
-// and flowID is the identifier of the WebSocket flow.
+// upgrade request and flowID is the identifier of the WebSocket flow.
 func (cr *compiledRule) matchesWebSocketFrame(upgradeURL string, flowID string) bool {
 	if cr.upgradeURLPatternRe != nil {
 		if !cr.upgradeURLPatternRe.MatchString(upgradeURL) {
