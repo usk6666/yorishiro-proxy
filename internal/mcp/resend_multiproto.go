@@ -405,7 +405,7 @@ func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message) (*gohttp.R
 	// Build the HTTP Upgrade request.
 	httpReq := &gohttp.Request{
 		Method:     "GET",
-		URL:        &url.URL{Path: reqURL.RequestURI()},
+		URL:        &url.URL{Path: reqURL.Path, RawPath: reqURL.RawPath, RawQuery: reqURL.RawQuery},
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
 		ProtoMinor: 1,
@@ -467,8 +467,7 @@ func ensureWebSocketHeaders(h gohttp.Header) {
 func generateWebSocketKey() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		// Fallback to a static key if rand fails (should never happen).
-		return "dGhlIHNhbXBsZSBub25jZQ=="
+		panic("crypto/rand failed: " + err.Error())
 	}
 	return base64.StdEncoding.EncodeToString(b)
 }
