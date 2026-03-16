@@ -142,32 +142,8 @@ func h2Handshake(conn net.Conn) (*frame.Reader, error) {
 	}
 
 	// Step 3: Read frames until we get the server's initial SETTINGS (non-ACK).
-	serverSettingsReceived := false
-	for !serverSettingsReceived {
-		f, err := reader.ReadFrame()
-		if err != nil {
-			return nil, fmt.Errorf("read server SETTINGS: %w", err)
-		}
-		switch {
-		case f.Header.Type == frame.TypeSettings && !f.Header.Flags.Has(frame.FlagAck):
-			serverSettingsReceived = true
-			// Update reader/writer max frame size if the server advertises a larger one.
-			settings, sErr := f.SettingsParams()
-			if sErr == nil {
-				for _, st := range settings {
-					if st.ID == frame.SettingMaxFrameSize && st.Value > frame.DefaultMaxFrameSize {
-						reader.SetMaxFrameSize(st.Value) //nolint:errcheck
-						writer.SetMaxFrameSize(st.Value) //nolint:errcheck
-					}
-				}
-			}
-		case f.Header.Type == frame.TypeSettings && f.Header.Flags.Has(frame.FlagAck):
-			// Server ACK for our SETTINGS; expected during handshake.
-		case f.Header.Type == frame.TypeWindowUpdate:
-			// Window updates during handshake; ignore.
-		default:
-			// Other frames during handshake; ignore gracefully.
-		}
+	if err := h2WaitForServerSettings(reader, writer); err != nil {
+		return nil, err
 	}
 
 	// Step 4: Send SETTINGS ACK for the server's SETTINGS.
@@ -176,6 +152,52 @@ func h2Handshake(conn net.Conn) (*frame.Reader, error) {
 	}
 
 	return reader, nil
+}
+
+// h2WaitForServerSettings reads frames until the server's initial SETTINGS
+// (non-ACK) is received. It handles GOAWAY (error), PING (send ACK per RFC
+// 9113 Section 6.7), SETTINGS ACK, and WINDOW_UPDATE during the handshake.
+func h2WaitForServerSettings(reader *frame.Reader, writer *frame.Writer) error {
+	for {
+		f, err := reader.ReadFrame()
+		if err != nil {
+			return fmt.Errorf("read server SETTINGS: %w", err)
+		}
+		switch {
+		case f.Header.Type == frame.TypeSettings && !f.Header.Flags.Has(frame.FlagAck):
+			// Server's initial SETTINGS received. Apply max frame size if advertised.
+			applyServerMaxFrameSize(f, reader, writer)
+			return nil
+		case f.Header.Type == frame.TypeSettings && f.Header.Flags.Has(frame.FlagAck):
+			// Server ACK for our SETTINGS; expected during handshake.
+		case f.Header.Type == frame.TypeGoAway:
+			return fmt.Errorf("server sent GOAWAY during handshake")
+		case f.Header.Type == frame.TypePing && !f.Header.Flags.Has(frame.FlagAck):
+			// Per RFC 9113 Section 6.7, PING frames must be acknowledged.
+			if pingData, pErr := f.PingData(); pErr == nil {
+				writer.WritePing(true, pingData) //nolint:errcheck
+			}
+		case f.Header.Type == frame.TypeWindowUpdate:
+			// Window updates during handshake; ignore.
+		default:
+			// Other frames during handshake; ignore gracefully.
+		}
+	}
+}
+
+// applyServerMaxFrameSize updates the reader/writer max frame size if the
+// server advertises a value larger than the default.
+func applyServerMaxFrameSize(f *frame.Frame, reader *frame.Reader, writer *frame.Writer) {
+	settings, err := f.SettingsParams()
+	if err != nil {
+		return
+	}
+	for _, st := range settings {
+		if st.ID == frame.SettingMaxFrameSize && st.Value > frame.DefaultMaxFrameSize {
+			reader.SetMaxFrameSize(st.Value) //nolint:errcheck
+			writer.SetMaxFrameSize(st.Value) //nolint:errcheck
+		}
+	}
 }
 
 // h2FrameAction describes how to handle a response frame.
