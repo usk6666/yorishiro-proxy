@@ -108,11 +108,15 @@ Returns: pem, fingerprint, subject, not_after, persisted, cert_path, install_hin
 - **install_hint** (string): Guidance for installing the CA certificate into the trust store (empty if ephemeral).
 
 ### intercept_queue
-List intercepted requests currently waiting in the intercept queue.
+List intercepted requests, responses, and WebSocket frames currently waiting in the intercept queue.
 
 Supports `limit` for limiting the number of returned items.
 
-Returns: `items[]` (id, method, url, headers, body, body_encoding, timestamp, matched_rules), `count`.
+Each item has a `protocol` field (`"http"` or `"websocket"`) and a `phase` field (`"request"`, `"response"`, or `"websocket_frame"`).
+
+Returns for HTTP items: `items[]` (id, phase, protocol, method, url, status_code, headers, body, body_encoding, timestamp, matched_rules), `count`.
+
+Returns for WebSocket items: `items[]` (id, phase, protocol, opcode, direction, flow_id, upgrade_url, sequence, body, body_encoding, timestamp, matched_rules), `count`.
 
 ## Usage Examples
 

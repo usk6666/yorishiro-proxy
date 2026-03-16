@@ -14,6 +14,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // queryInput is the typed input for the query tool.
@@ -1017,24 +1018,39 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 type queryInterceptQueueEntry struct {
 	// ID is the unique identifier for the intercepted item.
 	ID string `json:"id"`
-	// Phase indicates whether this is a "request" or "response" intercept.
+	// Phase indicates whether this is a "request", "response", or "websocket_frame" intercept.
 	Phase string `json:"phase"`
-	// Method is the HTTP method.
-	Method string `json:"method"`
-	// URL is the request URL.
-	URL string `json:"url"`
+	// Protocol is the protocol type: "http" or "websocket".
+	Protocol string `json:"protocol"`
+	// Method is the HTTP method (HTTP only).
+	Method string `json:"method,omitempty"`
+	// URL is the request URL (HTTP only).
+	URL string `json:"url,omitempty"`
 	// StatusCode is the HTTP status code (only set for response phase).
 	StatusCode int `json:"status_code,omitempty"`
-	// Headers are the request/response headers.
-	Headers map[string][]string `json:"headers"`
-	// BodyEncoding indicates the encoding of the body ("text" or "base64").
+	// Headers are the request/response headers (HTTP only).
+	Headers map[string][]string `json:"headers,omitempty"`
+	// BodyEncoding indicates the encoding of the body/payload ("text" or "base64").
 	BodyEncoding string `json:"body_encoding"`
-	// Body is the request/response body as text or Base64-encoded string.
+	// Body is the request/response body or WebSocket payload as text or Base64-encoded string.
 	Body string `json:"body"`
 	// Timestamp is when the item was intercepted.
 	Timestamp string `json:"timestamp"`
 	// MatchedRules lists the IDs of the rules that matched.
 	MatchedRules []string `json:"matched_rules"`
+
+	// --- WebSocket frame metadata (phase=websocket_frame only) ---
+
+	// Opcode is the WebSocket frame opcode name (e.g. "Text", "Binary").
+	Opcode string `json:"opcode,omitempty"`
+	// Direction is the frame direction: "client_to_server" or "server_to_client".
+	Direction string `json:"direction,omitempty"`
+	// FlowID is the WebSocket flow ID this frame belongs to.
+	FlowID string `json:"flow_id,omitempty"`
+	// UpgradeURL is the URL from the original WebSocket upgrade request.
+	UpgradeURL string `json:"upgrade_url,omitempty"`
+	// Sequence is the frame sequence number within the WebSocket connection.
+	Sequence int64 `json:"sequence,omitempty"`
 }
 
 // queryInterceptQueueResult is the response for the intercept_queue resource.
@@ -1070,31 +1086,40 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 
 	entries := make([]queryInterceptQueueEntry, 0, len(items))
 	for _, item := range items {
-		var urlStr string
-		if item.URL != nil {
-			urlStr = item.URL.String()
-		}
-
 		bodyStr, bodyEncoding := encodeBody(item.Body)
 
-		// Convert http.Header to map for JSON output.
-		headers := make(map[string][]string)
-		for k, vs := range item.Headers {
-			headers[k] = vs
-		}
-
-		entries = append(entries, queryInterceptQueueEntry{
+		entry := queryInterceptQueueEntry{
 			ID:           item.ID,
 			Phase:        string(item.Phase),
-			Method:       item.Method,
-			URL:          urlStr,
-			StatusCode:   item.StatusCode,
-			Headers:      headers,
 			Body:         bodyStr,
 			BodyEncoding: bodyEncoding,
 			Timestamp:    item.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			MatchedRules: item.MatchedRules,
-		})
+		}
+
+		if item.Phase == intercept.PhaseWebSocketFrame {
+			entry.Protocol = "websocket"
+			entry.Opcode = wsOpcodeNameFromInt(item.WSOpcode)
+			entry.Direction = item.WSDirection
+			entry.FlowID = item.WSFlowID
+			entry.UpgradeURL = item.WSUpgradeURL
+			entry.Sequence = item.WSSequence
+		} else {
+			entry.Protocol = "http"
+			entry.Method = item.Method
+			entry.StatusCode = item.StatusCode
+			if item.URL != nil {
+				entry.URL = item.URL.String()
+			}
+			// Convert http.Header to map for JSON output.
+			headers := make(map[string][]string)
+			for k, vs := range item.Headers {
+				headers[k] = vs
+			}
+			entry.Headers = headers
+		}
+
+		entries = append(entries, entry)
 	}
 
 	// Apply SafetyFilter output masking to intercept queue bodies and headers.
