@@ -634,11 +634,10 @@ func (tc *transportConn) writeDataFrames(ctx context.Context, streamID uint32, b
 		var available int32
 		for {
 			connWindow := tc.conn.SendWindow()
-			stream := tc.conn.Streams().Get(streamID)
-			if stream == nil {
+			streamWindow, ok := tc.conn.Streams().GetSendWindow(streamID)
+			if !ok {
 				return fmt.Errorf("stream %d does not exist", streamID)
 			}
-			streamWindow := stream.SendWindow
 			available = connWindow
 			if streamWindow < available {
 				available = streamWindow
