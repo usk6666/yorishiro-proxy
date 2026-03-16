@@ -915,7 +915,9 @@ func TestE2E_ResendRawH2_WithPatches(t *testing.T) {
 	})
 
 	t.Run("offset_overwrite", func(t *testing.T) {
-		// Overwrite the first byte of the frame payload (after the 9-byte header).
+		// Overwrite the first byte of raw bytes (frame header's Length field MSB).
+		// offset=0 targets the frame header, not the payload — this verifies
+		// that arbitrary offset patching works on the raw frame bytes.
 		result, err := cs.CallTool(ctx, &gomcp.CallToolParams{
 			Name: "resend",
 			Arguments: map[string]any{
@@ -1114,15 +1116,15 @@ func TestE2E_InterceptRawVariantRecording(t *testing.T) {
 		t.Errorf("expected at least 2 messages (original + modified + receive), got %d", flowDetail.MessageCount)
 	}
 
-	// Check if original_request is populated (indicates variant recording worked).
-	if flowDetail.OriginalRequest != nil {
-		// Verify original request preserved the original method and URL.
-		if flowDetail.OriginalRequest.Method != "POST" {
-			t.Errorf("original_request method = %q, want POST", flowDetail.OriginalRequest.Method)
-		}
-		if !strings.Contains(flowDetail.OriginalRequest.URL, "/api/variant-test") {
-			t.Errorf("original_request URL = %q, want to contain /api/variant-test", flowDetail.OriginalRequest.URL)
-		}
+	// Verify original_request is populated (variant recording must preserve the original request).
+	if flowDetail.OriginalRequest == nil {
+		t.Fatal("expected OriginalRequest to be non-nil (variant recording should preserve original request)")
+	}
+	if flowDetail.OriginalRequest.Method != "POST" {
+		t.Errorf("original_request method = %q, want POST", flowDetail.OriginalRequest.Method)
+	}
+	if !strings.Contains(flowDetail.OriginalRequest.URL, "/api/variant-test") {
+		t.Errorf("original_request URL = %q, want to contain /api/variant-test", flowDetail.OriginalRequest.URL)
 	}
 
 	client.CloseIdleConnections()
