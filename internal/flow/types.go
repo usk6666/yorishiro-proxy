@@ -14,8 +14,15 @@ type Flow struct {
 	ID string
 	// ConnID is the connection ID for log correlation.
 	ConnID string
-	// Protocol is the detected protocol (e.g., "HTTP/1.x", "HTTPS").
+	// Protocol is the detected application protocol
+	// (e.g., "HTTP/1.x", "HTTP/2", "gRPC", "WebSocket", "TCP").
 	Protocol string
+	// Scheme is the URL scheme or transport indicator
+	// (e.g., "https", "http", "wss", "ws", "tcp").
+	// It separates TLS/transport information from Protocol, so that
+	// filter={scheme: "https"} returns all TLS flows regardless of
+	// the application protocol.
+	Scheme string
 	// FlowType indicates the communication pattern:
 	// "unary" (single request-response), "stream", or "bidirectional".
 	FlowType string

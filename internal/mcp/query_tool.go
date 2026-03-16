@@ -52,8 +52,12 @@ type queryInput struct {
 
 // queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
-	// Protocol filters flows by protocol (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP").
-	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP)"`
+	// Protocol filters flows by application protocol (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP").
+	Protocol string `json:"protocol,omitempty" jsonschema:"application protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP)"`
+	// Scheme filters flows by URL scheme / transport (e.g. "https", "http", "wss", "ws", "tcp").
+	// Use scheme to find all TLS flows regardless of application protocol:
+	// filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
+	Scheme string `json:"scheme,omitempty" jsonschema:"URL scheme / transport filter (https, http, wss, ws, tcp)"`
 	// Method filters flows by HTTP method (e.g. "GET", "POST").
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`
 	// URLPattern filters flows by URL using a substring search pattern.
@@ -94,7 +98,7 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
 			"The 'id' parameter is required for flow, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
+			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), scheme (https, http, wss, ws, tcp — use scheme to find all TLS flows: scheme=https returns HTTP/1.x+HTTP/2+gRPC over TLS), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code, body_contains, and outliers_only (returns only outlier results). " +
 			"Flows include protocol_summary with protocol-specific information. " +
@@ -152,6 +156,7 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 type queryFlowsEntry struct {
 	ID              string            `json:"id"`
 	Protocol        string            `json:"protocol"`
+	Scheme          string            `json:"scheme,omitempty"`
 	FlowType        string            `json:"flow_type"`
 	State           string            `json:"state"`
 	Method          string            `json:"method"`
@@ -189,6 +194,7 @@ func buildFlowListOptions(input queryInput) flow.ListOptions {
 	}
 	if input.Filter != nil {
 		opts.Protocol = input.Filter.Protocol
+		opts.Scheme = input.Filter.Scheme
 		opts.Method = input.Filter.Method
 		opts.URLPattern = input.Filter.URLPattern
 		opts.StatusCode = input.Filter.StatusCode
@@ -260,6 +266,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 		entries = append(entries, queryFlowsEntry{
 			ID:              fl.ID,
 			Protocol:        fl.Protocol,
+			Scheme:          fl.Scheme,
 			FlowType:        fl.FlowType,
 			State:           fl.State,
 			Method:          method,
@@ -292,6 +299,7 @@ type queryFlowResult struct {
 	ID                    string              `json:"id"`
 	ConnID                string              `json:"conn_id"`
 	Protocol              string              `json:"protocol"`
+	Scheme                string              `json:"scheme,omitempty"`
 	FlowType              string              `json:"flow_type"`
 	State                 string              `json:"state"`
 	Method                string              `json:"method"`
@@ -533,6 +541,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		ID:                    fl.ID,
 		ConnID:                fl.ConnID,
 		Protocol:              fl.Protocol,
+		Scheme:                fl.Scheme,
 		FlowType:              fl.FlowType,
 		State:                 fl.State,
 		Method:                method,

@@ -175,7 +175,7 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 	}
 
 	newFl := &flow.Flow{
-		Protocol: "TCP", FlowType: "bidirectional", State: "complete",
+		Protocol: "TCP", Scheme: "tcp", FlowType: "bidirectional", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 		ConnInfo: &flow.ConnectionInfo{ServerAddr: targetAddr},
 	}
@@ -757,8 +757,13 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 		tags = map[string]string{"tag": params.Tag}
 	}
 
+	// Determine scheme from the handshake URL.
+	wsScheme := "ws"
+	if wr.upgradeURL != nil && (wr.upgradeURL.Scheme == "wss" || wr.upgradeURL.Scheme == "https") {
+		wsScheme = "wss"
+	}
 	newFl := &flow.Flow{
-		Protocol: "WebSocket", FlowType: "bidirectional", State: "complete",
+		Protocol: "WebSocket", Scheme: wsScheme, FlowType: "bidirectional", State: "complete",
 		Timestamp: wr.start, Duration: wr.duration, Tags: tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {

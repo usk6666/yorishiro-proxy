@@ -490,8 +490,13 @@ func recordMacroStepSessionDeps(
 		"macro_step": req.StepID,
 	}
 
+	scheme := "http"
+	if httpReq.URL != nil && httpReq.URL.Scheme == "https" {
+		scheme = "https"
+	}
 	fl := &flow.Flow{
 		Protocol:  "HTTP/1.x",
+		Scheme:    scheme,
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,

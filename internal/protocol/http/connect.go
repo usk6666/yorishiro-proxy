@@ -245,6 +245,7 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 		connID:       connID,
 		clientAddr:   clientAddr,
 		protocol:     socks5Protocol(ctx, "HTTP/1.x"),
+		scheme:       socks5Scheme(ctx, "http"),
 		start:        start,
 		tags:         mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},
@@ -660,6 +661,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		connID:     connID,
 		clientAddr: clientAddr,
 		protocol:   socks5Protocol(ctx, "HTTPS"),
+		scheme:     socks5Scheme(ctx, "https"),
 		start:      start,
 		tags:       mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo: &flow.ConnectionInfo{
@@ -890,6 +892,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "HTTPS",
+		Scheme:    "https",
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
@@ -980,6 +983,7 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *gohttp.Req
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "HTTPS",
+		Scheme:    "https",
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
