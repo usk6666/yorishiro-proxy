@@ -274,10 +274,9 @@ func TestIntegration_SOCKS5_HTTPThroughProxy(t *testing.T) {
 			break
 		}
 	}
-	// Note: SOCKS5 handler with PostHandshake=nil does a simple TCP relay
-	// without flow recording. This assertion documents the current behavior.
-	// When SOCKS5 flow recording is implemented, update this to require flows.
-	t.Logf("flows recorded after SOCKS5 session: %d", len(flows))
+	if len(flows) == 0 {
+		t.Errorf("expected flows to be recorded after SOCKS5 session, got 0")
+	}
 }
 
 func TestIntegration_SOCKS5_WithAuth(t *testing.T) {

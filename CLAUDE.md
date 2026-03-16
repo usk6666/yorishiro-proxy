@@ -101,6 +101,7 @@ make clean          # 成果物削除
 - `context.Context` は第一引数で伝播
 - パッケージコメントは doc.go または先頭ファイルに記載
 - テストは `_test.go` ファイル、テーブル駆動テスト推奨
+- `t.Logf` で未検証を記録するパターンは禁止。未実装機能は `t.Skip("not yet implemented: <issue-id>")` を使用すること
 - `internal/` 配下は外部公開しない
 
 ## 依存ライセンスポリシー

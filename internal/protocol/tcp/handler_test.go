@@ -547,7 +547,7 @@ func TestHandler_Handle_MultipleChunks(t *testing.T) {
 	if len(messages) < 6 {
 		// 3 sends + 3 receives = at least 6 messages.
 		// May have more if chunks get split.
-		t.Logf("recorded %d messages (expected at least 6)", len(messages))
+		t.Errorf("recorded %d messages (expected at least 6)", len(messages))
 	}
 
 	// Verify sequences are monotonically increasing.
