@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	gohttp "net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -887,7 +887,7 @@ func (tc *transportConn) handleRSTStream(f *frame.Frame) error {
 
 // handleReadError handles errors from the read loop.
 func (tc *transportConn) handleReadError(err error) {
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		tc.logger.Debug("upstream connection closed by server")
 	} else {
 		tc.logger.Error("upstream read error", "error", err)
@@ -918,8 +918,13 @@ func (tc *transportConn) close() {
 
 // buildResponse converts stream state into an *http.Response.
 func (tc *transportConn) buildResponse(req *gohttp.Request, ss *streamState) (*gohttp.Response, error) {
+	// Create a shallow copy of the request so we don't mutate the caller's req.URL.
+	reqCopy := *req
+	urlCopy := *req.URL
+	reqCopy.URL = &urlCopy
+
 	resp := &gohttp.Response{
-		Request: req,
+		Request: &reqCopy,
 		Header:  make(gohttp.Header),
 		Trailer: make(gohttp.Header),
 	}
@@ -960,14 +965,6 @@ func (tc *transportConn) buildResponse(req *gohttp.Request, ss *streamState) (*g
 	// Extract TLS state.
 	if tlsState, ok := httputil.TLSConnectionState(tc.netConn); ok {
 		resp.TLS = &tlsState
-	}
-
-	// Set the URL for the response (used by redirect handling).
-	resp.Request.URL = &url.URL{
-		Scheme:   req.URL.Scheme,
-		Host:     req.URL.Host,
-		Path:     req.URL.Path,
-		RawQuery: req.URL.RawQuery,
 	}
 
 	return resp, nil
