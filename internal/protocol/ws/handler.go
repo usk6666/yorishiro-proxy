@@ -114,8 +114,29 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	// Record the Upgrade response as the second message (sequence=1, direction="receive").
 	h.recordUpgradeResponse(ctx, fl.ID, upgradeResp, start)
 
+	// Parse permessage-deflate extension from the upgrade response.
+	var clientDeflate, serverDeflate *deflateState
+	if upgradeResp != nil {
+		extHeader := upgradeResp.Header.Get("Sec-WebSocket-Extensions")
+		clientParams, serverParams := parseDeflateExtension(extHeader)
+		if clientParams.enabled {
+			clientDeflate = newDeflateState(clientParams)
+			defer clientDeflate.close()
+			h.logger.Debug("websocket permessage-deflate enabled for client->server",
+				"flow_id", fl.ID, "context_takeover", clientParams.contextTakeover,
+				"window_bits", clientParams.windowBits)
+		}
+		if serverParams.enabled {
+			serverDeflate = newDeflateState(serverParams)
+			defer serverDeflate.close()
+			h.logger.Debug("websocket permessage-deflate enabled for server->client",
+				"flow_id", fl.ID, "context_takeover", serverParams.contextTakeover,
+				"window_bits", serverParams.windowBits)
+		}
+	}
+
 	// Run bidirectional frame relay.
-	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq, connInfo)
+	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq, connInfo, clientDeflate, serverDeflate)
 
 	// Update flow state to complete.
 	duration := time.Since(start)
@@ -190,7 +211,7 @@ func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp
 // between the client and upstream server. Each frame is recorded to the
 // flow store. The relay stops when a Close frame is received, a connection
 // error occurs, or the context is cancelled.
-func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
+func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, clientDeflate, serverDeflate *deflateState) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -220,7 +241,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start, upgradeReq, connInfo)
+		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start, upgradeReq, connInfo, clientDeflate)
 		errCh <- err
 		cancel()
 	}()
@@ -229,7 +250,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start, upgradeReq, connInfo)
+		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start, upgradeReq, connInfo, serverDeflate)
 		errCh <- err
 		cancel()
 	}()
@@ -256,10 +277,11 @@ type hookPair struct {
 
 // fragmentState tracks the state of fragmented message assembly.
 type fragmentState struct {
-	buf      []byte
-	opcode   byte
-	active   bool
-	dropping bool // true when the initial text frame was blocked by safety filter
+	buf        []byte
+	opcode     byte
+	active     bool
+	dropping   bool // true when the initial text frame was blocked by safety filter
+	compressed bool // true when the initial frame had RSV1 set (permessage-deflate)
 }
 
 // relayDirection reads frames from src, records them, and writes them to dst.
@@ -272,7 +294,7 @@ type fragmentState struct {
 //
 // If a plugin returns ActionDrop, the frame is silently skipped.
 // If a plugin modifies the payload via result Data, the modified payload is used.
-func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
+func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, ds *deflateState) error {
 	hooks := resolveHookPair(direction)
 
 	var frag fragmentState
@@ -305,7 +327,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			continue
 		}
 
-		done, err := h.processFrameAfterHooks(ctx, frame, flowID, direction, hooks.direction, seq, start, dst, &frag, upgradeReq)
+		done, err := h.processFrameAfterHooks(ctx, frame, flowID, direction, hooks.direction, seq, start, dst, &frag, upgradeReq, ds)
 		if err != nil {
 			return err
 		}
@@ -318,14 +340,20 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 // processFrameAfterHooks applies safety filter, intercept check, forwarding, and
 // recording for a single frame. Returns (done, err) where done=true means a Close
 // frame was processed and the relay should terminate.
-func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, upgradeReq *gohttp.Request) (bool, error) {
+//
+// When permessage-deflate is active (ds != nil and ds.params.enabled), data frames
+// with RSV1 set are decompressed for recording but forwarded as-is on the wire.
+func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, upgradeReq *gohttp.Request, ds *deflateState) (bool, error) {
+	// Determine if this frame is permessage-deflate compressed.
+	compressed := !frame.IsControl() && frame.RSV1 && ds != nil && ds.params.enabled
+
 	// Safety filter: apply to text frames only (opcode 0x1).
 	safetyMeta, rawPayload, blocked := h.applySafetyToFrame(frame, direction, upgradeReq, flowID)
 	if blocked {
 		if !frame.Fin {
 			frag.dropping = true
 		}
-		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
+		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta, compressed)
 		return false, nil
 	}
 
@@ -351,7 +379,7 @@ func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flow
 		recordPayload = rawPayload
 	}
 
-	err := h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta)
+	err := h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta, ds, compressed)
 	return false, err
 }
 
@@ -392,7 +420,7 @@ func (h *Handler) handleBlockedFragment(ctx context.Context, frame *Frame, frag 
 	}
 	h.logger.Debug("websocket continuation frame dropped (initial fragment was blocked)",
 		"flow_id", flowID, "direction", direction, "fin", frame.Fin)
-	h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, nil)
+	h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, nil, false)
 	if frame.Fin {
 		frag.dropping = false
 	}
@@ -423,18 +451,18 @@ func forwardFrame(dst net.Conn, frame *Frame, direction string) error {
 // handleDataFrameWithPayload processes a data frame for fragment assembly and recording,
 // using recordPayload for the flow store (which may differ from frame.Payload when the
 // output filter has masked the forwarded payload but raw data should be recorded).
-func (h *Handler) handleDataFrameWithPayload(ctx context.Context, dst net.Conn, frame *Frame, recordPayload []byte, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) error {
+func (h *Handler) handleDataFrameWithPayload(ctx context.Context, dst net.Conn, frame *Frame, recordPayload []byte, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata, ds *deflateState, compressed bool) error {
 	if frame.Opcode != OpcodeContinuation {
-		h.handleNewDataFrameWithPayload(ctx, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta)
+		h.handleNewDataFrameWithPayload(ctx, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta, ds, compressed)
 		return nil
 	}
-	return h.handleContinuationFrame(ctx, dst, frame, frag, flowID, direction, seq, start)
+	return h.handleContinuationFrame(ctx, dst, frame, frag, flowID, direction, seq, start, ds, compressed)
 }
 
 // handleNewDataFrameWithPayload processes a non-continuation data frame, using
 // recordPayload for recording (may differ from frame.Payload when output filter
 // has masked the forwarded data).
-func (h *Handler) handleNewDataFrameWithPayload(ctx context.Context, frame *Frame, recordPayload []byte, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) {
+func (h *Handler) handleNewDataFrameWithPayload(ctx context.Context, frame *Frame, recordPayload []byte, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata, ds *deflateState, compressed bool) {
 	if frag.active {
 		h.logger.Warn("websocket protocol violation: new data frame while fragment pending",
 			"flow_id", flowID, "direction", direction)
@@ -442,18 +470,21 @@ func (h *Handler) handleNewDataFrameWithPayload(ctx context.Context, frame *Fram
 		frag.active = false
 	}
 	if frame.Fin {
-		h.recordDataMessage(ctx, frame.Opcode, recordPayload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
+		// Decompress if permessage-deflate is active and RSV1 is set.
+		decompressedPayload := h.decompressForRecord(recordPayload, ds, compressed, flowID, direction)
+		h.recordDataMessage(ctx, frame.Opcode, decompressedPayload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta, compressed)
 	} else {
 		frag.opcode = frame.Opcode
 		frag.buf = make([]byte, len(recordPayload))
 		copy(frag.buf, recordPayload)
 		frag.active = true
+		frag.compressed = compressed
 	}
 }
 
 // handleContinuationFrame processes a continuation frame for fragment assembly.
 // Returns an error if the accumulated message exceeds the size limit.
-func (h *Handler) handleContinuationFrame(ctx context.Context, dst net.Conn, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time) error {
+func (h *Handler) handleContinuationFrame(ctx context.Context, dst net.Conn, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time, ds *deflateState, compressed bool) error {
 	if !frag.active {
 		h.logger.Warn("websocket protocol violation: continuation frame without initial fragment",
 			"flow_id", flowID, "direction", direction)
@@ -464,9 +495,14 @@ func (h *Handler) handleContinuationFrame(ctx context.Context, dst net.Conn, fra
 	}
 	frag.buf = append(frag.buf, frame.Payload...)
 	if frame.Fin {
-		h.recordDataMessage(ctx, frag.opcode, frag.buf, frame.Masked, frame.Fin, flowID, direction, seq, start, nil)
+		// Decompress the assembled message if it was a compressed fragmented message.
+		recordBuf := frag.buf
+		wasCompressed := frag.compressed
+		recordBuf = h.decompressForRecord(recordBuf, ds, wasCompressed, flowID, direction)
+		h.recordDataMessage(ctx, frag.opcode, recordBuf, frame.Masked, frame.Fin, flowID, direction, seq, start, nil, wasCompressed)
 		frag.buf = nil
 		frag.active = false
+		frag.compressed = false
 	}
 	return nil
 }
@@ -775,7 +811,7 @@ func (h *Handler) applyInterceptAction(ctx context.Context, action intercept.Int
 		if !frame.Fin && !frame.IsControl() {
 			frag.dropping = true
 		}
-		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
+		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta, false)
 
 	case intercept.ActionModifyAndForward:
 		modifiedPayload := frame.Payload
@@ -803,7 +839,9 @@ func (h *Handler) applyInterceptAction(ctx context.Context, action intercept.Int
 		if rawPayload != nil {
 			recordPayload = rawPayload
 		}
-		h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta)
+		// Intercepted frames are not decompressed here since the intercept
+		// operates on the raw wire data.
+		h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta, nil, false)
 
 	default:
 		// ActionRelease — forward as-is.
@@ -815,7 +853,9 @@ func (h *Handler) applyInterceptAction(ctx context.Context, action intercept.Int
 		if rawPayload != nil {
 			recordPayload = rawPayload
 		}
-		h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta)
+		// Intercepted frames are not decompressed here since the intercept
+		// operates on the raw wire data.
+		h.handleDataFrameWithPayload(ctx, dst, frame, recordPayload, frag, flowID, direction, seq, start, safetyMeta, nil, false)
 	}
 }
 
@@ -827,10 +867,27 @@ func truncateForLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// decompressForRecord decompresses payload for recording when permessage-deflate
+// is active. The original compressed frame is forwarded as-is on the wire; only
+// the stored copy is decompressed so that query results are human/AI-readable.
+func (h *Handler) decompressForRecord(payload []byte, ds *deflateState, compressed bool, flowID, direction string) []byte {
+	if !compressed || ds == nil || !ds.params.enabled {
+		return payload
+	}
+	decompressed, err := ds.decompress(payload, config.MaxWebSocketRecordPayloadSize)
+	if err != nil {
+		h.logger.Warn("websocket permessage-deflate decompress failed, storing compressed",
+			"flow_id", flowID, "direction", direction, "error", err)
+		return payload
+	}
+	return decompressed
+}
+
 // recordDataMessage records a complete WebSocket data message (text or binary)
 // to the flow store. If safetyMeta is non-nil, safety filter metadata is
-// attached to the recorded message.
-func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, fin bool, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata) {
+// attached to the recorded message. If compressed is true, the message was
+// originally compressed with permessage-deflate (metadata is annotated).
+func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []byte, masked bool, fin bool, flowID, direction string, seq *atomic.Int64, start time.Time, safetyMeta *safetyMetadata, compressed bool) {
 	if h.store == nil {
 		return
 	}
@@ -841,6 +898,10 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 		"opcode": strconv.Itoa(int(opcode)),
 		"fin":    strconv.FormatBool(fin),
 		"masked": strconv.FormatBool(masked),
+	}
+
+	if compressed {
+		metadata["compressed"] = "true"
 	}
 
 	// Attach safety filter metadata if present.

@@ -437,6 +437,11 @@ func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr
 	// Ensure required WebSocket headers are present.
 	ensureWebSocketHeaders(httpReq.Header)
 
+	// Remove Sec-WebSocket-Extensions to prevent permessage-deflate negotiation.
+	// The stored message bodies are already decompressed plaintext, so resend
+	// must use uncompressed frames to avoid double-compression or context mismatch.
+	httpReq.Header.Del("Sec-WebSocket-Extensions")
+
 	// Write the request to the connection.
 	if err := httpReq.Write(conn); err != nil {
 		return nil, nil, fmt.Errorf("write upgrade request: %w", err)
@@ -597,8 +602,12 @@ func (s *Server) resolveWebSocketTargetAddr(ctx context.Context, fl *flow.Flow, 
 }
 
 // resolveWebSocketBody determines the body to send, applying any overrides.
+// For binary messages, the body may be stored in RawBytes rather than Body.
 func resolveWebSocketBody(targetMsg *flow.Message, params resendParams) ([]byte, error) {
 	sendBody := targetMsg.Body
+	if len(sendBody) == 0 && len(targetMsg.RawBytes) > 0 {
+		sendBody = targetMsg.RawBytes
+	}
 	if params.OverrideBody != nil {
 		sendBody = []byte(*params.OverrideBody)
 	}
