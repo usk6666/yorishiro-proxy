@@ -331,8 +331,7 @@ func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Respo
 	for key := range resp.Trailer {
 		trailerKeys = append(trailerKeys, key)
 	}
-	grpcTrailerKeys := []string{"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"}
-	for _, gk := range grpcTrailerKeys {
+	for _, gk := range grpcTrailerKeyList {
 		found := false
 		for _, tk := range trailerKeys {
 			if strings.EqualFold(tk, gk) {
