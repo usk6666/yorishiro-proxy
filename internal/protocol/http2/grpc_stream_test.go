@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	gohttp "net/http"
 	"net/http/httptest"
@@ -359,5 +360,235 @@ func TestHandleGRPCStream_MultipleRequestFrames(t *testing.T) {
 	}
 	if sendCount < len(payloads) {
 		t.Errorf("expected at least %d send messages, got %d", len(payloads), sendCount)
+	}
+}
+
+// TestIsGRPCTrailersOnly verifies detection of gRPC Trailers-Only responses.
+func TestIsGRPCTrailersOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *gohttp.Response
+		want bool
+	}{
+		{
+			name: "trailers-only: grpc-status in header, empty trailer",
+			resp: &gohttp.Response{
+				Header:  gohttp.Header{"Grpc-Status": {"0"}, "Content-Type": {"application/grpc"}},
+				Trailer: gohttp.Header{},
+			},
+			want: true,
+		},
+		{
+			name: "trailers-only: grpc-status in header, nil trailer",
+			resp: &gohttp.Response{
+				Header:  gohttp.Header{"Grpc-Status": {"0"}},
+				Trailer: nil,
+			},
+			want: true,
+		},
+		{
+			name: "normal response: grpc-status in trailer",
+			resp: &gohttp.Response{
+				Header:  gohttp.Header{"Content-Type": {"application/grpc"}},
+				Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+			},
+			want: false,
+		},
+		{
+			name: "no grpc-status at all",
+			resp: &gohttp.Response{
+				Header:  gohttp.Header{"Content-Type": {"application/grpc"}},
+				Trailer: gohttp.Header{},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isGRPCTrailersOnly(tt.resp)
+			if got != tt.want {
+				t.Errorf("isGRPCTrailersOnly() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsGRPCTrailerKey verifies gRPC trailer key detection.
+func TestIsGRPCTrailerKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"Grpc-Status", true},
+		{"Grpc-Message", true},
+		{"Grpc-Status-Details-Bin", true},
+		{"grpc-status", true},
+		{"GRPC-STATUS", true},
+		{"Content-Type", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			got := isGRPCTrailerKey(tt.key)
+			if got != tt.want {
+				t.Errorf("isGRPCTrailerKey(%q) = %v, want %v", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandleGRPCStream_TrailersOnly verifies that a gRPC Trailers-Only
+// response (single HEADERS frame with END_STREAM containing grpc-status)
+// is correctly proxied. This is the scenario where Go's http2.Transport
+// places grpc-status into resp.Header instead of resp.Trailer.
+func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
+	tests := []struct {
+		name       string
+		grpcStatus string
+		grpcMsg    string
+	}{
+		{
+			name:       "OK status",
+			grpcStatus: "0",
+			grpcMsg:    "",
+		},
+		{
+			name:       "error status with message",
+			grpcStatus: "5",
+			grpcMsg:    "not found",
+		},
+		{
+			name:       "permission denied",
+			grpcStatus: "7",
+			grpcMsg:    "access denied",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Upstream sends a Trailers-Only response: gRPC status in headers
+			// with no body. Go's http2.Transport will merge these into resp.Header.
+			upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/grpc")
+				w.Header().Set("Grpc-Status", tt.grpcStatus)
+				if tt.grpcMsg != "" {
+					w.Header().Set("Grpc-Message", tt.grpcMsg)
+				}
+				w.WriteHeader(gohttp.StatusOK)
+				// No body — Trailers-Only pattern.
+			}))
+			defer upstream.Close()
+
+			store := &mockStore{}
+			handler := NewHandler(store, testutil.DiscardLogger())
+			grpcHandler := protogrpc.NewHandler(store, testutil.DiscardLogger())
+			handler.SetGRPCHandler(grpcHandler)
+
+			proxyAddr, cancel := startH2CProxyListener(t, handler,
+				fmt.Sprintf("conn-trailers-only-%s", tt.name), "127.0.0.1:9999", "", tlsMetadata{})
+			defer cancel()
+
+			client := newH2CClientForAddr(proxyAddr)
+
+			req, _ := gohttp.NewRequest("POST",
+				upstream.URL+"/test.Service/TrailersOnly", gohttp.NoBody)
+			req.Header.Set("Content-Type", "application/grpc")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("client request: %v", err)
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, resp.Body)
+
+			if resp.StatusCode != gohttp.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+			}
+
+			// gRPC clients read grpc-status from trailers. Verify it's present.
+			grpcStatus := resp.Trailer.Get("Grpc-Status")
+			if grpcStatus == "" {
+				// Also check Header for TrailerPrefix pattern (h2c client behavior).
+				grpcStatus = resp.Header.Get(gohttp.TrailerPrefix + "Grpc-Status")
+			}
+			if grpcStatus != tt.grpcStatus {
+				t.Errorf("grpc-status = %q, want %q (trailer=%v, header=%v)",
+					grpcStatus, tt.grpcStatus, resp.Trailer, resp.Header)
+			}
+
+			if tt.grpcMsg != "" {
+				grpcMsg := resp.Trailer.Get("Grpc-Message")
+				if grpcMsg == "" {
+					grpcMsg = resp.Header.Get(gohttp.TrailerPrefix + "Grpc-Message")
+				}
+				if grpcMsg != tt.grpcMsg {
+					t.Errorf("grpc-message = %q, want %q", grpcMsg, tt.grpcMsg)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleGRPCStream_NormalTrailers verifies that a normal gRPC response
+// (with body and proper trailers) still works correctly after the
+// Trailers-Only fix.
+func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
+	respPayload := []byte("normal-response")
+
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
+		w.WriteHeader(gohttp.StatusOK)
+		w.Write(protogrpc.EncodeFrame(false, respPayload))
+		w.Header().Set("Grpc-Status", "0")
+		w.Header().Set("Grpc-Message", "")
+	}))
+	defer upstream.Close()
+
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	grpcHandler := protogrpc.NewHandler(store, testutil.DiscardLogger())
+	handler.SetGRPCHandler(grpcHandler)
+
+	proxyAddr, cancel := startH2CProxyListener(t, handler,
+		"conn-normal-trailers", "127.0.0.1:9999", "", tlsMetadata{})
+	defer cancel()
+
+	client := newH2CClientForAddr(proxyAddr)
+
+	reqBody := protogrpc.EncodeFrame(false, []byte("request"))
+	req, _ := gohttp.NewRequest("POST",
+		upstream.URL+"/test.Service/Normal", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/grpc")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+
+	// Verify response body contains the gRPC frame.
+	frames, err := protogrpc.ReadAllFrames(body)
+	if err != nil {
+		t.Fatalf("parse response frames: %v", err)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 response frame, got %d", len(frames))
+	}
+	if string(frames[0].Payload) != string(respPayload) {
+		t.Errorf("response payload = %q, want %q", frames[0].Payload, respPayload)
 	}
 }

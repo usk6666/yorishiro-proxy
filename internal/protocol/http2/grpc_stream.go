@@ -319,7 +319,14 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, outReq *gohttp.Request, re
 
 // writeGRPCResponseHeaders writes the upstream response headers to the client,
 // declaring known gRPC trailer keys for proper HTTP/2 trailer framing.
+//
+// For Trailers-Only responses (where Go's http2.Transport places all headers
+// including gRPC trailer keys like Grpc-Status into resp.Header with an empty
+// resp.Trailer), gRPC trailer keys are excluded from the initial HEADERS frame.
+// They will be written as trailers by writeGRPCTrailers instead.
 func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Response) {
+	trailersOnly := isGRPCTrailersOnly(resp)
+
 	var trailerKeys []string
 	for key := range resp.Trailer {
 		trailerKeys = append(trailerKeys, key)
@@ -343,6 +350,12 @@ func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Respo
 
 	for key, vals := range resp.Header {
 		if strings.EqualFold(key, "Trailer") {
+			continue
+		}
+		// In Trailers-Only responses, gRPC trailer keys appear in resp.Header
+		// because Go's http2.Transport merges them. Exclude them from the
+		// initial HEADERS so they can be sent as proper trailers.
+		if trailersOnly && isGRPCTrailerKey(key) {
 			continue
 		}
 		for _, val := range vals {
@@ -462,10 +475,31 @@ func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamS
 }
 
 // writeGRPCTrailers writes the upstream response trailers to the client.
+//
+// For Trailers-Only responses, Go's http2.Transport places all headers
+// (including gRPC trailer keys like Grpc-Status) into resp.Header and leaves
+// resp.Trailer empty. In this case, gRPC trailer keys are extracted from
+// resp.Header as a fallback and written with the TrailerPrefix so that the
+// frameResponseWriter.finish() method can collect and send them as proper
+// HTTP/2 trailing HEADERS with END_STREAM.
 func (h *Handler) writeGRPCTrailers(sc *streamContext, resp *gohttp.Response) {
 	for key, vals := range resp.Trailer {
 		for _, val := range vals {
 			sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+		}
+	}
+
+	// Trailers-Only fallback: if resp.Trailer is empty, extract gRPC trailer
+	// keys from resp.Header. This handles the case where Go's http2.Transport
+	// merges all headers from a single HEADERS+END_STREAM frame into
+	// resp.Header (the Trailers-Only encoding per gRPC spec).
+	if len(resp.Trailer) == 0 {
+		for _, key := range grpcTrailerKeyList {
+			if vals, ok := resp.Header[key]; ok {
+				for _, val := range vals {
+					sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+				}
+			}
 		}
 	}
 }
@@ -504,6 +538,36 @@ func (h *Handler) finalizeGRPCStream(sc *streamContext, state *grpcStreamState, 
 		"req_frames", reqFrames,
 		"resp_frames", respFrames,
 		"duration_ms", duration.Milliseconds())
+}
+
+// grpcTrailerKeyList is the canonical list of gRPC trailer header keys.
+var grpcTrailerKeyList = []string{"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"}
+
+// isGRPCTrailersOnly detects a gRPC Trailers-Only response. Per the gRPC
+// HTTP/2 spec, a Trailers-Only response is a single HEADERS frame containing
+// both response headers and trailers (including grpc-status) with END_STREAM.
+//
+// Go's http2.Transport maps this into resp.Header containing grpc-status and
+// resp.Trailer being empty, because there is no separate trailing HEADERS frame.
+func isGRPCTrailersOnly(resp *gohttp.Response) bool {
+	if len(resp.Trailer) > 0 {
+		return false
+	}
+	// Check if Grpc-Status is present in resp.Header (case-insensitive via
+	// Go's canonical header key format).
+	_, ok := resp.Header["Grpc-Status"]
+	return ok
+}
+
+// isGRPCTrailerKey reports whether the header key is a gRPC trailer key
+// (case-insensitive comparison).
+func isGRPCTrailerKey(key string) bool {
+	for _, gk := range grpcTrailerKeyList {
+		if strings.EqualFold(key, gk) {
+			return true
+		}
+	}
+	return false
 }
 
 // joinTrailerKeys joins trailer key names with ", " for the Trailer header.
