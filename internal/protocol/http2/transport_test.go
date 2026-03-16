@@ -114,9 +114,7 @@ func (s *pipeServer) handshake(t *testing.T) {
 		t.Fatalf("read client SETTINGS ACK: %v", err)
 	}
 	// Accept SETTINGS ACK or any other valid frame (e.g. WINDOW_UPDATE).
-	if f.Header.Type == frame.TypeSettings && f.Header.Flags.Has(frame.FlagAck) {
-		// Expected.
-	}
+	_ = f.Header.Type == frame.TypeSettings && f.Header.Flags.Has(frame.FlagAck)
 }
 
 // readRequest reads a complete request (HEADERS + DATA) from the client.

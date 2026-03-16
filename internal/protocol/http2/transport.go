@@ -997,7 +997,7 @@ func (tc *transportConn) buildResponse(req *gohttp.Request, ss *streamState) (*g
 			// Skip other pseudo-headers.
 			continue
 		}
-		resp.Header.Add(gohttp.CanonicalHeaderKey(hf.Name), hf.Value)
+		resp.Header.Add(hf.Name, hf.Value)
 	}
 
 	if resp.StatusCode == 0 {
@@ -1008,7 +1008,7 @@ func (tc *transportConn) buildResponse(req *gohttp.Request, ss *streamState) (*g
 		if strings.HasPrefix(hf.Name, ":") {
 			continue
 		}
-		resp.Trailer.Add(gohttp.CanonicalHeaderKey(hf.Name), hf.Value)
+		resp.Trailer.Add(hf.Name, hf.Value)
 	}
 
 	resp.Body = io.NopCloser(bytes.NewReader(ss.data))
