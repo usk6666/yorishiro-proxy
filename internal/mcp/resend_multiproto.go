@@ -704,8 +704,12 @@ func (s *Server) resolveWebSocketTargetAddr(ctx context.Context, fl *flow.Flow, 
 }
 
 // resolveWebSocketBody determines the body to send, applying any overrides.
+// For binary messages, the body may be stored in RawBytes rather than Body.
 func resolveWebSocketBody(targetMsg *flow.Message, params resendParams) ([]byte, error) {
 	sendBody := targetMsg.Body
+	if len(sendBody) == 0 && len(targetMsg.RawBytes) > 0 {
+		sendBody = targetMsg.RawBytes
+	}
 	if params.OverrideBody != nil {
 		sendBody = []byte(*params.OverrideBody)
 	}
