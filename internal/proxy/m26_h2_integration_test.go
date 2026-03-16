@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1085,14 +1086,10 @@ func TestM26_H2C_MultipleRequests_SameConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var requestCount int32
-	var mu sync.Mutex
+	var requestCount atomic.Int32
 
 	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		mu.Lock()
-		requestCount++
-		n := requestCount
-		mu.Unlock()
+		n := requestCount.Add(1)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "request-%d", n)
 	}))
