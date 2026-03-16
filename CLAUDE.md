@@ -7,13 +7,34 @@ MCP (Model Context Protocol) サーバとして動作し、脆弱性診断のた
 
 ## アーキテクチャ
 
+### 原則: L7-first, L4-capable
+
+1. **デフォルトの操作インターフェースは構造化された L7 ビュー** — AI エージェントの Token 効率を優先し、method, URL, headers, body 等の構造化データで通信を表現する
+2. **全プロトコルで raw bytes の記録・閲覧・改変が可能であること** — 診断ツールとして、プロトコルレベルの異常検出・再現ができなければならない（SOCKS5 など純粋なトランスポート層プロトコルはトンネル先プロトコルに対して適用）
+3. **L7 パースは raw bytes の上に乗るオーバーレイであり、wire-observed な raw bytes スナップショット自体を破壊・改変してはならない** — 記録された raw bytes は常にワイヤー上の元データを反映し、改変は必ず別の派生データ（例: modified variant）として扱う
+
+### パイプライン
+
 ```
-Layer 4 TCP リスナ
+TCP リスナ (Layer 4)
   → プロトコル検出 (peek bytes)
     → プロトコルハンドラ (HTTP/S, HTTP/2, gRPC, WebSocket, Raw TCP)
-      → セッション記録 (Request/Response)
+      → セッション記録 (L7 構造化 + L4 raw bytes)
         → MCP Tool (傍受・リプレイ・検索)
 ```
+
+### プロトコル別 L7/L4 対応状況
+
+| プロトコル | L7 構造化ビュー | L4 raw bytes | 備考 |
+|-----------|---------------|-------------|------|
+| HTTP/1.x | YES | YES (captureReader) | intercept raw forwarding は M27 |
+| HTTP/2 | YES | YES (フレーム codec) | M26 で自前フレームエンジン実装 |
+| gRPC | YES | YES (HTTP/2 経由) | |
+| WebSocket | YES | YES (フレーム単位) | |
+| Raw TCP | N/A | YES (バイトストリーム) | |
+| SOCKS5 | N/A | N/A (トランスポート層として自身は対象外) | ハンドシェイク/トンネル後に委譲されたプロトコルで raw bytes/L7 を適用 |
+
+### 設計方針
 
 - Layer 4 (TCP) でコネクションを受け取り、モジュラー化されたプロトコルハンドラにルーティング
 - 外部プロキシライブラリは使用しない — 標準ライブラリベースで自前実装
