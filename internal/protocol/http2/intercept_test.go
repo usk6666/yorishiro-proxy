@@ -45,7 +45,7 @@ func TestInterceptRequest_NoEngineOrQueue(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
 	logger := testutil.DiscardLogger()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when engine/queue are nil")
 	}
@@ -63,7 +63,7 @@ func TestInterceptRequest_OnlyEngineNoQueue(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
 	logger := testutil.DiscardLogger()
 
-	_, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	_, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when queue is nil")
 	}
@@ -78,7 +78,7 @@ func TestInterceptRequest_OnlyQueueNoEngine(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
 	logger := testutil.DiscardLogger()
 
-	_, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	_, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when engine is nil")
 	}
@@ -107,7 +107,7 @@ func TestInterceptRequest_NoMatchingRules(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://different.example.com/test", nil)
 	logger := testutil.DiscardLogger()
 
-	_, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	_, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when no rules match")
 	}
@@ -155,7 +155,7 @@ func TestInterceptRequest_Release(t *testing.T) {
 		t.Error("timed out waiting for item in queue")
 	}()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 	wg.Wait()
 
 	if !intercepted {
@@ -200,7 +200,7 @@ func TestInterceptRequest_Drop(t *testing.T) {
 		}
 	}()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
@@ -235,7 +235,7 @@ func TestInterceptRequest_TimeoutAutoRelease(t *testing.T) {
 	logger := testutil.DiscardLogger()
 
 	// Do not respond — let it timeout.
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
@@ -269,7 +269,7 @@ func TestInterceptRequest_TimeoutAutoDrop(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
 	logger := testutil.DiscardLogger()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
@@ -308,7 +308,7 @@ func TestInterceptRequest_ContextCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	action, intercepted := handler.interceptRequest(ctx, req, nil, logger)
+	action, intercepted := handler.interceptRequest(ctx, req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
