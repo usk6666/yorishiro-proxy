@@ -684,6 +684,187 @@ func TestIsHopByHopHeader(t *testing.T) {
 	}
 }
 
+func TestBuildRequestHeaders_TETrailersAllowed(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tc := newTransportConn(nil, logger)
+
+	// te: trailers should be preserved (required for gRPC in HTTP/2).
+	req, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
+	req.Header.Set("Te", "trailers")
+	req.Header.Set("Content-Type", "application/grpc")
+
+	headers := tc.buildRequestHeaders(req)
+
+	var foundTE, foundCT bool
+	for _, hf := range headers {
+		if hf.Name == "te" && hf.Value == "trailers" {
+			foundTE = true
+		}
+		if hf.Name == "content-type" && hf.Value == "application/grpc" {
+			foundCT = true
+		}
+	}
+
+	if !foundTE {
+		t.Error("te: trailers header should be preserved in HTTP/2")
+	}
+	if !foundCT {
+		t.Error("content-type header should be preserved")
+	}
+
+	// te: gzip should be dropped (not allowed in HTTP/2).
+	req2, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
+	req2.Header.Set("Te", "gzip")
+
+	headers2 := tc.buildRequestHeaders(req2)
+	for _, hf := range headers2 {
+		if hf.Name == "te" {
+			t.Errorf("te: %s should be dropped in HTTP/2", hf.Value)
+		}
+	}
+}
+
+func TestSendRequest_BodyCloseOnError(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tc := newTransportConn(nil, logger)
+
+	closed := false
+	body := &errorReadCloser{
+		readErr: io.ErrUnexpectedEOF,
+		onClose: func() { closed = true },
+	}
+
+	req, _ := gohttp.NewRequest("POST", "https://example.com/api", body)
+
+	ctx := context.Background()
+	err := tc.sendRequest(ctx, 1, req)
+	if err == nil {
+		t.Fatal("expected error from broken body reader")
+	}
+
+	if !closed {
+		t.Error("req.Body should be closed even when ReadAll fails")
+	}
+}
+
+// errorReadCloser is a test helper that returns an error on Read.
+type errorReadCloser struct {
+	readErr error
+	onClose func()
+}
+
+func (e *errorReadCloser) Read([]byte) (int, error) {
+	return 0, e.readErr
+}
+
+func (e *errorReadCloser) Close() error {
+	if e.onClose != nil {
+		e.onClose()
+	}
+	return nil
+}
+
+func TestTransportConn_LargeBodyFlowControl(t *testing.T) {
+	clientConn, serverConn := localConnPair(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	server := newPipeServer(serverConn)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tc := newTransportConn(clientConn, logger)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server.handshake(t)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := tc.handshake(ctx); err != nil {
+		t.Fatalf("client handshake: %v", err)
+	}
+	wg.Wait()
+
+	// Use a body larger than the default initial window size (65535).
+	// This exercises the flow control waiting logic.
+	bodySize := 70000
+	bodyData := bytes.Repeat([]byte("A"), bodySize)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Read DATA frames, sending WINDOW_UPDATE as needed to allow flow.
+		// The initial window size is 65535, so we must grant more window for
+		// the 70000-byte body.
+		var headerFragment []byte
+		var streamID uint32
+
+		// Read HEADERS frame.
+		for {
+			f, err := server.reader.ReadFrame()
+			if err != nil {
+				t.Errorf("read frame: %v", err)
+				return
+			}
+			if f.Header.Type == frame.TypeHeaders {
+				streamID = f.Header.StreamID
+				frag, _ := f.HeaderBlockFragment()
+				headerFragment = append(headerFragment, frag...)
+				break
+			}
+		}
+		_ = headerFragment
+
+		// Read DATA frames, granting window as we go.
+		var body []byte
+		for {
+			f, err := server.reader.ReadFrame()
+			if err != nil {
+				t.Errorf("read DATA: %v", err)
+				return
+			}
+			switch f.Header.Type {
+			case frame.TypeData:
+				payload, _ := f.DataPayload()
+				body = append(body, payload...)
+				// Send WINDOW_UPDATE for connection and stream.
+				if len(payload) > 0 {
+					server.writer.WriteWindowUpdate(0, uint32(len(payload)))        //nolint:errcheck
+					server.writer.WriteWindowUpdate(streamID, uint32(len(payload))) //nolint:errcheck
+				}
+				if f.Header.Flags.Has(frame.FlagEndStream) {
+					goto done
+				}
+			case frame.TypeWindowUpdate:
+				// Ignore.
+			default:
+				// Skip other frames.
+			}
+		}
+	done:
+		if len(body) != bodySize {
+			t.Errorf("request body length = %d, want %d", len(body), bodySize)
+		}
+		server.sendResponse(t, streamID, 200, nil, []byte("ok"))
+	}()
+
+	req, _ := gohttp.NewRequestWithContext(ctx, "POST", "https://example.com/upload",
+		io.NopCloser(bytes.NewReader(bodyData)))
+
+	result, err := tc.roundTrip(ctx, req)
+	if err != nil {
+		t.Fatalf("roundTrip with large body: %v", err)
+	}
+	wg.Wait()
+
+	if result.Response.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", result.Response.StatusCode)
+	}
+}
+
 func TestTransportConn_AllocStreamID(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	tc := newTransportConn(nil, logger)

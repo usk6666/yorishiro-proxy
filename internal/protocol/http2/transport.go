@@ -251,6 +251,10 @@ type streamState struct {
 	headers []hpack.HeaderField
 	// data collects response DATA payloads.
 	data []byte
+	// headerBuf accumulates HEADERS/CONTINUATION fragments before END_HEADERS.
+	// Kept separate from data to prevent trailer header fragments from
+	// overwriting accumulated response body bytes.
+	headerBuf []byte
 	// rawFrames collects raw frame bytes for L4 recording.
 	rawFrames [][]byte
 	// done is sent the completed response (or an error).
@@ -304,7 +308,11 @@ func (tc *transportConn) handshake(ctx context.Context) error {
 	go func() {
 		for {
 			f, err := tc.reader.ReadFrame()
-			serverFrames <- frameReadResult{f, err}
+			select {
+			case serverFrames <- frameReadResult{f, err}:
+			case <-tc.readLoopDone:
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -412,7 +420,7 @@ func (tc *transportConn) roundTrip(ctx context.Context, req *gohttp.Request) (*R
 	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
 
 	// Send request.
-	if err := tc.sendRequest(streamID, req); err != nil {
+	if err := tc.sendRequest(ctx, streamID, req); err != nil {
 		return nil, fmt.Errorf("send request on stream %d: %w", streamID, err)
 	}
 
@@ -441,34 +449,35 @@ func (tc *transportConn) roundTrip(ctx context.Context, req *gohttp.Request) (*R
 }
 
 // sendRequest serializes and sends the HTTP request as HTTP/2 frames.
-func (tc *transportConn) sendRequest(streamID uint32, req *gohttp.Request) error {
+func (tc *transportConn) sendRequest(ctx context.Context, streamID uint32, req *gohttp.Request) error {
 	headers := tc.buildRequestHeaders(req)
 	fragment := tc.encodeHeaders(headers)
 
 	// Read request body if present.
 	var body []byte
 	if req.Body != nil {
+		defer req.Body.Close()
 		var err error
 		body, err = io.ReadAll(req.Body)
 		if err != nil {
 			return fmt.Errorf("read request body: %w", err)
 		}
-		req.Body.Close()
 	}
 
 	endStream := len(body) == 0
 
+	// Send HEADERS frame(s) under writeMu.
 	tc.writeMu.Lock()
-	defer tc.writeMu.Unlock()
-
-	// Send HEADERS frame(s).
-	if err := tc.writeHeaderFrames(streamID, endStream, fragment); err != nil {
+	err := tc.writeHeaderFrames(streamID, endStream, fragment)
+	tc.writeMu.Unlock()
+	if err != nil {
 		return err
 	}
 
-	// Send DATA frame(s) if there's a body.
+	// Send DATA frame(s) if there's a body. writeDataFrames acquires
+	// writeMu per-chunk so that flow control waits do not block other writes.
 	if len(body) > 0 {
-		if err := tc.writeDataFrames(streamID, body); err != nil {
+		if err := tc.writeDataFrames(ctx, streamID, body); err != nil {
 			return err
 		}
 		// Transition to half-closed (local) after sending END_STREAM.
@@ -508,7 +517,18 @@ func (tc *transportConn) buildRequestHeaders(req *gohttp.Request) []hpack.Header
 	for name, values := range req.Header {
 		lower := strings.ToLower(name)
 		// Skip hop-by-hop and HTTP/2 forbidden headers.
-		if isHopByHopHeader(lower) || lower == "host" {
+		if lower == "host" {
+			continue
+		}
+		if isHopByHopHeader(lower) {
+			// te: trailers is allowed in HTTP/2 (RFC 9113 Section 8.2.2) and required for gRPC.
+			if lower == "te" {
+				for _, v := range values {
+					if strings.EqualFold(v, "trailers") {
+						headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
+					}
+				}
+			}
 			continue
 		}
 		for _, v := range values {
@@ -568,18 +588,49 @@ func (tc *transportConn) writeHeaderFrames(streamID uint32, endStream bool, frag
 }
 
 // writeDataFrames writes DATA frames for a request body, respecting flow control.
-func (tc *transportConn) writeDataFrames(streamID uint32, body []byte) error {
+// It waits for send window availability, polling with context cancellation support.
+func (tc *transportConn) writeDataFrames(ctx context.Context, streamID uint32, body []byte) error {
 	maxPayload := int(tc.conn.PeerSettings().MaxFrameSize)
 
 	for len(body) > 0 {
-		chunk := body
-		if len(chunk) > maxPayload {
-			chunk = body[:maxPayload]
+		// Wait for available send window on both connection and stream level.
+		var available int32
+		for {
+			connWindow := tc.conn.SendWindow()
+			stream := tc.conn.Streams().Get(streamID)
+			if stream == nil {
+				return fmt.Errorf("stream %d does not exist", streamID)
+			}
+			streamWindow := stream.SendWindow
+			available = connWindow
+			if streamWindow < available {
+				available = streamWindow
+			}
+			if available > 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-tc.readLoopDone:
+				return fmt.Errorf("connection closed while waiting for send window")
+			case <-time.After(10 * time.Millisecond):
+				// Retry after peer sends WINDOW_UPDATE.
+			}
 		}
-		endStream := len(body) <= maxPayload
+
+		chunk := int(available)
+		if chunk > len(body) {
+			chunk = len(body)
+		}
+		if chunk > maxPayload {
+			chunk = maxPayload
+		}
+
+		endStream := chunk >= len(body)
+		n := int32(chunk)
 
 		// Consume flow control windows.
-		n := int32(len(chunk))
 		if err := tc.conn.ConsumeSendWindow(n); err != nil {
 			return fmt.Errorf("connection flow control: %w", err)
 		}
@@ -587,11 +638,14 @@ func (tc *transportConn) writeDataFrames(streamID uint32, body []byte) error {
 			return fmt.Errorf("stream flow control: %w", err)
 		}
 
-		if err := tc.writer.WriteData(streamID, endStream, chunk); err != nil {
+		tc.writeMu.Lock()
+		err := tc.writer.WriteData(streamID, endStream, body[:chunk])
+		tc.writeMu.Unlock()
+		if err != nil {
 			return fmt.Errorf("write DATA frame: %w", err)
 		}
 
-		body = body[len(chunk):]
+		body = body[chunk:]
 	}
 
 	return nil
@@ -703,8 +757,8 @@ func (tc *transportConn) handleResponseHeaders(f *frame.Frame) error {
 		}
 		tc.processDecodedHeaders(ss, f, fields)
 	} else {
-		// Need CONTINUATION frames; store fragment.
-		ss.data = append(ss.data[:0], fragment...)
+		// Need CONTINUATION frames; store fragment in headerBuf (not data).
+		ss.headerBuf = append(ss.headerBuf[:0], fragment...)
 	}
 
 	return nil
@@ -728,15 +782,15 @@ func (tc *transportConn) handleContinuation(f *frame.Frame) error {
 		return fmt.Errorf("stream %d continuation: %w", streamID, err)
 	}
 
-	ss.data = append(ss.data, fragment...)
+	ss.headerBuf = append(ss.headerBuf, fragment...)
 
 	if f.Header.Flags.Has(frame.FlagEndHeaders) {
-		fields, decErr := tc.decoder.Decode(ss.data)
+		fields, decErr := tc.decoder.Decode(ss.headerBuf)
 		if decErr != nil {
 			return fmt.Errorf("stream %d HPACK decode: %w", streamID, decErr)
 		}
-		// Clear the fragment accumulator.
-		ss.data = ss.data[:0]
+		// Clear the header fragment accumulator.
+		ss.headerBuf = ss.headerBuf[:0]
 		tc.processDecodedHeaders(ss, f, fields)
 	}
 
