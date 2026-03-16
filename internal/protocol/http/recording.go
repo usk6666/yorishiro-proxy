@@ -39,6 +39,14 @@ type sendRecordParams struct {
 	reqBody      []byte
 	rawRequest   []byte
 	reqTruncated bool
+
+	// rawVariant forces variant recording even when parsed headers/body are
+	// unchanged. This is needed for raw mode intercept where modifications
+	// happen at the raw bytes level, not the parsed HTTP level.
+	rawVariant bool
+	// originalRawBytes holds the original raw bytes before raw mode modification.
+	// Used only when rawVariant is true to record the original variant's RawBytes.
+	originalRawBytes []byte
 }
 
 // sendRecordResult holds the flow created by recordSend so that
@@ -135,7 +143,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	}
 
 	// Detect whether modification occurred.
-	modified := snap != nil && requestModified(*snap, p.req.Header, p.reqBody)
+	modified := p.rawVariant || (snap != nil && requestModified(*snap, p.req.Header, p.reqBody))
 
 	fl := &flow.Flow{
 		ConnID:    p.connID,
@@ -154,10 +162,31 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	if modified {
 		// Inject Host into the snapshot headers (the snapshot was taken from
 		// req.Header which does not contain Host per Go's net/http design).
-		origHeaders := snap.headers.Clone()
+		// Defensive nil guard: if snap is nil (rawVariant with no snapshot),
+		// fall back to current request headers/body.
+		var origHeaders gohttp.Header
+		var origBody []byte
+		if snap != nil {
+			origHeaders = snap.headers.Clone()
+			origBody = snap.body
+		} else {
+			origHeaders = requestHeaders(p.req)
+			origBody = p.reqBody
+		}
 		if p.req.Host != "" {
 			origHeaders["Host"] = []string{p.req.Host}
 		}
+
+		// Determine RawBytes for original and modified messages.
+		// For raw variant (raw mode intercept), the original raw bytes are stored
+		// separately since p.rawRequest already holds the modified raw bytes.
+		origRawBytes := p.rawRequest
+		var modRawBytes []byte
+		if p.rawVariant {
+			origRawBytes = p.originalRawBytes
+			modRawBytes = p.rawRequest // modified raw bytes that were actually sent
+		}
+
 		// Record the original (unmodified) request as sequence 0.
 		originalMsg := &flow.Message{
 			FlowID:        fl.ID,
@@ -167,8 +196,8 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Method:        p.req.Method,
 			URL:           reqURL,
 			Headers:       origHeaders,
-			Body:          snap.body,
-			RawBytes:      p.rawRequest,
+			Body:          origBody,
+			RawBytes:      origRawBytes,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "original"},
 		}
@@ -186,7 +215,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			URL:           reqURL,
 			Headers:       requestHeaders(p.req),
 			Body:          p.reqBody,
-			RawBytes:      nil, // modified is not wire-observed
+			RawBytes:      modRawBytes,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "modified"},
 		}
