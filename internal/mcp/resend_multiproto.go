@@ -76,12 +76,9 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		return nil, nil, err
 	}
 
-	// SafetyFilter input check: validate all send message bodies before replaying.
+	// SafetyFilter input check: validate all send message payloads (Body or RawBytes) before replaying.
 	for _, msg := range sendMsgs {
-		data := msg.Body
-		if len(data) == 0 {
-			data = msg.RawBytes
-		}
+		data := messagePayload(msg)
 		if v := s.checkSafetyInput(data, "", nil); v != nil {
 			return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 		}
@@ -153,10 +150,7 @@ func (s *Server) replayAllMessages(ctx context.Context, targetAddr string, useTL
 
 	totalBytesSent := 0
 	for _, msg := range sendMsgs {
-		data := msg.Body
-		if len(data) == 0 {
-			data = msg.RawBytes
-		}
+		data := messagePayload(msg)
 		if len(data) > 0 {
 			n, err := conn.Write(data)
 			if err != nil {
@@ -173,6 +167,16 @@ func (s *Server) replayAllMessages(ctx context.Context, targetAddr string, useTL
 	duration := time.Since(start)
 
 	return totalBytesSent, respData, start, duration, nil
+}
+
+// messagePayload returns the effective payload of a flow message,
+// preferring Body and falling back to RawBytes.
+// TCP relay records data in RawBytes; higher-level protocols use Body.
+func messagePayload(msg *flow.Message) []byte {
+	if len(msg.Body) > 0 {
+		return msg.Body
+	}
+	return msg.RawBytes
 }
 
 // recordReplay saves the replayed flow and all its messages to the store.
@@ -193,10 +197,7 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 
 	seq := 0
 	for _, msg := range sendMsgs {
-		data := msg.Body
-		if len(data) == 0 {
-			data = msg.RawBytes
-		}
+		data := messagePayload(msg)
 		if len(data) > 0 {
 			if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 				FlowID: newFl.ID, Sequence: seq, Direction: "send",
@@ -223,7 +224,7 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 	}
 
 	return &resendReplayRawResult{
-		NewFlowID: newFl.ID, MessagesSent: len(sendMsgs),
+		NewFlowID: newFl.ID, MessagesSent: seq,
 		MessagesReceived: messagesReceived, TotalBytesSent: totalBytesSent,
 		TotalBytesReceived: len(respData), DurationMs: duration.Milliseconds(),
 		Tag: params.Tag,
