@@ -34,11 +34,11 @@ import (
 )
 
 // =============================================================================
-// Test helpers for M26 integration tests
+// Test helpers for HTTP/2 frame engine integration tests
 // =============================================================================
 
-// newM26Store creates a temporary SQLite store for testing.
-func newM26Store(t *testing.T, ctx context.Context) flow.Store {
+// newH2FEStore creates a temporary SQLite store for testing.
+func newH2FEStore(t *testing.T, ctx context.Context) flow.Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	logger := testutil.DiscardLogger()
@@ -50,8 +50,8 @@ func newM26Store(t *testing.T, ctx context.Context) flow.Store {
 	return store
 }
 
-// startM26H2CUpstream creates a test HTTP/2 cleartext (h2c) server.
-func startM26H2CUpstream(t *testing.T, handler gohttp.Handler) (string, func()) {
+// startH2FEUpstream creates a test HTTP/2 cleartext (h2c) server.
+func startH2FEUpstream(t *testing.T, handler gohttp.Handler) (string, func()) {
 	t.Helper()
 	protos := &gohttp.Protocols{}
 	protos.SetHTTP1(true)
@@ -68,9 +68,9 @@ func startM26H2CUpstream(t *testing.T, handler gohttp.Handler) (string, func()) 
 	return ln.Addr().String(), func() { server.Close() }
 }
 
-// startM26H2CProxy creates a proxy supporting h2c with an HTTP/2 handler and
+// startH2FEProxy creates a proxy supporting h2c with an HTTP/2 handler and
 // optional gRPC recording. Returns the proxy address and cancel function.
-func startM26H2CProxy(
+func startH2FEProxy(
 	t *testing.T,
 	ctx context.Context,
 	store flow.Store,
@@ -110,9 +110,9 @@ func startM26H2CProxy(
 	return listener.Addr(), proxyCancel
 }
 
-// startM26H2Proxy creates a proxy supporting h2 (TLS ALPN) via CONNECT with
+// startH2FETLSProxy creates a proxy supporting h2 (TLS ALPN) via CONNECT with
 // MITM capabilities. Returns the proxy listener, HTTP handler, and cancel function.
-func startM26H2Proxy(
+func startH2FETLSProxy(
 	t *testing.T,
 	ctx context.Context,
 	store flow.Store,
@@ -156,8 +156,8 @@ func startM26H2Proxy(
 	return listener, httpHandler, h2Handler, proxyCancel
 }
 
-// startM26SOCKS5Proxy creates a proxy with SOCKS5 + HTTP handler support.
-func startM26SOCKS5Proxy(
+// startH2FESOCKS5Proxy creates a proxy with SOCKS5 + HTTP handler support.
+func startH2FESOCKS5Proxy(
 	t *testing.T,
 	ctx context.Context,
 	store flow.Store,
@@ -187,9 +187,9 @@ func startM26SOCKS5Proxy(
 	return listener.Addr(), proxyCancel
 }
 
-// newM26H2CClient creates an HTTP client configured for h2c that connects
+// newH2FEClient creates an HTTP client configured for h2c that connects
 // through the given proxy address.
-func newM26H2CClient(proxyAddr string) *gohttp.Client {
+func newH2FEClient(proxyAddr string) *gohttp.Client {
 	protos := &gohttp.Protocols{}
 	protos.SetUnencryptedHTTP2(true)
 	return &gohttp.Client{
@@ -203,8 +203,8 @@ func newM26H2CClient(proxyAddr string) *gohttp.Client {
 	}
 }
 
-// newM26H2Client creates an HTTP client for h2 (TLS) via CONNECT proxy.
-func newM26H2Client(proxyAddr string, caCert *x509.Certificate) *gohttp.Client {
+// newH2FETLSClient creates an HTTP client for h2 (TLS) via CONNECT proxy.
+func newH2FETLSClient(proxyAddr string, caCert *x509.Certificate) *gohttp.Client {
 	proxyURL, _ := url.Parse("http://" + proxyAddr)
 	certPool := x509.NewCertPool()
 	certPool.AddCert(caCert)
@@ -220,9 +220,9 @@ func newM26H2Client(proxyAddr string, caCert *x509.Certificate) *gohttp.Client {
 	}
 }
 
-// pollM26Flows polls the store until the expected number of flows with the
+// pollH2FEFlows polls the store until the expected number of flows with the
 // given protocol appear or timeout.
-func pollM26Flows(t *testing.T, ctx context.Context, store flow.Store, protocol string, wantCount int) []*flow.Flow {
+func pollH2FEFlows(t *testing.T, ctx context.Context, store flow.Store, protocol string, wantCount int) []*flow.Flow {
 	t.Helper()
 	var flows []*flow.Flow
 	var err error
@@ -244,8 +244,8 @@ func pollM26Flows(t *testing.T, ctx context.Context, store flow.Store, protocol 
 	return nil
 }
 
-// pollM26FlowMessages polls until both send and receive messages appear for a flow.
-func pollM26FlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
+// pollH2FEFlowMessages polls until both send and receive messages appear for a flow.
+func pollH2FEFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
 	t.Helper()
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
@@ -276,11 +276,11 @@ func pollM26FlowMessages(t *testing.T, ctx context.Context, store flow.Store, fl
 // h2c (HTTP/2 cleartext) path tests
 // =============================================================================
 
-func TestM26_H2C_GET_FlowRecording(t *testing.T) {
+func TestIntegration_H2FrameEngine_H2C_GET(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.Header().Set("X-Proto", r.Proto)
 		w.Header().Set("X-Custom", "test-value")
 		w.WriteHeader(gohttp.StatusOK)
@@ -288,11 +288,11 @@ func TestM26_H2C_GET_FlowRecording(t *testing.T) {
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store)
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	targetURL := fmt.Sprintf("http://%s/test-h2c-get", upstreamAddr)
 	resp, err := client.Get(targetURL)
@@ -311,7 +311,7 @@ func TestM26_H2C_GET_FlowRecording(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", 1)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", 1)
 	fl := flows[0]
 	if fl.Protocol != "HTTP/2" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTP/2")
@@ -324,7 +324,7 @@ func TestM26_H2C_GET_FlowRecording(t *testing.T) {
 	}
 
 	// Verify L7 structured data.
-	send, recv := pollM26FlowMessages(t, ctx, store, fl.ID)
+	send, recv := pollH2FEFlowMessages(t, ctx, store, fl.ID)
 	if send == nil {
 		t.Fatal("send message not found")
 	}
@@ -365,22 +365,22 @@ func TestM26_H2C_GET_FlowRecording(t *testing.T) {
 	}
 }
 
-func TestM26_H2C_POST_FlowRecording(t *testing.T) {
+func TestIntegration_H2FrameEngine_H2C_POST(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		reqBody, _ := io.ReadAll(r.Body)
 		w.WriteHeader(gohttp.StatusCreated)
 		fmt.Fprintf(w, "echo: %s", reqBody)
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store)
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	targetURL := fmt.Sprintf("http://%s/test-h2c-post", upstreamAddr)
 	resp, err := client.Post(targetURL, "text/plain", strings.NewReader("h2c-body-data"))
@@ -398,10 +398,10 @@ func TestM26_H2C_POST_FlowRecording(t *testing.T) {
 	}
 
 	// Verify flow.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", 1)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", 1)
 	fl := flows[0]
 
-	send, recv := pollM26FlowMessages(t, ctx, store, fl.ID)
+	send, recv := pollH2FEFlowMessages(t, ctx, store, fl.ID)
 	if send == nil || recv == nil {
 		t.Fatal("missing send or recv message")
 	}
@@ -425,12 +425,12 @@ func TestM26_H2C_POST_FlowRecording(t *testing.T) {
 // h2 (TLS ALPN) path tests — HTTP CONNECT → TLS → h2
 // =============================================================================
 
-func TestM26_H2_TLS_ALPN_FlowRecording(t *testing.T) {
+func TestIntegration_H2FrameEngine_TLS_ALPN(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Start upstream HTTPS server (h2 via TLS).
-	upstream := startM26TLSUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := startH2FETLSUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.Header().Set("X-Proto", r.Proto)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "hello from h2 TLS")
@@ -438,14 +438,14 @@ func TestM26_H2_TLS_ALPN_FlowRecording(t *testing.T) {
 
 	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
-	store := newM26Store(t, ctx)
+	store := newH2FEStore(t, ctx)
 
 	ca := &cert.CA{}
 	if err := ca.Generate(); err != nil {
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	listener, httpHandler, h2Handler, proxyCancel := startM26H2Proxy(t, ctx, store, ca)
+	listener, httpHandler, h2Handler, proxyCancel := startH2FETLSProxy(t, ctx, store, ca)
 	defer proxyCancel()
 
 	// Configure both handlers' upstream transports to trust the test server.
@@ -463,7 +463,7 @@ func TestM26_H2_TLS_ALPN_FlowRecording(t *testing.T) {
 		ForceAttemptHTTP2: true,
 	})
 
-	client := newM26H2Client(listener.Addr(), ca.Certificate())
+	client := newH2FETLSClient(listener.Addr(), ca.Certificate())
 
 	targetURL := fmt.Sprintf("https://localhost:%s/test-h2-tls", upstreamPort)
 	resp, err := client.Get(targetURL)
@@ -481,7 +481,7 @@ func TestM26_H2_TLS_ALPN_FlowRecording(t *testing.T) {
 	}
 
 	// Verify flow recording: h2 via CONNECT should record as HTTP/2.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", 1)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", 1)
 	fl := flows[0]
 	if fl.Protocol != "HTTP/2" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTP/2")
@@ -491,7 +491,7 @@ func TestM26_H2_TLS_ALPN_FlowRecording(t *testing.T) {
 	}
 
 	// Verify L7 structured data.
-	send, recv := pollM26FlowMessages(t, ctx, store, fl.ID)
+	send, recv := pollH2FEFlowMessages(t, ctx, store, fl.ID)
 	if send == nil {
 		t.Fatal("send message not found")
 	}
@@ -520,19 +520,19 @@ func TestM26_H2_TLS_ALPN_FlowRecording(t *testing.T) {
 	}
 }
 
-// m26TLSUpstream wraps a TLS upstream server with its listener address.
-type m26TLSUpstream struct {
+// h2feTLSUpstream wraps a TLS upstream server with its listener address.
+type h2feTLSUpstream struct {
 	server   *gohttp.Server
 	Listener net.Listener
 }
 
 // Close shuts down the TLS upstream server.
-func (u *m26TLSUpstream) Close() {
+func (u *h2feTLSUpstream) Close() {
 	u.server.Close()
 }
 
-// startM26TLSUpstream creates a TLS upstream server for h2 tests.
-func startM26TLSUpstream(t *testing.T, handler gohttp.Handler) *m26TLSUpstream {
+// startH2FETLSUpstream creates a TLS upstream server for h2 tests.
+func startH2FETLSUpstream(t *testing.T, handler gohttp.Handler) *h2feTLSUpstream {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -564,7 +564,7 @@ func startM26TLSUpstream(t *testing.T, handler gohttp.Handler) *m26TLSUpstream {
 
 	t.Cleanup(func() { server.Close() })
 
-	return &m26TLSUpstream{
+	return &h2feTLSUpstream{
 		server:   server,
 		Listener: ln,
 	}
@@ -574,19 +574,19 @@ func startM26TLSUpstream(t *testing.T, handler gohttp.Handler) *m26TLSUpstream {
 // SOCKS5 → TLS → h2 path tests
 // =============================================================================
 
-func TestM26_SOCKS5_H2C_FlowRecording(t *testing.T) {
+func TestIntegration_H2FrameEngine_SOCKS5(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Start h2c upstream.
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "hello via socks5")
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26SOCKS5Proxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FESOCKS5Proxy(t, ctx, store)
 	defer proxyCancel()
 
 	// Connect to proxy via SOCKS5, then send HTTP/1.x request through the tunnel.
@@ -627,11 +627,11 @@ func TestM26_SOCKS5_H2C_FlowRecording(t *testing.T) {
 // gRPC (unary + streaming) path tests
 // =============================================================================
 
-func TestM26_GRPC_Unary_FlowRecording(t *testing.T) {
+func TestIntegration_H2FrameEngine_GRPC_Unary(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
@@ -642,15 +642,15 @@ func TestM26_GRPC_Unary_FlowRecording(t *testing.T) {
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store, func(h *protohttp2.Handler) {
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store, func(h *protohttp2.Handler) {
 		logger := testutil.DiscardLogger()
 		grpcHandler := protogrpc.NewHandler(store, logger)
 		h.SetGRPCHandler(grpcHandler)
 	})
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	// Build a protobuf gRPC frame.
 	reqJSON := `{"0001:0000:String":"m26-unary-test"}`
@@ -679,7 +679,7 @@ func TestM26_GRPC_Unary_FlowRecording(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	flows := pollM26Flows(t, ctx, store, "gRPC", 1)
+	flows := pollH2FEFlows(t, ctx, store, "gRPC", 1)
 	fl := flows[0]
 	if fl.Protocol != "gRPC" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "gRPC")
@@ -698,11 +698,11 @@ func TestM26_GRPC_Unary_FlowRecording(t *testing.T) {
 	}
 }
 
-func TestM26_GRPC_ServerStreaming_FlowRecording(t *testing.T) {
+func TestIntegration_H2FrameEngine_GRPC_ServerStreaming(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.Header().Set("Trailer", "Grpc-Status")
@@ -721,14 +721,14 @@ func TestM26_GRPC_ServerStreaming_FlowRecording(t *testing.T) {
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store, func(h *protohttp2.Handler) {
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store, func(h *protohttp2.Handler) {
 		logger := testutil.DiscardLogger()
 		h.SetGRPCHandler(protogrpc.NewHandler(store, logger))
 	})
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	p, _ := protobuf.Encode(`{"0001:0000:String":"request"}`)
 	reqFrame := protogrpc.EncodeFrame(false, p)
@@ -758,7 +758,7 @@ func TestM26_GRPC_ServerStreaming_FlowRecording(t *testing.T) {
 	}
 
 	// Verify flow recording: should be "stream" type.
-	flows := pollM26Flows(t, ctx, store, "gRPC", 1)
+	flows := pollH2FEFlows(t, ctx, store, "gRPC", 1)
 	fl := flows[0]
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
@@ -772,21 +772,21 @@ func TestM26_GRPC_ServerStreaming_FlowRecording(t *testing.T) {
 // Stream multiplexing tests
 // =============================================================================
 
-func TestM26_H2C_StreamMultiplexing(t *testing.T) {
+func TestIntegration_H2FrameEngine_StreamMultiplexing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "path=%s", r.URL.Path)
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store)
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	const concurrency = 10
 	var wg sync.WaitGroup
@@ -819,7 +819,7 @@ func TestM26_H2C_StreamMultiplexing(t *testing.T) {
 	}
 
 	// Verify all flows were recorded.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", concurrency)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", concurrency)
 	if len(flows) < concurrency {
 		t.Errorf("expected at least %d flows, got %d", concurrency, len(flows))
 	}
@@ -836,25 +836,25 @@ func TestM26_H2C_StreamMultiplexing(t *testing.T) {
 // Flow control tests
 // =============================================================================
 
-func TestM26_H2C_LargeBody_FlowControl(t *testing.T) {
+func TestIntegration_H2FrameEngine_LargeBody_FlowControl(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Create a body larger than the default HTTP/2 flow control window (64KB).
 	largeBody := strings.Repeat("X", 128*1024)
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "received %d bytes", len(body))
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store)
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	targetURL := fmt.Sprintf("http://%s/test-large-body", upstreamAddr)
 	resp, err := client.Post(targetURL, "application/octet-stream", strings.NewReader(largeBody))
@@ -873,14 +873,14 @@ func TestM26_H2C_LargeBody_FlowControl(t *testing.T) {
 	}
 
 	// Verify flow recorded.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", 1)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", 1)
 	fl := flows[0]
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
 
 	// Verify raw bytes exist.
-	send, _ := pollM26FlowMessages(t, ctx, store, fl.ID)
+	send, _ := pollH2FEFlowMessages(t, ctx, store, fl.ID)
 	if send == nil {
 		t.Fatal("send message not found")
 	}
@@ -889,25 +889,25 @@ func TestM26_H2C_LargeBody_FlowControl(t *testing.T) {
 	}
 }
 
-func TestM26_H2C_LargeResponse_FlowControl(t *testing.T) {
+func TestIntegration_H2FrameEngine_LargeResponse_FlowControl(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Response larger than default HTTP/2 flow control window.
 	largeResponse := strings.Repeat("Y", 128*1024)
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write([]byte(largeResponse))
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store)
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	targetURL := fmt.Sprintf("http://%s/test-large-response", upstreamAddr)
 	resp, err := client.Get(targetURL)
@@ -925,7 +925,7 @@ func TestM26_H2C_LargeResponse_FlowControl(t *testing.T) {
 	}
 
 	// Verify flow is recorded with response body.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", 1)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", 1)
 	fl := flows[0]
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
@@ -936,18 +936,18 @@ func TestM26_H2C_LargeResponse_FlowControl(t *testing.T) {
 // Plugin hooks tests
 // =============================================================================
 
-func TestM26_H2C_PluginHook_OnReceiveFromClient(t *testing.T) {
+func TestIntegration_H2FrameEngine_PluginHook(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "got: %s", body)
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
+	store := newH2FEStore(t, ctx)
 
 	// Create a plugin engine with a simple on_receive_from_client hook
 	// that adds a custom header.
@@ -974,12 +974,12 @@ def on_receive_from_client(data):
 	}
 	defer engine.Close()
 
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store, func(h *protohttp2.Handler) {
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store, func(h *protohttp2.Handler) {
 		h.SetPluginEngine(engine)
 	})
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	targetURL := fmt.Sprintf("http://%s/test-plugin", upstreamAddr)
 	resp, err := client.Get(targetURL)
@@ -999,7 +999,7 @@ def on_receive_from_client(data):
 	}
 
 	// Verify flow was recorded.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", 1)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", 1)
 	if flows[0].State != "complete" {
 		t.Errorf("flow state = %q, want %q", flows[0].State, "complete")
 	}
@@ -1009,22 +1009,22 @@ def on_receive_from_client(data):
 // Raw bytes verification across all paths
 // =============================================================================
 
-func TestM26_H2C_RawBytes_FrameMetadata(t *testing.T) {
+func TestIntegration_H2FrameEngine_RawBytes_FrameMetadata(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.ReadAll(r.Body)
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write([]byte("raw-bytes-test"))
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store)
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	targetURL := fmt.Sprintf("http://%s/raw-bytes", upstreamAddr)
 	resp, err := client.Post(targetURL, "text/plain", strings.NewReader("request-body"))
@@ -1034,10 +1034,10 @@ func TestM26_H2C_RawBytes_FrameMetadata(t *testing.T) {
 	defer resp.Body.Close()
 	io.ReadAll(resp.Body)
 
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", 1)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", 1)
 	fl := flows[0]
 
-	send, _ := pollM26FlowMessages(t, ctx, store, fl.ID)
+	send, _ := pollH2FEFlowMessages(t, ctx, store, fl.ID)
 	if send == nil {
 		t.Fatal("send message not found")
 	}
@@ -1082,24 +1082,24 @@ func TestM26_H2C_RawBytes_FrameMetadata(t *testing.T) {
 // Mixed protocol tests
 // =============================================================================
 
-func TestM26_H2C_MultipleRequests_SameConnection(t *testing.T) {
+func TestIntegration_H2FrameEngine_MultipleRequests(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var requestCount atomic.Int32
 
-	upstreamAddr, closeUpstream := startM26H2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, closeUpstream := startH2FEUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		n := requestCount.Add(1)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "request-%d", n)
 	}))
 	defer closeUpstream()
 
-	store := newM26Store(t, ctx)
-	proxyAddr, proxyCancel := startM26H2CProxy(t, ctx, store)
+	store := newH2FEStore(t, ctx)
+	proxyAddr, proxyCancel := startH2FEProxy(t, ctx, store)
 	defer proxyCancel()
 
-	client := newM26H2CClient(proxyAddr)
+	client := newH2FEClient(proxyAddr)
 
 	// Send multiple sequential requests through the same h2c connection.
 	const numRequests = 5
@@ -1116,14 +1116,14 @@ func TestM26_H2C_MultipleRequests_SameConnection(t *testing.T) {
 	}
 
 	// Verify all requests recorded as separate flows.
-	flows := pollM26Flows(t, ctx, store, "HTTP/2", numRequests)
+	flows := pollH2FEFlows(t, ctx, store, "HTTP/2", numRequests)
 	if len(flows) < numRequests {
 		t.Errorf("expected at least %d flows, got %d", numRequests, len(flows))
 	}
 
 	// Verify each flow has raw bytes.
 	for _, fl := range flows {
-		send, _ := pollM26FlowMessages(t, ctx, store, fl.ID)
+		send, _ := pollH2FEFlowMessages(t, ctx, store, fl.ID)
 		if send != nil && len(send.RawBytes) == 0 {
 			t.Errorf("flow %s: send RawBytes is empty", fl.ID)
 		}
