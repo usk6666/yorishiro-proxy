@@ -143,16 +143,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 
 	// Delegate to the WebSocket handler for frame relay.
 	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
-	wsHandler := ws.NewHandler(h.Store, logger)
-	if h.SafetyEngine != nil {
-		wsHandler.SetSafetyEngine(h.SafetyEngine)
-	}
-	if h.InterceptEngine != nil {
-		wsHandler.SetInterceptEngine(h.InterceptEngine)
-	}
-	if h.InterceptQueue != nil {
-		wsHandler.SetInterceptQueue(h.InterceptQueue)
-	}
+	wsHandler := h.newWSHandler(logger)
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
@@ -201,28 +192,29 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	// Dial the upstream server, optionally via upstream proxy.
 	rawConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
-		logger.Error("wss upstream dial failed", "host", host, "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		h.recordWebSocketError(ctx, ep, fmt.Errorf("dial wss upstream %s: %w", host, err), logger)
-		return fmt.Errorf("dial wss upstream %s: %w", host, err)
+		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("dial wss upstream %s: %w", host, err))
 	}
 	defer rawConn.Close()
 
-	// Perform TLS handshake with the upstream server using the configured
-	// TLS transport (uTLS or standard crypto/tls).
+	// Perform TLS handshake with the upstream server using a transport that
+	// offers only HTTP/1.1 via ALPN (WebSocket requires HTTP/1.1 Upgrade).
 	hostname, _, splitErr := net.SplitHostPort(host)
 	if splitErr != nil {
 		hostname = host
 	}
-	tlsTransport := h.effectiveTLSTransport()
-	upstreamTLS, _, err := tlsTransport.TLSConnect(ctx, rawConn, hostname)
+	tlsTransport := h.wsHTTP1Transport()
+	upstreamTLS, negotiatedProto, err := tlsTransport.TLSConnect(ctx, rawConn, hostname)
 	if err != nil {
-		logger.Error("wss upstream TLS handshake failed", "host", host, "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		h.recordWebSocketError(ctx, ep, fmt.Errorf("wss upstream TLS handshake: %w", err), logger)
-		return fmt.Errorf("wss upstream TLS handshake: %w", err)
+		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("wss upstream TLS handshake: %w", err))
 	}
 	defer upstreamTLS.Close()
+
+	// Safety net: if the server negotiated HTTP/2 despite our preference for
+	// HTTP/1.1, WebSocket upgrade cannot proceed (RFC 8441 not yet supported).
+	if negotiatedProto == "h2" {
+		return h.wssUpstreamError(ctx, conn, ep, logger,
+			fmt.Errorf("wss upstream %s negotiated HTTP/2 via ALPN; WebSocket requires HTTP/1.1 (RFC 8441 not supported)", host))
+	}
 
 	serverAddr := rawConn.RemoteAddr().String()
 
@@ -237,20 +229,14 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	outReq := req.Clone(ctx)
 	outReq.RequestURI = req.URL.RequestURI()
 	if err := outReq.Write(upstreamTLS); err != nil {
-		logger.Error("wss upstream write failed", "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		h.recordWebSocketError(ctx, ep, fmt.Errorf("write wss upgrade request: %w", err), logger)
-		return fmt.Errorf("write wss upgrade request: %w", err)
+		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("write wss upgrade request: %w", err))
 	}
 
 	// Read the upstream's response.
 	upstreamReader := bufio.NewReader(upstreamTLS)
 	resp, err := gohttp.ReadResponse(upstreamReader, req)
 	if err != nil {
-		logger.Error("wss upstream response read failed", "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		h.recordWebSocketError(ctx, ep, fmt.Errorf("read wss upgrade response: %w", err), logger)
-		return fmt.Errorf("read wss upgrade response: %w", err)
+		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("read wss upgrade response: %w", err))
 	}
 
 	// Validate 101 Switching Protocols response.
@@ -279,6 +265,13 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 
 	// Delegate to the WebSocket handler for frame relay.
 	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
+	wsHandler := h.newWSHandler(logger)
+	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
+}
+
+// newWSHandler creates a ws.Handler configured with the handler's safety engine,
+// intercept engine, and intercept queue.
+func (h *Handler) newWSHandler(logger *slog.Logger) *ws.Handler {
 	wsHandler := ws.NewHandler(h.Store, logger)
 	if h.SafetyEngine != nil {
 		wsHandler.SetSafetyEngine(h.SafetyEngine)
@@ -289,7 +282,37 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	if h.InterceptQueue != nil {
 		wsHandler.SetInterceptQueue(h.InterceptQueue)
 	}
-	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
+	return wsHandler
+}
+
+// wssUpstreamError is a helper that handles common WSS upstream error paths:
+// it logs the error, sends 502 to the client, records the error flow, and
+// returns the formatted error. This reduces cyclomatic complexity in
+// handleWebSocketTLS.
+func (h *Handler) wssUpstreamError(ctx context.Context, conn net.Conn, ep wsErrorRecordParams, logger *slog.Logger, wrapErr error) error {
+	logger.Error("wss upstream error", "error", wrapErr)
+	httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+	h.recordWebSocketError(ctx, ep, wrapErr, logger)
+	return wrapErr
+}
+
+// wsHTTP1Transport returns a TLS transport configured to offer only HTTP/1.1
+// via ALPN. WebSocket requires HTTP/1.1 Upgrade semantics, so offering h2
+// would cause failures when the upstream server selects HTTP/2.
+//
+// For StandardTransport, a copy with NextProtos set to ["http/1.1"] is returned.
+// For other transport types (e.g. UTLSTransport), the original transport is
+// returned as-is — the h2 ALPN check after TLSConnect acts as a safety net.
+func (h *Handler) wsHTTP1Transport() httputil.TLSTransport {
+	t := h.effectiveTLSTransport()
+	if st, ok := t.(*httputil.StandardTransport); ok {
+		return &httputil.StandardTransport{
+			InsecureSkipVerify: st.InsecureSkipVerify,
+			HostTLS:            st.HostTLS,
+			NextProtos:         []string{"http/1.1"},
+		}
+	}
+	return t
 }
 
 // recordWebSocketError records a WebSocket upgrade failure as an error flow.
