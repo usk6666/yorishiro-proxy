@@ -23,7 +23,7 @@ dev-ui:
 	cd web && pnpm run dev
 
 test-ui:
-	cd web && pnpm test
+	cd web && pnpm install --frozen-lockfile && pnpm test
 
 test: ensure-ui
 	go test -race -v ./...
