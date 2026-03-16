@@ -867,6 +867,10 @@ type queryConfigResult struct {
 	SOCKS5Enabled    bool                     `json:"socks5_enabled"`
 	ClientCert       *queryClientCertResult   `json:"client_cert,omitempty"`
 	SafetyFilter     *querySafetyFilterResult `json:"safety_filter,omitempty"`
+	MaxConnections   int                      `json:"max_connections"`
+	PeekTimeoutMs    int64                    `json:"peek_timeout_ms"`
+	RequestTimeoutMs int64                    `json:"request_timeout_ms"`
+	TLSFingerprint   string                   `json:"tls_fingerprint"`
 }
 
 // querySafetyFilterResult holds SafetyFilter status in the config response.
@@ -959,6 +963,20 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 			Enabled: false,
 		}
 	}
+
+	if s.deps.manager != nil {
+		result.MaxConnections = s.deps.manager.MaxConnections()
+		result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
+	}
+
+	if rt := s.currentRequestTimeout(); rt > 0 {
+		result.RequestTimeoutMs = rt.Milliseconds()
+	} else {
+		// Default request timeout when no handler is registered.
+		result.RequestTimeoutMs = 60000
+	}
+
+	result.TLSFingerprint = s.currentTLSFingerprint()
 
 	return nil, result, nil
 }
