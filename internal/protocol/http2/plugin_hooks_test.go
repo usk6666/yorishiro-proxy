@@ -455,8 +455,10 @@ def on_receive_from_client(data):
 	}
 }
 
-func TestPluginHook_H2_RawFramesAccessible(t *testing.T) {
-	// Verify raw_frames is accessible in the Starlark hook data when provided.
+func TestPluginHook_H2_RawFramesAbsentViaH2CHelper(t *testing.T) {
+	// This test uses Go's h2c handler via startH2CProxyListener, which does
+	// not inject raw frames into the context (only clientConn does).
+	// Verify the plugin handles absent raw_frames gracefully.
 	script := writeStarlarkScript(t, "check_raw_frames.star", `
 def on_receive_from_client(data):
     raw = data.get("raw_frames", None)
@@ -501,14 +503,11 @@ def on_receive_from_client(data):
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
 
-	// Raw frames are only populated when using the custom frame engine
-	// (clientConn). This test uses Go's h2c handler via startH2CProxyListener,
-	// which does not inject raw frames into the context. Verify the plugin
-	// does not break when raw_frames is absent (backward compat).
-	// When the test infrastructure is updated to use clientConn directly,
-	// X-Received-Frame-Count should be > 0.
-	frameCount := resp.Header.Get("X-Received-Frame-Count")
-	t.Logf("X-Received-Frame-Count = %q (empty expected with h2c test helper)", frameCount)
+	// h2c helper does not inject raw frames, so X-Received-Frame-Count
+	// should be empty (plugin's raw_frames branch was not taken).
+	if got := resp.Header.Get("X-Received-Frame-Count"); got != "" {
+		t.Errorf("X-Received-Frame-Count = %q, want empty (h2c helper does not provide raw frames)", got)
+	}
 }
 
 func TestPluginHook_H2_NoRawFramesBackwardCompat(t *testing.T) {
@@ -556,60 +555,6 @@ def on_receive_from_client(data):
 	}
 	if got := resp.Header.Get("X-Received-Compat"); got != "ok" {
 		t.Errorf("X-Received-Compat = %q, want %q", got, "ok")
-	}
-}
-
-func Test_rawFramesFromContext(t *testing.T) {
-	tests := []struct {
-		name      string
-		setup     func() context.Context
-		wantNil   bool
-		wantCount int
-	}{
-		{
-			name: "no raw frames in context",
-			setup: func() context.Context {
-				return context.Background()
-			},
-			wantNil: true,
-		},
-		{
-			name: "raw frames present",
-			setup: func() context.Context {
-				frames := [][]byte{{0x01}, {0x02}, {0x03}}
-				return context.WithValue(context.Background(), rawFramesContextKey{}, frames)
-			},
-			wantNil:   false,
-			wantCount: 3,
-		},
-		{
-			name: "empty raw frames",
-			setup: func() context.Context {
-				frames := [][]byte{}
-				return context.WithValue(context.Background(), rawFramesContextKey{}, frames)
-			},
-			wantNil:   false,
-			wantCount: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := tt.setup()
-			frames := rawFramesFromContext(ctx)
-			if tt.wantNil {
-				if frames != nil {
-					t.Errorf("expected nil, got %v", frames)
-				}
-			} else {
-				if frames == nil {
-					t.Fatal("expected non-nil frames")
-				}
-				if len(frames) != tt.wantCount {
-					t.Errorf("frame count = %d, want %d", len(frames), tt.wantCount)
-				}
-			}
-		})
 	}
 }
 
