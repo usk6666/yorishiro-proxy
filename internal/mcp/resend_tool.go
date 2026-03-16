@@ -674,6 +674,7 @@ func (s *Server) resendHTTPClient(params resendParams) httpDoer {
 	}
 	dialer := &net.Dialer{Timeout: timeout}
 	transport := &http.Transport{
+		ForceAttemptHTTP2: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if params.OverrideHost != "" {
 				addr = params.OverrideHost
