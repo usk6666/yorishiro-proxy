@@ -128,7 +128,9 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 	}
 
 	data := plugin.HTTPResponseToMap(resp, body, req, connInfo, "h2")
-	plugin.InjectRawFrames(data, rawFrames)
+	if rawFrames != nil {
+		plugin.InjectRawFrames(data, rawFrames)
+	}
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromServer, data)
@@ -164,7 +166,9 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 	}
 
 	data := plugin.HTTPResponseToMap(resp, body, req, connInfo, "h2")
-	plugin.InjectRawFrames(data, rawFrames)
+	if rawFrames != nil {
+		plugin.InjectRawFrames(data, rawFrames)
+	}
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToClient, data)
