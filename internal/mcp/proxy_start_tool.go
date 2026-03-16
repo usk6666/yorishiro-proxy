@@ -24,6 +24,16 @@ const (
 	minTimeoutMs = 100
 	// maxTimeoutMs is the maximum allowed timeout in milliseconds (10 minutes).
 	maxTimeoutMs = 600000
+
+	// defaultMaxConnections is the default concurrent connection limit.
+	// Must match proxy.defaultMaxConnections (128).
+	defaultMaxConnections = 128
+	// defaultPeekTimeout is the default protocol detection timeout.
+	// Must match proxy.defaultPeekTimeout (30s).
+	defaultPeekTimeout = 30 * time.Second
+	// defaultRequestTimeout is the default HTTP request header read timeout.
+	// Must match http.defaultRequestTimeout (60s).
+	defaultRequestTimeout = 60 * time.Second
 )
 
 // captureScopeInput is the JSON representation of capture scope configuration
@@ -203,11 +213,74 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	return nil, result, nil
 }
 
+// resetSettingsToDefaults resets all proxy configuration to default values.
+// This is called at the beginning of proxy_start to ensure a clean state,
+// preventing settings from a previous session from leaking into the new one.
+func (s *Server) resetSettingsToDefaults() {
+	// Reset capture scope to empty (capture all).
+	if s.deps.scope != nil {
+		s.deps.scope.Clear()
+	}
+
+	// Reset TLS passthrough to empty (intercept all).
+	if s.deps.passthrough != nil {
+		s.deps.passthrough.Clear()
+	}
+
+	// Reset enabled protocols to nil (all protocols).
+	s.deps.enabledProtocols = nil
+
+	// Reset TCP forwards to nil (no forwards).
+	s.deps.tcpForwards = nil
+
+	// Reset intercept rules to empty (no intercept).
+	if s.deps.interceptEngine != nil {
+		s.deps.interceptEngine.Clear()
+	}
+
+	// Reset auto-transform rules to empty (no transforms).
+	if s.deps.transformPipeline != nil {
+		s.deps.transformPipeline.Clear()
+	}
+
+	// Reset connection limits and timeouts to defaults.
+	if s.deps.manager != nil {
+		s.deps.manager.SetMaxConnections(defaultMaxConnections)
+		s.deps.manager.SetPeekTimeout(defaultPeekTimeout)
+	}
+
+	// Reset request timeout to default.
+	s.applyRequestTimeout(defaultRequestTimeout)
+
+	// Reset upstream proxy to direct (no upstream).
+	if s.deps.manager != nil {
+		s.deps.manager.SetUpstreamProxy("")
+	}
+	for _, setter := range s.deps.upstreamProxySetters {
+		setter.SetUpstreamProxy(nil)
+	}
+
+	// Reset TLS fingerprint to default ("chrome").
+	for _, setter := range s.deps.tlsFingerprintSetters {
+		setter.SetTLSFingerprint("chrome")
+	}
+
+	// Reset global client certificate.
+	if s.deps.hostTLSRegistry != nil {
+		s.deps.hostTLSRegistry.SetGlobal(nil)
+	}
+}
+
 // applyProxyStartSettings validates and applies all proxy configuration sections
 // from the proxy_start input. It handles listen address, upstream proxy, capture
 // scope, TLS passthrough, intercept rules, auto-transform, TCP forwards,
 // protocols, SOCKS5 auth, and connection limits/timeouts.
+//
+// Before applying the new settings, all configuration is reset to defaults to
+// ensure proxy_start always produces a clean state regardless of prior sessions.
 func (s *Server) applyProxyStartSettings(input *proxyStartInput) error {
+	s.resetSettingsToDefaults()
+
 	if err := s.applyProxyStartPipeline(input); err != nil {
 		return err
 	}
