@@ -1,17 +1,23 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
+	gohttp "net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
 )
 
 // resendReplayRawResult is the structured output of the tcp_replay action.
@@ -229,14 +235,20 @@ type resendWebSocketResult struct {
 }
 
 // handleWebSocketResend handles resend for WebSocket flows.
-// It sends a single message from the original flow to the target server
-// over a raw TCP connection, recording the exchange.
+// It performs a proper HTTP Upgrade handshake with the target server,
+// sends the specified message as a WebSocket frame, and reads the response frame.
 func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, params resendParams) (*gomcp.CallToolResult, *resendWebSocketResult, error) {
 	if params.MessageSequence == nil {
 		return nil, nil, fmt.Errorf("message_sequence is required for WebSocket resend")
 	}
 
 	targetMsg, err := findSendMessage(ctx, s.deps.store, fl.ID, *params.MessageSequence)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Retrieve the Upgrade request message (seq=0) for reconstructing the handshake.
+	upgradeMsg, err := findUpgradeRequestMessage(ctx, s.deps.store, fl.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -263,22 +275,246 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
-	respData, start, duration, err := s.establishAndSend(ctx, targetAddr, useTLS, timeout, sendBody)
+	opcode := resolveWebSocketOpcode(targetMsg)
+
+	wsResult, err := s.establishWebSocketAndSend(ctx, targetAddr, useTLS, timeout, upgradeMsg, sendBody, opcode)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	result, err := s.recordWebSocketResend(ctx, params, targetMsg, sendBody, respData, start, duration)
+	result, err := s.recordWebSocketResend(ctx, params, targetMsg, upgradeMsg, wsResult)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Apply SafetyFilter output masking before returning to AI agent.
 	// Raw data is already saved to the store above.
-	maskedRespData := s.filterOutputBody(respData)
+	maskedRespData := s.filterOutputBody(wsResult.responsePayload)
 	result.ResponseData = base64.StdEncoding.EncodeToString(maskedRespData)
 
 	return nil, result, nil
+}
+
+// findUpgradeRequestMessage retrieves the Upgrade request message (seq=0, direction="send")
+// from a WebSocket flow. This message contains the URL and Headers needed to reconstruct
+// the HTTP Upgrade handshake.
+func findUpgradeRequestMessage(ctx context.Context, store flow.Store, flowID string) (*flow.Message, error) {
+	allMsgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get messages for upgrade request: %w", err)
+	}
+	for _, msg := range allMsgs {
+		if msg.Sequence == 0 && msg.Direction == "send" {
+			return msg, nil
+		}
+	}
+	return nil, fmt.Errorf("upgrade request message (seq=0) not found in flow %s", flowID)
+}
+
+// resolveWebSocketOpcode determines the WebSocket opcode from the message metadata.
+// Defaults to OpcodeText if the metadata is missing or invalid.
+func resolveWebSocketOpcode(msg *flow.Message) byte {
+	if msg.Metadata == nil {
+		return ws.OpcodeText
+	}
+	opcodeStr, ok := msg.Metadata["opcode"]
+	if !ok {
+		return ws.OpcodeText
+	}
+	v, err := strconv.Atoi(opcodeStr)
+	if err != nil {
+		return ws.OpcodeText
+	}
+	return byte(v)
+}
+
+// wsResendResult holds the intermediate results of a WebSocket resend operation.
+type wsResendResult struct {
+	start           time.Time
+	duration        time.Duration
+	upgradeResp     *gohttp.Response
+	responsePayload []byte
+	responseOpcode  byte
+	sendBody        []byte
+}
+
+// establishWebSocketAndSend performs the full WebSocket handshake and frame exchange:
+// 1. Establishes TCP/TLS connection
+// 2. Sends HTTP Upgrade request and validates 101 response
+// 3. Sends the payload as a masked WebSocket frame
+// 4. Reads the first response frame from the server
+func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr string, useTLS bool, timeout time.Duration, upgradeMsg *flow.Message, sendBody []byte, opcode byte) (*wsResendResult, error) {
+	dialer := s.rawDialerFunc()
+	start := time.Now()
+
+	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", targetAddr, err)
+	}
+	defer conn.Close()
+
+	if useTLS {
+		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("set deadline: %w", err)
+	}
+
+	// Step 1: Perform HTTP Upgrade handshake.
+	upgradeResp, bufReader, err := performUpgradeHandshake(conn, upgradeMsg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: Send the WebSocket frame (client frames must be masked per RFC 6455).
+	if err := sendWebSocketFrame(conn, sendBody, opcode); err != nil {
+		return nil, err
+	}
+
+	// Step 3: Read the first response frame from the server.
+	respPayload, respOpcode, err := readWebSocketResponseFrame(bufReader)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := time.Since(start)
+
+	return &wsResendResult{
+		start:           start,
+		duration:        duration,
+		upgradeResp:     upgradeResp,
+		responsePayload: respPayload,
+		responseOpcode:  respOpcode,
+		sendBody:        sendBody,
+	}, nil
+}
+
+// performUpgradeHandshake sends an HTTP Upgrade request and reads the 101 response.
+// It returns the response and a buffered reader wrapping the connection for
+// subsequent WebSocket frame reads.
+func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message) (*gohttp.Response, *bufio.Reader, error) {
+	reqURL := upgradeMsg.URL
+	if reqURL == nil {
+		return nil, nil, fmt.Errorf("upgrade request message has no URL")
+	}
+
+	// Build the HTTP Upgrade request.
+	httpReq := &gohttp.Request{
+		Method:     "GET",
+		URL:        &url.URL{Path: reqURL.RequestURI()},
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(gohttp.Header),
+		Host:       reqURL.Host,
+	}
+
+	// Copy headers from the original Upgrade request.
+	if upgradeMsg.Headers != nil {
+		for k, vs := range upgradeMsg.Headers {
+			for _, v := range vs {
+				httpReq.Header.Add(k, v)
+			}
+		}
+	}
+
+	// Ensure required WebSocket headers are present.
+	ensureWebSocketHeaders(httpReq.Header)
+
+	// Write the request to the connection.
+	if err := httpReq.Write(conn); err != nil {
+		return nil, nil, fmt.Errorf("write upgrade request: %w", err)
+	}
+
+	// Read the response.
+	bufReader := bufio.NewReader(conn)
+	resp, err := gohttp.ReadResponse(bufReader, httpReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read upgrade response: %w", err)
+	}
+
+	if resp.StatusCode != gohttp.StatusSwitchingProtocols {
+		resp.Body.Close()
+		return nil, nil, fmt.Errorf("upgrade failed: server returned status %d, want 101", resp.StatusCode)
+	}
+
+	return resp, bufReader, nil
+}
+
+// ensureWebSocketHeaders ensures the required WebSocket Upgrade headers are set.
+// If the original request already has them, they are preserved.
+func ensureWebSocketHeaders(h gohttp.Header) {
+	if h.Get("Upgrade") == "" {
+		h.Set("Upgrade", "websocket")
+	}
+	if h.Get("Connection") == "" {
+		h.Set("Connection", "Upgrade")
+	}
+	if h.Get("Sec-WebSocket-Version") == "" {
+		h.Set("Sec-WebSocket-Version", "13")
+	}
+	if h.Get("Sec-WebSocket-Key") == "" {
+		key := generateWebSocketKey()
+		h.Set("Sec-WebSocket-Key", key)
+	}
+}
+
+// generateWebSocketKey generates a random Sec-WebSocket-Key for the handshake.
+func generateWebSocketKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to a static key if rand fails (should never happen).
+		return "dGhlIHNhbXBsZSBub25jZQ=="
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// sendWebSocketFrame sends a single WebSocket frame with the given payload and opcode.
+// Client-to-server frames must be masked per RFC 6455 Section 5.3.
+func sendWebSocketFrame(w io.Writer, payload []byte, opcode byte) error {
+	var maskKey [4]byte
+	if _, err := rand.Read(maskKey[:]); err != nil {
+		return fmt.Errorf("generate mask key: %w", err)
+	}
+
+	frame := &ws.Frame{
+		Fin:     true,
+		Opcode:  opcode,
+		Masked:  true,
+		MaskKey: maskKey,
+		Payload: payload,
+	}
+	if err := ws.WriteFrame(w, frame); err != nil {
+		return fmt.Errorf("send WebSocket frame: %w", err)
+	}
+	return nil
+}
+
+// readWebSocketResponseFrame reads the first data frame from the server,
+// skipping control frames (Ping/Pong). Returns the payload and opcode.
+func readWebSocketResponseFrame(r io.Reader) ([]byte, byte, error) {
+	for {
+		frame, err := ws.ReadFrame(r)
+		if err != nil {
+			return nil, 0, fmt.Errorf("read WebSocket response frame: %w", err)
+		}
+
+		// Return Close frames as data (the response itself may be a close).
+		if frame.Opcode == ws.OpcodeClose {
+			return frame.Payload, frame.Opcode, nil
+		}
+
+		// Skip Ping/Pong control frames.
+		if frame.IsControl() {
+			continue
+		}
+
+		return frame.Payload, frame.Opcode, nil
+	}
 }
 
 // findSendMessage locates a specific send message by sequence number within a flow.
@@ -344,43 +580,6 @@ func resolveWebSocketBody(targetMsg *flow.Message, params resendParams) ([]byte,
 	return sendBody, nil
 }
 
-// establishAndSend establishes a TCP/TLS connection, sends data, and reads the response.
-func (s *Server) establishAndSend(ctx context.Context, targetAddr string, useTLS bool, timeout time.Duration, sendBody []byte) ([]byte, time.Time, time.Duration, error) {
-	dialer := s.rawDialerFunc()
-	start := time.Now()
-
-	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
-	if err != nil {
-		return nil, start, 0, fmt.Errorf("connect to %s: %w", targetAddr, err)
-	}
-	defer conn.Close()
-
-	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
-		if err != nil {
-			return nil, start, 0, err
-		}
-	}
-
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, start, 0, fmt.Errorf("set deadline: %w", err)
-	}
-
-	if len(sendBody) > 0 {
-		if _, err := conn.Write(sendBody); err != nil {
-			return nil, start, 0, fmt.Errorf("send WebSocket message: %w", err)
-		}
-	}
-
-	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
-	if err != nil && len(respData) == 0 {
-		return nil, start, 0, fmt.Errorf("read response: %w", err)
-	}
-	duration := time.Since(start)
-
-	return respData, start, duration, nil
-}
-
 // upgradeTLS wraps a connection with TLS using the provided TLSTransport.
 // If transport is nil, it falls back to a StandardTransport with InsecureSkipVerify.
 func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string, transport httputil.TLSTransport) (net.Conn, error) {
@@ -396,7 +595,9 @@ func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string, transport
 }
 
 // recordWebSocketResend saves the WebSocket resend flow and messages to the store.
-func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams, targetMsg *flow.Message, sendBody, respData []byte, start time.Time, duration time.Duration) (*resendWebSocketResult, error) {
+// The flow records: seq=0 Upgrade request, seq=1 Upgrade response, seq=2 sent frame,
+// seq=3 received frame (mirroring the structure of live WebSocket flows).
+func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams, targetMsg *flow.Message, upgradeMsg *flow.Message, wr *wsResendResult) (*resendWebSocketResult, error) {
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
@@ -404,23 +605,50 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 
 	newFl := &flow.Flow{
 		Protocol: "WebSocket", FlowType: "bidirectional", State: "complete",
-		Timestamp: start, Duration: duration, Tags: tags,
+		Timestamp: wr.start, Duration: wr.duration, Tags: tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
 		return nil, fmt.Errorf("save WebSocket resend session: %w", err)
 	}
 
+	// seq=0: Upgrade request (send).
 	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 		FlowID: newFl.ID, Sequence: 0, Direction: "send",
-		Timestamp: start, Body: sendBody, Metadata: targetMsg.Metadata,
+		Timestamp: wr.start, Method: upgradeMsg.Method, URL: upgradeMsg.URL,
+		Headers: upgradeMsg.Headers,
+	}); err != nil {
+		return nil, fmt.Errorf("save WebSocket resend upgrade request: %w", err)
+	}
+
+	// seq=1: Upgrade response (receive).
+	respHeaders := copyHTTPResponseHeaders(wr.upgradeResp)
+	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+		FlowID: newFl.ID, Sequence: 1, Direction: "receive",
+		Timestamp: wr.start, StatusCode: wr.upgradeResp.StatusCode,
+		Headers: respHeaders,
+	}); err != nil {
+		return nil, fmt.Errorf("save WebSocket resend upgrade response: %w", err)
+	}
+
+	// seq=2: Sent data frame.
+	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
+		FlowID: newFl.ID, Sequence: 2, Direction: "send",
+		Timestamp: wr.start, Body: wr.sendBody, Metadata: targetMsg.Metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("save WebSocket resend send message: %w", err)
 	}
 
-	if len(respData) > 0 {
+	// seq=3: Received data frame.
+	if len(wr.responsePayload) > 0 {
+		recvMetadata := map[string]string{
+			"opcode": strconv.Itoa(int(wr.responseOpcode)),
+			"fin":    "true",
+		}
+		recvBody, recvRawBytes := classifyWebSocketPayload(wr.responsePayload, wr.responseOpcode)
 		if err := s.deps.store.AppendMessage(ctx, &flow.Message{
-			FlowID: newFl.ID, Sequence: 1, Direction: "receive",
-			Timestamp: start.Add(duration), Body: respData,
+			FlowID: newFl.ID, Sequence: 3, Direction: "receive",
+			Timestamp: wr.start.Add(wr.duration), Body: recvBody,
+			RawBytes: recvRawBytes, Metadata: recvMetadata,
 		}); err != nil {
 			return nil, fmt.Errorf("save WebSocket resend receive message: %w", err)
 		}
@@ -428,8 +656,31 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 
 	return &resendWebSocketResult{
 		NewFlowID: newFl.ID, MessageSequence: *params.MessageSequence,
-		ResponseData: base64.StdEncoding.EncodeToString(respData),
-		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
+		ResponseData: base64.StdEncoding.EncodeToString(wr.responsePayload),
+		ResponseSize: len(wr.responsePayload), DurationMs: wr.duration.Milliseconds(),
 		Tag: params.Tag,
 	}, nil
+}
+
+// copyHTTPResponseHeaders extracts headers from an HTTP response into a map.
+func copyHTTPResponseHeaders(resp *gohttp.Response) map[string][]string {
+	if resp == nil || resp.Header == nil {
+		return nil
+	}
+	result := make(map[string][]string, len(resp.Header))
+	for k, vs := range resp.Header {
+		cp := make([]string, len(vs))
+		copy(cp, vs)
+		result[k] = cp
+	}
+	return result
+}
+
+// classifyWebSocketPayload returns (body, rawBytes) based on the opcode.
+// Text frames are stored in Body; binary frames are stored in RawBytes.
+func classifyWebSocketPayload(payload []byte, opcode byte) ([]byte, []byte) {
+	if opcode == ws.OpcodeText {
+		return payload, nil
+	}
+	return nil, payload
 }
