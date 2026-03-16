@@ -94,6 +94,25 @@ make clean          # 成果物削除
 > `internal/mcp/webui/embed.go` が `//go:embed dist/*` で Web UI を埋め込むため、
 > `dist/` が存在しないとコンパイルエラーになる。必ず `make` ターゲット経由で実行する。
 
+### e2e テストのサブシステム検証チェックリスト
+
+新規 e2e テスト (`*_integration_test.go`) を追加する際、通信の成功だけでなく
+サブシステム連携を必ず検証すること。以下のチェックリストを満たしているか確認する。
+
+- [ ] **通信の成功**: データが正しく透過・変換されること（リクエスト送信 → レスポンス受信 → 内容検証）
+- [ ] **フロー記録**: Store に正しいプロトコル名 (`Protocol`)、FlowType (`unary` / `bidirectional` / `stream`)、State で保存されること
+- [ ] **メッセージ内容**: リクエスト/レスポンスのヘッダー・ボディが `GetMessages()` で正しく記録されていること
+- [ ] **状態遷移**: progressive recording が正しく動作すること（`State` が `active` → `complete` に遷移）
+- [ ] **プラグインフック発火**: 該当プロトコルのフックが呼ばれること（プラグイン対応プロトコルの場合）
+- [ ] **エラーパス**: 接続失敗、タイムアウト時にフローが `State="error"` で記録されること
+- [ ] **raw bytes 記録**: wire-observed な raw bytes (`Message.RawBytes`) が正しく記録されていること（L4-capable 原則、M26/M27 で確立）
+- [ ] **variant recording**: intercept/transform による改変時、original と modified variant が両方記録されること（M27 で導入）
+- [ ] **MCP ツール統合**: `query_flows` / `get_flow_detail` 経由でフローが正しく取得できること
+
+> **適用範囲**: 全項目が全テストに必須ではない。プロトコル特性やテスト目的に応じて該当項目を検証する。
+> 例: Raw TCP は L7 構造化ビューを持たないため「メッセージ内容」のヘッダー検証は不要。
+> SOCKS5 はトランスポート層として自身のフロー記録対象外のため、トンネル先プロトコルで検証する。
+
 ## コーディング規約
 
 - Go 標準スタイル (`gofmt` / `goimports`)
