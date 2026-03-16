@@ -9,6 +9,7 @@ import { BodyEditor } from "./BodyEditor.js";
 import type { HeaderRow } from "./HeaderEditor.js";
 import { HeaderEditor } from "./HeaderEditor.js";
 import "./InterceptPage.css";
+import { RawBytesEditor } from "./RawBytesEditor.js";
 import { RulesPanel } from "./RulesPanel.js";
 
 const TABS = [
@@ -18,15 +19,21 @@ const TABS = [
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
+type DetailViewMode = "structured" | "raw";
+
 export function InterceptPage() {
   const [activeTab, setActiveTab] = useState("queue");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detailViewMode, setDetailViewMode] = useState<DetailViewMode>("structured");
 
-  // Editable fields for the selected request
+  // Editable fields for the selected request (structured mode)
   const [editMethod, setEditMethod] = useState("");
   const [editUrl, setEditUrl] = useState("");
   const [editHeaders, setEditHeaders] = useState<HeaderRow[]>([]);
   const [editBody, setEditBody] = useState("");
+
+  // Editable raw bytes (raw mode, Base64)
+  const [editRawBytes, setEditRawBytes] = useState("");
 
   const { addToast } = useToast();
   const { interceptAction, loading: executeLoading } = useInterceptAction();
@@ -67,6 +74,13 @@ export function InterceptPage() {
     setEditUrl(entry.url);
     setEditBody(entry.body);
 
+    // Populate raw bytes if available
+    if (entry.raw_bytes) {
+      setEditRawBytes(entry.raw_bytes);
+    } else {
+      setEditRawBytes("");
+    }
+
     // Flatten headers from Record<string, string[]> to editable rows
     const headerRows: HeaderRow[] = [];
     for (const [name, values] of Object.entries(entry.headers)) {
@@ -83,7 +97,10 @@ export function InterceptPage() {
     try {
       await interceptAction({
         action: "release",
-        params: { intercept_id: selectedId },
+        params: {
+          intercept_id: selectedId,
+          mode: detailViewMode,
+        },
       });
       addToast({ type: "success", message: "Request released" });
       setSelectedId(null);
@@ -94,13 +111,36 @@ export function InterceptPage() {
         message: `Release failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedId, interceptAction, addToast, refetchQueue]);
+  }, [selectedId, detailViewMode, interceptAction, addToast, refetchQueue]);
 
   // Modify & Forward: apply edits and forward
   const handleModifyAndForward = useCallback(async () => {
     if (!selectedId) return;
 
-    // Build override headers from edit state.
+    if (detailViewMode === "raw") {
+      // Raw mode: send raw_override_base64
+      try {
+        await interceptAction({
+          action: "modify_and_forward",
+          params: {
+            intercept_id: selectedId,
+            mode: "raw",
+            raw_override_base64: editRawBytes,
+          },
+        });
+        addToast({ type: "success", message: "Request modified (raw) and forwarded" });
+        setSelectedId(null);
+        refetchQueue();
+      } catch (err) {
+        addToast({
+          type: "error",
+          message: `Modify & Forward failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      return;
+    }
+
+    // Structured mode: build override headers from edit state.
     // Merge duplicate header names with comma concatenation (RFC 7230).
     const overrideHeaders: Record<string, string> = {};
     for (const h of editHeaders) {
@@ -134,7 +174,7 @@ export function InterceptPage() {
         message: `Modify & Forward failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [selectedId, editMethod, editUrl, editHeaders, editBody, interceptAction, addToast, refetchQueue]);
+  }, [selectedId, detailViewMode, editMethod, editUrl, editHeaders, editBody, editRawBytes, interceptAction, addToast, refetchQueue]);
 
   // Drop: discard request
   const handleDrop = useCallback(async () => {
@@ -154,6 +194,8 @@ export function InterceptPage() {
       });
     }
   }, [selectedId, interceptAction, addToast, refetchQueue]);
+
+  const hasRawBytes = selectedEntry?.raw_bytes_available ?? false;
 
   return (
     <div className="page intercept-page">
@@ -194,6 +236,23 @@ export function InterceptPage() {
               {selectedEntry.method} {extractHost(selectedEntry.url)}
             </span>
             <div className="intercept-detail-actions">
+              {/* Structured / Raw toggle */}
+              {hasRawBytes && (
+                <div className="intercept-view-mode-selector">
+                  <button
+                    className={`intercept-view-mode-btn ${detailViewMode === "structured" ? "intercept-view-mode-btn--active" : ""}`}
+                    onClick={() => setDetailViewMode("structured")}
+                  >
+                    Structured
+                  </button>
+                  <button
+                    className={`intercept-view-mode-btn ${detailViewMode === "raw" ? "intercept-view-mode-btn--active" : ""}`}
+                    onClick={() => setDetailViewMode("raw")}
+                  >
+                    Raw
+                  </button>
+                </div>
+              )}
               <Button
                 variant="primary"
                 size="sm"
@@ -221,30 +280,41 @@ export function InterceptPage() {
             </div>
           </div>
           <div className="intercept-detail-body">
-            {/* Method + URL */}
-            <div className="intercept-request-line">
-              <select
-                className="intercept-method-select"
-                value={editMethod}
-                onChange={(e) => setEditMethod(e.target.value)}
-              >
-                {HTTP_METHODS.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-              <input
-                className="input intercept-url-input"
-                value={editUrl}
-                onChange={(e) => setEditUrl(e.target.value)}
-                placeholder="URL"
+            {detailViewMode === "structured" ? (
+              <>
+                {/* Method + URL */}
+                <div className="intercept-request-line">
+                  <select
+                    className="intercept-method-select"
+                    value={editMethod}
+                    onChange={(e) => setEditMethod(e.target.value)}
+                  >
+                    {HTTP_METHODS.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                  <input
+                    className="input intercept-url-input"
+                    value={editUrl}
+                    onChange={(e) => setEditUrl(e.target.value)}
+                    placeholder="URL"
+                  />
+                </div>
+
+                {/* Headers */}
+                <HeaderEditor headers={editHeaders} onChange={setEditHeaders} />
+
+                {/* Body */}
+                <BodyEditor body={editBody} onChange={setEditBody} />
+              </>
+            ) : (
+              /* Raw bytes editor */
+              <RawBytesEditor
+                rawBytes={editRawBytes}
+                onChange={setEditRawBytes}
+                size={selectedEntry.raw_bytes_size}
               />
-            </div>
-
-            {/* Headers */}
-            <HeaderEditor headers={editHeaders} onChange={setEditHeaders} />
-
-            {/* Body */}
-            <BodyEditor body={editBody} onChange={setEditBody} />
+            )}
           </div>
         </div>
       )}
@@ -253,7 +323,7 @@ export function InterceptPage() {
 }
 
 // ---------------------------------------------------------------------------
-// QueuePanel — intercept queue table
+// QueuePanel -- intercept queue table
 // ---------------------------------------------------------------------------
 
 interface QueuePanelProps {

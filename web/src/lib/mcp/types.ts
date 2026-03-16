@@ -453,6 +453,9 @@ export interface InterceptQueueEntry {
   body: string;
   timestamp: string;
   matched_rules: string[];
+  raw_bytes_available?: boolean;
+  raw_bytes_size?: number;
+  raw_bytes?: string;
 }
 
 /** Response for query resource="intercept_queue". */
@@ -1023,13 +1026,19 @@ export interface InterceptActionParams {
   params: {
     intercept_id?: string;
 
-    // modify_and_forward mutation parameters
+    // Mode: "structured" (default) or "raw"
+    mode?: "structured" | "raw";
+
+    // modify_and_forward mutation parameters (structured mode)
     override_method?: string;
     override_url?: string;
     override_headers?: Record<string, string>;
     add_headers?: Record<string, string>;
     remove_headers?: string[];
     override_body?: string | null;
+
+    // modify_and_forward mutation parameters (raw mode)
+    raw_override_base64?: string;
   };
 }
 
