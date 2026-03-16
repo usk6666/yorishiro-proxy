@@ -260,24 +260,11 @@ func TestIntegration_SOCKS5_HTTPThroughProxy(t *testing.T) {
 		t.Errorf("expected body in response, got: %s", respStr)
 	}
 
-	// Verify flow recording — SOCKS5 handler doesn't record flows directly,
-	// but the post-handshake or relay should. Check for any recorded flow.
-	conn.Close()
-	var flows []*flow.Flow
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
-		if err != nil {
-			t.Fatalf("ListFlows: %v", err)
-		}
-		if len(flows) > 0 {
-			break
-		}
-	}
 	// Note: SOCKS5 handler with PostHandshake=nil does a simple TCP relay
-	// without flow recording. This assertion documents the current behavior.
-	// When SOCKS5 flow recording is implemented, update this to require flows.
-	t.Logf("flows recorded after SOCKS5 session: %d", len(flows))
+	// without flow recording. This test verifies SOCKS5 tunneling works
+	// correctly at the transport level. Flow recording requires PostHandshake
+	// to be set (e.g., protocol detection or TLS MITM), which is tested
+	// in integration tests that configure the full proxy pipeline.
 }
 
 func TestIntegration_SOCKS5_WithAuth(t *testing.T) {
