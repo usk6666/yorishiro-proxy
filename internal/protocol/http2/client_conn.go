@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"syscall"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
@@ -60,10 +60,8 @@ type clientConn struct {
 	// Per RFC 9113 Section 6.2, only one header block can be in progress at a time.
 	headerStreamID uint32
 
-	// active tracks in-flight handler goroutines.
-	active atomic.Int64
-	mu     sync.Mutex
-	cond   *sync.Cond
+	// wg tracks in-flight handler goroutines.
+	wg sync.WaitGroup
 
 	// decodedHeaders stores decoded HPACK headers for streams that have received
 	// HEADERS but not yet END_STREAM (waiting for DATA frames).
@@ -95,7 +93,6 @@ func newClientConn(
 		pendingStreams: make(map[uint32]*streamRequest),
 		streamHandler:  handler,
 	}
-	cc.cond = sync.NewCond(&cc.mu)
 	return cc
 }
 
@@ -122,11 +119,7 @@ func (cc *clientConn) serve() error {
 	}
 
 	// Wait for all in-flight handlers to complete.
-	cc.mu.Lock()
-	for cc.active.Load() > 0 {
-		cc.cond.Wait()
-	}
-	cc.mu.Unlock()
+	cc.wg.Wait()
 
 	return nil
 }
@@ -567,13 +560,11 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 		delete(cc.decodedHeaders, streamID)
 	}
 
-	cc.active.Add(1)
+	cc.wg.Add(1)
 	go func() {
 		defer func() {
 			rw.finish()
-			if cc.active.Add(-1) == 0 {
-				cc.cond.Signal()
-			}
+			cc.wg.Done()
 		}()
 		cc.streamHandler(cc.ctx, rw, req)
 	}()
@@ -683,10 +674,21 @@ func isConnectionClosed(err error) bool {
 	if err == nil {
 		return false
 	}
-	var netErr *net.OpError
-	if errors.As(err, &netErr) {
+	if errors.Is(err, net.ErrClosed) {
 		return true
 	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if errors.Is(opErr.Err, syscall.ECONNRESET) {
+			return true
+		}
+		// Don't treat timeouts or other op errors as closed.
+		return false
+	}
+	// Fallback string checks for edge cases.
 	msg := err.Error()
 	return strings.Contains(msg, "use of closed network connection") ||
 		strings.Contains(msg, "connection reset by peer")
