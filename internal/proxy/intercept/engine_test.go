@@ -734,10 +734,12 @@ func TestEngine_MatchesWebSocketFrame_HTTPRuleIndependence(t *testing.T) {
 		},
 	})
 
-	u := &url.URL{Path: "/api/test"}
-	if e.MatchesRequest("GET", u, nil) {
-		// HTTP-only rule still matches, WebSocket rule should not interfere.
-		// The "http-catch-all" rule matches everything, so this should be true.
+	testURL := &url.URL{Path: "/api/test"}
+	matched := e.MatchRequestRules("GET", testURL, http.Header{})
+	for _, id := range matched {
+		if id == "ws-catch-all" {
+			t.Error("WebSocket rule should not match HTTP request via MatchRequestRules")
+		}
 	}
 }
 

@@ -875,7 +875,7 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compileRule() error = %v", err)
 			}
-			got := cr.matchesWebSocketFrame(tt.upgradeURL, tt.direction, tt.flowID)
+			got := cr.matchesWebSocketFrame(tt.upgradeURL, tt.flowID)
 			if got != tt.want {
 				t.Errorf("matchesWebSocketFrame() = %v, want %v", got, tt.want)
 			}

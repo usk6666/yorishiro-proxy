@@ -140,6 +140,9 @@ func (e *Engine) MatchesRequest(method string, u *url.URL, headers http.Header) 
 		if !cr.rule.Enabled {
 			continue
 		}
+		if cr.isWebSocketRule() {
+			continue
+		}
 		if cr.rule.Direction != DirectionRequest && cr.rule.Direction != DirectionBoth {
 			continue
 		}
@@ -159,6 +162,9 @@ func (e *Engine) MatchesResponse(statusCode int, headers http.Header) bool {
 
 	for _, cr := range e.rules {
 		if !cr.rule.Enabled {
+			continue
+		}
+		if cr.isWebSocketRule() {
 			continue
 		}
 		if cr.rule.Direction != DirectionResponse && cr.rule.Direction != DirectionBoth {
@@ -182,6 +188,9 @@ func (e *Engine) MatchRequestRules(method string, u *url.URL, headers http.Heade
 		if !cr.rule.Enabled {
 			continue
 		}
+		if cr.isWebSocketRule() {
+			continue
+		}
 		if cr.rule.Direction != DirectionRequest && cr.rule.Direction != DirectionBoth {
 			continue
 		}
@@ -200,6 +209,9 @@ func (e *Engine) MatchResponseRules(statusCode int, headers http.Header) []strin
 	var matched []string
 	for _, cr := range e.rules {
 		if !cr.rule.Enabled {
+			continue
+		}
+		if cr.isWebSocketRule() {
 			continue
 		}
 		if cr.rule.Direction != DirectionResponse && cr.rule.Direction != DirectionBoth {
@@ -231,7 +243,7 @@ func (e *Engine) MatchesWebSocketFrame(upgradeURL string, direction string, flow
 		if !matchesWSDirection(cr.rule.Direction, direction) {
 			continue
 		}
-		if cr.matchesWebSocketFrame(upgradeURL, direction, flowID) {
+		if cr.matchesWebSocketFrame(upgradeURL, flowID) {
 			return true
 		}
 	}
@@ -255,7 +267,7 @@ func (e *Engine) MatchWebSocketFrameRules(upgradeURL string, direction string, f
 		if !matchesWSDirection(cr.rule.Direction, direction) {
 			continue
 		}
-		if cr.matchesWebSocketFrame(upgradeURL, direction, flowID) {
+		if cr.matchesWebSocketFrame(upgradeURL, flowID) {
 			matched = append(matched, cr.rule.ID)
 		}
 	}

@@ -30,6 +30,9 @@ const (
 // with the limits in the auto-transform, macro, body_patch, and fuzzer packages.
 const maxRegexPatternLen = 1024
 
+// maxFlowIDLen is the maximum allowed length (in bytes) for FlowID values.
+const maxFlowIDLen = 256
+
 // validDirections contains all valid Direction values for validation.
 var validDirections = map[Direction]bool{
 	DirectionRequest:  true,
@@ -137,6 +140,10 @@ func compileRule(r Rule) (*compiledRule, error) {
 
 	if err := validateConditionExclusivity(r.Conditions); err != nil {
 		return nil, err
+	}
+
+	if len(r.Conditions.FlowID) > maxFlowIDLen {
+		return nil, fmt.Errorf("flow_id too long: %d > %d", len(r.Conditions.FlowID), maxFlowIDLen)
 	}
 
 	cr := &compiledRule{rule: r}
@@ -276,7 +283,7 @@ func (cr *compiledRule) isWebSocketRule() bool {
 // WebSocket frame parameters. upgradeURL is the URL of the original WebSocket
 // upgrade request, direction is "client_to_server" or "server_to_client",
 // and flowID is the identifier of the WebSocket flow.
-func (cr *compiledRule) matchesWebSocketFrame(upgradeURL string, direction string, flowID string) bool {
+func (cr *compiledRule) matchesWebSocketFrame(upgradeURL string, flowID string) bool {
 	if cr.upgradeURLPatternRe != nil {
 		if !cr.upgradeURLPatternRe.MatchString(upgradeURL) {
 			return false
