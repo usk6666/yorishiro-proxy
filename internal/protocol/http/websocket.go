@@ -192,7 +192,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	// Dial the upstream server, optionally via upstream proxy.
 	rawConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
-		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("dial wss upstream %s: %w", host, err))
+		return h.wssUpstreamError(ctx, conn, ep, logger, host, fmt.Errorf("dial wss upstream %s: %w", host, err))
 	}
 	defer rawConn.Close()
 
@@ -205,14 +205,14 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	tlsTransport := h.wsHTTP1Transport()
 	upstreamTLS, negotiatedProto, err := tlsTransport.TLSConnect(ctx, rawConn, hostname)
 	if err != nil {
-		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("wss upstream TLS handshake: %w", err))
+		return h.wssUpstreamError(ctx, conn, ep, logger, host, fmt.Errorf("wss upstream TLS handshake: %w", err))
 	}
 	defer upstreamTLS.Close()
 
 	// Safety net: if the server negotiated HTTP/2 despite our preference for
 	// HTTP/1.1, WebSocket upgrade cannot proceed (RFC 8441 not yet supported).
 	if negotiatedProto == "h2" {
-		return h.wssUpstreamError(ctx, conn, ep, logger,
+		return h.wssUpstreamError(ctx, conn, ep, logger, host,
 			fmt.Errorf("wss upstream %s negotiated HTTP/2 via ALPN; WebSocket requires HTTP/1.1 (RFC 8441 not supported)", host))
 	}
 
@@ -229,14 +229,14 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	outReq := req.Clone(ctx)
 	outReq.RequestURI = req.URL.RequestURI()
 	if err := outReq.Write(upstreamTLS); err != nil {
-		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("write wss upgrade request: %w", err))
+		return h.wssUpstreamError(ctx, conn, ep, logger, host, fmt.Errorf("write wss upgrade request: %w", err))
 	}
 
 	// Read the upstream's response.
 	upstreamReader := bufio.NewReader(upstreamTLS)
 	resp, err := gohttp.ReadResponse(upstreamReader, req)
 	if err != nil {
-		return h.wssUpstreamError(ctx, conn, ep, logger, fmt.Errorf("read wss upgrade response: %w", err))
+		return h.wssUpstreamError(ctx, conn, ep, logger, host, fmt.Errorf("read wss upgrade response: %w", err))
 	}
 
 	// Validate 101 Switching Protocols response.
@@ -289,8 +289,8 @@ func (h *Handler) newWSHandler(logger *slog.Logger) *ws.Handler {
 // it logs the error, sends 502 to the client, records the error flow, and
 // returns the formatted error. This reduces cyclomatic complexity in
 // handleWebSocketTLS.
-func (h *Handler) wssUpstreamError(ctx context.Context, conn net.Conn, ep wsErrorRecordParams, logger *slog.Logger, wrapErr error) error {
-	logger.Error("wss upstream error", "error", wrapErr)
+func (h *Handler) wssUpstreamError(ctx context.Context, conn net.Conn, ep wsErrorRecordParams, logger *slog.Logger, host string, wrapErr error) error {
+	logger.Error("wss upstream error", slog.String("host", host), "error", wrapErr)
 	httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 	h.recordWebSocketError(ctx, ep, wrapErr, logger)
 	return wrapErr
@@ -306,11 +306,9 @@ func (h *Handler) wssUpstreamError(ctx context.Context, conn net.Conn, ep wsErro
 func (h *Handler) wsHTTP1Transport() httputil.TLSTransport {
 	t := h.effectiveTLSTransport()
 	if st, ok := t.(*httputil.StandardTransport); ok {
-		return &httputil.StandardTransport{
-			InsecureSkipVerify: st.InsecureSkipVerify,
-			HostTLS:            st.HostTLS,
-			NextProtos:         []string{"http/1.1"},
-		}
+		cp := *st // shallow copy — picks up all current and future fields
+		cp.NextProtos = []string{"http/1.1"}
+		return &cp
 	}
 	return t
 }

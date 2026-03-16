@@ -83,7 +83,10 @@ func TestWSS_H2OnlyServer_Returns502(t *testing.T) {
 	}
 	defer upstreamLn.Close()
 
-	// Accept connections in the background and keep them open.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Accept connections in the background and keep them open until context ends.
 	go func() {
 		for {
 			conn, err := upstreamLn.Accept()
@@ -93,7 +96,10 @@ func TestWSS_H2OnlyServer_Returns502(t *testing.T) {
 			go func() {
 				defer conn.Close()
 				// Hold connection open until test context ends.
-				time.Sleep(10 * time.Second)
+				select {
+				case <-ctx.Done():
+				case <-time.After(10 * time.Second):
+				}
 			}()
 		}
 	}()
@@ -102,9 +108,6 @@ func TestWSS_H2OnlyServer_Returns502(t *testing.T) {
 	// dialUpstream succeeds.
 	connectHost := upstreamLn.Addr().String()
 	handler.tlsTransport = &h2OnlyTLSTransport{}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
 	defer proxyCancel()
@@ -120,7 +123,10 @@ func TestWSS_H2OnlyServer_Returns502(t *testing.T) {
 		"Sec-WebSocket-Version: 13\r\n" +
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
 		"\r\n"
-	tlsConn.Write([]byte(wsReq))
+	_, err = tlsConn.Write([]byte(wsReq))
+	if err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
 
 	// Read the 502 Bad Gateway response.
 	resp, err := gohttp.ReadResponse(tlsReader, nil)
@@ -530,7 +536,9 @@ func TestWSS_UpstreamDialFailure_RecordsSession(t *testing.T) {
 		"Sec-WebSocket-Version: 13\r\n" +
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
 		"\r\n"
-	tlsConn.Write([]byte(wsReq))
+	if _, err := tlsConn.Write([]byte(wsReq)); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
 
 	// Read the 502 Bad Gateway response.
 	resp, err := gohttp.ReadResponse(tlsReader, nil)

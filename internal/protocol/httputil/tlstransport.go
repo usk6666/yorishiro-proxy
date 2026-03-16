@@ -112,7 +112,7 @@ func (t *StandardTransport) TLSConnect(ctx context.Context, conn net.Conn, serve
 	tlsConfig := &tls.Config{
 		ServerName:         serverName,
 		InsecureSkipVerify: t.InsecureSkipVerify, //nolint:gosec // proxy requires MITM
-		NextProtos:         nextProtos,
+		NextProtos:         append([]string(nil), nextProtos...),
 		MinVersion:         tls.VersionTLS12,
 	}
 
