@@ -147,6 +147,12 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	if h.SafetyEngine != nil {
 		wsHandler.SetSafetyEngine(h.SafetyEngine)
 	}
+	if h.InterceptEngine != nil {
+		wsHandler.SetInterceptEngine(h.InterceptEngine)
+	}
+	if h.InterceptQueue != nil {
+		wsHandler.SetInterceptQueue(h.InterceptQueue)
+	}
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
@@ -276,6 +282,12 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	wsHandler := ws.NewHandler(h.Store, logger)
 	if h.SafetyEngine != nil {
 		wsHandler.SetSafetyEngine(h.SafetyEngine)
+	}
+	if h.InterceptEngine != nil {
+		wsHandler.SetInterceptEngine(h.InterceptEngine)
+	}
+	if h.InterceptQueue != nil {
+		wsHandler.SetInterceptQueue(h.InterceptQueue)
 	}
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
