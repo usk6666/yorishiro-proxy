@@ -1349,3 +1349,325 @@ func TestSerializeRawResponse_NilResponse(t *testing.T) {
 		t.Errorf("serializeRawResponse(nil) = %v, want nil", raw)
 	}
 }
+
+// doConnectPlaintext performs a CONNECT handshake without TLS, returning the raw
+// connection for sending plaintext HTTP requests inside the tunnel.
+func doConnectPlaintext(t *testing.T, proxyAddr, connectHost string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+
+	// Send CONNECT request.
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectHost, connectHost)
+	conn.Write([]byte(connectReq))
+
+	// Read 200 response.
+	reader := bufio.NewReader(conn)
+	resp, err := gohttp.ReadResponse(reader, nil)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusOK {
+		conn.Close()
+		t.Fatalf("CONNECT status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+
+	return conn, reader
+}
+
+func TestHandleCONNECT_PlaintextHTTPForwarding(t *testing.T) {
+	// Start an upstream HTTP (not HTTPS) server.
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.Header().Set("X-Test", "upstream-plaintext")
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "hello from plaintext upstream")
+	}))
+	defer upstream.Close()
+
+	_, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	connectHost := "localhost:" + port
+
+	issuer, _ := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	// CONNECT to a non-TLS port, then send plaintext HTTP.
+	conn, reader := doConnectPlaintext(t, proxyAddr, connectHost)
+	defer conn.Close()
+
+	// Send plaintext HTTP request inside the CONNECT tunnel.
+	httpReq := fmt.Sprintf("GET /test-path HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", connectHost)
+	conn.Write([]byte(httpReq))
+
+	// Read HTTP response.
+	resp, err := gohttp.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+	if string(body) != "hello from plaintext upstream" {
+		t.Errorf("body = %q, want %q", body, "hello from plaintext upstream")
+	}
+	if resp.Header.Get("X-Test") != "upstream-plaintext" {
+		t.Errorf("X-Test = %q, want %q", resp.Header.Get("X-Test"), "upstream-plaintext")
+	}
+}
+
+func TestHandleCONNECT_PlaintextHTTPSessionRecording(t *testing.T) {
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.Header().Set("X-Custom", "value")
+		w.WriteHeader(gohttp.StatusCreated)
+		fmt.Fprintf(w, "response-body")
+	}))
+	defer upstream.Close()
+
+	_, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	connectHost := "localhost:" + port
+
+	issuer, _ := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	conn, reader := doConnectPlaintext(t, proxyAddr, connectHost)
+	defer conn.Close()
+
+	// Send POST request with body.
+	reqBody := "request-body-data"
+	httpReq := fmt.Sprintf("POST /api/submit HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		connectHost, len(reqBody), reqBody)
+	conn.Write([]byte(httpReq))
+
+	// Read response.
+	resp, _ := gohttp.ReadResponse(reader, nil)
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Wait for flow recording.
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify flow was recorded.
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+
+	if entry.Session.Protocol != "HTTP/1.x" {
+		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/1.x")
+	}
+	if entry.Send == nil {
+		t.Fatal("send message is nil")
+	}
+	if entry.Send.Method != "POST" {
+		t.Errorf("method = %q, want %q", entry.Send.Method, "POST")
+	}
+	if entry.Send.URL == nil {
+		t.Fatal("request URL is nil")
+	}
+	if entry.Send.URL.Scheme != "http" {
+		t.Errorf("URL scheme = %q, want %q", entry.Send.URL.Scheme, "http")
+	}
+	if entry.Send.URL.Path != "/api/submit" {
+		t.Errorf("URL path = %q, want %q", entry.Send.URL.Path, "/api/submit")
+	}
+	if string(entry.Send.Body) != reqBody {
+		t.Errorf("request body = %q, want %q", entry.Send.Body, reqBody)
+	}
+	if entry.Receive == nil {
+		t.Fatal("receive message is nil")
+	}
+	if entry.Receive.StatusCode != gohttp.StatusCreated {
+		t.Errorf("response status = %d, want %d", entry.Receive.StatusCode, gohttp.StatusCreated)
+	}
+}
+
+func TestHandleCONNECT_PlaintextKeepAlive(t *testing.T) {
+	var mu sync.Mutex
+	requestCount := 0
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		mu.Lock()
+		requestCount++
+		count := requestCount
+		mu.Unlock()
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "response-%d", count)
+	}))
+	defer upstream.Close()
+
+	_, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	connectHost := "localhost:" + port
+
+	issuer, _ := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	conn, reader := doConnectPlaintext(t, proxyAddr, connectHost)
+	defer conn.Close()
+
+	// Send multiple requests over the same connection (keep-alive).
+	for i := 1; i <= 3; i++ {
+		httpReq := fmt.Sprintf("GET /path-%d HTTP/1.1\r\nHost: %s\r\n\r\n", i, connectHost)
+		if _, err := conn.Write([]byte(httpReq)); err != nil {
+			t.Fatalf("write request %d: %v", i, err)
+		}
+
+		resp, err := gohttp.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("read response %d: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		expected := fmt.Sprintf("response-%d", i)
+		if string(body) != expected {
+			t.Errorf("response %d body = %q, want %q", i, body, expected)
+		}
+	}
+
+	conn.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify all 3 sessions were recorded.
+	entries := store.Entries()
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 session entries, got %d", len(entries))
+	}
+	for i, entry := range entries {
+		expectedPath := fmt.Sprintf("/path-%d", i+1)
+		if entry.Send == nil || entry.Send.URL == nil {
+			t.Errorf("entry[%d] send or URL is nil", i)
+			continue
+		}
+		if entry.Send.URL.Path != expectedPath {
+			t.Errorf("entry[%d] path = %q, want %q", i, entry.Send.URL.Path, expectedPath)
+		}
+	}
+}
+
+func TestHandleCONNECT_TLSStillWorksAfterPeek(t *testing.T) {
+	// Ensure that the TLS path still works after adding peek-based detection.
+	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "tls-ok")
+	}))
+	defer upstream.Close()
+
+	port := upstreamPort(t, upstream)
+	connectHost := "localhost:" + port
+
+	issuer, rootCAs := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
+	handler.Transport = upstreamTransport(upstream)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	// Standard TLS CONNECT should still work.
+	tlsConn, tlsReader := doConnectAndTLS(t, proxyAddr, connectHost, rootCAs)
+	defer tlsConn.Close()
+
+	httpReq := fmt.Sprintf("GET /test HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", connectHost)
+	tlsConn.Write([]byte(httpReq))
+
+	httpsResp, err := gohttp.ReadResponse(tlsReader, nil)
+	if err != nil {
+		t.Fatalf("read HTTPS response: %v", err)
+	}
+	body, _ := io.ReadAll(httpsResp.Body)
+	httpsResp.Body.Close()
+
+	if string(body) != "tls-ok" {
+		t.Errorf("body = %q, want %q", body, "tls-ok")
+	}
+
+	// Verify flow was recorded as HTTPS.
+	time.Sleep(100 * time.Millisecond)
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Session.Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want %q", entries[0].Session.Protocol, "HTTPS")
+	}
+}
+
+func TestHandleCONNECT_PlaintextClientDisconnect(t *testing.T) {
+	// When the client disconnects immediately after CONNECT 200, the handler
+	// should return gracefully without panicking.
+	issuer, _ := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+
+	connectReq := "CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n"
+	conn.Write([]byte(connectReq))
+
+	reader := bufio.NewReader(conn)
+	resp, err := gohttp.ReadResponse(reader, nil)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("read response: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+
+	// Close immediately — no data sent after CONNECT 200.
+	conn.Close()
+
+	// Give the handler time to process the close.
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify proxy is still alive.
+	probe, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("proxy is not accepting connections after client disconnect: %v", err)
+	}
+	probe.Close()
+}
