@@ -709,6 +709,132 @@ func TestFindUpgradeRequestMessage_NotFound(t *testing.T) {
 	}
 }
 
+func TestWebSocketResend_DeflateExtensionStripped(t *testing.T) {
+	// Verify that when the original Upgrade request has Sec-WebSocket-Extensions,
+	// the resend strips it to avoid permessage-deflate negotiation (since stored
+	// bodies are already decompressed).
+	store := newTestStore(t)
+
+	// Create a WebSocket echo server that verifies no extensions are requested.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	extensionReceived := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		// Capture the Sec-WebSocket-Extensions header value.
+		extensionReceived <- req.Header.Get("Sec-WebSocket-Extensions")
+
+		// Send 101 response.
+		resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: dummy-accept-key\r\n" +
+			"\r\n"
+		conn.Write([]byte(resp))
+
+		// Echo one frame then close.
+		frame, err := ws.ReadFrame(reader)
+		if err != nil {
+			return
+		}
+		ws.WriteFrame(conn, &ws.Frame{Fin: true, Opcode: frame.Opcode, Payload: frame.Payload})
+	}()
+
+	addr := ln.Addr().String()
+	seedWebSocketFlowWithExtensions(t, store, "ws-deflate-strip", addr)
+
+	cs := setupWSResendSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-deflate-strip",
+			"message_sequence": 2,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	// Verify the server received no Sec-WebSocket-Extensions header.
+	select {
+	case ext := <-extensionReceived:
+		if ext != "" {
+			t.Errorf("Sec-WebSocket-Extensions should be stripped, got %q", ext)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for extension check")
+	}
+}
+
+// seedWebSocketFlowWithExtensions creates a WebSocket flow whose Upgrade request
+// includes a Sec-WebSocket-Extensions header (permessage-deflate).
+func seedWebSocketFlowWithExtensions(t *testing.T, store flow.Store, id, targetAddr string) {
+	t.Helper()
+	ctx := context.Background()
+
+	host, port, _ := net.SplitHostPort(targetAddr)
+	wsURL, _ := url.Parse(fmt.Sprintf("ws://%s:%s/echo", host, port))
+
+	fl := &flow.Flow{
+		ID:        id,
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: targetAddr},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	// Upgrade request with Sec-WebSocket-Extensions.
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: id, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
+		Headers: map[string][]string{
+			"Upgrade":                  {"websocket"},
+			"Connection":               {"Upgrade"},
+			"Sec-Websocket-Version":    {"13"},
+			"Sec-Websocket-Key":        {"dGhlIHNhbXBsZSBub25jZQ=="},
+			"Sec-Websocket-Extensions": {"permessage-deflate; client_max_window_bits"},
+			"Host":                     {fmt.Sprintf("%s:%s", host, port)},
+		},
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade): %v", err)
+	}
+
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: id, Sequence: 1, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 101,
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade resp): %v", err)
+	}
+
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: id, Sequence: 2, Direction: "send",
+		Timestamp: time.Now().UTC(), Body: []byte("test deflate strip"),
+		Metadata: map[string]string{"opcode": "1", "fin": "true"},
+	}); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
+}
+
 func TestCopyHTTPResponseHeaders(t *testing.T) {
 	// Nil response.
 	if h := copyHTTPResponseHeaders(nil); h != nil {
