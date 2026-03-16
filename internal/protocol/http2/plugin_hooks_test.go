@@ -455,6 +455,109 @@ def on_receive_from_client(data):
 	}
 }
 
+func TestPluginHook_H2_RawFramesAbsentViaH2CHelper(t *testing.T) {
+	// This test uses Go's h2c handler via startH2CProxyListener, which does
+	// not inject raw frames into the context (only clientConn does).
+	// Verify the plugin handles absent raw_frames gracefully.
+	script := writeStarlarkScript(t, "check_raw_frames.star", `
+def on_receive_from_client(data):
+    raw = data.get("raw_frames", None)
+    if raw != None:
+        headers = data["headers"]
+        headers["X-Frame-Count"] = [str(len(raw))]
+    return {"action": "CONTINUE", "data": data}
+`)
+
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		val := r.Header.Get("X-Frame-Count")
+		w.Header().Set("X-Received-Frame-Count", val)
+		w.WriteHeader(gohttp.StatusOK)
+		fmt.Fprintf(w, "ok")
+	}))
+	defer upstream.Close()
+
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	engine := setupPluginEngine(t, script, "h2", []string{"on_receive_from_client"})
+	defer engine.Close()
+	handler.SetPluginEngine(engine)
+
+	addr, cancel := startH2CProxyListener(t, handler, "test-raw-frames", "127.0.0.1:12345", "", tlsMetadata{})
+	defer cancel()
+
+	client := newH2CClientForAddr(addr)
+	ctx, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+
+	reqURL := fmt.Sprintf("%s/test", upstream.URL)
+	req, _ := gohttp.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+
+	// h2c helper does not inject raw frames, so X-Received-Frame-Count
+	// should be empty (plugin's raw_frames branch was not taken).
+	if got := resp.Header.Get("X-Received-Frame-Count"); got != "" {
+		t.Errorf("X-Received-Frame-Count = %q, want empty (h2c helper does not provide raw frames)", got)
+	}
+}
+
+func TestPluginHook_H2_NoRawFramesBackwardCompat(t *testing.T) {
+	// Plugins that don't use raw_frames should work fine.
+	script := writeStarlarkScript(t, "no_raw_frames.star", `
+def on_receive_from_client(data):
+    # Plugin ignores raw_frames entirely — backward compatible.
+    headers = data["headers"]
+    headers["X-Compat"] = ["ok"]
+    return {"action": "CONTINUE", "data": data}
+`)
+
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		val := r.Header.Get("X-Compat")
+		w.Header().Set("X-Received-Compat", val)
+		w.WriteHeader(gohttp.StatusOK)
+	}))
+	defer upstream.Close()
+
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	engine := setupPluginEngine(t, script, "h2", []string{"on_receive_from_client"})
+	defer engine.Close()
+	handler.SetPluginEngine(engine)
+
+	addr, cancel := startH2CProxyListener(t, handler, "test-compat", "127.0.0.1:12345", "", tlsMetadata{})
+	defer cancel()
+
+	client := newH2CClientForAddr(addr)
+	ctx, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+
+	reqURL := fmt.Sprintf("%s/test", upstream.URL)
+	req, _ := gohttp.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+	if got := resp.Header.Get("X-Received-Compat"); got != "ok" {
+		t.Errorf("X-Received-Compat = %q, want %q", got, "ok")
+	}
+}
+
 func TestPluginHook_H2_FlowRecording_WithPlugin(t *testing.T) {
 	// Integration test: plugin adds a header, request flows through, and flow is recorded.
 	script := writeStarlarkScript(t, "record_test.star", `

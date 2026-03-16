@@ -106,6 +106,22 @@ func HTTPResponseToMap(resp *gohttp.Response, body []byte, req *gohttp.Request, 
 	return m
 }
 
+// InjectRawFrames adds raw frame bytes to a hook data map under the
+// "raw_frames" key. Each element is a []byte representing a single HTTP/2
+// frame. If rawFrames is nil or empty, the key is not added, maintaining
+// backward compatibility with existing plugins that do not use raw_frames.
+func InjectRawFrames(data map[string]any, rawFrames [][]byte) {
+	if len(rawFrames) == 0 {
+		return
+	}
+	// Convert [][]byte to []any for Starlark compatibility.
+	frames := make([]any, len(rawFrames))
+	for i, f := range rawFrames {
+		frames[i] = f
+	}
+	data["raw_frames"] = frames
+}
+
 // ApplyHTTPRequestChanges applies modifications from a plugin hook result
 // back to an HTTP request. It updates method, URL, host, headers, and body
 // from the data map. Only keys present in the data map are applied.
