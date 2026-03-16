@@ -15,7 +15,7 @@ Last updated: 2026-03-16 (USK-361)
 | Checklist Item                          | HTTP/1.x       | HTTPS          | HTTP/2         | gRPC           | WebSocket      | Raw TCP        | SOCKS5         |
 |-----------------------------------------|----------------|----------------|----------------|----------------|----------------|----------------|----------------|
 | Proxy communication success             | YES            | YES            | YES            | YES            | YES            | YES            | YES            |
-| Flow record completeness (Protocol/FlowType/State) | PARTIAL (no State) | PARTIAL (no State/FlowType) | YES | YES | PARTIAL (no FlowType/State) | PARTIAL (no State) | N/A (transport) |
+| Flow record completeness (Protocol/FlowType/State/MessageCount) | PARTIAL (no State) | PARTIAL (no State/FlowType) | YES | YES | PARTIAL (no FlowType/State) | PARTIAL (no State) | N/A (transport) |
 | Raw bytes recording                     | NO             | NO             | YES            | NO             | NO             | NO             | N/A            |
 | Variant recording (intercept)           | NO             | NO             | NO             | NO             | NO             | NO             | N/A            |
 | Progressive recording (streaming)       | N/A            | N/A            | NO             | PARTIAL (State wait) | NO       | NO             | N/A            |
@@ -23,7 +23,7 @@ Last updated: 2026-03-16 (USK-361)
 | Safety Filter / Output Filter           | YES            | YES            | NO             | NO             | NO             | NO             | N/A            |
 | Error path                              | PARTIAL (timeout) | PARTIAL (timeout) | NO         | NO             | NO             | NO             | YES (auth)     |
 | Derived protocol independent tests      | N/A            | N/A            | N/A            | YES (from H2)  | N/A            | N/A            | N/A            |
-| MCP tool integration                    | YES            | YES            | YES            | NO             | YES            | NO             | YES            |
+| MCP tool integration                    | YES            | YES            | YES            | NO             | YES            | NO             | NO             |
 | WebUI display tests                     | NO             | NO             | NO             | NO             | NO             | NO             | NO             |
 
 ## Key files
@@ -39,6 +39,7 @@ Last updated: 2026-03-16 (USK-361)
 - `internal/mcp/multiproto_integration_test.go` — MCP query for HTTP/2, WebSocket
 - `internal/mcp/intercept_integration_test.go` — MCP intercept (HTTP)
 - `internal/mcp/raw_intercept_integration_test.go` — MCP raw bytes intercept
+- `internal/mcp/socks5_integration_test.go` — MCP SOCKS5 auth/config/status
 
 ## Notable gaps
 
