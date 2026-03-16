@@ -461,13 +461,20 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// modified versions are recorded as separate send messages.
 	snap := snapshotRequest(req.Header, bodyResult.recordBody)
 
-	var dropped bool
-	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
-	if dropped {
-		sp.reqBody = bodyResult.recordBody
+	iResult := h.applyIntercept(ctx, conn, req, bodyResult.recordBody, rawRequest, logger)
+	if iResult.Dropped {
+		sp.reqBody = iResult.RecordBody
 		h.recordInterceptDrop(ctx, sp, logger)
 		return nil
 	}
+	req = iResult.Req
+	bodyResult.recordBody = iResult.RecordBody
+
+	// Raw mode: bypass net/http.Transport and forward raw bytes directly.
+	if iResult.IsRaw {
+		return h.handleRawForward(ctx, conn, req, iResult, sp, &snap, start, logger)
+	}
+
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
 
 	// Plugin hook: on_before_send_to_server — after Transform, before Recording.
@@ -654,7 +661,11 @@ func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
 // if so, enqueues it for AI agent review. It blocks until the agent responds
 // or the timeout expires. Returns the action and true if intercepted, or a
 // zero-value action and false if not intercepted.
-func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+//
+// The rawBytes parameter is the captured raw request bytes from captureReader.
+// When non-nil, they are attached to the queued item via SetRawBytes so that
+// the AI agent can view/edit the raw bytes and select raw forwarding mode.
+func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, body []byte, rawBytes []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
 	}
@@ -668,6 +679,13 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 
 	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
 	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
+
+	// Attach raw bytes to the queued item so the AI agent can view/edit them.
+	if len(rawBytes) > 0 {
+		if err := h.InterceptQueue.SetRawBytes(id, rawBytes); err != nil {
+			logger.Warn("failed to attach raw bytes to intercepted request", "id", id, "error", err)
+		}
+	}
 
 	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)

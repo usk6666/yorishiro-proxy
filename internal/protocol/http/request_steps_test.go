@@ -306,8 +306,8 @@ func TestApplyIntercept_ModifyAndForward_OverrideURLBlockedByTargetScope(t *test
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		r, b, d := handler.applyIntercept(ctx, serverConn, req, recordBody, logger)
-		resultCh <- result{r, b, d}
+		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, nil, logger)
+		resultCh <- result{ir.Req, ir.RecordBody, ir.Dropped}
 	}()
 
 	// Wait for the request to appear in the queue.
@@ -396,8 +396,8 @@ func TestApplyIntercept_ModifyAndForward_OverrideURLAllowedByTargetScope(t *test
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		r, b, d := handler.applyIntercept(ctx, serverConn, req, recordBody, logger)
-		resultCh <- result{r, b, d}
+		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, nil, logger)
+		resultCh <- result{ir.Req, ir.RecordBody, ir.Dropped}
 	}()
 
 	// Wait for the request to appear in the queue.
@@ -478,8 +478,8 @@ func TestApplyIntercept_ModifyAndForward_NoOverrideURL_SkipsRecheck(t *testing.T
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		r, b, d := handler.applyIntercept(ctx, serverConn, req, recordBody, logger)
-		resultCh <- result{r, b, d}
+		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, nil, logger)
+		resultCh <- result{ir.Req, ir.RecordBody, ir.Dropped}
 	}()
 
 	var interceptedID string

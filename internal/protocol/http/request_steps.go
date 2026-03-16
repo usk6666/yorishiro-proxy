@@ -75,27 +75,64 @@ func extractRawRequest(capture *captureReader, captureStart int, reader *bufio.R
 	return nil
 }
 
+// interceptResult holds the outcome of applyIntercept. When raw mode is
+// selected (IsRaw == true), the caller must bypass net/http.Transport and
+// write RawBytes directly to the upstream connection.
+type interceptResult struct {
+	// Req is the (possibly modified) request. Nil when raw mode is used.
+	Req *gohttp.Request
+	// RecordBody is the body bytes for flow recording.
+	RecordBody []byte
+	// Dropped is true when the request was dropped (caller should return early).
+	Dropped bool
+	// IsRaw is true when the intercept action selected raw forwarding mode.
+	// The caller must use RawBytes for upstream forwarding instead of
+	// net/http.Transport.
+	IsRaw bool
+	// RawBytes holds the raw bytes to send upstream in raw mode.
+	// For release+raw, this is the original captured raw bytes.
+	// For modify_and_forward+raw, this is the RawOverride from the action.
+	RawBytes []byte
+	// OriginalRawBytes holds the original (pre-modification) raw bytes
+	// for variant recording. Only set when IsRaw && action is modify_and_forward.
+	OriginalRawBytes []byte
+}
+
 // applyIntercept checks intercept rules and applies any modifications. It returns
-// the (possibly modified) request, updated body for recording, and a boolean
-// indicating whether the request was dropped (caller should return early).
-func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *gohttp.Request, recordReqBody []byte, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
-	action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, logger)
+// an interceptResult describing the outcome. When result.IsRaw is true, the
+// caller must forward result.RawBytes directly to the upstream connection,
+// bypassing net/http.Transport.
+func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *gohttp.Request, recordReqBody []byte, rawRequest []byte, logger *slog.Logger) interceptResult {
+	action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, rawRequest, logger)
 	if !intercepted {
-		return req, recordReqBody, false
+		return interceptResult{Req: req, RecordBody: recordReqBody}
 	}
 
 	switch action.Type {
 	case intercept.ActionDrop:
 		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
 		logger.Info("intercepted request dropped", "method", req.Method, "url", req.URL.String())
-		return req, recordReqBody, true
+		return interceptResult{Req: req, RecordBody: recordReqBody, Dropped: true}
 	case intercept.ActionModifyAndForward:
+		// Raw mode: bypass L7 modifications and forward raw bytes directly.
+		if action.IsRawMode() {
+			logger.Info("intercept raw mode modify_and_forward",
+				"method", req.Method, "url", req.URL.String(),
+				"raw_override_size", len(action.RawOverride))
+			return interceptResult{
+				Req:              req,
+				RecordBody:       recordReqBody,
+				IsRaw:            true,
+				RawBytes:         action.RawOverride,
+				OriginalRawBytes: rawRequest,
+			}
+		}
 		var modErr error
 		req, modErr = applyInterceptModifications(req, action, recordReqBody)
 		if modErr != nil {
 			logger.Error("intercept modification failed", "error", modErr)
 			httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
-			return req, recordReqBody, true
+			return interceptResult{Req: req, RecordBody: recordReqBody, Dropped: true}
 		}
 		// Re-check target scope after URL override to prevent SSRF (CWE-918, S-1).
 		if action.OverrideURL != "" {
@@ -103,17 +140,29 @@ func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *gohttp
 				h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
 				logger.Warn("intercept override_url blocked by target scope",
 					"url", req.URL.String(), "reason", reason)
-				return req, recordReqBody, true
+				return interceptResult{Req: req, RecordBody: recordReqBody, Dropped: true}
 			}
 		}
 		if action.OverrideBody != nil {
 			recordReqBody = []byte(*action.OverrideBody)
 		}
 	case intercept.ActionRelease:
-		// Continue with the original request.
+		// Raw mode release: forward original raw bytes as-is.
+		if action.IsRawMode() {
+			logger.Info("intercept raw mode release",
+				"method", req.Method, "url", req.URL.String(),
+				"raw_bytes_size", len(rawRequest))
+			return interceptResult{
+				Req:        req,
+				RecordBody: recordReqBody,
+				IsRaw:      true,
+				RawBytes:   rawRequest,
+			}
+		}
+		// Structured release: continue with the original request.
 	}
 
-	return req, recordReqBody, false
+	return interceptResult{Req: req, RecordBody: recordReqBody}
 }
 
 // applyTransform applies auto-transform rules to the request before forwarding
