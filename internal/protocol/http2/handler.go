@@ -16,10 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"golang.org/x/net/http2"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
@@ -210,34 +207,18 @@ func (h *Handler) HandleH2(ctx context.Context, tlsConn *tls.Conn, connectAuthor
 
 // serveHTTP2 runs the HTTP/2 server on the given connection, proxying each
 // stream to the upstream server and recording sessions.
+//
+// It uses the custom frame engine (clientConn) to handle HTTP/2 frames
+// directly, replacing the previous golang.org/x/net/http2.Server.ServeConn().
 func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthority string, tlsMeta tlsMetadata) error {
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 
-	// Track all in-flight request goroutines so we can wait for them
-	// before returning (and closing the connection).
-	//
-	// We use an atomic counter + mutex/cond instead of sync.WaitGroup
-	// because http2.Server.ServeConn dispatches handler goroutines
-	// internally, and wg.Add(1) inside the handler has a race window
-	// with wg.Wait() after ServeConn returns. (F-2)
-	var active atomic.Int64
-	var mu sync.Mutex
-	cond := sync.NewCond(&mu)
-
-	h2Server := &http2.Server{}
-	handler := gohttp.HandlerFunc(func(w gohttp.ResponseWriter, req *gohttp.Request) {
-		active.Add(1)
-		defer func() {
-			if active.Add(-1) == 0 {
-				cond.Signal()
-			}
-		}()
+	streamHandler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
 		h.handleStream(ctx, w, req, connID, clientAddr, connectAuthority, tlsMeta, logger)
-	})
+	}
 
-	// http2.Server.ServeConn blocks until the connection is closed or an error occurs.
 	// Use a context-cancellation watcher to close the connection on shutdown.
 	// A done channel ensures the goroutine exits when serveHTTP2 returns
 	// normally, preventing a goroutine leak. (F-3)
@@ -251,25 +232,11 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 		}
 	}()
 
-	opts := &http2.ServeConnOpts{
-		Handler: handler,
-		Context: ctx,
-	}
-	h2Server.ServeConn(conn, opts)
-
-	// Wait for all in-flight handlers to complete before returning,
-	// so that flow recording finishes before the connection is closed.
-	// We must check after ServeConn returns because new handlers cannot
-	// be dispatched after that point, making the counter monotonically
-	// decreasing from here. (F-2)
-	mu.Lock()
-	for active.Load() > 0 {
-		cond.Wait()
-	}
-	mu.Unlock()
+	cc := newClientConn(ctx, conn, logger, streamHandler)
+	err := cc.serve()
 
 	logger.Debug("HTTP/2 connection closed")
-	return nil
+	return err
 }
 
 // streamContext holds the state for a single HTTP/2 stream being proxied.
