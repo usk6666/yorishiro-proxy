@@ -24,26 +24,37 @@ type interceptParams struct {
 	// InterceptID is the intercepted request/response ID (required for all actions).
 	InterceptID string `json:"intercept_id,omitempty" jsonschema:"intercepted request/response ID for release/modify_and_forward/drop"`
 
-	// --- Request modify_and_forward mutation parameters ---
-	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override (request phase)"`
-	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"URL override (request phase)"`
-	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides (request phase)"`
-	AddHeaders      map[string]string `json:"add_headers,omitempty" jsonschema:"headers to add (request phase)"`
-	RemoveHeaders   []string          `json:"remove_headers,omitempty" jsonschema:"headers to remove (request phase)"`
-	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override (request phase)"`
+	// Mode selects the forwarding mode: "structured" (default, L7 modifications)
+	// or "raw" (send raw bytes directly, bypassing L7 serialization).
+	// When mode is "raw", all L7 override fields are ignored and
+	// raw_override_base64 is used instead.
+	Mode string `json:"mode,omitempty" jsonschema:"forwarding mode: structured (default) or raw"`
 
-	// --- Response modify_and_forward mutation parameters ---
+	// RawOverrideBase64 is the Base64-encoded raw bytes to send when mode is "raw".
+	// This replaces the entire request/response on the wire. Mutually exclusive
+	// with L7 modification fields.
+	RawOverrideBase64 *string `json:"raw_override_base64,omitempty" jsonschema:"Base64-encoded raw bytes for raw mode forwarding"`
+
+	// --- Request modify_and_forward mutation parameters (mode=structured) ---
+	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override (request phase, structured mode)"`
+	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"URL override (request phase, structured mode)"`
+	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides (request phase, structured mode)"`
+	AddHeaders      map[string]string `json:"add_headers,omitempty" jsonschema:"headers to add (request phase, structured mode)"`
+	RemoveHeaders   []string          `json:"remove_headers,omitempty" jsonschema:"headers to remove (request phase, structured mode)"`
+	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"body override (request phase, structured mode)"`
+
+	// --- Response modify_and_forward mutation parameters (mode=structured) ---
 	//
 	// Note: Response mutation fields (OverrideStatus, OverrideResponse*, OverrideResponseBody)
 	// are intentionally outside the SafetyFilter scope. SafetyFilter targets outbound
 	// destructive requests (body/URL/headers sent to upstream servers). Response
 	// modifications only affect data returned to the proxy client and do not pose
 	// the same server-side risk.
-	OverrideStatus          int               `json:"override_status,omitempty" jsonschema:"HTTP status code override (response phase)"`
-	OverrideResponseHeaders map[string]string `json:"override_response_headers,omitempty" jsonschema:"response header overrides (response phase)"`
-	AddResponseHeaders      map[string]string `json:"add_response_headers,omitempty" jsonschema:"response headers to add (response phase)"`
-	RemoveResponseHeaders   []string          `json:"remove_response_headers,omitempty" jsonschema:"response headers to remove (response phase)"`
-	OverrideResponseBody    *string           `json:"override_response_body,omitempty" jsonschema:"response body override (response phase)"`
+	OverrideStatus          int               `json:"override_status,omitempty" jsonschema:"HTTP status code override (response phase, structured mode)"`
+	OverrideResponseHeaders map[string]string `json:"override_response_headers,omitempty" jsonschema:"response header overrides (response phase, structured mode)"`
+	AddResponseHeaders      map[string]string `json:"add_response_headers,omitempty" jsonschema:"response headers to add (response phase, structured mode)"`
+	RemoveResponseHeaders   []string          `json:"remove_response_headers,omitempty" jsonschema:"response headers to remove (response phase, structured mode)"`
+	OverrideResponseBody    *string           `json:"override_response_body,omitempty" jsonschema:"response body override (response phase, structured mode)"`
 }
 
 // availableInterceptActions lists the valid action names for the intercept tool.
@@ -59,7 +70,9 @@ func (s *Server) registerIntercept() {
 			"'release' forwards the intercepted item as-is (requires intercept_id); " +
 			"'modify_and_forward' forwards with mutations — use request params (override_method, override_url, override_headers, add_headers, remove_headers, override_body) for request phase, " +
 			"response params (override_status, override_response_headers, add_response_headers, remove_response_headers, override_response_body) for response phase (requires intercept_id); " +
-			"'drop' discards the item returning 502 to the client (requires intercept_id).",
+			"'drop' discards the item returning 502 to the client (requires intercept_id). " +
+			"Mode: 'mode' selects forwarding mode — 'structured' (default, L7 modifications) or 'raw' (bypass L7, send raw_override_base64 directly). " +
+			"Raw mode requires raw_override_base64 for modify_and_forward; release with raw mode forwards original raw bytes as-is.",
 	}, s.handleInterceptTool)
 }
 
@@ -85,6 +98,16 @@ type executeInterceptResult struct {
 	BodyEncoding string `json:"body_encoding"`
 	// Body is the request/response body (output-filtered, as text or Base64).
 	Body string `json:"body"`
+
+	// RawBytesAvailable indicates whether raw bytes are available for this item.
+	RawBytesAvailable bool `json:"raw_bytes_available"`
+	// RawBytesSize is the size in bytes of the raw captured data (0 if unavailable).
+	RawBytesSize int `json:"raw_bytes_size,omitempty"`
+	// RawBytesEncoding indicates the encoding of raw_bytes ("text", "base64", or empty).
+	RawBytesEncoding string `json:"raw_bytes_encoding,omitempty"`
+	// RawBytes is the raw captured bytes (output-filtered, as text or Base64).
+	// Only populated when raw bytes are available.
+	RawBytes string `json:"raw_bytes,omitempty"`
 }
 
 // handleInterceptTool routes the intercept tool invocation to the appropriate action handler.
@@ -122,7 +145,7 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 		urlStr = item.URL.String()
 	}
 
-	return &executeInterceptResult{
+	result := &executeInterceptResult{
 		InterceptID:  item.ID,
 		Action:       action,
 		Status:       status,
@@ -134,6 +157,16 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 		BodyEncoding: bodyEncoding,
 		Body:         bodyStr,
 	}
+
+	// Include raw bytes if available.
+	if len(item.RawBytes) > 0 {
+		result.RawBytesAvailable = true
+		result.RawBytesSize = len(item.RawBytes)
+		filteredRaw := s.filterOutputBody(item.RawBytes)
+		result.RawBytes, result.RawBytesEncoding = encodeBody(filteredRaw)
+	}
+
+	return result
 }
 
 // handleInterceptRelease handles the release action.
@@ -145,14 +178,26 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 		return nil, nil, fmt.Errorf("intercept_id is required for release action")
 	}
 
+	// Validate mode.
+	mode, err := resolveReleaseMode(params.Mode)
+	if err != nil {
+		return nil, nil, fmt.Errorf("release: %w", err)
+	}
+
 	// Fetch the intercepted item before responding (Respond removes it from the queue).
 	item, err := s.deps.interceptQueue.Get(params.InterceptID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("release: %w", err)
 	}
 
+	// In raw mode release, validate that raw bytes are available.
+	if mode == intercept.ModeRaw && len(item.RawBytes) == 0 {
+		return nil, nil, fmt.Errorf("release: raw mode requested but no raw bytes available for this item")
+	}
+
 	action := intercept.InterceptAction{
 		Type: intercept.ActionRelease,
+		Mode: mode,
 	}
 	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("release: %w", err)
@@ -170,6 +215,21 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 		return nil, nil, fmt.Errorf("intercept_id is required for modify_and_forward action")
 	}
 
+	// Validate mode.
+	mode, err := resolveReleaseMode(params.Mode)
+	if err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	// Branch on mode.
+	if mode == intercept.ModeRaw {
+		return s.handleInterceptModifyAndForwardRaw(params)
+	}
+	return s.handleInterceptModifyAndForwardStructured(params)
+}
+
+// handleInterceptModifyAndForwardStructured handles modify_and_forward in structured (L7) mode.
+func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
 	// Validate request header params.
 	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
 		return nil, nil, fmt.Errorf("override_headers: %w", err)
@@ -198,6 +258,7 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 
 	action := intercept.InterceptAction{
 		Type:            intercept.ActionModifyAndForward,
+		Mode:            intercept.ModeStructured,
 		OverrideMethod:  params.OverrideMethod,
 		OverrideURL:     params.OverrideURL,
 		OverrideHeaders: params.OverrideHeaders,
@@ -223,6 +284,40 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 	}
 
 	return nil, s.buildInterceptResult(item, "modify_and_forward", "forwarded"), nil
+}
+
+// handleInterceptModifyAndForwardRaw handles modify_and_forward in raw bytes mode.
+func (s *Server) handleInterceptModifyAndForwardRaw(params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
+	if params.RawOverrideBase64 == nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: raw_override_base64 is required when mode is \"raw\"")
+	}
+
+	rawBytes, err := decodeRawOverride(*params.RawOverrideBase64)
+	if err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	if err := intercept.ValidateRawOverride(rawBytes); err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	action := intercept.InterceptAction{
+		Type:        intercept.ActionModifyAndForward,
+		Mode:        intercept.ModeRaw,
+		RawOverride: rawBytes,
+	}
+
+	// Fetch the intercepted item before responding (Respond removes it from the queue).
+	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	return nil, s.buildInterceptResult(item, "modify_and_forward", "forwarded_raw"), nil
 }
 
 // handleInterceptDrop handles the drop action.

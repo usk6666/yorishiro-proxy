@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 
@@ -149,4 +150,33 @@ func applyInterceptRulesHelper(engine *intercept.Engine, inputs []interceptRuleI
 		return err
 	}
 	return nil
+}
+
+// resolveReleaseMode converts a mode string from the MCP input to an intercept.ReleaseMode.
+// An empty string defaults to ModeStructured for backward compatibility.
+func resolveReleaseMode(mode string) (intercept.ReleaseMode, error) {
+	switch mode {
+	case "", "structured":
+		return intercept.ModeStructured, nil
+	case "raw":
+		return intercept.ModeRaw, nil
+	default:
+		return "", fmt.Errorf("invalid mode %q: must be \"structured\" or \"raw\"", mode)
+	}
+}
+
+// decodeRawOverride decodes a Base64-encoded raw override string into bytes.
+// Returns an error if the input is empty or not valid Base64.
+func decodeRawOverride(b64 string) ([]byte, error) {
+	if b64 == "" {
+		return nil, fmt.Errorf("raw_override_base64 must not be empty")
+	}
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid raw_override_base64: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("raw_override_base64 decodes to empty bytes")
+	}
+	return data, nil
 }
