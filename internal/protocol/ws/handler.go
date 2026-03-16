@@ -115,13 +115,13 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	h.recordUpgradeResponse(ctx, fl.ID, upgradeResp, start)
 
 	// Run bidirectional frame relay.
-	err := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq, connInfo)
+	err, closeReceived := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq, connInfo)
 
 	// Update flow state to complete.
 	duration := time.Since(start)
 	if h.store != nil {
 		state := "complete"
-		if err != nil && ctx.Err() == nil {
+		if err != nil && ctx.Err() == nil && !closeReceived {
 			state = "error"
 		}
 		if updateErr := h.store.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{
@@ -190,7 +190,7 @@ func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp
 // between the client and upstream server. Each frame is recorded to the
 // flow store. The relay stops when a Close frame is received, a connection
 // error occurs, or the context is cancelled.
-func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
+func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) (retErr error, gotClose bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -205,6 +205,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	// Data frame sequences start at 2 because sequence 0 and 1 are reserved
 	// for the Upgrade request and response messages recorded in HandleUpgrade.
 	seq.Store(2)
+	var closeReceived atomic.Bool
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
@@ -220,7 +221,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start, upgradeReq, connInfo)
+		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start, upgradeReq, connInfo, &closeReceived)
 		errCh <- err
 		cancel()
 	}()
@@ -229,7 +230,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start, upgradeReq, connInfo)
+		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start, upgradeReq, connInfo, &closeReceived)
 		errCh <- err
 		cancel()
 	}()
@@ -241,10 +242,10 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Wait()
 
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return ctx.Err(), closeReceived.Load()
 	}
 
-	return err
+	return err, closeReceived.Load()
 }
 
 // hookPair holds the plugin hooks for a relay direction.
@@ -272,7 +273,7 @@ type fragmentState struct {
 //
 // If a plugin returns ActionDrop, the frame is silently skipped.
 // If a plugin modifies the payload via result Data, the modified payload is used.
-func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) error {
+func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, closeReceived *atomic.Bool) error {
 	hooks := resolveHookPair(direction)
 
 	var frag fragmentState
@@ -305,7 +306,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			continue
 		}
 
-		done, err := h.processFrameAfterHooks(ctx, frame, flowID, direction, hooks.direction, seq, start, dst, &frag, upgradeReq)
+		done, err := h.processFrameAfterHooks(ctx, frame, flowID, direction, hooks.direction, seq, start, dst, &frag, upgradeReq, closeReceived)
 		if err != nil {
 			return err
 		}
@@ -318,7 +319,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 // processFrameAfterHooks applies safety filter, intercept check, forwarding, and
 // recording for a single frame. Returns (done, err) where done=true means a Close
 // frame was processed and the relay should terminate.
-func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, upgradeReq *gohttp.Request) (bool, error) {
+func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, upgradeReq *gohttp.Request, closeReceived *atomic.Bool) (bool, error) {
 	// Safety filter: apply to text frames only (opcode 0x1).
 	safetyMeta, rawPayload, blocked := h.applySafetyToFrame(frame, direction, upgradeReq, flowID)
 	if blocked {
@@ -342,7 +343,11 @@ func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flow
 
 	if frame.IsControl() {
 		h.recordControlFrame(ctx, frame, flowID, direction, seq, start)
-		return frame.Opcode == OpcodeClose, nil
+		if frame.Opcode == OpcodeClose {
+			closeReceived.Store(true)
+			return true, nil
+		}
+		return false, nil
 	}
 
 	// For output-filtered frames, record the raw (unmasked) payload.

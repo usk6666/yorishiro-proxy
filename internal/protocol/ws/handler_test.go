@@ -625,6 +625,133 @@ func TestHandleUpgrade_CloseFrameEndsRelay(t *testing.T) {
 	}
 }
 
+func TestHandleUpgrade_NormalCloseStateComplete(t *testing.T) {
+	// Verify that a normal Close frame exchange results in state="complete",
+	// not state="error". This is a regression test for USK-400.
+	tests := []struct {
+		name      string
+		closeFrom string // "client" or "server"
+	}{
+		{name: "client initiates close", closeFrom: "client"},
+		{name: "server initiates close", closeFrom: "server"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{}
+			handler := NewHandler(store, testutil.DiscardLogger())
+
+			clientConn, clientEnd := net.Pipe()
+			upstreamConn, upstreamEnd := net.Pipe()
+			defer clientConn.Close()
+			defer clientEnd.Close()
+			defer upstreamConn.Close()
+			defer upstreamEnd.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
+			resp := &gohttp.Response{StatusCode: 101}
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-close-test", "127.0.0.1:9999", nil)
+			}()
+
+			closePayload := make([]byte, 2)
+			binary.BigEndian.PutUint16(closePayload, 1000) // Normal closure
+
+			if tt.closeFrom == "client" {
+				// Client sends close frame.
+				closeFrame := &Frame{
+					Fin:     true,
+					Opcode:  OpcodeClose,
+					Masked:  true,
+					MaskKey: [4]byte{0xAA, 0xBB, 0xCC, 0xDD},
+					Payload: closePayload,
+				}
+				go func() {
+					WriteFrame(clientEnd, closeFrame)
+				}()
+				// Upstream receives close, then close connections.
+				ReadFrame(upstreamEnd)
+				upstreamEnd.Close()
+				clientEnd.Close()
+			} else {
+				// Server sends close frame.
+				closeFrame := &Frame{
+					Fin:     true,
+					Opcode:  OpcodeClose,
+					Payload: closePayload,
+				}
+				go func() {
+					WriteFrame(upstreamEnd, closeFrame)
+				}()
+				// Client receives close, then close connections.
+				ReadFrame(clientEnd)
+				clientEnd.Close()
+				upstreamEnd.Close()
+			}
+
+			select {
+			case <-errCh:
+			case <-time.After(3 * time.Second):
+				t.Fatal("handler did not finish within timeout")
+			}
+
+			sessions := store.Flows()
+			if len(sessions) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(sessions))
+			}
+			if sessions[0].State != "complete" {
+				t.Errorf("flow state = %q, want %q", sessions[0].State, "complete")
+			}
+		})
+	}
+}
+
+func TestHandleUpgrade_ConnectionDropStateError(t *testing.T) {
+	// Verify that an abrupt connection drop (no Close frame) results in state="error".
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	clientConn, clientEnd := net.Pipe()
+	upstreamConn, upstreamEnd := net.Pipe()
+	defer clientConn.Close()
+	defer upstreamConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
+	resp := &gohttp.Response{StatusCode: 101}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-drop", "127.0.0.1:8888", nil)
+	}()
+
+	// Give relay time to start, then abruptly close connections.
+	time.Sleep(50 * time.Millisecond)
+	clientEnd.Close()
+	upstreamEnd.Close()
+
+	select {
+	case <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not finish within timeout")
+	}
+
+	sessions := store.Flows()
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(sessions))
+	}
+	if sessions[0].State != "error" {
+		t.Errorf("flow state = %q, want %q", sessions[0].State, "error")
+	}
+}
+
 func TestHandleUpgrade_ContextCancellation(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
