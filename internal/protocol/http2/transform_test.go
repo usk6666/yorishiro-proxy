@@ -8,6 +8,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,10 +211,15 @@ func TestApplyResponseTransform_SetHeader(t *testing.T) {
 
 func TestHandleStream_RequestTransform_AppliedBeforeUpstream(t *testing.T) {
 	// Verify that request body transform is applied before forwarding upstream.
-	var receivedBody string
+	var (
+		mu           sync.Mutex
+		receivedBody string
+	)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		receivedBody = string(b)
+		mu.Unlock()
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, "ok")
 	}))
@@ -263,8 +269,11 @@ func TestHandleStream_RequestTransform_AppliedBeforeUpstream(t *testing.T) {
 
 	// The upstream should have received the transformed body.
 	want := `{"auth":"new-token"}`
-	if receivedBody != want {
-		t.Errorf("upstream received body = %q, want %q", receivedBody, want)
+	mu.Lock()
+	got := receivedBody
+	mu.Unlock()
+	if got != want {
+		t.Errorf("upstream received body = %q, want %q", got, want)
 	}
 
 	// Verify the recorded messages include a modified variant with the
@@ -350,10 +359,15 @@ func TestHandleStream_ResponseTransform_AppliedBeforeClient(t *testing.T) {
 
 func TestHandleStream_BothDirectionTransform(t *testing.T) {
 	// Verify that a "both" direction transform applies to both request and response.
-	var receivedBody string
+	var (
+		mu           sync.Mutex
+		receivedBody string
+	)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		receivedBody = string(b)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprintf(w, `{"value":"test-marker"}`)
@@ -401,8 +415,11 @@ func TestHandleStream_BothDirectionTransform(t *testing.T) {
 
 	// Request body should be transformed upstream.
 	wantReqBody := `{"input":"REPLACED"}`
-	if receivedBody != wantReqBody {
-		t.Errorf("upstream received body = %q, want %q", receivedBody, wantReqBody)
+	mu.Lock()
+	gotReqBody := receivedBody
+	mu.Unlock()
+	if gotReqBody != wantReqBody {
+		t.Errorf("upstream received body = %q, want %q", gotReqBody, wantReqBody)
 	}
 
 	// Response body should be transformed for client.
@@ -414,10 +431,15 @@ func TestHandleStream_BothDirectionTransform(t *testing.T) {
 
 func TestHandleStream_RequestTransform_NoMatchDoesNotModify(t *testing.T) {
 	// Verify that a transform rule that does not match leaves the body unchanged.
-	var receivedBody string
+	var (
+		mu           sync.Mutex
+		receivedBody string
+	)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		receivedBody = string(b)
+		mu.Unlock()
 		w.WriteHeader(gohttp.StatusOK)
 	}))
 	defer upstream.Close()
@@ -460,16 +482,24 @@ func TestHandleStream_RequestTransform_NoMatchDoesNotModify(t *testing.T) {
 	resp.Body.Close()
 
 	// Body should remain unchanged.
-	if receivedBody != reqBody {
-		t.Errorf("upstream received body = %q, want %q", receivedBody, reqBody)
+	mu.Lock()
+	got := receivedBody
+	mu.Unlock()
+	if got != reqBody {
+		t.Errorf("upstream received body = %q, want %q", got, reqBody)
 	}
 }
 
 func TestHandleStream_RequestTransform_HeaderAddedToUpstream(t *testing.T) {
 	// Verify that request header transform adds headers to upstream request.
-	var receivedHeader string
+	var (
+		mu             sync.Mutex
+		receivedHeader string
+	)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		mu.Lock()
 		receivedHeader = r.Header.Get("X-Injected")
+		mu.Unlock()
 		w.WriteHeader(gohttp.StatusOK)
 	}))
 	defer upstream.Close()
@@ -510,7 +540,10 @@ func TestHandleStream_RequestTransform_HeaderAddedToUpstream(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if receivedHeader != "from-transform" {
-		t.Errorf("upstream X-Injected = %q, want %q", receivedHeader, "from-transform")
+	mu.Lock()
+	got := receivedHeader
+	mu.Unlock()
+	if got != "from-transform" {
+		t.Errorf("upstream X-Injected = %q, want %q", got, "from-transform")
 	}
 }

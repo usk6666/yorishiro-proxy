@@ -650,10 +650,12 @@ func (h *Handler) applyRequestTransform(sc *streamContext, outReq *gohttp.Reques
 	if h.transformPipeline == nil {
 		return
 	}
-	outReq.Header, sc.reqBody = h.transformPipeline.TransformRequest(outReq.Method, outReq.URL, outReq.Header, sc.reqBody)
+	// Use sc.srp.reqBody as input (reflects intercept overrides).
+	outReq.Header, sc.reqBody = h.transformPipeline.TransformRequest(outReq.Method, outReq.URL, outReq.Header, sc.srp.reqBody)
 	outReq.Body = io.NopCloser(bytes.NewReader(sc.reqBody))
 	outReq.ContentLength = int64(len(sc.reqBody))
 	sc.srp.reqBody = sc.reqBody
+	sc.srp.req = outReq // Ensure recording reflects transform changes.
 }
 
 // applyResponseTransform applies auto-transform rules to the upstream response
