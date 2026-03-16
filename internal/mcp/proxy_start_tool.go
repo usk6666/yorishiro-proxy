@@ -342,15 +342,19 @@ func (s *Server) applyProtocolsConfig(protocols []string) error {
 }
 
 // applySOCKS5AuthFromInput applies SOCKS5 authentication configuration from proxy_start input.
+// When SOCKS5Auth is empty (omitted), it defaults to "none" to reset any previous auth
+// configuration. This ensures that proxy_start always initializes auth to a known state,
+// unlike configure which uses delta semantics and skips omitted fields.
 func (s *Server) applySOCKS5AuthFromInput(input *proxyStartInput) error {
-	if input.SOCKS5Auth == "" {
-		return nil
+	authMethod := input.SOCKS5Auth
+	if authMethod == "" {
+		authMethod = "none"
 	}
 	listenerName := input.Name
 	if listenerName == "" {
 		listenerName = proxy.DefaultListenerName
 	}
-	if err := s.applySOCKS5Auth(input.SOCKS5Auth, input.SOCKS5Username, input.SOCKS5Password, listenerName); err != nil {
+	if err := s.applySOCKS5Auth(authMethod, input.SOCKS5Username, input.SOCKS5Password, listenerName); err != nil {
 		return fmt.Errorf("socks5_auth: %w", err)
 	}
 	return nil

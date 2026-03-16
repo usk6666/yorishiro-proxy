@@ -158,6 +158,72 @@ func TestProxyStart_WithSOCKS5AuthNone(t *testing.T) {
 	}
 }
 
+// TestProxyStart_WithSOCKS5AuthOmitted verifies that proxy_start with no socks5_auth
+// resets any previous auth configuration to "none". This is the regression test for USK-402:
+// after configure sets password auth, proxy_stop → proxy_start (auth omitted) must clear it.
+func TestProxyStart_WithSOCKS5AuthOmitted(t *testing.T) {
+	logger := testutil.DiscardLogger()
+	detector := &stubDetector{}
+	manager := proxy.NewManager(detector, logger)
+	mock := &mockSOCKS5AuthSetter{}
+	cs := setupSOCKS5TestSession(t, manager, mock)
+
+	// Step 1: Start proxy with password auth.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"socks5_auth":     "password",
+		"socks5_username": "testuser",
+		"socks5_password": "testpass",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (first start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on first start: %v", result.Content)
+	}
+	if !mock.listenerPasswordAuthCalled {
+		t.Fatal("expected SetPasswordAuthForListener to be called on first start")
+	}
+
+	// Step 2: Stop the proxy.
+	stopResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_stop",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (proxy_stop): %v", err)
+	}
+	if stopResult.IsError {
+		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
+	}
+
+	// Step 3: Reset mock state so we can observe the second start's effects.
+	mock.listenerPasswordAuthCalled = false
+	mock.listenerClearAuthCalled = false
+	mock.lastListenerName = ""
+	mock.lastListenerUsername = ""
+	mock.lastListenerPassword = ""
+
+	// Step 4: Restart proxy with socks5_auth omitted.
+	result, err = callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		// socks5_auth intentionally omitted
+	})
+	if err != nil {
+		t.Fatalf("CallTool (second start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on second start: %v", result.Content)
+	}
+
+	// Step 5: Verify auth was cleared on the second start.
+	if !mock.listenerClearAuthCalled {
+		t.Error("expected ClearAuthForListener to be called when socks5_auth is omitted on restart")
+	}
+	if mock.lastListenerName != "default" {
+		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "default")
+	}
+}
+
 func TestProxyStart_WithSOCKS5AuthPasswordMissingUsername(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
@@ -605,6 +671,54 @@ func TestApplySOCKS5Auth_PasswordNoHandler(t *testing.T) {
 	err := s.applySOCKS5Auth("password", "u", "p", "")
 	if err == nil {
 		t.Fatal("expected error when handler is nil")
+	}
+}
+
+// TestApplySOCKS5AuthFromInput_EmptyDefaultsToNone verifies that applySOCKS5AuthFromInput
+// treats empty SOCKS5Auth as "none", resetting auth on proxy_start. (USK-402)
+func TestApplySOCKS5AuthFromInput_EmptyDefaultsToNone(t *testing.T) {
+	mock := &mockSOCKS5AuthSetter{}
+	s := &Server{deps: &deps{socks5AuthSetter: mock}}
+
+	input := &proxyStartInput{Name: "mylistener"}
+	// SOCKS5Auth is empty (omitted by caller).
+	if err := s.applySOCKS5AuthFromInput(input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.listenerClearAuthCalled {
+		t.Error("expected ClearAuthForListener to be called when SOCKS5Auth is empty")
+	}
+	if mock.lastListenerName != "mylistener" {
+		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "mylistener")
+	}
+}
+
+// TestApplySOCKS5AuthFromInput_EmptyDefaultListener verifies default listener name resolution.
+func TestApplySOCKS5AuthFromInput_EmptyDefaultListener(t *testing.T) {
+	mock := &mockSOCKS5AuthSetter{}
+	s := &Server{deps: &deps{socks5AuthSetter: mock}}
+
+	input := &proxyStartInput{} // Both Name and SOCKS5Auth empty.
+	if err := s.applySOCKS5AuthFromInput(input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.listenerClearAuthCalled {
+		t.Error("expected ClearAuthForListener to be called")
+	}
+	if mock.lastListenerName != "default" {
+		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "default")
+	}
+}
+
+// TestApplySOCKS5AuthFromInput_NilHandler verifies graceful behavior when no handler is set
+// and SOCKS5Auth is empty (should still default to "none" but skip since no setter).
+func TestApplySOCKS5AuthFromInput_NilHandler(t *testing.T) {
+	s := &Server{deps: &deps{}} // No socks5AuthSetter.
+
+	input := &proxyStartInput{}
+	// With "none" auth and nil setter, applySOCKS5Auth returns nil (no-op for none with nil setter).
+	if err := s.applySOCKS5AuthFromInput(input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
