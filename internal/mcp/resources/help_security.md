@@ -417,6 +417,41 @@ Output rules typically use `body` as the target. Header-level masking is also su
 | `header` | Individual header values (use `header:Name` for a specific header) |
 | `headers` | All header values |
 
+## Protocol Support Matrix
+
+| Protocol | Input Filter | Output Filter | Notes |
+|----------|-------------|---------------|-------|
+| HTTP/1.x | Supported | Supported | Full support |
+| HTTP/2 | Supported | Supported | Full support |
+| gRPC | Supported | Supported | Via HTTP/2 |
+| WebSocket | Supported (text only) | Supported (text only) | Binary frames not covered; fragment bypass possible |
+| SOCKS5 | N/A | N/A | Transport layer only (filters apply after HTTP delegation) |
+| Raw TCP | N/A | N/A | Binary stream |
+
+## WebSocket Safety Filter
+
+SafetyFilter is applied to WebSocket traffic on a per-frame basis. Only **text frames** (opcode 0x1) are inspected; binary frames and control frames are passed through without filtering.
+
+- **Send direction (Input Filter)**: `CheckInput` inspects the text frame payload and the upgrade request URL. If a rule matches with `block` action, the frame is silently dropped (not forwarded) and the connection remains open for subsequent frames. If the blocked frame is non-FIN (start of a fragmented message), subsequent continuation frames belonging to that message are also dropped.
+- **Receive direction (Output Filter)**: `FilterOutput` inspects the text frame payload and masks matching content. The original unmasked payload is preserved in the Flow Store.
+
+### Applicable Rule Targets
+
+WebSocket frames do not carry HTTP headers. The applicable rule targets differ between Input Filter and Output Filter:
+
+| Target | Input Filter | Output Filter | Reason |
+|--------|-------------|---------------|--------|
+| `body` | Yes | Yes | Matches against the text frame payload |
+| `url` | Yes (upgrade URL) | No | Input Filter receives the upgrade request URL; Output Filter has no URL context |
+| `query` | Yes (upgrade URL) | No | Input Filter can match the query string of the upgrade request URL |
+| `header` / `headers` | No | No | WebSocket frames have no HTTP headers |
+
+### Known Limitations
+
+1. **Binary frames not covered**: Binary frames (opcode 0x2) are not inspected by either Input Filter or Output Filter. Regex-based pattern matching is not meaningful for binary data.
+2. **Fragment bypass**: Filters are applied per-frame, not per-message. Only text frames (opcode 0x1) are inspected; continuation frames (opcode 0x0) are not inspected by the safety filter even if the entire pattern is contained within a single continuation frame. Additionally, if a fragmented message splits a pattern across frame boundaries (e.g., `DROP` in one frame and ` TABLE` in the next), the pattern will not be detected.
+3. **No header matching**: WebSocket data frames lack HTTP headers, so rules targeting `header` or `headers` have no effect. However, `url` and `query` rules are effective for the Input Filter because `CheckInput` receives the upgrade request URL.
+
 ## Error Handling
 
 - **Policy boundary violation**: Setting agent allows outside policy scope returns an error with the offending hostname and current policy allows.
