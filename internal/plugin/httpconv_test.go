@@ -512,6 +512,102 @@ func TestApplyHTTPResponseChanges_TrailersNotPresent(t *testing.T) {
 	}
 }
 
+func TestInjectRawFrames(t *testing.T) {
+	tests := []struct {
+		name      string
+		rawFrames [][]byte
+		wantKey   bool
+		wantLen   int
+	}{
+		{
+			name:      "nil raw frames does not add key",
+			rawFrames: nil,
+			wantKey:   false,
+		},
+		{
+			name:      "empty raw frames does not add key",
+			rawFrames: [][]byte{},
+			wantKey:   false,
+		},
+		{
+			name:      "single frame",
+			rawFrames: [][]byte{{0x00, 0x01, 0x02}},
+			wantKey:   true,
+			wantLen:   1,
+		},
+		{
+			name:      "multiple frames",
+			rawFrames: [][]byte{{0x00, 0x01}, {0x03, 0x04, 0x05}, {0x06}},
+			wantKey:   true,
+			wantLen:   3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := map[string]any{"method": "GET"}
+			InjectRawFrames(data, tt.rawFrames)
+
+			frames, ok := data["raw_frames"]
+			if tt.wantKey {
+				if !ok {
+					t.Fatal("expected raw_frames key in data map")
+				}
+				list, ok := frames.([]any)
+				if !ok {
+					t.Fatalf("raw_frames is %T, want []any", frames)
+				}
+				if len(list) != tt.wantLen {
+					t.Errorf("raw_frames length = %d, want %d", len(list), tt.wantLen)
+				}
+				// Verify each element is []byte with correct content.
+				for i, item := range list {
+					b, ok := item.([]byte)
+					if !ok {
+						t.Errorf("raw_frames[%d] is %T, want []byte", i, item)
+						continue
+					}
+					if !bytes.Equal(b, tt.rawFrames[i]) {
+						t.Errorf("raw_frames[%d] = %v, want %v", i, b, tt.rawFrames[i])
+					}
+				}
+			} else {
+				if ok {
+					t.Error("raw_frames key should not be present")
+				}
+			}
+		})
+	}
+}
+
+func TestInjectRawFrames_BackwardCompatibility(t *testing.T) {
+	// Existing plugins that don't use raw_frames should work fine.
+	// Verify that other keys are not affected.
+	req, _ := gohttp.NewRequest("GET", "http://example.com/", nil)
+	data := HTTPRequestToMap(req, []byte("body"), nil, "h2")
+
+	// Before injection: no raw_frames.
+	if _, ok := data["raw_frames"]; ok {
+		t.Error("raw_frames should not be present before injection")
+	}
+
+	// Inject raw frames.
+	InjectRawFrames(data, [][]byte{{0x01, 0x02}})
+
+	// Verify other keys are untouched.
+	if v := data["method"].(string); v != "GET" {
+		t.Errorf("method = %q, want GET", v)
+	}
+	if v := data["protocol"].(string); v != "h2" {
+		t.Errorf("protocol = %q, want h2", v)
+	}
+
+	// Verify raw_frames is present.
+	frames, ok := data["raw_frames"].([]any)
+	if !ok || len(frames) != 1 {
+		t.Errorf("raw_frames = %v, want 1 element", data["raw_frames"])
+	}
+}
+
 func TestBuildRespondResponse_InvalidStatusCode(t *testing.T) {
 	tests := []struct {
 		name       string
