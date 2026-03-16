@@ -168,19 +168,56 @@ func TestProxyStart_WithSOCKS5AuthOmitted(t *testing.T) {
 	mock := &mockSOCKS5AuthSetter{}
 	cs := setupSOCKS5TestSession(t, manager, mock)
 
+	// Step 1: Start proxy with password auth.
 	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"socks5_auth":     "password",
+		"socks5_username": "testuser",
+		"socks5_password": "testpass",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (first start): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error on first start: %v", result.Content)
+	}
+	if !mock.listenerPasswordAuthCalled {
+		t.Fatal("expected SetPasswordAuthForListener to be called on first start")
+	}
+
+	// Step 2: Stop the proxy.
+	stopResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_stop",
+	})
+	if err != nil {
+		t.Fatalf("CallTool (proxy_stop): %v", err)
+	}
+	if stopResult.IsError {
+		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
+	}
+
+	// Step 3: Reset mock state so we can observe the second start's effects.
+	mock.listenerPasswordAuthCalled = false
+	mock.listenerClearAuthCalled = false
+	mock.lastListenerName = ""
+	mock.lastListenerUsername = ""
+	mock.lastListenerPassword = ""
+
+	// Step 4: Restart proxy with socks5_auth omitted.
+	result, err = callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
 		// socks5_auth intentionally omitted
 	})
 	if err != nil {
-		t.Fatalf("CallTool: %v", err)
+		t.Fatalf("CallTool (second start): %v", err)
 	}
 	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
+		t.Fatalf("unexpected error on second start: %v", result.Content)
 	}
 
+	// Step 5: Verify auth was cleared on the second start.
 	if !mock.listenerClearAuthCalled {
-		t.Error("expected ClearAuthForListener to be called when socks5_auth is omitted")
+		t.Error("expected ClearAuthForListener to be called when socks5_auth is omitted on restart")
 	}
 	if mock.lastListenerName != "default" {
 		t.Errorf("listener name = %q, want %q", mock.lastListenerName, "default")
