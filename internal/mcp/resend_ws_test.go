@@ -893,6 +893,77 @@ func TestWebSocketResend_RemoveHeaders(t *testing.T) {
 	}
 }
 
+func TestWebSocketResend_RemoveHeaders_AutoAdded(t *testing.T) {
+	store := newTestStore(t)
+	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
+	defer cleanup()
+
+	// Seed flow — do NOT include User-Agent in the original headers.
+	// Go net/http auto-adds User-Agent if not explicitly set; remove_headers
+	// must suppress it via the empty-slice sentinel.
+	ctx := context.Background()
+	host, port, _ := net.SplitHostPort(addr)
+	wsURL, _ := url.Parse(fmt.Sprintf("ws://%s:%s/echo", host, port))
+
+	fl := &flow.Flow{
+		ID:        "ws-rha-1",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: addr},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rha-1", Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
+		Headers: map[string][]string{
+			"Upgrade":               {"websocket"},
+			"Connection":            {"Upgrade"},
+			"Sec-Websocket-Version": {"13"},
+			"Sec-Websocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
+			"Host":                  {fmt.Sprintf("%s:%s", host, port)},
+		},
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rha-1", Sequence: 1, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 101,
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade resp): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rha-1", Sequence: 2, Direction: "send",
+		Timestamp: time.Now().UTC(), Body: []byte("test remove ua"),
+		Metadata: map[string]string{"opcode": "1"},
+	}); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
+
+	cs := setupWSResendSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-rha-1",
+			"message_sequence": 2,
+			"remove_headers":   []string{"User-Agent"},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	req := getReq()
+	if got := req.Header.Get("User-Agent"); got != "" {
+		t.Errorf("User-Agent should be removed (auto-added suppressed), got %q", got)
+	}
+}
+
 func TestWebSocketResend_OverrideURL(t *testing.T) {
 	store := newTestStore(t)
 	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
