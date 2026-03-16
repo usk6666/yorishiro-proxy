@@ -64,12 +64,16 @@ type Conditions struct {
 	// UpgradeURLPattern is a regular expression matched against the WebSocket
 	// upgrade request URL. This field is exclusive to WebSocket intercept rules
 	// and must not be combined with HTTP-only conditions (HostPattern, PathPattern,
-	// Methods, HeaderMatch). An empty string matches all WebSocket URLs.
+	// Methods, HeaderMatch). An empty string means this field is not set and does
+	// not contribute to WebSocket rule detection; to match all WebSocket URLs,
+	// use ".*" instead.
 	UpgradeURLPattern string `json:"upgrade_url_pattern,omitempty"`
 
 	// FlowID specifies a particular WebSocket flow ID to intercept.
 	// This field is exclusive to WebSocket intercept rules. An empty string
-	// matches all flows.
+	// means this field is not set and does not contribute to WebSocket rule
+	// detection. A rule is recognized as a WebSocket rule only when at least
+	// one of UpgradeURLPattern or FlowID is non-empty.
 	FlowID string `json:"flow_id,omitempty"`
 }
 

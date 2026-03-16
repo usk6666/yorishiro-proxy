@@ -276,8 +276,12 @@ func (e *Engine) MatchWebSocketFrameRules(upgradeURL string, direction string, f
 
 // matchesWSDirection maps the rule's Direction to WebSocket direction strings.
 // "request" maps to "client_to_server", "response" maps to "server_to_client",
-// "both" matches either direction.
+// "both" matches either valid direction. An unrecognized frameDir always
+// returns false (fail-closed) to avoid accidentally matching unknown values.
 func matchesWSDirection(ruleDir Direction, frameDir string) bool {
+	if frameDir != "client_to_server" && frameDir != "server_to_client" {
+		return false
+	}
 	switch ruleDir {
 	case DirectionBoth:
 		return true

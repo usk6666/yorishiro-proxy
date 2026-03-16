@@ -743,6 +743,35 @@ func TestEngine_MatchesWebSocketFrame_HTTPRuleIndependence(t *testing.T) {
 	}
 }
 
+func TestEngine_MatchesWebSocketFrame_UnknownDirection(t *testing.T) {
+	e := NewEngine()
+
+	e.AddRule(Rule{
+		ID:        "ws-both",
+		Enabled:   true,
+		Direction: DirectionBoth,
+		Conditions: Conditions{
+			UpgradeURLPattern: ".*",
+		},
+	})
+
+	// Unknown direction strings must not match (fail-closed).
+	unknownDirs := []string{"", "unknown", "CLIENT_TO_SERVER", "bidirectional"}
+	for _, dir := range unknownDirs {
+		if e.MatchesWebSocketFrame("/ws/test", dir, "f1") {
+			t.Errorf("unknown direction %q should not match", dir)
+		}
+	}
+
+	// Valid directions should still work.
+	if !e.MatchesWebSocketFrame("/ws/test", "client_to_server", "f1") {
+		t.Error("client_to_server should match DirectionBoth rule")
+	}
+	if !e.MatchesWebSocketFrame("/ws/test", "server_to_client", "f1") {
+		t.Error("server_to_client should match DirectionBoth rule")
+	}
+}
+
 func TestEngine_MatchesWebSocketFrame_EmptyEngine(t *testing.T) {
 	e := NewEngine()
 
