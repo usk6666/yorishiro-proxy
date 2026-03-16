@@ -305,56 +305,16 @@ func (tc *transportConn) handshake(ctx context.Context) error {
 	// Start reading server frames in the background to avoid deadlocks
 	// on synchronous connections (e.g. net.Pipe).
 	serverFrames := make(chan frameReadResult, 4)
-	go func() {
-		for {
-			f, err := tc.reader.ReadFrame()
-			select {
-			case serverFrames <- frameReadResult{f, err}:
-			case <-tc.readLoopDone:
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	go tc.readFramesIntoChannel(serverFrames)
 
-	// Send client connection preface.
-	if _, err := tc.netConn.Write([]byte(clientPreface)); err != nil {
-		return fmt.Errorf("send client preface: %w", err)
+	// Send client connection preface and initial SETTINGS.
+	if err := tc.sendClientPreface(); err != nil {
+		return err
 	}
 
-	// Send our SETTINGS frame.
-	if err := tc.writer.WriteSettings([]frame.Setting{
-		{ID: frame.SettingEnablePush, Value: 0},
-		{ID: frame.SettingMaxConcurrentStreams, Value: defaultMaxConcurrentStreams},
-		{ID: frame.SettingInitialWindowSize, Value: defaultInitialWindowSize},
-	}); err != nil {
-		return fmt.Errorf("send initial SETTINGS: %w", err)
-	}
-
-	// Read server's initial SETTINGS from the background reader.
-	var serverSettingsReceived bool
-	for !serverSettingsReceived {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case r := <-serverFrames:
-			if r.err != nil {
-				return fmt.Errorf("read server SETTINGS: %w", r.err)
-			}
-			switch {
-			case r.f.Header.Type == frame.TypeSettings && !r.f.Header.Flags.Has(frame.FlagAck):
-				if _, err := tc.conn.HandleSettings(r.f); err != nil {
-					return fmt.Errorf("apply server SETTINGS: %w", err)
-				}
-				serverSettingsReceived = true
-			case r.f.Header.Type == frame.TypeSettings && r.f.Header.Flags.Has(frame.FlagAck):
-				tc.conn.AckLocalSettings()
-			case r.f.Header.Type == frame.TypeWindowUpdate:
-				tc.conn.HandleWindowUpdate(r.f) //nolint:errcheck
-			}
-		}
+	// Read and process server's initial SETTINGS from the background reader.
+	if err := tc.receiveServerSettings(ctx, serverFrames); err != nil {
+		return err
 	}
 
 	// Send SETTINGS ACK for server's settings.
@@ -363,11 +323,7 @@ func (tc *transportConn) handshake(ctx context.Context) error {
 	}
 
 	// Update writer max frame size from peer settings.
-	peerSettings := tc.conn.PeerSettings()
-	if peerSettings.MaxFrameSize != frame.DefaultMaxFrameSize {
-		tc.writer.SetMaxFrameSize(peerSettings.MaxFrameSize) //nolint:errcheck
-		tc.reader.SetMaxFrameSize(peerSettings.MaxFrameSize) //nolint:errcheck
-	}
+	tc.applyPeerFrameSize()
 
 	// The handshake reader goroutine continues reading from tc.reader and
 	// feeding frames into the channel. The readLoop consumes from the same
@@ -375,6 +331,87 @@ func (tc *transportConn) handshake(ctx context.Context) error {
 	go tc.readLoopFromChannel(serverFrames)
 
 	return nil
+}
+
+// readFramesIntoChannel reads frames from the connection and sends them into
+// the provided channel. It runs until an error occurs or readLoopDone is closed.
+func (tc *transportConn) readFramesIntoChannel(ch chan<- frameReadResult) {
+	for {
+		f, err := tc.reader.ReadFrame()
+		select {
+		case ch <- frameReadResult{f, err}:
+		case <-tc.readLoopDone:
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// sendClientPreface sends the HTTP/2 client connection preface and initial
+// SETTINGS frame to the server.
+func (tc *transportConn) sendClientPreface() error {
+	if _, err := tc.netConn.Write([]byte(clientPreface)); err != nil {
+		return fmt.Errorf("send client preface: %w", err)
+	}
+	if err := tc.writer.WriteSettings([]frame.Setting{
+		{ID: frame.SettingEnablePush, Value: 0},
+		{ID: frame.SettingMaxConcurrentStreams, Value: defaultMaxConcurrentStreams},
+		{ID: frame.SettingInitialWindowSize, Value: defaultInitialWindowSize},
+	}); err != nil {
+		return fmt.Errorf("send initial SETTINGS: %w", err)
+	}
+	return nil
+}
+
+// receiveServerSettings reads frames from the background reader channel until
+// the server's initial SETTINGS frame is received and processed.
+func (tc *transportConn) receiveServerSettings(ctx context.Context, serverFrames <-chan frameReadResult) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case r := <-serverFrames:
+			if r.err != nil {
+				return fmt.Errorf("read server SETTINGS: %w", r.err)
+			}
+			done, err := tc.processHandshakeFrame(r.f)
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
+		}
+	}
+}
+
+// processHandshakeFrame handles a single frame during the handshake phase.
+// It returns true when the server's initial SETTINGS has been received.
+func (tc *transportConn) processHandshakeFrame(f *frame.Frame) (bool, error) {
+	switch {
+	case f.Header.Type == frame.TypeSettings && !f.Header.Flags.Has(frame.FlagAck):
+		if _, err := tc.conn.HandleSettings(f); err != nil {
+			return false, fmt.Errorf("apply server SETTINGS: %w", err)
+		}
+		return true, nil
+	case f.Header.Type == frame.TypeSettings && f.Header.Flags.Has(frame.FlagAck):
+		tc.conn.AckLocalSettings()
+	case f.Header.Type == frame.TypeWindowUpdate:
+		tc.conn.HandleWindowUpdate(f) //nolint:errcheck
+	}
+	return false, nil
+}
+
+// applyPeerFrameSize updates the writer and reader max frame size based on
+// the peer's SETTINGS if it differs from the default.
+func (tc *transportConn) applyPeerFrameSize() {
+	peerSettings := tc.conn.PeerSettings()
+	if peerSettings.MaxFrameSize != frame.DefaultMaxFrameSize {
+		tc.writer.SetMaxFrameSize(peerSettings.MaxFrameSize) //nolint:errcheck
+		tc.reader.SetMaxFrameSize(peerSettings.MaxFrameSize) //nolint:errcheck
+	}
 }
 
 // allocStreamID returns the next available client-initiated stream ID.
