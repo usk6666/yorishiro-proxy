@@ -127,7 +127,11 @@ func readFullResponse(t *testing.T, tc *h2cTestConn) (status string, respHeaders
 		case frame.TypeWindowUpdate:
 			continue
 		case frame.TypeHeaders:
-			fields, err := tc.decoder.Decode(f.Payload)
+			fragment, err := f.HeaderBlockFragment()
+			if err != nil {
+				t.Fatalf("HeaderBlockFragment: %v", err)
+			}
+			fields, err := tc.decoder.Decode(fragment)
 			if err != nil {
 				t.Fatalf("decode headers: %v", err)
 			}
@@ -147,7 +151,10 @@ func readFullResponse(t *testing.T, tc *h2cTestConn) (status string, respHeaders
 				gotEndStream = true
 			}
 		case frame.TypeData:
-			data, _ := f.DataPayload()
+			data, err := f.DataPayload()
+			if err != nil {
+				t.Fatalf("DataPayload: %v", err)
+			}
 			bodyBuf.Write(data)
 			if f.Header.Flags.Has(frame.FlagEndStream) {
 				gotEndStream = true
@@ -757,11 +764,15 @@ func TestFrameEngine_GRPCContentTypeVariants(t *testing.T) {
 
 			time.Sleep(100 * time.Millisecond)
 			store.mu.Lock()
+			if len(store.flows) == 0 {
+				store.mu.Unlock()
+				t.Fatal("expected at least one flow to be recorded")
+			}
 			wantProtocol := "HTTP/2"
 			if tt.wantGRPC {
 				wantProtocol = "gRPC"
 			}
-			if len(store.flows) > 0 && store.flows[0].Protocol != wantProtocol {
+			if store.flows[0].Protocol != wantProtocol {
 				t.Errorf("protocol = %q, want %q", store.flows[0].Protocol, wantProtocol)
 			}
 			store.mu.Unlock()
@@ -1039,4 +1050,3 @@ func TestFrameEngine_GRPCWriteFlush(t *testing.T) {
 		}
 	}
 }
-
