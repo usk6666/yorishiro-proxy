@@ -185,6 +185,37 @@ func TestStandardTransport_TLSConnect_HTTP11Only(t *testing.T) {
 	}
 }
 
+func TestStandardTransport_TLSConnect_CustomNextProtos(t *testing.T) {
+	// Server supports both h2 and http/1.1, but client only offers http/1.1.
+	cert := generateTestCert(t, "localhost")
+	ln := startTLSServer(t, cert, []string{"h2", "http/1.1"})
+	defer ln.Close()
+
+	transport := &StandardTransport{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"http/1.1"},
+	}
+
+	rawConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tlsConn, proto, err := transport.TLSConnect(ctx, rawConn, "localhost")
+	if err != nil {
+		t.Fatalf("TLSConnect: %v", err)
+	}
+	defer tlsConn.Close()
+
+	if proto != "http/1.1" {
+		t.Errorf("negotiated protocol = %q, want %q (NextProtos should force http/1.1)", proto, "http/1.1")
+	}
+}
+
 func TestStandardTransport_TLSConnect_HandshakeFailure(t *testing.T) {
 	// Create a plain TCP server (no TLS) to cause handshake failure.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
