@@ -427,8 +427,13 @@ func (q *Queue) Remove(id string) {
 
 // SetRawBytes attaches raw bytes to an already-enqueued intercepted item.
 // This is used by protocol handlers that capture raw bytes after enqueuing
-// the L7-parsed request. Returns an error if the item is not found.
+// the L7-parsed request. Returns an error if the item is not found or if
+// the raw bytes exceed MaxRawBytesSize.
 func (q *Queue) SetRawBytes(id string, rawBytes []byte) error {
+	if len(rawBytes) > MaxRawBytesSize {
+		return fmt.Errorf("raw bytes size %d exceeds maximum %d", len(rawBytes), MaxRawBytesSize)
+	}
+
 	q.mu.Lock()
 	defer q.mu.Unlock()
 

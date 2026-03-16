@@ -528,6 +528,23 @@ func TestQueue_SetRawBytes_Empty(t *testing.T) {
 	}
 }
 
+func TestQueue_SetRawBytes_ExceedsMaxSize(t *testing.T) {
+	q := NewQueue()
+	id, _ := q.Enqueue("GET", nil, nil, nil, nil)
+
+	oversized := make([]byte, MaxRawBytesSize+1)
+	err := q.SetRawBytes(id, oversized)
+	if err == nil {
+		t.Fatal("expected error for oversized raw bytes")
+	}
+
+	// Verify the item's raw bytes were not set.
+	item, _ := q.Get(id)
+	if item.RawBytes != nil {
+		t.Error("raw bytes should not be set when exceeding max size")
+	}
+}
+
 func TestInterceptAction_IsRawMode(t *testing.T) {
 	tests := []struct {
 		name string
