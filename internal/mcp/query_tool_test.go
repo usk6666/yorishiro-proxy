@@ -883,6 +883,9 @@ func TestQuery_Config_WithManagerFields(t *testing.T) {
 	if out.RequestTimeoutMs != 60000 {
 		t.Errorf("request_timeout_ms = %d, want 60000", out.RequestTimeoutMs)
 	}
+	if out.TLSFingerprint != "chrome" {
+		t.Errorf("tls_fingerprint = %q, want %q", out.TLSFingerprint, "chrome")
+	}
 }
 
 func TestQuery_Config_DefaultManagerValues(t *testing.T) {
@@ -907,6 +910,9 @@ func TestQuery_Config_DefaultManagerValues(t *testing.T) {
 	// request_timeout_ms should still have the default.
 	if out.RequestTimeoutMs != 60000 {
 		t.Errorf("request_timeout_ms = %d, want 60000", out.RequestTimeoutMs)
+	}
+	if out.TLSFingerprint != "chrome" {
+		t.Errorf("tls_fingerprint = %q, want %q", out.TLSFingerprint, "chrome")
 	}
 }
 

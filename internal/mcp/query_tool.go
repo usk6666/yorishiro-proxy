@@ -17,6 +17,10 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
+// defaultRequestTimeoutMs is the default request timeout in milliseconds
+// used when no protocol handler is registered.
+const defaultRequestTimeoutMs = 60000
+
 // queryInput is the typed input for the query tool.
 type queryInput struct {
 	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results, technologies.
@@ -805,7 +809,7 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.RequestTimeoutMs = rt.Milliseconds()
 	} else {
 		// Default request timeout when no handler is registered.
-		result.RequestTimeoutMs = 60000
+		result.RequestTimeoutMs = defaultRequestTimeoutMs
 	}
 
 	if s.deps.store != nil {
@@ -973,7 +977,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		result.RequestTimeoutMs = rt.Milliseconds()
 	} else {
 		// Default request timeout when no handler is registered.
-		result.RequestTimeoutMs = 60000
+		result.RequestTimeoutMs = defaultRequestTimeoutMs
 	}
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
