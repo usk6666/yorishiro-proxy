@@ -35,6 +35,14 @@ type interceptConditionsInput struct {
 
 	// HeaderMatch maps header names to regular expressions (AND logic).
 	HeaderMatch map[string]string `json:"header_match,omitempty" jsonschema:"header name to regex pattern mapping"`
+
+	// UpgradeURLPattern is a regular expression matched against the WebSocket upgrade request URL.
+	// Exclusive to WebSocket intercept rules; must not be combined with HTTP conditions.
+	UpgradeURLPattern string `json:"upgrade_url_pattern,omitempty" jsonschema:"regex pattern for WebSocket upgrade URL matching"`
+
+	// FlowID specifies a particular WebSocket flow ID to intercept.
+	// Exclusive to WebSocket intercept rules; must not be combined with HTTP conditions.
+	FlowID string `json:"flow_id,omitempty" jsonschema:"WebSocket flow ID to intercept"`
 }
 
 // interceptRuleOutput is the JSON representation of an intercept rule for MCP tool output.
@@ -47,10 +55,12 @@ type interceptRuleOutput struct {
 
 // interceptConditionsOutput is the JSON representation of intercept conditions in output.
 type interceptConditionsOutput struct {
-	HostPattern string            `json:"host_pattern,omitempty"`
-	PathPattern string            `json:"path_pattern,omitempty"`
-	Methods     []string          `json:"methods,omitempty"`
-	HeaderMatch map[string]string `json:"header_match,omitempty"`
+	HostPattern       string            `json:"host_pattern,omitempty"`
+	PathPattern       string            `json:"path_pattern,omitempty"`
+	Methods           []string          `json:"methods,omitempty"`
+	HeaderMatch       map[string]string `json:"header_match,omitempty"`
+	UpgradeURLPattern string            `json:"upgrade_url_pattern,omitempty"`
+	FlowID            string            `json:"flow_id,omitempty"`
 }
 
 // toInterceptRule converts an MCP input rule to an intercept.Rule.
@@ -60,10 +70,12 @@ func toInterceptRule(input interceptRuleInput) intercept.Rule {
 		Enabled:   input.Enabled,
 		Direction: intercept.Direction(input.Direction),
 		Conditions: intercept.Conditions{
-			HostPattern: input.Conditions.HostPattern,
-			PathPattern: input.Conditions.PathPattern,
-			Methods:     input.Conditions.Methods,
-			HeaderMatch: input.Conditions.HeaderMatch,
+			HostPattern:       input.Conditions.HostPattern,
+			PathPattern:       input.Conditions.PathPattern,
+			Methods:           input.Conditions.Methods,
+			HeaderMatch:       input.Conditions.HeaderMatch,
+			UpgradeURLPattern: input.Conditions.UpgradeURLPattern,
+			FlowID:            input.Conditions.FlowID,
 		},
 	}
 }
@@ -75,10 +87,12 @@ func fromInterceptRule(r intercept.Rule) interceptRuleOutput {
 		Enabled:   r.Enabled,
 		Direction: string(r.Direction),
 		Conditions: interceptConditionsOutput{
-			HostPattern: r.Conditions.HostPattern,
-			PathPattern: r.Conditions.PathPattern,
-			Methods:     r.Conditions.Methods,
-			HeaderMatch: r.Conditions.HeaderMatch,
+			HostPattern:       r.Conditions.HostPattern,
+			PathPattern:       r.Conditions.PathPattern,
+			Methods:           r.Conditions.Methods,
+			HeaderMatch:       r.Conditions.HeaderMatch,
+			UpgradeURLPattern: r.Conditions.UpgradeURLPattern,
+			FlowID:            r.Conditions.FlowID,
 		},
 	}
 }

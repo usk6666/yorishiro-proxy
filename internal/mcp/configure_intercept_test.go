@@ -580,6 +580,112 @@ func TestInterceptHelpers_ToFromRoundTrip(t *testing.T) {
 	}
 }
 
+func TestInterceptHelpers_WebSocketRoundTrip(t *testing.T) {
+	input := interceptRuleInput{
+		ID:        "ws1",
+		Enabled:   true,
+		Direction: "request",
+		Conditions: interceptConditionsInput{
+			UpgradeURLPattern: "/ws/chat.*",
+			FlowID:            "flow-123",
+		},
+	}
+
+	rule := toInterceptRule(input)
+
+	if rule.Conditions.UpgradeURLPattern != "/ws/chat.*" {
+		t.Errorf("UpgradeURLPattern = %q, want %q", rule.Conditions.UpgradeURLPattern, "/ws/chat.*")
+	}
+	if rule.Conditions.FlowID != "flow-123" {
+		t.Errorf("FlowID = %q, want %q", rule.Conditions.FlowID, "flow-123")
+	}
+
+	output := fromInterceptRule(rule)
+
+	if output.Conditions.UpgradeURLPattern != "/ws/chat.*" {
+		t.Errorf("output UpgradeURLPattern = %q, want %q", output.Conditions.UpgradeURLPattern, "/ws/chat.*")
+	}
+	if output.Conditions.FlowID != "flow-123" {
+		t.Errorf("output FlowID = %q, want %q", output.Conditions.FlowID, "flow-123")
+	}
+}
+
+func TestConfigure_InterceptRules_MergeAddWebSocket(t *testing.T) {
+	engine := intercept.NewEngine()
+	cs := setupInterceptTestSession(t, engine)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{
+					{
+						ID:        "ws-rule-1",
+						Enabled:   true,
+						Direction: "request",
+						Conditions: interceptConditionsInput{
+							UpgradeURLPattern: "/ws/chat.*",
+						},
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out configureResult
+	configureUnmarshalResult(t, result, &out)
+
+	if out.InterceptRules.TotalRules != 1 {
+		t.Errorf("total_rules = %d, want 1", out.InterceptRules.TotalRules)
+	}
+
+	r, err := engine.GetRule("ws-rule-1")
+	if err != nil {
+		t.Fatalf("GetRule: %v", err)
+	}
+	if r.Conditions.UpgradeURLPattern != "/ws/chat.*" {
+		t.Errorf("UpgradeURLPattern = %q, want %q", r.Conditions.UpgradeURLPattern, "/ws/chat.*")
+	}
+}
+
+func TestConfigure_InterceptRules_MergeAddWebSocketMixedConditionsError(t *testing.T) {
+	engine := intercept.NewEngine()
+	cs := setupInterceptTestSession(t, engine)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{
+					{
+						ID:        "bad-mixed",
+						Enabled:   true,
+						Direction: "request",
+						Conditions: interceptConditionsInput{
+							UpgradeURLPattern: "/ws/.*",
+							PathPattern:       "/api/.*",
+						},
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		return // Go-level error is acceptable.
+	}
+	if !result.IsError {
+		t.Fatal("expected error for mixed WebSocket/HTTP conditions, got success")
+	}
+}
+
 func TestInterceptHelpers_FromInterceptRulesNil(t *testing.T) {
 	out := fromInterceptRules(nil)
 	if out != nil {

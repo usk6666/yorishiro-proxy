@@ -212,6 +212,72 @@ func (e *Engine) MatchResponseRules(statusCode int, headers http.Header) []strin
 	return matched
 }
 
+// MatchesWebSocketFrame evaluates all enabled WebSocket rules against the given
+// frame parameters. direction should be "client_to_server" or "server_to_client".
+// The existing Direction field is mapped: "request" -> client_to_server,
+// "response" -> server_to_client, "both" -> matches either direction.
+// Returns true if any enabled WebSocket rule matches (OR logic across rules).
+func (e *Engine) MatchesWebSocketFrame(upgradeURL string, direction string, flowID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	for _, cr := range e.rules {
+		if !cr.rule.Enabled {
+			continue
+		}
+		if !cr.isWebSocketRule() {
+			continue
+		}
+		if !matchesWSDirection(cr.rule.Direction, direction) {
+			continue
+		}
+		if cr.matchesWebSocketFrame(upgradeURL, direction, flowID) {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchWebSocketFrameRules returns the IDs of all enabled WebSocket rules
+// that match the given frame parameters.
+func (e *Engine) MatchWebSocketFrameRules(upgradeURL string, direction string, flowID string) []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var matched []string
+	for _, cr := range e.rules {
+		if !cr.rule.Enabled {
+			continue
+		}
+		if !cr.isWebSocketRule() {
+			continue
+		}
+		if !matchesWSDirection(cr.rule.Direction, direction) {
+			continue
+		}
+		if cr.matchesWebSocketFrame(upgradeURL, direction, flowID) {
+			matched = append(matched, cr.rule.ID)
+		}
+	}
+	return matched
+}
+
+// matchesWSDirection maps the rule's Direction to WebSocket direction strings.
+// "request" maps to "client_to_server", "response" maps to "server_to_client",
+// "both" matches either direction.
+func matchesWSDirection(ruleDir Direction, frameDir string) bool {
+	switch ruleDir {
+	case DirectionBoth:
+		return true
+	case DirectionRequest:
+		return frameDir == "client_to_server"
+	case DirectionResponse:
+		return frameDir == "server_to_client"
+	default:
+		return false
+	}
+}
+
 // Len returns the number of rules in the engine.
 func (e *Engine) Len() int {
 	e.mu.RLock()
@@ -233,8 +299,10 @@ func cloneRule(r Rule) Rule {
 		Enabled:   r.Enabled,
 		Direction: r.Direction,
 		Conditions: Conditions{
-			HostPattern: r.Conditions.HostPattern,
-			PathPattern: r.Conditions.PathPattern,
+			HostPattern:       r.Conditions.HostPattern,
+			PathPattern:       r.Conditions.PathPattern,
+			UpgradeURLPattern: r.Conditions.UpgradeURLPattern,
+			FlowID:            r.Conditions.FlowID,
 		},
 	}
 	if len(r.Conditions.Methods) > 0 {

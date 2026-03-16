@@ -57,6 +57,17 @@ type Conditions struct {
 	// Header names are matched case-insensitively.
 	// An empty map matches all headers.
 	HeaderMatch map[string]string `json:"header_match,omitempty"`
+
+	// UpgradeURLPattern is a regular expression matched against the WebSocket
+	// upgrade request URL. This field is exclusive to WebSocket intercept rules
+	// and must not be combined with HTTP-only conditions (HostPattern, PathPattern,
+	// Methods, HeaderMatch). An empty string matches all WebSocket URLs.
+	UpgradeURLPattern string `json:"upgrade_url_pattern,omitempty"`
+
+	// FlowID specifies a particular WebSocket flow ID to intercept.
+	// This field is exclusive to WebSocket intercept rules. An empty string
+	// matches all flows.
+	FlowID string `json:"flow_id,omitempty"`
 }
 
 // Rule defines a single intercept rule with an ID, enabled state,
@@ -78,10 +89,38 @@ type Rule struct {
 // compiledRule holds a Rule along with its pre-compiled regular expressions
 // for efficient matching.
 type compiledRule struct {
-	rule           Rule
-	hostPatternRe  *regexp.Regexp
-	pathPatternRe  *regexp.Regexp
-	headerMatchRes map[string]*regexp.Regexp // canonical header name -> compiled regex
+	rule                Rule
+	hostPatternRe       *regexp.Regexp
+	pathPatternRe       *regexp.Regexp
+	headerMatchRes      map[string]*regexp.Regexp // canonical header name -> compiled regex
+	upgradeURLPatternRe *regexp.Regexp
+}
+
+// compileRegexPattern validates the length and compiles a regex pattern.
+// fieldName is used in error messages. Returns nil regex for empty patterns.
+func compileRegexPattern(pattern string, fieldName string) (*regexp.Regexp, error) {
+	if pattern == "" {
+		return nil, nil
+	}
+	if len(pattern) > maxRegexPatternLen {
+		return nil, fmt.Errorf("%s too long: %d > %d", fieldName, len(pattern), maxRegexPatternLen)
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldName, pattern, err)
+	}
+	return re, nil
+}
+
+// validateConditionExclusivity checks that WebSocket and HTTP conditions are not mixed.
+func validateConditionExclusivity(c Conditions) error {
+	hasWSCondition := c.UpgradeURLPattern != "" || c.FlowID != ""
+	hasHTTPCondition := c.HostPattern != "" || c.PathPattern != "" ||
+		len(c.Methods) > 0 || len(c.HeaderMatch) > 0
+	if hasWSCondition && hasHTTPCondition {
+		return fmt.Errorf("WebSocket conditions (upgrade_url_pattern, flow_id) and HTTP conditions (host_pattern, path_pattern, methods, header_match) are mutually exclusive")
+	}
+	return nil
 }
 
 // compileRule validates and compiles a Rule's patterns into a compiledRule.
@@ -96,42 +135,30 @@ func compileRule(r Rule) (*compiledRule, error) {
 			r.Direction, DirectionRequest, DirectionResponse, DirectionBoth)
 	}
 
-	cr := &compiledRule{rule: r}
-
-	// Compile host pattern.
-	if r.Conditions.HostPattern != "" {
-		if len(r.Conditions.HostPattern) > maxRegexPatternLen {
-			return nil, fmt.Errorf("host_pattern too long: %d > %d", len(r.Conditions.HostPattern), maxRegexPatternLen)
-		}
-		re, err := regexp.Compile(r.Conditions.HostPattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid host_pattern %q: %w", r.Conditions.HostPattern, err)
-		}
-		cr.hostPatternRe = re
+	if err := validateConditionExclusivity(r.Conditions); err != nil {
+		return nil, err
 	}
 
-	// Compile path pattern.
-	if r.Conditions.PathPattern != "" {
-		if len(r.Conditions.PathPattern) > maxRegexPatternLen {
-			return nil, fmt.Errorf("path_pattern too long: %d > %d", len(r.Conditions.PathPattern), maxRegexPatternLen)
-		}
-		re, err := regexp.Compile(r.Conditions.PathPattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid path_pattern %q: %w", r.Conditions.PathPattern, err)
-		}
-		cr.pathPatternRe = re
+	cr := &compiledRule{rule: r}
+	var err error
+
+	if cr.upgradeURLPatternRe, err = compileRegexPattern(r.Conditions.UpgradeURLPattern, "upgrade_url_pattern"); err != nil {
+		return nil, err
+	}
+	if cr.hostPatternRe, err = compileRegexPattern(r.Conditions.HostPattern, "host_pattern"); err != nil {
+		return nil, err
+	}
+	if cr.pathPatternRe, err = compileRegexPattern(r.Conditions.PathPattern, "path_pattern"); err != nil {
+		return nil, err
 	}
 
 	// Compile header match patterns.
 	if len(r.Conditions.HeaderMatch) > 0 {
 		cr.headerMatchRes = make(map[string]*regexp.Regexp, len(r.Conditions.HeaderMatch))
 		for name, pattern := range r.Conditions.HeaderMatch {
-			if len(pattern) > maxRegexPatternLen {
-				return nil, fmt.Errorf("header_match pattern for %q too long: %d > %d", name, len(pattern), maxRegexPatternLen)
-			}
-			re, err := regexp.Compile(pattern)
+			re, err := compileRegexPattern(pattern, fmt.Sprintf("header_match pattern for %q", name))
 			if err != nil {
-				return nil, fmt.Errorf("invalid header_match pattern for %q: %w", name, err)
+				return nil, err
 			}
 			// Store with canonical header name for consistent lookup.
 			cr.headerMatchRes[http.CanonicalHeaderKey(name)] = re
@@ -237,6 +264,29 @@ func (cr *compiledRule) matchesResponse(statusCode int, headers http.Header) boo
 	}
 
 	_ = statusCode // reserved for future use
+	return true
+}
+
+// isWebSocketRule returns true if the rule has any WebSocket-specific conditions.
+func (cr *compiledRule) isWebSocketRule() bool {
+	return cr.upgradeURLPatternRe != nil || cr.rule.Conditions.FlowID != ""
+}
+
+// matchesWebSocketFrame evaluates whether the compiled rule matches the given
+// WebSocket frame parameters. upgradeURL is the URL of the original WebSocket
+// upgrade request, direction is "client_to_server" or "server_to_client",
+// and flowID is the identifier of the WebSocket flow.
+func (cr *compiledRule) matchesWebSocketFrame(upgradeURL string, direction string, flowID string) bool {
+	if cr.upgradeURLPatternRe != nil {
+		if !cr.upgradeURLPatternRe.MatchString(upgradeURL) {
+			return false
+		}
+	}
+	if cr.rule.Conditions.FlowID != "" {
+		if cr.rule.Conditions.FlowID != flowID {
+			return false
+		}
+	}
 	return true
 }
 

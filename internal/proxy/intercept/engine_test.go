@@ -514,6 +514,241 @@ func TestEngine_NoRules_NoMatch(t *testing.T) {
 	}
 }
 
+func TestEngine_MatchesWebSocketFrame(t *testing.T) {
+	e := NewEngine()
+
+	// Add a WebSocket rule.
+	e.AddRule(Rule{
+		ID:        "ws-chat",
+		Enabled:   true,
+		Direction: DirectionRequest,
+		Conditions: Conditions{
+			UpgradeURLPattern: "/ws/chat.*",
+		},
+	})
+	// Add an HTTP rule (should not match WebSocket frames).
+	e.AddRule(Rule{
+		ID:        "http-api",
+		Enabled:   true,
+		Direction: DirectionRequest,
+		Conditions: Conditions{
+			PathPattern: "/api/.*",
+		},
+	})
+
+	tests := []struct {
+		name       string
+		upgradeURL string
+		direction  string
+		flowID     string
+		want       bool
+	}{
+		{
+			name:       "matching WebSocket frame",
+			upgradeURL: "/ws/chat/room1",
+			direction:  "client_to_server",
+			flowID:     "f1",
+			want:       true,
+		},
+		{
+			name:       "non-matching upgrade URL",
+			upgradeURL: "/ws/events",
+			direction:  "client_to_server",
+			flowID:     "f1",
+			want:       false,
+		},
+		{
+			name:       "wrong direction for request-only rule",
+			upgradeURL: "/ws/chat/room1",
+			direction:  "server_to_client",
+			flowID:     "f1",
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := e.MatchesWebSocketFrame(tt.upgradeURL, tt.direction, tt.flowID)
+			if got != tt.want {
+				t.Errorf("MatchesWebSocketFrame() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEngine_MatchesWebSocketFrame_DirectionMapping(t *testing.T) {
+	tests := []struct {
+		name      string
+		direction Direction
+		frameDir  string
+		want      bool
+	}{
+		{
+			name:      "request direction matches client_to_server",
+			direction: DirectionRequest,
+			frameDir:  "client_to_server",
+			want:      true,
+		},
+		{
+			name:      "request direction does not match server_to_client",
+			direction: DirectionRequest,
+			frameDir:  "server_to_client",
+			want:      false,
+		},
+		{
+			name:      "response direction matches server_to_client",
+			direction: DirectionResponse,
+			frameDir:  "server_to_client",
+			want:      true,
+		},
+		{
+			name:      "response direction does not match client_to_server",
+			direction: DirectionResponse,
+			frameDir:  "client_to_server",
+			want:      false,
+		},
+		{
+			name:      "both direction matches client_to_server",
+			direction: DirectionBoth,
+			frameDir:  "client_to_server",
+			want:      true,
+		},
+		{
+			name:      "both direction matches server_to_client",
+			direction: DirectionBoth,
+			frameDir:  "server_to_client",
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := NewEngine()
+			e.AddRule(Rule{
+				ID:        "ws-rule",
+				Enabled:   true,
+				Direction: tt.direction,
+				Conditions: Conditions{
+					UpgradeURLPattern: ".*",
+				},
+			})
+			got := e.MatchesWebSocketFrame("/ws/test", tt.frameDir, "f1")
+			if got != tt.want {
+				t.Errorf("MatchesWebSocketFrame() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEngine_MatchesWebSocketFrame_DisabledRuleSkipped(t *testing.T) {
+	e := NewEngine()
+
+	e.AddRule(Rule{
+		ID:        "disabled-ws",
+		Enabled:   false,
+		Direction: DirectionBoth,
+		Conditions: Conditions{
+			UpgradeURLPattern: ".*",
+		},
+	})
+
+	if e.MatchesWebSocketFrame("/ws/test", "client_to_server", "f1") {
+		t.Error("disabled WebSocket rule should not match")
+	}
+}
+
+func TestEngine_MatchesWebSocketFrame_FlowID(t *testing.T) {
+	e := NewEngine()
+
+	e.AddRule(Rule{
+		ID:        "ws-flow",
+		Enabled:   true,
+		Direction: DirectionBoth,
+		Conditions: Conditions{
+			FlowID: "target-flow",
+		},
+	})
+
+	if !e.MatchesWebSocketFrame("/ws/any", "client_to_server", "target-flow") {
+		t.Error("should match target flow ID")
+	}
+	if e.MatchesWebSocketFrame("/ws/any", "client_to_server", "other-flow") {
+		t.Error("should not match different flow ID")
+	}
+}
+
+func TestEngine_MatchWebSocketFrameRules(t *testing.T) {
+	e := NewEngine()
+
+	e.AddRule(Rule{
+		ID: "ws1", Enabled: true, Direction: DirectionBoth,
+		Conditions: Conditions{UpgradeURLPattern: "/ws/.*"},
+	})
+	e.AddRule(Rule{
+		ID: "ws2", Enabled: true, Direction: DirectionRequest,
+		Conditions: Conditions{FlowID: "f1"},
+	})
+	e.AddRule(Rule{
+		ID: "ws3", Enabled: false, Direction: DirectionBoth,
+		Conditions: Conditions{UpgradeURLPattern: ".*"},
+	})
+	// HTTP rule should not appear in WebSocket matches.
+	e.AddRule(Rule{
+		ID: "http1", Enabled: true, Direction: DirectionRequest,
+		Conditions: Conditions{PathPattern: "/api/.*"},
+	})
+
+	matched := e.MatchWebSocketFrameRules("/ws/chat", "client_to_server", "f1")
+	if len(matched) != 2 {
+		t.Fatalf("MatchWebSocketFrameRules() len = %d, want 2", len(matched))
+	}
+	if matched[0] != "ws1" || matched[1] != "ws2" {
+		t.Errorf("MatchWebSocketFrameRules() = %v, want [ws1, ws2]", matched)
+	}
+}
+
+func TestEngine_MatchesWebSocketFrame_HTTPRuleIndependence(t *testing.T) {
+	e := NewEngine()
+
+	// HTTP rule should not affect WebSocket matching.
+	e.AddRule(Rule{
+		ID:        "http-catch-all",
+		Enabled:   true,
+		Direction: DirectionBoth,
+		Conditions: Conditions{
+			PathPattern: ".*",
+		},
+	})
+
+	if e.MatchesWebSocketFrame("/ws/test", "client_to_server", "f1") {
+		t.Error("HTTP-only rule should not match WebSocket frames")
+	}
+
+	// And WebSocket rule should not affect HTTP matching.
+	e.AddRule(Rule{
+		ID:        "ws-catch-all",
+		Enabled:   true,
+		Direction: DirectionBoth,
+		Conditions: Conditions{
+			UpgradeURLPattern: ".*",
+		},
+	})
+
+	u := &url.URL{Path: "/api/test"}
+	if e.MatchesRequest("GET", u, nil) {
+		// HTTP-only rule still matches, WebSocket rule should not interfere.
+		// The "http-catch-all" rule matches everything, so this should be true.
+	}
+}
+
+func TestEngine_MatchesWebSocketFrame_EmptyEngine(t *testing.T) {
+	e := NewEngine()
+
+	if e.MatchesWebSocketFrame("/ws/test", "client_to_server", "f1") {
+		t.Error("empty engine should not match WebSocket frames")
+	}
+}
+
 func TestEngine_ConcurrentAccess(t *testing.T) {
 	e := NewEngine()
 

@@ -680,6 +680,255 @@ func TestCompileRule_PatternTooLong(t *testing.T) {
 	}
 }
 
+func TestCompileRule_WebSocketConditions(t *testing.T) {
+	tests := []struct {
+		name    string
+		rule    Rule
+		wantErr bool
+	}{
+		{
+			name: "valid WebSocket rule with upgrade_url_pattern",
+			rule: Rule{
+				ID: "ws1", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{UpgradeURLPattern: "/ws/chat.*"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid WebSocket rule with flow_id",
+			rule: Rule{
+				ID: "ws2", Enabled: true, Direction: DirectionBoth,
+				Conditions: Conditions{FlowID: "flow-123"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid WebSocket rule with both conditions",
+			rule: Rule{
+				ID: "ws3", Enabled: true, Direction: DirectionResponse,
+				Conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-456"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid upgrade_url_pattern regex",
+			rule: Rule{
+				ID: "ws4", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{UpgradeURLPattern: "[invalid"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "upgrade_url_pattern too long",
+			rule: Rule{
+				ID: "ws5", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{UpgradeURLPattern: strings.Repeat("a", maxRegexPatternLen+1)},
+			},
+			wantErr: true,
+		},
+		{
+			name: "upgrade_url_pattern at max length accepted",
+			rule: Rule{
+				ID: "ws6", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{UpgradeURLPattern: strings.Repeat("a", maxRegexPatternLen)},
+			},
+			wantErr: false,
+		},
+		{
+			name: "WebSocket and HTTP conditions mutually exclusive - host_pattern",
+			rule: Rule{
+				ID: "ws7", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{
+					UpgradeURLPattern: "/ws/.*",
+					HostPattern:       "example.com",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "WebSocket and HTTP conditions mutually exclusive - path_pattern",
+			rule: Rule{
+				ID: "ws8", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{
+					FlowID:      "flow-1",
+					PathPattern: "/api/.*",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "WebSocket and HTTP conditions mutually exclusive - methods",
+			rule: Rule{
+				ID: "ws9", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{
+					UpgradeURLPattern: "/ws/.*",
+					Methods:           []string{"POST"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "WebSocket and HTTP conditions mutually exclusive - header_match",
+			rule: Rule{
+				ID: "ws10", Enabled: true, Direction: DirectionRequest,
+				Conditions: Conditions{
+					FlowID:      "flow-1",
+					HeaderMatch: map[string]string{"Content-Type": "text/html"},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileRule(tt.rule)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("compileRule() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestMatchesWebSocketFrame(t *testing.T) {
+	tests := []struct {
+		name       string
+		conditions Conditions
+		upgradeURL string
+		direction  string
+		flowID     string
+		want       bool
+	}{
+		{
+			name:       "upgrade URL pattern matches",
+			conditions: Conditions{UpgradeURLPattern: "/ws/chat.*"},
+			upgradeURL: "/ws/chat/room1",
+			direction:  "client_to_server",
+			flowID:     "f1",
+			want:       true,
+		},
+		{
+			name:       "upgrade URL pattern does not match",
+			conditions: Conditions{UpgradeURLPattern: "/ws/chat.*"},
+			upgradeURL: "/ws/events/stream",
+			direction:  "client_to_server",
+			flowID:     "f1",
+			want:       false,
+		},
+		{
+			name:       "flow ID matches",
+			conditions: Conditions{FlowID: "flow-123"},
+			upgradeURL: "/ws/any",
+			direction:  "server_to_client",
+			flowID:     "flow-123",
+			want:       true,
+		},
+		{
+			name:       "flow ID does not match",
+			conditions: Conditions{FlowID: "flow-123"},
+			upgradeURL: "/ws/any",
+			direction:  "server_to_client",
+			flowID:     "flow-456",
+			want:       false,
+		},
+		{
+			name:       "both conditions match",
+			conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-123"},
+			upgradeURL: "/ws/chat",
+			direction:  "client_to_server",
+			flowID:     "flow-123",
+			want:       true,
+		},
+		{
+			name:       "upgrade URL matches but flow ID does not",
+			conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-123"},
+			upgradeURL: "/ws/chat",
+			direction:  "client_to_server",
+			flowID:     "flow-999",
+			want:       false,
+		},
+		{
+			name:       "empty conditions match all",
+			conditions: Conditions{},
+			upgradeURL: "/ws/anything",
+			direction:  "client_to_server",
+			flowID:     "any-flow",
+			want:       true,
+		},
+		{
+			name:       "empty upgrade URL against pattern",
+			conditions: Conditions{UpgradeURLPattern: "/ws/.*"},
+			upgradeURL: "",
+			direction:  "client_to_server",
+			flowID:     "f1",
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Rule{
+				ID: "test", Enabled: true, Direction: DirectionRequest,
+				Conditions: tt.conditions,
+			}
+			cr, err := compileRule(r)
+			if err != nil {
+				t.Fatalf("compileRule() error = %v", err)
+			}
+			got := cr.matchesWebSocketFrame(tt.upgradeURL, tt.direction, tt.flowID)
+			if got != tt.want {
+				t.Errorf("matchesWebSocketFrame() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsWebSocketRule(t *testing.T) {
+	tests := []struct {
+		name       string
+		conditions Conditions
+		want       bool
+	}{
+		{
+			name:       "HTTP rule",
+			conditions: Conditions{PathPattern: "/api/.*"},
+			want:       false,
+		},
+		{
+			name:       "empty conditions is not WebSocket",
+			conditions: Conditions{},
+			want:       false,
+		},
+		{
+			name:       "upgrade_url_pattern makes it WebSocket",
+			conditions: Conditions{UpgradeURLPattern: "/ws/.*"},
+			want:       true,
+		},
+		{
+			name:       "flow_id makes it WebSocket",
+			conditions: Conditions{FlowID: "flow-1"},
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Rule{
+				ID: "test", Enabled: true, Direction: DirectionRequest,
+				Conditions: tt.conditions,
+			}
+			cr, err := compileRule(r)
+			if err != nil {
+				t.Fatalf("compileRule() error = %v", err)
+			}
+			got := cr.isWebSocketRule()
+			if got != tt.want {
+				t.Errorf("isWebSocketRule() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtractHostname(t *testing.T) {
 	tests := []struct {
 		name     string
