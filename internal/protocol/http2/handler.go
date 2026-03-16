@@ -209,7 +209,7 @@ func (h *Handler) HandleH2(ctx context.Context, tlsConn *tls.Conn, connectAuthor
 // stream to the upstream server and recording sessions.
 //
 // It uses the custom frame engine (clientConn) to handle HTTP/2 frames
-// directly, replacing the previous golang.org/x/net/http2.Server.ServeConn().
+// directly, using the custom frame engine.
 func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthority string, tlsMeta tlsMetadata) error {
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)

@@ -3,7 +3,6 @@ package http2
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -13,9 +12,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/google/uuid"
 
@@ -200,14 +196,24 @@ func (m *mockStore) Entries() []mockEntry {
 	return entries
 }
 
-// newH2CClient returns an HTTP client configured for h2c with a custom dialer
-// that always connects to the given address.
+// newH2CClientForAddr returns an HTTP client configured for h2c with a custom dialer
+// that always connects to the given address. It supports both http:// and https://
+// URLs, routing all connections through the h2c proxy.
 func newH2CClientForAddr(addr string) *gohttp.Client {
+	protos := &gohttp.Protocols{}
+	protos.SetUnencryptedHTTP2(true)
+	protos.SetHTTP2(true)
+	dial := func(ctx context.Context, network, a string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
 	return &gohttp.Client{
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, a string, _ *tls.Config) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, addr)
+		Transport: &gohttp.Transport{
+			Protocols: protos,
+			DialContext: dial,
+			// DialTLSContext returns a plain TCP conn so https:// URLs
+			// are sent over the cleartext h2c connection to the proxy.
+			DialTLSContext: func(ctx context.Context, network, a string) (net.Conn, error) {
+				return dial(ctx, network, a)
 			},
 		},
 	}
@@ -226,14 +232,15 @@ func startH2CProxyListener(t *testing.T, handler *Handler, connID, clientAddr, c
 		t.Fatalf("listen: %v", err)
 	}
 
-	h2Server := &http2.Server{}
 	proxyHTTPHandler := gohttp.HandlerFunc(func(w gohttp.ResponseWriter, req *gohttp.Request) {
 		hctx := proxy.ContextWithConnID(proxy.ContextWithClientAddr(ctx, clientAddr), connID)
 		handler.handleStream(hctx, w, req, connID, clientAddr, connectAuthority, tlsMeta, handler.Logger)
 	})
-	h2cH := h2c.NewHandler(proxyHTTPHandler, h2Server)
 
-	server := &gohttp.Server{Handler: h2cH}
+	protos := &gohttp.Protocols{}
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
+	server := &gohttp.Server{Handler: proxyHTTPHandler, Protocols: protos}
 
 	go func() {
 		server.Serve(ln)

@@ -16,8 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
@@ -208,8 +206,7 @@ func TestTLSFingerprint_ChromeProfile_HTTPS(t *testing.T) {
 // --- Test: HTTP/2 ALPN Negotiation ---
 
 // startH2Server starts a TLS server that supports HTTP/2 via ALPN.
-// httptest.NewTLSServer does not enable HTTP/2 by default, so we configure
-// it explicitly using golang.org/x/net/http2.
+// Go 1.25's net/http server supports HTTP/2 over TLS natively.
 func startH2Server(t *testing.T, handler gohttp.Handler) (addr string, cleanup func()) {
 	t.Helper()
 
@@ -233,11 +230,6 @@ func startH2Server(t *testing.T, handler gohttp.Handler) (addr string, cleanup f
 	srv := &gohttp.Server{
 		Handler:   handler,
 		TLSConfig: tlsConfig,
-	}
-	// Configure HTTP/2 support on the server.
-	if err := http2.ConfigureServer(srv, nil); err != nil {
-		ln.Close()
-		t.Fatalf("http2.ConfigureServer: %v", err)
 	}
 
 	go srv.Serve(tlsLn) //nolint:errcheck // test server

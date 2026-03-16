@@ -25,9 +25,8 @@ import (
 // before any frames per RFC 9113 Section 3.4.
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-// Transport is an HTTP/2 upstream transport that uses the custom frame engine
-// instead of golang.org/x/net/http2. It manages connection pooling and
-// supports uTLS/mTLS through httputil.TLSTransport.
+// Transport is an HTTP/2 upstream transport that uses the custom frame engine.
+// It manages connection pooling and supports uTLS/mTLS through httputil.TLSTransport.
 //
 // Transport is safe for concurrent use.
 type Transport struct {
