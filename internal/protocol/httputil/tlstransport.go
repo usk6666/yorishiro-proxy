@@ -95,16 +95,24 @@ type StandardTransport struct {
 	// HostTLS provides per-host TLS configuration (mTLS, custom CA, verification).
 	// When set, serverName-based lookup is performed to apply host-specific settings.
 	HostTLS *HostTLSRegistry
+
+	// NextProtos specifies the ALPN protocols to offer during the TLS handshake.
+	// When nil, defaults to ["h2", "http/1.1"].
+	NextProtos []string
 }
 
 // TLSConnect establishes a TLS connection using the standard crypto/tls library.
 // When HostTLS is configured, per-host settings (client certificates, CA bundles,
 // verification) are applied based on the serverName.
 func (t *StandardTransport) TLSConnect(ctx context.Context, conn net.Conn, serverName string) (net.Conn, string, error) {
+	nextProtos := t.NextProtos
+	if nextProtos == nil {
+		nextProtos = []string{"h2", "http/1.1"}
+	}
 	tlsConfig := &tls.Config{
 		ServerName:         serverName,
 		InsecureSkipVerify: t.InsecureSkipVerify, //nolint:gosec // proxy requires MITM
-		NextProtos:         []string{"h2", "http/1.1"},
+		NextProtos:         append([]string(nil), nextProtos...),
 		MinVersion:         tls.VersionTLS12,
 	}
 

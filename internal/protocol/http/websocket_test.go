@@ -12,8 +12,155 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
+
+// h2OnlyTLSTransport simulates a TLS transport where the server negotiates h2.
+type h2OnlyTLSTransport struct{}
+
+func (h *h2OnlyTLSTransport) TLSConnect(_ context.Context, conn net.Conn, _ string) (net.Conn, string, error) {
+	return conn, "h2", nil
+}
+
+func TestWsHTTP1Transport_StandardTransport(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+	handler.tlsTransport = &httputil.StandardTransport{
+		InsecureSkipVerify: true,
+	}
+
+	transport := handler.wsHTTP1Transport()
+	st, ok := transport.(*httputil.StandardTransport)
+	if !ok {
+		t.Fatalf("expected *httputil.StandardTransport, got %T", transport)
+	}
+	if !st.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be preserved")
+	}
+	if len(st.NextProtos) != 1 || st.NextProtos[0] != "http/1.1" {
+		t.Errorf("NextProtos = %v, want [http/1.1]", st.NextProtos)
+	}
+}
+
+func TestWsHTTP1Transport_NonStandardTransport(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+	mock := &mockTLSTransport{}
+	handler.tlsTransport = mock
+
+	transport := handler.wsHTTP1Transport()
+	if transport != mock {
+		t.Error("non-StandardTransport should be returned as-is")
+	}
+}
+
+func TestWsHTTP1Transport_FallbackStandardTransport(t *testing.T) {
+	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
+	// No explicit TLS transport set — falls back to StandardTransport.
+
+	transport := handler.wsHTTP1Transport()
+	st, ok := transport.(*httputil.StandardTransport)
+	if !ok {
+		t.Fatalf("expected *httputil.StandardTransport, got %T", transport)
+	}
+	if len(st.NextProtos) != 1 || st.NextProtos[0] != "http/1.1" {
+		t.Errorf("NextProtos = %v, want [http/1.1]", st.NextProtos)
+	}
+}
+
+// TestWSS_H2OnlyServer_Returns502 verifies that when the upstream server
+// negotiates HTTP/2 via ALPN, the WSS handler returns 502 with a clear error
+// instead of a cryptic "malformed HTTP response" error.
+func TestWSS_H2OnlyServer_Returns502(t *testing.T) {
+	issuer, rootCAs := newTestIssuer(t)
+	store := &mockStore{}
+	handler := NewHandler(store, issuer, testutil.DiscardLogger())
+
+	// Set up a mock upstream that accepts TCP connections (so dial succeeds)
+	// but whose TLS transport reports h2 negotiation.
+	upstreamLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer upstreamLn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Accept connections in the background and keep them open until context ends.
+	go func() {
+		for {
+			conn, err := upstreamLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				// Hold connection open until test context ends.
+				select {
+				case <-ctx.Done():
+				case <-time.After(10 * time.Second):
+				}
+			}()
+		}
+	}()
+
+	// Use the upstream listener's actual address as CONNECT target so
+	// dialUpstream succeeds.
+	connectHost := upstreamLn.Addr().String()
+	handler.tlsTransport = &h2OnlyTLSTransport{}
+
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	tlsConn, tlsReader := doConnectAndTLS(t, proxyAddr, connectHost, rootCAs)
+	defer tlsConn.Close()
+
+	// Send a WebSocket upgrade request over the TLS tunnel.
+	wsReq := "GET /ws HTTP/1.1\r\n" +
+		"Host: " + connectHost + "\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Sec-WebSocket-Version: 13\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"\r\n"
+	_, err = tlsConn.Write([]byte(wsReq))
+	if err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+
+	// Read the 502 Bad Gateway response.
+	resp, err := gohttp.ReadResponse(tlsReader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != gohttp.StatusBadGateway {
+		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusBadGateway)
+	}
+
+	// Wait for recording.
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify error flow was recorded with ALPN mismatch info.
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry (error), got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Session.State != "error" {
+		t.Errorf("flow state = %q, want %q", entry.Session.State, "error")
+	}
+	if entry.Session.Protocol != "WebSocket" {
+		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "WebSocket")
+	}
+	errTag := entry.Session.Tags["error"]
+	if !strings.Contains(errTag, "HTTP/2") || !strings.Contains(errTag, "ALPN") {
+		t.Errorf("error tag = %q, should mention HTTP/2 and ALPN", errTag)
+	}
+}
 
 func TestIsWebSocketUpgrade(t *testing.T) {
 	tests := []struct {
@@ -389,7 +536,9 @@ func TestWSS_UpstreamDialFailure_RecordsSession(t *testing.T) {
 		"Sec-WebSocket-Version: 13\r\n" +
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
 		"\r\n"
-	tlsConn.Write([]byte(wsReq))
+	if _, err := tlsConn.Write([]byte(wsReq)); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
 
 	// Read the 502 Bad Gateway response.
 	resp, err := gohttp.ReadResponse(tlsReader, nil)
