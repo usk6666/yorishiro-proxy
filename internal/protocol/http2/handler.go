@@ -260,6 +260,10 @@ type streamContext struct {
 	// reqRawFrames holds the raw HTTP/2 frame bytes received from the client
 	// for this stream. Extracted from the context set by clientConn.dispatchStream.
 	reqRawFrames [][]byte
+	// respRawFrames holds the raw HTTP/2 frame bytes from the upstream response.
+	// NOTE: Currently always nil. Will be populated when the custom Transport
+	// is integrated into the handler's upstream forwarding path.
+	respRawFrames [][]byte
 
 	// Plugin state shared across hooks for this stream.
 	pluginConnInfo *plugin.ConnInfo
@@ -546,7 +550,7 @@ func (h *Handler) runClientPluginHook(sc *streamContext) bool {
 	}
 	txCtx := plugin.NewTxCtx()
 	var terminated bool
-	sc.req, sc.reqBody, terminated = h.dispatchOnReceiveFromClient(sc.ctx, sc.w, sc.req, sc.reqBody, pluginConnInfo, txCtx, sc.logger)
+	sc.req, sc.reqBody, terminated = h.dispatchOnReceiveFromClient(sc.ctx, sc.w, sc.req, sc.reqBody, pluginConnInfo, txCtx, sc.reqRawFrames, sc.logger)
 	// Store txCtx and pluginConnInfo on the context for later hooks — we
 	// piggyback on the streamContext's context value.  For simplicity we
 	// store them as unexported fields (added below).
@@ -635,7 +639,7 @@ func (h *Handler) applyRequestInterceptMods(sc *streamContext, outReq *gohttp.Re
 
 // runServerPluginHook dispatches the on_before_send_to_server hook.
 func (h *Handler) runServerPluginHook(sc *streamContext, outReq *gohttp.Request) *gohttp.Request {
-	outReq, body := h.dispatchOnBeforeSendToServer(sc.ctx, outReq, sc.reqBody, sc.pluginConnInfo, sc.txCtx, sc.logger)
+	outReq, body := h.dispatchOnBeforeSendToServer(sc.ctx, outReq, sc.reqBody, sc.pluginConnInfo, sc.txCtx, sc.reqRawFrames, sc.logger)
 	if body != nil {
 		outReq.Body = io.NopCloser(bytes.NewReader(body))
 		outReq.ContentLength = int64(len(body))
@@ -720,8 +724,8 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 // runResponsePluginHooks dispatches the on_receive_from_server and
 // on_before_send_to_client hooks.
 func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *gohttp.Response, fullRespBody []byte) (*gohttp.Response, []byte) {
-	resp, fullRespBody = h.dispatchOnReceiveFromServer(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.logger)
-	resp, fullRespBody = h.dispatchOnBeforeSendToClient(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.logger)
+	resp, fullRespBody = h.dispatchOnReceiveFromServer(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
+	resp, fullRespBody = h.dispatchOnBeforeSendToClient(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
 	return resp, fullRespBody
 }
 
