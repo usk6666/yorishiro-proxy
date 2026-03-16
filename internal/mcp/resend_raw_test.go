@@ -464,10 +464,10 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
 	host, port, _ := net.SplitHostPort(addr)
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
-	// Create a flow with NO RawBytes (e.g. HTTP/2 or gRPC flow).
+	// Create a flow with NO RawBytes (e.g. HTTP flow with no raw capture).
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:  "HTTP/2",
+			Protocol:  "HTTP",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
@@ -478,7 +478,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
 			Method:    "GET",
 			URL:       u,
 			Headers:   map[string][]string{},
-			RawBytes:  nil, // No raw bytes stored for HTTP/2
+			RawBytes:  nil, // No raw bytes stored
 		},
 		&flow.Message{
 			Sequence:   1,
