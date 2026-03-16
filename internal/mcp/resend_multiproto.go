@@ -247,60 +247,26 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, err
 	}
 
-	// Retrieve the Upgrade request message (seq=0) for reconstructing the handshake.
 	upgradeMsg, err := findUpgradeRequestMessage(ctx, s.deps.store, fl.ID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// When override_url is specified, derive target address and TLS from it
-	// (unless target_addr is explicitly set).
-	var overrideURLParsed *url.URL
-	if params.OverrideURL != "" {
-		parsed, err := url.Parse(params.OverrideURL)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid override_url %q: %w", params.OverrideURL, err)
-		}
-		if parsed.Scheme == "" || parsed.Host == "" {
-			return nil, nil, fmt.Errorf("invalid override_url %q: must include scheme and host", params.OverrideURL)
-		}
-		overrideURLParsed = parsed
+	overrideURLParsed, err := parseOverrideURL(params.OverrideURL)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	var targetAddr string
-	if params.TargetAddr == "" && overrideURLParsed != nil {
-		// Derive target address from override_url when target_addr is not explicitly set.
-		host := overrideURLParsed.Hostname()
-		port := overrideURLParsed.Port()
-		if port == "" {
-			if overrideURLParsed.Scheme == "wss" || overrideURLParsed.Scheme == "https" {
-				port = "443"
-			} else {
-				port = "80"
-			}
-		}
-		targetAddr = net.JoinHostPort(host, port)
-	} else {
-		var addrErr error
-		targetAddr, addrErr = s.resolveWebSocketTargetAddr(ctx, fl, params)
-		if addrErr != nil {
-			return nil, nil, addrErr
-		}
+	targetAddr, err := s.resolveWSTargetAddr(ctx, fl, params, overrideURLParsed)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	if err := s.checkTargetScopeAddr("", targetAddr); err != nil {
 		return nil, nil, err
 	}
 
-	defaultTLS := fl.ConnInfo != nil && fl.ConnInfo.TLSVersion != ""
-	if overrideURLParsed != nil {
-		// Infer TLS from override_url scheme.
-		if overrideURLParsed.Scheme == "wss" || overrideURLParsed.Scheme == "https" {
-			defaultTLS = true
-		} else {
-			defaultTLS = false
-		}
-	}
+	defaultTLS := resolveDefaultTLS(fl, overrideURLParsed)
 	useTLS, timeout := determineTLSAndTimeout(defaultTLS, params)
 
 	sendBody, err := resolveWebSocketBody(targetMsg, params)
@@ -308,7 +274,6 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, err
 	}
 
-	// SafetyFilter input check: validate WebSocket message body before sending.
 	if v := s.checkSafetyInput(sendBody, "", nil); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
@@ -325,12 +290,59 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, err
 	}
 
-	// Apply SafetyFilter output masking before returning to AI agent.
-	// Raw data is already saved to the store above.
 	maskedRespData := s.filterOutputBody(wsResult.responsePayload)
 	result.ResponseData = base64.StdEncoding.EncodeToString(maskedRespData)
 
 	return nil, result, nil
+}
+
+// parseOverrideURL parses and validates the override_url parameter.
+// Returns nil if the parameter is empty.
+func parseOverrideURL(overrideURL string) (*url.URL, error) {
+	if overrideURL == "" {
+		return nil, nil
+	}
+	parsed, err := url.Parse(overrideURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid override_url %q: %w", overrideURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid override_url %q: must include scheme and host", overrideURL)
+	}
+	return parsed, nil
+}
+
+// resolveWSTargetAddr determines the target address for a WebSocket resend,
+// deriving it from override_url when target_addr is not explicitly set.
+func (s *Server) resolveWSTargetAddr(ctx context.Context, fl *flow.Flow, params resendParams, overrideURL *url.URL) (string, error) {
+	if params.TargetAddr == "" && overrideURL != nil {
+		return addrFromURL(overrideURL), nil
+	}
+	return s.resolveWebSocketTargetAddr(ctx, fl, params)
+}
+
+// addrFromURL derives a host:port address from a parsed URL, using default
+// ports (443 for wss/https, 80 otherwise) when the port is not specified.
+func addrFromURL(u *url.URL) string {
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "wss" || u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// resolveDefaultTLS determines the default TLS setting from the flow's connection
+// info and the override URL scheme.
+func resolveDefaultTLS(fl *flow.Flow, overrideURL *url.URL) bool {
+	if overrideURL != nil {
+		return overrideURL.Scheme == "wss" || overrideURL.Scheme == "https"
+	}
+	return fl.ConnInfo != nil && fl.ConnInfo.TLSVersion != ""
 }
 
 // findUpgradeRequestMessage retrieves the Upgrade request message (seq=0, direction="send")
@@ -458,12 +470,9 @@ func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr
 
 	// Apply override_url if specified.
 	if params.OverrideURL != "" {
-		parsed, err := url.Parse(params.OverrideURL)
+		parsed, err := parseOverrideURL(params.OverrideURL)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("invalid override_url %q: %w", params.OverrideURL, err)
-		}
-		if parsed.Scheme == "" || parsed.Host == "" {
-			return nil, nil, nil, nil, fmt.Errorf("invalid override_url %q: must include scheme and host", params.OverrideURL)
+			return nil, nil, nil, nil, err
 		}
 		reqURL = parsed
 	}
