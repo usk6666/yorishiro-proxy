@@ -224,6 +224,18 @@ func (sm *StreamMap) SetLastPeerStreamID(id uint32) {
 	}
 }
 
+// GetSendWindow returns the send window of the given stream.
+// Returns 0 and false if the stream does not exist.
+func (sm *StreamMap) GetSendWindow(id uint32) (int32, bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	s, ok := sm.streams[id]
+	if !ok {
+		return 0, false
+	}
+	return s.SendWindow, true
+}
+
 // ConsumeSendWindow decrements the send window of the given stream by n bytes.
 // Returns an error if n is not positive or the window would go below zero.
 func (sm *StreamMap) ConsumeSendWindow(id uint32, n int32) error {
