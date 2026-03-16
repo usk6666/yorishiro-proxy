@@ -166,6 +166,10 @@
     ]
   },
   "hooks": {},
+  "enabledPlugins": {
+    "gopls-lsp@claude-plugins-official": false,
+    "gopls-custom": true
+  },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "yorishiro-proxy"
