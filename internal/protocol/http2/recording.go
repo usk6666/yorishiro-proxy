@@ -36,6 +36,11 @@ type sendRecordParams struct {
 	reqURL       *url.URL
 	reqBody      []byte
 	reqTruncated bool
+
+	// rawFrames holds the raw HTTP/2 frame bytes received from the client.
+	// Each element is the complete wire bytes of one frame (header + payload).
+	// These are concatenated into Message.RawBytes for L4 recording.
+	rawFrames [][]byte
 }
 
 // sendRecordResult holds the flow created by recordSend so that
@@ -87,7 +92,9 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		URL:           p.reqURL,
 		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
+		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
+		Metadata:      buildFrameMetadata(p.rawFrames, nil),
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("HTTP/2 send message save failed", "error", err)
@@ -190,6 +197,9 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			origHeaders["Host"] = []string{p.req.Host}
 		}
 		// Record the original (unmodified) request as sequence 0.
+		// RawBytes is attached to the original message because it represents
+		// the wire-observed bytes before any intercept modifications.
+		origMeta := buildFrameMetadata(p.rawFrames, map[string]string{"variant": "original"})
 		originalMsg := &flow.Message{
 			FlowID:        fl.ID,
 			Sequence:      0,
@@ -199,14 +209,16 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			URL:           p.reqURL,
 			Headers:       origHeaders,
 			Body:          snap.body,
+			RawBytes:      joinRawFrames(p.rawFrames),
 			BodyTruncated: p.reqTruncated,
-			Metadata:      map[string]string{"variant": "original"},
+			Metadata:      origMeta,
 		}
 		if err := h.Store.AppendMessage(ctx, originalMsg); err != nil {
 			logger.Error("HTTP/2 original send message save failed", "error", err)
 		}
 
 		// Record the modified request as sequence 1.
+		// RawBytes is nil for modified messages — they are not wire-observed.
 		modifiedMsg := &flow.Message{
 			FlowID:        fl.ID,
 			Sequence:      1,
@@ -236,7 +248,9 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		URL:           p.reqURL,
 		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
+		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
+		Metadata:      buildFrameMetadata(p.rawFrames, nil),
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("HTTP/2 send message save failed", "error", err)
@@ -265,6 +279,11 @@ type receiveRecordParams struct {
 	waitMs *int64
 	// receiveMs is the time in milliseconds to receive the response.
 	receiveMs *int64
+
+	// rawFrames holds the raw HTTP/2 frame bytes received from the upstream.
+	// Each element is the complete wire bytes of one frame (header + payload).
+	// These are concatenated into Message.RawBytes for L4 recording.
+	rawFrames [][]byte
 }
 
 // recordReceive records the receive phase of an HTTP/2 session: appends the
@@ -338,6 +357,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		TLSServerCertSubject: p.tlsServerCertSubject,
 		Resp:                 p.resp,
 		RespBody:             p.respBody,
+		RawResponse:          joinRawFrames(p.rawFrames),
+		RawResponseMetadata:  buildFrameMetadata(p.rawFrames, nil),
 		Tags:                 tags,
 		SendMs:               p.sendMs,
 		WaitMs:               p.waitMs,
@@ -407,7 +428,9 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		URL:           p.reqURL,
 		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
+		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
+		Metadata:      buildFrameMetadata(p.rawFrames, nil),
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("HTTP/2 intercept drop send message save failed", "error", err)
@@ -455,7 +478,9 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 		URL:           p.reqURL,
 		Headers:       requestHeaders(p.req),
 		Body:          p.reqBody,
+		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
+		Metadata:      buildFrameMetadata(p.rawFrames, nil),
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("HTTP/2 outReq error send message save failed", "error", err)
