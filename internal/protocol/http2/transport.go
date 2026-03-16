@@ -743,6 +743,10 @@ func (tc *transportConn) sendRawFrames(ctx context.Context, rawBytes []byte) (*R
 		return nil, fmt.Errorf("rewrite stream IDs: %w", err)
 	}
 
+	if !hasEndStream {
+		return nil, fmt.Errorf("raw frames must contain END_STREAM flag to complete the request")
+	}
+
 	ss := &streamState{
 		done:        make(chan streamResult, 1),
 		headersDone: make(chan struct{}),

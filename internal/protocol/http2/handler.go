@@ -650,6 +650,11 @@ func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Reque
 			sc.logger.Info("intercepted HTTP/2 request dropped (raw mode)",
 				"method", sc.req.Method, "url", sc.reqURL.String())
 			return nil, false
+		default:
+			sc.logger.Error("HTTP/2 raw intercept: unknown action type",
+				"action_type", action.Type)
+			sc.w.WriteHeader(gohttp.StatusBadGateway)
+			return nil, false
 		}
 	}
 
