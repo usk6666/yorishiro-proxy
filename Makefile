@@ -8,7 +8,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-ui ensure-ui dev-ui test test-e2e test-cover vet lint fmt clean bench bench-compare
+.PHONY: build build-ui ensure-ui dev-ui test test-ui test-e2e test-cover vet lint fmt clean bench bench-compare
 
 build: build-ui vet
 	go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
@@ -21,6 +21,9 @@ ensure-ui:
 
 dev-ui:
 	cd web && pnpm run dev
+
+test-ui:
+	cd web && pnpm install --frozen-lockfile && pnpm test
 
 test: ensure-ui
 	go test -race -v ./...
