@@ -5,7 +5,6 @@ package http2_test
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -15,9 +14,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -69,9 +65,12 @@ func decodeAllProtobufFrames(t *testing.T, data []byte) []string {
 // back. It is the caller's responsibility to set Content-Type and status.
 func startGRPCTestUpstream(t *testing.T, handler gohttp.Handler) (addr string, cleanup func()) {
 	t.Helper()
-	h2s := &http2.Server{}
+	protos := &gohttp.Protocols{}
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
 	server := &gohttp.Server{
-		Handler: h2c.NewHandler(handler, h2s),
+		Handler:   handler,
+		Protocols: protos,
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -133,10 +132,12 @@ func startGRPCProxy(
 // newH2CClient creates an HTTP client configured for h2c that connects through
 // the given proxy address.
 func newH2CClient(proxyAddr string) *gohttp.Client {
+	protos := &gohttp.Protocols{}
+	protos.SetUnencryptedHTTP2(true)
 	return &gohttp.Client{
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		Transport: &gohttp.Transport{
+			Protocols: protos,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, proxyAddr)
 			},
 		},

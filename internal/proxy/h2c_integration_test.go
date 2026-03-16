@@ -4,7 +4,6 @@ package proxy_test
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -14,9 +13,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
@@ -62,9 +58,12 @@ func startH2CProxy(t *testing.T, ctx context.Context, store flow.Store) (*proxy.
 func startH2CUpstream(t *testing.T, handler gohttp.Handler) (string, func()) {
 	t.Helper()
 
-	h2s := &http2.Server{}
+	protos := &gohttp.Protocols{}
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
 	server := &gohttp.Server{
-		Handler: h2c.NewHandler(handler, h2s),
+		Handler:   handler,
+		Protocols: protos,
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -107,10 +106,12 @@ func TestIntegration_H2C_GET(t *testing.T) {
 	// Create h2c client that connects through the proxy.
 	// For h2c, the client sends the HTTP/2 preface directly.
 	proxyAddr := listener.Addr()
+	h2cProtos := &gohttp.Protocols{}
+	h2cProtos.SetUnencryptedHTTP2(true)
 	client := &gohttp.Client{
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		Transport: &gohttp.Transport{
+			Protocols: h2cProtos,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				// Connect to the proxy instead of the upstream.
 				return net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 			},
@@ -191,10 +192,13 @@ func TestIntegration_H2C_POST(t *testing.T) {
 	defer proxyCancel()
 
 	proxyAddr := listener.Addr()
+	h2cProtos := &gohttp.Protocols{}
+	h2cProtos.SetUnencryptedHTTP2(true)
 	client := &gohttp.Client{
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		Transport: &gohttp.Transport{
+			Protocols: h2cProtos,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Connect to the proxy instead of the upstream.
 				return net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 			},
 		},
@@ -256,10 +260,13 @@ func TestIntegration_H2C_ConcurrentStreams(t *testing.T) {
 	defer proxyCancel()
 
 	proxyAddr := listener.Addr()
+	h2cProtos := &gohttp.Protocols{}
+	h2cProtos.SetUnencryptedHTTP2(true)
 	client := &gohttp.Client{
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		Transport: &gohttp.Transport{
+			Protocols: h2cProtos,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Connect to the proxy instead of the upstream.
 				return net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 			},
 		},
