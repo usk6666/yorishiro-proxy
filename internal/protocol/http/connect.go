@@ -258,12 +258,18 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	// Snapshot + Intercept check + modifications.
 	snap := snapshotRequest(req.Header, bodyResult.recordBody)
 
-	var dropped bool
-	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
-	if dropped {
-		sp.reqBody = bodyResult.recordBody
+	iResult := h.applyIntercept(ctx, conn, req, bodyResult.recordBody, rawRequest, logger)
+	if iResult.Dropped {
+		sp.reqBody = iResult.RecordBody
 		h.recordInterceptDrop(ctx, sp, logger)
 		return nil
+	}
+	req = iResult.Req
+	bodyResult.recordBody = iResult.RecordBody
+
+	// Raw mode: bypass net/http.Transport and forward raw bytes directly.
+	if iResult.IsRaw {
+		return h.handleRawForward(ctx, conn, req, iResult, sp, &snap, start, logger)
 	}
 
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
@@ -673,12 +679,18 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// Snapshot headers/body before intercept/transform for variant recording.
 	snap := snapshotRequest(req.Header, bodyResult.recordBody)
 
-	var dropped bool
-	req, bodyResult.recordBody, dropped = h.applyIntercept(ctx, conn, req, bodyResult.recordBody, logger)
-	if dropped {
-		sp.reqBody = bodyResult.recordBody
+	iResult := h.applyIntercept(ctx, conn, req, bodyResult.recordBody, rawRequest, logger)
+	if iResult.Dropped {
+		sp.reqBody = iResult.RecordBody
 		h.recordInterceptDrop(ctx, sp, logger)
 		return nil
+	}
+	req = iResult.Req
+	bodyResult.recordBody = iResult.RecordBody
+
+	// Raw mode: bypass net/http.Transport and forward raw bytes directly.
+	if iResult.IsRaw {
+		return h.handleRawForward(ctx, conn, req, iResult, sp, &snap, start, logger)
 	}
 
 	// Step 5: Apply auto-transform rules.
