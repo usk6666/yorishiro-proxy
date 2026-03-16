@@ -247,13 +247,17 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, err
 	}
 
-	// Retrieve the Upgrade request message (seq=0) for reconstructing the handshake.
 	upgradeMsg, err := findUpgradeRequestMessage(ctx, s.deps.store, fl.ID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	targetAddr, err := s.resolveWebSocketTargetAddr(ctx, fl, params)
+	overrideURLParsed, err := parseOverrideURL(params.OverrideURL)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	targetAddr, err := s.resolveWSTargetAddr(ctx, fl, params, overrideURLParsed)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -262,7 +266,7 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, err
 	}
 
-	defaultTLS := fl.ConnInfo != nil && fl.ConnInfo.TLSVersion != ""
+	defaultTLS := resolveDefaultTLS(fl, overrideURLParsed)
 	useTLS, timeout := determineTLSAndTimeout(defaultTLS, params)
 
 	sendBody, err := resolveWebSocketBody(targetMsg, params)
@@ -270,29 +274,75 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Flow, param
 		return nil, nil, err
 	}
 
-	// SafetyFilter input check: validate WebSocket message body before sending.
 	if v := s.checkSafetyInput(sendBody, "", nil); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
 	opcode := resolveWebSocketOpcode(targetMsg)
 
-	wsResult, err := s.establishWebSocketAndSend(ctx, targetAddr, useTLS, timeout, upgradeMsg, sendBody, opcode)
+	wsResult, err := s.establishWebSocketAndSend(ctx, targetAddr, useTLS, timeout, upgradeMsg, sendBody, opcode, params)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	result, err := s.recordWebSocketResend(ctx, params, targetMsg, upgradeMsg, wsResult)
+	result, err := s.recordWebSocketResend(ctx, params, targetMsg, wsResult)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Apply SafetyFilter output masking before returning to AI agent.
-	// Raw data is already saved to the store above.
 	maskedRespData := s.filterOutputBody(wsResult.responsePayload)
 	result.ResponseData = base64.StdEncoding.EncodeToString(maskedRespData)
 
 	return nil, result, nil
+}
+
+// parseOverrideURL parses and validates the override_url parameter.
+// Returns nil if the parameter is empty.
+func parseOverrideURL(overrideURL string) (*url.URL, error) {
+	if overrideURL == "" {
+		return nil, nil
+	}
+	parsed, err := url.Parse(overrideURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid override_url %q: %w", overrideURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid override_url %q: must include scheme and host", overrideURL)
+	}
+	return parsed, nil
+}
+
+// resolveWSTargetAddr determines the target address for a WebSocket resend,
+// deriving it from override_url when target_addr is not explicitly set.
+func (s *Server) resolveWSTargetAddr(ctx context.Context, fl *flow.Flow, params resendParams, overrideURL *url.URL) (string, error) {
+	if params.TargetAddr == "" && overrideURL != nil {
+		return addrFromURL(overrideURL), nil
+	}
+	return s.resolveWebSocketTargetAddr(ctx, fl, params)
+}
+
+// addrFromURL derives a host:port address from a parsed URL, using default
+// ports (443 for wss/https, 80 otherwise) when the port is not specified.
+func addrFromURL(u *url.URL) string {
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "wss" || u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// resolveDefaultTLS determines the default TLS setting from the flow's connection
+// info and the override URL scheme.
+func resolveDefaultTLS(fl *flow.Flow, overrideURL *url.URL) bool {
+	if overrideURL != nil {
+		return overrideURL.Scheme == "wss" || overrideURL.Scheme == "https"
+	}
+	return fl.ConnInfo != nil && fl.ConnInfo.TLSVersion != ""
 }
 
 // findUpgradeRequestMessage retrieves the Upgrade request message (seq=0, direction="send")
@@ -339,6 +389,11 @@ type wsResendResult struct {
 	responsePayload []byte
 	responseOpcode  byte
 	sendBody        []byte
+	// upgradeHeaders and upgradeURL capture the actual headers and URL used
+	// in the handshake (after overrides), for accurate flow recording.
+	upgradeHeaders map[string][]string
+	upgradeURL     *url.URL
+	upgradeMethod  string
 }
 
 // establishWebSocketAndSend performs the full WebSocket handshake and frame exchange:
@@ -346,7 +401,7 @@ type wsResendResult struct {
 // 2. Sends HTTP Upgrade request and validates 101 response
 // 3. Sends the payload as a masked WebSocket frame
 // 4. Reads the first response frame from the server
-func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr string, useTLS bool, timeout time.Duration, upgradeMsg *flow.Message, sendBody []byte, opcode byte) (*wsResendResult, error) {
+func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr string, useTLS bool, timeout time.Duration, upgradeMsg *flow.Message, sendBody []byte, opcode byte, params resendParams) (*wsResendResult, error) {
 	dialer := s.rawDialerFunc()
 	start := time.Now()
 
@@ -368,7 +423,7 @@ func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr strin
 	}
 
 	// Step 1: Perform HTTP Upgrade handshake.
-	upgradeResp, bufReader, err := performUpgradeHandshake(conn, upgradeMsg, targetAddr)
+	upgradeResp, bufReader, handshakeHeaders, handshakeURL, err := performUpgradeHandshake(conn, upgradeMsg, targetAddr, params)
 	if err != nil {
 		return nil, err
 	}
@@ -394,17 +449,32 @@ func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr strin
 		responsePayload: respPayload,
 		responseOpcode:  respOpcode,
 		sendBody:        sendBody,
+		upgradeHeaders:  handshakeHeaders,
+		upgradeURL:      handshakeURL,
+		upgradeMethod:   upgradeMsg.Method,
 	}, nil
 }
 
 // performUpgradeHandshake sends an HTTP Upgrade request and reads the 101 response.
-// It returns the response and a buffered reader wrapping the connection for
-// subsequent WebSocket frame reads. When targetAddr differs from the original URL host,
-// the Host header and httpReq.Host are updated to match the target.
-func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr string) (*gohttp.Response, *bufio.Reader, error) {
+// It returns the response, a buffered reader wrapping the connection for
+// subsequent WebSocket frame reads, the actual headers used, and the actual URL used.
+// Header overrides (override_headers, add_headers, remove_headers) and URL overrides
+// (override_url) from params are applied to the handshake request.
+// When targetAddr differs from the original URL host, the Host header and httpReq.Host
+// are updated to match the target.
+func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr string, params resendParams) (*gohttp.Response, *bufio.Reader, map[string][]string, *url.URL, error) {
 	reqURL := upgradeMsg.URL
 	if reqURL == nil {
-		return nil, nil, fmt.Errorf("upgrade request message has no URL")
+		return nil, nil, nil, nil, fmt.Errorf("upgrade request message has no URL")
+	}
+
+	// Apply override_url if specified.
+	if params.OverrideURL != "" {
+		parsed, err := parseOverrideURL(params.OverrideURL)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		reqURL = parsed
 	}
 
 	// Build the HTTP Upgrade request.
@@ -418,20 +488,37 @@ func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr
 		Host:       reqURL.Host,
 	}
 
-	// Copy headers from the original Upgrade request.
-	if upgradeMsg.Headers != nil {
-		for k, vs := range upgradeMsg.Headers {
-			for _, v := range vs {
-				httpReq.Header.Add(k, v)
-			}
-		}
+	// Apply header overrides using buildResendHeaders (same as HTTP resend).
+	// This handles override_headers, add_headers, and remove_headers consistently.
+	headers := buildResendHeaders(upgradeMsg.Headers, params)
+	// Use direct map assignment instead of Header.Add so that empty-slice
+	// sentinels from buildResendHeaders (remove_headers) are preserved.
+	// This suppresses Go net/http auto-added headers like User-Agent,
+	// matching the behavior of applyHeaders in HTTP resend.
+	for k, vs := range headers {
+		httpReq.Header[k] = vs
 	}
 
-	// When target_addr differs from the original URL host, update
-	// Host header and httpReq.Host so virtual-hosting servers accept the request.
-	if targetAddr != "" && targetAddr != reqURL.Host {
-		httpReq.Host = targetAddr
-		httpReq.Header.Set("Host", targetAddr)
+	// Determine if the user explicitly overrode the Host header.
+	hostExplicitlyOverridden := hasHostOverride(params)
+
+	if !hostExplicitlyOverridden {
+		// When override_url changes the host, update Host header automatically.
+		if params.OverrideURL != "" && reqURL.Host != "" {
+			httpReq.Host = reqURL.Host
+			httpReq.Header.Set("Host", reqURL.Host)
+		} else if targetAddr != "" && targetAddr != reqURL.Host {
+			// When target_addr differs from the original URL host, update
+			// Host header and httpReq.Host so virtual-hosting servers accept the request.
+			httpReq.Host = targetAddr
+			httpReq.Header.Set("Host", targetAddr)
+		}
+	} else {
+		// User explicitly set Host via override_headers or add_headers.
+		// Sync httpReq.Host with the header value (Go's net/http uses req.Host).
+		if hostVal := httpReq.Header.Get("Host"); hostVal != "" {
+			httpReq.Host = hostVal
+		}
 	}
 
 	// Ensure required WebSocket headers are present.
@@ -442,24 +529,50 @@ func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr
 	// must use uncompressed frames to avoid double-compression or context mismatch.
 	httpReq.Header.Del("Sec-WebSocket-Extensions")
 
+	// Capture the actual headers and URL used for flow recording.
+	actualHeaders := copyHeadersMap(gohttp.Header(httpReq.Header))
+	actualURL := &url.URL{
+		Scheme:   reqURL.Scheme,
+		Host:     reqURL.Host,
+		Path:     reqURL.Path,
+		RawPath:  reqURL.RawPath,
+		RawQuery: reqURL.RawQuery,
+	}
+
 	// Write the request to the connection.
 	if err := httpReq.Write(conn); err != nil {
-		return nil, nil, fmt.Errorf("write upgrade request: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("write upgrade request: %w", err)
 	}
 
 	// Read the response.
 	bufReader := bufio.NewReader(conn)
 	resp, err := gohttp.ReadResponse(bufReader, httpReq)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read upgrade response: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("read upgrade response: %w", err)
 	}
 
 	if resp.StatusCode != gohttp.StatusSwitchingProtocols {
 		resp.Body.Close()
-		return nil, nil, fmt.Errorf("upgrade failed: server returned status %d, want 101", resp.StatusCode)
+		return nil, nil, nil, nil, fmt.Errorf("upgrade failed: server returned status %d, want 101", resp.StatusCode)
 	}
 
-	return resp, bufReader, nil
+	return resp, bufReader, actualHeaders, actualURL, nil
+}
+
+// hasHostOverride checks if the user explicitly set the Host header
+// via override_headers or add_headers.
+func hasHostOverride(params resendParams) bool {
+	for _, entry := range params.OverrideHeaders {
+		if gohttp.CanonicalHeaderKey(entry.Key) == "Host" {
+			return true
+		}
+	}
+	for _, entry := range params.AddHeaders {
+		if gohttp.CanonicalHeaderKey(entry.Key) == "Host" {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureWebSocketHeaders ensures the required WebSocket Upgrade headers are set.
@@ -638,7 +751,7 @@ func upgradeTLS(ctx context.Context, conn net.Conn, targetAddr string, transport
 // recordWebSocketResend saves the WebSocket resend flow and messages to the store.
 // The flow records: seq=0 Upgrade request, seq=1 Upgrade response, seq=2 sent frame,
 // seq=3 received frame (mirroring the structure of live WebSocket flows).
-func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams, targetMsg *flow.Message, upgradeMsg *flow.Message, wr *wsResendResult) (*resendWebSocketResult, error) {
+func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams, targetMsg *flow.Message, wr *wsResendResult) (*resendWebSocketResult, error) {
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
@@ -653,12 +766,11 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 	}
 
 	// seq=0: Upgrade request (send).
-	// Copy headers to avoid aliasing the original message's map.
-	upgradeHeaders := copyHeadersMap(upgradeMsg.Headers)
+	// Use the actual headers and URL from the handshake (after overrides).
 	if err := s.deps.store.AppendMessage(ctx, &flow.Message{
 		FlowID: newFl.ID, Sequence: 0, Direction: "send",
-		Timestamp: wr.start, Method: upgradeMsg.Method, URL: upgradeMsg.URL,
-		Headers: upgradeHeaders,
+		Timestamp: wr.start, Method: wr.upgradeMethod, URL: wr.upgradeURL,
+		Headers: wr.upgradeHeaders,
 	}); err != nil {
 		return nil, fmt.Errorf("save WebSocket resend upgrade request: %w", err)
 	}
