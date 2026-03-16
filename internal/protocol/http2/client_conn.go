@@ -554,11 +554,21 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 
 	rw := newFrameResponseWriter(cc, streamID)
 
+	// Extract raw frames before cleaning up pending state.
+	var rawFrames [][]byte
+	if sr := cc.pendingStreams[streamID]; sr != nil {
+		rawFrames = sr.rawFrames
+	}
+
 	// Clean up pending state before dispatching.
 	delete(cc.pendingStreams, streamID)
 	if cc.decodedHeaders != nil {
 		delete(cc.decodedHeaders, streamID)
 	}
+
+	// Store raw frames in the request context so that handleStream
+	// can record them as Message.RawBytes for L4 visibility.
+	streamCtx := contextWithRawFrames(cc.ctx, rawFrames)
 
 	cc.wg.Add(1)
 	go func() {
@@ -566,7 +576,7 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 			rw.finish()
 			cc.wg.Done()
 		}()
-		cc.streamHandler(cc.ctx, rw, req)
+		cc.streamHandler(streamCtx, rw, req)
 	}()
 
 	return nil

@@ -257,6 +257,10 @@ type streamContext struct {
 	connInfo     *flow.ConnectionInfo
 	srp          sendRecordParams
 
+	// reqRawFrames holds the raw HTTP/2 frame bytes received from the client
+	// for this stream. Extracted from the context set by clientConn.dispatchStream.
+	reqRawFrames [][]byte
+
 	// Plugin state shared across hooks for this stream.
 	pluginConnInfo *plugin.ConnInfo
 	txCtx          map[string]any
@@ -282,6 +286,7 @@ func (h *Handler) handleStream(
 		tlsMeta:          tlsMeta,
 		logger:           logger,
 		start:            time.Now(),
+		reqRawFrames:     rawFramesFromContext(ctx),
 	}
 
 	if h.tryHandleGRPCStream(sc) {
@@ -371,7 +376,7 @@ func (h *Handler) handleStream(
 	duration := time.Since(sc.start)
 	tlsCertSubject := extractTLSCertSubject(resp)
 
-	h.recordStreamResponse(sc, isGRPC, sendResult, resp, rawRespBody, rawTrailers, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs)
+	h.recordStreamResponse(sc, isGRPC, sendResult, resp, rawRespBody, rawTrailers, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs, fwd.respRawFrames)
 
 	logProtocol := "http/2"
 	if isGRPC {
@@ -440,6 +445,7 @@ func (h *Handler) buildStreamRecordParams(sc *streamContext) {
 		reqURL:       sc.reqURL,
 		reqBody:      recordBody,
 		reqTruncated: sc.reqTruncated,
+		rawFrames:    sc.reqRawFrames,
 	}
 }
 
@@ -648,6 +654,10 @@ type forwardUpstreamResult struct {
 	sendMs     *int64
 	waitMs     *int64
 	receiveMs  *int64
+	// respRawFrames holds the raw HTTP/2 frame bytes from the upstream response.
+	// Populated when the custom frame-engine Transport is used. Nil when the
+	// standard net/http Transport is used.
+	respRawFrames [][]byte
 }
 
 func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
@@ -763,7 +773,7 @@ func extractTLSCertSubject(resp *gohttp.Response) string {
 }
 
 // recordStreamResponse records the receive phase for HTTP/2 or gRPC flows.
-func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, rawTrailers gohttp.Header, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64) {
+func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, rawTrailers gohttp.Header, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64, respRawFrames [][]byte) {
 	if isGRPC {
 		h.recordGRPCFlow(sc, resp, fullRespBody, rawTrailers, serverAddr, duration, tlsCertSubject)
 	} else {
@@ -777,6 +787,7 @@ func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResul
 			sendMs:               sendMs,
 			waitMs:               waitMs,
 			receiveMs:            receiveMs,
+			rawFrames:            respRawFrames,
 		}, respSnap, sc.logger)
 	}
 }
