@@ -25,6 +25,7 @@ import {
   filterRegularHeaders,
 } from "./Http2Info.js";
 import { MessageList } from "./MessageList.js";
+import { RawBytesViewer } from "./RawBytesViewer.js";
 import { WebSocketMessageList } from "./WebSocketMessageList.js";
 
 // ---------------------------------------------------------------------------
@@ -36,10 +37,23 @@ const REQUEST_TABS = [
   { id: "body", label: "Body" },
 ];
 
+const REQUEST_TABS_RAW = [
+  { id: "headers", label: "Headers" },
+  { id: "body", label: "Body" },
+  { id: "raw", label: "Raw" },
+];
+
 const REQUEST_TABS_H2 = [
   { id: "pseudo", label: "Pseudo-Headers" },
   { id: "headers", label: "Headers" },
   { id: "body", label: "Body" },
+];
+
+const REQUEST_TABS_H2_RAW = [
+  { id: "pseudo", label: "Pseudo-Headers" },
+  { id: "headers", label: "Headers" },
+  { id: "body", label: "Body" },
+  { id: "raw", label: "Raw" },
 ];
 
 const RESPONSE_TABS = [
@@ -47,10 +61,23 @@ const RESPONSE_TABS = [
   { id: "body", label: "Body" },
 ];
 
+const RESPONSE_TABS_RAW = [
+  { id: "headers", label: "Headers" },
+  { id: "body", label: "Body" },
+  { id: "raw", label: "Raw" },
+];
+
 const RESPONSE_TABS_H2 = [
   { id: "pseudo", label: "Pseudo-Headers" },
   { id: "headers", label: "Headers" },
   { id: "body", label: "Body" },
+];
+
+const RESPONSE_TABS_H2_RAW = [
+  { id: "pseudo", label: "Pseudo-Headers" },
+  { id: "headers", label: "Headers" },
+  { id: "body", label: "Body" },
+  { id: "raw", label: "Raw" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -321,8 +348,14 @@ export function FlowDetailPage() {
   const totalMessages = messagesData?.total ?? flowData.message_count;
 
   const isH2 = flowData.protocol === "HTTP/2";
-  const reqTabs = isH2 ? REQUEST_TABS_H2 : REQUEST_TABS;
-  const resTabs = isH2 ? RESPONSE_TABS_H2 : RESPONSE_TABS;
+  const hasRawReq = !!flowData.raw_request;
+  const hasRawResp = !!flowData.raw_response;
+  const reqTabs = isH2
+    ? (hasRawReq ? REQUEST_TABS_H2_RAW : REQUEST_TABS_H2)
+    : (hasRawReq ? REQUEST_TABS_RAW : REQUEST_TABS);
+  const resTabs = isH2
+    ? (hasRawResp ? RESPONSE_TABS_H2_RAW : RESPONSE_TABS_H2)
+    : (hasRawResp ? RESPONSE_TABS_RAW : RESPONSE_TABS);
 
   // For HTTP/2, separate pseudo-headers from regular headers.
   const displayReqHeaders = isH2
@@ -579,6 +612,9 @@ export function FlowDetailPage() {
                     headers={flowData.original_request.headers}
                   />
                 )}
+                {requestTab === "raw" && flowData.raw_request && (
+                  <RawBytesViewer rawBytes={flowData.raw_request} label="Raw Request" />
+                )}
               </Tabs>
             </div>
 
@@ -609,6 +645,9 @@ export function FlowDetailPage() {
                     truncated={flowData.request_body_truncated}
                     headers={flowData.request_headers}
                   />
+                )}
+                {requestTab === "raw" && flowData.raw_request && (
+                  <RawBytesViewer rawBytes={flowData.raw_request} label="Raw Request" />
                 )}
               </Tabs>
             </div>
@@ -670,6 +709,9 @@ export function FlowDetailPage() {
                     headers={flowData.original_response.headers}
                   />
                 )}
+                {responseTab === "raw" && flowData.raw_response && (
+                  <RawBytesViewer rawBytes={flowData.raw_response} label="Raw Response" />
+                )}
               </Tabs>
             </div>
 
@@ -716,6 +758,9 @@ export function FlowDetailPage() {
                     headers={flowData.response_headers}
                   />
                 )}
+                {responseTab === "raw" && flowData.raw_response && (
+                  <RawBytesViewer rawBytes={flowData.raw_response} label="Raw Response" />
+                )}
               </Tabs>
             </div>
           </div>
@@ -751,6 +796,9 @@ export function FlowDetailPage() {
                   truncated={flowData.request_body_truncated}
                   headers={flowData.request_headers}
                 />
+              )}
+              {requestTab === "raw" && flowData.raw_request && (
+                <RawBytesViewer rawBytes={flowData.raw_request} label="Raw Request" />
               )}
             </Tabs>
           </div>
@@ -808,6 +856,9 @@ export function FlowDetailPage() {
                     headers={flowData.response_headers}
                   />
                 )
+              )}
+              {responseTab === "raw" && flowData.raw_response && (
+                <RawBytesViewer rawBytes={flowData.raw_response} label="Raw Response" />
               )}
             </Tabs>
           ) : (
