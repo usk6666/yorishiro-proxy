@@ -681,6 +681,55 @@ func TestWriter_WritePing_NoAck(t *testing.T) {
 	}
 }
 
+func TestWriter_WriteRawBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		wantLen int
+	}{
+		{
+			name:    "nil data is no-op",
+			data:    nil,
+			wantLen: 0,
+		},
+		{
+			name:    "empty data is no-op",
+			data:    []byte{},
+			wantLen: 0,
+		},
+		{
+			name:    "writes raw bytes verbatim",
+			data:    []byte{0x00, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 'h', 'e', 'l', 'l', 'o'},
+			wantLen: 14,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewWriter(&buf)
+
+			err := w.WriteRawBytes(tt.data)
+			if err != nil {
+				t.Fatalf("WriteRawBytes() error: %v", err)
+			}
+			if buf.Len() != tt.wantLen {
+				t.Errorf("written bytes = %d, want %d", buf.Len(), tt.wantLen)
+			}
+			if tt.wantLen > 0 && !bytes.Equal(buf.Bytes(), tt.data) {
+				t.Errorf("written data mismatch")
+			}
+		})
+	}
+}
+
+func TestWriter_WriteRawBytes_Error(t *testing.T) {
+	w := NewWriter(errWriter{})
+	err := w.WriteRawBytes([]byte("hello"))
+	if err == nil {
+		t.Error("WriteRawBytes() should return error on write failure")
+	}
+}
+
 func TestWriter_WritePushPromise_NoEndHeaders(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)

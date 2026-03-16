@@ -546,7 +546,7 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 	// Body-level intercept is not supported since the body is streamed.
 	// interceptRequest internally calls MatchRequestRules, so we call it directly.
 	if h.InterceptEngine != nil && h.InterceptQueue != nil {
-		action, intercepted := h.interceptRequest(sc.ctx, sc.req, nil, sc.logger)
+		action, intercepted := h.interceptRequest(sc.ctx, sc.req, nil, sc.reqRawFrames, sc.logger)
 		if intercepted {
 			switch action.Type {
 			case intercept.ActionDrop:
