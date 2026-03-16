@@ -241,9 +241,10 @@ type hookPair struct {
 
 // fragmentState tracks the state of fragmented message assembly.
 type fragmentState struct {
-	buf    []byte
-	opcode byte
-	active bool
+	buf      []byte
+	opcode   byte
+	active   bool
+	dropping bool // true when the initial text frame was blocked by safety filter
 }
 
 // relayDirection reads frames from src, records them, and writes them to dst.
@@ -284,10 +285,20 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			}
 		}
 
+		// Drop continuation frames belonging to a blocked fragmented message.
+		if h.handleBlockedFragment(ctx, frame, &frag, flowID, direction, seq, start) {
+			continue
+		}
+
 		// Safety filter: apply to text frames only (opcode 0x1).
 		// Binary frames are skipped because safety rules target human-readable text.
 		safetyMeta, rawPayload, blocked := h.applySafetyToFrame(frame, direction, upgradeReq, flowID)
 		if blocked {
+			// If the blocked frame is non-FIN (start of a fragmented message),
+			// mark state to drop subsequent continuation frames.
+			if !frame.Fin {
+				frag.dropping = true
+			}
 			h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta)
 			continue
 		}
@@ -340,6 +351,24 @@ func (h *Handler) dispatchDataFrameHooks(ctx context.Context, hooks hookPair, fr
 		return true
 	}
 	return h.dispatchFrameHook(ctx, hooks.sendHook, frame, hooks.direction, upgradeReq, connInfo, flowID, frameTxCtx)
+}
+
+// handleBlockedFragment checks if a continuation frame belongs to a blocked
+// fragmented message. When a non-FIN text frame is blocked by the safety filter,
+// subsequent continuation frames must also be dropped to avoid protocol violation
+// (upstream would receive continuations without the initial text frame).
+// Returns true if the frame was dropped and should be skipped.
+func (h *Handler) handleBlockedFragment(ctx context.Context, frame *Frame, frag *fragmentState, flowID, direction string, seq *atomic.Int64, start time.Time) bool {
+	if !frag.dropping || frame.Opcode != OpcodeContinuation {
+		return false
+	}
+	h.logger.Debug("websocket continuation frame dropped (initial fragment was blocked)",
+		"flow_id", flowID, "direction", direction, "fin", frame.Fin)
+	h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, nil)
+	if frame.Fin {
+		frag.dropping = false
+	}
+	return true
 }
 
 // forwardFrame writes the frame to the destination connection, preserving
@@ -620,14 +649,21 @@ func (h *Handler) applySafetyInputFilter(frame *Frame, upgradeReq *gohttp.Reques
 // The caller is responsible for preserving the raw (unmasked) data for recording.
 func (h *Handler) applySafetyOutputFilter(frame *Frame, flowID string) {
 	result := h.safetyEngine.FilterOutput(frame.Payload)
+
+	// Log all matches for observability, consistent with HTTP handler's
+	// ApplyOutputFilter which logs matches regardless of masking.
+	for _, m := range result.Matches {
+		h.logger.Info("websocket output filter matched",
+			"flow_id", flowID,
+			"rule_id", m.RuleID,
+			"count", m.Count,
+			"action", m.Action.String(),
+		)
+	}
+
 	if !result.Masked {
 		return
 	}
-
-	h.logger.Debug("websocket frame masked by output filter",
-		"flow_id", flowID,
-		"match_count", len(result.Matches),
-	)
 
 	// Replace the frame payload with the masked version.
 	// The caller must capture raw payload before calling this if it needs to record raw data.

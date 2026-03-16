@@ -613,3 +613,105 @@ func TestSafetyFilter_InputAndOutputCombined(t *testing.T) {
 		t.Errorf("safety_rule_id = %q, want %q", blocked.Metadata["safety_rule_id"], "block-sql")
 	}
 }
+
+func TestSafetyFilter_BlockedFragmentedTextFrame_DropsContinuation(t *testing.T) {
+	// When a non-FIN text frame is blocked by the safety filter, subsequent
+	// continuation frames must also be dropped to prevent protocol violation
+	// (upstream would receive continuations without the initial text frame).
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	handler.SetSafetyEngine(newBlockEngine(t, `DROP\s+TABLE`))
+
+	clientConn, clientEnd := net.Pipe()
+	upstreamConn, upstreamEnd := net.Pipe()
+	defer clientConn.Close()
+	defer clientEnd.Close()
+	defer upstreamConn.Close()
+	defer upstreamEnd.Close()
+
+	errCh := runWSRelay(t, handler, clientConn, upstreamConn)
+
+	// Send non-FIN text frame with blocked content (start of fragmented message).
+	frag1 := &Frame{
+		Fin:     false,
+		Opcode:  OpcodeText,
+		Masked:  true,
+		MaskKey: [4]byte{0x12, 0x34, 0x56, 0x78},
+		Payload: []byte("DROP TABLE users"),
+	}
+	if err := WriteFrame(clientEnd, frag1); err != nil {
+		t.Fatalf("failed to write frag1: %v", err)
+	}
+
+	// Send continuation frame (should also be dropped).
+	contFrame := &Frame{
+		Fin:     false,
+		Opcode:  OpcodeContinuation,
+		Masked:  true,
+		MaskKey: [4]byte{0x12, 0x34, 0x56, 0x78},
+		Payload: []byte(" more data"),
+	}
+	if err := WriteFrame(clientEnd, contFrame); err != nil {
+		t.Fatalf("failed to write continuation: %v", err)
+	}
+
+	// Send final continuation frame with FIN (should also be dropped, resetting state).
+	finalContFrame := &Frame{
+		Fin:     true,
+		Opcode:  OpcodeContinuation,
+		Masked:  true,
+		MaskKey: [4]byte{0x12, 0x34, 0x56, 0x78},
+		Payload: []byte(" end"),
+	}
+	if err := WriteFrame(clientEnd, finalContFrame); err != nil {
+		t.Fatalf("failed to write final continuation: %v", err)
+	}
+
+	// Send a benign non-fragmented frame to verify connection is alive and
+	// the dropping state was properly reset.
+	go func() {
+		WriteFrame(clientEnd, &Frame{
+			Fin:     true,
+			Opcode:  OpcodeText,
+			Masked:  true,
+			MaskKey: [4]byte{0x12, 0x34, 0x56, 0x78},
+			Payload: []byte("SELECT 1"),
+		})
+	}()
+
+	// Upstream should only receive the benign frame, nothing else.
+	received, err := ReadFrame(upstreamEnd)
+	if err != nil {
+		t.Fatalf("upstream read: %v", err)
+	}
+	if string(received.Payload) != "SELECT 1" {
+		t.Errorf("upstream received = %q, want %q", received.Payload, "SELECT 1")
+	}
+
+	// Close the relay.
+	go writeCloseFrame(clientEnd)
+	_, _ = ReadFrame(upstreamEnd)
+	upstreamEnd.Close()
+
+	select {
+	case <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not finish within timeout")
+	}
+
+	// Verify the blocked initial frame was recorded with safety metadata.
+	messages := store.Messages()
+	var blockedMsg *flow.Message
+	for _, msg := range messages {
+		if msg.Direction == "send" && msg.Metadata["safety_blocked"] == "true" {
+			blockedMsg = msg
+			break
+		}
+	}
+	if blockedMsg == nil {
+		t.Fatal("expected a blocked message with safety_blocked metadata")
+	}
+	if string(blockedMsg.Body) != "DROP TABLE users" {
+		t.Errorf("blocked msg body = %q, want %q", blockedMsg.Body, "DROP TABLE users")
+	}
+}
