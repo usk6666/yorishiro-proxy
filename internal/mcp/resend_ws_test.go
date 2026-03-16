@@ -709,6 +709,387 @@ func TestFindUpgradeRequestMessage_NotFound(t *testing.T) {
 	}
 }
 
+// newWebSocketHeaderCaptureServer creates a WebSocket echo server that captures
+// the received HTTP Upgrade request for header verification.
+func newWebSocketHeaderCaptureServer(t *testing.T) (addr string, receivedReq func() *http.Request, cleanup func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	reqCh := make(chan *http.Request, 1)
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		reqCh <- req
+
+		// Send 101 response.
+		resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: dummy-accept-key\r\n" +
+			"\r\n"
+		conn.Write([]byte(resp))
+
+		// Echo one frame.
+		frame, err := ws.ReadFrame(reader)
+		if err != nil {
+			return
+		}
+		ws.WriteFrame(conn, &ws.Frame{Fin: true, Opcode: frame.Opcode, Payload: frame.Payload})
+	}()
+
+	return ln.Addr().String(), func() *http.Request {
+		select {
+		case r := <-reqCh:
+			return r
+		case <-time.After(3 * time.Second):
+			t.Fatal("timeout waiting for request")
+			return nil
+		}
+	}, func() { ln.Close() }
+}
+
+func TestWebSocketResend_OverrideHeaders(t *testing.T) {
+	store := newTestStore(t)
+	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
+	defer cleanup()
+
+	seedWebSocketFlow(t, store, "ws-oh-1", addr)
+
+	cs := setupWSResendSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-oh-1",
+			"message_sequence": 2,
+			"override_headers": []map[string]string{
+				{"key": "Host", "value": "custom-host:8080"},
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	req := getReq()
+	if got := req.Header.Get("Host"); got != "custom-host:8080" {
+		// Go's net/http puts Host in req.Host, not req.Header.
+		if req.Host != "custom-host:8080" {
+			t.Errorf("Host = %q (header: %q), want custom-host:8080", req.Host, got)
+		}
+	}
+}
+
+func TestWebSocketResend_AddHeaders(t *testing.T) {
+	store := newTestStore(t)
+	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
+	defer cleanup()
+
+	seedWebSocketFlow(t, store, "ws-ah-1", addr)
+
+	cs := setupWSResendSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-ah-1",
+			"message_sequence": 2,
+			"add_headers": []map[string]string{
+				{"key": "X-Custom-Header", "value": "custom-value"},
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	req := getReq()
+	if got := req.Header.Get("X-Custom-Header"); got != "custom-value" {
+		t.Errorf("X-Custom-Header = %q, want custom-value", got)
+	}
+}
+
+func TestWebSocketResend_RemoveHeaders(t *testing.T) {
+	store := newTestStore(t)
+	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
+	defer cleanup()
+
+	// Seed flow with a custom header that we will remove.
+	ctx := context.Background()
+	host, port, _ := net.SplitHostPort(addr)
+	wsURL, _ := url.Parse(fmt.Sprintf("ws://%s:%s/echo", host, port))
+
+	fl := &flow.Flow{
+		ID:        "ws-rh-1",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: addr},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rh-1", Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
+		Headers: map[string][]string{
+			"Upgrade":               {"websocket"},
+			"Connection":            {"Upgrade"},
+			"Sec-Websocket-Version": {"13"},
+			"Sec-Websocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
+			"Host":                  {fmt.Sprintf("%s:%s", host, port)},
+			"X-Remove-Me":           {"should-be-removed"},
+		},
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rh-1", Sequence: 1, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 101,
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade resp): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rh-1", Sequence: 2, Direction: "send",
+		Timestamp: time.Now().UTC(), Body: []byte("test remove"),
+		Metadata: map[string]string{"opcode": "1"},
+	}); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
+
+	cs := setupWSResendSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-rh-1",
+			"message_sequence": 2,
+			"remove_headers":   []string{"X-Remove-Me"},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	req := getReq()
+	if got := req.Header.Get("X-Remove-Me"); got != "" {
+		t.Errorf("X-Remove-Me should be removed, got %q", got)
+	}
+}
+
+func TestWebSocketResend_RemoveHeaders_AutoAdded(t *testing.T) {
+	store := newTestStore(t)
+	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
+	defer cleanup()
+
+	// Seed flow — do NOT include User-Agent in the original headers.
+	// Go net/http auto-adds User-Agent if not explicitly set; remove_headers
+	// must suppress it via the empty-slice sentinel.
+	ctx := context.Background()
+	host, port, _ := net.SplitHostPort(addr)
+	wsURL, _ := url.Parse(fmt.Sprintf("ws://%s:%s/echo", host, port))
+
+	fl := &flow.Flow{
+		ID:        "ws-rha-1",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: addr},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rha-1", Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
+		Headers: map[string][]string{
+			"Upgrade":               {"websocket"},
+			"Connection":            {"Upgrade"},
+			"Sec-Websocket-Version": {"13"},
+			"Sec-Websocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
+			"Host":                  {fmt.Sprintf("%s:%s", host, port)},
+		},
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rha-1", Sequence: 1, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 101,
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade resp): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-rha-1", Sequence: 2, Direction: "send",
+		Timestamp: time.Now().UTC(), Body: []byte("test remove ua"),
+		Metadata: map[string]string{"opcode": "1"},
+	}); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
+
+	cs := setupWSResendSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-rha-1",
+			"message_sequence": 2,
+			"remove_headers":   []string{"User-Agent"},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	req := getReq()
+	if got := req.Header.Get("User-Agent"); got != "" {
+		t.Errorf("User-Agent should be removed (auto-added suppressed), got %q", got)
+	}
+}
+
+func TestWebSocketResend_OverrideURL(t *testing.T) {
+	store := newTestStore(t)
+	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	// Create flow pointing to a non-existent host.
+	wsURL, _ := url.Parse("ws://original-host:9999/original-path")
+
+	fl := &flow.Flow{
+		ID:        "ws-ou-1",
+		Protocol:  "WebSocket",
+		FlowType:  "bidirectional",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "original-host:9999"},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-ou-1", Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: wsURL,
+		Headers: map[string][]string{
+			"Upgrade":               {"websocket"},
+			"Connection":            {"Upgrade"},
+			"Sec-Websocket-Version": {"13"},
+			"Sec-Websocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
+			"Host":                  {"original-host:9999"},
+		},
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-ou-1", Sequence: 1, Direction: "receive",
+		Timestamp: time.Now().UTC(), StatusCode: 101,
+	}); err != nil {
+		t.Fatalf("AppendMessage(upgrade resp): %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: "ws-ou-1", Sequence: 2, Direction: "send",
+		Timestamp: time.Now().UTC(), Body: []byte("url override test"),
+		Metadata: map[string]string{"opcode": "1"},
+	}); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
+
+	cs := setupWSResendSession(t, store)
+
+	// Override URL to point to the actual echo server.
+	overrideURL := fmt.Sprintf("ws://%s/new-path?q=1", addr)
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-ou-1",
+			"message_sequence": 2,
+			"override_url":     overrideURL,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	req := getReq()
+	// Verify the request URI was updated.
+	if req.RequestURI != "/new-path?q=1" {
+		t.Errorf("RequestURI = %q, want /new-path?q=1", req.RequestURI)
+	}
+	// Verify Host was updated to the override URL's host.
+	if req.Host != addr {
+		t.Errorf("Host = %q, want %q", req.Host, addr)
+	}
+
+	// Verify the recorded flow has the override URL.
+	var out resendWebSocketResult
+	unmarshalExecMultiProtoResult(t, result, &out)
+
+	msgs, err := store.GetMessages(ctx, out.NewFlowID, flow.MessageListOptions{})
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if msgs[0].URL == nil {
+		t.Fatal("recorded upgrade message should have URL")
+	}
+	if msgs[0].URL.Path != "/new-path" {
+		t.Errorf("recorded URL path = %q, want /new-path", msgs[0].URL.Path)
+	}
+	if msgs[0].URL.RawQuery != "q=1" {
+		t.Errorf("recorded URL query = %q, want q=1", msgs[0].URL.RawQuery)
+	}
+}
+
+func TestWebSocketResend_NoOverrides_PreservesOriginalHeaders(t *testing.T) {
+	store := newTestStore(t)
+	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
+	defer cleanup()
+
+	seedWebSocketFlow(t, store, "ws-no-override-1", addr)
+
+	cs := setupWSResendSession(t, store)
+
+	result := callExecMultiProto(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id":          "ws-no-override-1",
+			"message_sequence": 2,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	req := getReq()
+	// Original headers should be preserved.
+	if got := req.Header.Get("Upgrade"); got != "websocket" {
+		t.Errorf("Upgrade = %q, want websocket", got)
+	}
+	if got := req.Header.Get("Connection"); got != "Upgrade" {
+		t.Errorf("Connection = %q, want Upgrade", got)
+	}
+	if got := req.Header.Get("Sec-Websocket-Version"); got != "13" {
+		t.Errorf("Sec-Websocket-Version = %q, want 13", got)
+	}
+}
+
 func TestWebSocketResend_DeflateExtensionStripped(t *testing.T) {
 	// Verify that when the original Upgrade request has Sec-WebSocket-Extensions,
 	// the resend strips it to avoid permessage-deflate negotiation (since stored
