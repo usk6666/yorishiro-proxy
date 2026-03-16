@@ -144,6 +144,9 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	// Delegate to the WebSocket handler for frame relay.
 	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
 	wsHandler := ws.NewHandler(h.Store, logger)
+	if h.SafetyEngine != nil {
+		wsHandler.SetSafetyEngine(h.SafetyEngine)
+	}
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
@@ -271,6 +274,9 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	// Delegate to the WebSocket handler for frame relay.
 	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
 	wsHandler := ws.NewHandler(h.Store, logger)
+	if h.SafetyEngine != nil {
+		wsHandler.SetSafetyEngine(h.SafetyEngine)
+	}
 	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
