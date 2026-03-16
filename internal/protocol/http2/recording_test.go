@@ -732,3 +732,245 @@ func TestRecordSend_HostHeader(t *testing.T) {
 		t.Errorf("Host header = %v, want [example.com]", hostVals)
 	}
 }
+
+// --- Raw bytes recording tests ---
+
+func TestRecordSend_WithRawFrames(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	frame1 := []byte{0x00, 0x00, 0x05, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01}
+	frame2 := []byte{0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01}
+
+	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}
+	p := sendRecordParams{
+		connID:     "conn-raw",
+		clientAddr: "127.0.0.1:1234",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:        &gohttp.Request{Method: "POST", Header: gohttp.Header{}},
+		reqURL:     reqURL,
+		reqBody:    []byte("body"),
+		rawFrames:  [][]byte{frame1, frame2},
+	}
+
+	result := handler.recordSend(context.Background(), p, testutil.DiscardLogger())
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	send := entries[0].Send
+	if send == nil {
+		t.Fatal("send message is nil")
+	}
+
+	// RawBytes should be the concatenation of frame1 + frame2.
+	expectedRaw := append([]byte{}, frame1...)
+	expectedRaw = append(expectedRaw, frame2...)
+	if !bytes.Equal(send.RawBytes, expectedRaw) {
+		t.Errorf("RawBytes = %v, want %v", send.RawBytes, expectedRaw)
+	}
+
+	// Metadata should contain frame info.
+	if send.Metadata == nil {
+		t.Fatal("Metadata is nil")
+	}
+	if send.Metadata["h2_frame_count"] != "2" {
+		t.Errorf("h2_frame_count = %q, want %q", send.Metadata["h2_frame_count"], "2")
+	}
+	if send.Metadata["h2_total_wire_bytes"] != "18" {
+		t.Errorf("h2_total_wire_bytes = %q, want %q", send.Metadata["h2_total_wire_bytes"], "18")
+	}
+}
+
+func TestRecordSend_NoRawFrames(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}
+	p := sendRecordParams{
+		connID:     "conn-no-raw",
+		clientAddr: "127.0.0.1:1234",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
+		reqURL:     reqURL,
+	}
+
+	result := handler.recordSend(context.Background(), p, testutil.DiscardLogger())
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	entries := store.Entries()
+	send := entries[0].Send
+	if send.RawBytes != nil {
+		t.Errorf("RawBytes should be nil without raw frames, got %v", send.RawBytes)
+	}
+	if send.Metadata != nil {
+		t.Errorf("Metadata should be nil without raw frames, got %v", send.Metadata)
+	}
+}
+
+func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	frame1 := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09}
+
+	req := &gohttp.Request{
+		Method: "POST",
+		Header: gohttp.Header{"Content-Type": {"application/json"}},
+	}
+	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/api"}
+
+	originalBody := []byte(`{"key":"original"}`)
+	modifiedBody := []byte(`{"key":"modified"}`)
+
+	snap := snapshotRequest(req.Header, originalBody)
+
+	result := handler.recordSendWithVariant(ctx, sendRecordParams{
+		connID:    "conn-variant-raw",
+		start:     time.Now(),
+		connInfo:  &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:       req,
+		reqURL:    reqURL,
+		reqBody:   modifiedBody,
+		rawFrames: [][]byte{frame1},
+	}, &snap, logger)
+
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+
+	// Original message (sequence 0) should have RawBytes.
+	original := msgs[0]
+	if original.RawBytes == nil {
+		t.Error("original RawBytes should not be nil")
+	}
+	if !bytes.Equal(original.RawBytes, frame1) {
+		t.Errorf("original RawBytes = %v, want %v", original.RawBytes, frame1)
+	}
+	if original.Metadata == nil || original.Metadata["variant"] != "original" {
+		t.Error("original should have variant=original metadata")
+	}
+	if original.Metadata["h2_frame_count"] != "1" {
+		t.Errorf("original h2_frame_count = %q, want %q", original.Metadata["h2_frame_count"], "1")
+	}
+
+	// Modified message (sequence 1) should NOT have RawBytes.
+	modified := msgs[1]
+	if modified.RawBytes != nil {
+		t.Error("modified RawBytes should be nil (not wire-observed)")
+	}
+	if modified.Metadata == nil || modified.Metadata["variant"] != "modified" {
+		t.Error("modified should have variant=modified metadata")
+	}
+	// Modified should not have frame metadata.
+	if _, ok := modified.Metadata["h2_frame_count"]; ok {
+		t.Error("modified should not have h2_frame_count")
+	}
+}
+
+func TestRecordInterceptDrop_WithRawFrames(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	frame1 := []byte{0xAA, 0xBB, 0xCC}
+
+	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/dropped"}
+	p := sendRecordParams{
+		connID:     "conn-drop-raw",
+		clientAddr: "127.0.0.1:1234",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:        &gohttp.Request{Method: "POST", Header: gohttp.Header{}},
+		reqURL:     reqURL,
+		reqBody:    []byte("drop-body"),
+		rawFrames:  [][]byte{frame1},
+	}
+
+	handler.recordInterceptDrop(context.Background(), p, testutil.DiscardLogger())
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	send := entries[0].Send
+	if !bytes.Equal(send.RawBytes, frame1) {
+		t.Errorf("RawBytes = %v, want %v", send.RawBytes, frame1)
+	}
+	if send.Metadata == nil || send.Metadata["h2_frame_count"] != "1" {
+		t.Errorf("expected h2_frame_count=1, got %v", send.Metadata)
+	}
+}
+
+func TestRecordReceive_WithRawFrames(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	// Create a send record first.
+	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}
+	sendResult := handler.recordSend(context.Background(), sendRecordParams{
+		connID:     "conn-recv-raw",
+		clientAddr: "127.0.0.1:1234",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
+		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
+		reqURL:     reqURL,
+	}, testutil.DiscardLogger())
+
+	respFrame1 := []byte{0x00, 0x00, 0x05, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01}
+	respFrame2 := []byte{0x00, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01}
+
+	handler.recordReceive(context.Background(), sendResult, receiveRecordParams{
+		start:      time.Now(),
+		duration:   50 * time.Millisecond,
+		serverAddr: "93.184.216.34:80",
+		resp: &gohttp.Response{
+			StatusCode: 200,
+			Header:     gohttp.Header{"Content-Type": {"text/plain"}},
+		},
+		respBody:  []byte("response"),
+		rawFrames: [][]byte{respFrame1, respFrame2},
+	}, testutil.DiscardLogger())
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	recv := entries[0].Receive
+	if recv == nil {
+		t.Fatal("receive message is nil")
+	}
+
+	// RawBytes should be the concatenation of response frames.
+	expectedRaw := append([]byte{}, respFrame1...)
+	expectedRaw = append(expectedRaw, respFrame2...)
+	if !bytes.Equal(recv.RawBytes, expectedRaw) {
+		t.Errorf("RawBytes = %v, want %v", recv.RawBytes, expectedRaw)
+	}
+
+	// Metadata should contain frame info.
+	if recv.Metadata == nil {
+		t.Fatal("Metadata is nil")
+	}
+	if recv.Metadata["h2_frame_count"] != "2" {
+		t.Errorf("h2_frame_count = %q, want %q", recv.Metadata["h2_frame_count"], "2")
+	}
+}

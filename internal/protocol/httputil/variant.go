@@ -49,8 +49,13 @@ type ReceiveVariantParams struct {
 	// RespBody is the (possibly modified) response body bytes.
 	RespBody []byte
 	// RawResponse holds the raw wire bytes of the response. May be nil for
-	// protocols that do not capture raw bytes (e.g., HTTP/2).
+	// protocols that do not capture raw bytes.
 	RawResponse []byte
+	// RawResponseMetadata holds protocol-specific metadata about the raw
+	// response bytes (e.g., HTTP/2 frame count and total wire bytes).
+	// These entries are merged into the receive Message.Metadata.
+	// May be nil if no raw response metadata is available.
+	RawResponseMetadata map[string]string
 	// Tags holds additional key-value metadata to merge into the flow on
 	// completion (e.g., technology fingerprint results). May be nil.
 	Tags map[string]string
@@ -118,6 +123,7 @@ func recordSingleReceive(
 		Body:          body,
 		RawBytes:      p.RawResponse,
 		BodyTruncated: truncated,
+		Metadata:      cloneMetadata(p.RawResponseMetadata),
 	}
 	if err := store.AppendMessage(ctx, msg); err != nil {
 		logger.Error("receive message save failed", "error", err)
@@ -139,6 +145,7 @@ func recordOriginalReceive(
 		snap.Body, snap.Headers.Get("Content-Encoding"), logger,
 	)
 
+	origMeta := mergeMetadata(p.RawResponseMetadata, map[string]string{"variant": "original"})
 	msg := &flow.Message{
 		FlowID:        p.FlowID,
 		Sequence:      p.RecvSequence,
@@ -149,7 +156,7 @@ func recordOriginalReceive(
 		Body:          body,
 		RawBytes:      p.RawResponse,
 		BodyTruncated: truncated,
-		Metadata:      map[string]string{"variant": "original"},
+		Metadata:      origMeta,
 	}
 	if err := store.AppendMessage(ctx, msg); err != nil {
 		logger.Error("original receive message save failed", "error", err)
@@ -270,6 +277,37 @@ func HeadersModified(a, b gohttp.Header) bool {
 		}
 	}
 	return false
+}
+
+// cloneMetadata creates a shallow copy of a metadata map. Returns nil if the
+// input is nil or empty.
+func cloneMetadata(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(m))
+	for k, v := range m {
+		clone[k] = v
+	}
+	return clone
+}
+
+// mergeMetadata creates a new map containing entries from both base and
+// override. Keys in override take precedence over keys in base. Returns nil
+// if both maps are empty.
+func mergeMetadata(base, override map[string]string) map[string]string {
+	total := len(base) + len(override)
+	if total == 0 {
+		return nil
+	}
+	result := make(map[string]string, total)
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range override {
+		result[k] = v
+	}
+	return result
 }
 
 // SnapshotResponse creates a deep copy of the response status code, headers,
