@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	gohttp "net/http"
 	"testing"
@@ -83,7 +84,10 @@ func TestHandleUpgrade_DeflateCompressedTextFrame(t *testing.T) {
 	upstreamEnd.Close()
 
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("HandleUpgrade returned unexpected error: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler timeout")
 	}
@@ -166,7 +170,10 @@ func TestHandleUpgrade_DeflateCompressedServerFrame(t *testing.T) {
 	clientEnd.Close()
 
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("HandleUpgrade returned unexpected error: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler timeout")
 	}
@@ -239,7 +246,10 @@ func TestHandleUpgrade_NoDeflate_RSV1NotSet(t *testing.T) {
 	upstreamEnd.Close()
 
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("HandleUpgrade returned unexpected error: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler timeout")
 	}
@@ -312,7 +322,10 @@ func TestHandleUpgrade_DeflateCompressedBinaryFrame(t *testing.T) {
 	upstreamEnd.Close()
 
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("HandleUpgrade returned unexpected error: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler timeout")
 	}

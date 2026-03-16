@@ -352,6 +352,7 @@ func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flow
 	if blocked {
 		if !frame.Fin {
 			frag.dropping = true
+			frag.compressed = compressed
 		}
 		h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, safetyMeta, compressed)
 		return false, nil
@@ -420,7 +421,7 @@ func (h *Handler) handleBlockedFragment(ctx context.Context, frame *Frame, frag 
 	}
 	h.logger.Debug("websocket continuation frame dropped (initial fragment was blocked)",
 		"flow_id", flowID, "direction", direction, "fin", frame.Fin)
-	h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, nil, false)
+	h.recordDataMessage(ctx, frame.Opcode, frame.Payload, frame.Masked, frame.Fin, flowID, direction, seq, start, nil, frag.compressed)
 	if frame.Fin {
 		frag.dropping = false
 	}

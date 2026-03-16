@@ -3,6 +3,7 @@ package ws
 import (
 	"bytes"
 	"compress/flate"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -25,11 +26,12 @@ type deflateParams struct {
 }
 
 // deflateState manages the decompression state for one relay direction.
-// It wraps a flate.Reader that may be reused across messages (context takeover)
-// or created fresh for each message (no context takeover).
+// A fresh flate.Reader is created for each message because Go's compress/flate
+// Reset() clears the LZ77 sliding window, making it impossible to implement
+// true context takeover. This approach is correct for no_context_takeover and
+// safe (though suboptimal) when context takeover is negotiated.
 type deflateState struct {
 	params deflateParams
-	reader io.ReadCloser
 }
 
 // newDeflateState creates a new deflateState for the given parameters.
@@ -56,55 +58,39 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 	copy(src, payload)
 	copy(src[len(payload):], flateTrailer)
 
-	if ds.params.contextTakeover && ds.reader != nil {
-		// Reuse existing reader with new input (context takeover).
-		// flate.Resetter allows feeding new data without losing LZ77 state.
-		if resetter, ok := ds.reader.(flate.Resetter); ok {
-			if err := resetter.Reset(bytes.NewReader(src), nil); err != nil {
-				return nil, fmt.Errorf("reset deflate reader: %w", err)
+	// Always create a fresh reader per message. Go's compress/flate Reset()
+	// clears the LZ77 sliding window, so reusing the reader does not provide
+	// true context takeover semantics — it would silently produce incorrect
+	// output. A fresh reader is correct for no_context_takeover and safe
+	// (though unable to leverage cross-message references) when context
+	// takeover is negotiated.
+	reader := flate.NewReader(bytes.NewReader(src))
+	defer reader.Close()
+
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+	if err != nil {
+		// permessage-deflate streams lack proper termination (no BFINAL block),
+		// so io.ErrUnexpectedEOF is expected after successfully reading all data.
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+			// Expected for permessage-deflate — treat as success if we got data.
+			if len(decoded) == 0 {
+				return nil, fmt.Errorf("deflate decompress: %w", err)
 			}
 		} else {
-			// Fallback: create new reader (should not happen with stdlib).
-			ds.reader = flate.NewReader(bytes.NewReader(src))
-		}
-	} else {
-		// Create a new reader (no context takeover or first message).
-		if ds.reader != nil {
-			ds.reader.Close()
-		}
-		ds.reader = flate.NewReader(bytes.NewReader(src))
-	}
-
-	decoded, err := io.ReadAll(io.LimitReader(ds.reader, maxSize+1))
-	if err != nil {
-		// permessage-deflate streams are not properly terminated (no final block marker),
-		// so io.ReadAll may return io.ErrUnexpectedEOF after successfully reading all data.
-		// This is expected per RFC 7692 Section 7.2.2: the 4 octets appended before
-		// decompression form a non-final DEFLATE block, so the reader sees a truncated stream.
-		if len(decoded) == 0 {
 			return nil, fmt.Errorf("deflate decompress: %w", err)
 		}
-		// Got some data before the error — treat as success (partial stream is normal).
 	}
 	if int64(len(decoded)) > maxSize {
 		decoded = decoded[:maxSize]
-	}
-
-	// For no_context_takeover, close the reader after each message.
-	if !ds.params.contextTakeover {
-		ds.reader.Close()
-		ds.reader = nil
 	}
 
 	return decoded, nil
 }
 
 // close releases the decompression resources.
+// Since each message creates a fresh reader (closed via defer), this is a no-op.
+// Retained for interface compatibility with defer calls in HandleUpgrade.
 func (ds *deflateState) close() {
-	if ds.reader != nil {
-		ds.reader.Close()
-		ds.reader = nil
-	}
 }
 
 // parseDeflateExtension parses the Sec-WebSocket-Extensions header value for
