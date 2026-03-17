@@ -89,8 +89,18 @@ func TestListResources_AllRegistered(t *testing.T) {
 		}
 	}
 
-	// Total expected count = 11 help + 8 schema = 19.
-	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs)
+	// Verify the dynamic info resource is present.
+	expectedInfoURIs := []string{
+		"yorishiro://info/wordlist_dir",
+	}
+	for _, uri := range expectedInfoURIs {
+		if !gotURIs[uri] {
+			t.Errorf("missing info resource: %s", uri)
+		}
+	}
+
+	// Total expected count = 11 help + 8 schema + 1 info = 20.
+	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs) + len(expectedInfoURIs)
 	if len(result.Resources) != expectedCount {
 		t.Errorf("resource count = %d, want %d", len(result.Resources), expectedCount)
 	}
@@ -394,19 +404,54 @@ func TestResourceMetadata(t *testing.T) {
 			}
 
 			// Verify MIME type is valid.
-			validMIME := r.MIMEType == "text/markdown" || r.MIMEType == "application/json"
+			validMIME := r.MIMEType == "text/markdown" || r.MIMEType == "application/json" || r.MIMEType == "text/plain"
 			if !validMIME {
 				t.Errorf("unexpected MIME type: %s", r.MIMEType)
 			}
 
-			// Help resources should be markdown, schema resources should be JSON.
+			// Help resources should be markdown, schema resources should be JSON, info resources should be plain text.
 			if strings.Contains(r.URI, "/help/") && r.MIMEType != "text/markdown" {
 				t.Errorf("help resource has MIME type %s, want text/markdown", r.MIMEType)
 			}
 			if strings.Contains(r.URI, "/schema/") && r.MIMEType != "application/json" {
 				t.Errorf("schema resource has MIME type %s, want application/json", r.MIMEType)
 			}
+			if strings.Contains(r.URI, "/info/") && r.MIMEType != "text/plain" {
+				t.Errorf("info resource has MIME type %s, want text/plain", r.MIMEType)
+			}
 		})
+	}
+}
+
+func TestReadResource_WordlistDir(t *testing.T) {
+	cs := setupResourceTestSession(t)
+
+	result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
+		URI: "yorishiro://info/wordlist_dir",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+
+	if len(result.Contents) == 0 {
+		t.Fatal("result has no contents")
+	}
+
+	content := result.Contents[0]
+	if content.URI != "yorishiro://info/wordlist_dir" {
+		t.Errorf("content URI = %q, want %q", content.URI, "yorishiro://info/wordlist_dir")
+	}
+	if content.MIMEType != "text/plain" {
+		t.Errorf("content MIMEType = %q, want %q", content.MIMEType, "text/plain")
+	}
+	if content.Text == "" {
+		t.Error("content text is empty")
+	}
+	if !strings.Contains(content.Text, ".yorishiro-proxy") {
+		t.Errorf("content text %q does not contain expected directory component", content.Text)
+	}
+	if !strings.Contains(content.Text, "wordlists") {
+		t.Errorf("content text %q does not contain 'wordlists'", content.Text)
 	}
 }
 
