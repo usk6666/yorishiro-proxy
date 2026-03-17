@@ -97,6 +97,10 @@ func TestValidateFlowFilters(t *testing.T) {
 			input: queryInput{Resource: "flows", Filter: &queryFilter{BlockedBy: "target_scope"}},
 		},
 		{
+			name:  "valid blocked_by safety_filter",
+			input: queryInput{Resource: "flows", Filter: &queryFilter{BlockedBy: "safety_filter"}},
+		},
+		{
 			name:    "invalid blocked_by",
 			input:   queryInput{Resource: "flows", Filter: &queryFilter{BlockedBy: "firewall"}},
 			wantErr: true,

@@ -99,7 +99,7 @@ var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
 var validFilterStates = []string{"active", "complete", "error"}
 
 // validFilterBlockedBy lists valid values for filter.blocked_by.
-var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit"}
+var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter"}
 
 // validFilterFuzzJobStatuses lists valid values for filter.status (fuzz_jobs).
 var validFilterFuzzJobStatuses = []string{"running", "paused", "completed", "cancelled", "error"}
@@ -190,13 +190,27 @@ func (s *Server) registerQuery() {
 	}, s.handleQuery)
 }
 
-// handleQuery dispatches the query request to the appropriate resource handler.
-func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, input queryInput) (*gomcp.CallToolResult, any, error) {
+// validateQueryInput dispatches enum validation by resource type.
+func validateQueryInput(input queryInput) error {
 	switch input.Resource {
 	case "flows":
-		if err := validateFlowFilters(input); err != nil {
-			return nil, nil, err
-		}
+		return validateFlowFilters(input)
+	case "fuzz_jobs":
+		return validateFuzzJobFilters(input)
+	case "fuzz_results":
+		return validateFuzzResultFilters(input)
+	default:
+		return nil
+	}
+}
+
+// handleQuery dispatches the query request to the appropriate resource handler.
+func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, input queryInput) (*gomcp.CallToolResult, any, error) {
+	if err := validateQueryInput(input); err != nil {
+		return nil, nil, err
+	}
+	switch input.Resource {
+	case "flows":
 		return s.handleQueryFlows(ctx, input)
 	case "flow":
 		return s.handleQueryFlow(ctx, input)
@@ -215,14 +229,8 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 	case "macro":
 		return s.handleQueryMacro(ctx, input)
 	case "fuzz_jobs":
-		if err := validateFuzzJobFilters(input); err != nil {
-			return nil, nil, err
-		}
 		return s.handleQueryFuzzJobs(ctx, input)
 	case "fuzz_results":
-		if err := validateFuzzResultFilters(input); err != nil {
-			return nil, nil, err
-		}
 		return s.handleQueryFuzzResults(ctx, input)
 	case "technologies":
 		return s.handleQueryTechnologies(ctx, input)
