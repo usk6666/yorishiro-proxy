@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -63,14 +64,18 @@ func NewIssuer(ca *CA, opts ...IssuerOption) *Issuer {
 func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 	// Check cache first.
 	if cc, ok := iss.cache.Get(hostname); ok {
+		slog.Debug("certificate cache hit", "hostname", hostname)
 		return cc.cert, nil
 	}
 
 	// Use singleflight to coalesce concurrent requests for the same hostname.
+	slog.Debug("certificate cache miss, generating", "hostname", hostname)
+	generateStart := time.Now()
 	result, err, _ := iss.group.Do(hostname, func() (interface{}, error) {
 		// Double-check cache after acquiring the singleflight slot,
 		// in case another goroutine populated it while we were waiting.
 		if cc, ok := iss.cache.Get(hostname); ok {
+			slog.Debug("certificate cache hit after singleflight", "hostname", hostname)
 			return cc.cert, nil
 		}
 
@@ -85,6 +90,8 @@ func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 		}
 		iss.cache.Put(hostname, cc)
 
+		slog.Debug("certificate issued", "hostname", hostname,
+			"duration", time.Since(generateStart).String())
 		return cert, nil
 	})
 	if err != nil {

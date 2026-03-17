@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 
@@ -122,12 +123,17 @@ func (t *StandardTransport) TLSConnect(ctx context.Context, conn net.Conn, serve
 		}
 	}
 
+	slog.Debug("upstream TLS handshake starting", "server", serverName, "transport", "standard",
+		"insecure_skip_verify", tlsConfig.InsecureSkipVerify)
 	tlsConn := tls.Client(conn, tlsConfig)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return nil, "", fmt.Errorf("standard TLS handshake with %s: %w", serverName, err)
 	}
 
-	proto := tlsConn.ConnectionState().NegotiatedProtocol
+	state := tlsConn.ConnectionState()
+	proto := state.NegotiatedProtocol
+	slog.Debug("upstream TLS handshake complete", "server", serverName, "transport", "standard",
+		"tls_version", tlsVersionName(state.Version), "alpn", proto)
 	return tlsConn, proto, nil
 }
 
@@ -175,12 +181,17 @@ func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverNam
 		}
 	}
 
+	slog.Debug("upstream TLS handshake starting", "server", serverName, "transport", "utls",
+		"profile", profile.String(), "insecure_skip_verify", tlsConfig.InsecureSkipVerify)
 	utlsConn := utls.UClient(conn, tlsConfig, *helloID)
 	if err := utlsConn.HandshakeContext(ctx); err != nil {
 		return nil, "", fmt.Errorf("uTLS handshake with %s (profile=%s): %w", serverName, profile, err)
 	}
 
-	proto := utlsConn.ConnectionState().NegotiatedProtocol
+	uState := utlsConn.ConnectionState()
+	proto := uState.NegotiatedProtocol
+	slog.Debug("upstream TLS handshake complete", "server", serverName, "transport", "utls",
+		"profile", profile.String(), "tls_version", tlsVersionName(uState.Version), "alpn", proto)
 	return utlsConn, proto, nil
 }
 
@@ -226,6 +237,22 @@ func (t *UTLSTransport) applyHostTLS(cfg *utls.Config, serverName string) error 
 	}
 
 	return nil
+}
+
+// tlsVersionName converts a TLS version constant to a human-readable string.
+func tlsVersionName(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return fmt.Sprintf("unknown (0x%04x)", version)
+	}
 }
 
 // TLSConnectionState extracts the TLS connection state from a net.Conn.

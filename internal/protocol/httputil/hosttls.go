@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,8 +201,11 @@ func (r *HostTLSRegistry) Hosts() map[string]*HostTLSConfig {
 func (r *HostTLSRegistry) ApplyToTLSConfig(tlsCfg *tls.Config, serverName string, globalInsecure bool) error {
 	cfg := r.Lookup(serverName)
 	if cfg == nil {
+		slog.Debug("no per-host TLS config found", "server", serverName)
 		return nil
 	}
+
+	slog.Debug("applying per-host TLS config", "server", serverName)
 
 	// Apply client certificate.
 	cert, err := cfg.LoadClientCert()
@@ -210,11 +214,14 @@ func (r *HostTLSRegistry) ApplyToTLSConfig(tlsCfg *tls.Config, serverName string
 	}
 	if cert != nil {
 		tlsCfg.Certificates = []tls.Certificate{*cert}
+		slog.Debug("mTLS client certificate applied", "server", serverName)
 	}
 
 	// Apply TLS verification setting.
 	if cfg.TLSVerify != nil {
 		tlsCfg.InsecureSkipVerify = !*cfg.TLSVerify //nolint:gosec // per-host TLS verify control
+		slog.Debug("per-host TLS verify override", "server", serverName,
+			"tls_verify", *cfg.TLSVerify, "insecure_skip_verify", tlsCfg.InsecureSkipVerify)
 	} else {
 		tlsCfg.InsecureSkipVerify = globalInsecure //nolint:gosec // proxy requires MITM
 	}
@@ -226,6 +233,7 @@ func (r *HostTLSRegistry) ApplyToTLSConfig(tlsCfg *tls.Config, serverName string
 	}
 	if pool != nil {
 		tlsCfg.RootCAs = pool
+		slog.Debug("custom CA bundle applied", "server", serverName)
 	}
 
 	return nil
