@@ -260,12 +260,12 @@ func (r *grpcProgressiveRecorder) completeFlow(
 		)
 	}
 
-	// Build tags.
-	tags := map[string]string{
+	// Build tags, preserving SOCKS5 metadata from the context.
+	tags := proxy.MergeSOCKS5Tags(ctx, map[string]string{
 		"streaming_type": "grpc",
 		"grpc_service":   r.service,
 		"grpc_method":    r.method,
-	}
+	})
 	if grpcStatus != "" {
 		tags["grpc_status"] = grpcStatus
 	}

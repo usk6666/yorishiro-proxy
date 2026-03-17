@@ -8,6 +8,7 @@ import (
 
 	gohttp "net/http"
 
+	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -163,6 +164,101 @@ func TestRecordInterceptDrop_SOCKS5Protocol(t *testing.T) {
 	}
 	if fl.Tags["socks5_target"] != "target.host:443" {
 		t.Errorf("tags[socks5_target] = %q, want %q", fl.Tags["socks5_target"], "target.host:443")
+	}
+}
+
+func TestGRPCProgressiveRecorder_SOCKS5TagLifecycle(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	// Set grpcHandler so initGRPCFlow does not short-circuit.
+	grpcHandler := protogrpc.NewHandler(store, testutil.DiscardLogger())
+	handler.SetGRPCHandler(grpcHandler)
+
+	ctx := proxy.ContextWithSOCKS5Target(context.Background(), "grpc.example.com:443")
+	ctx = proxy.ContextWithSOCKS5AuthMethod(ctx, "username_password")
+	ctx = proxy.ContextWithSOCKS5AuthUser(ctx, "grpcuser")
+
+	reqURL, _ := url.Parse("https://grpc.example.com/my.Service/MyMethod")
+	req, _ := gohttp.NewRequestWithContext(ctx, "POST", reqURL.String(), nil)
+	req.Header.Set("Content-Type", "application/grpc")
+
+	sc := &streamContext{
+		ctx:        ctx,
+		connID:     "conn-grpc-1",
+		clientAddr: "127.0.0.1:54321",
+		req:        req,
+		reqURL:     reqURL,
+		flowScheme: "https",
+		start:      time.Now(),
+		logger:     testutil.DiscardLogger(),
+		tlsMeta:    tlsMetadata{},
+	}
+
+	// Phase 1: initGRPCFlow should set SOCKS5 tags.
+	rec := handler.initGRPCFlow(ctx, sc)
+	if rec.flowID == "" {
+		t.Fatal("initGRPCFlow did not create a flow")
+	}
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry after init, got %d", len(entries))
+	}
+
+	fl := entries[0].Session
+	if fl.Protocol != "SOCKS5+gRPC" {
+		t.Errorf("protocol = %q, want %q", fl.Protocol, "SOCKS5+gRPC")
+	}
+	if fl.Tags["socks5_target"] != "grpc.example.com:443" {
+		t.Errorf("tags[socks5_target] = %q, want %q", fl.Tags["socks5_target"], "grpc.example.com:443")
+	}
+	if fl.Tags["socks5_auth_method"] != "username_password" {
+		t.Errorf("tags[socks5_auth_method] = %q, want %q", fl.Tags["socks5_auth_method"], "username_password")
+	}
+	if fl.Tags["socks5_auth_user"] != "grpcuser" {
+		t.Errorf("tags[socks5_auth_user] = %q, want %q", fl.Tags["socks5_auth_user"], "grpcuser")
+	}
+
+	// Phase 2: completeFlow should preserve SOCKS5 tags.
+	resp := &gohttp.Response{
+		StatusCode: 200,
+		Header:     gohttp.Header{"Grpc-Status": {"0"}},
+		Trailer:    gohttp.Header{"Grpc-Status": {"0"}},
+	}
+	rec.completeFlow(ctx, resp, 1, 1, 100*time.Millisecond)
+
+	// Re-read the flow after completion.
+	entries = store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry after complete, got %d", len(entries))
+	}
+
+	fl = entries[0].Session
+	if fl.State != "complete" {
+		t.Errorf("state = %q, want %q", fl.State, "complete")
+	}
+
+	// SOCKS5 tags must survive completeFlow.
+	if fl.Tags["socks5_target"] != "grpc.example.com:443" {
+		t.Errorf("after completeFlow: tags[socks5_target] = %q, want %q", fl.Tags["socks5_target"], "grpc.example.com:443")
+	}
+	if fl.Tags["socks5_auth_method"] != "username_password" {
+		t.Errorf("after completeFlow: tags[socks5_auth_method] = %q, want %q", fl.Tags["socks5_auth_method"], "username_password")
+	}
+	if fl.Tags["socks5_auth_user"] != "grpcuser" {
+		t.Errorf("after completeFlow: tags[socks5_auth_user] = %q, want %q", fl.Tags["socks5_auth_user"], "grpcuser")
+	}
+
+	// gRPC-specific tags must also be present.
+	if fl.Tags["streaming_type"] != "grpc" {
+		t.Errorf("after completeFlow: tags[streaming_type] = %q, want %q", fl.Tags["streaming_type"], "grpc")
+	}
+	if fl.Tags["grpc_service"] != "my.Service" {
+		t.Errorf("after completeFlow: tags[grpc_service] = %q, want %q", fl.Tags["grpc_service"], "my.Service")
+	}
+	if fl.Tags["grpc_method"] != "MyMethod" {
+		t.Errorf("after completeFlow: tags[grpc_method] = %q, want %q", fl.Tags["grpc_method"], "MyMethod")
 	}
 }
 
