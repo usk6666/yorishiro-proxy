@@ -63,7 +63,7 @@ func TestValidateFuzzParams_AttackType(t *testing.T) {
 				return
 			}
 			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				t.Fatalf("expected error %q, got nil", tt.wantErr)
 			}
 			if err.Error() != tt.wantErr {
 				t.Errorf("error mismatch:\n  got:  %s\n  want: %s", err.Error(), tt.wantErr)
