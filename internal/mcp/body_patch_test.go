@@ -413,9 +413,10 @@ func TestApplyBodyPatches_RegexWithEncoding(t *testing.T) {
 
 func TestValidateBodyPatch_EncodingValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		patch   BodyPatch
-		wantErr bool
+		name        string
+		patch       BodyPatch
+		wantErr     bool
+		errContains string
 	}{
 		{
 			name:  "valid encoding",
@@ -426,9 +427,10 @@ func TestValidateBodyPatch_EncodingValidation(t *testing.T) {
 			patch: BodyPatch{JSONPath: "$.key", Value: "v", Encoding: []string{"url_encode_query", "base64"}},
 		},
 		{
-			name:    "unknown codec",
-			patch:   BodyPatch{JSONPath: "$.key", Value: "v", Encoding: []string{"nonexistent"}},
-			wantErr: true,
+			name:        "unknown codec",
+			patch:       BodyPatch{JSONPath: "$.key", Value: "v", Encoding: []string{"nonexistent"}},
+			wantErr:     true,
+			errContains: "available codecs:",
 		},
 		{
 			name:  "empty encoding is valid",
@@ -466,6 +468,11 @@ func TestValidateBodyPatch_EncodingValidation(t *testing.T) {
 			err := validateBodyPatch(tt.patch)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateBodyPatch() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.errContains != "" && err != nil {
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.errContains)
+				}
 			}
 		})
 	}
