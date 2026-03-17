@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"path/filepath"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
@@ -189,6 +190,13 @@ func (s *Server) registerResources() {
 // determine where to place wordlist files for file-type payload sets.
 func (s *Server) registerWordlistDirResource() {
 	const uri = "yorishiro://info/wordlist_dir"
+
+	// Compute the wordlist directory once and ensure it is absolute (C-1/F-1).
+	wordlistDir := fuzzer.DefaultWordlistBaseDir()
+	if abs, err := filepath.Abs(wordlistDir); err == nil {
+		wordlistDir = abs
+	}
+
 	s.server.AddResource(
 		&gomcp.Resource{
 			URI:         uri,
@@ -202,7 +210,7 @@ func (s *Server) registerWordlistDirResource() {
 					{
 						URI:      uri,
 						MIMEType: "text/plain",
-						Text:     fuzzer.DefaultWordlistBaseDir(),
+						Text:     wordlistDir,
 					},
 				},
 			}, nil

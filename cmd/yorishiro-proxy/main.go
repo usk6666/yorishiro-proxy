@@ -497,7 +497,7 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 
 	// Initialize fuzzer components for async fuzz job execution.
 	wordlistDir := fuzzer.DefaultWordlistBaseDir()
-	if err := os.MkdirAll(wordlistDir, 0750); err != nil {
+	if err := os.MkdirAll(wordlistDir, 0700); err != nil {
 		logger.Warn("failed to create wordlist directory", "path", wordlistDir, "error", err)
 	}
 	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewDefaultHTTPClient(), wordlistDir)

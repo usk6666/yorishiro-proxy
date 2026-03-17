@@ -360,7 +360,7 @@ func resolveWordlistPath(baseDir, relPath string) (string, error) {
 	// Resolve symlinks to get the real path.
 	resolved, err := filepath.EvalSymlinks(fullPath)
 	if err != nil {
-		return "", fmt.Errorf("resolve wordlist path %q: %w (hint: place wordlist files in %s)", relPath, err, baseDir)
+		return "", fmt.Errorf("resolve wordlist path %q (hint: place wordlist files in %q): %w", relPath, baseDir, err)
 	}
 
 	// Resolve the base directory as well.
