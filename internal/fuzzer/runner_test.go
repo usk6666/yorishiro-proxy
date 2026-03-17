@@ -823,6 +823,186 @@ func TestRunner_MaxRetries(t *testing.T) {
 	}
 }
 
+func TestRunner_UpdateJobProgress_ReflectsControllerStatus(t *testing.T) {
+	// This test directly verifies that updateJobProgress uses the controller's
+	// status rather than hardcoding "running".
+	testURL, _ := url.Parse("http://example.com/api")
+
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
+			ID:       "template-1",
+			Protocol: "HTTP/1.x",
+		},
+		messages: []*flow.Message{
+			{
+				FlowID:    "template-1",
+				Direction: "send",
+				Method:    "GET",
+				URL:       testURL,
+				Headers:   map[string][]string{},
+			},
+		},
+	}
+
+	recorder := &threadSafeMockFlowRecorder{}
+	fuzzStore := &threadSafeMockFuzzJobStore{}
+	doer := &threadSafeMockHTTPDoer{}
+
+	engine := NewEngine(fetcher, recorder, fuzzStore, doer, t.TempDir())
+	registry := NewJobRegistry()
+	runner := NewRunner(engine, registry)
+
+	// Create a job and a controller.
+	job := &flow.FuzzJob{
+		ID:     "test-job-1",
+		FlowID: "template-1",
+		Status: "running",
+	}
+	if err := fuzzStore.SaveFuzzJob(context.Background(), job); err != nil {
+		t.Fatalf("SaveFuzzJob() error = %v", err)
+	}
+
+	cancel := func() {}
+	ctrl := NewJobController(cancel)
+
+	// Test with running status.
+	runner.updateJobProgress(context.Background(), job, ctrl, 5, 1)
+	jobs := fuzzStore.getJobs()
+	if len(jobs) == 0 {
+		t.Fatal("no jobs found")
+	}
+	if jobs[0].Status != "running" {
+		t.Errorf("status after running = %q, want %q", jobs[0].Status, "running")
+	}
+
+	// Pause the controller and verify DB reflects "paused".
+	if err := ctrl.Pause(); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	runner.updateJobProgress(context.Background(), job, ctrl, 6, 1)
+	jobs = fuzzStore.getJobs()
+	if jobs[0].Status != "paused" {
+		t.Errorf("status after pause = %q, want %q", jobs[0].Status, "paused")
+	}
+
+	// Resume the controller and verify DB reflects "running" again.
+	if err := ctrl.Resume(); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	runner.updateJobProgress(context.Background(), job, ctrl, 7, 1)
+	jobs = fuzzStore.getJobs()
+	if jobs[0].Status != "running" {
+		t.Errorf("status after resume = %q, want %q", jobs[0].Status, "running")
+	}
+}
+
+func TestRunner_PausedStatusReflectedInDB(t *testing.T) {
+	testURL, _ := url.Parse("http://example.com/api")
+
+	fetcher := &mockFlowFetcher{
+		fl: &flow.Flow{
+			ID:       "template-1",
+			Protocol: "HTTP/1.x",
+		},
+		messages: []*flow.Message{
+			{
+				FlowID:    "template-1",
+				Direction: "send",
+				Method:    "GET",
+				URL:       testURL,
+				Headers:   map[string][]string{},
+			},
+		},
+	}
+
+	doer := &threadSafeMockHTTPDoer{}
+	recorder := &threadSafeMockFlowRecorder{}
+	fuzzStore := &threadSafeMockFuzzJobStore{}
+
+	engine := NewEngine(fetcher, recorder, fuzzStore, doer, t.TempDir())
+	registry := NewJobRegistry()
+	runner := NewRunner(engine, registry)
+
+	// Many payloads with delay so we can pause mid-job.
+	payloads := make([]string, 1000)
+	for i := range payloads {
+		payloads[i] = fmt.Sprintf("payload-%d", i)
+	}
+
+	cfg := RunConfig{
+		Config: Config{
+			FlowID:     "template-1",
+			AttackType: "sequential",
+			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
+			PayloadSets: map[string]PayloadSet{
+				"s": {Type: "wordlist", Values: payloads},
+			},
+		},
+		DelayMs: 10,
+	}
+
+	result, err := runner.Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	// Wait for some progress.
+	time.Sleep(50 * time.Millisecond)
+
+	ctrl := registry.Get(result.FuzzID)
+	if ctrl == nil {
+		t.Fatal("controller not found in registry")
+	}
+
+	// Pause the job.
+	if err := ctrl.Pause(); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	// Resume, let some iterations run, then pause again.
+	if err := ctrl.Resume(); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	if err := ctrl.Pause(); err != nil {
+		t.Fatalf("second Pause() error = %v", err)
+	}
+
+	// Give time for the last in-flight iteration to write its progress.
+	time.Sleep(50 * time.Millisecond)
+
+	// Check the DB: the latest job status should be "paused" (written by
+	// updateJobProgress using ctrl.Status()).
+	jobs := fuzzStore.getJobs()
+	if len(jobs) == 0 {
+		t.Fatal("no jobs found in store")
+	}
+	latestJob := jobs[0]
+	if latestJob.Status != "paused" {
+		t.Errorf("job status = %q after pause, want %q", latestJob.Status, "paused")
+	}
+
+	// Cancel and wait for finalization.
+	if err := ctrl.Cancel(); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("job did not finish after cancel")
+		default:
+		}
+		jobs := fuzzStore.getJobs()
+		if len(jobs) > 0 && jobs[0].Status == "cancelled" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestRunner_DefaultConcurrency(t *testing.T) {
 	runner, fuzzStore, _, _ := newTestRunner(t)
 

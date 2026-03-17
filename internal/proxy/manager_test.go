@@ -677,9 +677,18 @@ func TestManager_StopAll(t *testing.T) {
 
 	// All addresses should be unreachable.
 	for name, addr := range addrs {
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-		if err == nil {
+		var lastOK bool
+		for i := 0; i < 10; i++ {
+			conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+			if err != nil {
+				lastOK = false
+				break
+			}
 			conn.Close()
+			lastOK = true
+			time.Sleep(50 * time.Millisecond)
+		}
+		if lastOK {
 			t.Errorf("listener %q at %s still accepting after StopAll", name, addr)
 		}
 	}

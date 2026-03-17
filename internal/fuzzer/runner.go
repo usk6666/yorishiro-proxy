@@ -350,7 +350,7 @@ func (r *Runner) workerLoop(
 
 		result := r.executeWithRetries(ctx, p, fc, hookState)
 
-		if !r.saveAndUpdateProgress(ctx, p.job, result, completedCount, errorCount) {
+		if !r.saveAndUpdateProgress(ctx, p.job, p.ctrl, result, completedCount, errorCount) {
 			continue
 		}
 
@@ -363,7 +363,7 @@ func (r *Runner) workerLoop(
 		}
 
 		// Update progress in DB.
-		r.updateJobProgress(ctx, p.job, int(completedCount.Load()), int(errorCount.Load()))
+		r.updateJobProgress(ctx, p.job, p.ctrl, int(completedCount.Load()), int(errorCount.Load()))
 
 		if r.checkStopConditions(result, p.cfg.StopOn, p.monitor, errorCount, triggerStop) {
 			return
@@ -410,10 +410,10 @@ func (r *Runner) executeWithRetries(ctx context.Context, p executeParams, fc Fuz
 
 // saveAndUpdateProgress saves the fuzz result and updates counters.
 // Returns false if saving failed (caller should continue to next case).
-func (r *Runner) saveAndUpdateProgress(ctx context.Context, job *flow.FuzzJob, result *flow.FuzzResult, completedCount, errorCount *atomic.Int32) bool {
+func (r *Runner) saveAndUpdateProgress(ctx context.Context, job *flow.FuzzJob, ctrl *JobController, result *flow.FuzzResult, completedCount, errorCount *atomic.Int32) bool {
 	if err := r.engine.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
 		errorCount.Add(1)
-		r.updateJobProgress(ctx, job, int(completedCount.Load()), int(errorCount.Load()))
+		r.updateJobProgress(ctx, job, ctrl, int(completedCount.Load()), int(errorCount.Load()))
 		return false
 	}
 	if result.Error != "" {
@@ -504,13 +504,15 @@ func (r *Runner) finalizeJob(job *flow.FuzzJob, ctrl *JobController, completed, 
 }
 
 // updateJobProgress updates the job's completed and error counts in the DB.
-func (r *Runner) updateJobProgress(ctx context.Context, job *flow.FuzzJob, completed, errors int) {
+// It reads the current status from the JobController so that pause/resume
+// transitions are correctly reflected in the database.
+func (r *Runner) updateJobProgress(ctx context.Context, job *flow.FuzzJob, ctrl *JobController, completed, errors int) {
 	// Create a shallow copy to avoid data races.
 	update := &flow.FuzzJob{
 		ID:             job.ID,
 		FlowID:         job.FlowID,
 		Config:         job.Config,
-		Status:         string(StatusRunning),
+		Status:         string(ctrl.Status()),
 		Tag:            job.Tag,
 		CreatedAt:      job.CreatedAt,
 		Total:          job.Total,
