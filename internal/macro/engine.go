@@ -452,6 +452,21 @@ func validateStepGuard(step *Step, seenIDs map[string]bool) error {
 	return nil
 }
 
+// validExtractionSources is the set of valid ExtractionSource values.
+var validExtractionSources = map[ExtractionSource]bool{
+	ExtractionSourceHeader:   true,
+	ExtractionSourceBody:     true,
+	ExtractionSourceBodyJSON: true,
+	ExtractionSourceStatus:   true,
+	ExtractionSourceURL:      true,
+}
+
+// validExtractionFroms is the set of valid ExtractionFrom values.
+var validExtractionFroms = map[ExtractionFrom]bool{
+	ExtractionFromRequest:  true,
+	ExtractionFromResponse: true,
+}
+
 // validateExtractRules validates the extraction rules of a step.
 func validateExtractRules(step *Step) error {
 	for j := range step.Extract {
@@ -462,8 +477,14 @@ func validateExtractRules(step *Step) error {
 		if rule.Source == "" {
 			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
 		}
+		if !validExtractionSources[rule.Source] {
+			return fmt.Errorf("step %q extraction rule %q has invalid source %q (valid: header, body, body_json, status, url)", step.ID, rule.Name, rule.Source)
+		}
 		if rule.From == "" {
 			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
+		}
+		if !validExtractionFroms[rule.From] {
+			return fmt.Errorf("step %q extraction rule %q has invalid from %q (valid: request, response)", step.ID, rule.Name, rule.From)
 		}
 	}
 	return nil

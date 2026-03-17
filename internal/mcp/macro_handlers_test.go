@@ -286,6 +286,78 @@ func TestExecute_DefineMacro_DuplicateStepID(t *testing.T) {
 	}
 }
 
+func TestExecute_DefineMacro_InvalidExtractSource(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupMacroTestSession(t, store)
+
+	// "response" is a valid "from" value but invalid as "source".
+	// This is the exact mistake from the bug report (swapped source/from).
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "macro",
+		Arguments: map[string]any{
+			"action": "define_macro",
+			"params": map[string]any{
+				"name": "bad-source",
+				"steps": []any{
+					map[string]any{
+						"id":      "s1",
+						"flow_id": "sess1",
+						"extract": []any{
+							map[string]any{
+								"name":   "token",
+								"source": "response",
+								"from":   "body",
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		// SDK schema validation error — acceptable.
+		return
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid source value 'response'")
+	}
+}
+
+func TestExecute_DefineMacro_InvalidExtractFrom(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupMacroTestSession(t, store)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "macro",
+		Arguments: map[string]any{
+			"action": "define_macro",
+			"params": map[string]any{
+				"name": "bad-from",
+				"steps": []any{
+					map[string]any{
+						"id":      "s1",
+						"flow_id": "sess1",
+						"extract": []any{
+							map[string]any{
+								"name":   "token",
+								"source": "body",
+								"from":   "body",
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		// SDK schema validation error — acceptable.
+		return
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid from value 'body'")
+	}
+}
+
 func TestExecute_RunMacro_Success(t *testing.T) {
 	store := newTestStore(t)
 

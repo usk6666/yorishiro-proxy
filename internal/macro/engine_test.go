@@ -188,6 +188,63 @@ func TestValidateMacro(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "extraction rule with invalid source",
+			macro: &Macro{
+				Name: "test",
+				Steps: []Step{
+					{
+						ID: "s1", FlowID: "sess1",
+						Extract: []ExtractionRule{{Name: "var1", Source: "response", From: ExtractionFromResponse}},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "extraction rule with invalid from",
+			macro: &Macro{
+				Name: "test",
+				Steps: []Step{
+					{
+						ID: "s1", FlowID: "sess1",
+						Extract: []ExtractionRule{{Name: "var1", Source: ExtractionSourceBody, From: "body"}},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "extraction rule with swapped source and from values",
+			macro: &Macro{
+				Name: "test",
+				Steps: []Step{
+					{
+						ID: "s1", FlowID: "sess1",
+						Extract: []ExtractionRule{{Name: "var1", Source: "response", From: "body"}},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid extraction rule with all source types",
+			macro: &Macro{
+				Name: "test",
+				Steps: []Step{
+					{
+						ID: "s1", FlowID: "sess1",
+						Extract: []ExtractionRule{
+							{Name: "v1", Source: ExtractionSourceHeader, From: ExtractionFromRequest, HeaderName: "X-Token"},
+							{Name: "v2", Source: ExtractionSourceBody, From: ExtractionFromResponse},
+							{Name: "v3", Source: ExtractionSourceBodyJSON, From: ExtractionFromResponse, JSONPath: "$.token"},
+							{Name: "v4", Source: ExtractionSourceStatus, From: ExtractionFromResponse},
+							{Name: "v5", Source: ExtractionSourceURL, From: ExtractionFromRequest},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "valid macro",
 			macro: &Macro{
 				Name: "test",
