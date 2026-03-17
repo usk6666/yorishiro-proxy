@@ -59,7 +59,7 @@ func (s *Server) handlePlugin(ctx context.Context, _ *gomcp.CallToolRequest, inp
 	case "disable":
 		return s.handlePluginDisable(input.Params)
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availablePluginActions)
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availablePluginActions, ", "))
 	}
 }
 
