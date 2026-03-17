@@ -948,3 +948,252 @@ func TestClientConn_StreamingFlush(t *testing.T) {
 	// Let handler finish.
 	close(done)
 }
+
+// TestClientConn_DataWithoutEndStream_StreamingDispatch tests the gRPC-Go
+// pattern where HEADERS has no END_STREAM and DATA frames also have no
+// END_STREAM. This was the root cause of USK-427: the proxy waited for
+// END_STREAM on DATA before dispatching, causing a deadlock.
+//
+// Sequence:
+//  1. HEADERS (END_HEADERS, no END_STREAM)
+//  2. DATA (no END_STREAM) — body payload
+//  3. Handler receives request body via io.Pipe and responds
+//  4. DATA (END_STREAM) — empty, signaling end of client request
+func TestClientConn_DataWithoutEndStream_StreamingDispatch(t *testing.T) {
+	var mu sync.Mutex
+	var receivedBody string
+
+	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		body, _ := io.ReadAll(req.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/grpc")
+		w.WriteHeader(gohttp.StatusOK)
+		w.Write([]byte("response-data"))
+	}
+
+	tc := newH2CTestConn(t, handler)
+	defer tc.close(t)
+
+	// Send HEADERS without END_STREAM (gRPC-Go pattern).
+	headerBlock := tc.encoder.Encode([]hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "grpcb.in:443"},
+		{Name: ":path", Value: "/grpcbin.GRPCBin/DummyUnary"},
+		{Name: "content-type", Value: "application/grpc"},
+		{Name: "te", Value: "trailers"},
+	})
+	tc.writer.WriteHeaders(1, false, true, headerBlock)
+
+	// Send DATA without END_STREAM (gRPC-Go sends body without END_STREAM).
+	bodyPayload := []byte("grpc-request-body")
+	tc.writer.WriteData(1, false, bodyPayload)
+
+	// Send empty DATA with END_STREAM to signal end of request.
+	tc.writer.WriteData(1, true, nil)
+
+	// Read response frames.
+	var status string
+	var respBodyBuf bytes.Buffer
+	gotEndStream := false
+	deadline := time.After(5 * time.Second)
+	for !gotEndStream {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for response — likely deadlock (USK-427 regression)")
+		default:
+		}
+		tc.clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		f, err := tc.reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("read response frame: %v", err)
+		}
+		switch f.Header.Type {
+		case frame.TypeWindowUpdate:
+			continue
+		case frame.TypeHeaders:
+			respHeaders, _ := tc.decoder.Decode(f.Payload)
+			for _, hf := range respHeaders {
+				if hf.Name == ":status" {
+					status = hf.Value
+				}
+			}
+			if f.Header.Flags.Has(frame.FlagEndStream) {
+				gotEndStream = true
+			}
+		case frame.TypeData:
+			data, _ := f.DataPayload()
+			respBodyBuf.Write(data)
+			if f.Header.Flags.Has(frame.FlagEndStream) {
+				gotEndStream = true
+			}
+		default:
+			// Ignore other frame types.
+		}
+	}
+
+	if status != "200" {
+		t.Errorf(":status = %q, want %q", status, "200")
+	}
+	if respBodyBuf.String() != "response-data" {
+		t.Errorf("response body = %q, want %q", respBodyBuf.String(), "response-data")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	if receivedBody != "grpc-request-body" {
+		t.Errorf("received body = %q, want %q", receivedBody, "grpc-request-body")
+	}
+	mu.Unlock()
+}
+
+// TestClientConn_StreamingBody_MultipleDataFrames tests that multiple DATA
+// frames without END_STREAM are correctly streamed to the handler via io.Pipe.
+func TestClientConn_StreamingBody_MultipleDataFrames(t *testing.T) {
+	var mu sync.Mutex
+	var receivedBody string
+
+	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		body, _ := io.ReadAll(req.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		mu.Unlock()
+		w.WriteHeader(gohttp.StatusOK)
+		w.Write([]byte("ok"))
+	}
+
+	tc := newH2CTestConn(t, handler)
+	defer tc.close(t)
+
+	// Send HEADERS without END_STREAM.
+	headerBlock := tc.encoder.Encode([]hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/streaming"},
+	})
+	tc.writer.WriteHeaders(1, false, true, headerBlock)
+
+	// Send multiple DATA frames without END_STREAM.
+	tc.writer.WriteData(1, false, []byte("chunk1-"))
+	tc.writer.WriteData(1, false, []byte("chunk2-"))
+	tc.writer.WriteData(1, false, []byte("chunk3"))
+
+	// Send final empty DATA with END_STREAM.
+	tc.writer.WriteData(1, true, nil)
+
+	// Read response.
+	gotEndStream := false
+	deadline := time.After(5 * time.Second)
+	for !gotEndStream {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for response")
+		default:
+		}
+		tc.clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		f, err := tc.reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("read response frame: %v", err)
+		}
+		if f.Header.Flags.Has(frame.FlagEndStream) {
+			gotEndStream = true
+		}
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	if receivedBody != "chunk1-chunk2-chunk3" {
+		t.Errorf("received body = %q, want %q", receivedBody, "chunk1-chunk2-chunk3")
+	}
+	mu.Unlock()
+}
+
+// TestClientConn_StreamingBody_RSTStream tests that RST_STREAM during
+// streaming dispatch correctly closes the body pipe with an error.
+func TestClientConn_StreamingBody_RSTStream(t *testing.T) {
+	var mu sync.Mutex
+	var readErr error
+
+	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		_, err := io.ReadAll(req.Body)
+		mu.Lock()
+		readErr = err
+		mu.Unlock()
+		w.WriteHeader(gohttp.StatusOK)
+	}
+
+	tc := newH2CTestConn(t, handler)
+	defer tc.close(t)
+
+	// Send HEADERS without END_STREAM.
+	headerBlock := tc.encoder.Encode([]hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/reset"},
+	})
+	tc.writer.WriteHeaders(1, false, true, headerBlock)
+
+	// Send some data.
+	tc.writer.WriteData(1, false, []byte("partial"))
+
+	// Give the handler time to start reading.
+	time.Sleep(50 * time.Millisecond)
+
+	// Send RST_STREAM to cancel the stream.
+	tc.writer.WriteRSTStream(1, 8) // CANCEL
+
+	// Wait for handler to finish.
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	if readErr == nil {
+		t.Error("expected read error from RST_STREAM, got nil")
+	}
+	mu.Unlock()
+}
+
+// TestBuildHTTPRequestWithReader tests the streaming body builder.
+func TestBuildHTTPRequestWithReader(t *testing.T) {
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/api/stream"},
+		{Name: "content-type", Value: "application/grpc"},
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte("streamed body"))
+		pw.Close()
+	}()
+
+	req, err := buildHTTPRequestWithReader(context.Background(), headers, pr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Method != "POST" {
+		t.Errorf("method = %q, want %q", req.Method, "POST")
+	}
+	if req.ContentLength != -1 {
+		t.Errorf("ContentLength = %d, want -1", req.ContentLength)
+	}
+	if req.URL.Scheme != "https" {
+		t.Errorf("scheme = %q, want %q", req.URL.Scheme, "https")
+	}
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "streamed body" {
+		t.Errorf("body = %q, want %q", body, "streamed body")
+	}
+}
