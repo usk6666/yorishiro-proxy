@@ -8,6 +8,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // handleRawForward handles the raw mode forwarding path for intercepted HTTP/2
@@ -107,13 +108,17 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 	}
 
 	// Modified: record two send messages (original + modified).
+	protocol := proxy.SOCKS5Protocol(sc.ctx, "HTTP/2")
+	tags := proxy.MergeSOCKS5Tags(sc.ctx, nil)
+
 	fl := &flow.Flow{
 		ConnID:    sc.connID,
-		Protocol:  "HTTP/2",
+		Protocol:  protocol,
 		Scheme:    sc.flowScheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: sc.start,
+		Tags:      tags,
 		ConnInfo:  sc.connInfo,
 	}
 	if err := h.Store.SaveFlow(sc.ctx, fl); err != nil {
