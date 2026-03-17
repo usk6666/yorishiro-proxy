@@ -505,7 +505,7 @@ func (s *Server) RunHTTP(ctx context.Context, addr string, onListening ...func(a
 
 		slog.Info("shutting down MCP HTTP server", "addr", listenAddr)
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("MCP HTTP server shutdown error", "error", err)
+			slog.Debug("MCP HTTP server shutdown error", "error", err)
 		}
 	}()
 

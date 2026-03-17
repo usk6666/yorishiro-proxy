@@ -172,7 +172,7 @@ func fuzzResultToEntry(r *flow.FuzzResult) queryFuzzResultEntry {
 	payloads := make(map[string]string)
 	if r.Payloads != "" {
 		if err := json.Unmarshal([]byte(r.Payloads), &payloads); err != nil {
-			slog.Warn("failed to parse fuzz result payloads", "result_id", r.ID, "error", err)
+			slog.Debug("failed to parse fuzz result payloads", "result_id", r.ID, "error", err)
 		}
 	}
 	return queryFuzzResultEntry{
