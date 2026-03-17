@@ -3,6 +3,7 @@ package macro
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -483,6 +484,7 @@ func ValidSourceList() string {
 	for s := range validExtractionSources {
 		names = append(names, string(s))
 	}
+	sort.Strings(names)
 	return strings.Join(names, ", ")
 }
 
@@ -492,6 +494,7 @@ func ValidFromList() string {
 	for f := range validExtractionFroms {
 		names = append(names, string(f))
 	}
+	sort.Strings(names)
 	return strings.Join(names, ", ")
 }
 

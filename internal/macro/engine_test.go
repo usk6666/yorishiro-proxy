@@ -301,7 +301,7 @@ func TestValidateMacro_ErrorMessagesIncludeValidValues(t *testing.T) {
 					Extract: []ExtractionRule{{Name: "v1", Source: "bad", From: ExtractionFromResponse}},
 				}},
 			},
-			wantSub: "(valid:",
+			wantSub: "(valid: body, body_json, header, status, url)",
 		},
 		{
 			name: "invalid from includes valid values",
@@ -312,7 +312,7 @@ func TestValidateMacro_ErrorMessagesIncludeValidValues(t *testing.T) {
 					Extract: []ExtractionRule{{Name: "v1", Source: ExtractionSourceBody, From: "bad"}},
 				}},
 			},
-			wantSub: "(valid:",
+			wantSub: "(valid: request, response)",
 		},
 	}
 
@@ -340,19 +340,19 @@ func TestValidOnErrorList(t *testing.T) {
 
 func TestValidSourceList(t *testing.T) {
 	got := ValidSourceList()
-	for _, want := range []string{"header", "body", "body_json", "status", "url"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("ValidSourceList() = %q, missing %q", got, want)
-		}
+	// Output is sorted alphabetically after the sort fix.
+	want := "body, body_json, header, status, url"
+	if got != want {
+		t.Errorf("ValidSourceList() = %q, want %q", got, want)
 	}
 }
 
 func TestValidFromList(t *testing.T) {
 	got := ValidFromList()
-	for _, want := range []string{"request", "response"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("ValidFromList() = %q, missing %q", got, want)
-		}
+	// Output is sorted alphabetically after the sort fix.
+	want := "request, response"
+	if got != want {
+		t.Errorf("ValidFromList() = %q, want %q", got, want)
 	}
 }
 
