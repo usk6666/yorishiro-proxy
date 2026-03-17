@@ -36,8 +36,9 @@ type ViewMode = "raw" | "pretty" | "hex" | "preview";
 function getContentType(headers?: Record<string, string[]> | null): string {
   if (!headers) return "";
   for (const [key, values] of Object.entries(headers)) {
-    if (key.toLowerCase() === "content-type" && values.length > 0) {
-      return values[0];
+    const sv = values ?? [];
+    if (key.toLowerCase() === "content-type" && sv.length > 0) {
+      return sv[0];
     }
   }
   return "";

@@ -243,14 +243,14 @@ function GrpcMetadataTable({
     if (!requestHeaders) return [];
     return Object.entries(requestHeaders)
       .filter(([key]) => isGrpcMetadata(key))
-      .flatMap(([key, values]) => values.map((v) => ({ key, value: v })));
+      .flatMap(([key, values]) => (values ?? []).map((v) => ({ key, value: v })));
   }, [requestHeaders]);
 
   const responseMetadata = useMemo(() => {
     if (!responseHeaders) return [];
     return Object.entries(responseHeaders)
       .filter(([key]) => isGrpcMetadata(key))
-      .flatMap(([key, values]) => values.map((v) => ({ key, value: v })));
+      .flatMap(([key, values]) => (values ?? []).map((v) => ({ key, value: v })));
   }, [responseHeaders]);
 
   if (requestMetadata.length === 0 && responseMetadata.length === 0) {

@@ -28,8 +28,9 @@ export function ResponseViewer({ response, originalFlow }: ResponseViewerProps) 
   const responseContentType = useMemo(() => {
     if (!response.response_headers) return "";
     for (const [key, values] of Object.entries(response.response_headers)) {
-      if (key.toLowerCase() === "content-type" && values.length > 0) {
-        return values[0];
+      const sv = values ?? [];
+      if (key.toLowerCase() === "content-type" && sv.length > 0) {
+        return sv[0];
       }
     }
     return "";
@@ -63,7 +64,7 @@ export function ResponseViewer({ response, originalFlow }: ResponseViewerProps) 
                 </thead>
                 <tbody>
                   {Object.entries(response.response_headers).map(([key, values]) =>
-                    values.map((value, idx) => (
+                    (values ?? []).map((value, idx) => (
                       <tr key={`${key}-${idx}`}>
                         <td className="response-header-key">{key}</td>
                         <td className="response-header-value">{value}</td>

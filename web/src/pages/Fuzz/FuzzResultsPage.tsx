@@ -658,7 +658,7 @@ export function FuzzResultsPage() {
                           >
                             <span className="fuzz-header-name">{name}:</span>
                             <span className="fuzz-header-value">
-                              {values.join(", ")}
+                              {(values ?? []).join(", ")}
                             </span>
                           </div>
                         ),
@@ -678,7 +678,8 @@ export function FuzzResultsPage() {
                           (() => {
                             const hdrs = detailFlow.response_headers ?? {};
                             for (const [k, v] of Object.entries(hdrs)) {
-                              if (k.toLowerCase() === "content-type" && v.length > 0) return v[0];
+                              const sv = v ?? [];
+                              if (k.toLowerCase() === "content-type" && sv.length > 0) return sv[0];
                             }
                             return "";
                           })()
