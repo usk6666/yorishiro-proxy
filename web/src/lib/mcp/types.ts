@@ -254,6 +254,7 @@ export type QueryResource =
 /** Filter options for the query tool. */
 export interface QueryFilter {
   protocol?: string;
+  scheme?: string;
   method?: string;
   url_pattern?: string;
   status_code?: number;
@@ -283,6 +284,7 @@ export interface QueryParams {
 export interface FlowEntry {
   id: string;
   protocol: string;
+  scheme?: string;
   flow_type: string;
   state: string;
   method: string;
@@ -341,6 +343,7 @@ export interface FlowDetailResult {
   id: string;
   conn_id: string;
   protocol: string;
+  scheme?: string;
   flow_type: string;
   state: string;
   method: string;

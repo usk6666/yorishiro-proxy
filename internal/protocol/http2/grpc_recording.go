@@ -80,6 +80,7 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	fl := &flow.Flow{
 		ConnID:    sc.connID,
 		Protocol:  "gRPC",
+		Scheme:    "https",
 		FlowType:  "unary", // Updated to stream/bidirectional on completion.
 		State:     "active",
 		Timestamp: sc.start,

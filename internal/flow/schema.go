@@ -125,12 +125,20 @@ ALTER TABLE flows ADD COLUMN wait_ms INTEGER;
 ALTER TABLE flows ADD COLUMN receive_ms INTEGER;
 `
 
+// schemaV6 adds a scheme column to flows for separating transport security
+// (http/https/ws/wss/tcp) from application protocol (HTTP/1.x, HTTP/2, gRPC, etc.).
+const schemaV6 = `
+ALTER TABLE flows ADD COLUMN scheme TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_flows_scheme ON flows(scheme);
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
 	2: schemaV2,
 	3: schemaV3,
 	4: schemaV4,
 	5: schemaV5,
+	6: schemaV6,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

@@ -84,9 +84,16 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	start := time.Now()
 
 	// Create the WebSocket flow record.
+	// Determine scheme based on TLS metadata from connection info.
+	wsScheme := "ws"
+	if connInfo != nil && connInfo.TLSVersion != "" {
+		wsScheme = "wss"
+	}
+
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "WebSocket",
+		Scheme:    wsScheme,
 		FlowType:  "bidirectional",
 		State:     "active",
 		Timestamp: start,

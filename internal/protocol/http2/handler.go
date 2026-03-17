@@ -476,6 +476,7 @@ func (h *Handler) buildStreamRecordParams(sc *streamContext) {
 	sc.srp = sendRecordParams{
 		connID:       sc.connID,
 		clientAddr:   sc.clientAddr,
+		scheme:       "https",
 		start:        sc.start,
 		connInfo:     sc.connInfo,
 		req:          sc.req,

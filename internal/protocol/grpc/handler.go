@@ -145,6 +145,7 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	fl := &flow.Flow{
 		ConnID:    info.ConnID,
 		Protocol:  "gRPC",
+		Scheme:    "https",
 		FlowType:  sessionType,
 		State:     "complete",
 		Timestamp: info.Start,
