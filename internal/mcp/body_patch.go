@@ -49,7 +49,7 @@ func validateBodyPatch(bp BodyPatch) error {
 		reg := codec.DefaultRegistry()
 		for _, name := range bp.Encoding {
 			if _, ok := reg.Get(name); !ok {
-				return fmt.Errorf("unknown encoding codec %q", name)
+				return fmt.Errorf("unknown encoding codec %q; available codecs: %s", name, strings.Join(reg.List(), ", "))
 			}
 		}
 	}

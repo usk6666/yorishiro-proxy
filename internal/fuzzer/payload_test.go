@@ -13,9 +13,10 @@ func TestPayloadSet_Validate(t *testing.T) {
 	intPtr := func(v int) *int { return &v }
 
 	tests := []struct {
-		name    string
-		ps      PayloadSet
-		wantErr bool
+		name        string
+		ps          PayloadSet
+		wantErr     bool
+		errContains string
 	}{
 		{
 			name: "valid wordlist",
@@ -124,9 +125,10 @@ func TestPayloadSet_Validate(t *testing.T) {
 			ps:   PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: []string{"base64"}},
 		},
 		{
-			name:    "unknown encoding codec",
-			ps:      PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: []string{"nonexistent_codec"}},
-			wantErr: true,
+			name:        "unknown encoding codec",
+			ps:          PayloadSet{Type: "wordlist", Values: []string{"a"}, Encoding: []string{"nonexistent_codec"}},
+			wantErr:     true,
+			errContains: "available codecs:",
 		},
 		{
 			name: "encoding chain at max length",
@@ -156,6 +158,11 @@ func TestPayloadSet_Validate(t *testing.T) {
 			err := tt.ps.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.errContains != "" && err != nil {
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.errContains)
+				}
 			}
 		})
 	}
