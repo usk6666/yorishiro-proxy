@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -380,6 +381,42 @@ func TestResolveWordlistPath_Security(t *testing.T) {
 				t.Errorf("resolveWordlistPath() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestResolveWordlistPath_ErrorContainsHint(t *testing.T) {
+	baseDir := t.TempDir()
+	_, err := resolveWordlistPath(baseDir, "nonexistent.txt")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+	// Verify the error includes the hint with the base directory path.
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "hint:") {
+		t.Errorf("error %q does not contain hint", errMsg)
+	}
+	if !strings.Contains(errMsg, baseDir) {
+		t.Errorf("error %q does not contain base dir %q", errMsg, baseDir)
+	}
+}
+
+func TestDefaultWordlistBaseDir(t *testing.T) {
+	dir := DefaultWordlistBaseDir()
+	if dir == "" {
+		t.Fatal("DefaultWordlistBaseDir() returned empty string")
+	}
+	if !filepath.IsAbs(dir) {
+		// When HOME is set, the path should be absolute.
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			t.Errorf("DefaultWordlistBaseDir() = %q, expected absolute path", dir)
+		}
+	}
+	if !strings.Contains(dir, ".yorishiro-proxy") {
+		t.Errorf("DefaultWordlistBaseDir() = %q, expected to contain .yorishiro-proxy", dir)
+	}
+	if !strings.Contains(dir, "wordlists") {
+		t.Errorf("DefaultWordlistBaseDir() = %q, expected to contain wordlists", dir)
 	}
 }
 

@@ -363,7 +363,7 @@ func TestM3ComponentInitialization(t *testing.T) {
 	// Verify FuzzEngine and FuzzRunner construction.
 	// The store satisfies FlowFetcher, FlowRecorder, and FuzzJobStore interfaces.
 	// Use the default HTTP client with explicit timeout (never http.DefaultClient).
-	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewDefaultHTTPClient(), "")
+	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewDefaultHTTPClient(), fuzzer.DefaultWordlistBaseDir())
 	if fuzzEngine == nil {
 		t.Fatal("fuzzer.NewEngine() returned nil")
 	}

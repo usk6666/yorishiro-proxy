@@ -4,8 +4,10 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"path/filepath"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 )
 
 //go:embed resources/*.md resources/*.json
@@ -178,6 +180,42 @@ func (s *Server) registerResources() {
 			makeResourceHandler(rd.uri, rd.mimeType, rd.filename),
 		)
 	}
+
+	// Register dynamic resources that depend on runtime values.
+	s.registerWordlistDirResource()
+}
+
+// registerWordlistDirResource registers a dynamic MCP resource that returns
+// the resolved wordlist directory path. AI agents can read this resource to
+// determine where to place wordlist files for file-type payload sets.
+func (s *Server) registerWordlistDirResource() {
+	const uri = "yorishiro://info/wordlist_dir"
+
+	// Compute the wordlist directory once and ensure it is absolute (C-1/F-1).
+	wordlistDir := fuzzer.DefaultWordlistBaseDir()
+	if abs, err := filepath.Abs(wordlistDir); err == nil {
+		wordlistDir = abs
+	}
+
+	s.server.AddResource(
+		&gomcp.Resource{
+			URI:         uri,
+			Name:        "info_wordlist_dir",
+			Description: "Absolute path to the wordlist directory where file-type fuzz payload files should be placed.",
+			MIMEType:    "text/plain",
+		},
+		func(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
+			return &gomcp.ReadResourceResult{
+				Contents: []*gomcp.ResourceContents{
+					{
+						URI:      uri,
+						MIMEType: "text/plain",
+						Text:     wordlistDir,
+					},
+				},
+			}, nil
+		},
+	)
 }
 
 // makeResourceHandler returns a ResourceHandler that reads the given file from the

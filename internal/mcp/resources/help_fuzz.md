@@ -29,7 +29,7 @@ Start an asynchronous fuzz campaign against a recorded flow. Returns fuzz_id imm
 - **payload_sets** (object, required): Named payload sets. Each set specifies:
   - **type** (string, required): `wordlist`, `file`, `range`, `sequence`, `charset`, `case_variation`, or `null_byte_injection`.
   - **values** (array): Payload strings (for wordlist).
-  - **path** (string): Relative path under `~/.yorishiro-proxy/wordlists/` (for file).
+  - **path** (string): Relative path under the wordlist directory (for file). Default directory: `~/.yorishiro-proxy/wordlists/`. Read the `yorishiro://info/wordlist_dir` resource to get the exact resolved path.
   - **start**, **end**, **step** (integer): Range parameters (for range/sequence).
   - **format** (string): Format string (for sequence, e.g. `"user%04d"`).
   - **charset** (string): Character set for charset type (e.g. `"abc"`, `"0123456789"`).
