@@ -447,7 +447,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		connID:       connID,
 		clientAddr:   clientAddr,
 		protocol:     socks5Protocol(ctx, "HTTP/1.x"),
-		scheme:       socks5Scheme(ctx, "http"),
+		scheme:       "http",
 		start:        start,
 		tags:         mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},

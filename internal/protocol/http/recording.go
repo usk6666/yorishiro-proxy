@@ -495,15 +495,6 @@ func socks5Protocol(ctx context.Context, base string) string {
 	return base
 }
 
-// socks5Scheme returns the scheme string, replacing with "socks5" prefix
-// context if the request arrived through a SOCKS5 tunnel.
-// The scheme itself does not change for SOCKS5 tunneled connections because
-// the scheme represents the end-to-end transport, not the tunnel layer.
-// SOCKS5 metadata is already captured in the protocol field and tags.
-func socks5Scheme(_ context.Context, base string) string {
-	return base
-}
-
 // mergeSOCKS5Tags adds SOCKS5 metadata tags to the given tags map if the
 // request arrived through a SOCKS5 tunnel. If tags is nil, a new map is
 // created. Returns the (possibly new) tags map.

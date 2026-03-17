@@ -52,11 +52,11 @@ type queryInput struct {
 
 // queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
-	// Protocol filters flows by application protocol (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP").
-	Protocol string `json:"protocol,omitempty" jsonschema:"application protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP)"`
+	// Protocol filters flows by protocol label (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP").
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP)"`
 	// Scheme filters flows by URL scheme / transport (e.g. "https", "http", "wss", "ws", "tcp").
-	// Use scheme to find all TLS flows regardless of application protocol:
-	// filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
+	// Use scheme to find TLS flows: filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
+	// WebSocket over TLS uses scheme="wss", not "https".
 	Scheme string `json:"scheme,omitempty" jsonschema:"URL scheme / transport filter (https, http, wss, ws, tcp)"`
 	// Method filters flows by HTTP method (e.g. "GET", "POST").
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`

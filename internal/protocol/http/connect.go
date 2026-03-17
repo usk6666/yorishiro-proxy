@@ -245,7 +245,7 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 		connID:       connID,
 		clientAddr:   clientAddr,
 		protocol:     socks5Protocol(ctx, "HTTP/1.x"),
-		scheme:       socks5Scheme(ctx, "http"),
+		scheme:       "http",
 		start:        start,
 		tags:         mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},
@@ -661,7 +661,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		connID:     connID,
 		clientAddr: clientAddr,
 		protocol:   socks5Protocol(ctx, "HTTPS"),
-		scheme:     socks5Scheme(ctx, "https"),
+		scheme:     "https",
 		start:      start,
 		tags:       mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
 		connInfo: &flow.ConnectionInfo{
