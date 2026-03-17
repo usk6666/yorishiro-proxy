@@ -10,6 +10,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // requestHeaders returns a clone of the request headers with the Host header
@@ -70,13 +71,17 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		return nil
 	}
 
+	protocol := proxy.SOCKS5Protocol(ctx, "HTTP/2")
+	tags := proxy.MergeSOCKS5Tags(ctx, nil)
+
 	fl := &flow.Flow{
 		ConnID:    p.connID,
-		Protocol:  "HTTP/2",
+		Protocol:  protocol,
 		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
+		Tags:      tags,
 		ConnInfo:  p.connInfo,
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
@@ -177,13 +182,17 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	// Detect whether modification occurred.
 	modified := snap != nil && requestModified(*snap, p.req.Header, p.reqBody)
 
+	protocol := proxy.SOCKS5Protocol(ctx, "HTTP/2")
+	tags := proxy.MergeSOCKS5Tags(ctx, nil)
+
 	fl := &flow.Flow{
 		ConnID:    p.connID,
-		Protocol:  "HTTP/2",
+		Protocol:  protocol,
 		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
+		Tags:      tags,
 		ConnInfo:  p.connInfo,
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
@@ -349,7 +358,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		sharedSnap = &s
 	}
 
-	tags := httputil.MergeTechnologyTags(nil, h.detector, p.resp.Header, p.respBody)
+	tags := proxy.MergeSOCKS5Tags(ctx, nil)
+	tags = httputil.MergeTechnologyTags(tags, h.detector, p.resp.Header, p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
@@ -380,9 +390,9 @@ func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordRes
 	}
 
 	duration := time.Since(start)
-	tags := map[string]string{
+	tags := proxy.MergeSOCKS5Tags(ctx, map[string]string{
 		"error": upstreamErr.Error(),
-	}
+	})
 	update := flow.FlowUpdate{
 		State:    "error",
 		Duration: duration,
@@ -406,14 +416,18 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	}
 
 	duration := time.Since(p.start)
+	protocol := proxy.SOCKS5Protocol(ctx, "HTTP/2")
+	tags := proxy.MergeSOCKS5Tags(ctx, nil)
+
 	fl := &flow.Flow{
 		ConnID:    p.connID,
-		Protocol:  "HTTP/2",
+		Protocol:  protocol,
 		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: p.start,
 		Duration:  duration,
+		Tags:      tags,
 		BlockedBy: "intercept_drop",
 		ConnInfo:  p.connInfo,
 	}
@@ -454,12 +468,12 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 	}
 
 	duration := time.Since(p.start)
-	tags := map[string]string{
+	tags := proxy.MergeSOCKS5Tags(ctx, map[string]string{
 		"error": buildErr.Error(),
-	}
+	})
 	fl := &flow.Flow{
 		ConnID:    p.connID,
-		Protocol:  "HTTP/2",
+		Protocol:  proxy.SOCKS5Protocol(ctx, "HTTP/2"),
 		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "error",

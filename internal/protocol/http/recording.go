@@ -482,36 +482,13 @@ func (h *Handler) recordHTTPSession(ctx context.Context, p sessionRecordParams, 
 
 // socks5Protocol returns the protocol string with a "SOCKS5+" prefix if the
 // request arrived through a SOCKS5 tunnel (detected via context metadata).
-// For example, "HTTPS" becomes "SOCKS5+HTTPS" and "HTTP/1.x" becomes "SOCKS5+HTTP".
+// Delegates to proxy.SOCKS5Protocol.
 func socks5Protocol(ctx context.Context, base string) string {
-	if proxy.SOCKS5TargetFromContext(ctx) != "" {
-		switch base {
-		case "HTTP/1.x":
-			return "SOCKS5+HTTP"
-		default:
-			return "SOCKS5+" + base
-		}
-	}
-	return base
+	return proxy.SOCKS5Protocol(ctx, base)
 }
 
 // mergeSOCKS5Tags adds SOCKS5 metadata tags to the given tags map if the
-// request arrived through a SOCKS5 tunnel. If tags is nil, a new map is
-// created. Returns the (possibly new) tags map.
+// request arrived through a SOCKS5 tunnel. Delegates to proxy.MergeSOCKS5Tags.
 func mergeSOCKS5Tags(ctx context.Context, tags map[string]string) map[string]string {
-	target := proxy.SOCKS5TargetFromContext(ctx)
-	if target == "" {
-		return tags
-	}
-	if tags == nil {
-		tags = make(map[string]string)
-	}
-	tags["socks5_target"] = target
-	if authMethod := proxy.SOCKS5AuthMethodFromContext(ctx); authMethod != "" {
-		tags["socks5_auth_method"] = authMethod
-	}
-	if authUser := proxy.SOCKS5AuthUserFromContext(ctx); authUser != "" {
-		tags["socks5_auth_user"] = authUser
-	}
-	return tags
+	return proxy.MergeSOCKS5Tags(ctx, tags)
 }

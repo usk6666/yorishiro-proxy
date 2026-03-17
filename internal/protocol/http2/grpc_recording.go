@@ -11,6 +11,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // grpcProgressiveRecorder manages progressive (frame-by-frame) recording
@@ -77,13 +78,17 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	rec.grpcEncoding = sc.req.Header.Get("grpc-encoding")
 
 	// Create flow with State="active".
+	protocol := proxy.SOCKS5Protocol(ctx, "gRPC")
+	tags := proxy.MergeSOCKS5Tags(ctx, nil)
+
 	fl := &flow.Flow{
 		ConnID:    sc.connID,
-		Protocol:  "gRPC",
+		Protocol:  protocol,
 		Scheme:    sc.flowScheme,
 		FlowType:  "unary", // Updated to stream/bidirectional on completion.
 		State:     "active",
 		Timestamp: sc.start,
+		Tags:      tags,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: sc.clientAddr,
 			TLSVersion: sc.tlsMeta.Version,
@@ -255,12 +260,12 @@ func (r *grpcProgressiveRecorder) completeFlow(
 		)
 	}
 
-	// Build tags.
-	tags := map[string]string{
+	// Build tags, preserving SOCKS5 metadata from the context.
+	tags := proxy.MergeSOCKS5Tags(ctx, map[string]string{
 		"streaming_type": "grpc",
 		"grpc_service":   r.service,
 		"grpc_method":    r.method,
-	}
+	})
 	if grpcStatus != "" {
 		tags["grpc_status"] = grpcStatus
 	}
