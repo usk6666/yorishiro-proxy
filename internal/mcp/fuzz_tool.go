@@ -157,8 +157,12 @@ func validateFuzzParams(params fuzzParams) error {
 	if params.FlowID == "" {
 		return fmt.Errorf("flow_id is required for fuzz action")
 	}
+	validAttackTypes := []string{"sequential", "parallel"}
 	if params.AttackType == "" {
-		return fmt.Errorf("attack_type is required for fuzz action")
+		return fmt.Errorf("attack_type is required for fuzz action: valid values are %s", strings.Join(validAttackTypes, ", "))
+	}
+	if params.AttackType != "sequential" && params.AttackType != "parallel" {
+		return fmt.Errorf("invalid attack_type %q: valid values are %s", params.AttackType, strings.Join(validAttackTypes, ", "))
 	}
 	if len(params.Positions) == 0 {
 		return fmt.Errorf("at least one position is required for fuzz action")
