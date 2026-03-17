@@ -55,6 +55,9 @@ type fuzzParams struct {
 // availableFuzzActions lists the valid action names for the fuzz tool.
 var availableFuzzActions = []string{"fuzz", "fuzz_pause", "fuzz_resume", "fuzz_cancel"}
 
+// validAttackTypes lists the valid attack_type values for fuzz actions.
+var validAttackTypes = []string{"sequential", "parallel"}
+
 // registerFuzz registers the fuzz MCP tool.
 func (s *Server) registerFuzz() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
@@ -160,7 +163,10 @@ func validateFuzzParams(params fuzzParams) error {
 		return fmt.Errorf("flow_id is required for fuzz action")
 	}
 	if params.AttackType == "" {
-		return fmt.Errorf("attack_type is required for fuzz action")
+		return fmt.Errorf("attack_type is required for fuzz action: valid values are %s", strings.Join(validAttackTypes, ", "))
+	}
+	if params.AttackType != "sequential" && params.AttackType != "parallel" {
+		return fmt.Errorf("invalid attack_type %q: valid values are %s", params.AttackType, strings.Join(validAttackTypes, ", "))
 	}
 	if len(params.Positions) == 0 {
 		return fmt.Errorf("at least one position is required for fuzz action")
