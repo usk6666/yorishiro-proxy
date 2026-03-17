@@ -89,6 +89,80 @@ type queryFilter struct {
 // availableResources lists all valid resource names for error messages.
 var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results", "technologies"}
 
+// validFilterProtocols lists valid values for filter.protocol.
+var validFilterProtocols = []string{"HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"}
+
+// validFilterSchemes lists valid values for filter.scheme.
+var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
+
+// validFilterStates lists valid values for filter.state.
+var validFilterStates = []string{"active", "complete", "error"}
+
+// validFilterBlockedBy lists valid values for filter.blocked_by.
+var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter"}
+
+// validFilterFuzzJobStatuses lists valid values for filter.status (fuzz_jobs).
+var validFilterFuzzJobStatuses = []string{"running", "paused", "completed", "cancelled", "error"}
+
+// validFlowSortByValues lists valid values for sort_by (flows).
+var validFlowSortByValues = []string{"timestamp", "duration_ms"}
+
+// validFuzzResultSortByValues lists valid values for sort_by (fuzz_results).
+var validFuzzResultSortByValues = []string{"index_num", "status_code", "duration_ms", "response_length"}
+
+// validateEnum checks whether value is in the allowed set and returns an error with valid values listed.
+func validateEnum(param, value string, valid []string) error {
+	if value == "" {
+		return nil
+	}
+	for _, v := range valid {
+		if value == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid %s %q: valid values are %s", param, value, strings.Join(valid, ", "))
+}
+
+// validateFlowFilters validates enum filter parameters for the flows resource.
+func validateFlowFilters(input queryInput) error {
+	if input.Filter != nil {
+		if err := validateEnum("protocol", input.Filter.Protocol, validFilterProtocols); err != nil {
+			return err
+		}
+		if err := validateEnum("scheme", input.Filter.Scheme, validFilterSchemes); err != nil {
+			return err
+		}
+		if err := validateEnum("state", input.Filter.State, validFilterStates); err != nil {
+			return err
+		}
+		if err := validateEnum("blocked_by", input.Filter.BlockedBy, validFilterBlockedBy); err != nil {
+			return err
+		}
+	}
+	if err := validateEnum("sort_by", input.SortBy, validFlowSortByValues); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateFuzzJobFilters validates enum filter parameters for the fuzz_jobs resource.
+func validateFuzzJobFilters(input queryInput) error {
+	if input.Filter != nil {
+		if err := validateEnum("status", input.Filter.Status, validFilterFuzzJobStatuses); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateFuzzResultFilters validates enum filter parameters for the fuzz_results resource.
+func validateFuzzResultFilters(input queryInput) error {
+	if err := validateEnum("sort_by", input.SortBy, validFuzzResultSortByValues); err != nil {
+		return err
+	}
+	return nil
+}
+
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
@@ -116,8 +190,25 @@ func (s *Server) registerQuery() {
 	}, s.handleQuery)
 }
 
+// validateQueryInput dispatches enum validation by resource type.
+func validateQueryInput(input queryInput) error {
+	switch input.Resource {
+	case "flows":
+		return validateFlowFilters(input)
+	case "fuzz_jobs":
+		return validateFuzzJobFilters(input)
+	case "fuzz_results":
+		return validateFuzzResultFilters(input)
+	default:
+		return nil
+	}
+}
+
 // handleQuery dispatches the query request to the appropriate resource handler.
 func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, input queryInput) (*gomcp.CallToolResult, any, error) {
+	if err := validateQueryInput(input); err != nil {
+		return nil, nil, err
+	}
 	switch input.Resource {
 	case "flows":
 		return s.handleQueryFlows(ctx, input)
