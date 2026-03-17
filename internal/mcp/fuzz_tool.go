@@ -321,6 +321,7 @@ func (s *Server) syncFuzzJobStatus(fuzzID, status string) {
 	ctx := context.Background()
 	job, err := s.deps.fuzzStore.GetFuzzJob(ctx, fuzzID)
 	if err != nil {
+		slog.Warn("failed to fetch fuzz job for status sync", "job_id", fuzzID, "error", err)
 		return
 	}
 	job.Status = status
