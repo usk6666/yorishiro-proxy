@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -315,11 +316,19 @@ func TestExecute_DefineMacro_InvalidExtractSource(t *testing.T) {
 		},
 	})
 	if err != nil {
-		// SDK schema validation error — acceptable.
+		// SDK schema validation may reject the invalid enum value before
+		// it reaches the handler. Verify the error mentions the field.
+		if !strings.Contains(err.Error(), "source") {
+			t.Fatalf("expected SDK error about 'source', got: %v", err)
+		}
 		return
 	}
 	if !result.IsError {
 		t.Fatal("expected error for invalid source value 'response'")
+	}
+	errText := extractTextContent(result)
+	if !strings.Contains(errText, "invalid source") {
+		t.Errorf("error should mention 'invalid source', got: %s", errText)
 	}
 }
 
@@ -350,11 +359,19 @@ func TestExecute_DefineMacro_InvalidExtractFrom(t *testing.T) {
 		},
 	})
 	if err != nil {
-		// SDK schema validation error — acceptable.
+		// SDK schema validation may reject the invalid enum value before
+		// it reaches the handler. Verify the error mentions the field.
+		if !strings.Contains(err.Error(), "from") {
+			t.Fatalf("expected SDK error about 'from', got: %v", err)
+		}
 		return
 	}
 	if !result.IsError {
 		t.Fatal("expected error for invalid from value 'body'")
+	}
+	errText := extractTextContent(result)
+	if !strings.Contains(errText, "invalid from") {
+		t.Errorf("error should mention 'invalid from', got: %s", errText)
 	}
 }
 
@@ -1157,4 +1174,15 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 	if newCount < 2 {
 		t.Errorf("new flows = %d, want >= 2 (hook macro + resend)", newCount)
 	}
+}
+
+// extractTextContent returns the text from the first TextContent in a CallToolResult.
+func extractTextContent(result *gomcp.CallToolResult) string {
+	if len(result.Content) == 0 {
+		return ""
+	}
+	if tc, ok := result.Content[0].(*gomcp.TextContent); ok {
+		return tc.Text
+	}
+	return ""
 }

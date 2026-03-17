@@ -432,24 +432,9 @@ func validateMacroStep(step *macro.Step, index int, seenIDs map[string]bool) err
 	return validateStepExtractionRules(step)
 }
 
-// validMacroExtractionSources is the set of valid macro.ExtractionSource values
-// for MCP-layer validation.
-var validMacroExtractionSources = map[macro.ExtractionSource]bool{
-	macro.ExtractionSourceHeader:   true,
-	macro.ExtractionSourceBody:     true,
-	macro.ExtractionSourceBodyJSON: true,
-	macro.ExtractionSourceStatus:   true,
-	macro.ExtractionSourceURL:      true,
-}
-
-// validMacroExtractionFroms is the set of valid macro.ExtractionFrom values
-// for MCP-layer validation.
-var validMacroExtractionFroms = map[macro.ExtractionFrom]bool{
-	macro.ExtractionFromRequest:  true,
-	macro.ExtractionFromResponse: true,
-}
-
 // validateStepExtractionRules validates all extraction rules in a macro step.
+// Validation logic for source/from enum values is delegated to the macro package
+// via macro.ValidSource and macro.ValidFrom to avoid duplicating the allow-lists.
 func validateStepExtractionRules(step *macro.Step) error {
 	for j := range step.Extract {
 		rule := &step.Extract[j]
@@ -459,14 +444,14 @@ func validateStepExtractionRules(step *macro.Step) error {
 		if rule.Source == "" {
 			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
 		}
-		if !validMacroExtractionSources[rule.Source] {
-			return fmt.Errorf("step %q extraction rule %q has invalid source %q (valid: header, body, body_json, status, url)", step.ID, rule.Name, rule.Source)
+		if !macro.ValidSource(rule.Source) {
+			return fmt.Errorf("step %q extraction rule %q has invalid source %q", step.ID, rule.Name, rule.Source)
 		}
 		if rule.From == "" {
 			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
 		}
-		if !validMacroExtractionFroms[rule.From] {
-			return fmt.Errorf("step %q extraction rule %q has invalid from %q (valid: request, response)", step.ID, rule.Name, rule.From)
+		if !macro.ValidFrom(rule.From) {
+			return fmt.Errorf("step %q extraction rule %q has invalid from %q", step.ID, rule.Name, rule.From)
 		}
 	}
 	return nil
