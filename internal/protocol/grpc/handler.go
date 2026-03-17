@@ -105,6 +105,8 @@ type StreamInfo struct {
 	TLSALPN string
 	// TLSServerCertSubject is the subject of the upstream server's TLS certificate.
 	TLSServerCertSubject string
+	// Scheme is the URL scheme ("https" for TLS, "http" for plaintext).
+	Scheme string
 }
 
 // RecordSession records a gRPC session from the given stream info.
@@ -145,6 +147,7 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	fl := &flow.Flow{
 		ConnID:    info.ConnID,
 		Protocol:  "gRPC",
+		Scheme:    info.Scheme,
 		FlowType:  sessionType,
 		State:     "complete",
 		Timestamp: info.Start,

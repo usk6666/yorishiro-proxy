@@ -182,6 +182,7 @@ func relayRawTCP(ctx context.Context, clientConn, upstreamConn net.Conn, target 
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "SOCKS5+TCP",
+		Scheme:    "tcp",
 		FlowType:  "bidirectional",
 		State:     "active",
 		Timestamp: start,

@@ -160,11 +160,12 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, fl *Flow) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO flows (id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO flows (id, conn_id, protocol, scheme, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		fl.ID,
 		fl.ConnID,
 		fl.Protocol,
+		fl.Scheme,
 		flowType,
 		state,
 		fl.Timestamp.UTC().Format(time.RFC3339Nano),
@@ -319,7 +320,7 @@ func ValidateFlowID(id string) error {
 }
 
 // flowColumns is the list of columns selected in flow queries.
-const flowColumns = `id, conn_id, protocol, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms`
+const flowColumns = `id, conn_id, protocol, scheme, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms`
 
 // buildFlowWhereClause constructs a SQL WHERE clause from ListOptions.
 // Method, URLPattern, and StatusCode are matched via EXISTS subqueries on messages.
@@ -330,6 +331,10 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 	if opts.Protocol != "" {
 		conditions = append(conditions, "s.protocol = ?")
 		args = append(args, opts.Protocol)
+	}
+	if opts.Scheme != "" {
+		conditions = append(conditions, "s.scheme = ?")
+		args = append(args, opts.Scheme)
 	}
 	if opts.Method != "" {
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND m.method = ?)")
@@ -740,6 +745,7 @@ func scanFlow(row scannable) (*Flow, error) {
 		&fl.ID,
 		&fl.ConnID,
 		&fl.Protocol,
+		&fl.Scheme,
 		&fl.FlowType,
 		&fl.State,
 		&tsStr,

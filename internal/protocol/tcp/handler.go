@@ -122,6 +122,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "TCP",
+		Scheme:    "tcp",
 		FlowType:  "bidirectional",
 		State:     "active",
 		Timestamp: start,

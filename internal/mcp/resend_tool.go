@@ -537,7 +537,8 @@ func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, par
 	}
 
 	newFl := &flow.Flow{
-		Protocol: prep.flow.Protocol, FlowType: "unary", State: "complete",
+		Protocol: prep.flow.Protocol, Scheme: prep.flow.Scheme,
+		FlowType: "unary", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
@@ -935,7 +936,8 @@ func (s *Server) recordRawResend(ctx context.Context, fl *flow.Flow, params rese
 	}
 
 	newFl := &flow.Flow{
-		Protocol: fl.Protocol, FlowType: "unary", State: "complete",
+		Protocol: fl.Protocol, Scheme: fl.Scheme,
+		FlowType: "unary", State: "complete",
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
 	if err := s.deps.store.SaveFlow(ctx, newFl); err != nil {
