@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 
@@ -16,10 +17,13 @@ import (
 // decompression bomb attacks (CWE-409) where a small compressed payload expands
 // to consume excessive memory.
 // Any change to config.MaxGRPCMessageSize should be reflected here.
-const maxDecompressedSize = 254 << 20 // 254 MB
+//
+// This is a var (not const) so that tests can temporarily override it with a
+// smaller value to avoid allocating 254 MB+ of memory in every test run.
+var maxDecompressedSize = 254 << 20 // 254 MB
 
 // ErrDecompressedSizeExceeded is returned when decompressed data exceeds maxDecompressedSize.
-var ErrDecompressedSizeExceeded = fmt.Errorf("protobuf: decompressed size exceeds limit (%d bytes)", maxDecompressedSize)
+var ErrDecompressedSizeExceeded = errors.New("protobuf: decompressed size exceeds limit")
 
 // ErrUnknownCompression is returned when the grpc-encoding value is not recognized.
 var ErrUnknownCompression = fmt.Errorf("protobuf: unknown compression algorithm")
@@ -70,13 +74,13 @@ func decompressGzip(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("gzip decompress: %w", err)
 	}
 	defer r.Close()
-	limited := &io.LimitedReader{R: r, N: maxDecompressedSize + 1}
+	limited := &io.LimitedReader{R: r, N: int64(maxDecompressedSize) + 1}
 	out, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("gzip decompress read: %w", err)
 	}
 	if len(out) > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	return out, nil
 }
@@ -96,13 +100,13 @@ func compressGzip(data []byte) ([]byte, error) {
 func decompressDeflate(data []byte) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(data))
 	defer r.Close()
-	limited := &io.LimitedReader{R: r, N: maxDecompressedSize + 1}
+	limited := &io.LimitedReader{R: r, N: int64(maxDecompressedSize) + 1}
 	out, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("deflate decompress: %w", err)
 	}
 	if len(out) > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	return out, nil
 }
@@ -128,7 +132,7 @@ func decompressSnappy(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("snappy decompress: %w", err)
 	}
 	if decodedLen > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	out, err := s2.Decode(nil, data)
 	if err != nil {
@@ -142,18 +146,18 @@ func compressSnappy(data []byte) ([]byte, error) {
 }
 
 func decompressZstd(data []byte) ([]byte, error) {
-	r, err := zstd.NewReader(bytes.NewReader(data), zstd.WithDecoderMaxMemory(maxDecompressedSize))
+	r, err := zstd.NewReader(bytes.NewReader(data), zstd.WithDecoderMaxMemory(uint64(maxDecompressedSize)))
 	if err != nil {
 		return nil, fmt.Errorf("zstd decompress init: %w", err)
 	}
 	defer r.Close()
-	limited := &io.LimitedReader{R: r, N: maxDecompressedSize + 1}
+	limited := &io.LimitedReader{R: r, N: int64(maxDecompressedSize) + 1}
 	out, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("zstd decompress read: %w", err)
 	}
 	if len(out) > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	return out, nil
 }

@@ -113,8 +113,18 @@ func TestCompress_LargePayload(t *testing.T) {
 	}
 }
 
+// setTestMaxDecompressedSize overrides maxDecompressedSize for the duration of a test.
+func setTestMaxDecompressedSize(t *testing.T, size int) {
+	t.Helper()
+	orig := maxDecompressedSize
+	maxDecompressedSize = size
+	t.Cleanup(func() { maxDecompressedSize = orig })
+}
+
 // TestDecompress_BombProtection tests that decompression is limited to maxDecompressedSize.
 func TestDecompress_BombProtection(t *testing.T) {
+	setTestMaxDecompressedSize(t, 8<<20) // 8 MB — keep tests fast while exceeding zstd default window size
+
 	// Create data slightly over the limit
 	oversize := make([]byte, maxDecompressedSize+1)
 	for i := range oversize {
@@ -172,6 +182,8 @@ func TestDecompress_BombProtection(t *testing.T) {
 
 // TestDecompress_AtLimit tests that data exactly at the limit succeeds.
 func TestDecompress_AtLimit(t *testing.T) {
+	setTestMaxDecompressedSize(t, 8<<20) // 8 MB — keep tests fast while exceeding zstd default window size
+
 	atLimit := make([]byte, maxDecompressedSize)
 	for i := range atLimit {
 		atLimit[i] = 'B'
