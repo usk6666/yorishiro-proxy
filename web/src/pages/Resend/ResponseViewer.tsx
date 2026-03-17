@@ -28,8 +28,9 @@ export function ResponseViewer({ response, originalFlow }: ResponseViewerProps) 
   const responseContentType = useMemo(() => {
     if (!response.response_headers) return "";
     for (const [key, values] of Object.entries(response.response_headers)) {
-      if (key.toLowerCase() === "content-type" && (values ?? []).length > 0) {
-        return values[0];
+      const sv = values ?? [];
+      if (key.toLowerCase() === "content-type" && sv.length > 0) {
+        return sv[0];
       }
     }
     return "";
