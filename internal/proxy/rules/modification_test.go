@@ -71,7 +71,7 @@ func TestCompileRule_InvalidActionType(t *testing.T) {
 		t.Fatal("expected error for invalid action type")
 	}
 	msg := err.Error()
-	for _, vt := range []string{"add_header", "set_header", "remove_header", "replace_body"} {
+	for _, vt := range []string{string(ActionAddHeader), string(ActionSetHeader), string(ActionRemoveHeader), string(ActionReplaceBody)} {
 		if !strings.Contains(msg, vt) {
 			t.Errorf("error message should contain valid type %q, got: %s", vt, msg)
 		}
