@@ -76,7 +76,7 @@ func (s *Server) handleMacroTool(ctx context.Context, _ *gomcp.CallToolRequest, 
 		}
 		return nil, result, nil
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableMacroActions)
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availableMacroActions, ", "))
 	}
 }
 

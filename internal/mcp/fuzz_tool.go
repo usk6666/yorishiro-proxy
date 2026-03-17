@@ -85,7 +85,7 @@ func (s *Server) handleFuzzTool(ctx context.Context, _ *gomcp.CallToolRequest, i
 	case "fuzz_cancel":
 		return s.handleFuzzCancelAction(input.Params)
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableFuzzActions)
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availableFuzzActions, ", "))
 	}
 }
 

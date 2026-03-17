@@ -94,7 +94,7 @@ func (s *Server) handleManage(ctx context.Context, _ *gomcp.CallToolRequest, inp
 		}
 		return nil, result, nil
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableManageActions)
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availableManageActions, ", "))
 	}
 }
 

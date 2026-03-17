@@ -138,7 +138,7 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 	case "drop":
 		return s.handleInterceptDrop(ctx, input.Params)
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableInterceptActions)
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availableInterceptActions, ", "))
 	}
 }
 

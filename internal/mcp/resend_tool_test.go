@@ -910,6 +910,15 @@ func TestExecute_InvalidAction(t *testing.T) {
 	if !result.IsError {
 		t.Fatal("expected error for invalid action")
 	}
+
+	// Verify comma-separated format (not Go slice format like "[a b c]").
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if strings.Contains(textContent.Text, "[") {
+		t.Errorf("error message should use comma-separated format, got %q", textContent.Text)
+	}
+	if !strings.Contains(textContent.Text, "resend, resend_raw") {
+		t.Errorf("error message = %q, want comma-separated actions", textContent.Text)
+	}
 }
 
 func TestExecute_EmptyAction(t *testing.T) {

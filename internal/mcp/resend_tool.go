@@ -206,7 +206,7 @@ func (s *Server) handleResend(ctx context.Context, _ *gomcp.CallToolRequest, inp
 			FlowIDB: input.Params.FlowIDB,
 		})
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %v", input.Action, availableResendActions)
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availableResendActions, ", "))
 	}
 }
 
