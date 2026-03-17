@@ -433,6 +433,8 @@ func validateMacroStep(step *macro.Step, index int, seenIDs map[string]bool) err
 }
 
 // validateStepExtractionRules validates all extraction rules in a macro step.
+// Validation logic for source/from enum values is delegated to the macro package
+// via macro.ValidSource and macro.ValidFrom to avoid duplicating the allow-lists.
 func validateStepExtractionRules(step *macro.Step) error {
 	for j := range step.Extract {
 		rule := &step.Extract[j]
@@ -442,8 +444,14 @@ func validateStepExtractionRules(step *macro.Step) error {
 		if rule.Source == "" {
 			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
 		}
+		if !macro.ValidSource(rule.Source) {
+			return fmt.Errorf("step %q extraction rule %q has invalid source %q", step.ID, rule.Name, rule.Source)
+		}
 		if rule.From == "" {
 			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
+		}
+		if !macro.ValidFrom(rule.From) {
+			return fmt.Errorf("step %q extraction rule %q has invalid from %q", step.ID, rule.Name, rule.From)
 		}
 	}
 	return nil
