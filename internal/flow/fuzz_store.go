@@ -64,6 +64,9 @@ type FuzzStore interface {
 	// UpdateFuzzJob updates the mutable fields of a fuzz job.
 	UpdateFuzzJob(ctx context.Context, job *FuzzJob) error
 
+	// UpdateFuzzJobStatus atomically updates only the status column of a fuzz job.
+	UpdateFuzzJobStatus(ctx context.Context, id string, status string) error
+
 	// GetFuzzJob retrieves a fuzz job by ID.
 	GetFuzzJob(ctx context.Context, id string) (*FuzzJob, error)
 
@@ -167,6 +170,21 @@ func (s *SQLiteStore) UpdateFuzzJob(ctx context.Context, job *FuzzJob) error {
 		)
 		if err != nil {
 			return fmt.Errorf("update fuzz job %s: %w", job.ID, err)
+		}
+		return nil
+	})
+}
+
+// UpdateFuzzJobStatus atomically updates only the status column of a fuzz job.
+func (s *SQLiteStore) UpdateFuzzJobStatus(ctx context.Context, id string, status string) error {
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE fuzz_jobs SET status = ? WHERE id = ?`,
+			status,
+			id,
+		)
+		if err != nil {
+			return fmt.Errorf("update fuzz job status %s: %w", id, err)
 		}
 		return nil
 	})

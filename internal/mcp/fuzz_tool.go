@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -318,14 +319,9 @@ func (s *Server) syncFuzzJobStatus(fuzzID, status string) {
 	if s.deps.fuzzStore == nil {
 		return
 	}
-	ctx := context.Background()
-	job, err := s.deps.fuzzStore.GetFuzzJob(ctx, fuzzID)
-	if err != nil {
-		slog.Warn("failed to fetch fuzz job for status sync", "job_id", fuzzID, "error", err)
-		return
-	}
-	job.Status = status
-	if err := s.deps.fuzzStore.UpdateFuzzJob(ctx, job); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.deps.fuzzStore.UpdateFuzzJobStatus(ctx, fuzzID, status); err != nil {
 		slog.Warn("failed to sync fuzz job status to DB", "job_id", fuzzID, "status", status, "error", err)
 	}
 }
