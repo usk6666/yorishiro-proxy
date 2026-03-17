@@ -30,6 +30,7 @@ type sendRecordParams struct {
 	connID     string
 	clientAddr string
 	protocol   string
+	scheme     string
 	start      time.Time
 	tags       map[string]string
 	connInfo   *flow.ConnectionInfo
@@ -86,6 +87,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  p.protocol,
+		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
@@ -148,6 +150,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  p.protocol,
+		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
@@ -374,6 +377,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  p.protocol,
+		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: p.start,
@@ -416,6 +420,7 @@ type sessionRecordParams struct {
 	clientAddr string
 	serverAddr string
 	protocol   string
+	scheme     string
 	start      time.Time
 	duration   time.Duration
 	tags       map[string]string
@@ -445,6 +450,7 @@ func (h *Handler) recordHTTPSession(ctx context.Context, p sessionRecordParams, 
 		connID:       p.connID,
 		clientAddr:   p.clientAddr,
 		protocol:     p.protocol,
+		scheme:       p.scheme,
 		start:        p.start,
 		tags:         p.tags,
 		connInfo:     p.connInfo,

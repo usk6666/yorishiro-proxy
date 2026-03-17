@@ -1157,7 +1157,7 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 		t.Errorf("new flow BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
 	}
 
-	// Verify schema version is now 5 (V3 adds blocked_by, V4 renames sessions→flows, V5 adds timing columns).
+	// Verify schema version is now 6 (V3 adds blocked_by, V4 renames sessions→flows, V5 adds timing columns, V6 adds scheme).
 	checkDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open check db: %v", err)
@@ -1168,8 +1168,8 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("schema version = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("schema version = %d, want 6", version)
 	}
 }
 
@@ -1699,5 +1699,76 @@ func Test_ListFlows_SortByDuration(t *testing.T) {
 	}
 	if sorted[2].Duration != 100*time.Millisecond {
 		t.Errorf("duration sort: third = %v, want 100ms", sorted[2].Duration)
+	}
+}
+
+func TestSQLiteStore_SchemeField(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Save flows with different schemes.
+	flows := []*Flow{
+		{Protocol: "HTTPS", Scheme: "https", Timestamp: time.Now()},
+		{Protocol: "HTTP/2", Scheme: "https", Timestamp: time.Now()},
+		{Protocol: "gRPC", Scheme: "https", Timestamp: time.Now()},
+		{Protocol: "HTTP/1.x", Scheme: "http", Timestamp: time.Now()},
+		{Protocol: "WebSocket", Scheme: "wss", Timestamp: time.Now()},
+		{Protocol: "WebSocket", Scheme: "ws", Timestamp: time.Now()},
+		{Protocol: "TCP", Scheme: "tcp", Timestamp: time.Now()},
+	}
+	for _, fl := range flows {
+		if err := store.SaveFlow(ctx, fl); err != nil {
+			t.Fatalf("save flow: %v", err)
+		}
+	}
+
+	// Test scheme filter: "https" should return 3 flows.
+	httpsFlows, err := store.ListFlows(ctx, ListOptions{Scheme: "https", Limit: 100})
+	if err != nil {
+		t.Fatalf("list https flows: %v", err)
+	}
+	if len(httpsFlows) != 3 {
+		t.Errorf("https filter: got %d flows, want 3", len(httpsFlows))
+	}
+	for _, fl := range httpsFlows {
+		if fl.Scheme != "https" {
+			t.Errorf("expected scheme=https, got %q", fl.Scheme)
+		}
+	}
+
+	// Test scheme filter: "ws" should return 1 flow.
+	wsFlows, err := store.ListFlows(ctx, ListOptions{Scheme: "ws", Limit: 100})
+	if err != nil {
+		t.Fatalf("list ws flows: %v", err)
+	}
+	if len(wsFlows) != 1 {
+		t.Errorf("ws filter: got %d flows, want 1", len(wsFlows))
+	}
+
+	// Test combined protocol + scheme filter: protocol="HTTP/2" AND scheme="https".
+	h2TlsFlows, err := store.ListFlows(ctx, ListOptions{Protocol: "HTTP/2", Scheme: "https", Limit: 100})
+	if err != nil {
+		t.Fatalf("list h2+https flows: %v", err)
+	}
+	if len(h2TlsFlows) != 1 {
+		t.Errorf("h2+https filter: got %d flows, want 1", len(h2TlsFlows))
+	}
+
+	// Test count with scheme filter.
+	count, err := store.CountFlows(ctx, ListOptions{Scheme: "https"})
+	if err != nil {
+		t.Fatalf("count https flows: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("count https: got %d, want 3", count)
+	}
+
+	// Verify scheme is persisted and retrieved via GetFlow.
+	got, err := store.GetFlow(ctx, flows[0].ID)
+	if err != nil {
+		t.Fatalf("get flow: %v", err)
+	}
+	if got.Scheme != "https" {
+		t.Errorf("GetFlow scheme = %q, want %q", got.Scheme, "https")
 	}
 }

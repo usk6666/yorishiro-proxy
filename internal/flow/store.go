@@ -103,6 +103,9 @@ type Store interface {
 type ListOptions struct {
 	// Protocol filters flows by protocol (e.g. "HTTP/1.x").
 	Protocol string
+	// Scheme filters flows by URL scheme / transport indicator
+	// (e.g. "https", "http", "wss", "ws", "tcp").
+	Scheme string
 	// Method filters flows that have a send message with this HTTP method.
 	Method string
 	// URLPattern filters flows that have a send message with a URL

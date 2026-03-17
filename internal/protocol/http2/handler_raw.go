@@ -110,6 +110,7 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 	fl := &flow.Flow{
 		ConnID:    sc.connID,
 		Protocol:  "HTTP/2",
+		Scheme:    sc.flowScheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: sc.start,

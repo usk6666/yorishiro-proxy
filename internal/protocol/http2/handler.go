@@ -271,6 +271,7 @@ type streamContext struct {
 	reqBody      []byte
 	reqTruncated bool
 	reqURL       *url.URL
+	flowScheme   string // "https" for h2 (TLS), "http" for h2c (plaintext)
 	connInfo     *flow.ConnectionInfo
 	srp          sendRecordParams
 
@@ -446,6 +447,7 @@ func (h *Handler) resolveSchemeAndHost(sc *streamContext) {
 	if sc.connectAuthority != "" {
 		scheme = "https"
 	}
+	sc.flowScheme = scheme
 	host := sc.req.Host
 	if host == "" && sc.connectAuthority != "" {
 		host = sc.connectAuthority
@@ -476,6 +478,7 @@ func (h *Handler) buildStreamRecordParams(sc *streamContext) {
 	sc.srp = sendRecordParams{
 		connID:       sc.connID,
 		clientAddr:   sc.clientAddr,
+		scheme:       sc.flowScheme,
 		start:        sc.start,
 		connInfo:     sc.connInfo,
 		req:          sc.req,
@@ -915,6 +918,7 @@ func (h *Handler) recordGRPCFlow(sc *streamContext, resp *gohttp.Response, fullR
 		TLSCipher:            sc.tlsMeta.CipherSuite,
 		TLSALPN:              sc.tlsMeta.ALPN,
 		TLSServerCertSubject: tlsCertSubject,
+		Scheme:               sc.flowScheme,
 	}
 	if err := h.grpcHandler.RecordSession(sc.ctx, info); err != nil {
 		sc.logger.Error("gRPC flow recording failed", "error", err)

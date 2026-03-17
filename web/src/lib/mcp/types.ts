@@ -283,6 +283,7 @@ export interface QueryParams {
 export interface FlowEntry {
   id: string;
   protocol: string;
+  scheme?: string;
   flow_type: string;
   state: string;
   method: string;
@@ -341,6 +342,7 @@ export interface FlowDetailResult {
   id: string;
   conn_id: string;
   protocol: string;
+  scheme?: string;
   flow_type: string;
   state: string;
   method: string;

@@ -29,6 +29,7 @@ func requestHeaders(req *gohttp.Request) gohttp.Header {
 type sendRecordParams struct {
 	connID     string
 	clientAddr string
+	scheme     string
 	start      time.Time
 	connInfo   *flow.ConnectionInfo
 
@@ -72,6 +73,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  "HTTP/2",
+		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
@@ -178,6 +180,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  "HTTP/2",
+		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
@@ -406,6 +409,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  "HTTP/2",
+		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: p.start,
@@ -456,6 +460,7 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  "HTTP/2",
+		Scheme:    p.scheme,
 		FlowType:  "unary",
 		State:     "error",
 		Timestamp: p.start,

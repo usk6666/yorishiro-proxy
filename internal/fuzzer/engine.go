@@ -425,8 +425,14 @@ func (e *Engine) sendFuzzRequest(ctx context.Context, data *RequestData, doer HT
 
 // recordFuzzFlow saves the flow and its send/receive messages, populating result.
 func (e *Engine) recordFuzzFlow(ctx context.Context, data *RequestData, resp *fuzzResponse, protocol, fuzzID string, result *flow.FuzzResult) {
+	// Derive scheme from the request URL.
+	scheme := "http"
+	if data.URL != nil && data.URL.Scheme == "https" {
+		scheme = "https"
+	}
 	newFl := &flow.Flow{
 		Protocol:  protocol,
+		Scheme:    scheme,
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: resp.start,

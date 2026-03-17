@@ -46,6 +46,7 @@ func headerContains(headerValue, token string) bool {
 type wsErrorRecordParams struct {
 	connID     string
 	clientAddr string
+	scheme     string
 	start      time.Time
 	connInfo   *flow.ConnectionInfo
 	req        *gohttp.Request
@@ -85,6 +86,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	ep := wsErrorRecordParams{
 		connID:     connID,
 		clientAddr: clientAddr,
+		scheme:     "ws",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: clientAddr},
 		req:        req,
@@ -179,6 +181,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	ep := wsErrorRecordParams{
 		connID:     connID,
 		clientAddr: clientAddr,
+		scheme:     "wss",
 		start:      start,
 		connInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,
@@ -340,6 +343,7 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 	fl := &flow.Flow{
 		ConnID:    p.connID,
 		Protocol:  "WebSocket",
+		Scheme:    p.scheme,
 		FlowType:  "bidirectional",
 		State:     "error",
 		Timestamp: p.start,

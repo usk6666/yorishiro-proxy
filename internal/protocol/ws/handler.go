@@ -65,6 +65,18 @@ func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
 	h.interceptQueue = queue
 }
 
+// wsScheme determines the WebSocket scheme ("ws" or "wss") from the upgrade
+// request URL or TLS connection metadata.
+func wsScheme(upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) string {
+	if upgradeReq.URL != nil && (upgradeReq.URL.Scheme == "https" || upgradeReq.URL.Scheme == "wss") {
+		return "wss"
+	}
+	if connInfo != nil && connInfo.TLSVersion != "" {
+		return "wss"
+	}
+	return "ws"
+}
+
 // HandleUpgrade processes a WebSocket upgrade request. It forwards the upgrade
 // to the upstream server, validates the 101 response, then starts a bidirectional
 // frame relay with flow recording.
@@ -87,6 +99,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "WebSocket",
+		Scheme:    wsScheme(upgradeReq, connInfo),
 		FlowType:  "bidirectional",
 		State:     "active",
 		Timestamp: start,
