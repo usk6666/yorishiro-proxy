@@ -151,6 +151,13 @@ func (l *Listener) Start(ctx context.Context) error {
 			continue
 		}
 
+		active := l.activeConns.Load()
+		l.logger.Debug("connection accepted",
+			"remote_addr", conn.RemoteAddr().String(),
+			"active_connections", active,
+			"max_connections", maxConns,
+		)
+
 		l.wg.Go(func() {
 			if maxConns > 0 {
 				defer l.activeConns.Add(-1)
@@ -206,7 +213,19 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 
 	if err := handler.Handle(ctx, pc); err != nil {
 		connLogger.Error("handler error", "protocol", handler.Name(), "error", err)
+		connLogger.Debug("connection closed",
+			"protocol", handler.Name(),
+			"status", "error",
+			"duration_ms", time.Since(connStart).Milliseconds(),
+		)
+		return
 	}
+
+	connLogger.Debug("connection closed",
+		"protocol", handler.Name(),
+		"status", "complete",
+		"duration_ms", time.Since(connStart).Milliseconds(),
+	)
 }
 
 // detectProtocol performs two-stage protocol detection on the connection.

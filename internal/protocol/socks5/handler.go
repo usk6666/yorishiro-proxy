@@ -152,6 +152,8 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	logger := proxy.LoggerFromContext(ctx, h.logger)
 	listenerName := proxy.ListenerNameFromContext(ctx)
 
+	logger.Debug("socks5 handshake started")
+
 	// 1. Method negotiation (uses per-listener auth if available).
 	method, err := h.negotiateMethodForListener(conn, listenerName)
 	if err != nil {
@@ -173,6 +175,8 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	} else {
 		authMethodName = "none"
 	}
+
+	logger.Debug("socks5 auth complete", "auth_method", authMethodName)
 
 	// 3. Read request.
 	target, err := h.handleRequest(conn)
@@ -209,6 +213,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	}
 
 	logger.Info("socks5 tunnel established", "target", target)
+	logger.Debug("socks5 handshake complete", "target", target, "auth_method", authMethodName)
 
 	// 7. Dispatch on_socks5_connect plugin hook.
 	h.dispatchOnSOCKS5Connect(ctx, target, authMethodName, authUsername, conn)
