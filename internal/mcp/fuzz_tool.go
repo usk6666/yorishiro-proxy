@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -271,6 +273,10 @@ func (s *Server) handleFuzzPauseAction(params fuzzParams) (*gomcp.CallToolResult
 		return nil, nil, fmt.Errorf("fuzz_pause: %w", err)
 	}
 
+	// Sync the paused status to DB immediately so query reflects the change
+	// without waiting for the next progress update tick.
+	s.syncFuzzJobStatus(params.FuzzID, string(ctrl.Status()))
+
 	return nil, &executeFuzzControlResult{
 		FuzzID: params.FuzzID,
 		Action: "fuzz_pause",
@@ -296,11 +302,28 @@ func (s *Server) handleFuzzResumeAction(params fuzzParams) (*gomcp.CallToolResul
 		return nil, nil, fmt.Errorf("fuzz_resume: %w", err)
 	}
 
+	// Sync the resumed status to DB immediately so query reflects the change
+	// without waiting for the next progress update tick.
+	s.syncFuzzJobStatus(params.FuzzID, string(ctrl.Status()))
+
 	return nil, &executeFuzzControlResult{
 		FuzzID: params.FuzzID,
 		Action: "fuzz_resume",
 		Status: string(ctrl.Status()),
 	}, nil
+}
+
+// syncFuzzJobStatus updates the fuzz job's status in the DB immediately.
+// This is best-effort; failures are logged but do not propagate errors.
+func (s *Server) syncFuzzJobStatus(fuzzID, status string) {
+	if s.deps.fuzzStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.deps.fuzzStore.UpdateFuzzJobStatus(ctx, fuzzID, status); err != nil {
+		slog.Warn("failed to sync fuzz job status to DB", "job_id", fuzzID, "status", status, "error", err)
+	}
 }
 
 // handleFuzzCancelAction handles the fuzz_cancel action within the fuzz tool.
