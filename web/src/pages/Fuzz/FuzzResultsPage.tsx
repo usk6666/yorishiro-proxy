@@ -658,7 +658,7 @@ export function FuzzResultsPage() {
                           >
                             <span className="fuzz-header-name">{name}:</span>
                             <span className="fuzz-header-value">
-                              {values.join(", ")}
+                              {(values ?? []).join(", ")}
                             </span>
                           </div>
                         ),

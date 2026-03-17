@@ -63,7 +63,7 @@ export function ResponseViewer({ response, originalFlow }: ResponseViewerProps) 
                 </thead>
                 <tbody>
                   {Object.entries(response.response_headers).map(([key, values]) =>
-                    values.map((value, idx) => (
+                    (values ?? []).map((value, idx) => (
                       <tr key={`${key}-${idx}`}>
                         <td className="response-header-key">{key}</td>
                         <td className="response-header-value">{value}</td>
