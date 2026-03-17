@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -274,6 +275,84 @@ func TestValidateMacro(t *testing.T) {
 				t.Errorf("validateMacro() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateMacro_ErrorMessagesIncludeValidValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		macro   *Macro
+		wantSub string // substring expected in error message
+	}{
+		{
+			name: "invalid on_error includes valid values",
+			macro: &Macro{
+				Name:  "test",
+				Steps: []Step{{ID: "s1", FlowID: "sess1", OnError: "bad"}},
+			},
+			wantSub: "valid: abort, skip, retry",
+		},
+		{
+			name: "invalid source includes valid values",
+			macro: &Macro{
+				Name: "test",
+				Steps: []Step{{
+					ID: "s1", FlowID: "sess1",
+					Extract: []ExtractionRule{{Name: "v1", Source: "bad", From: ExtractionFromResponse}},
+				}},
+			},
+			wantSub: "(valid: body, body_json, header, status, url)",
+		},
+		{
+			name: "invalid from includes valid values",
+			macro: &Macro{
+				Name: "test",
+				Steps: []Step{{
+					ID: "s1", FlowID: "sess1",
+					Extract: []ExtractionRule{{Name: "v1", Source: ExtractionSourceBody, From: "bad"}},
+				}},
+			},
+			wantSub: "(valid: request, response)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMacro(tt.macro)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if got := err.Error(); !strings.Contains(got, tt.wantSub) {
+				t.Errorf("error message %q should contain %q", got, tt.wantSub)
+			}
+		})
+	}
+}
+
+func TestValidOnErrorList(t *testing.T) {
+	got := ValidOnErrorList()
+	for _, want := range []string{"abort", "skip", "retry"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ValidOnErrorList() = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestValidSourceList(t *testing.T) {
+	got := ValidSourceList()
+	// Output is sorted alphabetically after the sort fix.
+	want := "body, body_json, header, status, url"
+	if got != want {
+		t.Errorf("ValidSourceList() = %q, want %q", got, want)
+	}
+}
+
+func TestValidFromList(t *testing.T) {
+	got := ValidFromList()
+	// Output is sorted alphabetically after the sort fix.
+	want := "request, response"
+	if got != want {
+		t.Errorf("ValidFromList() = %q, want %q", got, want)
 	}
 }
 
