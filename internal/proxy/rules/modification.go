@@ -144,7 +144,8 @@ func compileRule(r Rule) (*compiledRule, error) {
 	}
 
 	if !validActionTypes[r.Action.Type] {
-		return nil, fmt.Errorf("invalid action type %q", r.Action.Type)
+		return nil, fmt.Errorf("invalid action type %q: valid types are %q, %q, %q, %q",
+			r.Action.Type, ActionAddHeader, ActionSetHeader, ActionRemoveHeader, ActionReplaceBody)
 	}
 
 	if err := validateAction(r.Action); err != nil {

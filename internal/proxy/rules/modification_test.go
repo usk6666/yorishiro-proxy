@@ -70,6 +70,12 @@ func TestCompileRule_InvalidActionType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid action type")
 	}
+	msg := err.Error()
+	for _, vt := range []string{"add_header", "set_header", "remove_header", "replace_body"} {
+		if !strings.Contains(msg, vt) {
+			t.Errorf("error message should contain valid type %q, got: %s", vt, msg)
+		}
+	}
 }
 
 func TestCompileRule_AddHeaderNoName(t *testing.T) {
