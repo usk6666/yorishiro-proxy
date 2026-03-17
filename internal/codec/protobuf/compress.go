@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 
@@ -22,7 +23,7 @@ import (
 var maxDecompressedSize = 254 << 20 // 254 MB
 
 // ErrDecompressedSizeExceeded is returned when decompressed data exceeds maxDecompressedSize.
-var ErrDecompressedSizeExceeded = fmt.Errorf("protobuf: decompressed size exceeds limit (%d bytes)", maxDecompressedSize)
+var ErrDecompressedSizeExceeded = errors.New("protobuf: decompressed size exceeds limit")
 
 // ErrUnknownCompression is returned when the grpc-encoding value is not recognized.
 var ErrUnknownCompression = fmt.Errorf("protobuf: unknown compression algorithm")
@@ -79,7 +80,7 @@ func decompressGzip(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("gzip decompress read: %w", err)
 	}
 	if len(out) > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	return out, nil
 }
@@ -105,7 +106,7 @@ func decompressDeflate(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("deflate decompress: %w", err)
 	}
 	if len(out) > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	return out, nil
 }
@@ -131,7 +132,7 @@ func decompressSnappy(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("snappy decompress: %w", err)
 	}
 	if decodedLen > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	out, err := s2.Decode(nil, data)
 	if err != nil {
@@ -156,7 +157,7 @@ func decompressZstd(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("zstd decompress read: %w", err)
 	}
 	if len(out) > maxDecompressedSize {
-		return nil, ErrDecompressedSizeExceeded
+		return nil, fmt.Errorf("%w (%d bytes)", ErrDecompressedSizeExceeded, maxDecompressedSize)
 	}
 	return out, nil
 }
