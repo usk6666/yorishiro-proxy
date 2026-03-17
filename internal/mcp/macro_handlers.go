@@ -414,7 +414,7 @@ func validateMacroStep(step *macro.Step, index int, seenIDs map[string]bool) err
 	}
 
 	if step.OnError != "" && step.OnError != macro.OnErrorAbort && step.OnError != macro.OnErrorSkip && step.OnError != macro.OnErrorRetry {
-		return fmt.Errorf("step %q has invalid on_error value %q", step.ID, step.OnError)
+		return fmt.Errorf("step %q has invalid on_error value %q (valid: %s)", step.ID, step.OnError, macro.ValidOnErrorList())
 	}
 
 	if step.When != nil && step.When.Step != "" {
@@ -445,13 +445,13 @@ func validateStepExtractionRules(step *macro.Step) error {
 			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
 		}
 		if !macro.ValidSource(rule.Source) {
-			return fmt.Errorf("step %q extraction rule %q has invalid source %q", step.ID, rule.Name, rule.Source)
+			return fmt.Errorf("step %q extraction rule %q has invalid source %q (valid: %s)", step.ID, rule.Name, rule.Source, macro.ValidSourceList())
 		}
 		if rule.From == "" {
 			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
 		}
 		if !macro.ValidFrom(rule.From) {
-			return fmt.Errorf("step %q extraction rule %q has invalid from %q", step.ID, rule.Name, rule.From)
+			return fmt.Errorf("step %q extraction rule %q has invalid from %q (valid: %s)", step.ID, rule.Name, rule.From, macro.ValidFromList())
 		}
 	}
 	return nil

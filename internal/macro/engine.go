@@ -433,7 +433,7 @@ func validateStep(step *Step, index int, seenIDs map[string]bool) error {
 // validateStepErrorPolicy validates the on_error and retry_count fields of a step.
 func validateStepErrorPolicy(step *Step) error {
 	if step.OnError != "" && step.OnError != OnErrorAbort && step.OnError != OnErrorSkip && step.OnError != OnErrorRetry {
-		return fmt.Errorf("step %q has invalid on_error value %q", step.ID, step.OnError)
+		return fmt.Errorf("step %q has invalid on_error value %q (valid: %s)", step.ID, step.OnError, ValidOnErrorList())
 	}
 	// Validate retry_count upper bound (CWE-770).
 	if step.RetryCount > MaxRetryCount {
@@ -477,8 +477,8 @@ func ValidFrom(f ExtractionFrom) bool {
 	return validExtractionFroms[f]
 }
 
-// validSourceList returns a comma-separated list of valid ExtractionSource values.
-func validSourceList() string {
+// ValidSourceList returns a comma-separated list of valid ExtractionSource values.
+func ValidSourceList() string {
 	names := make([]string, 0, len(validExtractionSources))
 	for s := range validExtractionSources {
 		names = append(names, string(s))
@@ -486,13 +486,18 @@ func validSourceList() string {
 	return strings.Join(names, ", ")
 }
 
-// validFromList returns a comma-separated list of valid ExtractionFrom values.
-func validFromList() string {
+// ValidFromList returns a comma-separated list of valid ExtractionFrom values.
+func ValidFromList() string {
 	names := make([]string, 0, len(validExtractionFroms))
 	for f := range validExtractionFroms {
 		names = append(names, string(f))
 	}
 	return strings.Join(names, ", ")
+}
+
+// ValidOnErrorList returns a comma-separated list of valid OnError values.
+func ValidOnErrorList() string {
+	return strings.Join([]string{string(OnErrorAbort), string(OnErrorSkip), string(OnErrorRetry)}, ", ")
 }
 
 // validateExtractRules validates the extraction rules of a step.
@@ -506,13 +511,13 @@ func validateExtractRules(step *Step) error {
 			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
 		}
 		if !ValidSource(rule.Source) {
-			return fmt.Errorf("step %q extraction rule %q has invalid source %q (valid: %s)", step.ID, rule.Name, rule.Source, validSourceList())
+			return fmt.Errorf("step %q extraction rule %q has invalid source %q (valid: %s)", step.ID, rule.Name, rule.Source, ValidSourceList())
 		}
 		if rule.From == "" {
 			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
 		}
 		if !ValidFrom(rule.From) {
-			return fmt.Errorf("step %q extraction rule %q has invalid from %q (valid: %s)", step.ID, rule.Name, rule.From, validFromList())
+			return fmt.Errorf("step %q extraction rule %q has invalid from %q (valid: %s)", step.ID, rule.Name, rule.From, ValidFromList())
 		}
 	}
 	return nil
