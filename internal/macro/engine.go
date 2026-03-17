@@ -452,6 +452,49 @@ func validateStepGuard(step *Step, seenIDs map[string]bool) error {
 	return nil
 }
 
+// validExtractionSources is the set of valid ExtractionSource values.
+var validExtractionSources = map[ExtractionSource]bool{
+	ExtractionSourceHeader:   true,
+	ExtractionSourceBody:     true,
+	ExtractionSourceBodyJSON: true,
+	ExtractionSourceStatus:   true,
+	ExtractionSourceURL:      true,
+}
+
+// validExtractionFroms is the set of valid ExtractionFrom values.
+var validExtractionFroms = map[ExtractionFrom]bool{
+	ExtractionFromRequest:  true,
+	ExtractionFromResponse: true,
+}
+
+// ValidSource reports whether s is a valid ExtractionSource value.
+func ValidSource(s ExtractionSource) bool {
+	return validExtractionSources[s]
+}
+
+// ValidFrom reports whether f is a valid ExtractionFrom value.
+func ValidFrom(f ExtractionFrom) bool {
+	return validExtractionFroms[f]
+}
+
+// validSourceList returns a comma-separated list of valid ExtractionSource values.
+func validSourceList() string {
+	names := make([]string, 0, len(validExtractionSources))
+	for s := range validExtractionSources {
+		names = append(names, string(s))
+	}
+	return strings.Join(names, ", ")
+}
+
+// validFromList returns a comma-separated list of valid ExtractionFrom values.
+func validFromList() string {
+	names := make([]string, 0, len(validExtractionFroms))
+	for f := range validExtractionFroms {
+		names = append(names, string(f))
+	}
+	return strings.Join(names, ", ")
+}
+
 // validateExtractRules validates the extraction rules of a step.
 func validateExtractRules(step *Step) error {
 	for j := range step.Extract {
@@ -462,8 +505,14 @@ func validateExtractRules(step *Step) error {
 		if rule.Source == "" {
 			return fmt.Errorf("step %q extraction rule %q has no source", step.ID, rule.Name)
 		}
+		if !ValidSource(rule.Source) {
+			return fmt.Errorf("step %q extraction rule %q has invalid source %q (valid: %s)", step.ID, rule.Name, rule.Source, validSourceList())
+		}
 		if rule.From == "" {
 			return fmt.Errorf("step %q extraction rule %q has no from", step.ID, rule.Name)
+		}
+		if !ValidFrom(rule.From) {
+			return fmt.Errorf("step %q extraction rule %q has invalid from %q (valid: %s)", step.ID, rule.Name, rule.From, validFromList())
 		}
 	}
 	return nil
