@@ -678,7 +678,7 @@ export function FuzzResultsPage() {
                           (() => {
                             const hdrs = detailFlow.response_headers ?? {};
                             for (const [k, v] of Object.entries(hdrs)) {
-                              if (k.toLowerCase() === "content-type" && v.length > 0) return v[0];
+                              if (k.toLowerCase() === "content-type" && (v ?? []).length > 0) return v[0];
                             }
                             return "";
                           })()
