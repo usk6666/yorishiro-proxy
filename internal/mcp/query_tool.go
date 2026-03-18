@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -206,6 +208,20 @@ func validateQueryInput(input queryInput) error {
 
 // handleQuery dispatches the query request to the appropriate resource handler.
 func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, input queryInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "query",
+		"resource", input.Resource,
+		"id", input.ID,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "query",
+			"resource", input.Resource,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	if err := validateQueryInput(input); err != nil {
 		return nil, nil, err
 	}

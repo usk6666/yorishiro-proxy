@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -35,6 +37,18 @@ func (s *Server) registerProxyStop() {
 
 // handleProxyStop handles the proxy_stop tool invocation.
 func (s *Server) handleProxyStop(ctx context.Context, _ *gomcp.CallToolRequest, input proxyStopInput) (*gomcp.CallToolResult, *proxyStopResult, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "proxy_stop",
+		"name", input.Name,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "proxy_stop",
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	if s.deps.manager == nil {
 		return nil, nil, fmt.Errorf("proxy manager is not initialized")
 	}

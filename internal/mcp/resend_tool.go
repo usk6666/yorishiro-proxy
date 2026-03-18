@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -186,6 +187,28 @@ func (s *Server) registerResend() {
 
 // handleResend routes the resend tool invocation to the appropriate action handler.
 func (s *Server) handleResend(ctx context.Context, _ *gomcp.CallToolRequest, input resendInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	hasModifications := input.Params.OverrideMethod != "" ||
+		input.Params.OverrideURL != "" ||
+		input.Params.OverrideHeadersRaw != nil ||
+		input.Params.AddHeadersRaw != nil ||
+		input.Params.OverrideBodyBase64 != nil ||
+		input.Params.OverrideRawBase64 != "" ||
+		len(input.Params.Patches) > 0
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "resend",
+		"action", input.Action,
+		"flow_id", input.Params.FlowID,
+		"has_modifications", hasModifications,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "resend",
+			"action", input.Action,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	// Parse raw header JSON fields into typed HeaderEntries.
 	if err := input.Params.parseRawHeaders(); err != nil {
 		return nil, nil, err
