@@ -117,8 +117,20 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		return nil, nil, err
 	}
 
-	// Load template flow and send messages once, shared between scope and safety checks.
-	templateFlow, templateSendMsgs, err := s.loadFuzzTemplate(ctx, params.FlowID)
+	// Load template flow first for protocol check, then load messages.
+	templateFlow, err := s.loadFuzzTemplateFlow(ctx, params.FlowID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// gRPC flows use length-prefixed protobuf frames; byte-offset fuzzing would
+	// corrupt the frame header and produce invalid messages. Reject early until
+	// frame-aware mutation is implemented.
+	if templateFlow.Protocol == "gRPC" {
+		return nil, nil, fmt.Errorf("fuzzing gRPC flows is not yet supported: gRPC uses length-prefixed protobuf frames that require frame-aware mutation")
+	}
+
+	templateSendMsgs, err := s.loadFuzzTemplateSendMessages(ctx, templateFlow.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,20 +204,27 @@ func validateFuzzParams(params fuzzParams) error {
 	return nil
 }
 
-// loadFuzzTemplate loads the template flow and its send messages from the store.
-func (s *Server) loadFuzzTemplate(ctx context.Context, flowID string) (*flow.Flow, []*flow.Message, error) {
+// loadFuzzTemplateFlow loads the template flow from the store.
+// This is called before protocol checks so unsupported protocols can be
+// rejected without loading messages.
+func (s *Server) loadFuzzTemplateFlow(ctx context.Context, flowID string) (*flow.Flow, error) {
 	if s.deps.store == nil {
-		return nil, nil, fmt.Errorf("flow store is not initialized")
+		return nil, fmt.Errorf("flow store is not initialized")
 	}
 	fl, err := s.deps.store.GetFlow(ctx, flowID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get template flow: %w", err)
+		return nil, fmt.Errorf("get template flow: %w", err)
 	}
-	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	return fl, nil
+}
+
+// loadFuzzTemplateSendMessages loads the send-direction messages for the given flow.
+func (s *Server) loadFuzzTemplateSendMessages(ctx context.Context, flowID string) ([]*flow.Message, error) {
+	sendMsgs, err := s.deps.store.GetMessages(ctx, flowID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
-		return nil, nil, fmt.Errorf("get send messages: %w", err)
+		return nil, fmt.Errorf("get send messages: %w", err)
 	}
-	return fl, sendMsgs, nil
+	return sendMsgs, nil
 }
 
 // checkFuzzTargetScopeWithData enforces the target scope on pre-loaded template data.
