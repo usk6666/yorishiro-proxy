@@ -79,8 +79,9 @@ func TestValidateFuzzParams_AttackType(t *testing.T) {
 // fuzzTestStore is a minimal flow.Store stub used only by fuzz_tool tests.
 // It returns pre-configured flows and messages; unimplemented methods panic.
 type fuzzTestStore struct {
-	flow     *flow.Flow
-	messages []*flow.Message
+	flow              *flow.Flow
+	messages          []*flow.Message
+	getMessagesCalled bool
 }
 
 func (s *fuzzTestStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) {
@@ -88,6 +89,7 @@ func (s *fuzzTestStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error)
 }
 
 func (s *fuzzTestStore) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
+	s.getMessagesCalled = true
 	return s.messages, nil
 }
 
@@ -161,6 +163,12 @@ func TestHandleFuzzStart_RejectsGRPCFlow(t *testing.T) {
 	want := "fuzzing gRPC flows is not yet supported: gRPC uses length-prefixed protobuf frames that require frame-aware mutation"
 	if err.Error() != want {
 		t.Errorf("error mismatch:\n  got:  %s\n  want: %s", err.Error(), want)
+	}
+
+	// Verify that GetMessages was NOT called — the gRPC guard should
+	// short-circuit before loading messages.
+	if store.getMessagesCalled {
+		t.Error("GetMessages should not be called for rejected gRPC flows")
 	}
 }
 
