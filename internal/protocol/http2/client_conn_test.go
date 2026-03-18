@@ -427,8 +427,10 @@ func TestClientConn_FullH2CExchange(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var received []receivedReq
+	handlerDone := make(chan struct{}, 1)
 
 	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
 		received = append(received, receivedReq{
@@ -496,7 +498,11 @@ func TestClientConn_FullH2CExchange(t *testing.T) {
 		}
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler to complete")
+	}
 
 	mu.Lock()
 	if len(received) != 1 {
@@ -515,8 +521,10 @@ func TestClientConn_FullH2CExchange(t *testing.T) {
 func TestClientConn_POSTWithBody(t *testing.T) {
 	var mu sync.Mutex
 	var receivedBody string
+	handlerDone := make(chan struct{}, 1)
 
 	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
 		receivedBody = string(body)
@@ -585,7 +593,11 @@ func TestClientConn_POSTWithBody(t *testing.T) {
 		t.Errorf("response body = %q, want %q", respBodyBuf.String(), "created")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler to complete")
+	}
 
 	mu.Lock()
 	if receivedBody != `{"key":"value"}` {
@@ -598,8 +610,10 @@ func TestClientConn_POSTWithBody(t *testing.T) {
 func TestClientConn_MultipleStreams(t *testing.T) {
 	var mu sync.Mutex
 	var paths []string
+	handlerDone := make(chan struct{}, 3)
 
 	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		defer func() { handlerDone <- struct{}{} }()
 		mu.Lock()
 		paths = append(paths, req.URL.Path)
 		mu.Unlock()
@@ -633,7 +647,13 @@ func TestClientConn_MultipleStreams(t *testing.T) {
 		}
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 3; i++ {
+		select {
+		case <-handlerDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for handler %d to complete", i+1)
+		}
+	}
 
 	mu.Lock()
 	if len(paths) != 3 {
@@ -962,8 +982,10 @@ func TestClientConn_StreamingFlush(t *testing.T) {
 func TestClientConn_DataWithoutEndStream_StreamingDispatch(t *testing.T) {
 	var mu sync.Mutex
 	var receivedBody string
+	handlerDone := make(chan struct{}, 1)
 
 	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
 		receivedBody = string(body)
@@ -1041,7 +1063,11 @@ func TestClientConn_DataWithoutEndStream_StreamingDispatch(t *testing.T) {
 		t.Errorf("response body = %q, want %q", respBodyBuf.String(), "response-data")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler to complete")
+	}
 
 	mu.Lock()
 	if receivedBody != "grpc-request-body" {
@@ -1055,8 +1081,10 @@ func TestClientConn_DataWithoutEndStream_StreamingDispatch(t *testing.T) {
 func TestClientConn_StreamingBody_MultipleDataFrames(t *testing.T) {
 	var mu sync.Mutex
 	var receivedBody string
+	handlerDone := make(chan struct{}, 1)
 
 	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
 		receivedBody = string(body)
@@ -1104,7 +1132,11 @@ func TestClientConn_StreamingBody_MultipleDataFrames(t *testing.T) {
 		}
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler to complete")
+	}
 
 	mu.Lock()
 	if receivedBody != "chunk1-chunk2-chunk3" {
@@ -1118,8 +1150,13 @@ func TestClientConn_StreamingBody_MultipleDataFrames(t *testing.T) {
 func TestClientConn_StreamingBody_RSTStream(t *testing.T) {
 	var mu sync.Mutex
 	var readErr error
+	bodyReadStarted := make(chan struct{})
+	handlerDone := make(chan struct{})
 
 	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+		defer close(handlerDone)
+		// Signal that we've started reading the body.
+		close(bodyReadStarted)
 		_, err := io.ReadAll(req.Body)
 		mu.Lock()
 		readErr = err
@@ -1142,14 +1179,22 @@ func TestClientConn_StreamingBody_RSTStream(t *testing.T) {
 	// Send some data.
 	tc.writer.WriteData(1, false, []byte("partial"))
 
-	// Give the handler time to start reading.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the handler to start reading before sending RST_STREAM.
+	select {
+	case <-bodyReadStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler to start reading body")
+	}
 
 	// Send RST_STREAM to cancel the stream.
 	tc.writer.WriteRSTStream(1, 8) // CANCEL
 
 	// Wait for handler to finish.
-	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler to complete after RST_STREAM")
+	}
 
 	mu.Lock()
 	if readErr == nil {

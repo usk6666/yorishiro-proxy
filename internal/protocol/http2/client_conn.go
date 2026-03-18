@@ -486,8 +486,19 @@ func (cc *clientConn) replenishFlowControl(streamID uint32, payloadLen uint32) e
 
 // handleStreamingData writes DATA payload to the body pipe for the handler.
 // On END_STREAM, it closes the pipe and cleans up the pending stream.
+//
+// NOTE: Writing to the pipe is synchronous and blocks until the handler reads
+// from the pipe reader. This means a slow handler can block the frame loop for
+// all streams on this connection. This is mitigated by HTTP/2 flow control
+// (the client cannot send more data than the window allows) but a completely
+// stalled handler could still block indefinitely. A per-stream goroutine or
+// buffered channel would decouple this, but adds complexity beyond this fix.
 func (cc *clientConn) handleStreamingData(streamID uint32, sr *streamRequest, f *frame.Frame, data []byte) error {
 	if _, wErr := sr.bodyPipe.Write(data); wErr != nil {
+		// Clean up: close the pipe so the reader side sees an error,
+		// and remove the pending stream to avoid stale state.
+		sr.bodyPipe.CloseWithError(wErr)
+		delete(cc.pendingStreams, streamID)
 		return &StreamError{
 			StreamID: streamID,
 			Code:     ErrCodeInternal,
@@ -614,6 +625,13 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.HeaderField, body io.Reader) error {
 	req, err := buildHTTPRequestWithReader(cc.ctx, headers, body)
 	if err != nil {
+		// Clean up streaming state on error: close the pipe so the writer
+		// side (handleStreamingData) does not block, and remove the pending
+		// stream entry.
+		if sr := cc.pendingStreams[streamID]; sr != nil && sr.bodyPipe != nil {
+			sr.bodyPipe.CloseWithError(err)
+		}
+		delete(cc.pendingStreams, streamID)
 		return &StreamError{
 			StreamID: streamID,
 			Code:     ErrCodeProtocol,
@@ -698,9 +716,17 @@ func buildHTTPRequest(ctx context.Context, headers []hpack.HeaderField, body []b
 
 // buildHTTPRequestWithReader constructs a *http.Request from decoded HPACK
 // header fields and a streaming body reader. The body length is unknown
-// (ContentLength = -1), enabling chunked transfer for io.Pipe-backed bodies.
+// (ContentLength = -1) since the full body has not been received yet.
+// If body already implements io.ReadCloser (e.g. *io.PipeReader), it is used
+// directly so that closing req.Body propagates to the underlying resource.
 func buildHTTPRequestWithReader(ctx context.Context, headers []hpack.HeaderField, body io.Reader) (*gohttp.Request, error) {
-	return buildHTTPRequestCommon(ctx, headers, io.NopCloser(body), -1)
+	var bodyReader io.ReadCloser
+	if rc, ok := body.(io.ReadCloser); ok {
+		bodyReader = rc
+	} else {
+		bodyReader = io.NopCloser(body)
+	}
+	return buildHTTPRequestCommon(ctx, headers, bodyReader, -1)
 }
 
 // buildHTTPRequestCommon is the shared request builder used by both
