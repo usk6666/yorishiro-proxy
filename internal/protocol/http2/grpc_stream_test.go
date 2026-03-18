@@ -600,6 +600,7 @@ func TestHandleGRPCStream_TrailersOnlyNoDeadlock(t *testing.T) {
 	// after it receives the response — mimicking real gRPC client behavior
 	// where the client waits for the server response before finishing.
 	bodyPR, bodyPW := io.Pipe()
+	defer bodyPW.Close()
 
 	req, _ := gohttp.NewRequest("POST",
 		upstreamURL+"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo", bodyPR)
