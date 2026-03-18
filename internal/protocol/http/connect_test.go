@@ -19,6 +19,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -1227,7 +1228,7 @@ func TestHandleCONNECT_PartialHTTPSRequests(t *testing.T) {
 	conn.Close()
 }
 
-func TestTLSVersionString(t *testing.T) {
+func TestTLSVersionName(t *testing.T) {
 	tests := []struct {
 		version uint16
 		want    string
@@ -1242,9 +1243,9 @@ func TestTLSVersionString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
-			got := tlsVersionString(tt.version)
+			got := httputil.TLSVersionName(tt.version)
 			if got != tt.want {
-				t.Errorf("tlsVersionString(0x%04x) = %q, want %q", tt.version, got, tt.want)
+				t.Errorf("TLSVersionName(0x%04x) = %q, want %q", tt.version, got, tt.want)
 			}
 		})
 	}

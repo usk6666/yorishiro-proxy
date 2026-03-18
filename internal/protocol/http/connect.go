@@ -37,6 +37,8 @@ type tlsMetadata struct {
 func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
 	logger := h.connLogger(ctx)
 
+	logger.Debug("CONNECT request received", "host", req.Host)
+
 	// Parse the hostname from the CONNECT request for passthrough check and
 	// certificate generation.
 	hostname, err := parseConnectHost(req.Host)
@@ -77,8 +79,10 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Check if the target host is in the TLS passthrough list.
 	// If so, relay encrypted bytes directly without MITM interception.
 	if h.passthrough != nil && h.passthrough.Contains(hostname) {
+		logger.Debug("TLS passthrough matched", "host", hostname)
 		return h.handlePassthrough(ctx, conn, connectAuthority, hostname)
 	}
+	logger.Debug("TLS passthrough not matched, proceeding with MITM", "host", hostname)
 
 	// Validate that the issuer is configured for TLS interception.
 	if h.issuer == nil {
@@ -359,6 +363,7 @@ func (h *Handler) HandleTunnelMITM(ctx context.Context, conn net.Conn, authority
 	}
 
 	// Perform TLS handshake with the client.
+	logger.Debug("client TLS handshake starting", "host", hostname)
 	tlsConn, err := h.tlsHandshake(ctx, conn, hostname)
 	if err != nil {
 		logger.Error("TLS handshake failed", "host", hostname, "error", err)
@@ -368,6 +373,9 @@ func (h *Handler) HandleTunnelMITM(ctx context.Context, conn net.Conn, authority
 
 	// Extract TLS metadata from the client-side handshake.
 	tlsMeta := extractTLSMetadata(tlsConn)
+	logger.Debug("client TLS handshake complete", "host", hostname,
+		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite,
+		"alpn", tlsMeta.ALPN)
 
 	// Dispatch on_tls_handshake lifecycle hook (fail-open).
 	h.dispatchOnTLSHandshake(ctx, hostname, tlsMeta)
@@ -480,6 +488,7 @@ func parseConnectHost(hostPort string) (string, error) {
 // When an h2Handler is configured, ALPN advertises both "h2" and "http/1.1"
 // so that clients can negotiate HTTP/2 over TLS.
 func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (*tls.Conn, error) {
+	logger := h.connLogger(ctx)
 	tlsConfig := &tls.Config{
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			name := hello.ServerName
@@ -487,7 +496,10 @@ func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname stri
 			// (RFC 6066), so ServerName is empty. Fall back to the hostname
 			// extracted from the CONNECT/tunnel authority.
 			if name == "" {
+				logger.Debug("TLS ClientHello without SNI, using tunnel hostname", "hostname", hostname)
 				name = hostname
+			} else {
+				logger.Debug("TLS ClientHello SNI received", "sni", name)
 			}
 			return h.issuer.GetCertificate(name)
 		},
@@ -512,25 +524,9 @@ func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname stri
 func extractTLSMetadata(tlsConn *tls.Conn) tlsMetadata {
 	state := tlsConn.ConnectionState()
 	return tlsMetadata{
-		Version:     tlsVersionString(state.Version),
+		Version:     httputil.TLSVersionName(state.Version),
 		CipherSuite: tls.CipherSuiteName(state.CipherSuite),
 		ALPN:        state.NegotiatedProtocol,
-	}
-}
-
-// tlsVersionString converts a TLS version constant to a human-readable string.
-func tlsVersionString(version uint16) string {
-	switch version {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("unknown (0x%04x)", version)
 	}
 }
 
