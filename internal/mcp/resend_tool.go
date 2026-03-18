@@ -334,6 +334,10 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 		return nil, r1, r2, err
 	}
 
+	if err := checkResendProtocolSupport(fl); err != nil {
+		return nil, nil, nil, err
+	}
+
 	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("get send messages: %w", err)
@@ -396,6 +400,15 @@ func (s *Server) executePreSendHook(ctx context.Context, params *resendParams) (
 		}
 	}
 	return kvStore, nil
+}
+
+// checkResendProtocolSupport returns an error if the flow's protocol/type combination
+// is not supported for resend. Currently gRPC streaming flows are unsupported.
+func checkResendProtocolSupport(fl *flow.Flow) error {
+	if fl.Protocol == "gRPC" && fl.FlowType != "unary" {
+		return fmt.Errorf("resending gRPC streaming flows (type: %s) is not yet supported; only unary gRPC flows can be resent", fl.FlowType)
+	}
+	return nil
 }
 
 // buildResendURL resolves the target URL from the original message URL and any override.
