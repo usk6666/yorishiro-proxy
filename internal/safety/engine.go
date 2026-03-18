@@ -2,6 +2,7 @@ package safety
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
@@ -246,6 +247,12 @@ func (e *Engine) CheckInput(body []byte, rawURL string, headers http.Header) *In
 		for _, target := range r.Targets {
 			matched, fragment := matchTarget(r.Pattern, target, body, rawURL, headers, r.HeaderName)
 			if matched {
+				slog.Debug("safety input filter matched",
+					slog.String("rule_id", r.ID),
+					slog.String("rule_name", r.Name),
+					slog.String("target", target.String()),
+					slog.String("action", r.Action.String()),
+				)
 				return &InputViolation{
 					RuleID:    r.ID,
 					RuleName:  r.Name,
@@ -373,6 +380,11 @@ func (e *Engine) FilterOutput(data []byte) *OutputResult {
 			if len(locs) == 0 {
 				continue
 			}
+			slog.Debug("safety output filter matched body",
+				slog.String("rule_id", r.ID),
+				slog.Int("match_count", len(locs)),
+				slog.String("action", r.Action.String()),
+			)
 			result.Matches = append(result.Matches, OutputMatch{
 				RuleID: r.ID,
 				Count:  len(locs),
@@ -389,6 +401,11 @@ func (e *Engine) FilterOutput(data []byte) *OutputResult {
 			if count == 0 {
 				continue
 			}
+			slog.Debug("safety output filter matched body (validated)",
+				slog.String("rule_id", r.ID),
+				slog.Int("match_count", count),
+				slog.String("action", r.Action.String()),
+			)
 			result.Matches = append(result.Matches, OutputMatch{
 				RuleID: r.ID,
 				Count:  count,
@@ -458,12 +475,23 @@ func (e *Engine) FilterOutputHeaders(headers http.Header) (http.Header, []Output
 
 		if hasTarget(r.Targets, TargetHeaders) {
 			if c := applyRuleToHeaders(r, modified, ""); c > 0 {
+				slog.Debug("safety output filter matched headers",
+					slog.String("rule_id", r.ID),
+					slog.Int("match_count", c),
+					slog.String("action", r.Action.String()),
+				)
 				matches = append(matches, OutputMatch{RuleID: r.ID, Count: c, Action: r.Action})
 			}
 		}
 
 		if hasTarget(r.Targets, TargetHeader) {
 			if c := applyRuleToHeaders(r, modified, r.HeaderName); c > 0 {
+				slog.Debug("safety output filter matched header",
+					slog.String("rule_id", r.ID),
+					slog.String("header_name", r.HeaderName),
+					slog.Int("match_count", c),
+					slog.String("action", r.Action.String()),
+				)
 				matches = append(matches, OutputMatch{RuleID: r.ID, Count: c, Action: r.Action})
 			}
 		}
