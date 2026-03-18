@@ -151,6 +151,14 @@ func (l *Listener) Start(ctx context.Context) error {
 			continue
 		}
 
+		if l.logger.Enabled(ctx, slog.LevelDebug) {
+			l.logger.Debug("connection accepted",
+				"remote_addr", conn.RemoteAddr().String(),
+				"active_connections", l.activeConns.Load(),
+				"max_connections", maxConns,
+			)
+		}
+
 		l.wg.Go(func() {
 			if maxConns > 0 {
 				defer l.activeConns.Add(-1)
@@ -206,6 +214,22 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 
 	if err := handler.Handle(ctx, pc); err != nil {
 		connLogger.Error("handler error", "protocol", handler.Name(), "error", err)
+		if connLogger.Enabled(ctx, slog.LevelDebug) {
+			connLogger.Debug("connection closed",
+				"protocol", handler.Name(),
+				"status", "error",
+				"duration_ms", time.Since(connStart).Milliseconds(),
+			)
+		}
+		return
+	}
+
+	if connLogger.Enabled(ctx, slog.LevelDebug) {
+		connLogger.Debug("connection closed",
+			"protocol", handler.Name(),
+			"status", "complete",
+			"duration_ms", time.Since(connStart).Milliseconds(),
+		)
 	}
 }
 
