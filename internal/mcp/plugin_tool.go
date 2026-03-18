@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
@@ -43,6 +45,20 @@ func (s *Server) registerPlugin() {
 
 // handlePlugin routes the plugin tool invocation to the appropriate action handler.
 func (s *Server) handlePlugin(ctx context.Context, _ *gomcp.CallToolRequest, input pluginInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "plugin",
+		"action", input.Action,
+		"name", input.Params.Name,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "plugin",
+			"action", input.Action,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	if s.deps.pluginEngine == nil {
 		return nil, nil, fmt.Errorf("plugin engine is not initialized")
 	}

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strings"
@@ -81,7 +82,20 @@ func (s *Server) registerSecurity() {
 }
 
 // handleSecurity routes the security tool invocation to the appropriate action handler.
-func (s *Server) handleSecurity(_ context.Context, _ *gomcp.CallToolRequest, input securityInput) (*gomcp.CallToolResult, any, error) {
+func (s *Server) handleSecurity(ctx context.Context, _ *gomcp.CallToolRequest, input securityInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "security",
+		"action", input.Action,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "security",
+			"action", input.Action,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	switch input.Action {
 	case "set_target_scope":
 		return s.handleSetTargetScope(input.Params)

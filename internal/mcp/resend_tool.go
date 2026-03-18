@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -184,8 +185,38 @@ func (s *Server) registerResend() {
 	}, s.handleResend)
 }
 
+// hasModifications reports whether any mutation field is set on the resend params.
+func (p *resendParams) hasModifications() bool {
+	return p.OverrideMethod != "" ||
+		p.OverrideURL != "" ||
+		p.OverrideHeadersRaw != nil ||
+		p.AddHeadersRaw != nil ||
+		p.OverrideBody != nil ||
+		p.OverrideBodyBase64 != nil ||
+		len(p.RemoveHeaders) > 0 ||
+		len(p.BodyPatches) > 0 ||
+		p.OverrideHost != "" ||
+		p.OverrideRawBase64 != "" ||
+		len(p.Patches) > 0
+}
+
 // handleResend routes the resend tool invocation to the appropriate action handler.
 func (s *Server) handleResend(ctx context.Context, _ *gomcp.CallToolRequest, input resendInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "resend",
+		"action", input.Action,
+		"flow_id", input.Params.FlowID,
+		"has_modifications", input.Params.hasModifications(),
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "resend",
+			"action", input.Action,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	// Parse raw header JSON fields into typed HeaderEntries.
 	if err := input.Params.parseRawHeaders(); err != nil {
 		return nil, nil, err
