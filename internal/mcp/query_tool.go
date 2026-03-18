@@ -213,6 +213,7 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 		"tool", "query",
 		"resource", input.Resource,
 		"id", input.ID,
+		"fuzz_id", input.FuzzID,
 	)
 	defer func() {
 		slog.DebugContext(ctx, "MCP tool completed",

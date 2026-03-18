@@ -178,17 +178,6 @@ func (s *Server) registerProxyStart() {
 // handleProxyStart handles the proxy_start tool invocation.
 func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest, input proxyStartInput) (*gomcp.CallToolResult, *proxyStartResult, error) {
 	start := time.Now()
-	slog.DebugContext(ctx, "MCP tool invoked",
-		"tool", "proxy_start",
-		"listen_addr", input.ListenAddr,
-		"name", input.Name,
-	)
-	defer func() {
-		slog.DebugContext(ctx, "MCP tool completed",
-			"tool", "proxy_start",
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
-	}()
 
 	if s.deps.manager == nil {
 		return nil, nil, fmt.Errorf("proxy manager is not initialized")
@@ -202,6 +191,18 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	if listenerName == "" {
 		listenerName = proxy.DefaultListenerName
 	}
+
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "proxy_start",
+		"listen_addr", input.ListenAddr,
+		"name", listenerName,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "proxy_start",
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
 
 	// Validate the listen address before attempting to start.
 	if input.ListenAddr != "" {
