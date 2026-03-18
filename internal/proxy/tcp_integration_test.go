@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
@@ -99,8 +100,8 @@ func TestIntegration_TCP_Relay(t *testing.T) {
 
 	// Configure TCP forwarding: proxy port -> upstream echo server.
 	_, proxyPort, _ := net.SplitHostPort(listener.Addr())
-	tcpHandler.SetForwards(map[string]string{
-		proxyPort: upstreamAddr,
+	tcpHandler.SetForwards(map[string]*config.ForwardConfig{
+		proxyPort: {Target: upstreamAddr, Protocol: "raw"},
 	})
 
 	// Connect to the proxy with non-HTTP data (triggers TCP fallback).
@@ -192,8 +193,8 @@ func TestIntegration_TCP_ConcurrentRelays(t *testing.T) {
 	}
 
 	_, proxyPort, _ := net.SplitHostPort(listener.Addr())
-	tcpHandler.SetForwards(map[string]string{
-		proxyPort: upstreamAddr,
+	tcpHandler.SetForwards(map[string]*config.ForwardConfig{
+		proxyPort: {Target: upstreamAddr, Protocol: "raw"},
 	})
 
 	const concurrency = 10

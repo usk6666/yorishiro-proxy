@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -963,18 +964,18 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 
 // queryConfigResult is the response for the config resource.
 type queryConfigResult struct {
-	UpstreamProxy    string                   `json:"upstream_proxy"`
-	CaptureScope     *queryScopeResult        `json:"capture_scope"`
-	TLSPassthrough   *queryPassthroughResult  `json:"tls_passthrough"`
-	TCPForwards      map[string]string        `json:"tcp_forwards,omitempty"`
-	EnabledProtocols []string                 `json:"enabled_protocols,omitempty"`
-	SOCKS5Enabled    bool                     `json:"socks5_enabled"`
-	ClientCert       *queryClientCertResult   `json:"client_cert,omitempty"`
-	SafetyFilter     *querySafetyFilterResult `json:"safety_filter,omitempty"`
-	MaxConnections   int                      `json:"max_connections"`
-	PeekTimeoutMs    int64                    `json:"peek_timeout_ms"`
-	RequestTimeoutMs int64                    `json:"request_timeout_ms"`
-	TLSFingerprint   string                   `json:"tls_fingerprint"`
+	UpstreamProxy    string                           `json:"upstream_proxy"`
+	CaptureScope     *queryScopeResult                `json:"capture_scope"`
+	TLSPassthrough   *queryPassthroughResult          `json:"tls_passthrough"`
+	TCPForwards      map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
+	EnabledProtocols []string                         `json:"enabled_protocols,omitempty"`
+	SOCKS5Enabled    bool                             `json:"socks5_enabled"`
+	ClientCert       *queryClientCertResult           `json:"client_cert,omitempty"`
+	SafetyFilter     *querySafetyFilterResult         `json:"safety_filter,omitempty"`
+	MaxConnections   int                              `json:"max_connections"`
+	PeekTimeoutMs    int64                            `json:"peek_timeout_ms"`
+	RequestTimeoutMs int64                            `json:"request_timeout_ms"`
+	TLSFingerprint   string                           `json:"tls_fingerprint"`
 }
 
 // querySafetyFilterResult holds SafetyFilter status in the config response.

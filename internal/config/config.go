@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,6 +282,56 @@ func isValidProjectNameRune(r rune) bool {
 		r == '-' || r == '_' || r == '.'
 }
 
+// ForwardConfig holds the configuration for a single TCP forward entry.
+// It specifies the upstream target address and optional protocol/TLS hints
+// for L7 parsing on forwarded connections.
+type ForwardConfig struct {
+	// Target is the upstream address (e.g. "api.example.com:50051").
+	Target string `json:"target"`
+
+	// Protocol specifies the expected protocol for L7 parsing.
+	// Valid values: "auto" (default, peek-based detection), "raw" (no L7, current behavior),
+	// "http", "http2", "grpc", "websocket".
+	// Empty is treated as "auto".
+	Protocol string `json:"protocol,omitempty"`
+
+	// TLS enables TLS MITM termination on the forwarded port.
+	// When true, the proxy terminates TLS using the target hostname
+	// for certificate generation, then applies L7 parsing.
+	TLS bool `json:"tls,omitempty"`
+}
+
+// ValidForwardProtocols is the set of valid protocol values for ForwardConfig.
+var ValidForwardProtocols = map[string]bool{
+	"":          true, // empty means "auto"
+	"auto":      true,
+	"raw":       true,
+	"http":      true,
+	"http2":     true,
+	"grpc":      true,
+	"websocket": true,
+}
+
+// ValidateForwardConfig validates a ForwardConfig for a given port key.
+// It checks that target is non-empty, protocol is valid, and emits a
+// warning log if tls is true with protocol "raw".
+func ValidateForwardConfig(port string, fc *ForwardConfig) error {
+	if fc == nil {
+		return fmt.Errorf("forward config for port %q is nil", port)
+	}
+	if fc.Target == "" {
+		return fmt.Errorf("forward config for port %q: target cannot be empty", port)
+	}
+	if !ValidForwardProtocols[fc.Protocol] {
+		return fmt.Errorf("forward config for port %q: invalid protocol %q (valid: auto, raw, http, http2, grpc, websocket)", port, fc.Protocol)
+	}
+	if fc.TLS && (fc.Protocol == "raw") {
+		slog.Warn("TCP forward: tls=true with protocol=raw means TLS termination without L7 parsing",
+			"port", port, "target", fc.Target)
+	}
+	return nil
+}
+
 // HostTLSEntry defines per-host TLS configuration in the config file.
 type HostTLSEntry struct {
 	// ClientCertPath is the path to the PEM-encoded client certificate file.
@@ -418,8 +469,10 @@ type ProxyConfig struct {
 	// AutoTransform configures auto-transform rules for automatic modification.
 	AutoTransform json.RawMessage `json:"auto_transform,omitempty"`
 
-	// TCPForwards maps local listen ports to upstream TCP addresses.
-	TCPForwards map[string]string `json:"tcp_forwards,omitempty"`
+	// TCPForwards maps local listen ports to forwarding configurations.
+	// Supports both legacy string format ("host:port") and structured ForwardConfig.
+	// Use UnmarshalJSON for backward-compatible parsing.
+	TCPForwards map[string]*ForwardConfig `json:"tcp_forwards,omitempty"`
 
 	// UpstreamProxy is the upstream proxy URL for proxy chaining.
 	UpstreamProxy string `json:"upstream_proxy,omitempty"`
@@ -541,6 +594,74 @@ type SafetyFilterRuleConfig struct {
 	// preset rules. Ignored for input rules and custom rules (which use the
 	// section-level action). Only applicable when referencing an output preset.
 	Replacement string `json:"replacement,omitempty"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler for ProxyConfig.
+// It handles backward-compatible deserialization of TCPForwards, which can be
+// either a string value (legacy: "host:port") or a structured ForwardConfig object.
+func (c *ProxyConfig) UnmarshalJSON(data []byte) error {
+	// Use an alias type to avoid infinite recursion.
+	type proxyConfigAlias ProxyConfig
+	// Temporarily override TCPForwards to capture raw JSON.
+	type proxyConfigWithRawForwards struct {
+		proxyConfigAlias
+		TCPForwards json.RawMessage `json:"tcp_forwards,omitempty"`
+	}
+
+	var raw proxyConfigWithRawForwards
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// Copy all fields except TCPForwards.
+	*c = ProxyConfig(raw.proxyConfigAlias)
+
+	// Parse TCPForwards with backward compatibility.
+	if len(raw.TCPForwards) > 0 {
+		parsed, err := unmarshalTCPForwards(raw.TCPForwards)
+		if err != nil {
+			return fmt.Errorf("tcp_forwards: %w", err)
+		}
+		c.TCPForwards = parsed
+	}
+
+	return nil
+}
+
+// unmarshalTCPForwards parses a JSON value that can be either:
+//   - {"port": "host:port"}              (legacy string format)
+//   - {"port": {"target": "host:port"}}  (structured ForwardConfig)
+//   - a mix of both
+//
+// Legacy string values are converted to ForwardConfig{Target: value, Protocol: "raw"}.
+func unmarshalTCPForwards(data json.RawMessage) (map[string]*ForwardConfig, error) {
+	// First, unmarshal as map[string]json.RawMessage to inspect each value.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("must be an object: %w", err)
+	}
+
+	result := make(map[string]*ForwardConfig, len(raw))
+	for port, val := range raw {
+		// Try string first (legacy format).
+		var s string
+		if err := json.Unmarshal(val, &s); err == nil {
+			result[port] = &ForwardConfig{
+				Target:   s,
+				Protocol: "raw",
+			}
+			continue
+		}
+
+		// Try structured ForwardConfig.
+		var fc ForwardConfig
+		if err := json.Unmarshal(val, &fc); err != nil {
+			return nil, fmt.Errorf("port %q: must be a string or ForwardConfig object: %w", port, err)
+		}
+		result[port] = &fc
+	}
+
+	return result, nil
 }
 
 // LoadFile reads and parses a JSON config file from the given path.
