@@ -319,14 +319,18 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 		return nil, nil, nil, fmt.Errorf("invalid hooks: %w", err)
 	}
 
-	kvStore, err := s.executePreSendHook(ctx, params)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
 	fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("get flow: %w", err)
+	}
+
+	if err := checkResendProtocolSupport(fl); err != nil {
+		return nil, nil, nil, err
+	}
+
+	kvStore, err := s.executePreSendHook(ctx, params)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	if fl.Protocol == "WebSocket" {
@@ -396,6 +400,15 @@ func (s *Server) executePreSendHook(ctx context.Context, params *resendParams) (
 		}
 	}
 	return kvStore, nil
+}
+
+// checkResendProtocolSupport returns an error if the flow's protocol/type combination
+// is not supported for resend. Currently gRPC streaming flows are unsupported.
+func checkResendProtocolSupport(fl *flow.Flow) error {
+	if fl.Protocol == "gRPC" && fl.FlowType != "unary" {
+		return fmt.Errorf("resending gRPC streaming flows (type: %s) is not yet supported; only unary gRPC flows can be resent", fl.FlowType)
+	}
+	return nil
 }
 
 // buildResendURL resolves the target URL from the original message URL and any override.
