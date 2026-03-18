@@ -2,6 +2,7 @@ package intercept
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
@@ -295,11 +296,22 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []b
 	// between our capacity check and now.
 	if q.maxItems > 0 && len(q.items) >= q.maxItems {
 		q.mu.Unlock()
+		slog.Debug("intercept queue full, auto-releasing request",
+			slog.String("intercept_id", id),
+			slog.String("method", method),
+		)
 		actionCh <- InterceptAction{Type: ActionRelease}
 		return id, actionCh
 	}
 	q.items[id] = item
 	q.mu.Unlock()
+
+	slog.Debug("request held in intercept queue",
+		slog.String("intercept_id", id),
+		slog.String("method", method),
+		slog.String("url", urlString(urlCopy)),
+		slog.Any("matched_rules", rulesCopy),
+	)
 
 	return id, actionCh
 }
@@ -369,11 +381,22 @@ func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, 
 	q.mu.Lock()
 	if q.maxItems > 0 && len(q.items) >= q.maxItems {
 		q.mu.Unlock()
+		slog.Debug("intercept queue full, auto-releasing response",
+			slog.String("intercept_id", id),
+			slog.Int("status_code", statusCode),
+		)
 		actionCh <- InterceptAction{Type: ActionRelease}
 		return id, actionCh
 	}
 	q.items[id] = item
 	q.mu.Unlock()
+
+	slog.Debug("response held in intercept queue",
+		slog.String("intercept_id", id),
+		slog.Int("status_code", statusCode),
+		slog.String("url", urlString(urlCopy)),
+		slog.Any("matched_rules", rulesCopy),
+	)
 
 	return id, actionCh
 }
@@ -428,11 +451,23 @@ func (q *Queue) EnqueueWebSocketFrame(opcode int, direction, flowID, upgradeURL 
 	q.mu.Lock()
 	if q.maxItems > 0 && len(q.items) >= q.maxItems {
 		q.mu.Unlock()
+		slog.Debug("intercept queue full, auto-releasing websocket frame",
+			slog.String("intercept_id", id),
+			slog.String("flow_id", flowID),
+		)
 		actionCh <- InterceptAction{Type: ActionRelease}
 		return id, actionCh
 	}
 	q.items[id] = item
 	q.mu.Unlock()
+
+	slog.Debug("websocket frame held in intercept queue",
+		slog.String("intercept_id", id),
+		slog.String("direction", direction),
+		slog.String("flow_id", flowID),
+		slog.Int64("sequence", sequence),
+		slog.Any("matched_rules", rulesCopy),
+	)
 
 	return id, actionCh
 }
@@ -485,10 +520,31 @@ func (q *Queue) Respond(id string, action InterceptAction) error {
 	delete(q.items, id)
 	q.mu.Unlock()
 
+	slog.Debug("intercept queue item released",
+		slog.String("intercept_id", id),
+		slog.String("phase", string(item.Phase)),
+		slog.String("action", actionTypeString(action.Type)),
+		slog.String("mode", string(action.EffectiveMode())),
+	)
+
 	// Send action to the channel. This is non-blocking because the channel
 	// has a buffer of 1.
 	item.actionCh <- action
 	return nil
+}
+
+// actionTypeString returns a human-readable string for an ActionType.
+func actionTypeString(a ActionType) string {
+	switch a {
+	case ActionRelease:
+		return "release"
+	case ActionModifyAndForward:
+		return "modify_and_forward"
+	case ActionDrop:
+		return "drop"
+	default:
+		return "unknown"
+	}
 }
 
 // Remove removes a request from the queue without sending an action.
@@ -521,6 +577,11 @@ func (q *Queue) SetRawBytes(id string, rawBytes []byte) error {
 		copy(cp, rawBytes)
 		item.RawBytes = cp
 	}
+
+	slog.Debug("raw bytes attached to intercept queue item",
+		slog.String("intercept_id", id),
+		slog.Int("raw_bytes_size", len(rawBytes)),
+	)
 	return nil
 }
 

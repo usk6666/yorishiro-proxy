@@ -2,6 +2,7 @@ package intercept
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
@@ -147,6 +148,11 @@ func (e *Engine) MatchesRequest(method string, u *url.URL, headers http.Header) 
 			continue
 		}
 		if cr.matchesRequest(method, u, headers) {
+			slog.Debug("intercept rule matched request",
+				slog.String("rule_id", cr.rule.ID),
+				slog.String("method", method),
+				slog.String("url", urlString(u)),
+			)
 			return true
 		}
 	}
@@ -171,6 +177,10 @@ func (e *Engine) MatchesResponse(statusCode int, headers http.Header) bool {
 			continue
 		}
 		if cr.matchesResponse(statusCode, headers) {
+			slog.Debug("intercept rule matched response",
+				slog.String("rule_id", cr.rule.ID),
+				slog.Int("status_code", statusCode),
+			)
 			return true
 		}
 	}
@@ -198,6 +208,13 @@ func (e *Engine) MatchRequestRules(method string, u *url.URL, headers http.Heade
 			matched = append(matched, cr.rule.ID)
 		}
 	}
+	if len(matched) > 0 {
+		slog.Debug("intercept request rules evaluated",
+			slog.String("method", method),
+			slog.String("url", urlString(u)),
+			slog.Any("matched_rules", matched),
+		)
+	}
 	return matched
 }
 
@@ -220,6 +237,12 @@ func (e *Engine) MatchResponseRules(statusCode int, headers http.Header) []strin
 		if cr.matchesResponse(statusCode, headers) {
 			matched = append(matched, cr.rule.ID)
 		}
+	}
+	if len(matched) > 0 {
+		slog.Debug("intercept response rules evaluated",
+			slog.Int("status_code", statusCode),
+			slog.Any("matched_rules", matched),
+		)
 	}
 	return matched
 }
@@ -244,6 +267,11 @@ func (e *Engine) MatchesWebSocketFrame(upgradeURL string, direction string, flow
 			continue
 		}
 		if cr.matchesWebSocketFrame(upgradeURL, flowID) {
+			slog.Debug("intercept rule matched websocket frame",
+				slog.String("rule_id", cr.rule.ID),
+				slog.String("direction", direction),
+				slog.String("flow_id", flowID),
+			)
 			return true
 		}
 	}
@@ -271,7 +299,22 @@ func (e *Engine) MatchWebSocketFrameRules(upgradeURL string, direction string, f
 			matched = append(matched, cr.rule.ID)
 		}
 	}
+	if len(matched) > 0 {
+		slog.Debug("intercept websocket frame rules evaluated",
+			slog.String("direction", direction),
+			slog.String("flow_id", flowID),
+			slog.Any("matched_rules", matched),
+		)
+	}
 	return matched
+}
+
+// urlString returns the string representation of a URL, or an empty string if nil.
+func urlString(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	return u.Redacted()
 }
 
 // matchesWSDirection maps the rule's Direction to WebSocket direction strings.

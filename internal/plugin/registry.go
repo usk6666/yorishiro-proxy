@@ -2,7 +2,9 @@ package plugin
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+	"time"
 )
 
 // hookEntry represents a single plugin's handler for a specific hook.
@@ -85,12 +87,28 @@ func (r *Registry) Dispatch(ctx context.Context, hook Hook, data map[string]any)
 	copy(snapshot, entries)
 	r.mu.RUnlock()
 
+	debugEnabled := slog.Default().Enabled(ctx, slog.LevelDebug)
+
 	for _, entry := range snapshot {
 		if !entry.enabled {
 			continue
 		}
+		var start time.Time
+		if debugEnabled {
+			start = time.Now()
+		}
 		result, err := entry.handler(ctx, data)
 		if err != nil {
+			if debugEnabled {
+				elapsed := time.Since(start)
+				slog.DebugContext(ctx, "plugin hook execution failed",
+					slog.String("plugin", entry.pluginName),
+					slog.String("hook", string(hook)),
+					slog.Duration("duration", elapsed),
+					slog.String("on_error", string(entry.onError)),
+					slog.String("error", err.Error()),
+				)
+			}
 			switch entry.onError {
 			case OnErrorAbort:
 				return nil, &DispatchError{
@@ -103,7 +121,27 @@ func (r *Registry) Dispatch(ctx context.Context, hook Hook, data map[string]any)
 			}
 		}
 		if result == nil {
+			if debugEnabled {
+				elapsed := time.Since(start)
+				slog.DebugContext(ctx, "plugin hook returned nil",
+					slog.String("plugin", entry.pluginName),
+					slog.String("hook", string(hook)),
+					slog.Duration("duration", elapsed),
+				)
+			}
 			continue
+		}
+
+		if debugEnabled {
+			elapsed := time.Since(start)
+			hasModifications := len(result.Data) > 0
+			slog.DebugContext(ctx, "plugin hook executed",
+				slog.String("plugin", entry.pluginName),
+				slog.String("hook", string(hook)),
+				slog.String("action", result.Action.String()),
+				slog.Bool("has_modifications", hasModifications),
+				slog.Duration("duration", elapsed),
+			)
 		}
 
 		// Update data from result for subsequent handlers.

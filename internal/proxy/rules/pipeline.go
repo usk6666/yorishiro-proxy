@@ -2,6 +2,7 @@ package rules
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -167,6 +168,12 @@ func (p *Pipeline) TransformRequest(method string, u *url.URL, headers http.Head
 		if !cr.matchesRequest(method, u, headers) {
 			continue
 		}
+		slog.Debug("auto-transform rule matched request",
+			slog.String("rule_id", cr.rule.ID),
+			slog.String("action_type", string(cr.rule.Action.Type)),
+			slog.Int("priority", cr.rule.Priority),
+			slog.String("method", method),
+		)
 		headers, body = applyAction(cr, headers, body)
 	}
 
@@ -190,6 +197,12 @@ func (p *Pipeline) TransformResponse(statusCode int, headers http.Header, body [
 		if !cr.matchesResponse(statusCode, headers) {
 			continue
 		}
+		slog.Debug("auto-transform rule matched response",
+			slog.String("rule_id", cr.rule.ID),
+			slog.String("action_type", string(cr.rule.Action.Type)),
+			slog.Int("priority", cr.rule.Priority),
+			slog.Int("status_code", statusCode),
+		)
 		headers, body = applyAction(cr, headers, body)
 	}
 
