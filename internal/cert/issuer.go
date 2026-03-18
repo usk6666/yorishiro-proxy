@@ -69,9 +69,7 @@ func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 	}
 
 	// Use singleflight to coalesce concurrent requests for the same hostname.
-	slog.Debug("certificate cache miss, generating", "hostname", hostname)
-	generateStart := time.Now()
-	result, err, _ := iss.group.Do(hostname, func() (interface{}, error) {
+	result, err, shared := iss.group.Do(hostname, func() (interface{}, error) {
 		// Double-check cache after acquiring the singleflight slot,
 		// in case another goroutine populated it while we were waiting.
 		if cc, ok := iss.cache.Get(hostname); ok {
@@ -79,6 +77,8 @@ func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 			return cc.cert, nil
 		}
 
+		slog.Debug("certificate cache miss, generating", "hostname", hostname)
+		generateStart := time.Now()
 		cert, expiresAt, err := iss.generate(hostname)
 		if err != nil {
 			return nil, err
@@ -94,6 +94,9 @@ func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 			"duration", time.Since(generateStart))
 		return cert, nil
 	})
+	if shared {
+		slog.Debug("certificate obtained via singleflight coalescing", "hostname", hostname)
+	}
 	if err != nil {
 		return nil, err
 	}
