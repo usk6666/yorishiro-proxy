@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -28,30 +29,40 @@ func (d *Detector) SetLogger(logger *slog.Logger) {
 
 // Detect examines peek bytes and returns the first matching handler, or nil.
 func (d *Detector) Detect(peek []byte) proxy.ProtocolHandler {
-	start := time.Now()
+	debugEnabled := d.logger.Enabled(context.Background(), slog.LevelDebug)
 
-	// Log leading bytes for diagnostics (up to 8 bytes).
-	previewLen := len(peek)
-	if previewLen > 8 {
-		previewLen = 8
+	var start time.Time
+	var previewLen int
+	if debugEnabled {
+		start = time.Now()
+
+		// Log leading bytes for diagnostics (up to 8 bytes).
+		previewLen = len(peek)
+		if previewLen > 8 {
+			previewLen = 8
+		}
 	}
 
 	for _, h := range d.handlers {
 		if h.Detect(peek) {
-			d.logger.Debug("protocol detected",
-				"protocol", h.Name(),
-				"peek_hex", fmt.Sprintf("%x", peek[:previewLen]),
-				"peek_len", len(peek),
-				"duration_us", time.Since(start).Microseconds(),
-			)
+			if debugEnabled {
+				d.logger.Debug("protocol detected",
+					"protocol", h.Name(),
+					"peek_hex", fmt.Sprintf("%x", peek[:previewLen]),
+					"peek_len", len(peek),
+					"duration_us", time.Since(start).Microseconds(),
+				)
+			}
 			return h
 		}
 	}
 
-	d.logger.Debug("no protocol matched",
-		"peek_hex", fmt.Sprintf("%x", peek[:previewLen]),
-		"peek_len", len(peek),
-		"duration_us", time.Since(start).Microseconds(),
-	)
+	if debugEnabled {
+		d.logger.Debug("no protocol matched",
+			"peek_hex", fmt.Sprintf("%x", peek[:previewLen]),
+			"peek_len", len(peek),
+			"duration_us", time.Since(start).Microseconds(),
+		)
+	}
 	return nil
 }
