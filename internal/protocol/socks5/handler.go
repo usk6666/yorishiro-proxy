@@ -212,8 +212,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("socks5 write success reply: %w", err)
 	}
 
-	logger.Info("socks5 tunnel established", "target", target)
-	logger.Debug("socks5 handshake complete", "target", target, "auth_method", authMethodName)
+	logger.Info("socks5 tunnel established", "target", target, "auth_method", authMethodName)
 
 	// 7. Dispatch on_socks5_connect plugin hook.
 	h.dispatchOnSOCKS5Connect(ctx, target, authMethodName, authUsername, conn)
