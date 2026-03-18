@@ -278,6 +278,10 @@ func (h *Handler) recordReceiveMessages(
 
 	if len(frames) == 0 {
 		// Record the response metadata even without frames (e.g., error responses).
+		meta := buildReceiveMetadata(service, method, grpcStatus, grpcMessage, grpcEncoding, false)
+		// Mark as trailers-only: no DATA frames in the response indicates
+		// a gRPC Trailers-Only response (e.g., UNIMPLEMENTED, NOT_FOUND).
+		meta["grpc_trailers_only"] = "true"
 		msg := &flow.Message{
 			FlowID:     flowID,
 			Sequence:   seq,
@@ -285,7 +289,7 @@ func (h *Handler) recordReceiveMessages(
 			Timestamp:  info.Start.Add(info.Duration),
 			StatusCode: info.StatusCode,
 			Headers:    mergeHeaders(info.ResponseHeaders, info.Trailers),
-			Metadata:   buildReceiveMetadata(service, method, grpcStatus, grpcMessage, grpcEncoding, false),
+			Metadata:   meta,
 		}
 		if err := h.store.AppendMessage(ctx, msg); err != nil {
 			logger.Error("gRPC receive message save failed", "sequence", seq, "error", err)
