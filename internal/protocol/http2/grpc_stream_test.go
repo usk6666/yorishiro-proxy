@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	gohttp "net/http"
 	"net/http/httptest"
 	"testing"
@@ -533,6 +534,133 @@ func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHandleGRPCStream_TrailersOnlyNoDeadlock verifies that a gRPC
+// Trailers-Only response (no DATA frames, only HEADERS+END_STREAM) does not
+// deadlock when the client uses a streaming request body. This is the
+// regression test for USK-434.
+//
+// The deadlock scenario:
+//  1. Client sends request via a pipe (body not yet closed).
+//  2. Upstream returns Trailers-Only (grpc-status in headers, empty body).
+//  3. Proxy must flush the response to the client before waiting for the
+//     request goroutine to finish — otherwise the client never sees the
+//     response and cannot close its request stream, causing a deadlock.
+//
+// This test uses an h2c upstream to enable true HTTP/2 bidirectional streaming,
+// where the server can respond before the client finishes sending its body.
+// An HTTP/1.1 upstream cannot reproduce this deadlock because its transport
+// blocks until the entire request body is sent.
+func TestHandleGRPCStream_TrailersOnlyNoDeadlock(t *testing.T) {
+	// Start an h2c upstream that returns a Trailers-Only response immediately
+	// without draining the request body, simulating a gRPC UNIMPLEMENTED error.
+	upstreamHandler := gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Grpc-Status", "12") // UNIMPLEMENTED
+		w.Header().Set("Grpc-Message", "method not found")
+		w.WriteHeader(gohttp.StatusOK)
+		// No body — Trailers-Only pattern.
+		// Do NOT drain body: server responds before client finishes.
+	})
+
+	upstreamProtos := &gohttp.Protocols{}
+	upstreamProtos.SetHTTP1(true)
+	upstreamProtos.SetUnencryptedHTTP2(true)
+	upstreamLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("upstream listen: %v", err)
+	}
+	upstreamServer := &gohttp.Server{Handler: upstreamHandler, Protocols: upstreamProtos}
+	go upstreamServer.Serve(upstreamLn)
+	defer upstreamServer.Close()
+	upstreamURL := "http://" + upstreamLn.Addr().String()
+
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	grpcHandler := protogrpc.NewHandler(store, testutil.DiscardLogger())
+	handler.SetGRPCHandler(grpcHandler)
+
+	// Configure proxy transport to use h2c to the upstream.
+	upstreamTransportProtos := &gohttp.Protocols{}
+	upstreamTransportProtos.SetUnencryptedHTTP2(true)
+	upstreamTransportProtos.SetHTTP2(true)
+	handler.Transport = &gohttp.Transport{
+		Protocols: upstreamTransportProtos,
+	}
+
+	proxyAddr, cancel := startH2CProxyListener(t, handler,
+		"conn-trailers-only-deadlock", "127.0.0.1:9999", "", tlsMetadata{})
+	defer cancel()
+
+	client := newH2CClientForAddr(proxyAddr)
+
+	// Use a pipe for the request body. The client will only close the pipe
+	// after it receives the response — mimicking real gRPC client behavior
+	// where the client waits for the server response before finishing.
+	bodyPR, bodyPW := io.Pipe()
+
+	req, _ := gohttp.NewRequest("POST",
+		upstreamURL+"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo", bodyPR)
+	req.Header.Set("Content-Type", "application/grpc")
+
+	type result struct {
+		resp *gohttp.Response
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		resp, err := client.Do(req)
+		resCh <- result{resp, err}
+	}()
+
+	// Write one gRPC frame so the proxy can forward it to the upstream.
+	// The upstream will respond immediately with Trailers-Only.
+	frame := protogrpc.EncodeFrame(false, []byte("reflection-request"))
+	if _, err := bodyPW.Write(frame); err != nil {
+		t.Fatalf("write initial frame: %v", err)
+	}
+
+	// Wait for the response with a timeout. Before the fix, this would
+	// deadlock because the proxy never flushed the trailers-only response.
+	var resp *gohttp.Response
+	select {
+	case r := <-resCh:
+		if r.err != nil {
+			t.Fatalf("client request: %v", r.err)
+		}
+		resp = r.resp
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for response — deadlock detected (USK-434)")
+	}
+	defer resp.Body.Close()
+
+	// Close the pipe now that we have the response.
+	bodyPW.Close()
+
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != gohttp.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+	}
+
+	// Verify grpc-status trailer was received.
+	grpcStatus := resp.Trailer.Get("Grpc-Status")
+	if grpcStatus == "" {
+		grpcStatus = resp.Header.Get(gohttp.TrailerPrefix + "Grpc-Status")
+	}
+	if grpcStatus != "12" {
+		t.Errorf("grpc-status = %q, want %q (trailer=%v, header=%v)",
+			grpcStatus, "12", resp.Trailer, resp.Header)
+	}
+
+	grpcMsg := resp.Trailer.Get("Grpc-Message")
+	if grpcMsg == "" {
+		grpcMsg = resp.Header.Get(gohttp.TrailerPrefix + "Grpc-Message")
+	}
+	if grpcMsg != "method not found" {
+		t.Errorf("grpc-message = %q, want %q", grpcMsg, "method not found")
 	}
 }
 
