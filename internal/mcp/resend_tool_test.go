@@ -397,6 +397,113 @@ func TestExecute_Replay_NoSendMessages(t *testing.T) {
 	}
 }
 
+func TestExecute_Replay_GRPCStreamingUnsupported(t *testing.T) {
+	tests := []struct {
+		name     string
+		flowType string
+	}{
+		{"server_streaming", "stream"},
+		{"bidirectional", "bidirectional"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+
+			u, _ := url.Parse("http://localhost:50051/test.Service/Method")
+			entry := saveTestEntry(t, store,
+				&flow.Flow{
+					Protocol:  "gRPC",
+					FlowType:  tt.flowType,
+					Timestamp: time.Now(),
+					Duration:  100 * time.Millisecond,
+				},
+				&flow.Message{
+					Sequence:  0,
+					Direction: "send",
+					Timestamp: time.Now(),
+					Method:    "POST",
+					URL:       u,
+					Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
+					Body:      []byte("grpc-frame"),
+				},
+				&flow.Message{
+					Sequence:   1,
+					Direction:  "receive",
+					Timestamp:  time.Now(),
+					StatusCode: 200,
+					Headers:    map[string][]string{"Content-Type": {"application/grpc"}},
+					Body:       []byte("grpc-response"),
+				},
+			)
+
+			cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+			result := executeCallTool(t, cs, map[string]any{
+				"action": "replay",
+				"params": map[string]any{
+					"flow_id": entry.Session.ID,
+				},
+			})
+			if !result.IsError {
+				t.Fatal("expected error for gRPC streaming flow")
+			}
+
+			textContent := result.Content[0].(*gomcp.TextContent)
+			if !strings.Contains(textContent.Text, "not yet supported") {
+				t.Errorf("error message should mention 'not yet supported', got: %s", textContent.Text)
+			}
+			if !strings.Contains(textContent.Text, tt.flowType) {
+				t.Errorf("error message should mention flow type %q, got: %s", tt.flowType, textContent.Text)
+			}
+		})
+	}
+}
+
+func TestExecute_Replay_GRPCUnaryAllowed(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/test.Service/Method")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "gRPC",
+			FlowType:  "unary",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
+			Body:      []byte("grpc-frame"),
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/grpc"}},
+			Body:       []byte("grpc-response"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "replay",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success for gRPC unary flow, got error: %v", result.Content)
+	}
+}
+
 // --- ReplayRaw action tests ---
 
 func TestExecute_ReplayRaw_Success(t *testing.T) {
