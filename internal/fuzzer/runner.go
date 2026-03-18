@@ -521,6 +521,6 @@ func (r *Runner) updateJobProgress(ctx context.Context, job *flow.FuzzJob, ctrl 
 	}
 	// Best-effort update; don't fail the job if DB write fails here.
 	if err := r.engine.fuzzStore.UpdateFuzzJob(ctx, update); err != nil {
-		slog.Warn("failed to update fuzz job progress", "job_id", job.ID, "error", err)
+		slog.Debug("failed to update fuzz job progress", "job_id", job.ID, "error", err)
 	}
 }
