@@ -29,9 +29,6 @@ type streamRequest struct {
 	headerFragments []byte
 	// endStream indicates whether END_STREAM was set on the HEADERS frame.
 	headersEndStream bool
-	// bodyBuf accumulates DATA frame payloads when END_STREAM arrives on HEADERS
-	// (i.e. no streaming needed). Unused when bodyPipe is set.
-	bodyBuf bytes.Buffer
 	// rawFrames stores raw bytes of all received frames for L4 recording.
 	rawFrames [][]byte
 	// bodyPipe is the write end of an io.Pipe used to stream DATA frame payloads
@@ -68,11 +65,6 @@ type clientConn struct {
 
 	// wg tracks in-flight handler goroutines.
 	wg sync.WaitGroup
-
-	// decodedHeaders stores decoded HPACK headers for streams that have received
-	// HEADERS but not yet END_STREAM (waiting for DATA frames).
-	// Accessed only from the main read loop goroutine.
-	decodedHeaders map[uint32][]hpack.HeaderField
 
 	// streamHandler is called for each completed request.
 	streamHandler func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request)
@@ -417,8 +409,7 @@ func (cc *clientConn) completeHeaders(streamID uint32) error {
 }
 
 // handleDataFrame processes a DATA frame, streaming the payload to the handler
-// via the io.Pipe (if active) or accumulating it in bodyBuf, and updating
-// flow control.
+// via the io.Pipe and updating flow control.
 func (cc *clientConn) handleDataFrame(f *frame.Frame) error {
 	streamID := f.Header.StreamID
 	if streamID == 0 {
@@ -453,7 +444,15 @@ func (cc *clientConn) handleDataFrame(f *frame.Frame) error {
 	if sr.bodyPipe != nil {
 		return cc.handleStreamingData(streamID, sr, f, data)
 	}
-	return cc.handleBufferedData(streamID, sr, f, data)
+
+	// bodyPipe is always set for streams expecting DATA frames (HEADERS without
+	// END_STREAM creates a pipe in completeHeaders). Reaching here indicates a
+	// protocol-level inconsistency.
+	return &StreamError{
+		StreamID: streamID,
+		Code:     ErrCodeInternal,
+		Reason:   "DATA frame received but no body pipe active",
+	}
 }
 
 // replenishFlowControl consumes and replenishes flow control windows for
@@ -507,23 +506,6 @@ func (cc *clientConn) handleStreamingData(streamID uint32, sr *streamRequest, f 
 	return nil
 }
 
-// handleBufferedData accumulates DATA payload in bodyBuf. On END_STREAM,
-// dispatches the complete request. This path is used when headersEndStream
-// was true (defensive fallback).
-func (cc *clientConn) handleBufferedData(streamID uint32, sr *streamRequest, f *frame.Frame, data []byte) error {
-	sr.bodyBuf.Write(data)
-
-	if f.Header.Flags.Has(frame.FlagEndStream) {
-		if err := cc.h2conn.Streams().Transition(streamID, EventRecvEndStream); err != nil {
-			return err
-		}
-		headers := cc.decodedHeaders[streamID]
-		delete(cc.decodedHeaders, streamID)
-		return cc.dispatchStream(streamID, headers, sr.bodyBuf.Bytes())
-	}
-	return nil
-}
-
 // handlePingFrame processes a PING frame.
 func (cc *clientConn) handlePingFrame(f *frame.Frame) error {
 	needsAck, data, err := cc.h2conn.HandlePing(f)
@@ -572,9 +554,6 @@ func (cc *clientConn) handleRSTStreamFrame(f *frame.Frame) error {
 	}
 	// Clean up pending stream state.
 	delete(cc.pendingStreams, streamID)
-	if cc.decodedHeaders != nil {
-		delete(cc.decodedHeaders, streamID)
-	}
 	// If we were in the middle of a header block for this stream, clear it.
 	if cc.headerStreamID == streamID {
 		cc.headerStreamID = 0
@@ -608,9 +587,6 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 
 	// Clean up pending state — request is complete (END_STREAM received).
 	delete(cc.pendingStreams, streamID)
-	if cc.decodedHeaders != nil {
-		delete(cc.decodedHeaders, streamID)
-	}
 
 	streamCtx := contextWithRawFrames(cc.ctx, rawFrames)
 
@@ -647,9 +623,12 @@ func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.He
 
 	rw := newFrameResponseWriter(cc, streamID)
 
-	// Extract raw frames accumulated so far (HEADERS + CONTINUATION).
+	// Extract raw frames accumulated so far (HEADERS + CONTINUATION only).
 	// Note: pendingStreams is NOT deleted here — DATA frames will continue
-	// to append to rawFrames and write to bodyPipe.
+	// to append to sr.rawFrames and write to bodyPipe. However, DATA frame
+	// raw bytes appended after this point are NOT visible through streamCtx
+	// because the context snapshot is captured here. This is a known trade-off
+	// of streaming dispatch: the handler must start before all DATA arrives.
 	var rawFrames [][]byte
 	if sr := cc.pendingStreams[streamID]; sr != nil {
 		rawFrames = sr.rawFrames
@@ -671,6 +650,10 @@ func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.He
 
 // closePendingPipes closes all remaining body pipes with an error so that
 // handler goroutines reading from them don't hang after the connection ends.
+//
+// Safety: no synchronization is needed because this is called from serve()
+// after runFrameLoop() returns. runFrameLoop is the sole writer to
+// pendingStreams, so there are no concurrent modifications at this point.
 func (cc *clientConn) closePendingPipes() {
 	for streamID, sr := range cc.pendingStreams {
 		if sr.bodyPipe != nil {
