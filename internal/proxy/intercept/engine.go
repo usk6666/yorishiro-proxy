@@ -314,7 +314,7 @@ func urlString(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
-	return u.String()
+	return u.Redacted()
 }
 
 // matchesWSDirection maps the rule's Direction to WebSocket direction strings.
