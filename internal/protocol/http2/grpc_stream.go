@@ -118,6 +118,16 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 		h.writeGRPCTrailers(sc, resp)
 	}
 
+	// Flush response to wire before waiting for request goroutine.
+	// This is critical for trailers-only responses where no body Write()/Flush()
+	// has occurred: without this, the client never receives the response and
+	// cannot close its request stream, causing a deadlock at reqWg.Wait().
+	// For normal responses, streamGRPCResponseBody already called Flush(),
+	// so this is a harmless no-op.
+	if flusher, ok := sc.w.(gohttp.Flusher); ok {
+		flusher.Flush()
+	}
+
 	reqWg.Wait()
 
 	h.finalizeGRPCStream(sc, state, resp)
