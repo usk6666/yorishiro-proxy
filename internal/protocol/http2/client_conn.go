@@ -29,10 +29,13 @@ type streamRequest struct {
 	headerFragments []byte
 	// endStream indicates whether END_STREAM was set on the HEADERS frame.
 	headersEndStream bool
-	// bodyBuf accumulates DATA frame payloads.
-	bodyBuf bytes.Buffer
 	// rawFrames stores raw bytes of all received frames for L4 recording.
 	rawFrames [][]byte
+	// bodyPipe is the write end of an io.Pipe used to stream DATA frame payloads
+	// to the handler when HEADERS did not carry END_STREAM. This enables gRPC-Go
+	// clients (which send DATA without END_STREAM) to avoid deadlock.
+	// nil when headersEndStream is true (no pipe needed).
+	bodyPipe *io.PipeWriter
 }
 
 // clientConn manages the lifecycle of a single HTTP/2 client connection
@@ -62,11 +65,6 @@ type clientConn struct {
 
 	// wg tracks in-flight handler goroutines.
 	wg sync.WaitGroup
-
-	// decodedHeaders stores decoded HPACK headers for streams that have received
-	// HEADERS but not yet END_STREAM (waiting for DATA frames).
-	// Accessed only from the main read loop goroutine.
-	decodedHeaders map[uint32][]hpack.HeaderField
 
 	// streamHandler is called for each completed request.
 	streamHandler func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request)
@@ -117,6 +115,10 @@ func (cc *clientConn) serve() error {
 	if err := cc.runFrameLoop(); err != nil {
 		cc.logger.Debug("frame loop ended", "error", err)
 	}
+
+	// Close any remaining body pipes so handler goroutines reading from
+	// them don't hang after the connection is gone.
+	cc.closePendingPipes()
 
 	// Wait for all in-flight handlers to complete.
 	cc.wg.Wait()
@@ -373,8 +375,12 @@ func (cc *clientConn) handleContinuationFrame(f *frame.Frame) error {
 	return nil
 }
 
-// completeHeaders decodes the accumulated header block and, if the request
-// is complete (END_STREAM was set on HEADERS), dispatches it.
+// completeHeaders decodes the accumulated header block and dispatches the
+// stream. When END_STREAM was set on HEADERS, the request has no body and is
+// dispatched with a nil body. Otherwise, an io.Pipe is created so that
+// subsequent DATA frames are streamed to the handler as they arrive, avoiding
+// the deadlock where the proxy waits for END_STREAM while the client waits
+// for a response (e.g. gRPC-Go unary RPCs).
 func (cc *clientConn) completeHeaders(streamID uint32) error {
 	sr := cc.pendingStreams[streamID]
 	headers, err := cc.decoder.Decode(sr.headerFragments)
@@ -386,9 +392,6 @@ func (cc *clientConn) completeHeaders(streamID uint32) error {
 	}
 	sr.headerFragments = nil // free memory
 
-	// Store decoded headers back into streamRequest for later use.
-	// We will build the http.Request when the stream is complete.
-	// For now, we just need to check if we can dispatch immediately.
 	if sr.headersEndStream {
 		// Transition: open -> half-closed (remote) — client is done sending.
 		if err := cc.h2conn.Streams().Transition(streamID, EventRecvEndStream); err != nil {
@@ -396,26 +399,17 @@ func (cc *clientConn) completeHeaders(streamID uint32) error {
 		}
 		return cc.dispatchStream(streamID, headers, nil)
 	}
-	// Store headers for when we get DATA frames and eventually END_STREAM.
-	// We store a temporary marker so we know headers are decoded.
-	sr.headerFragments = nil // already decoded
-	// We need to keep the decoded headers somewhere — re-encode to HPACK is wasteful.
-	// Instead, store them as a serialized form in the streamRequest.
-	cc.storeDecodedHeaders(streamID, headers)
-	return nil
+
+	// HEADERS without END_STREAM: body will follow in DATA frames.
+	// Dispatch immediately with a streaming body (io.Pipe) so the handler
+	// can start forwarding to upstream without waiting for END_STREAM.
+	pr, pw := io.Pipe()
+	sr.bodyPipe = pw
+	return cc.dispatchStreamWithBody(streamID, headers, pr)
 }
 
-// storeDecodedHeaders stores decoded HPACK headers on the clientConn for
-// later retrieval when the stream completes via DATA + END_STREAM.
-func (cc *clientConn) storeDecodedHeaders(streamID uint32, headers []hpack.HeaderField) {
-	if cc.decodedHeaders == nil {
-		cc.decodedHeaders = make(map[uint32][]hpack.HeaderField)
-	}
-	cc.decodedHeaders[streamID] = headers
-}
-
-// handleDataFrame processes a DATA frame, accumulating the body and updating
-// flow control.
+// handleDataFrame processes a DATA frame, streaming the payload to the handler
+// via the io.Pipe and updating flow control.
 func (cc *clientConn) handleDataFrame(f *frame.Frame) error {
 	streamID := f.Header.StreamID
 	if streamID == 0 {
@@ -441,46 +435,84 @@ func (cc *clientConn) handleDataFrame(f *frame.Frame) error {
 		}
 	}
 
-	// Flow control: consume receive window.
-	payloadLen := int32(f.Header.Length)
-	if payloadLen > 0 {
-		if err := cc.h2conn.ConsumeRecvWindow(payloadLen); err != nil {
-			return err
-		}
-		if err := cc.h2conn.Streams().ConsumeRecvWindow(streamID, payloadLen); err != nil {
-			return err
-		}
-		// Send WINDOW_UPDATE to replenish connection and stream windows.
-		cc.writeMu.Lock()
-		if wErr := cc.writer.WriteWindowUpdate(0, uint32(payloadLen)); wErr != nil {
-			cc.writeMu.Unlock()
-			return fmt.Errorf("write connection WINDOW_UPDATE: %w", wErr)
-		}
-		if wErr := cc.writer.WriteWindowUpdate(streamID, uint32(payloadLen)); wErr != nil {
-			cc.writeMu.Unlock()
-			return fmt.Errorf("write stream WINDOW_UPDATE: %w", wErr)
-		}
+	if err := cc.replenishFlowControl(streamID, f.Header.Length); err != nil {
+		return err
+	}
+
+	sr.rawFrames = append(sr.rawFrames, f.RawBytes)
+
+	if sr.bodyPipe != nil {
+		return cc.handleStreamingData(streamID, sr, f, data)
+	}
+
+	// bodyPipe is always set for streams expecting DATA frames (HEADERS without
+	// END_STREAM creates a pipe in completeHeaders). Reaching here indicates a
+	// protocol-level inconsistency.
+	return &StreamError{
+		StreamID: streamID,
+		Code:     ErrCodeInternal,
+		Reason:   "DATA frame received but no body pipe active",
+	}
+}
+
+// replenishFlowControl consumes and replenishes flow control windows for
+// the given DATA frame payload length on both the connection and stream.
+func (cc *clientConn) replenishFlowControl(streamID uint32, payloadLen uint32) error {
+	n := int32(payloadLen)
+	if n <= 0 {
+		return nil
+	}
+	if err := cc.h2conn.ConsumeRecvWindow(n); err != nil {
+		return err
+	}
+	if err := cc.h2conn.Streams().ConsumeRecvWindow(streamID, n); err != nil {
+		return err
+	}
+	cc.writeMu.Lock()
+	if wErr := cc.writer.WriteWindowUpdate(0, uint32(n)); wErr != nil {
 		cc.writeMu.Unlock()
-		// Replenish local tracking.
-		if err := cc.h2conn.IncrementRecvWindow(uint32(payloadLen)); err != nil {
-			return err
-		}
-		if err := cc.h2conn.Streams().IncrementRecvWindow(streamID, uint32(payloadLen)); err != nil {
-			return err
+		return fmt.Errorf("write connection WINDOW_UPDATE: %w", wErr)
+	}
+	if wErr := cc.writer.WriteWindowUpdate(streamID, uint32(n)); wErr != nil {
+		cc.writeMu.Unlock()
+		return fmt.Errorf("write stream WINDOW_UPDATE: %w", wErr)
+	}
+	cc.writeMu.Unlock()
+	if err := cc.h2conn.IncrementRecvWindow(uint32(n)); err != nil {
+		return err
+	}
+	return cc.h2conn.Streams().IncrementRecvWindow(streamID, uint32(n))
+}
+
+// handleStreamingData writes DATA payload to the body pipe for the handler.
+// On END_STREAM, it closes the pipe and cleans up the pending stream.
+//
+// NOTE: Writing to the pipe is synchronous and blocks until the handler reads
+// from the pipe reader. This means a slow handler can block the frame loop for
+// all streams on this connection. This is mitigated by HTTP/2 flow control
+// (the client cannot send more data than the window allows) but a completely
+// stalled handler could still block indefinitely. A per-stream goroutine or
+// buffered channel would decouple this, but adds complexity beyond this fix.
+func (cc *clientConn) handleStreamingData(streamID uint32, sr *streamRequest, f *frame.Frame, data []byte) error {
+	if _, wErr := sr.bodyPipe.Write(data); wErr != nil {
+		// Clean up: close the pipe so the reader side sees an error,
+		// and remove the pending stream to avoid stale state.
+		sr.bodyPipe.CloseWithError(wErr)
+		delete(cc.pendingStreams, streamID)
+		return &StreamError{
+			StreamID: streamID,
+			Code:     ErrCodeInternal,
+			Reason:   fmt.Sprintf("pipe write: %v", wErr),
 		}
 	}
 
-	sr.bodyBuf.Write(data)
-	sr.rawFrames = append(sr.rawFrames, f.RawBytes)
-
 	if f.Header.Flags.Has(frame.FlagEndStream) {
-		// Transition: open -> half-closed (remote).
 		if err := cc.h2conn.Streams().Transition(streamID, EventRecvEndStream); err != nil {
 			return err
 		}
-		headers := cc.decodedHeaders[streamID]
-		delete(cc.decodedHeaders, streamID)
-		return cc.dispatchStream(streamID, headers, sr.bodyBuf.Bytes())
+		sr.bodyPipe.Close()
+		sr.bodyPipe = nil
+		delete(cc.pendingStreams, streamID)
 	}
 	return nil
 }
@@ -525,11 +557,14 @@ func (cc *clientConn) handleRSTStreamFrame(f *frame.Frame) error {
 		return err
 	}
 	streamID := f.Header.StreamID
+	// Close the body pipe with an error if streaming is in progress,
+	// so the handler sees a read error instead of hanging.
+	if sr := cc.pendingStreams[streamID]; sr != nil && sr.bodyPipe != nil {
+		sr.bodyPipe.CloseWithError(fmt.Errorf("stream %d reset by peer: %s", streamID, ErrCodeString(errCode)))
+		sr.bodyPipe = nil
+	}
 	// Clean up pending stream state.
 	delete(cc.pendingStreams, streamID)
-	if cc.decodedHeaders != nil {
-		delete(cc.decodedHeaders, streamID)
-	}
 	// If we were in the middle of a header block for this stream, clear it.
 	if cc.headerStreamID == streamID {
 		cc.headerStreamID = 0
@@ -540,8 +575,9 @@ func (cc *clientConn) handleRSTStreamFrame(f *frame.Frame) error {
 	return nil
 }
 
-// dispatchStream builds an http.Request from the decoded headers and body,
-// then invokes the stream handler in a new goroutine.
+// dispatchStream builds an http.Request from the decoded headers and a
+// complete body ([]byte), then invokes the stream handler in a new goroutine.
+// Used when END_STREAM was set on HEADERS (no body or body fully buffered).
 func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderField, body []byte) error {
 	req, err := buildHTTPRequest(cc.ctx, headers, body)
 	if err != nil {
@@ -560,14 +596,9 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 		rawFrames = sr.rawFrames
 	}
 
-	// Clean up pending state before dispatching.
+	// Clean up pending state — request is complete (END_STREAM received).
 	delete(cc.pendingStreams, streamID)
-	if cc.decodedHeaders != nil {
-		delete(cc.decodedHeaders, streamID)
-	}
 
-	// Store raw frames in the request context so that handleStream
-	// can record them as Message.RawBytes for L4 visibility.
 	streamCtx := contextWithRawFrames(cc.ctx, rawFrames)
 
 	cc.wg.Add(1)
@@ -580,6 +611,74 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 	}()
 
 	return nil
+}
+
+// dispatchStreamWithBody builds an http.Request from the decoded headers and
+// a streaming body (io.Reader), then invokes the stream handler in a new
+// goroutine. Used when HEADERS did not carry END_STREAM and the body will
+// arrive in subsequent DATA frames via an io.Pipe.
+//
+// Unlike dispatchStream, this does NOT delete the stream from pendingStreams
+// because handleDataFrame still needs access to the streamRequest (to write
+// to bodyPipe and accumulate rawFrames). The stream is cleaned up when
+// END_STREAM arrives in handleDataFrame.
+func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.HeaderField, body io.Reader) error {
+	req, err := buildHTTPRequestWithReader(cc.ctx, headers, body)
+	if err != nil {
+		// Clean up streaming state on error: close the pipe so the writer
+		// side (handleStreamingData) does not block, and remove the pending
+		// stream entry.
+		if sr := cc.pendingStreams[streamID]; sr != nil && sr.bodyPipe != nil {
+			sr.bodyPipe.CloseWithError(err)
+		}
+		delete(cc.pendingStreams, streamID)
+		return &StreamError{
+			StreamID: streamID,
+			Code:     ErrCodeProtocol,
+			Reason:   fmt.Sprintf("build request: %v", err),
+		}
+	}
+
+	rw := newFrameResponseWriter(cc, streamID)
+
+	// Extract raw frames accumulated so far (HEADERS + CONTINUATION only).
+	// Note: pendingStreams is NOT deleted here — DATA frames will continue
+	// to append to sr.rawFrames and write to bodyPipe. However, DATA frame
+	// raw bytes appended after this point are NOT visible through streamCtx
+	// because the context snapshot is captured here. This is a known trade-off
+	// of streaming dispatch: the handler must start before all DATA arrives.
+	var rawFrames [][]byte
+	if sr := cc.pendingStreams[streamID]; sr != nil {
+		rawFrames = sr.rawFrames
+	}
+
+	streamCtx := contextWithRawFrames(cc.ctx, rawFrames)
+
+	cc.wg.Add(1)
+	go func() {
+		defer func() {
+			rw.finish()
+			cc.wg.Done()
+		}()
+		cc.streamHandler(streamCtx, rw, req)
+	}()
+
+	return nil
+}
+
+// closePendingPipes closes all remaining body pipes with an error so that
+// handler goroutines reading from them don't hang after the connection ends.
+//
+// Safety: no synchronization is needed because this is called from serve()
+// after runFrameLoop() returns. runFrameLoop is the sole writer to
+// pendingStreams, so there are no concurrent modifications at this point.
+func (cc *clientConn) closePendingPipes() {
+	for streamID, sr := range cc.pendingStreams {
+		if sr.bodyPipe != nil {
+			sr.bodyPipe.CloseWithError(fmt.Errorf("stream %d: connection closed", streamID))
+			sr.bodyPipe = nil
+		}
+	}
 }
 
 // sendGoAway sends a GOAWAY frame and cancels the connection.
@@ -604,6 +703,35 @@ func (cc *clientConn) sendRSTStream(streamID, errCode uint32) {
 // and an optional body. It extracts pseudo-headers (:method, :scheme, :authority,
 // :path) per RFC 9113 Section 8.3.1.
 func buildHTTPRequest(ctx context.Context, headers []hpack.HeaderField, body []byte) (*gohttp.Request, error) {
+	var bodyReader io.ReadCloser
+	var contentLength int64
+	if len(body) > 0 {
+		bodyReader = io.NopCloser(bytes.NewReader(body))
+		contentLength = int64(len(body))
+	} else {
+		bodyReader = gohttp.NoBody
+	}
+	return buildHTTPRequestCommon(ctx, headers, bodyReader, contentLength)
+}
+
+// buildHTTPRequestWithReader constructs a *http.Request from decoded HPACK
+// header fields and a streaming body reader. The body length is unknown
+// (ContentLength = -1) since the full body has not been received yet.
+// If body already implements io.ReadCloser (e.g. *io.PipeReader), it is used
+// directly so that closing req.Body propagates to the underlying resource.
+func buildHTTPRequestWithReader(ctx context.Context, headers []hpack.HeaderField, body io.Reader) (*gohttp.Request, error) {
+	var bodyReader io.ReadCloser
+	if rc, ok := body.(io.ReadCloser); ok {
+		bodyReader = rc
+	} else {
+		bodyReader = io.NopCloser(body)
+	}
+	return buildHTTPRequestCommon(ctx, headers, bodyReader, -1)
+}
+
+// buildHTTPRequestCommon is the shared request builder used by both
+// buildHTTPRequest (buffered body) and buildHTTPRequestWithReader (streaming body).
+func buildHTTPRequestCommon(ctx context.Context, headers []hpack.HeaderField, body io.ReadCloser, contentLength int64) (*gohttp.Request, error) {
 	var method, scheme, authority, path string
 	httpHeaders := make(gohttp.Header)
 
@@ -652,29 +780,19 @@ func buildHTTPRequest(ctx context.Context, headers []hpack.HeaderField, body []b
 		reqURL.RawQuery = path[idx+1:]
 	}
 
-	var bodyReader io.ReadCloser
-	if len(body) > 0 {
-		bodyReader = io.NopCloser(bytes.NewReader(body))
-	} else {
-		bodyReader = gohttp.NoBody
-	}
-
 	req := &gohttp.Request{
-		Method:     method,
-		URL:        reqURL,
-		Proto:      "HTTP/2.0",
-		ProtoMajor: 2,
-		ProtoMinor: 0,
-		Header:     httpHeaders,
-		Body:       bodyReader,
-		Host:       host,
-		RequestURI: path,
+		Method:        method,
+		URL:           reqURL,
+		Proto:         "HTTP/2.0",
+		ProtoMajor:    2,
+		ProtoMinor:    0,
+		Header:        httpHeaders,
+		Body:          body,
+		Host:          host,
+		RequestURI:    path,
+		ContentLength: contentLength,
 	}
 	req = req.WithContext(ctx)
-
-	if len(body) > 0 {
-		req.ContentLength = int64(len(body))
-	}
 
 	return req, nil
 }
