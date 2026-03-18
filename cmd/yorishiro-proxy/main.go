@@ -565,6 +565,7 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 
 	// Register handlers in priority order: h2c -> HTTP/1.x -> SOCKS5 -> raw TCP fallback.
 	detector := protocol.NewDetector(http2Handler, httpHandler, socks5Handler, tcpHandler)
+	detector.SetLogger(logger)
 
 	return &protocolResult{
 		detector:        detector,
