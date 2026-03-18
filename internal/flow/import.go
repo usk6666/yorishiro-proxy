@@ -236,7 +236,7 @@ func importFlowWithMessages(ctx context.Context, store Store, fl *Flow, messages
 // cleanupFlow removes a flow from the store, logging any error.
 func cleanupFlow(ctx context.Context, store Store, flowID string) {
 	if delErr := store.DeleteFlow(ctx, flowID); delErr != nil {
-		slog.Warn("failed to clean up flow after import error", "flow_id", flowID, "error", delErr)
+		slog.Debug("failed to clean up flow after import error", "flow_id", flowID, "error", delErr)
 	}
 }
 
