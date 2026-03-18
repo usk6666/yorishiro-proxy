@@ -319,23 +319,23 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 		return nil, nil, nil, fmt.Errorf("invalid hooks: %w", err)
 	}
 
-	kvStore, err := s.executePreSendHook(ctx, params)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
 	fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
+	if err := checkResendProtocolSupport(fl); err != nil {
+		return nil, nil, nil, err
+	}
+
+	kvStore, err := s.executePreSendHook(ctx, params)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	if fl.Protocol == "WebSocket" {
 		r1, r2, err := s.handleWebSocketResend(ctx, fl, *params)
 		return nil, r1, r2, err
-	}
-
-	if err := checkResendProtocolSupport(fl); err != nil {
-		return nil, nil, nil, err
 	}
 
 	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
