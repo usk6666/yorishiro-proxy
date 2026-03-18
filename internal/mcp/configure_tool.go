@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -285,11 +286,22 @@ func (s *Server) registerConfigure() {
 }
 
 // handleConfigure handles the configure tool invocation.
-func (s *Server) handleConfigure(_ context.Context, _ *gomcp.CallToolRequest, input configureInput) (*gomcp.CallToolResult, *configureResult, error) {
+func (s *Server) handleConfigure(ctx context.Context, _ *gomcp.CallToolRequest, input configureInput) (*gomcp.CallToolResult, *configureResult, error) {
+	start := time.Now()
 	op := input.Operation
 	if op == "" {
 		op = "merge"
 	}
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "configure",
+		"operation", op,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "configure",
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
 
 	switch op {
 	case "merge":

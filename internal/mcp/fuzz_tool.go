@@ -73,6 +73,21 @@ func (s *Server) registerFuzz() {
 
 // handleFuzzTool routes the fuzz tool invocation to the appropriate action handler.
 func (s *Server) handleFuzzTool(ctx context.Context, _ *gomcp.CallToolRequest, input fuzzInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "fuzz",
+		"action", input.Action,
+		"flow_id", input.Params.FlowID,
+		"fuzz_id", input.Params.FuzzID,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "fuzz",
+			"action", input.Action,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	switch input.Action {
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableFuzzActions, ", "))

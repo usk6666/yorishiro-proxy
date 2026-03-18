@@ -74,6 +74,19 @@ func (s *Server) registerManage() {
 
 // handleManage routes the manage tool invocation to the appropriate action handler.
 func (s *Server) handleManage(ctx context.Context, _ *gomcp.CallToolRequest, input manageInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "manage",
+		"action", input.Action,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "manage",
+			"action", input.Action,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	switch input.Action {
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableManageActions, ", "))

@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -51,6 +53,20 @@ func (s *Server) registerMacro() {
 
 // handleMacroTool routes the macro tool invocation to the appropriate action handler.
 func (s *Server) handleMacroTool(ctx context.Context, _ *gomcp.CallToolRequest, input macroToolInput) (*gomcp.CallToolResult, any, error) {
+	start := time.Now()
+	slog.DebugContext(ctx, "MCP tool invoked",
+		"tool", "macro",
+		"action", input.Action,
+		"name", input.Params.Name,
+	)
+	defer func() {
+		slog.DebugContext(ctx, "MCP tool completed",
+			"tool", "macro",
+			"action", input.Action,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	switch input.Action {
 	case "":
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableMacroActions, ", "))
