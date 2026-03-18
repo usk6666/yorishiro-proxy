@@ -224,7 +224,7 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (*Result, error) {
 			job.CompletedCount = completedCount
 			job.ErrorCount = errorCount
 			if err := e.fuzzStore.UpdateFuzzJob(ctx, job); err != nil {
-				slog.Warn("failed to update cancelled fuzz job", "job_id", job.ID, "error", err)
+				slog.Debug("failed to update cancelled fuzz job", "job_id", job.ID, "error", err)
 			}
 			return nil, ctx.Err()
 		default:
