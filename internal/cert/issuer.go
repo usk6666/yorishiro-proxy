@@ -91,7 +91,7 @@ func (iss *Issuer) GetCertificate(hostname string) (*tls.Certificate, error) {
 		iss.cache.Put(hostname, cc)
 
 		slog.Debug("certificate issued", "hostname", hostname,
-			"duration", time.Since(generateStart).String())
+			"duration", time.Since(generateStart))
 		return cert, nil
 	})
 	if err != nil {

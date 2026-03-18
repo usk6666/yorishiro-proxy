@@ -524,25 +524,9 @@ func (h *Handler) tlsHandshake(ctx context.Context, conn net.Conn, hostname stri
 func extractTLSMetadata(tlsConn *tls.Conn) tlsMetadata {
 	state := tlsConn.ConnectionState()
 	return tlsMetadata{
-		Version:     tlsVersionString(state.Version),
+		Version:     httputil.TLSVersionName(state.Version),
 		CipherSuite: tls.CipherSuiteName(state.CipherSuite),
 		ALPN:        state.NegotiatedProtocol,
-	}
-}
-
-// tlsVersionString converts a TLS version constant to a human-readable string.
-func tlsVersionString(version uint16) string {
-	switch version {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("unknown (0x%04x)", version)
 	}
 }
 

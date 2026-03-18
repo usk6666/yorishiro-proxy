@@ -133,7 +133,7 @@ func (t *StandardTransport) TLSConnect(ctx context.Context, conn net.Conn, serve
 	state := tlsConn.ConnectionState()
 	proto := state.NegotiatedProtocol
 	slog.Debug("upstream TLS handshake complete", "server", serverName, "transport", "standard",
-		"tls_version", tlsVersionName(state.Version), "alpn", proto)
+		"tls_version", TLSVersionName(state.Version), "alpn", proto)
 	return tlsConn, proto, nil
 }
 
@@ -191,7 +191,7 @@ func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverNam
 	uState := utlsConn.ConnectionState()
 	proto := uState.NegotiatedProtocol
 	slog.Debug("upstream TLS handshake complete", "server", serverName, "transport", "utls",
-		"profile", profile.String(), "tls_version", tlsVersionName(uState.Version), "alpn", proto)
+		"profile", profile.String(), "tls_version", TLSVersionName(uState.Version), "alpn", proto)
 	return utlsConn, proto, nil
 }
 
@@ -239,8 +239,8 @@ func (t *UTLSTransport) applyHostTLS(cfg *utls.Config, serverName string) error 
 	return nil
 }
 
-// tlsVersionName converts a TLS version constant to a human-readable string.
-func tlsVersionName(version uint16) string {
+// TLSVersionName converts a TLS version constant to a human-readable string.
+func TLSVersionName(version uint16) string {
 	switch version {
 	case tls.VersionTLS10:
 		return "TLS 1.0"
