@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -501,6 +502,247 @@ func TestExecute_Replay_GRPCUnaryAllowed(t *testing.T) {
 	})
 	if result.IsError {
 		t.Fatalf("expected success for gRPC unary flow, got error: %v", result.Content)
+	}
+}
+
+func TestExecute_Replay_GRPCDataFrameBody(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/test.Service/Method")
+
+	// Create a gRPC flow with sequence 0 = headers (empty body),
+	// sequence 1+ = data frame messages with protobuf payloads.
+	fl := &flow.Flow{
+		Protocol:  "gRPC",
+		FlowType:  "unary",
+		Timestamp: time.Now(),
+		Duration:  100 * time.Millisecond,
+	}
+	ctx := context.Background()
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	// Sequence 0: header message (no body, as in real gRPC recording)
+	headerMsg := &flow.Message{
+		FlowID:    fl.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:    "POST",
+		URL:       u,
+		Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
+	}
+	if err := store.AppendMessage(ctx, headerMsg); err != nil {
+		t.Fatalf("AppendMessage(header): %v", err)
+	}
+
+	// Sequence 1: data frame message with protobuf payload
+	payload := []byte("test-protobuf-payload")
+	dataMsg := &flow.Message{
+		FlowID:    fl.ID,
+		Sequence:  1,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Body:      payload,
+	}
+	if err := store.AppendMessage(ctx, dataMsg); err != nil {
+		t.Fatalf("AppendMessage(data): %v", err)
+	}
+
+	// Sequence 2: receive message
+	recvMsg := &flow.Message{
+		FlowID:     fl.ID,
+		Sequence:   2,
+		Direction:  "receive",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"application/grpc"}},
+		Body:       []byte("grpc-response"),
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage(recv): %v", err)
+	}
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": fl.ID,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out resendActionResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify the echo server received a non-empty body containing the
+	// gRPC length-prefixed frame.
+	var echo map[string]any
+	if err := json.Unmarshal([]byte(out.ResponseBody), &echo); err != nil {
+		t.Fatalf("unmarshal echo response: %v", err)
+	}
+	echoBody, ok := echo["body"].(string)
+	if !ok || echoBody == "" {
+		t.Fatal("echo body is empty; gRPC data frame was not sent")
+	}
+	// The body should contain the gRPC frame: 5-byte header + payload
+	if len(echoBody) != 5+len(payload) {
+		t.Errorf("echo body length = %d, want %d (5-byte header + %d-byte payload)", len(echoBody), 5+len(payload), len(payload))
+	}
+}
+
+func TestExecute_Replay_GRPCTrailersRecorded(t *testing.T) {
+	store := newTestStore(t)
+
+	// Create a test server that returns gRPC trailers.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		// Declare trailers before writing.
+		w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("grpc-response-body"))
+		// Set trailers after writing body.
+		w.Header().Set("Grpc-Status", "0")
+		w.Header().Set("Grpc-Message", "OK")
+	}))
+	t.Cleanup(server.Close)
+
+	u, _ := url.Parse(server.URL + "/test.Service/Method")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "gRPC",
+			FlowType:  "unary",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
+			Body:      []byte("grpc-frame"),
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/grpc"}},
+			Body:       []byte("grpc-response"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out resendActionResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Verify that a trailers message was recorded as sequence 2.
+	msgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "receive"})
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+
+	var trailerMsg *flow.Message
+	for _, msg := range msgs {
+		if msg.Metadata != nil && msg.Metadata["grpc_type"] == "trailers" {
+			trailerMsg = msg
+			break
+		}
+	}
+	if trailerMsg == nil {
+		t.Fatal("no trailers message recorded for gRPC resend")
+	}
+	if trailerMsg.Sequence != 2 {
+		t.Errorf("trailer message sequence = %d, want 2", trailerMsg.Sequence)
+	}
+	if trailerMsg.Direction != "receive" {
+		t.Errorf("trailer message direction = %q, want receive", trailerMsg.Direction)
+	}
+	if trailerMsg.Metadata["grpc_status"] != "0" {
+		t.Errorf("trailer grpc_status = %q, want 0", trailerMsg.Metadata["grpc_status"])
+	}
+	if trailerMsg.Metadata["grpc_message"] != "OK" {
+		t.Errorf("trailer grpc_message = %q, want OK", trailerMsg.Metadata["grpc_message"])
+	}
+	grpcStatusHeader := trailerMsg.Headers["Grpc-Status"]
+	if len(grpcStatusHeader) == 0 || grpcStatusHeader[0] != "0" {
+		t.Errorf("trailer headers Grpc-Status = %v, want [0]", grpcStatusHeader)
+	}
+}
+
+func TestExecute_Replay_GRPCBodyPatchesRejected(t *testing.T) {
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/test.Service/Method")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "gRPC",
+			FlowType:  "unary",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
+			Body:      []byte("grpc-frame"),
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/grpc"}},
+			Body:       []byte("grpc-response"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+			"body_patches": []map[string]any{
+				{"regex": "old", "replace": "new"},
+			},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for body_patches on gRPC flow")
+	}
+
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(textContent.Text, "body_patches is not yet supported for gRPC") {
+		t.Errorf("error = %q, want to contain 'body_patches is not yet supported for gRPC'", textContent.Text)
 	}
 }
 
