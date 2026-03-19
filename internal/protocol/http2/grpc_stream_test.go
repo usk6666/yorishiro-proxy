@@ -895,3 +895,114 @@ func TestForwardGRPCRequestChunk_NoSubsystems(t *testing.T) {
 		t.Errorf("pipe output = %q, want %q", got, chunk)
 	}
 }
+
+// TestHandleGRPCStream_TrailersOnlyBidiStreamDeadlock reproduces the real
+// deadlock scenario observed with grpcurl connecting through the proxy.
+//
+// Unlike TestHandleGRPCStream_TrailersOnlyNoDeadlock, this test does NOT
+// close the client's send-side pipe after receiving response headers. This
+// matches grpcurl's actual behavior: for a bidi-streaming RPC like
+// ServerReflectionInfo, grpcurl waits for the trailing HEADERS frame
+// (containing grpc-status) before closing its send-side. But Go's net/http
+// HTTP/2 server only sends trailing HEADERS when the handler returns — and
+// the handler blocks at reqWg.Wait() because the request goroutine is stuck
+// on Body.Read() waiting for more client data. The result is a deadlock.
+//
+// The fix: call sc.req.Body.Close() before reqWg.Wait() so the request
+// goroutine unblocks, the handler returns, and Go sends the trailers.
+func TestHandleGRPCStream_TrailersOnlyBidiStreamDeadlock(t *testing.T) {
+	upstreamHandler := gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		// Server responds immediately with UNIMPLEMENTED — does NOT drain body.
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Grpc-Status", "12")
+		w.Header().Set("Grpc-Message", "method not found")
+		w.WriteHeader(gohttp.StatusOK)
+	})
+
+	upstreamProtos := &gohttp.Protocols{}
+	upstreamProtos.SetHTTP1(true)
+	upstreamProtos.SetUnencryptedHTTP2(true)
+	upstreamLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("upstream listen: %v", err)
+	}
+	upstreamServer := &gohttp.Server{Handler: upstreamHandler, Protocols: upstreamProtos}
+	go upstreamServer.Serve(upstreamLn)
+	defer upstreamServer.Close()
+	upstreamURL := "http://" + upstreamLn.Addr().String()
+
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	grpcHandler := protogrpc.NewHandler(store, testutil.DiscardLogger())
+	handler.SetGRPCHandler(grpcHandler)
+
+	upstreamTransportProtos := &gohttp.Protocols{}
+	upstreamTransportProtos.SetUnencryptedHTTP2(true)
+	upstreamTransportProtos.SetHTTP2(true)
+	handler.Transport = &gohttp.Transport{
+		Protocols: upstreamTransportProtos,
+	}
+
+	proxyAddr, cancel := startH2CProxyListener(t, handler,
+		"conn-bidi-deadlock", "127.0.0.1:9999", "", tlsMetadata{})
+	defer cancel()
+
+	client := newH2CClientForAddr(proxyAddr)
+
+	// Simulate grpcurl's behavior: a pipe-based request body that stays
+	// open until the client receives the full response (including trailers).
+	bodyPR, bodyPW := io.Pipe()
+	defer bodyPW.Close()
+
+	req, _ := gohttp.NewRequest("POST",
+		upstreamURL+"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo", bodyPR)
+	req.Header.Set("Content-Type", "application/grpc")
+
+	type result struct {
+		resp *gohttp.Response
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			resCh <- result{nil, doErr}
+			return
+		}
+		// Read full body AND trailers before signaling — this is what grpcurl does.
+		io.Copy(io.Discard, resp.Body)
+		resCh <- result{resp, nil}
+	}()
+
+	// Send one gRPC frame.
+	frame := protogrpc.EncodeFrame(false, []byte("reflection-request"))
+	if _, err := bodyPW.Write(frame); err != nil {
+		t.Fatalf("write initial frame: %v", err)
+	}
+
+	// Wait for the full response including trailers.
+	// Without the fix (sc.req.Body.Close() before reqWg.Wait()), this times out.
+	select {
+	case r := <-resCh:
+		if r.err != nil {
+			t.Fatalf("client request: %v", r.err)
+		}
+		resp := r.resp
+		defer resp.Body.Close()
+
+		if resp.StatusCode != gohttp.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+		}
+
+		grpcStatus := resp.Trailer.Get("Grpc-Status")
+		if grpcStatus == "" {
+			grpcStatus = resp.Header.Get(gohttp.TrailerPrefix + "Grpc-Status")
+		}
+		if grpcStatus != "12" {
+			t.Errorf("grpc-status = %q, want %q (trailer=%v, header=%v)",
+				grpcStatus, "12", resp.Trailer, resp.Header)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for response+trailers — bidi stream deadlock detected")
+	}
+}
