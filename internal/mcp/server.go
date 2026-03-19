@@ -45,6 +45,7 @@ type deps struct {
 	rawReplayDialer       rawDialer
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
+	detector              proxy.ProtocolDetector
 	enabledProtocols      []string
 	proxyDefaults         *config.ProxyConfig
 	upstreamProxySetters  []upstreamProxySetter
@@ -210,6 +211,14 @@ func WithIssuer(iss *cert.Issuer) ServerOption {
 func WithTCPHandler(h tcpForwardHandler) ServerOption {
 	return func(s *Server) {
 		s.deps.tcpHandler = h
+	}
+}
+
+// WithDetector sets the protocol detector for TCP forward listeners, enabling
+// peek-based protocol detection on forwarded connections (protocol: "auto").
+func WithDetector(d proxy.ProtocolDetector) ServerOption {
+	return func(s *Server) {
+		s.deps.detector = d
 	}
 }
 
