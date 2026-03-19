@@ -9,6 +9,7 @@ func TestForwardTargetContext(t *testing.T) {
 	tests := []struct {
 		name      string
 		target    string
+		setEmpty  bool // when true, call ContextWithForwardTarget even for empty target
 		wantFound bool
 		wantValue string
 	}{
@@ -20,7 +21,8 @@ func TestForwardTargetContext(t *testing.T) {
 		},
 		{
 			name:      "empty target treated as not set",
-			target:    "",
+			target:    "", // explicitly set via ContextWithForwardTarget below
+			setEmpty:  true,
 			wantFound: false,
 			wantValue: "",
 		},
@@ -35,7 +37,7 @@ func TestForwardTargetContext(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			if tt.target != "" {
+			if tt.target != "" || tt.setEmpty {
 				ctx = ContextWithForwardTarget(ctx, tt.target)
 			}
 			got, found := ForwardTargetFromContext(ctx)

@@ -605,16 +605,27 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 
+	// TCP forwarding: resolve the effective host before scope checks so that
+	// forwarding target traffic is checked against the real upstream host
+	// rather than the localhost address the client connected to.
+	effectiveHost := proxy.ResolveUpstreamTarget(ctx, connectHost)
+	if _, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		if req.URL.Host == "" || req.URL.Host == connectHost {
+			req.URL.Host = effectiveHost
+		}
+		req.Host = effectiveHost
+	}
+
 	// Step 1: Target scope enforcement for HTTPS requests inside the MITM tunnel.
 	// The CONNECT target was already checked, but the Host header inside
 	// the tunnel may differ (e.g., HTTP/1.1 Host header rewrite).
-	if blocked := h.checkHTTPSScopeRewrite(ctx, conn, connectHost, req, smuggling, start, connID, clientAddr, tlsMeta, logger); blocked {
+	if blocked := h.checkHTTPSScopeRewrite(ctx, conn, effectiveHost, req, smuggling, start, connID, clientAddr, tlsMeta, logger); blocked {
 		return nil
 	}
 
 	// Step 2: WebSocket upgrade (before hop-by-hop header removal).
 	if isWebSocketUpgrade(req) {
-		return h.handleWebSocketTLS(ctx, conn, connectHost, req, tlsMeta)
+		return h.handleWebSocketTLS(ctx, conn, effectiveHost, req, tlsMeta)
 	}
 
 	// Step 3: Read request body + capture raw bytes.
@@ -622,14 +633,8 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	rawRequest := extractRawRequest(capture, captureStart, reader)
 
 	// Reconstruct the full URL for the upstream request.
-	// TCP forwarding: override the host with the actual upstream target.
-	effectiveHost := proxy.ResolveUpstreamTarget(ctx, connectHost)
 	if req.URL.Host == "" {
 		req.URL.Host = effectiveHost
-	}
-	if _, ok := proxy.ForwardTargetFromContext(ctx); ok {
-		req.URL.Host = effectiveHost
-		req.Host = effectiveHost
 	}
 	req.URL.Scheme = "https"
 
