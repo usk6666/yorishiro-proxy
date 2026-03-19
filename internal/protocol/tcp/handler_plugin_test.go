@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -75,7 +76,7 @@ def on_before_send_to_client(data):
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -160,7 +161,7 @@ def on_before_send_to_server(data):
 	}()
 
 	store := &mockStore{}
-	forwards := map[string]string{serverPort: serverAddr}
+	forwards := map[string]*config.ForwardConfig{serverPort: {Target: serverAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -233,7 +234,7 @@ def on_receive_from_client(data):
 	}()
 
 	store := &mockStore{}
-	forwards := map[string]string{serverPort: serverAddr}
+	forwards := map[string]*config.ForwardConfig{serverPort: {Target: serverAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -287,7 +288,7 @@ func TestHandler_PluginNilEngine(t *testing.T) {
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	// Do NOT call SetPluginEngine.
 
@@ -344,7 +345,7 @@ def on_receive_from_client(data):
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -417,7 +418,7 @@ def on_receive_from_client(data):
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -536,7 +537,7 @@ def on_before_send_to_server(data):
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -622,7 +623,7 @@ def on_before_send_to_client(data):
 	}()
 
 	store := &mockStore{}
-	forwards := map[string]string{serverPort: serverAddr}
+	forwards := map[string]*config.ForwardConfig{serverPort: {Target: serverAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -731,7 +732,7 @@ def on_before_send_to_server(data):
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 
@@ -789,7 +790,7 @@ def on_receive_from_client(data):
 	defer engine.Close()
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 	h.SetPluginEngine(engine)
 

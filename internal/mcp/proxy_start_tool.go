@@ -86,11 +86,11 @@ type proxyStartInput struct {
 	// If omitted, no auto-transform rules are active.
 	AutoTransform []transformRuleInput `json:"auto_transform,omitempty" jsonschema:"auto-transform rules for automatic request/response modification"`
 
-	// TCPForwards maps local listen ports to upstream TCP addresses for the Raw TCP handler.
-	// Format: {"port": "upstream_host:port"} (e.g. {"3306": "db.example.com:3306"}).
-	// Connections arriving on a mapped port are forwarded to the specified upstream.
-	// If omitted, Raw TCP forwarding is not configured.
-	TCPForwards map[string]string `json:"tcp_forwards,omitempty" jsonschema:"Raw TCP forwarding map: local port -> upstream host:port"`
+	// TCPForwards maps local listen ports to forwarding configurations.
+	// Values can be strings (legacy: "host:port") or ForwardConfig objects
+	// ({target, protocol, tls}). Uses map[string]any to accept both formats
+	// in the MCP JSON schema; parsed into *config.ForwardConfig by parseTCPForwardsAny.
+	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string or {target, protocol, tls} object"`
 
 	// Protocols specifies which protocols are enabled for detection.
 	// Valid values: "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "SOCKS5", "TCP".
@@ -136,6 +136,57 @@ type proxyStartInput struct {
 	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (default: 60000)"`
 }
 
+// parseTCPForwardsAny parses TCP forward values from the MCP input into structured ForwardConfig.
+// Each value can be a string (legacy: "host:port") or an object with {target, protocol, tls}.
+// Legacy string values are converted to ForwardConfig{Target: value, Protocol: "raw"}.
+func parseTCPForwardsAny(raw map[string]any) (map[string]*config.ForwardConfig, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]*config.ForwardConfig, len(raw))
+	for port, val := range raw {
+		switch v := val.(type) {
+		case string:
+			result[port] = &config.ForwardConfig{
+				Target:   v,
+				Protocol: "raw",
+			}
+		case map[string]any:
+			fc := &config.ForwardConfig{}
+			if t, ok := v["target"].(string); ok {
+				fc.Target = t
+			}
+			if p, ok := v["protocol"].(string); ok {
+				fc.Protocol = p
+			}
+			if tls, ok := v["tls"].(bool); ok {
+				fc.TLS = tls
+			}
+			result[port] = fc
+		default:
+			// Try JSON round-trip for other types (e.g. json.RawMessage from defaults).
+			data, err := json.Marshal(val)
+			if err != nil {
+				return nil, fmt.Errorf("port %q: must be a string or ForwardConfig object", port)
+			}
+			var s string
+			if json.Unmarshal(data, &s) == nil {
+				result[port] = &config.ForwardConfig{
+					Target:   s,
+					Protocol: "raw",
+				}
+				continue
+			}
+			var fc config.ForwardConfig
+			if err := json.Unmarshal(data, &fc); err != nil {
+				return nil, fmt.Errorf("port %q: must be a string or ForwardConfig object: %w", port, err)
+			}
+			result[port] = &fc
+		}
+	}
+	return result, nil
+}
+
 // proxyStartResult is the structured output of the proxy_start tool.
 type proxyStartResult struct {
 	// Name is the listener name.
@@ -145,7 +196,8 @@ type proxyStartResult struct {
 	// Status indicates the proxy state after the operation.
 	Status string `json:"status"`
 	// TCPForwards is the configured TCP forwarding map (if any).
-	TCPForwards map[string]string `json:"tcp_forwards,omitempty"`
+	TCPForwards map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
+
 	// Protocols lists the enabled protocols (if explicitly configured).
 	Protocols []string `json:"protocols,omitempty"`
 }
@@ -163,7 +215,7 @@ func (s *Server) registerProxyStart() {
 			"tls_passthrough to specify domains that bypass TLS interception, " +
 			"intercept_rules to define conditions for intercepting requests/responses, " +
 			"auto_transform to configure automatic request/response modification rules, " +
-			"tcp_forwards to map local ports to upstream TCP addresses for Raw TCP forwarding, " +
+			"tcp_forwards to map local ports to upstream TCP addresses (string format: 'host:port' for raw TCP, or structured ForwardConfig: {target, protocol, tls} for L7 detection), " +
 			"protocols to specify which protocols are enabled for detection (including SOCKS5), " +
 			"socks5_auth to set SOCKS5 authentication method ('none' or 'password'), " +
 			"socks5_username and socks5_password for SOCKS5 password authentication, " +
@@ -224,12 +276,19 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	// running proxy with invalid/default-only configuration.
 	s.resetSettingsToDefaults()
 
-	if err := s.applyProxyStartSettings(&input); err != nil {
+	// Parse raw TCP forwards into structured ForwardConfig.
+	parsedForwards, err := parseTCPForwardsAny(input.TCPForwards)
+	if err != nil {
+		s.deps.manager.StopNamed(ctx, listenerName)
+		return nil, nil, fmt.Errorf("tcp_forwards: %w", err)
+	}
+
+	if err := s.applyProxyStartSettings(&input, parsedForwards); err != nil {
 		s.deps.manager.StopNamed(ctx, listenerName)
 		return nil, nil, err
 	}
 
-	if err := s.startTCPForwards(ctx, listenerName, input.TCPForwards); err != nil {
+	if err := s.startTCPForwards(ctx, listenerName, parsedForwards); err != nil {
 		return nil, nil, err
 	}
 
@@ -239,7 +298,7 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		Name:        listenerName,
 		ListenAddr:  addr,
 		Status:      "running",
-		TCPForwards: input.TCPForwards,
+		TCPForwards: parsedForwards,
 		Protocols:   input.Protocols,
 	}
 	return nil, result, nil
@@ -312,11 +371,11 @@ func (s *Server) resetSettingsToDefaults() {
 // (handleProxyStart) is responsible for calling it after StartNamed() succeeds,
 // so that a failed start (e.g. already running, bind error) does not clear the
 // active configuration.
-func (s *Server) applyProxyStartSettings(input *proxyStartInput) error {
+func (s *Server) applyProxyStartSettings(input *proxyStartInput, parsedForwards map[string]*config.ForwardConfig) error {
 	if err := s.applyProxyStartPipeline(input); err != nil {
 		return err
 	}
-	if err := s.applyTCPForwardsConfig(input.TCPForwards); err != nil {
+	if err := s.applyTCPForwardsConfig(parsedForwards); err != nil {
 		return err
 	}
 	if err := s.applyProtocolsConfig(input.Protocols); err != nil {
@@ -420,11 +479,11 @@ func (s *Server) currentClientCert() (string, string) {
 }
 
 // applyTCPForwardsConfig validates and stores TCP forward mappings.
-func (s *Server) applyTCPForwardsConfig(forwards map[string]string) error {
+func (s *Server) applyTCPForwardsConfig(forwards map[string]*config.ForwardConfig) error {
 	if len(forwards) == 0 {
 		return nil
 	}
-	if err := validateTCPForwards(forwards); err != nil {
+	if err := validateTCPForwardsConfig(forwards); err != nil {
 		return fmt.Errorf("tcp_forwards: %w", err)
 	}
 	if s.deps.tcpHandler == nil {
@@ -494,13 +553,19 @@ func (s *Server) applyProxyStartLimits(input *proxyStartInput) error {
 
 // startTCPForwards starts TCP forward listeners for the given listener name.
 // If no forwards are configured, it is a no-op.
-func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forwards map[string]string) error {
+func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forwards map[string]*config.ForwardConfig) error {
 	if len(forwards) == 0 {
 		return nil
 	}
 	s.deps.tcpHandler.SetForwards(forwards)
 
-	if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, forwards, s.deps.tcpHandler); err != nil {
+	// Extract port -> target map for the manager (it only needs addresses for listening).
+	targetMap := make(map[string]string, len(forwards))
+	for port, fc := range forwards {
+		targetMap[port] = fc.Target
+	}
+
+	if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, targetMap, s.deps.tcpHandler); err != nil {
 		s.deps.manager.StopNamed(ctx, listenerName)
 		return fmt.Errorf("tcp_forwards: %w", err)
 	}
@@ -577,7 +642,7 @@ var validProtocols = map[string]bool{
 	"TCP":       true,
 }
 
-// validateTCPForwards validates tcp_forwards entries.
+// validateTCPForwards validates tcp_forwards entries (legacy string map format).
 func validateTCPForwards(forwards map[string]string) error {
 	for port, target := range forwards {
 		if port == "" {
@@ -605,6 +670,36 @@ func validateTCPForwards(forwards map[string]string) error {
 		// Validate target port is a valid port number (1-65535).
 		if err := validatePortNumber(p, false); err != nil {
 			return fmt.Errorf("invalid target %q for port %q: %w", target, port, err)
+		}
+	}
+	return nil
+}
+
+// validateTCPForwardsConfig validates tcp_forwards entries with ForwardConfig values.
+func validateTCPForwardsConfig(forwards map[string]*config.ForwardConfig) error {
+	for port, fc := range forwards {
+		if port == "" {
+			return fmt.Errorf("port key cannot be empty")
+		}
+		if err := validatePortNumber(port, true); err != nil {
+			return fmt.Errorf("invalid port key %q: %w", port, err)
+		}
+		if err := config.ValidateForwardConfig(port, fc); err != nil {
+			return err
+		}
+		// Validate target is host:port format.
+		host, p, err := net.SplitHostPort(fc.Target)
+		if err != nil {
+			return fmt.Errorf("invalid target %q for port %q: must be host:port format", fc.Target, port)
+		}
+		if host == "" {
+			return fmt.Errorf("invalid target %q for port %q: host cannot be empty", fc.Target, port)
+		}
+		if p == "" {
+			return fmt.Errorf("invalid target %q for port %q: port cannot be empty", fc.Target, port)
+		}
+		if err := validatePortNumber(p, false); err != nil {
+			return fmt.Errorf("invalid target %q for port %q: %w", fc.Target, port, err)
 		}
 	}
 	return nil
@@ -718,7 +813,19 @@ func (s *Server) applyProxyDefaultSlicesAndMaps(input *proxyStartInput, d *confi
 		input.TLSPassthrough = d.TLSPassthrough
 	}
 	if len(input.TCPForwards) == 0 && len(d.TCPForwards) > 0 {
-		input.TCPForwards = d.TCPForwards
+		// Serialize config ForwardConfig values to map[string]any for the input.
+		input.TCPForwards = make(map[string]any, len(d.TCPForwards))
+		for k, v := range d.TCPForwards {
+			// Use JSON round-trip to convert *ForwardConfig to map[string]any.
+			data, err := json.Marshal(v)
+			if err != nil {
+				continue
+			}
+			var m map[string]any
+			if json.Unmarshal(data, &m) == nil {
+				input.TCPForwards[k] = m
+			}
+		}
 	}
 }
 

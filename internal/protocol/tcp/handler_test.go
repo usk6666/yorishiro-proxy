@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -221,7 +222,7 @@ func TestHandler_Handle_BidirectionalRelay(t *testing.T) {
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	// Create a pipe simulating client <-> proxy.
@@ -373,7 +374,7 @@ func TestHandler_Handle_NoForwardConfigured(t *testing.T) {
 func TestHandler_Handle_UpstreamDialFailure(t *testing.T) {
 	store := &mockStore{}
 	// Point to a non-routable address that should fail fast.
-	forwards := map[string]string{"9999": "127.0.0.1:1"}
+	forwards := map[string]*config.ForwardConfig{"9999": {Target: "127.0.0.1:1", Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
@@ -399,7 +400,7 @@ func TestHandler_Handle_ContextCancellation(t *testing.T) {
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
@@ -452,7 +453,7 @@ func TestHandler_Handle_NilStore(t *testing.T) {
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	// Nil store: relay should still work, just no recording.
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(nil, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
@@ -497,7 +498,7 @@ func TestHandler_Handle_MultipleChunks(t *testing.T) {
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 
 	store := &mockStore{}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
@@ -567,7 +568,7 @@ func TestHandler_Handle_StoreErrors(t *testing.T) {
 	store := &mockStore{
 		appendMessageErr: errors.New("storage write error"),
 	}
-	forwards := map[string]string{echoPort: echoAddr}
+	forwards := map[string]*config.ForwardConfig{echoPort: {Target: echoAddr, Protocol: "raw"}}
 	h := NewHandler(store, forwards, testutil.DiscardLogger())
 
 	clientConn, proxyConn := net.Pipe()
@@ -688,61 +689,61 @@ func TestHandler_SetForwards(t *testing.T) {
 	}
 
 	// Set forwards.
-	h.SetForwards(map[string]string{
-		"3306": "db.example.com:3306",
-		"6379": "redis.example.com:6379",
+	h.SetForwards(map[string]*config.ForwardConfig{
+		"3306": {Target: "db.example.com:3306", Protocol: "raw"},
+		"6379": {Target: "redis.example.com:6379", Protocol: "raw"},
 	})
 
 	got := h.Forwards()
 	if len(got) != 2 {
 		t.Fatalf("forwards len = %d, want 2", len(got))
 	}
-	if got["3306"] != "db.example.com:3306" {
-		t.Errorf("forwards[3306] = %q, want %q", got["3306"], "db.example.com:3306")
+	if got["3306"] == nil || got["3306"].Target != "db.example.com:3306" {
+		t.Errorf("forwards[3306].Target = %v, want db.example.com:3306", got["3306"])
 	}
-	if got["6379"] != "redis.example.com:6379" {
-		t.Errorf("forwards[6379] = %q, want %q", got["6379"], "redis.example.com:6379")
+	if got["6379"] == nil || got["6379"].Target != "redis.example.com:6379" {
+		t.Errorf("forwards[6379].Target = %v, want redis.example.com:6379", got["6379"])
 	}
 }
 
 func TestHandler_SetForwards_Merge(t *testing.T) {
 	// SetForwards should merge into existing entries.
-	initial := map[string]string{
-		"3306": "db.example.com:3306",
+	initial := map[string]*config.ForwardConfig{
+		"3306": {Target: "db.example.com:3306", Protocol: "raw"},
 	}
 	h := NewHandler(nil, initial, testutil.DiscardLogger())
 
 	// Add a new entry.
-	h.SetForwards(map[string]string{
-		"6379": "redis.example.com:6379",
+	h.SetForwards(map[string]*config.ForwardConfig{
+		"6379": {Target: "redis.example.com:6379", Protocol: "raw"},
 	})
 
 	got := h.Forwards()
 	if len(got) != 2 {
 		t.Fatalf("forwards len = %d, want 2", len(got))
 	}
-	if got["3306"] != "db.example.com:3306" {
-		t.Errorf("forwards[3306] = %q, want %q", got["3306"], "db.example.com:3306")
+	if got["3306"] == nil || got["3306"].Target != "db.example.com:3306" {
+		t.Errorf("forwards[3306].Target = %v, want db.example.com:3306", got["3306"])
 	}
-	if got["6379"] != "redis.example.com:6379" {
-		t.Errorf("forwards[6379] = %q, want %q", got["6379"], "redis.example.com:6379")
+	if got["6379"] == nil || got["6379"].Target != "redis.example.com:6379" {
+		t.Errorf("forwards[6379].Target = %v, want redis.example.com:6379", got["6379"])
 	}
 }
 
 func TestHandler_SetForwards_Override(t *testing.T) {
 	// SetForwards should override existing entries.
-	initial := map[string]string{
-		"3306": "old-db.example.com:3306",
+	initial := map[string]*config.ForwardConfig{
+		"3306": {Target: "old-db.example.com:3306", Protocol: "raw"},
 	}
 	h := NewHandler(nil, initial, testutil.DiscardLogger())
 
-	h.SetForwards(map[string]string{
-		"3306": "new-db.example.com:3306",
+	h.SetForwards(map[string]*config.ForwardConfig{
+		"3306": {Target: "new-db.example.com:3306", Protocol: "raw"},
 	})
 
 	got := h.Forwards()
-	if got["3306"] != "new-db.example.com:3306" {
-		t.Errorf("forwards[3306] = %q, want %q", got["3306"], "new-db.example.com:3306")
+	if got["3306"] == nil || got["3306"].Target != "new-db.example.com:3306" {
+		t.Errorf("forwards[3306].Target = %v, want new-db.example.com:3306", got["3306"])
 	}
 }
 

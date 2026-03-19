@@ -726,7 +726,7 @@ func TestProxyStart_PassthroughAppliedBeforeStart(t *testing.T) {
 
 // mockTCPHandler satisfies the tcpForwardHandler interface for testing.
 type mockTCPHandler struct {
-	forwards map[string]string
+	forwards map[string]*config.ForwardConfig
 }
 
 func (h *mockTCPHandler) Name() string         { return "TCP" }
@@ -740,9 +740,9 @@ func (h *mockTCPHandler) Handle(_ context.Context, conn net.Conn) error {
 	}
 	return nil
 }
-func (h *mockTCPHandler) SetForwards(forwards map[string]string) {
+func (h *mockTCPHandler) SetForwards(forwards map[string]*config.ForwardConfig) {
 	if h.forwards == nil {
-		h.forwards = make(map[string]string)
+		h.forwards = make(map[string]*config.ForwardConfig)
 	}
 	for k, v := range forwards {
 		h.forwards[k] = v
@@ -780,8 +780,13 @@ func TestProxyStart_WithTCPForwards(t *testing.T) {
 	}
 
 	// Verify forward mappings were set on the handler.
-	if tcpHandler.forwards["0"] != "127.0.0.1:9999" {
-		t.Errorf("tcpHandler forwards[0] = %q, want %q", tcpHandler.forwards["0"], "127.0.0.1:9999")
+	fc := tcpHandler.forwards["0"]
+	if fc == nil || fc.Target != "127.0.0.1:9999" {
+		var got string
+		if fc != nil {
+			got = fc.Target
+		}
+		t.Errorf("tcpHandler forwards[0].Target = %q, want %q", got, "127.0.0.1:9999")
 	}
 
 	// Verify the forward listener is accessible.
@@ -1416,28 +1421,38 @@ func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
 func TestApplyProxyDefaults_TCPForwards(t *testing.T) {
 	s := &Server{deps: &deps{
 		proxyDefaults: &config.ProxyConfig{
-			TCPForwards: map[string]string{"3306": "db.example.com:3306"},
+			TCPForwards: map[string]*config.ForwardConfig{"3306": {Target: "db.example.com:3306", Protocol: "raw"}},
 		},
 	}}
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
 		s.applyProxyDefaults(&input)
-		if input.TCPForwards["3306"] != "db.example.com:3306" {
-			t.Errorf("TCPForwards[3306] = %q, want %q", input.TCPForwards["3306"], "db.example.com:3306")
+		parsed, err := parseTCPForwardsAny(input.TCPForwards)
+		if err != nil {
+			t.Fatalf("parseTCPForwardsAny: %v", err)
+		}
+		fc := parsed["3306"]
+		if fc == nil || fc.Target != "db.example.com:3306" {
+			t.Errorf("TCPForwards[3306] = %v, want target db.example.com:3306", fc)
 		}
 	})
 
 	t.Run("caller value takes precedence", func(t *testing.T) {
 		input := proxyStartInput{
-			TCPForwards: map[string]string{"5432": "pg.example.com:5432"},
+			TCPForwards: map[string]any{"5432": "pg.example.com:5432"},
 		}
 		s.applyProxyDefaults(&input)
 		if _, ok := input.TCPForwards["3306"]; ok {
 			t.Error("default TCPForwards[3306] should not be applied when caller specifies forwards")
 		}
-		if input.TCPForwards["5432"] != "pg.example.com:5432" {
-			t.Errorf("TCPForwards[5432] = %q, want %q", input.TCPForwards["5432"], "pg.example.com:5432")
+		parsed, err := parseTCPForwardsAny(input.TCPForwards)
+		if err != nil {
+			t.Fatalf("parseTCPForwardsAny: %v", err)
+		}
+		fc := parsed["5432"]
+		if fc == nil || fc.Target != "pg.example.com:5432" {
+			t.Errorf("TCPForwards[5432] = %v, want target pg.example.com:5432", fc)
 		}
 	})
 }
