@@ -224,43 +224,10 @@ func (r *grpcProgressiveRecorder) completeFlow(
 	grpcMessage := protogrpc.ExtractGRPCMessage(trailers, respHeadersMap(resp))
 
 	// Record final receive message with trailers and status.
-	finalSeq := int(r.seq.Add(1) - 1)
-	finalMeta := map[string]string{
-		"grpc_type": "trailers",
-		"service":   r.service,
-		"method":    r.method,
-	}
-	if grpcStatus != "" {
-		finalMeta["grpc_status"] = grpcStatus
-	}
-	if grpcMessage != "" {
-		finalMeta["grpc_message"] = grpcMessage
-	}
-
-	totalMessages := int(r.messageCount.Load())
-	finalMeta["message_count"] = strconv.Itoa(totalMessages)
-
-	finalMsg := &flow.Message{
-		FlowID:    r.flowID,
-		Sequence:  finalSeq,
-		Direction: "receive",
-		Timestamp: time.Now(),
-		Metadata:  finalMeta,
-	}
-	if resp != nil {
-		finalMsg.StatusCode = resp.StatusCode
-		if trailers != nil {
-			finalMsg.Headers = trailers
-		}
-	}
-	if err := r.store.AppendMessage(ctx, finalMsg); err != nil {
-		r.logger.Error("gRPC progressive trailers save failed",
-			"flow_id", r.flowID,
-			"error", err,
-		)
-	}
+	r.recordTrailersMessage(ctx, resp, trailers, grpcStatus, grpcMessage)
 
 	// Build tags, preserving SOCKS5 metadata from the context.
+	totalMessages := int(r.messageCount.Load())
 	tags := proxy.MergeSOCKS5Tags(ctx, map[string]string{
 		"streaming_type": "grpc",
 		"grpc_service":   r.service,
@@ -287,6 +254,58 @@ func (r *grpcProgressiveRecorder) completeFlow(
 	}
 	if err := r.store.UpdateFlow(ctx, r.flowID, update); err != nil {
 		r.logger.Error("gRPC progressive flow completion failed",
+			"flow_id", r.flowID,
+			"error", err,
+		)
+	}
+}
+
+// recordTrailersMessage records the final receive message with trailers
+// and gRPC status metadata. It also marks trailers-only responses when
+// no response DATA frames were received.
+func (r *grpcProgressiveRecorder) recordTrailersMessage(
+	ctx context.Context,
+	resp *gohttp.Response,
+	trailers map[string][]string,
+	grpcStatus, grpcMessage string,
+) {
+	finalSeq := int(r.seq.Add(1) - 1)
+	finalMeta := map[string]string{
+		"grpc_type": "trailers",
+		"service":   r.service,
+		"method":    r.method,
+	}
+	if grpcStatus != "" {
+		finalMeta["grpc_status"] = grpcStatus
+	}
+	if grpcMessage != "" {
+		finalMeta["grpc_message"] = grpcMessage
+	}
+	// Mark as trailers-only using the HTTP/2 response pattern rather than
+	// frame count, which could be zero due to parse failure rather than a
+	// genuine Trailers-Only response.
+	if resp != nil && isGRPCTrailersOnly(resp) {
+		finalMeta["grpc_trailers_only"] = "true"
+	}
+
+	totalMessages := int(r.messageCount.Load())
+	finalMeta["message_count"] = strconv.Itoa(totalMessages)
+
+	finalMsg := &flow.Message{
+		FlowID:    r.flowID,
+		Sequence:  finalSeq,
+		Direction: "receive",
+		Timestamp: time.Now(),
+		Metadata:  finalMeta,
+	}
+	if resp != nil {
+		finalMsg.StatusCode = resp.StatusCode
+		if trailers != nil {
+			finalMsg.Headers = trailers
+		}
+	}
+	if err := r.store.AppendMessage(ctx, finalMsg); err != nil {
+		r.logger.Error("gRPC progressive trailers save failed",
 			"flow_id", r.flowID,
 			"error", err,
 		)
