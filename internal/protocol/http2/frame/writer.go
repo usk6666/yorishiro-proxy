@@ -75,7 +75,12 @@ func (wr *Writer) WriteFrame(f *Frame) error {
 		Flags:    f.Header.Flags,
 		StreamID: f.Header.StreamID,
 	}
-	buf := hdr.AppendTo(make([]byte, 0, HeaderSize+len(f.Payload)))
+	// Use int64 arithmetic to prevent potential overflow on 32-bit platforms
+	// when computing the allocation size (HeaderSize + payload length).
+	// The payload is already validated against maxFrameSize above, so this
+	// cannot overflow in practice, but we make it explicit for static analysis.
+	capSize := int64(HeaderSize) + int64(len(f.Payload))
+	buf := hdr.AppendTo(make([]byte, 0, capSize))
 	buf = append(buf, f.Payload...)
 
 	_, err := wr.w.Write(buf)
