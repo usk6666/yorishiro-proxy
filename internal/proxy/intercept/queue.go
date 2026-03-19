@@ -574,7 +574,12 @@ func (q *Queue) SetMetadata(id string, metadata map[string]string) error {
 		return fmt.Errorf("intercepted request %q not found", id)
 	}
 
-	item.Metadata = metadata
+	// Deep copy the metadata map for consistency with SetRawBytes.
+	cp := make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		cp[k] = v
+	}
+	item.Metadata = cp
 
 	slog.Debug("metadata attached to intercept queue item",
 		slog.String("intercept_id", id),

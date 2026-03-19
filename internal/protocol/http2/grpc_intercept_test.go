@@ -43,7 +43,9 @@ func buildGRPCStreamBody(t *testing.T, payloads ...[]byte) []byte {
 }
 
 // makeGRPCStreamContext creates a streamContext for gRPC intercept testing.
-func makeGRPCStreamContext(t *testing.T, body []byte) (*streamContext, *httptest.ResponseRecorder) {
+// If endStreamCh is non-nil, it is stored in the context so that
+// bufferGRPCUnaryBody can use it for unary/streaming detection.
+func makeGRPCStreamContext(t *testing.T, body []byte, endStreamCh chan struct{}) (*streamContext, *httptest.ResponseRecorder) {
 	t.Helper()
 	reqURL, _ := url.Parse("https://example.com/test.Service/Method")
 	req := &gohttp.Request{
@@ -55,8 +57,12 @@ func makeGRPCStreamContext(t *testing.T, body []byte) (*streamContext, *httptest
 		Body: io.NopCloser(bytes.NewReader(body)),
 	}
 	w := httptest.NewRecorder()
+	ctx := context.Background()
+	if endStreamCh != nil {
+		ctx = contextWithEndStreamCh(ctx, endStreamCh)
+	}
 	return &streamContext{
-		ctx:    context.Background(),
+		ctx:    ctx,
 		req:    req,
 		reqURL: reqURL,
 		w:      w,
@@ -76,7 +82,10 @@ func TestHandleGRPCIntercept_UnaryDrop(t *testing.T) {
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	body := buildGRPCUnaryBody(t, pbPayload)
 
-	sc, w := makeGRPCStreamContext(t, body)
+	// Simulate END_STREAM received (unary RPC).
+	endStreamCh := make(chan struct{})
+	close(endStreamCh)
+	sc, w := makeGRPCStreamContext(t, body, endStreamCh)
 	matchedRules := []string{"rule1"}
 
 	// Respond with drop in background.
@@ -111,7 +120,9 @@ func TestHandleGRPCIntercept_UnaryRelease(t *testing.T) {
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	body := buildGRPCUnaryBody(t, pbPayload)
 
-	sc, _ := makeGRPCStreamContext(t, body)
+	endStreamCh := make(chan struct{})
+	close(endStreamCh)
+	sc, _ := makeGRPCStreamContext(t, body, endStreamCh)
 	matchedRules := []string{"rule1"}
 
 	// Respond with release in background.
@@ -151,7 +162,9 @@ func TestHandleGRPCIntercept_UnaryModifyAndForward(t *testing.T) {
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	body := buildGRPCUnaryBody(t, pbPayload)
 
-	sc, _ := makeGRPCStreamContext(t, body)
+	endStreamCh := make(chan struct{})
+	close(endStreamCh)
+	sc, _ := makeGRPCStreamContext(t, body, endStreamCh)
 	matchedRules := []string{"rule1"}
 
 	// The override body should be the re-encoded gRPC frame bytes (as string).
@@ -217,7 +230,10 @@ func TestHandleGRPCIntercept_StreamingFallback(t *testing.T) {
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	body := buildGRPCStreamBody(t, pbPayload, pbPayload)
 
-	sc, _ := makeGRPCStreamContext(t, body)
+	// endStreamCh is NOT closed — simulates streaming RPC where END_STREAM
+	// has not arrived. bufferGRPCUnaryBody should timeout and fall back.
+	endStreamCh := make(chan struct{})
+	sc, _ := makeGRPCStreamContext(t, body, endStreamCh)
 	matchedRules := []string{"rule1"}
 
 	handled := handler.handleGRPCIntercept(sc, matchedRules)
@@ -225,7 +241,8 @@ func TestHandleGRPCIntercept_StreamingFallback(t *testing.T) {
 		t.Error("expected streaming fallback to not be handled (return false)")
 	}
 
-	// Body should be restored for streaming path.
+	// Body should be restored for streaming path. The first frame's bytes
+	// are prepended back, and the remaining body (second frame) follows.
 	restoredBody, err := io.ReadAll(sc.req.Body)
 	if err != nil {
 		t.Fatalf("read restored body: %v", err)
@@ -247,7 +264,9 @@ func TestHandleGRPCIntercept_TimeoutAutoRelease(t *testing.T) {
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	body := buildGRPCUnaryBody(t, pbPayload)
 
-	sc, _ := makeGRPCStreamContext(t, body)
+	endStreamCh := make(chan struct{})
+	close(endStreamCh)
+	sc, _ := makeGRPCStreamContext(t, body, endStreamCh)
 	matchedRules := []string{"rule1"}
 
 	// Do not respond — let it timeout.
@@ -269,7 +288,9 @@ func TestHandleGRPCIntercept_TimeoutAutoDrop(t *testing.T) {
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	body := buildGRPCUnaryBody(t, pbPayload)
 
-	sc, w := makeGRPCStreamContext(t, body)
+	endStreamCh := make(chan struct{})
+	close(endStreamCh)
+	sc, w := makeGRPCStreamContext(t, body, endStreamCh)
 	matchedRules := []string{"rule1"}
 
 	handled := handler.handleGRPCIntercept(sc, matchedRules)
@@ -292,7 +313,9 @@ func TestHandleGRPCIntercept_BodyDecodeJSON(t *testing.T) {
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	body := buildGRPCUnaryBody(t, pbPayload)
 
-	sc, _ := makeGRPCStreamContext(t, body)
+	endStreamCh := make(chan struct{})
+	close(endStreamCh)
+	sc, _ := makeGRPCStreamContext(t, body, endStreamCh)
 	matchedRules := []string{"rule1"}
 
 	var heldBody []byte

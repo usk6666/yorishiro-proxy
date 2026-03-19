@@ -670,10 +670,11 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 
 	// Step 1: Read the 5-byte gRPC frame header.
 	var header [5]byte
-	if _, err := io.ReadFull(reqBody, header[:]); err != nil {
+	n, err := io.ReadFull(reqBody, header[:])
+	if err != nil {
 		sc.logger.Debug("gRPC intercept: failed to read frame header", "error", err)
 		// Restore any partial data + remaining body for streaming fallback.
-		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:0]), sc.req.Body))
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:n]), sc.req.Body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
@@ -702,14 +703,16 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 	}
 
 	// Step 2: Read the payload.
-	payload := make([]byte, msgLen)
-	if msgLen > 0 {
-		if _, err := io.ReadFull(reqBody, payload); err != nil {
-			sc.logger.Debug("gRPC intercept: failed to read frame payload", "error", err, "expected", msgLen)
-			// Restore header + partial payload + remaining body.
+	payloadLen := int(msgLen)
+	payload := make([]byte, payloadLen)
+	if payloadLen > 0 {
+		pn, pErr := io.ReadFull(reqBody, payload)
+		if pErr != nil {
+			sc.logger.Debug("gRPC intercept: failed to read frame payload", "error", pErr, "expected", payloadLen)
+			// Restore header + actually-read partial payload + remaining body.
 			var read []byte
 			read = append(read, header[:]...)
-			read = append(read, payload...)
+			read = append(read, payload[:pn]...)
 			sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(read), sc.req.Body))
 			return nil, "", protobuf.Frame{}, false
 		}
@@ -720,26 +723,39 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 	copy(firstFrame, header[:])
 	copy(firstFrame[5:], payload)
 
-	// Step 3: Probe for additional data to distinguish unary vs streaming.
-	// If we can read even 1 byte more, there is a second frame → streaming.
-	var peekBuf [1]byte
-	n, peekErr := reqBody.Read(peekBuf[:])
-	if n > 0 {
-		// Streaming RPC detected — restore all read data + remaining body.
-		sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
-			"method", sc.req.Method, "url", sc.reqURL.String())
-		sc.req.Body = io.NopCloser(io.MultiReader(
-			bytes.NewReader(firstFrame),
-			bytes.NewReader(peekBuf[:1]),
-			sc.req.Body,
-		))
-		return nil, "", protobuf.Frame{}, false
-	}
-	// peekErr should be io.EOF (unary, no more data) or an actual error.
-	if peekErr != nil && peekErr != io.EOF {
-		sc.logger.Debug("gRPC intercept: error probing for additional frames", "error", peekErr)
-		sc.req.Body = io.NopCloser(bytes.NewReader(firstFrame))
-		return nil, "", protobuf.Frame{}, false
+	// Step 3: Check END_STREAM signal to distinguish unary vs streaming.
+	// Instead of a blocking 1-byte probe read (which deadlocks on bidirectional
+	// streaming RPCs where the client waits for a server response before sending
+	// the next frame), we use the endStreamCh channel set by client_conn.go
+	// when END_STREAM is received on a DATA frame.
+	endStreamCh := endStreamChFromContext(sc.ctx)
+	if endStreamCh == nil {
+		// No endStreamCh means HEADERS had END_STREAM (no body expected).
+		// This shouldn't happen since we already read a frame, but handle
+		// gracefully by treating as unary.
+		sc.logger.Debug("gRPC intercept: no endStreamCh in context, assuming unary")
+	} else {
+		// Wait briefly for the END_STREAM signal. In unary RPCs, the DATA
+		// frame carrying END_STREAM is received very close to the first frame
+		// read (often the same frame). A short timeout handles goroutine
+		// scheduling delays.
+		select {
+		case <-endStreamCh:
+			// END_STREAM received — unary RPC confirmed.
+		case <-time.After(100 * time.Millisecond):
+			// Timeout — likely a streaming RPC. Restore body and fall back.
+			sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
+				"method", sc.req.Method, "url", sc.reqURL.String())
+			sc.req.Body = io.NopCloser(io.MultiReader(
+				bytes.NewReader(firstFrame),
+				sc.req.Body,
+			))
+			return nil, "", protobuf.Frame{}, false
+		case <-sc.ctx.Done():
+			sc.logger.Debug("gRPC intercept: context cancelled during unary detection")
+			sc.req.Body = io.NopCloser(bytes.NewReader(firstFrame))
+			return nil, "", protobuf.Frame{}, false
+		}
 	}
 
 	// Unary RPC confirmed — single frame, EOF reached.
@@ -838,6 +854,12 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 		return true
 
 	case intercept.ActionModifyAndForward:
+		if action.IsRawMode() {
+			sc.logger.Warn("gRPC intercept raw mode not supported, releasing",
+				"method", sc.req.Method, "url", sc.reqURL.String())
+			sc.req.Body = io.NopCloser(bytes.NewReader(body))
+			return false
+		}
 		if action.OverrideBody != nil {
 			sc.req.Body = io.NopCloser(bytes.NewReader([]byte(*action.OverrideBody)))
 		} else {
