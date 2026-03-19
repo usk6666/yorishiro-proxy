@@ -687,6 +687,11 @@ func validateTCPForwardsConfig(forwards map[string]*config.ForwardConfig) error 
 		if err := config.ValidateForwardConfig(port, fc); err != nil {
 			return err
 		}
+		// Warn about unusual but valid combination: TLS termination without L7 parsing.
+		if fc.TLS && fc.Protocol == "raw" {
+			slog.Warn("TCP forward: tls=true with protocol=raw means TLS termination without L7 parsing",
+				"port", port, "target", fc.Target)
+		}
 		// Validate target is host:port format.
 		host, p, err := net.SplitHostPort(fc.Target)
 		if err != nil {
@@ -819,12 +824,15 @@ func (s *Server) applyProxyDefaultSlicesAndMaps(input *proxyStartInput, d *confi
 			// Use JSON round-trip to convert *ForwardConfig to map[string]any.
 			data, err := json.Marshal(v)
 			if err != nil {
+				slog.Warn("failed to marshal default ForwardConfig", "port", k, "error", err)
 				continue
 			}
 			var m map[string]any
-			if json.Unmarshal(data, &m) == nil {
-				input.TCPForwards[k] = m
+			if err := json.Unmarshal(data, &m); err != nil {
+				slog.Warn("failed to unmarshal default ForwardConfig", "port", k, "error", err)
+				continue
 			}
+			input.TCPForwards[k] = m
 		}
 	}
 }

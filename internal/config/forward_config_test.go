@@ -253,16 +253,18 @@ func TestValidateForwardConfig(t *testing.T) {
 }
 
 func TestValidForwardProtocols(t *testing.T) {
-	expected := []string{"", "auto", "raw", "http", "http2", "grpc", "websocket"}
-	for _, p := range expected {
-		if !ValidForwardProtocols[p] {
-			t.Errorf("protocol %q should be valid", p)
+	validProtocols := []string{"", "auto", "raw", "http", "http2", "grpc", "websocket"}
+	for _, p := range validProtocols {
+		fc := &ForwardConfig{Target: "host:1234", Protocol: p}
+		if err := ValidateForwardConfig("9999", fc); err != nil {
+			t.Errorf("protocol %q should be valid, got error: %v", p, err)
 		}
 	}
-	invalid := []string{"ftp", "ssh", "HTTP", "HTTP2", "GRPC"}
-	for _, p := range invalid {
-		if ValidForwardProtocols[p] {
-			t.Errorf("protocol %q should be invalid", p)
+	invalidProtocols := []string{"ftp", "ssh", "HTTP", "HTTP2", "GRPC"}
+	for _, p := range invalidProtocols {
+		fc := &ForwardConfig{Target: "host:1234", Protocol: p}
+		if err := ValidateForwardConfig("9999", fc); err == nil {
+			t.Errorf("protocol %q should be invalid, but no error returned", p)
 		}
 	}
 }

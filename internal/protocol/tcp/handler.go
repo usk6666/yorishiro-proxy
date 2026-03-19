@@ -66,7 +66,8 @@ func (h *Handler) Forwards() map[string]*config.ForwardConfig {
 	defer h.mu.Unlock()
 	out := make(map[string]*config.ForwardConfig, len(h.forwards))
 	for k, v := range h.forwards {
-		out[k] = v
+		copied := *v
+		out[k] = &copied
 	}
 	return out
 }

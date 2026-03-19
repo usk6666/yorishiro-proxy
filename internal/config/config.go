@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,8 +300,8 @@ type ForwardConfig struct {
 	TLS bool `json:"tls,omitempty"`
 }
 
-// ValidForwardProtocols is the set of valid protocol values for ForwardConfig.
-var ValidForwardProtocols = map[string]bool{
+// validForwardProtocols is the set of valid protocol values for ForwardConfig.
+var validForwardProtocols = map[string]bool{
 	"":          true, // empty means "auto"
 	"auto":      true,
 	"raw":       true,
@@ -322,13 +321,11 @@ func ValidateForwardConfig(port string, fc *ForwardConfig) error {
 	if fc.Target == "" {
 		return fmt.Errorf("forward config for port %q: target cannot be empty", port)
 	}
-	if !ValidForwardProtocols[fc.Protocol] {
+	if !validForwardProtocols[fc.Protocol] {
 		return fmt.Errorf("forward config for port %q: invalid protocol %q (valid: auto, raw, http, http2, grpc, websocket)", port, fc.Protocol)
 	}
-	if fc.TLS && (fc.Protocol == "raw") {
-		slog.Warn("TCP forward: tls=true with protocol=raw means TLS termination without L7 parsing",
-			"port", port, "target", fc.Target)
-	}
+	// Note: tls=true with protocol=raw is valid but unusual (TLS termination
+	// without L7 parsing). The caller is responsible for logging a warning.
 	return nil
 }
 
