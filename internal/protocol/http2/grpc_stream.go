@@ -104,6 +104,18 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 	}
 	defer resp.Body.Close()
 
+	// Response intercept check: if response matches intercept rules,
+	// buffer the unary response body + trailers for AI agent review.
+	if h.handleGRPCResponseIntercept(sc, state, resp) {
+		// Flush and wait for request goroutine before returning.
+		if flusher, ok := sc.w.(gohttp.Flusher); ok {
+			flusher.Flush()
+		}
+		reqWg.Wait()
+		h.finalizeGRPCStream(sc, state, resp)
+		return
+	}
+
 	// Apply output filter to response headers before writing to client.
 	_, resp.Header = h.ApplyOutputFilter(nil, resp.Header, sc.logger)
 
@@ -917,4 +929,328 @@ func percentEncodeGRPCMessage(msg string) string {
 		}
 	}
 	return buf.String()
+}
+
+// handleGRPCResponseIntercept checks whether the gRPC response matches
+// intercept rules and, if so, buffers the unary response body + trailers
+// for AI agent review. Returns true if the response was fully handled
+// (intercepted), false if the normal streaming path should continue.
+//
+// The intercept is inserted before subsystems (plugin, transform, output filter)
+// so the AI agent sees the raw server response. After release/modify, the
+// response is sent through subsystems before reaching the client.
+//
+// Design decisions:
+//   - Trailers-Only responses are skipped (no body to intercept).
+//   - Streaming responses (multiple DATA frames) are released immediately.
+//   - Raw mode (raw_override_base64) is not supported for gRPC response intercept.
+func (h *Handler) handleGRPCResponseIntercept(sc *streamContext, state *grpcStreamState, resp *gohttp.Response) bool {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
+		return false
+	}
+
+	// Trailers-Only responses have no body to intercept.
+	if isGRPCTrailersOnly(resp) {
+		return false
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	if len(matchedRules) == 0 {
+		return false
+	}
+
+	// Buffer the response body and check for unary response.
+	body, jsonBody, frame, trailers, ok := h.bufferGRPCUnaryResponseBody(sc, resp)
+	if !ok {
+		// Not a unary response or decode failed — fall back to streaming path.
+		return false
+	}
+
+	// Enqueue the response for AI agent review and wait for action.
+	action := h.enqueueGRPCResponseIntercept(sc, resp, body, jsonBody, frame, trailers, matchedRules)
+
+	// Apply the action.
+	h.applyGRPCResponseInterceptAction(sc, state, resp, action, body, trailers)
+	return true
+}
+
+// bufferGRPCUnaryResponseBody reads the response body and validates it as
+// a gRPC unary response (single DATA frame). It reads the entire body to
+// populate resp.Trailer, then checks for a single frame.
+//
+// Returns the raw body bytes, decoded JSON, the single frame, trailers,
+// and true if the body is a valid unary response. On failure, the response
+// body is replaced with unread data and false is returned.
+func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Response) (body []byte, jsonBody string, frame protobuf.Frame, trailers gohttp.Header, ok bool) {
+	// Read the full response body to also populate resp.Trailer.
+	fullBody, err := io.ReadAll(io.LimitReader(resp.Body, intercept.MaxRawBytesSize+1))
+	if err != nil {
+		sc.logger.Debug("gRPC response intercept: failed to read body", "error", err)
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	// Check size limit.
+	if len(fullBody) > intercept.MaxRawBytesSize {
+		sc.logger.Warn("gRPC response intercept: body too large, releasing",
+			"body_len", len(fullBody), "max", intercept.MaxRawBytesSize)
+		// Replace body so streaming path can still forward it.
+		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	// After reading to EOF, resp.Trailer is populated by Go's http2.Transport.
+	trailers = cloneHeaders(resp.Trailer)
+
+	if len(fullBody) == 0 {
+		sc.logger.Debug("gRPC response intercept: empty body, skipping")
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	// Parse gRPC frame header.
+	if len(fullBody) < 5 {
+		sc.logger.Debug("gRPC response intercept: body too short for frame header",
+			"len", len(fullBody))
+		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	compressed := fullBody[0]
+	if compressed > 1 {
+		sc.logger.Debug("gRPC response intercept: invalid compressed flag", "flag", compressed)
+		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	msgLen := binary.BigEndian.Uint32(fullBody[1:5])
+	expectedLen := 5 + int(msgLen)
+
+	// Check for streaming response (multiple frames).
+	if len(fullBody) > expectedLen {
+		sc.logger.Warn("gRPC streaming response intercept not supported, releasing",
+			"method", sc.req.Method, "url", sc.reqURL.String(),
+			"body_len", len(fullBody), "first_frame_len", expectedLen)
+		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	// Incomplete frame.
+	if len(fullBody) < expectedLen {
+		sc.logger.Debug("gRPC response intercept: incomplete frame",
+			"body_len", len(fullBody), "expected", expectedLen)
+		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	payload := fullBody[5:expectedLen]
+	frame = protobuf.Frame{
+		Compressed: compressed,
+		Payload:    payload,
+	}
+
+	// Decode protobuf to JSON.
+	respEncoding := resp.Header.Get("Grpc-Encoding")
+	jsonBody, _, decodeErr := decodeGRPCPayload(frame.Payload, frame.Compressed != 0, respEncoding)
+	if decodeErr != nil {
+		sc.logger.Debug("gRPC response intercept: protobuf decode failed, releasing", "error", decodeErr)
+		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
+	return fullBody, jsonBody, frame, trailers, true
+}
+
+// enqueueGRPCResponseIntercept enqueues the decoded gRPC unary response for
+// AI agent review and waits for the agent's action (or timeout).
+func (h *Handler) enqueueGRPCResponseIntercept(sc *streamContext, resp *gohttp.Response, body []byte, jsonBody string, frame protobuf.Frame, trailers gohttp.Header, matchedRules []string) intercept.InterceptAction {
+	sc.logger.Info("gRPC unary response intercepted",
+		"method", sc.req.Method, "url", sc.reqURL.String(),
+		"status", resp.StatusCode, "matched_rules", matchedRules)
+
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		sc.req.Method, sc.req.URL, resp.StatusCode, resp.Header, []byte(jsonBody), matchedRules,
+	)
+	defer h.InterceptQueue.Remove(id)
+
+	// Attach raw bytes (the original gRPC wire body).
+	if len(body) > 0 {
+		if err := h.InterceptQueue.SetRawBytes(id, body); err != nil {
+			sc.logger.Warn("gRPC response intercept: failed to set raw bytes", "id", id, "error", err)
+		}
+	}
+
+	// Attach gRPC metadata for re-encoding on modify_and_forward.
+	h.attachGRPCResponseInterceptMetadata(sc, resp, id, frame, trailers)
+
+	return h.waitGRPCInterceptAction(sc, id, actionCh)
+}
+
+// attachGRPCResponseInterceptMetadata sets gRPC-specific metadata on the
+// enqueued response intercept item. This includes encoding info for
+// re-encoding and trailer values so the AI agent can see them.
+func (h *Handler) attachGRPCResponseInterceptMetadata(sc *streamContext, resp *gohttp.Response, id string, frame protobuf.Frame, trailers gohttp.Header) {
+	contentType := resp.Header.Get("Content-Type")
+	respEncoding := resp.Header.Get("Grpc-Encoding")
+	compressed := "false"
+	if frame.Compressed != 0 {
+		compressed = "true"
+	}
+	metadata := map[string]string{
+		"grpc_content_type": contentType,
+		"grpc_encoding":     respEncoding,
+		"grpc_compressed":   compressed,
+		"original_frames":   "1",
+	}
+
+	// Include trailer values as metadata so the AI agent can inspect them.
+	for key, vals := range trailers {
+		if len(vals) > 0 {
+			metadata["trailer_"+strings.ToLower(key)] = vals[0]
+		}
+	}
+
+	if err := h.InterceptQueue.SetMetadata(id, metadata); err != nil {
+		sc.logger.Warn("gRPC response intercept: failed to set metadata", "id", id, "error", err)
+	}
+}
+
+// applyGRPCResponseInterceptAction applies the AI agent's action to the
+// gRPC response. It writes the (possibly modified) response through
+// subsystems and sends it to the client.
+func (h *Handler) applyGRPCResponseInterceptAction(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, action intercept.InterceptAction, body []byte, trailers gohttp.Header) {
+	switch action.Type {
+	case intercept.ActionDrop:
+		writeGRPCStatus(sc.w, gohttp.StatusOK, 10, "intercepted response dropped") // ABORTED
+		sc.logger.Info("intercepted gRPC response dropped",
+			"method", sc.req.Method, "url", sc.reqURL.String())
+		return
+
+	case intercept.ActionModifyAndForward:
+		if action.IsRawMode() {
+			sc.logger.Warn("gRPC response intercept raw mode not supported, releasing",
+				"method", sc.req.Method, "url", sc.reqURL.String())
+			// Fall through to release path with original body.
+		} else {
+			if action.OverrideResponseBody != nil {
+				body = []byte(*action.OverrideResponseBody)
+			}
+			h.applyGRPCResponseInterceptHeaderMods(resp, action)
+			h.applyGRPCResponseInterceptTrailerMods(trailers, action)
+		}
+	}
+
+	// Pass through subsystems and write to client.
+	body, resp, trailers = h.runGRPCResponseSubsystems(sc, state, resp, body, trailers)
+	_, resp.Header = h.ApplyOutputFilter(nil, resp.Header, sc.logger)
+	h.writeGRPCInterceptedResponse(sc, state, resp, body, trailers)
+}
+
+// writeGRPCInterceptedResponse writes a buffered gRPC response (from intercept)
+// to the client, including headers, body, progressive recording, and trailers.
+func (h *Handler) writeGRPCInterceptedResponse(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, body []byte, trailers gohttp.Header) {
+	h.writeGRPCResponseHeaders(sc, resp)
+	if len(body) > 0 {
+		if _, err := sc.w.Write(body); err != nil {
+			sc.logger.Debug("gRPC response intercept: failed to write body", "error", err)
+		}
+		if flusher, ok := sc.w.(gohttp.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+
+	// Record the body frame for progressive recording.
+	if fbErr := state.respFrameBuf.Write(body); fbErr != nil {
+		sc.logger.Warn("gRPC response intercept frame buffer error", "error", fbErr)
+	}
+
+	// Apply output filter to trailers before writing.
+	if len(trailers) > 0 {
+		trailers = h.ApplyOutputFilterHeaders(trailers, sc.logger)
+	}
+
+	h.writeGRPCInterceptedTrailers(sc, resp, trailers)
+}
+
+// writeGRPCInterceptedTrailers writes gRPC trailers to the client for an
+// intercepted response. Falls back to extracting trailer keys from resp.Header
+// when the trailers map is empty (Trailers-Only pattern).
+func (h *Handler) writeGRPCInterceptedTrailers(sc *streamContext, resp *gohttp.Response, trailers gohttp.Header) {
+	for key, vals := range trailers {
+		for _, val := range vals {
+			sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+		}
+	}
+	if len(trailers) == 0 {
+		for _, key := range grpcTrailerKeyList {
+			if vals, ok := resp.Header[key]; ok {
+				for _, val := range vals {
+					sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+				}
+			}
+		}
+	}
+}
+
+// applyGRPCResponseInterceptHeaderMods applies header modifications from
+// an intercept action to the gRPC response.
+func (h *Handler) applyGRPCResponseInterceptHeaderMods(resp *gohttp.Response, action intercept.InterceptAction) {
+	for k, v := range action.OverrideResponseHeaders {
+		resp.Header.Set(k, v)
+	}
+	for k, v := range action.AddResponseHeaders {
+		resp.Header.Add(k, v)
+	}
+	for _, k := range action.RemoveResponseHeaders {
+		resp.Header.Del(k)
+	}
+}
+
+// applyGRPCResponseInterceptTrailerMods applies trailer modifications from
+// an intercept action. Trailer overrides are stored in OverrideResponseHeaders
+// with a "trailer_" prefix convention when the AI agent modifies them.
+func (h *Handler) applyGRPCResponseInterceptTrailerMods(trailers gohttp.Header, action intercept.InterceptAction) {
+	// No special trailer modifications for now — trailers are preserved as-is
+	// unless the AI agent modifies them through response header overrides.
+	// Future enhancement: dedicated trailer modification fields.
+}
+
+// runGRPCResponseSubsystems passes the buffered gRPC response body through
+// the response-side subsystem pipeline (plugin hooks, auto-transform,
+// output filter) for a single frame. This is used after response intercept
+// when the body has been fully buffered instead of streamed frame-by-frame.
+func (h *Handler) runGRPCResponseSubsystems(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, body []byte, trailers gohttp.Header) ([]byte, *gohttp.Response, gohttp.Header) {
+	hasSubsystems := h.SafetyEngine != nil || h.pluginEngine != nil || h.transformPipeline != nil
+	if !hasSubsystems || len(body) < 5 {
+		return body, resp, trailers
+	}
+
+	// Parse the frame for subsystem processing.
+	compressed := body[0]
+	msgLen := binary.BigEndian.Uint32(body[1:5])
+	expectedLen := 5 + int(msgLen)
+	if len(body) < expectedLen {
+		return body, resp, trailers
+	}
+	payload := body[5:expectedLen]
+
+	respEncoding := resp.Header.Get("Grpc-Encoding")
+
+	// Lock txCtx for thread-safe plugin hook access.
+	state.txCtxMu.Lock()
+	wireBytes, blocked := h.processGRPCResponseFrame(
+		sc, body, compressed != 0, payload,
+		respEncoding, resp, state.pluginConnInfo, state.txCtx)
+	state.txCtxMu.Unlock()
+
+	if blocked {
+		state.mu.Lock()
+		state.respBlocked = true
+		state.mu.Unlock()
+		// Return error response body.
+		return nil, resp, gohttp.Header{
+			"Grpc-Status":  {"13"},
+			"Grpc-Message": {percentEncodeGRPCMessage("response blocked by output filter")},
+		}
+	}
+
+	return wireBytes, resp, trailers
 }
