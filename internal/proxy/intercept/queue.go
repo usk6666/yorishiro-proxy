@@ -148,7 +148,8 @@ type InterceptedRequest struct {
 
 	// Metadata holds protocol-specific metadata for the intercepted item.
 	// For gRPC requests, this includes "grpc_content_type", "grpc_encoding",
-	// and "original_frames" to enable proper re-encoding on modify_and_forward.
+	// "grpc_compressed", and "original_frames" to enable proper re-encoding
+	// on modify_and_forward.
 	Metadata map[string]string
 
 	// --- WebSocket frame metadata (phase=websocket_frame only) ---

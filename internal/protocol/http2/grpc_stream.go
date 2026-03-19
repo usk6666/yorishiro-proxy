@@ -3,6 +3,7 @@ package http2
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	gohttp "net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -655,42 +657,98 @@ func (h *Handler) handleGRPCIntercept(sc *streamContext, matchedRules []string) 
 }
 
 // bufferGRPCUnaryBody reads and validates the request body as a gRPC unary
-// request. It returns the raw body, decoded JSON, the single frame, and true
+// request using frame-level reading to avoid blocking on streaming RPCs.
+// Instead of io.ReadAll (which blocks until END_STREAM), it reads the first
+// gRPC frame header+payload, then probes for additional data to distinguish
+// unary from streaming.
+//
+// It returns the raw body, decoded JSON, the single frame, and true
 // if the body is a valid unary request. On failure, the request body is restored
 // and false is returned.
 func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody string, frame protobuf.Frame, ok bool) {
-	// Limit body read to prevent memory exhaustion from oversized payloads
-	// disguised as gRPC (CWE-400). Uses the same limit as raw bytes storage.
-	var err error
-	body, err = io.ReadAll(io.LimitReader(sc.req.Body, intercept.MaxRawBytesSize+1))
-	if err != nil {
-		sc.logger.Debug("gRPC intercept: failed to buffer request body", "error", err)
-		sc.req.Body = io.NopCloser(bytes.NewReader(nil))
+	reqBody := io.LimitReader(sc.req.Body, intercept.MaxRawBytesSize+1)
+
+	// Step 1: Read the 5-byte gRPC frame header.
+	var header [5]byte
+	if _, err := io.ReadFull(reqBody, header[:]); err != nil {
+		sc.logger.Debug("gRPC intercept: failed to read frame header", "error", err)
+		// Restore any partial data + remaining body for streaming fallback.
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:0]), sc.req.Body))
 		return nil, "", protobuf.Frame{}, false
 	}
-	if len(body) > intercept.MaxRawBytesSize {
+
+	compressed := header[0]
+	if compressed > 1 {
+		sc.logger.Debug("gRPC intercept: invalid compressed flag", "flag", compressed)
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		return nil, "", protobuf.Frame{}, false
+	}
+
+	msgLen := binary.BigEndian.Uint32(header[1:5])
+	if msgLen > config.MaxGRPCMessageSize {
+		sc.logger.Warn("gRPC intercept: frame payload too large, releasing",
+			"msg_len", msgLen, "max", config.MaxGRPCMessageSize)
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		return nil, "", protobuf.Frame{}, false
+	}
+
+	// Check total frame size against intercept limit.
+	totalFrameSize := 5 + int(msgLen)
+	if totalFrameSize > intercept.MaxRawBytesSize {
 		sc.logger.Warn("gRPC intercept: request body too large, releasing",
-			"body_len", len(body), "max", intercept.MaxRawBytesSize)
-		sc.req.Body = io.NopCloser(bytes.NewReader(body))
+			"body_len", totalFrameSize, "max", intercept.MaxRawBytesSize)
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
-	frames, parseErr := protobuf.ParseFrames(body)
-	if parseErr != nil || len(frames) == 0 {
-		sc.logger.Debug("gRPC intercept: frame parse failed or empty, releasing",
-			"error", parseErr, "body_len", len(body))
-		sc.req.Body = io.NopCloser(bytes.NewReader(body))
-		return nil, "", protobuf.Frame{}, false
+	// Step 2: Read the payload.
+	payload := make([]byte, msgLen)
+	if msgLen > 0 {
+		if _, err := io.ReadFull(reqBody, payload); err != nil {
+			sc.logger.Debug("gRPC intercept: failed to read frame payload", "error", err, "expected", msgLen)
+			// Restore header + partial payload + remaining body.
+			var read []byte
+			read = append(read, header[:]...)
+			read = append(read, payload...)
+			sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(read), sc.req.Body))
+			return nil, "", protobuf.Frame{}, false
+		}
 	}
 
-	if len(frames) != 1 {
+	// Build the first frame's raw bytes (header + payload).
+	firstFrame := make([]byte, totalFrameSize)
+	copy(firstFrame, header[:])
+	copy(firstFrame[5:], payload)
+
+	// Step 3: Probe for additional data to distinguish unary vs streaming.
+	// If we can read even 1 byte more, there is a second frame → streaming.
+	var peekBuf [1]byte
+	n, peekErr := reqBody.Read(peekBuf[:])
+	if n > 0 {
+		// Streaming RPC detected — restore all read data + remaining body.
 		sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "frame_count", len(frames))
-		sc.req.Body = io.NopCloser(bytes.NewReader(body))
+			"method", sc.req.Method, "url", sc.reqURL.String())
+		sc.req.Body = io.NopCloser(io.MultiReader(
+			bytes.NewReader(firstFrame),
+			bytes.NewReader(peekBuf[:1]),
+			sc.req.Body,
+		))
+		return nil, "", protobuf.Frame{}, false
+	}
+	// peekErr should be io.EOF (unary, no more data) or an actual error.
+	if peekErr != nil && peekErr != io.EOF {
+		sc.logger.Debug("gRPC intercept: error probing for additional frames", "error", peekErr)
+		sc.req.Body = io.NopCloser(bytes.NewReader(firstFrame))
 		return nil, "", protobuf.Frame{}, false
 	}
 
-	frame = frames[0]
+	// Unary RPC confirmed — single frame, EOF reached.
+	body = firstFrame
+	frame = protobuf.Frame{
+		Compressed: compressed,
+		Payload:    payload,
+	}
+
 	grpcEncoding := sc.req.Header.Get("Grpc-Encoding")
 	jsonBody, _, decodeErr := decodeGRPCPayload(frame.Payload, frame.Compressed != 0, grpcEncoding)
 	if decodeErr != nil {
