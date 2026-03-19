@@ -388,6 +388,369 @@ func TestReadH2ResponseFrames_EOF(t *testing.T) {
 	}
 }
 
+// TestRemapH2StreamIDs tests stream ID remapping for raw HTTP/2 frames.
+func TestRemapH2StreamIDs(t *testing.T) {
+	t.Run("single stream remapped to 1", func(t *testing.T) {
+		// Build a HEADERS frame on stream 3 (should be remapped to 1).
+		encoder := hpack.NewEncoder(4096, true)
+		headers := []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":path", Value: "/test"},
+		}
+		fragment := encoder.Encode(headers)
+		var buf bytes.Buffer
+		w := frame.NewWriter(&buf)
+		if err := w.WriteHeaders(3, true, true, fragment); err != nil {
+			t.Fatalf("WriteHeaders: %v", err)
+		}
+
+		remapped, err := remapH2StreamIDs(buf.Bytes())
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+
+		// Parse the remapped frame and check stream ID.
+		reader := frame.NewReader(bytes.NewReader(remapped))
+		f, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		if f.Header.StreamID != 1 {
+			t.Errorf("stream ID = %d, want 1", f.Header.StreamID)
+		}
+		if f.Header.Type != frame.TypeHeaders {
+			t.Errorf("frame type = %s, want HEADERS", f.Header.Type)
+		}
+	})
+
+	t.Run("multiple streams remapped sequentially", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := frame.NewWriter(&buf)
+
+		// Stream 5: HEADERS
+		encoder := hpack.NewEncoder(4096, true)
+		frag1 := encoder.Encode([]hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":path", Value: "/first"},
+		})
+		if err := w.WriteHeaders(5, true, true, frag1); err != nil {
+			t.Fatalf("WriteHeaders stream 5: %v", err)
+		}
+
+		// Stream 7: HEADERS
+		frag2 := encoder.Encode([]hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":path", Value: "/second"},
+		})
+		if err := w.WriteHeaders(7, true, true, frag2); err != nil {
+			t.Fatalf("WriteHeaders stream 7: %v", err)
+		}
+
+		remapped, err := remapH2StreamIDs(buf.Bytes())
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+
+		reader := frame.NewReader(bytes.NewReader(remapped))
+
+		// First frame should be on stream 1.
+		f1, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame 1: %v", err)
+		}
+		if f1.Header.StreamID != 1 {
+			t.Errorf("first frame stream ID = %d, want 1", f1.Header.StreamID)
+		}
+
+		// Second frame should be on stream 3.
+		f2, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame 2: %v", err)
+		}
+		if f2.Header.StreamID != 3 {
+			t.Errorf("second frame stream ID = %d, want 3", f2.Header.StreamID)
+		}
+	})
+
+	t.Run("DATA frame preserves same stream mapping as HEADERS", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := frame.NewWriter(&buf)
+
+		encoder := hpack.NewEncoder(4096, true)
+		frag := encoder.Encode([]hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":path", Value: "/data"},
+		})
+		// HEADERS on stream 5 (no END_STREAM).
+		if err := w.WriteHeaders(5, false, true, frag); err != nil {
+			t.Fatalf("WriteHeaders: %v", err)
+		}
+		// DATA on stream 5 with END_STREAM.
+		if err := w.WriteData(5, true, []byte("body")); err != nil {
+			t.Fatalf("WriteData: %v", err)
+		}
+
+		remapped, err := remapH2StreamIDs(buf.Bytes())
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+
+		reader := frame.NewReader(bytes.NewReader(remapped))
+		f1, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		f2, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+
+		if f1.Header.StreamID != 1 || f2.Header.StreamID != 1 {
+			t.Errorf("HEADERS stream=%d, DATA stream=%d, both should be 1", f1.Header.StreamID, f2.Header.StreamID)
+		}
+	})
+
+	t.Run("control frames are dropped", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := frame.NewWriter(&buf)
+
+		// SETTINGS frame (should be dropped).
+		if err := w.WriteSettings([]frame.Setting{
+			{ID: frame.SettingInitialWindowSize, Value: 65535},
+		}); err != nil {
+			t.Fatalf("WriteSettings: %v", err)
+		}
+		// WINDOW_UPDATE on stream 0 (should be dropped).
+		if err := w.WriteWindowUpdate(0, 1024); err != nil {
+			t.Fatalf("WriteWindowUpdate: %v", err)
+		}
+		// PING frame (should be dropped).
+		if err := w.WritePing(false, [8]byte{1, 2, 3, 4, 5, 6, 7, 8}); err != nil {
+			t.Fatalf("WritePing: %v", err)
+		}
+		// HEADERS on stream 1 (should be kept).
+		encoder := hpack.NewEncoder(4096, true)
+		frag := encoder.Encode([]hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":path", Value: "/keep"},
+		})
+		if err := w.WriteHeaders(1, true, true, frag); err != nil {
+			t.Fatalf("WriteHeaders: %v", err)
+		}
+
+		remapped, err := remapH2StreamIDs(buf.Bytes())
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+
+		// Only the HEADERS frame should remain.
+		reader := frame.NewReader(bytes.NewReader(remapped))
+		f, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		if f.Header.Type != frame.TypeHeaders {
+			t.Errorf("expected HEADERS frame, got %s", f.Header.Type)
+		}
+
+		// Should be EOF after that.
+		_, err = reader.ReadFrame()
+		if err != io.EOF {
+			t.Errorf("expected EOF after HEADERS, got err=%v", err)
+		}
+	})
+
+	t.Run("stream-level WINDOW_UPDATE is kept", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := frame.NewWriter(&buf)
+
+		// HEADERS on stream 3.
+		encoder := hpack.NewEncoder(4096, true)
+		frag := encoder.Encode([]hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":path", Value: "/flow"},
+		})
+		if err := w.WriteHeaders(3, false, true, frag); err != nil {
+			t.Fatalf("WriteHeaders: %v", err)
+		}
+		// WINDOW_UPDATE on stream 3 (stream-level, should be kept).
+		if err := w.WriteWindowUpdate(3, 512); err != nil {
+			t.Fatalf("WriteWindowUpdate: %v", err)
+		}
+		// DATA on stream 3 with END_STREAM.
+		if err := w.WriteData(3, true, []byte("data")); err != nil {
+			t.Fatalf("WriteData: %v", err)
+		}
+
+		remapped, err := remapH2StreamIDs(buf.Bytes())
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+
+		reader := frame.NewReader(bytes.NewReader(remapped))
+		f1, err := reader.ReadFrame() // HEADERS
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		f2, err := reader.ReadFrame() // WINDOW_UPDATE
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		f3, err := reader.ReadFrame() // DATA
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+
+		if f1.Header.Type != frame.TypeHeaders || f1.Header.StreamID != 1 {
+			t.Errorf("f1: type=%s stream=%d, want HEADERS/1", f1.Header.Type, f1.Header.StreamID)
+		}
+		if f2.Header.Type != frame.TypeWindowUpdate || f2.Header.StreamID != 1 {
+			t.Errorf("f2: type=%s stream=%d, want WINDOW_UPDATE/1", f2.Header.Type, f2.Header.StreamID)
+		}
+		if f3.Header.Type != frame.TypeData || f3.Header.StreamID != 1 {
+			t.Errorf("f3: type=%s stream=%d, want DATA/1", f3.Header.Type, f3.Header.StreamID)
+		}
+	})
+
+	t.Run("already stream 1 is not changed", func(t *testing.T) {
+		encoder := hpack.NewEncoder(4096, true)
+		frag := encoder.Encode([]hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":path", Value: "/"},
+		})
+		var buf bytes.Buffer
+		w := frame.NewWriter(&buf)
+		if err := w.WriteHeaders(1, true, true, frag); err != nil {
+			t.Fatalf("WriteHeaders: %v", err)
+		}
+		original := buf.Bytes()
+
+		remapped, err := remapH2StreamIDs(original)
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+
+		if !bytes.Equal(original, remapped) {
+			t.Error("expected no change when stream ID is already 1")
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		remapped, err := remapH2StreamIDs(nil)
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+		if len(remapped) != 0 {
+			t.Errorf("expected empty output, got %d bytes", len(remapped))
+		}
+	})
+
+	t.Run("truncated header returns error", func(t *testing.T) {
+		_, err := remapH2StreamIDs([]byte{0, 0, 0, 1, 0}) // only 5 bytes
+		if err == nil {
+			t.Fatal("expected error for truncated header")
+		}
+	})
+
+	t.Run("truncated payload returns error", func(t *testing.T) {
+		// Build a valid header claiming 100 bytes of payload, but only provide header.
+		hdr := frame.Header{Length: 100, Type: frame.TypeData, StreamID: 1}
+		raw := hdr.AppendTo(nil)
+		_, err := remapH2StreamIDs(raw)
+		if err == nil {
+			t.Fatal("expected error for truncated payload")
+		}
+	})
+
+	t.Run("GOAWAY frame is dropped", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := frame.NewWriter(&buf)
+		if err := w.WriteGoAway(0, 0, nil); err != nil {
+			t.Fatalf("WriteGoAway: %v", err)
+		}
+		// Add a HEADERS frame after GOAWAY.
+		encoder := hpack.NewEncoder(4096, true)
+		frag := encoder.Encode([]hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":path", Value: "/after-goaway"},
+		})
+		if err := w.WriteHeaders(1, true, true, frag); err != nil {
+			t.Fatalf("WriteHeaders: %v", err)
+		}
+
+		remapped, err := remapH2StreamIDs(buf.Bytes())
+		if err != nil {
+			t.Fatalf("remapH2StreamIDs: %v", err)
+		}
+
+		// Only the HEADERS frame should remain.
+		reader := frame.NewReader(bytes.NewReader(remapped))
+		f, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		if f.Header.Type != frame.TypeHeaders {
+			t.Errorf("expected HEADERS, got %s", f.Header.Type)
+		}
+	})
+}
+
+// TestShouldDropH2ControlFrame tests the control frame classification.
+func TestShouldDropH2ControlFrame(t *testing.T) {
+	tests := []struct {
+		name     string
+		hdr      frame.Header
+		wantDrop bool
+	}{
+		{"SETTINGS", frame.Header{Type: frame.TypeSettings}, true},
+		{"PING", frame.Header{Type: frame.TypePing}, true},
+		{"GOAWAY", frame.Header{Type: frame.TypeGoAway}, true},
+		{"WINDOW_UPDATE stream 0", frame.Header{Type: frame.TypeWindowUpdate, StreamID: 0}, true},
+		{"WINDOW_UPDATE stream 1", frame.Header{Type: frame.TypeWindowUpdate, StreamID: 1}, false},
+		{"HEADERS", frame.Header{Type: frame.TypeHeaders, StreamID: 1}, false},
+		{"DATA", frame.Header{Type: frame.TypeData, StreamID: 1}, false},
+		{"RST_STREAM", frame.Header{Type: frame.TypeRSTStream, StreamID: 1}, false},
+		{"CONTINUATION", frame.Header{Type: frame.TypeContinuation, StreamID: 1}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldDropH2ControlFrame(tt.hdr)
+			if got != tt.wantDrop {
+				t.Errorf("shouldDropH2ControlFrame(%s) = %v, want %v", tt.name, got, tt.wantDrop)
+			}
+		})
+	}
+}
+
+// TestPutStreamID tests the stream ID encoding helper.
+func TestPutStreamID(t *testing.T) {
+	tests := []struct {
+		name     string
+		streamID uint32
+	}{
+		{"stream 0", 0},
+		{"stream 1", 1},
+		{"stream 3", 3},
+		{"large stream", 0x7FFFFFFF},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := make([]byte, 4)
+			putStreamID(buf, tt.streamID)
+			// Verify by parsing back.
+			hdr := make([]byte, 9)
+			copy(hdr[5:], buf)
+			parsed, err := frame.ParseHeader(hdr)
+			if err != nil {
+				t.Fatalf("ParseHeader: %v", err)
+			}
+			if parsed.StreamID != tt.streamID {
+				t.Errorf("roundtrip stream ID = %d, want %d", parsed.StreamID, tt.streamID)
+			}
+		})
+	}
+}
+
 // --- Integration-style tests using MCP tool invocation ---
 
 // newH2EchoServer creates a TCP server that speaks HTTP/2 (without TLS, for testing).

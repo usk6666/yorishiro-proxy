@@ -53,8 +53,10 @@ func inferFlowUseTLS(fl *flow.Flow) bool {
 // response frames. This is the HTTP/2 equivalent of buildAndSendRaw.
 //
 // The raw bytes from the original flow contain serialized HTTP/2 frames
-// (HEADERS, DATA, etc.) as captured on the wire. These are written directly
-// after the connection handshake, preserving the exact byte representation.
+// (HEADERS, DATA, etc.) as captured on the wire. Before sending, stream IDs
+// are remapped for the new connection and connection-level control frames
+// (SETTINGS, PING, GOAWAY, WINDOW_UPDATE on stream 0) are dropped since the
+// handshake already established the connection state.
 //
 // Response frames are read until the server sends END_STREAM or the connection
 // is closed/timed out.
@@ -97,9 +99,17 @@ func (s *Server) buildAndSendRawH2(ctx context.Context, fl *flow.Flow, params re
 		return nil, start, 0, fmt.Errorf("HTTP/2 handshake: %w", err)
 	}
 
-	// Write the raw frame bytes directly to the connection.
-	// These are the original HTTP/2 frames captured from the wire.
-	if _, err := conn.Write(rawBytes); err != nil {
+	// Remap stream IDs in the raw frame bytes before sending.
+	// The original capture may use arbitrary stream IDs that conflict with the
+	// new connection's state. We parse each frame, build a mapping from original
+	// stream IDs to new sequential odd IDs (1, 3, 5, ...), and skip connection-
+	// level control frames (SETTINGS, PING, WINDOW_UPDATE on stream 0) since
+	// the handshake already established those.
+	remapped, err := remapH2StreamIDs(rawBytes)
+	if err != nil {
+		return nil, start, 0, fmt.Errorf("remap HTTP/2 stream IDs: %w", err)
+	}
+	if _, err := conn.Write(remapped); err != nil {
 		return nil, start, 0, fmt.Errorf("send raw HTTP/2 frames: %w", err)
 	}
 
@@ -298,6 +308,104 @@ func readH2ResponseFrames(reader *frame.Reader) ([]byte, error) {
 			return respData, nil
 		}
 	}
+}
+
+// remapH2StreamIDs parses raw HTTP/2 frame bytes and remaps stream IDs so they
+// are valid for a fresh connection. Client-initiated stream IDs (odd, non-zero)
+// are remapped to sequential odd IDs starting from 1. Connection-level control
+// frames (SETTINGS, PING, GOAWAY, and WINDOW_UPDATE on stream 0) are dropped
+// because the handshake already established the connection state.
+//
+// Server-initiated stream IDs (even, non-zero) and stream 0 frames that are not
+// control frames are preserved with their stream ID remapped or kept at 0.
+func remapH2StreamIDs(raw []byte) ([]byte, error) {
+	var out []byte
+	streamMap := make(map[uint32]uint32) // original stream ID → new stream ID
+	var nextClientStream uint32 = 1      // next client-initiated stream ID (odd)
+
+	for len(raw) > 0 {
+		if len(raw) < frame.HeaderSize {
+			return nil, fmt.Errorf("truncated frame header: %d bytes remaining", len(raw))
+		}
+		hdr, err := frame.ParseHeader(raw[:frame.HeaderSize])
+		if err != nil {
+			return nil, fmt.Errorf("parse frame header: %w", err)
+		}
+		frameLen := frame.HeaderSize + int(hdr.Length)
+		if len(raw) < frameLen {
+			return nil, fmt.Errorf("truncated frame payload: need %d bytes, have %d", frameLen, len(raw))
+		}
+		frameBytes := raw[:frameLen]
+		raw = raw[frameLen:]
+
+		// Skip connection-level control frames that were already handled by the handshake.
+		if shouldDropH2ControlFrame(hdr) {
+			continue
+		}
+
+		// Remap the stream ID for stream-level frames.
+		newStreamID := hdr.StreamID
+		if hdr.StreamID != 0 {
+			if mapped, ok := streamMap[hdr.StreamID]; ok {
+				newStreamID = mapped
+			} else {
+				// Assign the next available stream ID.
+				// Client-initiated streams use odd IDs; server-initiated use even.
+				if hdr.StreamID%2 == 1 {
+					newStreamID = nextClientStream
+					nextClientStream += 2
+				}
+				// For even (server-initiated) IDs, keep the original since we don't
+				// expect the client to be sending server-initiated stream frames, but
+				// handle it gracefully.
+				streamMap[hdr.StreamID] = newStreamID
+			}
+		}
+
+		if newStreamID == hdr.StreamID {
+			// No remapping needed; append the original bytes.
+			out = append(out, frameBytes...)
+		} else {
+			// Copy the frame and patch the stream ID in bytes 5-8 of the header.
+			patched := make([]byte, len(frameBytes))
+			copy(patched, frameBytes)
+			putStreamID(patched[5:9], newStreamID)
+			out = append(out, patched...)
+		}
+	}
+	return out, nil
+}
+
+// shouldDropH2ControlFrame reports whether a frame is a connection-level control
+// frame that should be dropped during resend (because the handshake already
+// established these). This includes SETTINGS, PING, GOAWAY, and WINDOW_UPDATE
+// on stream 0.
+func shouldDropH2ControlFrame(hdr frame.Header) bool {
+	switch hdr.Type {
+	case frame.TypeSettings, frame.TypePing:
+		// Always connection-level.
+		return true
+	case frame.TypeWindowUpdate:
+		// Stream 0 WINDOW_UPDATE is connection-level flow control.
+		return hdr.StreamID == 0
+	case frame.TypeGoAway:
+		// GOAWAY is connection-level.
+		return true
+	default:
+		return false
+	}
+}
+
+// putStreamID encodes a stream ID into the 4-byte slice at the position
+// corresponding to bytes 5-8 of an HTTP/2 frame header. The reserved bit
+// (bit 31, the most significant bit) is implicitly cleared to 0 per RFC 9113.
+func putStreamID(buf []byte, streamID uint32) {
+	_ = buf[3] // bounds check hint
+	streamID &= 0x7FFFFFFF
+	buf[0] = byte(streamID >> 24)
+	buf[1] = byte(streamID >> 16)
+	buf[2] = byte(streamID >> 8)
+	buf[3] = byte(streamID)
 }
 
 // appendRawCapped appends raw bytes to dst, capping at MaxReplayResponseSize.
