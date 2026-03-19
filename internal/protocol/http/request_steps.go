@@ -13,17 +13,26 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // normalizeRequestURL ensures the request URL has an absolute form suitable for
 // forward proxy use. This sets the Host and Scheme if they are missing.
-func normalizeRequestURL(req *gohttp.Request) {
+// When a forwarding target is present in the context, it overrides the Host
+// so that the request is sent to the correct upstream server rather than
+// the localhost address that the client connected to.
+func normalizeRequestURL(ctx context.Context, req *gohttp.Request) {
 	if req.URL.Host == "" {
 		req.URL.Host = req.Host
 	}
 	if req.URL.Scheme == "" {
 		req.URL.Scheme = "http"
+	}
+	// TCP forwarding: override the host with the actual upstream target.
+	if target, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		req.URL.Host = target
+		req.Host = target
 	}
 }
 

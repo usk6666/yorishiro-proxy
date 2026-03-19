@@ -622,8 +622,14 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	rawRequest := extractRawRequest(capture, captureStart, reader)
 
 	// Reconstruct the full URL for the upstream request.
+	// TCP forwarding: override the host with the actual upstream target.
+	effectiveHost := proxy.ResolveUpstreamTarget(ctx, connectHost)
 	if req.URL.Host == "" {
-		req.URL.Host = connectHost
+		req.URL.Host = effectiveHost
+	}
+	if _, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		req.URL.Host = effectiveHost
+		req.Host = effectiveHost
 	}
 	req.URL.Scheme = "https"
 
