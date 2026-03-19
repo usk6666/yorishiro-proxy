@@ -53,8 +53,10 @@ func inferFlowUseTLS(fl *flow.Flow) bool {
 // response frames. This is the HTTP/2 equivalent of buildAndSendRaw.
 //
 // The raw bytes from the original flow contain serialized HTTP/2 frames
-// (HEADERS, DATA, etc.) as captured on the wire. These are written directly
-// after the connection handshake, preserving the exact byte representation.
+// (HEADERS, DATA, etc.) as captured on the wire. Before sending, stream IDs
+// are remapped for the new connection and connection-level control frames
+// (SETTINGS, PING, GOAWAY, WINDOW_UPDATE on stream 0) are dropped since the
+// handshake already established the connection state.
 //
 // Response frames are read until the server sends END_STREAM or the connection
 // is closed/timed out.
@@ -311,7 +313,7 @@ func readH2ResponseFrames(reader *frame.Reader) ([]byte, error) {
 // remapH2StreamIDs parses raw HTTP/2 frame bytes and remaps stream IDs so they
 // are valid for a fresh connection. Client-initiated stream IDs (odd, non-zero)
 // are remapped to sequential odd IDs starting from 1. Connection-level control
-// frames (SETTINGS, PING, WINDOW_UPDATE/RST_STREAM on stream 0) are dropped
+// frames (SETTINGS, PING, GOAWAY, and WINDOW_UPDATE on stream 0) are dropped
 // because the handshake already established the connection state.
 //
 // Server-initiated stream IDs (even, non-zero) and stream 0 frames that are not
@@ -376,7 +378,7 @@ func remapH2StreamIDs(raw []byte) ([]byte, error) {
 
 // shouldDropH2ControlFrame reports whether a frame is a connection-level control
 // frame that should be dropped during resend (because the handshake already
-// established these). This includes SETTINGS, PING, and WINDOW_UPDATE/GOAWAY
+// established these). This includes SETTINGS, PING, GOAWAY, and WINDOW_UPDATE
 // on stream 0.
 func shouldDropH2ControlFrame(hdr frame.Header) bool {
 	switch hdr.Type {
@@ -395,10 +397,11 @@ func shouldDropH2ControlFrame(hdr frame.Header) bool {
 }
 
 // putStreamID encodes a stream ID into the 4-byte slice at the position
-// corresponding to bytes 5-8 of an HTTP/2 frame header, preserving the
-// reserved high bit (always 0 per RFC 9113).
+// corresponding to bytes 5-8 of an HTTP/2 frame header. The reserved bit
+// (bit 31, the most significant bit) is implicitly cleared to 0 per RFC 9113.
 func putStreamID(buf []byte, streamID uint32) {
 	_ = buf[3] // bounds check hint
+	streamID &= 0x7FFFFFFF
 	buf[0] = byte(streamID >> 24)
 	buf[1] = byte(streamID >> 16)
 	buf[2] = byte(streamID >> 8)

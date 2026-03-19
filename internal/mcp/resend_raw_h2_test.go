@@ -496,8 +496,14 @@ func TestRemapH2StreamIDs(t *testing.T) {
 		}
 
 		reader := frame.NewReader(bytes.NewReader(remapped))
-		f1, _ := reader.ReadFrame()
-		f2, _ := reader.ReadFrame()
+		f1, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		f2, err := reader.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
 
 		if f1.Header.StreamID != 1 || f2.Header.StreamID != 1 {
 			t.Errorf("HEADERS stream=%d, DATA stream=%d, both should be 1", f1.Header.StreamID, f2.Header.StreamID)
@@ -582,9 +588,18 @@ func TestRemapH2StreamIDs(t *testing.T) {
 		}
 
 		reader := frame.NewReader(bytes.NewReader(remapped))
-		f1, _ := reader.ReadFrame() // HEADERS
-		f2, _ := reader.ReadFrame() // WINDOW_UPDATE
-		f3, _ := reader.ReadFrame() // DATA
+		f1, err := reader.ReadFrame() // HEADERS
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		f2, err := reader.ReadFrame() // WINDOW_UPDATE
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		f3, err := reader.ReadFrame() // DATA
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
 
 		if f1.Header.Type != frame.TypeHeaders || f1.Header.StreamID != 1 {
 			t.Errorf("f1: type=%s stream=%d, want HEADERS/1", f1.Header.Type, f1.Header.StreamID)
