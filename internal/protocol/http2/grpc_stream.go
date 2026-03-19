@@ -275,6 +275,7 @@ func (h *Handler) forwardGRPCRequestChunk(sc *streamContext, state *grpcStreamSt
 	if fbErr := subsystemBuf.Write(chunk); fbErr != nil {
 		// Never fall back to raw bytes transfer on subsystem error.
 		// Doing so would bypass safety filters and plugin checks.
+		sc.logger.Warn("gRPC request subsystem buffer error", "error", fbErr)
 		return fbErr
 	}
 	return nil
@@ -459,13 +460,19 @@ func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamS
 		// Doing so would bypass safety filters and plugin checks.
 		state.mu.Lock()
 		blocked := state.respBlocked
+		if !blocked {
+			state.respBlocked = true
+		}
 		state.mu.Unlock()
 		if blocked {
 			sc.logger.Warn("gRPC response stream terminated by output filter")
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response blocked by output filter"))
 		} else {
 			sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response subsystem processing error"))
 		}
-		writeGRPCStatus(sc.w, gohttp.StatusOK, 13, "response blocked by subsystem") // INTERNAL
 		return true
 	}
 	return false
