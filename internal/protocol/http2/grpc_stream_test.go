@@ -746,3 +746,152 @@ func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 		t.Errorf("Grpc-Message trailer = %q, want %q", grpcMsg, "OK")
 	}
 }
+
+// TestForwardGRPCRequestChunk_SubsystemError verifies that when the subsystem
+// buffer returns an error, raw bytes are NOT forwarded to the upstream pipe.
+// This prevents safety filter bypass (USK-441).
+func TestForwardGRPCRequestChunk_SubsystemError(t *testing.T) {
+	tests := []struct {
+		name       string
+		reqBlocked bool
+	}{
+		{
+			name:       "subsystem error with reqBlocked flag set",
+			reqBlocked: true,
+		},
+		{
+			name:       "subsystem error without reqBlocked flag",
+			reqBlocked: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewHandler(&mockStore{}, testutil.DiscardLogger())
+
+			state := &grpcStreamState{}
+			if tt.reqBlocked {
+				state.reqBlocked = true
+			}
+
+			// Create a pipe to capture any bytes written to upstream.
+			pr, pw := io.Pipe()
+
+			// Create a subsystem buffer that always returns an error.
+			subsystemBuf := protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
+				return fmt.Errorf("subsystem rejected frame")
+			})
+
+			sc := &streamContext{
+				logger: testutil.DiscardLogger(),
+			}
+
+			chunk := protogrpc.EncodeFrame(false, []byte("blocked-payload"))
+
+			err := handler.forwardGRPCRequestChunk(sc, state, pw, subsystemBuf, chunk, true)
+			if err == nil {
+				t.Fatal("expected error from forwardGRPCRequestChunk, got nil")
+			}
+
+			// Close the write end so Read won't block.
+			pw.Close()
+
+			// Verify no raw bytes leaked through the pipe.
+			leaked, _ := io.ReadAll(pr)
+			if len(leaked) > 0 {
+				t.Errorf("raw bytes leaked to upstream: got %d bytes, want 0", len(leaked))
+			}
+		})
+	}
+}
+
+// TestForwardGRPCResponseChunk_SubsystemError verifies that when the subsystem
+// buffer returns an error, raw bytes are NOT forwarded to the client.
+// This prevents output filter bypass (USK-441).
+func TestForwardGRPCResponseChunk_SubsystemError(t *testing.T) {
+	tests := []struct {
+		name        string
+		respBlocked bool
+	}{
+		{
+			name:        "subsystem error with respBlocked flag set",
+			respBlocked: true,
+		},
+		{
+			name:        "subsystem error without respBlocked flag",
+			respBlocked: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewHandler(&mockStore{}, testutil.DiscardLogger())
+
+			state := &grpcStreamState{}
+			if tt.respBlocked {
+				state.respBlocked = true
+			}
+
+			rec := httptest.NewRecorder()
+			sc := &streamContext{
+				w:      rec,
+				logger: testutil.DiscardLogger(),
+			}
+
+			// Create a subsystem buffer that always returns an error.
+			subsystemBuf := protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
+				return fmt.Errorf("output filter rejected frame")
+			})
+
+			chunk := protogrpc.EncodeFrame(false, []byte("sensitive-data"))
+
+			done := handler.forwardGRPCResponseChunk(sc, state, subsystemBuf, rec, chunk, true)
+			if !done {
+				t.Error("expected forwardGRPCResponseChunk to return true (stop), got false")
+			}
+
+			// Verify no raw response bytes leaked to the client body.
+			// The recorder body should only contain the gRPC error status trailer,
+			// not the original chunk data.
+			body := rec.Body.Bytes()
+			if bytes.Contains(body, []byte("sensitive-data")) {
+				t.Error("raw response bytes leaked to client: found sensitive-data in response body")
+			}
+		})
+	}
+}
+
+// TestForwardGRPCRequestChunk_NoSubsystems verifies that when subsystems are
+// disabled, chunks are written directly to the pipe writer without error.
+func TestForwardGRPCRequestChunk_NoSubsystems(t *testing.T) {
+	handler := NewHandler(&mockStore{}, testutil.DiscardLogger())
+
+	state := &grpcStreamState{}
+	pr, pw := io.Pipe()
+
+	sc := &streamContext{
+		logger: testutil.DiscardLogger(),
+	}
+
+	chunk := protogrpc.EncodeFrame(false, []byte("pass-through"))
+
+	// Write in a goroutine since pipe blocks until read.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.forwardGRPCRequestChunk(sc, state, pw, nil, chunk, false)
+		pw.Close()
+	}()
+
+	got, readErr := io.ReadAll(pr)
+	if readErr != nil {
+		t.Fatalf("read pipe: %v", readErr)
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("forwardGRPCRequestChunk error: %v", err)
+	}
+
+	if !bytes.Equal(got, chunk) {
+		t.Errorf("pipe output = %q, want %q", got, chunk)
+	}
+}

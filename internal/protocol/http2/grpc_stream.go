@@ -273,16 +273,10 @@ func (h *Handler) forwardGRPCRequestChunk(sc *streamContext, state *grpcStreamSt
 	}
 
 	if fbErr := subsystemBuf.Write(chunk); fbErr != nil {
-		state.mu.Lock()
-		blocked := state.reqBlocked
-		state.mu.Unlock()
-		if blocked {
-			return fbErr
-		}
+		// Never fall back to raw bytes transfer on subsystem error.
+		// Doing so would bypass safety filters and plugin checks.
 		sc.logger.Warn("gRPC request subsystem buffer error", "error", fbErr)
-		// Fallback: write raw bytes directly.
-		_, err := pw.Write(chunk)
-		return err
+		return fbErr
 	}
 	return nil
 }
@@ -462,23 +456,24 @@ func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamS
 	}
 
 	if fbErr := subsystemBuf.Write(chunk); fbErr != nil {
+		// Never fall back to raw bytes transfer on subsystem error.
+		// Doing so would bypass safety filters and plugin checks.
 		state.mu.Lock()
 		blocked := state.respBlocked
+		if !blocked {
+			state.respBlocked = true
+		}
 		state.mu.Unlock()
 		if blocked {
 			sc.logger.Warn("gRPC response stream terminated by output filter")
-			// Write gRPC error status to client so they know why the stream stopped.
-			writeGRPCStatus(sc.w, gohttp.StatusOK, 13, "response blocked by output filter") // INTERNAL
-			return true
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response blocked by output filter"))
+		} else {
+			sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
+			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response subsystem processing error"))
 		}
-		sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
-		if _, writeErr := sc.w.Write(chunk); writeErr != nil {
-			sc.logger.Debug("gRPC failed to write response to client", "error", writeErr)
-			return true
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
+		return true
 	}
 	return false
 }
