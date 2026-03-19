@@ -146,6 +146,12 @@ type InterceptedRequest struct {
 	// for the protocol or connection.
 	RawBytes []byte
 
+	// Metadata holds protocol-specific metadata for the intercepted item.
+	// For gRPC requests, this includes "grpc_content_type", "grpc_encoding",
+	// "grpc_compressed", and "original_frames" to enable proper re-encoding
+	// on modify_and_forward.
+	Metadata map[string]string
+
 	// --- WebSocket frame metadata (phase=websocket_frame only) ---
 
 	// WSOpcode is the WebSocket frame opcode (e.g. 0x1 for text, 0x2 for binary).
@@ -553,6 +559,33 @@ func (q *Queue) Remove(id string) {
 	q.mu.Lock()
 	delete(q.items, id)
 	q.mu.Unlock()
+}
+
+// SetMetadata attaches protocol-specific metadata to an already-enqueued
+// intercepted item. For gRPC requests, this includes encoding and compression
+// information needed for re-encoding on modify_and_forward.
+// Returns an error if the item is not found.
+func (q *Queue) SetMetadata(id string, metadata map[string]string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	item, ok := q.items[id]
+	if !ok {
+		return fmt.Errorf("intercepted request %q not found", id)
+	}
+
+	// Deep copy the metadata map for consistency with SetRawBytes.
+	cp := make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		cp[k] = v
+	}
+	item.Metadata = cp
+
+	slog.Debug("metadata attached to intercept queue item",
+		slog.String("intercept_id", id),
+		slog.Int("metadata_keys", len(metadata)),
+	)
+	return nil
 }
 
 // SetRawBytes attaches raw bytes to an already-enqueued intercepted item.

@@ -2,6 +2,8 @@ package http2
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	gohttp "net/http"
@@ -10,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -595,7 +599,11 @@ func joinTrailerKeys(keys []string) string {
 // The gRPC streaming path uses per-frame subsystem processing instead of
 // full-body buffering. Each gRPC frame is decoded to JSON and passed through
 // safety filter, plugin hooks, auto-transform, and output filter.
-// Intercept is applied at the header level (request URL/headers matching).
+//
+// For intercept, gRPC unary requests (single frame) are fully buffered, the
+// protobuf payload is decoded to JSON, and the item is enqueued with the JSON
+// body so the AI agent can inspect and modify it. Streaming requests (multiple
+// frames) fall back to release with a warning log.
 func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 	if h.grpcHandler == nil || !isGRPCContentType(sc.req.Header.Get("Content-Type")) {
 		return false
@@ -610,22 +618,16 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 		return true
 	}
 
-	// Intercept check at header level for gRPC streaming requests.
-	// Body-level intercept is not supported since the body is streamed.
-	// interceptRequest internally calls MatchRequestRules, so we call it directly.
+	// Intercept check for gRPC requests.
 	if h.InterceptEngine != nil && h.InterceptQueue != nil {
-		action, intercepted := h.interceptRequest(sc.ctx, sc.req, nil, sc.reqRawFrames, sc.logger)
-		if intercepted {
-			switch action.Type {
-			case intercept.ActionDrop:
-				writeGRPCStatus(sc.w, gohttp.StatusOK, 10, "intercepted request dropped") // ABORTED
-				sc.logger.Info("intercepted gRPC request dropped",
-					"method", sc.req.Method, "url", sc.reqURL.String())
+		matchedRules := h.InterceptEngine.MatchRequestRules(sc.req.Method, sc.req.URL, sc.req.Header)
+		if len(matchedRules) > 0 {
+			handled := h.handleGRPCIntercept(sc, matchedRules)
+			if handled {
 				return true
-			case intercept.ActionModifyAndForward:
-				sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
-					"method", sc.req.Method, "url", sc.reqURL.String())
 			}
+			// Not handled means the request was released or modified;
+			// continue to streaming path with possibly modified request.
 		}
 	}
 
@@ -636,6 +638,256 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 		"has_transform", h.transformPipeline != nil)
 	h.handleGRPCStream(sc)
 	return true
+}
+
+// handleGRPCIntercept handles the intercept logic for gRPC requests.
+// It buffers the request body, checks whether it is a unary RPC (single frame),
+// and enqueues the decoded JSON body for AI agent review.
+//
+// Returns true if the request was fully handled (dropped), false if processing
+// should continue to the streaming path (released or modified).
+func (h *Handler) handleGRPCIntercept(sc *streamContext, matchedRules []string) bool {
+	body, jsonBody, frame, ok := h.bufferGRPCUnaryBody(sc)
+	if !ok {
+		return false
+	}
+
+	action := h.enqueueGRPCIntercept(sc, body, jsonBody, frame, matchedRules)
+	return h.applyGRPCInterceptAction(sc, action, body)
+}
+
+// bufferGRPCUnaryBody reads and validates the request body as a gRPC unary
+// request using frame-level reading to avoid blocking on streaming RPCs.
+// Instead of io.ReadAll (which blocks until END_STREAM), it reads the first
+// gRPC frame header+payload, then probes for additional data to distinguish
+// unary from streaming.
+//
+// It returns the raw body, decoded JSON, the single frame, and true
+// if the body is a valid unary request. On failure, the request body is restored
+// and false is returned.
+func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody string, frame protobuf.Frame, ok bool) {
+	reqBody := io.LimitReader(sc.req.Body, intercept.MaxRawBytesSize+1)
+
+	// Step 1: Read the 5-byte gRPC frame header.
+	var header [5]byte
+	n, err := io.ReadFull(reqBody, header[:])
+	if err != nil {
+		sc.logger.Debug("gRPC intercept: failed to read frame header", "error", err)
+		// Restore any partial data + remaining body for streaming fallback.
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:n]), sc.req.Body))
+		return nil, "", protobuf.Frame{}, false
+	}
+
+	compressed := header[0]
+	if compressed > 1 {
+		sc.logger.Debug("gRPC intercept: invalid compressed flag", "flag", compressed)
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		return nil, "", protobuf.Frame{}, false
+	}
+
+	msgLen := binary.BigEndian.Uint32(header[1:5])
+	if msgLen > config.MaxGRPCMessageSize {
+		sc.logger.Warn("gRPC intercept: frame payload too large, releasing",
+			"msg_len", msgLen, "max", config.MaxGRPCMessageSize)
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		return nil, "", protobuf.Frame{}, false
+	}
+
+	// Check total frame size against intercept limit.
+	totalFrameSize := 5 + int(msgLen)
+	if totalFrameSize > intercept.MaxRawBytesSize {
+		sc.logger.Warn("gRPC intercept: request body too large, releasing",
+			"body_len", totalFrameSize, "max", intercept.MaxRawBytesSize)
+		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		return nil, "", protobuf.Frame{}, false
+	}
+
+	// Step 2: Read the payload.
+	payloadLen := int(msgLen)
+	payload := make([]byte, payloadLen)
+	if payloadLen > 0 {
+		pn, pErr := io.ReadFull(reqBody, payload)
+		if pErr != nil {
+			sc.logger.Debug("gRPC intercept: failed to read frame payload", "error", pErr, "expected", payloadLen)
+			// Restore header + actually-read partial payload + remaining body.
+			var read []byte
+			read = append(read, header[:]...)
+			read = append(read, payload[:pn]...)
+			sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(read), sc.req.Body))
+			return nil, "", protobuf.Frame{}, false
+		}
+	}
+
+	// Build the first frame's raw bytes (header + payload).
+	firstFrame := make([]byte, totalFrameSize)
+	copy(firstFrame, header[:])
+	copy(firstFrame[5:], payload)
+
+	// Step 3: Check END_STREAM signal to distinguish unary vs streaming.
+	// Instead of a blocking 1-byte probe read (which deadlocks on bidirectional
+	// streaming RPCs where the client waits for a server response before sending
+	// the next frame), we use the endStreamCh channel set by client_conn.go
+	// when END_STREAM is received on a DATA frame.
+	endStreamCh := endStreamChFromContext(sc.ctx)
+	if endStreamCh == nil {
+		// No endStreamCh means HEADERS had END_STREAM (no body expected).
+		// This shouldn't happen since we already read a frame, but handle
+		// gracefully by treating as unary.
+		sc.logger.Debug("gRPC intercept: no endStreamCh in context, assuming unary")
+	} else {
+		// Wait briefly for the END_STREAM signal. In unary RPCs, the DATA
+		// frame carrying END_STREAM is received very close to the first frame
+		// read (often the same frame). A short timeout handles goroutine
+		// scheduling delays.
+		select {
+		case <-endStreamCh:
+			// END_STREAM received — unary RPC confirmed.
+		case <-time.After(100 * time.Millisecond):
+			// Timeout — likely a streaming RPC. Restore body and fall back.
+			sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
+				"method", sc.req.Method, "url", sc.reqURL.String())
+			sc.req.Body = io.NopCloser(io.MultiReader(
+				bytes.NewReader(firstFrame),
+				sc.req.Body,
+			))
+			return nil, "", protobuf.Frame{}, false
+		case <-sc.ctx.Done():
+			sc.logger.Debug("gRPC intercept: context cancelled during unary detection")
+			sc.req.Body = io.NopCloser(bytes.NewReader(firstFrame))
+			return nil, "", protobuf.Frame{}, false
+		}
+	}
+
+	// Unary RPC confirmed — single frame, EOF reached.
+	body = firstFrame
+	frame = protobuf.Frame{
+		Compressed: compressed,
+		Payload:    payload,
+	}
+
+	grpcEncoding := sc.req.Header.Get("Grpc-Encoding")
+	jsonBody, _, decodeErr := decodeGRPCPayload(frame.Payload, frame.Compressed != 0, grpcEncoding)
+	if decodeErr != nil {
+		sc.logger.Debug("gRPC intercept: protobuf decode failed, releasing", "error", decodeErr)
+		sc.req.Body = io.NopCloser(bytes.NewReader(body))
+		return nil, "", protobuf.Frame{}, false
+	}
+
+	return body, jsonBody, frame, true
+}
+
+// enqueueGRPCIntercept enqueues the decoded gRPC unary request for AI agent
+// review and waits for the agent's action (or timeout).
+func (h *Handler) enqueueGRPCIntercept(sc *streamContext, body []byte, jsonBody string, frame protobuf.Frame, matchedRules []string) intercept.InterceptAction {
+	sc.logger.Info("gRPC unary request intercepted",
+		"method", sc.req.Method, "url", sc.reqURL.String(), "matched_rules", matchedRules)
+
+	id, actionCh := h.InterceptQueue.Enqueue(sc.req.Method, sc.req.URL, sc.req.Header, []byte(jsonBody), matchedRules)
+	defer h.InterceptQueue.Remove(id)
+
+	// Attach raw bytes (the original gRPC wire body).
+	if len(body) > 0 {
+		if err := h.InterceptQueue.SetRawBytes(id, body); err != nil {
+			sc.logger.Warn("gRPC intercept: failed to set raw bytes", "id", id, "error", err)
+		}
+	}
+
+	// Attach gRPC metadata for re-encoding on modify_and_forward.
+	h.attachGRPCInterceptMetadata(sc, id, frame)
+
+	return h.waitGRPCInterceptAction(sc, id, actionCh)
+}
+
+// attachGRPCInterceptMetadata sets gRPC-specific metadata on the enqueued
+// intercept item so the MCP tool layer can re-encode the body correctly.
+func (h *Handler) attachGRPCInterceptMetadata(sc *streamContext, id string, frame protobuf.Frame) {
+	contentType := sc.req.Header.Get("Content-Type")
+	grpcEncoding := sc.req.Header.Get("Grpc-Encoding")
+	compressed := "false"
+	if frame.Compressed != 0 {
+		compressed = "true"
+	}
+	metadata := map[string]string{
+		"grpc_content_type": contentType,
+		"grpc_encoding":     grpcEncoding,
+		"grpc_compressed":   compressed,
+		"original_frames":   "1",
+	}
+	if err := h.InterceptQueue.SetMetadata(id, metadata); err != nil {
+		sc.logger.Warn("gRPC intercept: failed to set metadata", "id", id, "error", err)
+	}
+}
+
+// waitGRPCInterceptAction waits for the AI agent's action on the enqueued
+// gRPC intercept item, handling timeout and context cancellation.
+func (h *Handler) waitGRPCInterceptAction(sc *streamContext, id string, actionCh <-chan intercept.InterceptAction) intercept.InterceptAction {
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(sc.ctx, timeout)
+	defer timeoutCancel()
+
+	select {
+	case action := <-actionCh:
+		return action
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if sc.ctx.Err() != nil {
+			sc.logger.Info("intercepted gRPC request cancelled (proxy shutdown)", "id", id)
+			return intercept.InterceptAction{Type: intercept.ActionDrop}
+		}
+		sc.logger.Info("intercepted gRPC request timed out", "id", id, "behavior", string(behavior))
+		if behavior == intercept.TimeoutAutoDrop {
+			return intercept.InterceptAction{Type: intercept.ActionDrop}
+		}
+		return intercept.InterceptAction{Type: intercept.ActionRelease}
+	}
+}
+
+// applyGRPCInterceptAction applies the AI agent's action to the gRPC request.
+// Returns true if the request was fully handled (dropped), false if processing
+// should continue to the streaming path.
+func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.InterceptAction, body []byte) bool {
+	switch action.Type {
+	case intercept.ActionDrop:
+		writeGRPCStatus(sc.w, gohttp.StatusOK, 10, "intercepted request dropped") // ABORTED
+		sc.logger.Info("intercepted gRPC request dropped",
+			"method", sc.req.Method, "url", sc.reqURL.String())
+		return true
+
+	case intercept.ActionModifyAndForward:
+		if action.IsRawMode() {
+			sc.logger.Warn("gRPC intercept raw mode not supported, releasing",
+				"method", sc.req.Method, "url", sc.reqURL.String())
+			sc.req.Body = io.NopCloser(bytes.NewReader(body))
+			return false
+		}
+		if action.OverrideBody != nil {
+			sc.req.Body = io.NopCloser(bytes.NewReader([]byte(*action.OverrideBody)))
+		} else {
+			sc.req.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		h.applyGRPCInterceptHeaderMods(sc, action)
+		return false
+
+	default:
+		// Release: restore original body.
+		sc.req.Body = io.NopCloser(bytes.NewReader(body))
+		return false
+	}
+}
+
+// applyGRPCInterceptHeaderMods applies header modifications from an intercept
+// action to the gRPC request. Only header-level modifications are applied here;
+// body modifications are handled by the caller.
+func (h *Handler) applyGRPCInterceptHeaderMods(sc *streamContext, action intercept.InterceptAction) {
+	for k, v := range action.OverrideHeaders {
+		sc.req.Header.Set(k, v)
+	}
+	for k, v := range action.AddHeaders {
+		sc.req.Header.Add(k, v)
+	}
+	for _, k := range action.RemoveHeaders {
+		sc.req.Header.Del(k)
+	}
 }
 
 // writeGRPCStatus writes a gRPC error response with the given status code

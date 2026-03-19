@@ -36,6 +36,10 @@ type streamRequest struct {
 	// clients (which send DATA without END_STREAM) to avoid deadlock.
 	// nil when headersEndStream is true (no pipe needed).
 	bodyPipe *io.PipeWriter
+	// endStreamCh is closed when END_STREAM is received on a DATA frame.
+	// This allows the handler to detect unary RPCs without blocking on a
+	// 1-byte probe read from the body pipe.
+	endStreamCh chan struct{}
 }
 
 // clientConn manages the lifecycle of a single HTTP/2 client connection
@@ -405,7 +409,8 @@ func (cc *clientConn) completeHeaders(streamID uint32) error {
 	// can start forwarding to upstream without waiting for END_STREAM.
 	pr, pw := io.Pipe()
 	sr.bodyPipe = pw
-	return cc.dispatchStreamWithBody(streamID, headers, pr)
+	sr.endStreamCh = make(chan struct{})
+	return cc.dispatchStreamWithBody(streamID, headers, pr, sr.endStreamCh)
 }
 
 // handleDataFrame processes a DATA frame, streaming the payload to the handler
@@ -509,6 +514,11 @@ func (cc *clientConn) handleStreamingData(streamID uint32, sr *streamRequest, f 
 	if f.Header.Flags.Has(frame.FlagEndStream) {
 		if err := cc.h2conn.Streams().Transition(streamID, EventRecvEndStream); err != nil {
 			return err
+		}
+		// Signal END_STREAM to the handler before closing the pipe,
+		// so the handler can distinguish unary from streaming RPCs.
+		if sr.endStreamCh != nil {
+			close(sr.endStreamCh)
 		}
 		sr.bodyPipe.Close()
 		sr.bodyPipe = nil
@@ -622,7 +632,11 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 // because handleDataFrame still needs access to the streamRequest (to write
 // to bodyPipe and accumulate rawFrames). The stream is cleaned up when
 // END_STREAM arrives in handleDataFrame.
-func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.HeaderField, body io.Reader) error {
+//
+// endStreamCh is closed by handleStreamingData when END_STREAM arrives on a
+// DATA frame. It is stored in the context so that handlers (e.g. gRPC
+// intercept) can detect unary RPCs without blocking on a body read probe.
+func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.HeaderField, body io.Reader, endStreamCh chan struct{}) error {
 	req, err := buildHTTPRequestWithReader(cc.ctx, headers, body)
 	if err != nil {
 		// Clean up streaming state on error: close the pipe so the writer
@@ -653,6 +667,7 @@ func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.He
 	}
 
 	streamCtx := contextWithRawFrames(cc.ctx, rawFrames)
+	streamCtx = contextWithEndStreamCh(streamCtx, endStreamCh)
 
 	cc.wg.Add(1)
 	go func() {

@@ -14,6 +14,10 @@ const maxRawCaptureSize = 2 << 20 // 2MB
 // clientConn.dispatchStream to handleStream.
 type rawFramesContextKey struct{}
 
+// endStreamChContextKey is the context key for passing the END_STREAM signal
+// channel from clientConn.dispatchStreamWithBody to handlers.
+type endStreamChContextKey struct{}
+
 // contextWithRawFrames stores raw frame bytes in the context.
 func contextWithRawFrames(ctx context.Context, frames [][]byte) context.Context {
 	return context.WithValue(ctx, rawFramesContextKey{}, frames)
@@ -24,6 +28,23 @@ func contextWithRawFrames(ctx context.Context, frames [][]byte) context.Context 
 func rawFramesFromContext(ctx context.Context) [][]byte {
 	v, _ := ctx.Value(rawFramesContextKey{}).([][]byte)
 	return v
+}
+
+// contextWithEndStreamCh stores the END_STREAM signal channel in the context.
+func contextWithEndStreamCh(ctx context.Context, ch chan struct{}) context.Context {
+	return context.WithValue(ctx, endStreamChContextKey{}, ch)
+}
+
+// endStreamChFromContext retrieves the END_STREAM signal channel from the context.
+// Returns nil if no channel is stored (e.g. HEADERS had END_STREAM set).
+func endStreamChFromContext(ctx context.Context) <-chan struct{} {
+	v, _ := ctx.Value(endStreamChContextKey{}).(<-chan struct{})
+	if v != nil {
+		return v
+	}
+	// Also try the writable channel type, since we store chan struct{}.
+	w, _ := ctx.Value(endStreamChContextKey{}).(chan struct{})
+	return w
 }
 
 // joinRawFrames concatenates multiple raw frame byte slices into a single

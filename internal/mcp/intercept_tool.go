@@ -114,6 +114,9 @@ type executeInterceptResult struct {
 	// Only populated when raw bytes are available.
 	RawBytes string `json:"raw_bytes,omitempty"`
 
+	// Metadata holds protocol-specific metadata (e.g. gRPC encoding info).
+	Metadata map[string]string `json:"metadata,omitempty"`
+
 	// --- WebSocket frame metadata (phase=websocket_frame only) ---
 
 	// Opcode is the WebSocket frame opcode name (e.g. "Text", "Binary").
@@ -172,6 +175,10 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 		Phase:        string(item.Phase),
 		BodyEncoding: bodyEncoding,
 		Body:         bodyStr,
+	}
+
+	if len(item.Metadata) > 0 {
+		result.Metadata = item.Metadata
 	}
 
 	if item.Phase == intercept.PhaseWebSocketFrame {
@@ -295,6 +302,25 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 		return nil, nil, err
 	}
 
+	// Fetch the intercepted item before responding (Respond removes it from the queue).
+	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
+	}
+
+	// For gRPC requests, re-encode the JSON body to protobuf with gRPC framing.
+	overrideBody := params.OverrideBody
+	if overrideBody != nil && isGRPCInterceptItem(item) {
+		reencoded, reencErr := reencodeGRPCBody(*overrideBody, item.Metadata)
+		if reencErr != nil {
+			return nil, nil, fmt.Errorf("modify_and_forward: grpc body re-encode: %w", reencErr)
+		}
+		// Store binary gRPC frame as string to match the OverrideBody *string interface.
+		// Go strings can hold arbitrary bytes; the downstream handler converts back via []byte().
+		reencodedStr := string(reencoded)
+		overrideBody = &reencodedStr
+	}
+
 	action := intercept.InterceptAction{
 		Type:            intercept.ActionModifyAndForward,
 		Mode:            intercept.ModeStructured,
@@ -303,19 +329,13 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 		OverrideHeaders: params.OverrideHeaders,
 		AddHeaders:      params.AddHeaders,
 		RemoveHeaders:   params.RemoveHeaders,
-		OverrideBody:    params.OverrideBody,
+		OverrideBody:    overrideBody,
 		// Response modification fields.
 		OverrideStatus:          params.OverrideStatus,
 		OverrideResponseHeaders: params.OverrideResponseHeaders,
 		AddResponseHeaders:      params.AddResponseHeaders,
 		RemoveResponseHeaders:   params.RemoveResponseHeaders,
 		OverrideResponseBody:    params.OverrideResponseBody,
-	}
-
-	// Fetch the intercepted item before responding (Respond removes it from the queue).
-	item, err := s.deps.interceptQueue.Get(params.InterceptID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
 
 	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
