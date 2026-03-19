@@ -53,6 +53,11 @@ type grpcStreamState struct {
 
 	// respBlocked is set to true if a response frame was blocked by output filter.
 	respBlocked bool
+
+	// reqBodyClosed is set before calling sc.req.Body.Close() to signal
+	// that the close is intentional. streamGRPCRequestBody checks this
+	// flag to distinguish handler-initiated close from real stream errors.
+	reqBodyClosed atomic.Bool
 }
 
 // handleGRPCStream proxies a gRPC stream using io.Pipe-based bidirectional
@@ -107,10 +112,13 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 	// Response intercept check: if response matches intercept rules,
 	// buffer the unary response body + trailers for AI agent review.
 	if h.handleGRPCResponseIntercept(sc, state, resp) {
-		// Flush and wait for request goroutine before returning.
 		if flusher, ok := sc.w.(gohttp.Flusher); ok {
 			flusher.Flush()
 		}
+		// Close request body to unblock the request-streaming goroutine
+		// (see main path comment below for full rationale).
+		state.reqBodyClosed.Store(true)
+		sc.req.Body.Close()
 		reqWg.Wait()
 		h.finalizeGRPCStream(sc, state, resp)
 		return
@@ -134,15 +142,22 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 		h.writeGRPCTrailers(sc, resp)
 	}
 
-	// Flush response to wire before waiting for request goroutine.
-	// This is critical for trailers-only responses where no body Write()/Flush()
-	// has occurred: without this, the client never receives the response and
-	// cannot close its request stream, causing a deadlock at reqWg.Wait().
-	// For normal responses, streamGRPCResponseBody already called Flush(),
-	// so this is a harmless no-op.
 	if flusher, ok := sc.w.(gohttp.Flusher); ok {
 		flusher.Flush()
 	}
+
+	// Close the client request body to unblock the request-streaming
+	// goroutine before reqWg.Wait(). Go's net/http HTTP/2 server sends
+	// trailers (grpc-status etc.) only when the handler returns — not on
+	// Flush(). Without this close, the handler blocks at reqWg.Wait()
+	// because the request goroutine is stuck on sc.req.Body.Read(),
+	// waiting for more client data. The client in turn waits for the
+	// trailers before closing its send-side — a deadlock.
+	// Closing the body causes Read() to return immediately with a
+	// close-induced error; the goroutine exits, reqWg unblocks,
+	// the handler returns, and Go sends the trailing HEADERS frame.
+	state.reqBodyClosed.Store(true)
+	sc.req.Body.Close()
 
 	reqWg.Wait()
 
@@ -246,7 +261,7 @@ func (h *Handler) streamGRPCRequestBody(sc *streamContext, state *grpcStreamStat
 			}
 		}
 		if readErr != nil {
-			if readErr != io.EOF {
+			if readErr != io.EOF && !state.reqBodyClosed.Load() {
 				state.mu.Lock()
 				state.reqStreamErr = readErr
 				state.mu.Unlock()
