@@ -273,16 +273,9 @@ func (h *Handler) forwardGRPCRequestChunk(sc *streamContext, state *grpcStreamSt
 	}
 
 	if fbErr := subsystemBuf.Write(chunk); fbErr != nil {
-		state.mu.Lock()
-		blocked := state.reqBlocked
-		state.mu.Unlock()
-		if blocked {
-			return fbErr
-		}
-		sc.logger.Warn("gRPC request subsystem buffer error", "error", fbErr)
-		// Fallback: write raw bytes directly.
-		_, err := pw.Write(chunk)
-		return err
+		// Never fall back to raw bytes transfer on subsystem error.
+		// Doing so would bypass safety filters and plugin checks.
+		return fbErr
 	}
 	return nil
 }
@@ -462,23 +455,18 @@ func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamS
 	}
 
 	if fbErr := subsystemBuf.Write(chunk); fbErr != nil {
+		// Never fall back to raw bytes transfer on subsystem error.
+		// Doing so would bypass safety filters and plugin checks.
 		state.mu.Lock()
 		blocked := state.respBlocked
 		state.mu.Unlock()
 		if blocked {
 			sc.logger.Warn("gRPC response stream terminated by output filter")
-			// Write gRPC error status to client so they know why the stream stopped.
-			writeGRPCStatus(sc.w, gohttp.StatusOK, 13, "response blocked by output filter") // INTERNAL
-			return true
+		} else {
+			sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
 		}
-		sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
-		if _, writeErr := sc.w.Write(chunk); writeErr != nil {
-			sc.logger.Debug("gRPC failed to write response to client", "error", writeErr)
-			return true
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
+		writeGRPCStatus(sc.w, gohttp.StatusOK, 13, "response blocked by subsystem") // INTERNAL
+		return true
 	}
 	return false
 }
