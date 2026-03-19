@@ -8,6 +8,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
@@ -589,7 +590,7 @@ func TestQuery_Config_WithTCPForwards(t *testing.T) {
 	ctx := context.Background()
 	ca := newTestCA(t)
 	s := NewServer(ctx, ca, store, nil)
-	s.deps.tcpForwards = map[string]string{"3306": "db.example.com:3306"}
+	s.deps.tcpForwards = map[string]*config.ForwardConfig{"3306": {Target: "db.example.com:3306", Protocol: "raw"}}
 	s.deps.enabledProtocols = []string{"HTTP/1.x", "HTTPS", "gRPC"}
 
 	ct, st := gomcp.NewInMemoryTransports()
@@ -617,8 +618,12 @@ func TestQuery_Config_WithTCPForwards(t *testing.T) {
 	if out.TCPForwards == nil {
 		t.Fatal("tcp_forwards should not be nil")
 	}
-	if out.TCPForwards["3306"] != "db.example.com:3306" {
-		t.Errorf("tcp_forwards[3306] = %q, want db.example.com:3306", out.TCPForwards["3306"])
+	if fc := out.TCPForwards["3306"]; fc == nil || fc.Target != "db.example.com:3306" {
+		var got string
+		if fc != nil {
+			got = fc.Target
+		}
+		t.Errorf("tcp_forwards[3306].Target = %q, want db.example.com:3306", got)
 	}
 	if len(out.EnabledProtocols) != 3 {
 		t.Errorf("enabled_protocols len = %d, want 3", len(out.EnabledProtocols))

@@ -401,8 +401,12 @@ func TestLoadFile_ValidConfig(t *testing.T) {
 	if len(cfg.TLSPassthrough) != 1 || cfg.TLSPassthrough[0] != "pinned-service.com" {
 		t.Errorf("TLSPassthrough = %v, want [pinned-service.com]", cfg.TLSPassthrough)
 	}
-	if cfg.TCPForwards["3306"] != "db.example.com:3306" {
-		t.Errorf("TCPForwards[3306] = %q, want %q", cfg.TCPForwards["3306"], "db.example.com:3306")
+	if fc := cfg.TCPForwards["3306"]; fc == nil || fc.Target != "db.example.com:3306" {
+		var got string
+		if fc != nil {
+			got = fc.Target
+		}
+		t.Errorf("TCPForwards[3306].Target = %q, want %q", got, "db.example.com:3306")
 	}
 	if cfg.CaptureScope == nil {
 		t.Fatal("CaptureScope is nil, want non-nil")

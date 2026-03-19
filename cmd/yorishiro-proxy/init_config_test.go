@@ -538,11 +538,19 @@ func TestTCPForwards_FromConfigFile(t *testing.T) {
 	if len(proxyCfg.TCPForwards) != 2 {
 		t.Fatalf("expected 2 TCP forwards, got %d", len(proxyCfg.TCPForwards))
 	}
-	if proxyCfg.TCPForwards["9001"] != "internal-db.corp:3306" {
-		t.Errorf("TCPForwards[9001] = %q, want %q", proxyCfg.TCPForwards["9001"], "internal-db.corp:3306")
+	if fc := proxyCfg.TCPForwards["9001"]; fc == nil || fc.Target != "internal-db.corp:3306" {
+		var got string
+		if fc != nil {
+			got = fc.Target
+		}
+		t.Errorf("TCPForwards[9001].Target = %q, want %q", got, "internal-db.corp:3306")
 	}
-	if proxyCfg.TCPForwards["9002"] != "redis.corp:6379" {
-		t.Errorf("TCPForwards[9002] = %q, want %q", proxyCfg.TCPForwards["9002"], "redis.corp:6379")
+	if fc := proxyCfg.TCPForwards["9002"]; fc == nil || fc.Target != "redis.corp:6379" {
+		var got string
+		if fc != nil {
+			got = fc.Target
+		}
+		t.Errorf("TCPForwards[9002].Target = %q, want %q", got, "redis.corp:6379")
 	}
 }
 

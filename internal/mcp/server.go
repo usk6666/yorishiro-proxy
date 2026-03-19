@@ -43,7 +43,7 @@ type deps struct {
 	dbPath                string
 	replayDoer            httpDoer
 	rawReplayDialer       rawDialer
-	tcpForwards           map[string]string
+	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
 	enabledProtocols      []string
 	proxyDefaults         *config.ProxyConfig
@@ -78,7 +78,7 @@ type Server struct {
 // forward mappings at runtime. This interface is satisfied by tcp.Handler.
 type tcpForwardHandler interface {
 	proxy.ProtocolHandler
-	SetForwards(forwards map[string]string)
+	SetForwards(forwards map[string]*config.ForwardConfig)
 }
 
 // upstreamProxySetter is implemented by protocol handlers that support upstream

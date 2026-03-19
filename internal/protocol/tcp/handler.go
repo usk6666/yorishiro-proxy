@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -22,7 +23,7 @@ import (
 // registered last in the protocol detector.
 type Handler struct {
 	store        flow.FlowWriter
-	forwards     map[string]string // listen port -> forward address
+	forwards     map[string]*config.ForwardConfig // listen port -> forward config
 	logger       *slog.Logger
 	pluginEngine *plugin.Engine
 	mu           sync.Mutex
@@ -30,12 +31,11 @@ type Handler struct {
 
 // NewHandler creates a new raw TCP handler.
 //
-// forwards maps local listen ports to upstream addresses
-// (e.g. {"3306": "db.example.com:3306"}). Connections arriving on a port
-// without a mapping are closed immediately.
-func NewHandler(store flow.FlowWriter, forwards map[string]string, logger *slog.Logger) *Handler {
+// forwards maps local listen ports to forward configurations.
+// Connections arriving on a port without a mapping are closed immediately.
+func NewHandler(store flow.FlowWriter, forwards map[string]*config.ForwardConfig, logger *slog.Logger) *Handler {
 	if forwards == nil {
-		forwards = make(map[string]string)
+		forwards = make(map[string]*config.ForwardConfig)
 	}
 	return &Handler{
 		store:    store,
@@ -51,22 +51,23 @@ func (h *Handler) Name() string {
 
 // SetForwards merges the given forward mappings into the existing map so that
 // previously configured forwards remain active. This is safe for concurrent use.
-func (h *Handler) SetForwards(forwards map[string]string) {
+func (h *Handler) SetForwards(forwards map[string]*config.ForwardConfig) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for port, target := range forwards {
-		h.forwards[port] = target
+	for port, fc := range forwards {
+		h.forwards[port] = fc
 	}
 }
 
 // Forwards returns a snapshot of the current forward mappings.
 // The returned map is a copy and safe to modify.
-func (h *Handler) Forwards() map[string]string {
+func (h *Handler) Forwards() map[string]*config.ForwardConfig {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make(map[string]string, len(h.forwards))
+	out := make(map[string]*config.ForwardConfig, len(h.forwards))
 	for k, v := range h.forwards {
-		out[k] = v
+		copied := *v
+		out[k] = &copied
 	}
 	return out
 }
@@ -100,12 +101,13 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	}
 
 	h.mu.Lock()
-	target, ok := h.forwards[port]
+	fc, ok := h.forwards[port]
 	h.mu.Unlock()
-	if !ok {
+	if !ok || fc == nil {
 		logger.Warn("no TCP forward configured for port, closing connection", "port", port)
 		return nil
 	}
+	target := fc.Target
 
 	// Dial upstream.
 	upstream, err := net.DialTimeout("tcp", target, 30*time.Second)

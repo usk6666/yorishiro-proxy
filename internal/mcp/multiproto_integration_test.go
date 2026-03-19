@@ -748,8 +748,12 @@ func TestMultiProto_ProxyStart_TCPForwards(t *testing.T) {
 	if startResult.TCPForwards == nil {
 		t.Fatal("tcp_forwards should not be nil in result")
 	}
-	if startResult.TCPForwards["0"] != "db.example.com:3306" {
-		t.Errorf("tcp_forwards[0] = %q, want db.example.com:3306", startResult.TCPForwards["0"])
+	if fc := startResult.TCPForwards["0"]; fc == nil || fc.Target != "db.example.com:3306" {
+		var got string
+		if fc != nil {
+			got = fc.Target
+		}
+		t.Errorf("tcp_forwards[0].Target = %q, want db.example.com:3306", got)
 	}
 
 	// Verify forward listeners are actually running.
@@ -825,8 +829,12 @@ func TestMultiProto_QueryConfig_TCPForwardsAndProtocols(t *testing.T) {
 	if cfgResult.TCPForwards == nil {
 		t.Fatal("tcp_forwards should not be nil in config")
 	}
-	if cfgResult.TCPForwards["0"] != "postgres.example.com:5432" {
-		t.Errorf("tcp_forwards[0] = %q, want postgres.example.com:5432", cfgResult.TCPForwards["0"])
+	if fc := cfgResult.TCPForwards["0"]; fc == nil || fc.Target != "postgres.example.com:5432" {
+		var got string
+		if fc != nil {
+			got = fc.Target
+		}
+		t.Errorf("tcp_forwards[0].Target = %q, want postgres.example.com:5432", got)
 	}
 	if len(cfgResult.EnabledProtocols) != 3 {
 		t.Fatalf("enabled_protocols len = %d, want 3", len(cfgResult.EnabledProtocols))
