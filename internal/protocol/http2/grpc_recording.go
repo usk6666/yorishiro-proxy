@@ -224,7 +224,7 @@ func (r *grpcProgressiveRecorder) completeFlow(
 	grpcMessage := protogrpc.ExtractGRPCMessage(trailers, respHeadersMap(resp))
 
 	// Record final receive message with trailers and status.
-	r.recordTrailersMessage(ctx, resp, trailers, grpcStatus, grpcMessage, respFrameCount)
+	r.recordTrailersMessage(ctx, resp, trailers, grpcStatus, grpcMessage)
 
 	// Build tags, preserving SOCKS5 metadata from the context.
 	totalMessages := int(r.messageCount.Load())
@@ -268,7 +268,6 @@ func (r *grpcProgressiveRecorder) recordTrailersMessage(
 	resp *gohttp.Response,
 	trailers map[string][]string,
 	grpcStatus, grpcMessage string,
-	respFrameCount int,
 ) {
 	finalSeq := int(r.seq.Add(1) - 1)
 	finalMeta := map[string]string{
@@ -282,10 +281,10 @@ func (r *grpcProgressiveRecorder) recordTrailersMessage(
 	if grpcMessage != "" {
 		finalMeta["grpc_message"] = grpcMessage
 	}
-	// Mark as trailers-only when no response DATA frames were received.
-	// This distinguishes gRPC Trailers-Only responses (e.g., UNIMPLEMENTED)
-	// from normal unary RPCs that have response data.
-	if respFrameCount == 0 {
+	// Mark as trailers-only using the HTTP/2 response pattern rather than
+	// frame count, which could be zero due to parse failure rather than a
+	// genuine Trailers-Only response.
+	if resp != nil && isGRPCTrailersOnly(resp) {
 		finalMeta["grpc_trailers_only"] = "true"
 	}
 
