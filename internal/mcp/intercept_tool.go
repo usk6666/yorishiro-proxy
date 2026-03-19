@@ -276,25 +276,8 @@ func (s *Server) handleInterceptModifyAndForward(_ context.Context, params inter
 
 // handleInterceptModifyAndForwardStructured handles modify_and_forward in structured (L7) mode.
 func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
-	// Validate request header params.
-	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
-		return nil, nil, fmt.Errorf("override_headers: %w", err)
-	}
-	if err := validateHeaderValues(params.AddHeaders); err != nil {
-		return nil, nil, fmt.Errorf("add_headers: %w", err)
-	}
-	if err := validateHeaderKeys(params.RemoveHeaders); err != nil {
-		return nil, nil, fmt.Errorf("remove_headers: %w", err)
-	}
-	// Validate response header params.
-	if err := validateHeaderValues(params.OverrideResponseHeaders); err != nil {
-		return nil, nil, fmt.Errorf("override_response_headers: %w", err)
-	}
-	if err := validateHeaderValues(params.AddResponseHeaders); err != nil {
-		return nil, nil, fmt.Errorf("add_response_headers: %w", err)
-	}
-	if err := validateHeaderKeys(params.RemoveResponseHeaders); err != nil {
-		return nil, nil, fmt.Errorf("remove_response_headers: %w", err)
+	if err := validateInterceptHeaderParams(params); err != nil {
+		return nil, nil, err
 	}
 
 	// SafetyFilter input check: validate modified request data before forwarding.
@@ -308,17 +291,9 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
 
-	// For gRPC requests, re-encode the JSON body to protobuf with gRPC framing.
-	overrideBody := params.OverrideBody
-	if overrideBody != nil && isGRPCInterceptItem(item) {
-		reencoded, reencErr := reencodeGRPCBody(*overrideBody, item.Metadata)
-		if reencErr != nil {
-			return nil, nil, fmt.Errorf("modify_and_forward: grpc body re-encode: %w", reencErr)
-		}
-		// Store binary gRPC frame as string to match the OverrideBody *string interface.
-		// Go strings can hold arbitrary bytes; the downstream handler converts back via []byte().
-		reencodedStr := string(reencoded)
-		overrideBody = &reencodedStr
+	overrideBody, overrideResponseBody, err := resolveGRPCBodyOverrides(params, item)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	action := intercept.InterceptAction{
@@ -335,7 +310,7 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 		OverrideResponseHeaders: params.OverrideResponseHeaders,
 		AddResponseHeaders:      params.AddResponseHeaders,
 		RemoveResponseHeaders:   params.RemoveResponseHeaders,
-		OverrideResponseBody:    params.OverrideResponseBody,
+		OverrideResponseBody:    overrideResponseBody,
 	}
 
 	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
@@ -343,6 +318,64 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 	}
 
 	return nil, s.buildInterceptResult(item, "modify_and_forward", "forwarded"), nil
+}
+
+// validateInterceptHeaderParams validates all header-related parameters for
+// the modify_and_forward action (both request and response headers).
+func validateInterceptHeaderParams(params interceptParams) error {
+	if err := validateHeaderValues(params.OverrideHeaders); err != nil {
+		return fmt.Errorf("override_headers: %w", err)
+	}
+	if err := validateHeaderValues(params.AddHeaders); err != nil {
+		return fmt.Errorf("add_headers: %w", err)
+	}
+	if err := validateHeaderKeys(params.RemoveHeaders); err != nil {
+		return fmt.Errorf("remove_headers: %w", err)
+	}
+	if err := validateHeaderValues(params.OverrideResponseHeaders); err != nil {
+		return fmt.Errorf("override_response_headers: %w", err)
+	}
+	if err := validateHeaderValues(params.AddResponseHeaders); err != nil {
+		return fmt.Errorf("add_response_headers: %w", err)
+	}
+	if err := validateHeaderKeys(params.RemoveResponseHeaders); err != nil {
+		return fmt.Errorf("remove_response_headers: %w", err)
+	}
+	return nil
+}
+
+// resolveGRPCBodyOverrides handles gRPC-specific body re-encoding for both
+// request and response phases. For gRPC items, JSON body overrides are
+// re-encoded to protobuf with gRPC framing.
+func resolveGRPCBodyOverrides(params interceptParams, item *intercept.InterceptedRequest) (overrideBody, overrideResponseBody *string, err error) {
+	overrideBody = params.OverrideBody
+	overrideResponseBody = params.OverrideResponseBody
+
+	if !isGRPCInterceptItem(item) {
+		return overrideBody, overrideResponseBody, nil
+	}
+
+	// For gRPC requests, re-encode the JSON body to protobuf with gRPC framing.
+	if overrideBody != nil && item.Phase == intercept.PhaseRequest {
+		reencoded, reencErr := reencodeGRPCBody(*overrideBody, item.Metadata)
+		if reencErr != nil {
+			return nil, nil, fmt.Errorf("modify_and_forward: grpc body re-encode: %w", reencErr)
+		}
+		reencodedStr := string(reencoded)
+		overrideBody = &reencodedStr
+	}
+
+	// For gRPC responses, re-encode the JSON body to protobuf with gRPC framing.
+	if overrideResponseBody != nil && item.Phase == intercept.PhaseResponse {
+		reencoded, reencErr := reencodeGRPCBody(*overrideResponseBody, item.Metadata)
+		if reencErr != nil {
+			return nil, nil, fmt.Errorf("modify_and_forward: grpc response body re-encode: %w", reencErr)
+		}
+		reencodedStr := string(reencoded)
+		overrideResponseBody = &reencodedStr
+	}
+
+	return overrideBody, overrideResponseBody, nil
 }
 
 // handleInterceptModifyAndForwardRaw handles modify_and_forward in raw bytes mode.
