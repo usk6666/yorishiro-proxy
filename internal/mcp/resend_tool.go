@@ -17,6 +17,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
@@ -338,14 +339,10 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 		return nil, r1, r2, err
 	}
 
-	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	sendMsg, reqBody, err := s.loadResendSendData(ctx, fl, *params)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("get send messages: %w", err)
+		return nil, nil, nil, err
 	}
-	if len(sendMsgs) == 0 {
-		return nil, nil, nil, fmt.Errorf("flow %s has no send messages", params.FlowID)
-	}
-	sendMsg := sendMsgs[0]
 
 	method := sendMsg.Method
 	if params.OverrideMethod != "" {
@@ -362,11 +359,6 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 	}
 
 	if err := validateResendHeaders(*params); err != nil {
-		return nil, nil, nil, err
-	}
-
-	reqBody, err := buildResendBody(sendMsg.Body, *params)
-	if err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -402,10 +394,45 @@ func (s *Server) executePreSendHook(ctx context.Context, params *resendParams) (
 	return kvStore, nil
 }
 
+// loadResendSendData loads send messages from the store, validates gRPC-specific
+// constraints, and builds the request body. For gRPC flows, the body is
+// reconstructed from data frame messages (sequence 1+).
+func (s *Server) loadResendSendData(ctx context.Context, fl *flow.Flow, params resendParams) (*flow.Message, []byte, error) {
+	sendMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get send messages: %w", err)
+	}
+	if len(sendMsgs) == 0 {
+		return nil, nil, fmt.Errorf("flow %s has no send messages", params.FlowID)
+	}
+	sendMsg := sendMsgs[0]
+
+	// Reject body_patches for gRPC flows: protobuf decode/re-encode is not yet supported.
+	if isGRPCFlow(fl.Protocol) && len(params.BodyPatches) > 0 {
+		return nil, nil, fmt.Errorf("body_patches is not yet supported for gRPC flows")
+	}
+
+	// For gRPC flows, reconstruct the request body from data frame messages
+	// (sequence 1+), since sequence 0 is the header-only message.
+	var originalBody []byte
+	if isGRPCFlow(fl.Protocol) && len(sendMsgs) > 1 {
+		originalBody = buildGRPCRequestBody(sendMsgs[1:])
+	} else {
+		originalBody = sendMsg.Body
+	}
+
+	reqBody, err := buildResendBody(originalBody, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return sendMsg, reqBody, nil
+}
+
 // checkResendProtocolSupport returns an error if the flow's protocol/type combination
 // is not supported for resend. Currently gRPC streaming flows are unsupported.
 func checkResendProtocolSupport(fl *flow.Flow) error {
-	if fl.Protocol == "gRPC" && fl.FlowType != "unary" {
+	if isGRPCFlow(fl.Protocol) && fl.FlowType != "unary" {
 		return fmt.Errorf("resending gRPC streaming flows (type: %s) is not yet supported; only unary gRPC flows can be resent", fl.FlowType)
 	}
 	return nil
@@ -619,10 +646,68 @@ func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, par
 	if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
 		return fmt.Errorf("save resend receive message: %w", err)
 	}
+
+	// For gRPC flows, record trailers as a separate message to match
+	// the proxy-captured recording format (grpc_type=trailers).
+	if isGRPCFlow(prep.flow.Protocol) && len(resp.Trailer) > 0 {
+		trailerHeaders := copyHeaders(resp.Trailer)
+		trailerMeta := map[string]string{
+			"grpc_type": "trailers",
+		}
+		// Extract service/method from gRPC path (format: /package.Service/Method)
+		if prep.url != nil {
+			parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
+			if len(parts) == 2 {
+				trailerMeta["service"] = parts[0]
+				trailerMeta["method"] = parts[1]
+			}
+		}
+		if grpcStatus := resp.Trailer.Get("Grpc-Status"); grpcStatus != "" {
+			trailerMeta["grpc_status"] = grpcStatus
+		}
+		if grpcMessage := resp.Trailer.Get("Grpc-Message"); grpcMessage != "" {
+			trailerMeta["grpc_message"] = grpcMessage
+		}
+		trailerMsg := &flow.Message{
+			FlowID:     newFl.ID,
+			Sequence:   newRecvMsg.Sequence + 1,
+			Direction:  "receive",
+			Timestamp:  start.Add(duration),
+			StatusCode: resp.StatusCode,
+			Headers:    trailerHeaders,
+			Metadata:   trailerMeta,
+		}
+		if err := s.deps.store.AppendMessage(ctx, trailerMsg); err != nil {
+			return fmt.Errorf("save resend gRPC trailers message: %w", err)
+		}
+	}
+
 	return nil
 }
 
+// isGRPCFlow reports whether the protocol string indicates a gRPC flow,
+// including SOCKS5-tunneled gRPC flows.
+func isGRPCFlow(protocol string) bool {
+	return protocol == "gRPC" || protocol == "SOCKS5+gRPC"
+}
+
 // --- Resend helper functions ---
+
+// buildGRPCRequestBody reconstructs the gRPC request body from data frame
+// messages (sequence 1+). Each message's Body contains the raw protobuf
+// payload, which is re-encoded into gRPC length-prefixed frames.
+func buildGRPCRequestBody(dataMessages []*flow.Message) []byte {
+	var buf bytes.Buffer
+	for _, msg := range dataMessages {
+		if len(msg.Body) == 0 {
+			continue
+		}
+		compressed := msg.Metadata["compressed"] == "true"
+		frame := protogrpc.EncodeFrame(compressed, msg.Body)
+		buf.Write(frame)
+	}
+	return buf.Bytes()
+}
 
 func buildResendBody(originalBody []byte, params resendParams) ([]byte, error) {
 	if params.OverrideBody != nil {
