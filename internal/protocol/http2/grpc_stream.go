@@ -1026,7 +1026,7 @@ func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Re
 
 	// Check for streaming response (multiple frames).
 	if len(fullBody) > expectedLen {
-		sc.logger.Warn("gRPC streaming response intercept not supported, releasing",
+		sc.logger.Info("gRPC streaming response intercept not supported, releasing",
 			"method", sc.req.Method, "url", sc.reqURL.String(),
 			"body_len", len(fullBody), "first_frame_len", expectedLen)
 		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
@@ -1134,7 +1134,7 @@ func (h *Handler) applyGRPCResponseInterceptAction(sc *streamContext, state *grp
 				body = []byte(*action.OverrideResponseBody)
 			}
 			h.applyGRPCResponseInterceptHeaderMods(resp, action)
-			h.applyGRPCResponseInterceptTrailerMods(trailers, action)
+			// TODO: dedicated trailer modification fields (trailers are preserved as-is for now).
 		}
 	}
 
@@ -1202,15 +1202,6 @@ func (h *Handler) applyGRPCResponseInterceptHeaderMods(resp *gohttp.Response, ac
 	for _, k := range action.RemoveResponseHeaders {
 		resp.Header.Del(k)
 	}
-}
-
-// applyGRPCResponseInterceptTrailerMods applies trailer modifications from
-// an intercept action. Trailer overrides are stored in OverrideResponseHeaders
-// with a "trailer_" prefix convention when the AI agent modifies them.
-func (h *Handler) applyGRPCResponseInterceptTrailerMods(trailers gohttp.Header, action intercept.InterceptAction) {
-	// No special trailer modifications for now — trailers are preserved as-is
-	// unless the AI agent modifies them through response header overrides.
-	// Future enhancement: dedicated trailer modification fields.
 }
 
 // runGRPCResponseSubsystems passes the buffered gRPC response body through

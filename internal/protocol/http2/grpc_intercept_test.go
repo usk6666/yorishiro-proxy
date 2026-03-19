@@ -603,6 +603,7 @@ func TestHandleGRPCResponseIntercept_Drop(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
+		t.Error("timed out waiting for intercept item")
 	}()
 
 	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
@@ -637,6 +638,7 @@ func TestHandleGRPCResponseIntercept_Release(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
+		t.Error("timed out waiting for intercept item")
 	}()
 
 	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
@@ -709,6 +711,7 @@ func TestHandleGRPCResponseIntercept_ModifyAndForward(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
+		t.Error("timed out waiting for intercept item")
 	}()
 
 	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
@@ -752,6 +755,7 @@ func TestHandleGRPCResponseIntercept_RawModeRejected(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
+		t.Error("timed out waiting for intercept item")
 	}()
 
 	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
@@ -862,6 +866,7 @@ func TestHandleGRPCResponseIntercept_BodyDecodeJSON(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
+		t.Error("timed out waiting for intercept item")
 	}()
 
 	handler.handleGRPCResponseIntercept(sc, state, resp)
