@@ -1178,6 +1178,9 @@ type queryInterceptQueueEntry struct {
 	// MatchedRules lists the IDs of the rules that matched.
 	MatchedRules []string `json:"matched_rules"`
 
+	// Metadata holds protocol-specific metadata (e.g. gRPC encoding info).
+	Metadata map[string]string `json:"metadata,omitempty"`
+
 	// --- WebSocket frame metadata (phase=websocket_frame only) ---
 
 	// Opcode is the WebSocket frame opcode name (e.g. "Text", "Binary").
@@ -1234,6 +1237,10 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 			BodyEncoding: bodyEncoding,
 			Timestamp:    item.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			MatchedRules: item.MatchedRules,
+		}
+
+		if len(item.Metadata) > 0 {
+			entry.Metadata = item.Metadata
 		}
 
 		if item.Phase == intercept.PhaseWebSocketFrame {
