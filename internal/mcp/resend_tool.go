@@ -408,14 +408,14 @@ func (s *Server) loadResendSendData(ctx context.Context, fl *flow.Flow, params r
 	sendMsg := sendMsgs[0]
 
 	// Reject body_patches for gRPC flows: protobuf decode/re-encode is not yet supported.
-	if fl.Protocol == "gRPC" && len(params.BodyPatches) > 0 {
+	if isGRPCFlow(fl.Protocol) && len(params.BodyPatches) > 0 {
 		return nil, nil, fmt.Errorf("body_patches is not yet supported for gRPC flows")
 	}
 
 	// For gRPC flows, reconstruct the request body from data frame messages
 	// (sequence 1+), since sequence 0 is the header-only message.
 	var originalBody []byte
-	if fl.Protocol == "gRPC" && len(sendMsgs) > 1 {
+	if isGRPCFlow(fl.Protocol) && len(sendMsgs) > 1 {
 		originalBody = buildGRPCRequestBody(sendMsgs[1:])
 	} else {
 		originalBody = sendMsg.Body
@@ -432,7 +432,7 @@ func (s *Server) loadResendSendData(ctx context.Context, fl *flow.Flow, params r
 // checkResendProtocolSupport returns an error if the flow's protocol/type combination
 // is not supported for resend. Currently gRPC streaming flows are unsupported.
 func checkResendProtocolSupport(fl *flow.Flow) error {
-	if fl.Protocol == "gRPC" && fl.FlowType != "unary" {
+	if isGRPCFlow(fl.Protocol) && fl.FlowType != "unary" {
 		return fmt.Errorf("resending gRPC streaming flows (type: %s) is not yet supported; only unary gRPC flows can be resent", fl.FlowType)
 	}
 	return nil
@@ -649,10 +649,18 @@ func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, par
 
 	// For gRPC flows, record trailers as a separate message to match
 	// the proxy-captured recording format (grpc_type=trailers).
-	if prep.flow.Protocol == "gRPC" && len(resp.Trailer) > 0 {
+	if isGRPCFlow(prep.flow.Protocol) && len(resp.Trailer) > 0 {
 		trailerHeaders := copyHeaders(resp.Trailer)
 		trailerMeta := map[string]string{
 			"grpc_type": "trailers",
+		}
+		// Extract service/method from gRPC path (format: /package.Service/Method)
+		if prep.url != nil {
+			parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
+			if len(parts) == 2 {
+				trailerMeta["service"] = parts[0]
+				trailerMeta["method"] = parts[1]
+			}
 		}
 		if grpcStatus := resp.Trailer.Get("Grpc-Status"); grpcStatus != "" {
 			trailerMeta["grpc_status"] = grpcStatus
@@ -661,12 +669,13 @@ func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, par
 			trailerMeta["grpc_message"] = grpcMessage
 		}
 		trailerMsg := &flow.Message{
-			FlowID:    newFl.ID,
-			Sequence:  2,
-			Direction: "receive",
-			Timestamp: start.Add(duration),
-			Headers:   trailerHeaders,
-			Metadata:  trailerMeta,
+			FlowID:     newFl.ID,
+			Sequence:   newRecvMsg.Sequence + 1,
+			Direction:  "receive",
+			Timestamp:  start.Add(duration),
+			StatusCode: resp.StatusCode,
+			Headers:    trailerHeaders,
+			Metadata:   trailerMeta,
 		}
 		if err := s.deps.store.AppendMessage(ctx, trailerMsg); err != nil {
 			return fmt.Errorf("save resend gRPC trailers message: %w", err)
@@ -674,6 +683,12 @@ func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, par
 	}
 
 	return nil
+}
+
+// isGRPCFlow reports whether the protocol string indicates a gRPC flow,
+// including SOCKS5-tunneled gRPC flows.
+func isGRPCFlow(protocol string) bool {
+	return protocol == "gRPC" || protocol == "SOCKS5+gRPC"
 }
 
 // --- Resend helper functions ---
@@ -687,7 +702,8 @@ func buildGRPCRequestBody(dataMessages []*flow.Message) []byte {
 		if len(msg.Body) == 0 {
 			continue
 		}
-		frame := protogrpc.EncodeFrame(false, msg.Body)
+		compressed := msg.Metadata["compressed"] == "true"
+		frame := protogrpc.EncodeFrame(compressed, msg.Body)
 		buf.Write(frame)
 	}
 	return buf.Bytes()
