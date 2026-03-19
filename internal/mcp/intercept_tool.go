@@ -315,6 +315,8 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 		if reencErr != nil {
 			return nil, nil, fmt.Errorf("modify_and_forward: grpc body re-encode: %w", reencErr)
 		}
+		// Store binary gRPC frame as string to match the OverrideBody *string interface.
+		// Go strings can hold arbitrary bytes; the downstream handler converts back via []byte().
 		reencodedStr := string(reencoded)
 		overrideBody = &reencodedStr
 	}

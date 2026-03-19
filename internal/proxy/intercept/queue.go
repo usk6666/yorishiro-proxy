@@ -560,6 +560,28 @@ func (q *Queue) Remove(id string) {
 	q.mu.Unlock()
 }
 
+// SetMetadata attaches protocol-specific metadata to an already-enqueued
+// intercepted item. For gRPC requests, this includes encoding and compression
+// information needed for re-encoding on modify_and_forward.
+// Returns an error if the item is not found.
+func (q *Queue) SetMetadata(id string, metadata map[string]string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	item, ok := q.items[id]
+	if !ok {
+		return fmt.Errorf("intercepted request %q not found", id)
+	}
+
+	item.Metadata = metadata
+
+	slog.Debug("metadata attached to intercept queue item",
+		slog.String("intercept_id", id),
+		slog.Int("metadata_keys", len(metadata)),
+	)
+	return nil
+}
+
 // SetRawBytes attaches raw bytes to an already-enqueued intercepted item.
 // This is used by protocol handlers that capture raw bytes after enqueuing
 // the L7-parsed request. Returns an error if the item is not found or if

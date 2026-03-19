@@ -659,11 +659,19 @@ func (h *Handler) handleGRPCIntercept(sc *streamContext, matchedRules []string) 
 // if the body is a valid unary request. On failure, the request body is restored
 // and false is returned.
 func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody string, frame protobuf.Frame, ok bool) {
+	// Limit body read to prevent memory exhaustion from oversized payloads
+	// disguised as gRPC (CWE-400). Uses the same limit as raw bytes storage.
 	var err error
-	body, err = io.ReadAll(sc.req.Body)
+	body, err = io.ReadAll(io.LimitReader(sc.req.Body, intercept.MaxRawBytesSize+1))
 	if err != nil {
 		sc.logger.Debug("gRPC intercept: failed to buffer request body", "error", err)
 		sc.req.Body = io.NopCloser(bytes.NewReader(nil))
+		return nil, "", protobuf.Frame{}, false
+	}
+	if len(body) > intercept.MaxRawBytesSize {
+		sc.logger.Warn("gRPC intercept: request body too large, releasing",
+			"body_len", len(body), "max", intercept.MaxRawBytesSize)
+		sc.req.Body = io.NopCloser(bytes.NewReader(body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
@@ -725,13 +733,14 @@ func (h *Handler) attachGRPCInterceptMetadata(sc *streamContext, id string, fram
 	if frame.Compressed != 0 {
 		compressed = "true"
 	}
-	if item, err := h.InterceptQueue.Get(id); err == nil {
-		item.Metadata = map[string]string{
-			"grpc_content_type": contentType,
-			"grpc_encoding":     grpcEncoding,
-			"grpc_compressed":   compressed,
-			"original_frames":   "1",
-		}
+	metadata := map[string]string{
+		"grpc_content_type": contentType,
+		"grpc_encoding":     grpcEncoding,
+		"grpc_compressed":   compressed,
+		"original_frames":   "1",
+	}
+	if err := h.InterceptQueue.SetMetadata(id, metadata); err != nil {
+		sc.logger.Warn("gRPC intercept: failed to set metadata", "id", id, "error", err)
 	}
 }
 
