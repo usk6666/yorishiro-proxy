@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -828,6 +829,77 @@ func TestHandleGRPCResponseIntercept_TimeoutAutoDrop(t *testing.T) {
 	}
 	if w.Code != gohttp.StatusOK {
 		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	}
+}
+
+func TestBufferGRPCUnaryResponseBody_MaxRawBytesSize(t *testing.T) {
+	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
+
+	// Create a payload that exceeds MaxRawBytesSize when wrapped in a gRPC frame.
+	// The gRPC frame header is 5 bytes, so we need payload > MaxRawBytesSize - 5.
+	oversizedPayload := make([]byte, intercept.MaxRawBytesSize)
+	resp := &gohttp.Response{
+		StatusCode: gohttp.StatusOK,
+		Header: gohttp.Header{
+			"Content-Type": []string{"application/grpc+proto"},
+		},
+		Body:    io.NopCloser(bytes.NewReader(buildGRPCUnaryBody(t, oversizedPayload))),
+		Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+	}
+
+	_, _, _, _, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	if ok {
+		t.Error("expected bufferGRPCUnaryResponseBody to return ok=false for oversized body")
+	}
+
+	// Body should be restored for streaming fallback.
+	restoredBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read restored body: %v", err)
+	}
+	// The restored body should contain the full gRPC frame (5-byte header + payload).
+	expectedLen := 5 + len(oversizedPayload)
+	if len(restoredBody) != expectedLen {
+		t.Errorf("restored body length = %d, want %d", len(restoredBody), expectedLen)
+	}
+}
+
+func TestBufferGRPCUnaryResponseBody_MaxGRPCMessageSize(t *testing.T) {
+	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
+
+	// Create a body with a gRPC frame header declaring a message length
+	// that exceeds MaxGRPCMessageSize, but keep the actual body small
+	// (only the 5-byte header) so it fits within MaxRawBytesSize.
+	var header [5]byte
+	header[0] = 0 // uncompressed
+	// Set msgLen to MaxGRPCMessageSize + 1 in the header.
+	oversize := config.MaxGRPCMessageSize + 1
+	header[1] = byte(oversize >> 24)
+	header[2] = byte(oversize >> 16)
+	header[3] = byte(oversize >> 8)
+	header[4] = byte(oversize)
+
+	resp := &gohttp.Response{
+		StatusCode: gohttp.StatusOK,
+		Header: gohttp.Header{
+			"Content-Type": []string{"application/grpc+proto"},
+		},
+		Body:    io.NopCloser(bytes.NewReader(header[:])),
+		Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+	}
+
+	_, _, _, _, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	if ok {
+		t.Error("expected bufferGRPCUnaryResponseBody to return ok=false for oversized gRPC message")
+	}
+
+	// Body should be restored.
+	restoredBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read restored body: %v", err)
+	}
+	if !bytes.Equal(restoredBody, header[:]) {
+		t.Errorf("restored body mismatch: got %d bytes, want %d bytes", len(restoredBody), len(header))
 	}
 }
 

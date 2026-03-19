@@ -982,10 +982,16 @@ func (h *Handler) handleGRPCResponseIntercept(sc *streamContext, state *grpcStre
 // and true if the body is a valid unary response. On failure, the response
 // body is replaced with unread data and false is returned.
 func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Response) (body []byte, jsonBody string, frame protobuf.Frame, trailers gohttp.Header, ok bool) {
+	// Keep a reference to the original body so we can restore unread data
+	// if the body exceeds MaxRawBytesSize or an error occurs during read.
+	origBody := resp.Body
+
 	// Read the full response body to also populate resp.Trailer.
-	fullBody, err := io.ReadAll(io.LimitReader(resp.Body, intercept.MaxRawBytesSize+1))
+	fullBody, err := io.ReadAll(io.LimitReader(origBody, intercept.MaxRawBytesSize+1))
 	if err != nil {
 		sc.logger.Debug("gRPC response intercept: failed to read body", "error", err)
+		// Restore: concatenate partially-read data with the remaining unread body.
+		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(fullBody), origBody))
 		return nil, "", protobuf.Frame{}, nil, false
 	}
 
@@ -994,7 +1000,8 @@ func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Re
 		sc.logger.Warn("gRPC response intercept: body too large, releasing",
 			"body_len", len(fullBody), "max", intercept.MaxRawBytesSize)
 		// Replace body so streaming path can still forward it.
-		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		// Include both the read bytes and the remaining unread body.
+		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(fullBody), origBody))
 		return nil, "", protobuf.Frame{}, nil, false
 	}
 
@@ -1022,6 +1029,15 @@ func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Re
 	}
 
 	msgLen := binary.BigEndian.Uint32(fullBody[1:5])
+
+	// Check gRPC message size limit (consistent with request-side validation).
+	if msgLen > config.MaxGRPCMessageSize {
+		sc.logger.Warn("gRPC response intercept: frame payload too large, releasing",
+			"msg_len", msgLen, "max", config.MaxGRPCMessageSize)
+		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, nil, false
+	}
+
 	expectedLen := 5 + int(msgLen)
 
 	// Check for streaming response (multiple frames).
