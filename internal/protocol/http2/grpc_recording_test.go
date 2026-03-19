@@ -591,6 +591,127 @@ func TestGRPCProgressiveRecording_NilStore(t *testing.T) {
 	}
 }
 
+// TestGRPCProgressiveRecording_TrailersOnly verifies that trailers-only
+// responses (no DATA frames) are recorded with grpc_trailers_only metadata.
+func TestGRPCProgressiveRecording_TrailersOnly(t *testing.T) {
+	// Upstream returns a trailers-only response (grpc-status in headers, no body).
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Grpc-Status", "12") // UNIMPLEMENTED
+		w.Header().Set("Grpc-Message", "method not implemented")
+		w.WriteHeader(gohttp.StatusOK)
+		// No body — trailers-only response.
+	}))
+	defer upstream.Close()
+
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	grpcHandler := protogrpc.NewHandler(store, testutil.DiscardLogger())
+	handler.SetGRPCHandler(grpcHandler)
+
+	proxyAddr, cancel := startH2CProxyListener(t, handler, "conn-prog-trailers-only", "127.0.0.1:9999", "", tlsMetadata{})
+	defer cancel()
+
+	client := newH2CClientForAddr(proxyAddr)
+
+	reqBody := protogrpc.EncodeFrame(false, []byte("request"))
+	req, _ := gohttp.NewRequest("POST", upstream.URL+"/test.Service/Unimplemented", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/grpc")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	time.Sleep(100 * time.Millisecond)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if len(store.flows) == 0 {
+		t.Fatal("expected at least one flow to be recorded")
+	}
+
+	fl := store.flows[0]
+	if fl.State != "complete" {
+		t.Errorf("state = %q, want %q", fl.State, "complete")
+	}
+	if fl.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
+	}
+
+	// Find the final trailers message and verify grpc_trailers_only.
+	flowMsgs := filterMessages(store.messages, fl.ID)
+	var trailersMsg *flow.Message
+	for _, msg := range flowMsgs {
+		if msg.Metadata != nil && msg.Metadata["grpc_type"] == "trailers" {
+			trailersMsg = msg
+		}
+	}
+	if trailersMsg == nil {
+		t.Fatal("expected a trailers message")
+	}
+	if trailersMsg.Metadata["grpc_trailers_only"] != "true" {
+		t.Errorf("grpc_trailers_only = %q, want %q", trailersMsg.Metadata["grpc_trailers_only"], "true")
+	}
+	if trailersMsg.Metadata["grpc_status"] != "12" {
+		t.Errorf("grpc_status = %q, want %q", trailersMsg.Metadata["grpc_status"], "12")
+	}
+}
+
+// TestGRPCProgressiveRecording_NormalUnary_NoTrailersOnlyMetadata verifies that
+// normal unary RPCs with response DATA frames do NOT have grpc_trailers_only.
+func TestGRPCProgressiveRecording_NormalUnary_NoTrailersOnlyMetadata(t *testing.T) {
+	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/grpc")
+		w.WriteHeader(gohttp.StatusOK)
+		w.Write(protogrpc.EncodeFrame(false, []byte("response")))
+	}))
+	defer upstream.Close()
+
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	grpcHandler := protogrpc.NewHandler(store, testutil.DiscardLogger())
+	handler.SetGRPCHandler(grpcHandler)
+
+	proxyAddr, cancel := startH2CProxyListener(t, handler, "conn-prog-normal-unary", "127.0.0.1:9999", "", tlsMetadata{})
+	defer cancel()
+
+	client := newH2CClientForAddr(proxyAddr)
+
+	reqBody := protogrpc.EncodeFrame(false, []byte("request"))
+	req, _ := gohttp.NewRequest("POST", upstream.URL+"/test.Service/Method", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/grpc")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	time.Sleep(100 * time.Millisecond)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if len(store.flows) == 0 {
+		t.Fatal("expected at least one flow to be recorded")
+	}
+
+	// Find the final trailers message and verify NO grpc_trailers_only.
+	flowMsgs := filterMessages(store.messages, store.flows[0].ID)
+	for _, msg := range flowMsgs {
+		if msg.Metadata != nil && msg.Metadata["grpc_type"] == "trailers" {
+			if _, ok := msg.Metadata["grpc_trailers_only"]; ok {
+				t.Errorf("normal unary RPC should not have grpc_trailers_only metadata")
+			}
+		}
+	}
+}
+
 // filterMessages returns messages belonging to a specific flow, sorted by sequence.
 func filterMessages(messages []*flow.Message, flowID string) []*flow.Message {
 	var result []*flow.Message

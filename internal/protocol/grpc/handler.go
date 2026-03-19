@@ -138,6 +138,11 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	// Determine session type based on frame counts.
 	sessionType := ClassifyFlowType(len(reqFrames), len(respFrames))
 
+	// Detect trailers-only: no parsed frames AND no response body data.
+	// Using len(respFrames)==0 alone would false-positive when frames exist
+	// but failed to parse (e.g., MaxBodySize truncation, incomplete frames).
+	trailersOnly := len(respFrames) == 0 && len(info.ResponseBody) == 0
+
 	// Extract grpc-status from trailers or response headers.
 	grpcStatus := ExtractGRPCStatus(info.Trailers, info.ResponseHeaders)
 	grpcMessage := ExtractGRPCMessage(info.Trailers, info.ResponseHeaders)
@@ -183,11 +188,11 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	if sessionType == "unary" {
 		// Unary: one send message (seq=0), one receive message (seq=1).
 		seq = h.recordSendMessages(ctx, logger, fl.ID, info, service, method, grpcEncoding, reqFrames, seq)
-		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq)
+		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq, trailersOnly)
 	} else {
 		// Streaming: record all request frames as send, all response frames as receive.
 		seq = h.recordSendMessages(ctx, logger, fl.ID, info, service, method, grpcEncoding, reqFrames, seq)
-		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq)
+		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq, trailersOnly)
 	}
 
 	logger.Info("gRPC flow recorded",
@@ -273,11 +278,18 @@ func (h *Handler) recordReceiveMessages(
 	service, method, grpcStatus, grpcMessage, grpcEncoding string,
 	frames []*Frame,
 	startSeq int,
+	trailersOnly bool,
 ) {
 	seq := startSeq
 
 	if len(frames) == 0 {
 		// Record the response metadata even without frames (e.g., error responses).
+		meta := buildReceiveMetadata(service, method, grpcStatus, grpcMessage, grpcEncoding, false)
+		// Only mark as trailers-only when the response body was truly empty.
+		// len(frames)==0 alone could be a false positive from parse failure.
+		if trailersOnly {
+			meta["grpc_trailers_only"] = "true"
+		}
 		msg := &flow.Message{
 			FlowID:     flowID,
 			Sequence:   seq,
@@ -285,7 +297,7 @@ func (h *Handler) recordReceiveMessages(
 			Timestamp:  info.Start.Add(info.Duration),
 			StatusCode: info.StatusCode,
 			Headers:    mergeHeaders(info.ResponseHeaders, info.Trailers),
-			Metadata:   buildReceiveMetadata(service, method, grpcStatus, grpcMessage, grpcEncoding, false),
+			Metadata:   meta,
 		}
 		if err := h.store.AppendMessage(ctx, msg); err != nil {
 			logger.Error("gRPC receive message save failed", "sequence", seq, "error", err)

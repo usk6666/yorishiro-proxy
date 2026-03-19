@@ -803,6 +803,177 @@ func TestRecordSession_EmptyBodies(t *testing.T) {
 	}
 }
 
+// --- Trailers-Only metadata tests ---
+
+func TestRecordSession_TrailersOnly_NoResponseFrames(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	ctx := context.Background()
+
+	// Trailers-Only: server responds with trailers only (e.g., UNIMPLEMENTED).
+	// No request or response DATA frames.
+	info := &StreamInfo{
+		ConnID:     "test-conn-trailers-only",
+		ClientAddr: "127.0.0.1:10000",
+		ServerAddr: "10.0.0.1:50051",
+		Method:     "POST",
+		URL: &url.URL{
+			Scheme: "https",
+			Host:   "example.com",
+			Path:   "/com.example.UserService/GetUser",
+		},
+		RequestHeaders: map[string][]string{
+			"Content-Type": {"application/grpc"},
+		},
+		ResponseHeaders: map[string][]string{
+			"Content-Type": {"application/grpc"},
+			"grpc-status":  {"12"},
+			"grpc-message": {"method not implemented"},
+		},
+		RequestBody:  nil, // No request body (0 req frames).
+		ResponseBody: nil, // No response body (0 resp frames).
+		StatusCode:   200,
+		Start:        time.Now(),
+		Duration:     5 * time.Millisecond,
+	}
+
+	err := handler.RecordSession(ctx, info)
+	if err != nil {
+		t.Fatalf("RecordSession() error = %v", err)
+	}
+
+	fl := store.flows[0]
+	if fl.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
+	}
+
+	msgs := store.messagesForSession(fl.ID)
+	if len(msgs) != 2 {
+		t.Fatalf("messages count = %d, want 2", len(msgs))
+	}
+
+	// Receive message should have grpc_trailers_only metadata.
+	recv := msgs[1]
+	if recv.Metadata["grpc_trailers_only"] != "true" {
+		t.Errorf("grpc_trailers_only = %q, want %q", recv.Metadata["grpc_trailers_only"], "true")
+	}
+	if recv.Metadata["grpc_status"] != "12" {
+		t.Errorf("grpc_status = %q, want %q", recv.Metadata["grpc_status"], "12")
+	}
+	if recv.Metadata["grpc_message"] != "method not implemented" {
+		t.Errorf("grpc_message = %q, want %q", recv.Metadata["grpc_message"], "method not implemented")
+	}
+}
+
+func TestRecordSession_TrailersOnly_RequestWithNoResponseFrames(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	ctx := context.Background()
+
+	// Client sends data but server responds with trailers-only (e.g., NOT_FOUND).
+	reqPayload := []byte{0x0A, 0x05, 0x68, 0x65, 0x6C, 0x6C, 0x6F}
+	info := &StreamInfo{
+		ConnID:     "test-conn-trailers-only-with-req",
+		ClientAddr: "127.0.0.1:10001",
+		ServerAddr: "10.0.0.1:50051",
+		Method:     "POST",
+		URL: &url.URL{
+			Scheme: "https",
+			Host:   "example.com",
+			Path:   "/com.example.UserService/GetUser",
+		},
+		RequestHeaders: map[string][]string{
+			"Content-Type": {"application/grpc"},
+		},
+		ResponseHeaders: map[string][]string{
+			"Content-Type": {"application/grpc"},
+			"grpc-status":  {"5"},
+			"grpc-message": {"user not found"},
+		},
+		RequestBody:  EncodeFrame(false, reqPayload),
+		ResponseBody: nil, // No response body (trailers-only).
+		StatusCode:   200,
+		Start:        time.Now(),
+		Duration:     10 * time.Millisecond,
+	}
+
+	err := handler.RecordSession(ctx, info)
+	if err != nil {
+		t.Fatalf("RecordSession() error = %v", err)
+	}
+
+	fl := store.flows[0]
+	if fl.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
+	}
+
+	msgs := store.messagesForSession(fl.ID)
+	if len(msgs) != 2 {
+		t.Fatalf("messages count = %d, want 2", len(msgs))
+	}
+
+	// Send message should NOT have grpc_trailers_only.
+	send := msgs[0]
+	if _, ok := send.Metadata["grpc_trailers_only"]; ok {
+		t.Errorf("send message should not have grpc_trailers_only metadata")
+	}
+
+	// Receive message should have grpc_trailers_only.
+	recv := msgs[1]
+	if recv.Metadata["grpc_trailers_only"] != "true" {
+		t.Errorf("grpc_trailers_only = %q, want %q", recv.Metadata["grpc_trailers_only"], "true")
+	}
+}
+
+func TestRecordSession_NormalUnary_NoTrailersOnlyMetadata(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	ctx := context.Background()
+
+	// Normal unary RPC with both request and response DATA frames.
+	info := &StreamInfo{
+		ConnID:     "test-conn-normal-unary",
+		ClientAddr: "127.0.0.1:10002",
+		ServerAddr: "10.0.0.1:50051",
+		Method:     "POST",
+		URL: &url.URL{
+			Scheme: "https",
+			Host:   "example.com",
+			Path:   "/com.example.UserService/GetUser",
+		},
+		RequestHeaders: map[string][]string{
+			"Content-Type": {"application/grpc"},
+		},
+		ResponseHeaders: map[string][]string{
+			"Content-Type": {"application/grpc"},
+		},
+		Trailers: map[string][]string{
+			"grpc-status": {"0"},
+		},
+		RequestBody:  EncodeFrame(false, []byte{0x01}),
+		ResponseBody: EncodeFrame(false, []byte{0x02}),
+		StatusCode:   200,
+		Start:        time.Now(),
+		Duration:     20 * time.Millisecond,
+	}
+
+	err := handler.RecordSession(ctx, info)
+	if err != nil {
+		t.Fatalf("RecordSession() error = %v", err)
+	}
+
+	msgs := store.messagesForSession(store.flows[0].ID)
+	if len(msgs) != 2 {
+		t.Fatalf("messages count = %d, want 2", len(msgs))
+	}
+
+	// Receive message should NOT have grpc_trailers_only.
+	recv := msgs[1]
+	if _, ok := recv.Metadata["grpc_trailers_only"]; ok {
+		t.Errorf("normal unary RPC should not have grpc_trailers_only metadata, got %q", recv.Metadata["grpc_trailers_only"])
+	}
+}
+
 // --- extractHeader tests ---
 
 func TestExtractHeader(t *testing.T) {
