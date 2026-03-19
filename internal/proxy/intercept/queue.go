@@ -146,6 +146,11 @@ type InterceptedRequest struct {
 	// for the protocol or connection.
 	RawBytes []byte
 
+	// Metadata holds protocol-specific metadata for the intercepted item.
+	// For gRPC requests, this includes "grpc_content_type", "grpc_encoding",
+	// and "original_frames" to enable proper re-encoding on modify_and_forward.
+	Metadata map[string]string
+
 	// --- WebSocket frame metadata (phase=websocket_frame only) ---
 
 	// WSOpcode is the WebSocket frame opcode (e.g. 0x1 for text, 0x2 for binary).
