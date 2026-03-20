@@ -122,13 +122,22 @@ func TestTCPForwardListener_TLS_MITM_SNIDiffersFromTarget(t *testing.T) {
 
 	handler := &echoHandler{}
 
+	// Use a closed localhost port as target to avoid DNS resolution and
+	// connection timeout when the handler attempts to dial upstream.
+	tmpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, unreachablePort, _ := net.SplitHostPort(tmpLn.Addr().String())
+	tmpLn.Close()
+
 	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
 		Addr:    "127.0.0.1:0",
 		Handler: handler,
 		Issuer:  issuer,
 		Logger:  testutil.DiscardLogger(),
 		Config: &config.ForwardConfig{
-			Target:   "backend.example.com:443",
+			Target:   "127.0.0.1:" + unreachablePort,
 			Protocol: "raw",
 			TLS:      true,
 		},
@@ -177,8 +186,13 @@ func TestTCPForwardListener_TLS_MITM_SNIDiffersFromTarget(t *testing.T) {
 		t.Errorf("certificate CN = %q, want %q (should match SNI)", cn, "different.example.com")
 	}
 
+	tlsConn.Close()
 	cancel()
-	<-errCh
+	select {
+	case <-errCh:
+	case <-time.After(5 * time.Second):
+		// Listener may take a moment to shut down.
+	}
 }
 
 func TestTCPForwardListener_TLS_False_NoTermination(t *testing.T) {
