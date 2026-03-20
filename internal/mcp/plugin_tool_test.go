@@ -52,6 +52,7 @@ func writeStarlarkScript(t *testing.T, dir, name, content string) string {
 }
 
 func TestPlugin_List_Empty(t *testing.T) {
+	t.Parallel()
 	logger := testutil.DiscardLogger()
 	engine := plugin.NewEngine(logger)
 
@@ -83,6 +84,7 @@ func TestPlugin_List_Empty(t *testing.T) {
 }
 
 func TestPlugin_List_WithPlugins(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	scriptPath := writeStarlarkScript(t, dir, "test_plugin.star", `
 def on_receive_from_client(data):
@@ -128,6 +130,7 @@ def on_receive_from_client(data):
 }
 
 func TestPlugin_EnableDisable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	scriptPath := writeStarlarkScript(t, dir, "toggle_plugin.star", `
 def on_receive_from_client(data):
@@ -205,6 +208,7 @@ def on_receive_from_client(data):
 }
 
 func TestPlugin_Reload(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	scriptPath := writeStarlarkScript(t, dir, "reload_plugin.star", `
 def on_receive_from_client(data):
@@ -245,6 +249,7 @@ def on_receive_from_client(data):
 }
 
 func TestPlugin_ReloadAll(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	scriptPath := writeStarlarkScript(t, dir, "reload_all.star", `
 def on_receive_from_client(data):
@@ -285,6 +290,7 @@ def on_receive_from_client(data):
 }
 
 func TestPlugin_MissingAction(t *testing.T) {
+	t.Parallel()
 	logger := testutil.DiscardLogger()
 	engine := plugin.NewEngine(logger)
 
@@ -303,6 +309,7 @@ func TestPlugin_MissingAction(t *testing.T) {
 }
 
 func TestPlugin_InvalidAction(t *testing.T) {
+	t.Parallel()
 	logger := testutil.DiscardLogger()
 	engine := plugin.NewEngine(logger)
 
@@ -321,6 +328,7 @@ func TestPlugin_InvalidAction(t *testing.T) {
 }
 
 func TestPlugin_NilEngine(t *testing.T) {
+	t.Parallel()
 	cs := setupTestSessionWithPluginEngine(t, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -336,6 +344,7 @@ func TestPlugin_NilEngine(t *testing.T) {
 }
 
 func TestPlugin_EnableNotFound(t *testing.T) {
+	t.Parallel()
 	logger := testutil.DiscardLogger()
 	engine := plugin.NewEngine(logger)
 
@@ -354,6 +363,7 @@ func TestPlugin_EnableNotFound(t *testing.T) {
 }
 
 func TestPlugin_EnableMissingName(t *testing.T) {
+	t.Parallel()
 	logger := testutil.DiscardLogger()
 	engine := plugin.NewEngine(logger)
 

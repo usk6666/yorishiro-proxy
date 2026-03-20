@@ -7,6 +7,7 @@ import (
 )
 
 func TestSaveMacro_Create(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -38,6 +39,7 @@ func TestSaveMacro_Create(t *testing.T) {
 }
 
 func TestSaveMacro_Upsert(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -82,6 +84,7 @@ func TestSaveMacro_Upsert(t *testing.T) {
 }
 
 func TestGetMacro_NotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -92,6 +95,7 @@ func TestGetMacro_NotFound(t *testing.T) {
 }
 
 func TestListMacros_Empty(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -105,6 +109,7 @@ func TestListMacros_Empty(t *testing.T) {
 }
 
 func TestListMacros_OrderedByName(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -132,6 +137,7 @@ func TestListMacros_OrderedByName(t *testing.T) {
 }
 
 func TestDeleteMacro_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -150,6 +156,7 @@ func TestDeleteMacro_Success(t *testing.T) {
 }
 
 func TestDeleteMacro_NotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -160,6 +167,7 @@ func TestDeleteMacro_NotFound(t *testing.T) {
 }
 
 func TestSaveMacro_EmptyDescription(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -178,6 +186,7 @@ func TestSaveMacro_EmptyDescription(t *testing.T) {
 }
 
 func TestMacroTableSurvivesMigration(t *testing.T) {
+	t.Parallel()
 	// Tests that the macros table exists after V2 migration.
 	store := newTestStore(t)
 	ctx := context.Background()

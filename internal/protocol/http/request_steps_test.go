@@ -163,8 +163,14 @@ func TestReadAndCaptureRequestBody(t *testing.T) {
 }
 
 func TestReadAndCaptureRequestBody_Truncation(t *testing.T) {
+	// Use a small MaxBodySize to avoid 254 MB allocation under -race.
+	origMax := config.MaxBodySize
+	config.MaxBodySize = 1024
+	t.Cleanup(func() { config.MaxBodySize = origMax })
+
 	// Create a body larger than MaxBodySize to test truncation.
-	bigBody := strings.Repeat("x", int(config.MaxBodySize)+100)
+	bodyLen := int(config.MaxBodySize) + 100
+	bigBody := strings.Repeat("x", bodyLen)
 	req, _ := gohttp.NewRequest("POST", "http://example.com", strings.NewReader(bigBody))
 
 	logger := testutil.DiscardLogger()
@@ -179,8 +185,8 @@ func TestReadAndCaptureRequestBody_Truncation(t *testing.T) {
 
 	// The req.Body should still contain the full body (not truncated).
 	rereadBody, _ := io.ReadAll(req.Body)
-	if len(rereadBody) != len(bigBody) {
-		t.Errorf("re-read body len = %d, want %d", len(rereadBody), len(bigBody))
+	if len(rereadBody) != bodyLen {
+		t.Errorf("re-read body len = %d, want %d", len(rereadBody), bodyLen)
 	}
 }
 
