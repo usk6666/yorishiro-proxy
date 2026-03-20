@@ -109,9 +109,9 @@
             "properties": {
               "offset": { "type": "integer" },
               "data_base64": { "type": "string" },
-              "find": { "type": "string" },
+              "find_text": { "type": "string" },
               "find_base64": { "type": "string" },
-              "replace": { "type": "string" },
+              "replace_text": { "type": "string" },
               "replace_base64": { "type": "string" }
             },
             "additionalProperties": false
