@@ -455,15 +455,21 @@ export interface CACertResult {
   install_hint?: string;
 }
 
+/** Intercept phase: request (pre-send), response (post-receive), or websocket_frame. */
+export type InterceptPhase = "request" | "response" | "websocket_frame";
+
+/** Intercept protocol type. */
+export type InterceptProtocol = "http" | "websocket";
+
 /** Intercept queue entry. */
 export interface InterceptQueueEntry {
   id: string;
-  phase?: string; // "request" | "response" | "websocket_frame"
-  protocol?: string; // "http" | "websocket"
-  method: string;
-  url: string;
+  phase?: InterceptPhase;
+  protocol?: InterceptProtocol;
+  method?: string; // HTTP-only (omitempty in backend)
+  url?: string; // HTTP-only (omitempty in backend)
   status_code?: number; // response phase: HTTP status code
-  headers: Record<string, string[]>;
+  headers?: Record<string, string[]>; // HTTP-only (omitempty in backend)
   body_encoding: string;
   body: string;
   timestamp: string;
@@ -471,7 +477,7 @@ export interface InterceptQueueEntry {
   metadata?: Record<string, string>; // protocol-specific metadata (e.g. gRPC encoding)
   // WebSocket frame fields (phase=websocket_frame only)
   opcode?: string; // e.g. "Text", "Binary"
-  direction?: string; // "client_to_server" | "server_to_client"
+  direction?: "client_to_server" | "server_to_client";
   flow_id?: string;
   upgrade_url?: string;
   sequence?: number;

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Spinner, Table, Tabs, useToast } from "../../components/ui/index.js";
 import { useInterceptAction, useQuery } from "../../lib/mcp/hooks.js";
 import type {
+  InterceptPhase,
   InterceptQueueEntry,
   InterceptQueueResult,
 } from "../../lib/mcp/types.js";
@@ -26,7 +27,7 @@ const HTTP_STATUS_CODES = [
 type DetailViewMode = "structured" | "raw";
 
 /** Resolve the effective phase of an entry, defaulting to "request" for backward compat. */
-function resolvePhase(entry: InterceptQueueEntry): string {
+function resolvePhase(entry: InterceptQueueEntry): InterceptPhase {
   return entry.phase ?? "request";
 }
 
@@ -96,32 +97,14 @@ export function InterceptPage() {
       setEditUrl("");
       setEditStatusCode(entry.status_code ?? 200);
       setEditBody(entry.body);
-
-      const headerRows: HeaderRow[] = [];
-      if (entry.headers) {
-        for (const [name, values] of Object.entries(entry.headers)) {
-          for (const value of values) {
-            headerRows.push({ id: crypto.randomUUID(), name, value });
-          }
-        }
-      }
-      setEditHeaders(headerRows);
+      setEditHeaders(flattenHeaders(entry.headers));
     } else {
       // Request phase (default)
-      setEditMethod(entry.method);
-      setEditUrl(entry.url);
+      setEditMethod(entry.method ?? "");
+      setEditUrl(entry.url ?? "");
       setEditBody(entry.body);
       setEditStatusCode(0);
-
-      const headerRows: HeaderRow[] = [];
-      if (entry.headers) {
-        for (const [name, values] of Object.entries(entry.headers)) {
-          for (const value of values) {
-            headerRows.push({ id: crypto.randomUUID(), name, value });
-          }
-        }
-      }
-      setEditHeaders(headerRows);
+      setEditHeaders(flattenHeaders(entry.headers));
     }
 
     // Populate raw bytes if available
@@ -195,48 +178,24 @@ export function InterceptPage() {
           },
         });
       } else if (phase === "response") {
-        const overrideHeaders: Record<string, string> = {};
-        for (const h of editHeaders) {
-          const key = h.name.trim();
-          if (key) {
-            if (key in overrideHeaders) {
-              overrideHeaders[key] = overrideHeaders[key] + ", " + h.value;
-            } else {
-              overrideHeaders[key] = h.value;
-            }
-          }
-        }
-
         await interceptAction({
           action: "modify_and_forward",
           params: {
             intercept_id: selectedId,
             override_status: editStatusCode,
-            override_response_headers: overrideHeaders,
+            override_response_headers: mergeHeaders(editHeaders),
             override_response_body: editBody,
           },
         });
       } else {
         // Request phase
-        const overrideHeaders: Record<string, string> = {};
-        for (const h of editHeaders) {
-          const key = h.name.trim();
-          if (key) {
-            if (key in overrideHeaders) {
-              overrideHeaders[key] = overrideHeaders[key] + ", " + h.value;
-            } else {
-              overrideHeaders[key] = h.value;
-            }
-          }
-        }
-
         await interceptAction({
           action: "modify_and_forward",
           params: {
             intercept_id: selectedId,
             override_method: editMethod,
             override_url: editUrl,
-            override_headers: overrideHeaders,
+            override_headers: mergeHeaders(editHeaders),
             override_body: editBody,
           },
         });
@@ -285,7 +244,7 @@ export function InterceptPage() {
         </Badge>
       </div>
       <p className="page-description">
-        Intercepted requests waiting for review.
+        Intercepted items waiting for review.
       </p>
 
       <div className="intercept-tabs">
@@ -390,22 +349,23 @@ export function InterceptPage() {
                   <>
                     {/* Status Code + URL (read-only) */}
                     <div className="intercept-request-line">
-                      <select
-                        className="intercept-method-select intercept-status-select"
+                      <input
+                        type="number"
+                        className="input intercept-status-input"
                         value={editStatusCode}
+                        min={100}
+                        max={599}
                         onChange={(e) => setEditStatusCode(Number(e.target.value))}
-                      >
+                        list="http-status-codes"
+                      />
+                      <datalist id="http-status-codes">
                         {HTTP_STATUS_CODES.map((code) => (
-                          <option key={code} value={code}>{code}</option>
+                          <option key={code} value={code} />
                         ))}
-                        {/* Allow the current status code even if not in the preset list */}
-                        {!HTTP_STATUS_CODES.includes(editStatusCode) && (
-                          <option value={editStatusCode}>{editStatusCode}</option>
-                        )}
-                      </select>
+                      </datalist>
                       <input
                         className="input intercept-url-input"
-                        value={selectedEntry.url}
+                        value={selectedEntry.url ?? ""}
                         readOnly
                         title="URL (read-only for response phase)"
                       />
@@ -475,7 +435,7 @@ function DetailTitle({ entry }: { entry: InterceptQueueEntry }) {
           {entry.status_code ?? "???"}
         </Badge>
         {" "}
-        {extractHost(entry.url)}
+        {extractHost(entry.url ?? "")}
       </>
     );
   }
@@ -492,7 +452,7 @@ function DetailTitle({ entry }: { entry: InterceptQueueEntry }) {
     );
   }
   // request phase (default)
-  return <>{entry.method} {extractHost(entry.url)}</>;
+  return <>{entry.method ?? ""} {extractHost(entry.url ?? "")}</>;
 }
 
 // ---------------------------------------------------------------------------
@@ -570,13 +530,17 @@ function QueuePanel({ queue, loading, error, selectedId, onSelect }: QueuePanelP
                   <QueueMethodCell entry={entry} phase={phase} />
                 </td>
                 <td>
-                  <span className="intercept-queue-url" title={phase === "websocket_frame" ? entry.upgrade_url : entry.url}>
-                    {extractPath(phase === "websocket_frame" ? (entry.upgrade_url ?? "") : entry.url)}
+                  <span className="intercept-queue-url" title={phase === "websocket_frame" ? (entry.upgrade_url || undefined) : (entry.url ?? "")}>
+                    {phase === "websocket_frame"
+                      ? (entry.upgrade_url ? extractPath(entry.upgrade_url) : (entry.flow_id ? `[Flow ${entry.flow_id.slice(0, 8)}]` : "[WebSocket]"))
+                      : extractPath(entry.url ?? "")}
                   </span>
                 </td>
                 <td>
                   <span className="intercept-queue-host">
-                    {extractHost(phase === "websocket_frame" ? (entry.upgrade_url ?? "") : entry.url)}
+                    {phase === "websocket_frame"
+                      ? (entry.upgrade_url ? extractHost(entry.upgrade_url) : "\u2014")
+                      : extractHost(entry.url ?? "")}
                   </span>
                 </td>
                 <td>
@@ -604,7 +568,7 @@ function QueuePanel({ queue, loading, error, selectedId, onSelect }: QueuePanelP
 // QueueMethodCell -- phase-aware method/status display in the queue table
 // ---------------------------------------------------------------------------
 
-function QueueMethodCell({ entry, phase }: { entry: InterceptQueueEntry; phase: string }) {
+function QueueMethodCell({ entry, phase }: { entry: InterceptQueueEntry; phase: InterceptPhase }) {
   if (phase === "response") {
     return (
       <Badge variant={statusVariant(entry.status_code ?? 0)}>
@@ -626,8 +590,8 @@ function QueueMethodCell({ entry, phase }: { entry: InterceptQueueEntry; phase: 
   }
   // request phase
   return (
-    <Badge variant={methodVariant(entry.method)}>
-      {entry.method}
+    <Badge variant={methodVariant(entry.method ?? "")}>
+      {entry.method ?? ""}
     </Badge>
   );
 }
@@ -635,6 +599,34 @@ function QueueMethodCell({ entry, phase }: { entry: InterceptQueueEntry; phase: 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Flatten headers Record to editable HeaderRow array. */
+function flattenHeaders(headers: Record<string, string[]> | undefined): HeaderRow[] {
+  if (!headers) return [];
+  const rows: HeaderRow[] = [];
+  for (const [name, values] of Object.entries(headers)) {
+    for (const value of values) {
+      rows.push({ id: crypto.randomUUID(), name, value });
+    }
+  }
+  return rows;
+}
+
+/** Merge HeaderRow array to Record with comma concatenation (RFC 7230). */
+function mergeHeaders(rows: HeaderRow[]): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const h of rows) {
+    const key = h.name.trim();
+    if (key) {
+      if (key in merged) {
+        merged[key] = merged[key] + ", " + h.value;
+      } else {
+        merged[key] = h.value;
+      }
+    }
+  }
+  return merged;
+}
 
 function truncateId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
@@ -692,7 +684,7 @@ function methodVariant(method: string): "success" | "warning" | "danger" | "info
   }
 }
 
-function phaseVariant(phase: string): "success" | "warning" | "danger" | "info" | "default" {
+function phaseVariant(phase: InterceptPhase): "success" | "warning" | "danger" | "info" | "default" {
   switch (phase) {
     case "request":
       return "info";
@@ -705,7 +697,7 @@ function phaseVariant(phase: string): "success" | "warning" | "danger" | "info" 
   }
 }
 
-function phaseLabel(phase: string): string {
+function phaseLabel(phase: InterceptPhase): string {
   switch (phase) {
     case "request":
       return "Request";

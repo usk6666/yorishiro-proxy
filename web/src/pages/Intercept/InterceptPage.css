@@ -405,9 +405,10 @@
   vertical-align: middle;
 }
 
-/* Status code select (slightly wider than method select) */
-.intercept-status-select {
-  width: 80px;
+/* Status code number input (slightly wider than method select) */
+.intercept-status-input {
+  width: 90px;
+  flex-shrink: 0;
 }
 
 /* WebSocket frame metadata panel */
