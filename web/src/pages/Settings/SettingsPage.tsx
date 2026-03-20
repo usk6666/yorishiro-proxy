@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Spinner, Tabs } from "../../components/ui/index.js";
+import { Badge, Spinner, Tabs } from "../../components/ui/index.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import { AutoTransformRules } from "./AutoTransformRules.js";
 import { CACertPanel } from "./CACertPanel.js";
@@ -68,6 +68,31 @@ export function SettingsPage() {
           <div className="settings-section">
             <ProxyControl />
             {configData && <ProtocolFilter config={configData} />}
+            {configData?.safety_filter && (
+              <div className="settings-card">
+                <div className="settings-card-header">
+                  <span className="settings-card-title">Safety Filter</span>
+                </div>
+                <div className="settings-card-body">
+                  <div className="settings-form-row">
+                    <div className="settings-info-item">
+                      <span className="settings-info-label">Status</span>
+                      <Badge variant={configData.safety_filter.enabled ? "success" : "default"}>
+                        {configData.safety_filter.enabled ? "Enabled" : "Disabled"}
+                      </Badge>
+                    </div>
+                    <div className="settings-info-item">
+                      <span className="settings-info-label">Input Rules</span>
+                      <span className="settings-info-value">{configData.safety_filter.input_rules}</span>
+                    </div>
+                    <div className="settings-info-item">
+                      <span className="settings-info-label">Output Rules</span>
+                      <span className="settings-info-value">{configData.safety_filter.output_rules}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         );
 

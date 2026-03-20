@@ -305,6 +305,9 @@ export interface FlowEntry {
   tags?: Record<string, string>;
   timestamp: string;
   duration_ms: number;
+  send_ms?: number;
+  wait_ms?: number;
+  receive_ms?: number;
 }
 
 /** Response for query resource="flows". */
@@ -368,6 +371,9 @@ export interface FlowDetailResult {
   response_body_truncated: boolean;
   timestamp: string;
   duration_ms: number;
+  send_ms?: number;
+  wait_ms?: number;
+  receive_ms?: number;
   tags?: Record<string, string>;
   blocked_by?: string;
   raw_request?: string;
@@ -395,6 +401,20 @@ export interface ListenerStatusEntry {
   uptime_seconds: number;
 }
 
+/** Rate limit status in the status response. */
+export interface RateLimitStatus {
+  effective: RateLimitConfig;
+  enabled: boolean;
+}
+
+/** Budget status in the status response. */
+export interface BudgetStatus {
+  effective: BudgetConfig;
+  enabled: boolean;
+  request_count: number;
+  stop_reason?: string;
+}
+
 /** Response for query resource="status". */
 export interface StatusResult {
   running: boolean;
@@ -410,7 +430,11 @@ export interface StatusResult {
   db_size_bytes: number;
   uptime_seconds: number;
   ca_initialized: boolean;
-  tls_fingerprint?: string;
+  socks5_enabled: boolean;
+  socks5_auth?: string;
+  tls_fingerprint: string;
+  rate_limits?: RateLimitStatus;
+  budget?: BudgetStatus;
 }
 
 /** Scope rule in config output. */
@@ -418,6 +442,13 @@ export interface ScopeRuleOutput {
   hostname?: string;
   url_prefix?: string;
   method?: string;
+}
+
+/** Safety filter status in the config response. */
+export interface SafetyFilterStatus {
+  enabled: boolean;
+  input_rules: number;
+  output_rules: number;
 }
 
 /** Response for query resource="config". */
@@ -442,6 +473,11 @@ export interface ConfigResult {
     cert_path: string;
     key_path: string;
   };
+  safety_filter?: SafetyFilterStatus;
+  max_connections: number;
+  peek_timeout_ms: number;
+  request_timeout_ms: number;
+  tls_fingerprint: string;
 }
 
 /** Response for query resource="ca_cert". */

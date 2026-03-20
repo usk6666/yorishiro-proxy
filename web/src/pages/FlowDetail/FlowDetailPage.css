@@ -104,6 +104,15 @@
   color: var(--text-secondary);
 }
 
+.sd-timing-breakdown {
+  display: inline-flex;
+  gap: var(--space-sm);
+}
+
+.sd-timing-part {
+  white-space: nowrap;
+}
+
 /* Status code colors */
 .sd-status--2xx {
   color: var(--accent-success);
