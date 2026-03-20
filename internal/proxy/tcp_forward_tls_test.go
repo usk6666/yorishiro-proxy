@@ -500,6 +500,9 @@ func TestTCPForwardListener_TLS_MITM_ALPN(t *testing.T) {
 		t.Errorf("ALPN = %q, want %q", state.NegotiatedProtocol, "h2")
 	}
 
+	// Close connection before cancel to unblock echoHandler's io.Copy.
+	tlsConn.Close()
+
 	cancel()
 	<-errCh
 }
