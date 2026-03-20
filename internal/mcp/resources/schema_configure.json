@@ -101,6 +101,79 @@
       },
       "additionalProperties": false
     },
+    "upstream_proxy": {
+      "type": ["string", "null"],
+      "description": "Upstream proxy URL. Set to proxy URL to route traffic, empty string to disable. Omit to keep current."
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "TLS ClientHello fingerprint profile for upstream connections.",
+      "enum": ["chrome", "firefox", "safari", "edge", "random", "none"]
+    },
+    "max_connections": {
+      "type": "integer",
+      "description": "Maximum concurrent proxy connections.",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "peek_timeout_ms": {
+      "type": "integer",
+      "description": "Protocol detection timeout in milliseconds.",
+      "minimum": 100,
+      "maximum": 600000
+    },
+    "request_timeout_ms": {
+      "type": "integer",
+      "description": "HTTP request header read timeout in milliseconds.",
+      "minimum": 100,
+      "maximum": 600000
+    },
+    "budget": {
+      "type": "object",
+      "description": "Diagnostic session budget limits.",
+      "properties": {
+        "max_total_requests": {
+          "type": "integer",
+          "description": "Maximum total requests for the session. 0 means no limit."
+        },
+        "max_duration": {
+          "type": "string",
+          "description": "Maximum session duration as Go duration string (e.g. 30m, 1h). 0s means no limit."
+        }
+      },
+      "additionalProperties": false
+    },
+    "intercept_queue": {
+      "type": "object",
+      "description": "Intercept queue behavior configuration.",
+      "properties": {
+        "timeout_ms": {
+          "type": "integer",
+          "description": "Timeout in milliseconds for blocked requests."
+        },
+        "timeout_behavior": {
+          "type": "string",
+          "description": "Action when timeout is reached: auto_release (default) or auto_drop.",
+          "enum": ["auto_release", "auto_drop"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "client_cert": {
+      "type": "object",
+      "description": "Global mTLS client certificate configuration.",
+      "properties": {
+        "cert_path": {
+          "type": "string",
+          "description": "PEM client certificate path (empty to remove)."
+        },
+        "key_path": {
+          "type": "string",
+          "description": "PEM client private key path (empty to remove)."
+        }
+      },
+      "additionalProperties": false
+    },
     "socks5_auth": {
       "type": "object",
       "description": "SOCKS5 authentication configuration.",
@@ -219,6 +292,14 @@
           "type": "object",
           "description": "Header name to regex pattern mapping (AND logic).",
           "additionalProperties": { "type": "string" }
+        },
+        "upgrade_url_pattern": {
+          "type": "string",
+          "description": "Regex for WebSocket upgrade URL matching (WebSocket rules only)."
+        },
+        "flow_id": {
+          "type": "string",
+          "description": "WebSocket flow ID to intercept (WebSocket rules only)."
         }
       },
       "additionalProperties": false

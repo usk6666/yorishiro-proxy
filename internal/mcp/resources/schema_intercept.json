@@ -16,34 +16,66 @@
       "properties": {
         "intercept_id": {
           "type": "string",
-          "description": "Intercepted request ID (required for all actions)."
+          "description": "Intercepted request/response ID (required for all actions)."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Forwarding mode: structured (default, L7 modifications) or raw (bypass L7, send raw bytes).",
+          "enum": ["structured", "raw"]
+        },
+        "raw_override_base64": {
+          "type": "string",
+          "description": "Base64-encoded raw bytes for raw mode forwarding (required for modify_and_forward with mode=raw)."
         },
         "override_method": {
           "type": "string",
-          "description": "HTTP method override (modify_and_forward)."
+          "description": "HTTP method override (request phase, structured mode)."
         },
         "override_url": {
           "type": "string",
-          "description": "URL override (modify_and_forward)."
+          "description": "URL override (request phase, structured mode)."
         },
         "override_headers": {
           "type": "object",
-          "description": "Header overrides (modify_and_forward).",
+          "description": "Header overrides (request phase, structured mode).",
           "additionalProperties": { "type": "string" }
         },
         "add_headers": {
           "type": "object",
-          "description": "Headers to add (modify_and_forward).",
+          "description": "Headers to add (request phase, structured mode).",
           "additionalProperties": { "type": "string" }
         },
         "remove_headers": {
           "type": "array",
-          "description": "Header names to remove (modify_and_forward).",
+          "description": "Header names to remove (request phase, structured mode).",
           "items": { "type": "string" }
         },
         "override_body": {
           "type": "string",
-          "description": "Body override (modify_and_forward)."
+          "description": "Body override (request phase, structured mode; or WebSocket frame payload)."
+        },
+        "override_status": {
+          "type": "integer",
+          "description": "HTTP status code override (response phase, structured mode)."
+        },
+        "override_response_headers": {
+          "type": "object",
+          "description": "Response header overrides (response phase, structured mode).",
+          "additionalProperties": { "type": "string" }
+        },
+        "add_response_headers": {
+          "type": "object",
+          "description": "Response headers to add (response phase, structured mode).",
+          "additionalProperties": { "type": "string" }
+        },
+        "remove_response_headers": {
+          "type": "array",
+          "description": "Response header names to remove (response phase, structured mode).",
+          "items": { "type": "string" }
+        },
+        "override_response_body": {
+          "type": "string",
+          "description": "Response body override (response phase, structured mode)."
         }
       },
       "additionalProperties": false
