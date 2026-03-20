@@ -559,13 +559,14 @@ func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forw
 	}
 	s.deps.tcpHandler.SetForwards(forwards)
 
-	// Extract port -> target map for the manager (it only needs addresses for listening).
-	targetMap := make(map[string]string, len(forwards))
-	for port, fc := range forwards {
-		targetMap[port] = fc.Target
+	params := proxy.TCPForwardParams{
+		Forwards:     forwards,
+		Handler:      s.deps.tcpHandler,
+		Detector:     s.deps.detector,
+		PluginEngine: s.deps.pluginEngine,
 	}
 
-	if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, targetMap, s.deps.tcpHandler); err != nil {
+	if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, params); err != nil {
 		s.deps.manager.StopNamed(ctx, listenerName)
 		return fmt.Errorf("tcp_forwards: %w", err)
 	}

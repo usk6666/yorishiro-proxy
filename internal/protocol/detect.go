@@ -66,3 +66,12 @@ func (d *Detector) Detect(peek []byte) proxy.ProtocolHandler {
 	}
 	return nil
 }
+
+// Handlers returns the registered handlers in priority order.
+// This implements the proxy.HandlerLister interface, allowing callers
+// to enumerate handlers for fixed-protocol dispatch.
+func (d *Detector) Handlers() []proxy.ProtocolHandler {
+	out := make([]proxy.ProtocolHandler, len(d.handlers))
+	copy(out, d.handlers)
+	return out
+}
