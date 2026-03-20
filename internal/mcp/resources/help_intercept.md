@@ -10,6 +10,13 @@ The action to execute. One of: `release`, `modify_and_forward`, `drop`.
 ### params (object, required)
 Action-specific parameters (see below).
 
+### Mode (string, optional)
+Forwarding mode for `release` and `modify_and_forward` actions.
+- `"structured"` (default): Apply L7 modifications (override_method, override_headers, etc.).
+- `"raw"`: Bypass L7 serialization and send raw bytes directly. When using `raw` mode:
+  - For `modify_and_forward`: `raw_override_base64` is required. All L7 override fields are ignored.
+  - For `release`: Forwards the original raw bytes as-is.
+
 ## Actions
 
 ### release
@@ -43,6 +50,10 @@ Modify an intercepted item and forward it with the specified changes.
 
 **Parameters (WebSocket frame phase):**
 - **override_body** (string, optional): Override the WebSocket frame payload. For text frames, provide the payload as a plain string. For binary frames, provide a Base64-encoded string.
+
+**Parameters (raw mode):**
+- **mode** (string, optional): Set to `"raw"` to use raw bytes mode.
+- **raw_override_base64** (string, required for raw mode): Base64-encoded raw bytes to send. Replaces the entire request/response on the wire.
 
 Returns: intercept_id, action, status, phase, protocol, and item details.
 
@@ -128,5 +139,17 @@ Returns: intercept_id, action, status.
 {
   "action": "drop",
   "params": {"intercept_id": "ws-frame-456"}
+}
+```
+
+### Modify and forward with raw bytes (raw mode)
+```json
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "int-abc-123",
+    "mode": "raw",
+    "raw_override_base64": "R0VUIC8gSFRUUC8xLjENCkhvc3Q6IGV4YW1wbGUuY29tDQoNCg=="
+  }
 }
 ```

@@ -4,11 +4,22 @@ Start the proxy server with optional configuration. The proxy listens on the spe
 
 ## Parameters
 
+### name (string, optional)
+Listener name for multi-listener support. Allows running multiple simultaneous listeners with different names.
+- Default: `"default"`
+
 ### listen_addr (string, optional)
 TCP address to listen on. Must be a loopback address for security.
 - Default: `"127.0.0.1:8080"`
 - Format: `"host:port"` (e.g. `"127.0.0.1:9090"`, `"[::1]:8080"`)
 - Only loopback addresses (127.0.0.1, ::1, localhost) are allowed
+
+### upstream_proxy (string, optional)
+Upstream proxy URL to route all outgoing traffic through.
+- Supported schemes: `http://host:port` (HTTP CONNECT proxy), `socks5://host:port` (SOCKS5 proxy)
+- Authentication: `http://user:pass@host:port`, `socks5://user:pass@host:port`
+- If omitted, traffic is sent directly to the target
+- Takes precedence over HTTP_PROXY/HTTPS_PROXY environment variables
 
 ### capture_scope (object, optional)
 Controls which requests are recorded to the flow store. If omitted, all requests are captured.
@@ -90,6 +101,35 @@ Username for SOCKS5 password authentication.
 Password for SOCKS5 password authentication.
 - Required when `socks5_auth` is `"password"`.
 - Ignored when `socks5_auth` is `"none"`.
+
+### client_cert (string, optional)
+Path to a PEM-encoded client certificate for mTLS with upstream servers (global).
+- Must be used together with `client_key`
+- If omitted, no client certificate is presented
+
+### client_key (string, optional)
+Path to a PEM-encoded client private key for mTLS with upstream servers (global).
+- Must be used together with `client_cert`
+- If omitted, no client certificate is presented
+
+### max_connections (integer, optional)
+Maximum number of concurrent proxy connections.
+- Default: `128`
+- Range: 1-100000
+
+### peek_timeout_ms (integer, optional)
+Timeout in milliseconds for protocol detection on new connections.
+- Default: `30000` (30 seconds)
+- Range: 100-600000
+
+### request_timeout_ms (integer, optional)
+Timeout in milliseconds for reading HTTP request headers.
+- Default: `60000` (60 seconds)
+- Range: 100-600000
+
+### auto_transform (array of transform rules, optional)
+Auto-transform rules for automatic request/response modification at startup. Same format as the `configure` tool's auto_transform rules.
+- If omitted, no auto-transform rules are active
 
 ## Usage Examples
 
@@ -222,5 +262,30 @@ socks5 127.0.0.1 1080
       }
     }
   ]
+}
+```
+
+### Start with upstream proxy
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "upstream_proxy": "http://upstream:3128"
+}
+```
+
+### Start with named listener
+```json
+{
+  "name": "api-proxy",
+  "listen_addr": "127.0.0.1:9090"
+}
+```
+
+### Start with mTLS client certificate
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "client_cert": "/path/to/client.crt",
+  "client_key": "/path/to/client.key"
 }
 ```

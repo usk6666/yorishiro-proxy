@@ -15,11 +15,12 @@ Fuzz job ID. Required for `fuzz_results` resource.
 
 ### filter (object, optional)
 Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
-- **protocol** (string): Protocol filter for flows (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`).
+- **protocol** (string): Protocol filter for flows (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`, `"SOCKS5+HTTPS"`, `"SOCKS5+HTTP"`).
+- **scheme** (string): URL scheme / transport filter for flows (e.g. `"https"`, `"http"`, `"wss"`, `"ws"`, `"tcp"`). Use to find TLS flows: `"https"` returns HTTP/1.x, HTTP/2, gRPC flows over TLS. WebSocket over TLS uses `"wss"`, not `"https"`.
 - **method** (string): HTTP method filter for flows (e.g. `"GET"`, `"POST"`).
 - **url_pattern** (string): URL substring match for flows (e.g. `"/api/"`).
 - **status_code** (integer): HTTP status code filter for flows and fuzz_results (e.g. `200`, `404`).
-- **blocked_by** (string): Filter for blocked flows (e.g. `"target_scope"`, `"intercept_drop"`).
+- **blocked_by** (string): Filter for blocked flows (e.g. `"target_scope"`, `"intercept_drop"`, `"rate_limit"`, `"safety_filter"`).
 - **state** (string): Flow lifecycle state filter (`"active"`, `"complete"`, `"error"`).
 - **technology** (string): Technology name filter for flows (case-insensitive substring match, e.g. `"nginx"`, `"wordpress"`).
 - **conn_id** (string): Connection ID filter for flows (exact match). Use to find all flows from the same connection.
@@ -27,7 +28,7 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
 - **outliers_only** (boolean): Return only outlier fuzz results (detected by status_code, body_length, or timing deviation).
-- **status** (string): Job status filter for fuzz_jobs (e.g. `"running"`, `"completed"`).
+- **status** (string): Job status filter for fuzz_jobs (`"running"`, `"paused"`, `"completed"`, `"cancelled"`, `"error"`).
 - **tag** (string): Job tag filter for fuzz_jobs (exact match).
 
 ### fields (array of strings, optional)
@@ -35,8 +36,9 @@ Controls which fields are returned in the response for `fuzz_jobs` and `fuzz_res
 If omitted, all fields are returned. Metadata fields (`count`, `total`, `summary`) are always included.
 
 ### sort_by (string, optional)
-Field to sort results by for the `fuzz_results` resource.
-Supported values: `index_num` (default), `status_code`, `duration_ms`, `response_length`.
+Field to sort results by.
+- For `flows` resource: `timestamp` (default), `duration_ms`.
+- For `fuzz_results` resource: `index_num` (default), `status_code`, `duration_ms`, `response_length`.
 
 ### limit (integer, optional)
 Maximum number of items to return. Default: 50, max: 1000. Applies to `flows`, `messages`, `fuzz_jobs`, and `fuzz_results`.
@@ -171,6 +173,14 @@ Returns for WebSocket items: `items[]` (id, phase, protocol, opcode, direction, 
 {
   "resource": "flows",
   "filter": {"host": "example.com"}
+}
+```
+
+### Filter flows by scheme (TLS flows)
+```json
+{
+  "resource": "flows",
+  "filter": {"scheme": "https"}
 }
 ```
 
