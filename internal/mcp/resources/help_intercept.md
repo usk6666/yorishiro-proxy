@@ -10,7 +10,7 @@ The action to execute. One of: `release`, `modify_and_forward`, `drop`.
 ### params (object, required)
 Action-specific parameters (see below).
 
-### Mode (string, optional)
+### mode (string, optional)
 Forwarding mode for `release` and `modify_and_forward` actions.
 - `"structured"` (default): Apply L7 modifications (override_method, override_headers, etc.).
 - `"raw"`: Bypass L7 serialization and send raw bytes directly. When using `raw` mode:

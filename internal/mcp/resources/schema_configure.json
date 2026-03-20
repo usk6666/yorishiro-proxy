@@ -134,7 +134,8 @@
       "properties": {
         "max_total_requests": {
           "type": "integer",
-          "description": "Maximum total requests for the session. 0 means no limit."
+          "description": "Maximum total requests for the session. 0 means no limit.",
+          "minimum": 0
         },
         "max_duration": {
           "type": "string",
@@ -149,7 +150,8 @@
       "properties": {
         "timeout_ms": {
           "type": "integer",
-          "description": "Timeout in milliseconds for blocked requests."
+          "description": "Timeout in milliseconds for blocked requests.",
+          "minimum": 1000
         },
         "timeout_behavior": {
           "type": "string",
