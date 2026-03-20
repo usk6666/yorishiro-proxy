@@ -295,7 +295,7 @@ func TestTCPForwardListener_TLS_NonTLSClient_GracefulFallback(t *testing.T) {
 	<-errCh
 }
 
-func TestTCPForwardListener_TLS_NoIssuer_ReturnsError(t *testing.T) {
+func TestTCPForwardListener_TLS_NoIssuer_ClosesConnection(t *testing.T) {
 	// When TLS is true but no issuer is configured, the connection should be closed.
 	handlerCalled := make(chan struct{}, 1)
 	handler := &namedHandler{
@@ -490,29 +490,6 @@ func TestTCPForwardListener_TLS_MITM_ALPN(t *testing.T) {
 	<-errCh
 }
 
-func TestIsTLSClientHello(t *testing.T) {
-	tests := []struct {
-		name   string
-		peek   []byte
-		expect bool
-	}{
-		{"TLS 1.0", []byte{0x16, 0x03, 0x01}, true},
-		{"TLS 1.2", []byte{0x16, 0x03, 0x03}, true},
-		{"TLS 1.3", []byte{0x16, 0x03, 0x04}, true},
-		{"not TLS - HTTP", []byte("GET / HTTP/1.1"), false},
-		{"not TLS - random", []byte{0x00, 0x01}, false},
-		{"too short - 1 byte", []byte{0x16}, false},
-		{"too short - empty", []byte{}, false},
-		{"wrong second byte", []byte{0x16, 0x04}, false},
-	}
-
-	// isTLSClientHello is unexported, so we test it indirectly through
-	// the TLS MITM graceful fallback behavior (non-TLS data should pass through).
-	// The explicit byte-level tests above are verified via the
-	// TestTCPForwardListener_TLS_NonTLSClient_GracefulFallback test.
-	_ = tests
-}
-
 func TestTCPForwardListener_TLS_MITM_IPAddress_Target(t *testing.T) {
 	// When target is an IP address, certificate should use IP SAN.
 	ca, issuer := newTestCAAndIssuer(t)
@@ -570,9 +547,24 @@ func TestTCPForwardListener_TLS_MITM_IPAddress_Target(t *testing.T) {
 	if len(state.PeerCertificates) == 0 {
 		t.Fatal("no peer certificates")
 	}
-	cn := state.PeerCertificates[0].Subject.CommonName
-	if cn != "127.0.0.1" {
+	cert := state.PeerCertificates[0]
+	if cn := cert.Subject.CommonName; cn != "127.0.0.1" {
 		t.Errorf("certificate CN = %q, want %q", cn, "127.0.0.1")
+	}
+
+	// Verify IP SAN is set (not DNS SAN) for IP-based targets.
+	foundIP := false
+	for _, ip := range cert.IPAddresses {
+		if ip.Equal(net.ParseIP("127.0.0.1")) {
+			foundIP = true
+			break
+		}
+	}
+	if !foundIP {
+		t.Errorf("certificate IPAddresses = %v, want to contain 127.0.0.1", cert.IPAddresses)
+	}
+	if len(cert.DNSNames) != 0 {
+		t.Errorf("certificate DNSNames = %v, want empty for IP target", cert.DNSNames)
 	}
 
 	cancel()

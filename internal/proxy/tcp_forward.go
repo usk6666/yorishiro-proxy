@@ -196,6 +196,12 @@ func (l *TCPForwardListener) handleConn(ctx context.Context, conn net.Conn) {
 		dispatchConn = tlsConn
 	}
 
+	// If TLS termination produced a different conn, ensure it is closed
+	// so that a proper close_notify is sent to the client.
+	if dispatchConn != conn {
+		defer dispatchConn.Close()
+	}
+
 	// Determine the protocol mode.
 	proto := ""
 	if l.config != nil {
@@ -414,7 +420,7 @@ func (l *TCPForwardListener) terminateTLS(ctx context.Context, conn net.Conn, lo
 		conn.SetReadDeadline(time.Now().Add(peekTimeout))
 	}
 
-	peek, _ := pc.Peek(2)
+	peek, _ := pc.Peek(6)
 
 	// Reset deadline.
 	conn.SetReadDeadline(time.Time{})
@@ -485,13 +491,15 @@ func (l *TCPForwardListener) targetHostname() string {
 }
 
 // isTLSClientHello checks if the peeked bytes begin with a TLS ClientHello.
-// TLS records start with ContentType (0x16) followed by the protocol version
-// (0x03, 0x0N where N is the minor version).
+// isTLSClientHello checks whether peek bytes look like a TLS ClientHello.
+// TLS record header: ContentType(1) + Version(2) + Length(2), followed by
+// HandshakeType(1). We require ContentType = 0x16 (Handshake), major version
+// 0x03 (SSL 3.x / TLS 1.x), and HandshakeType = 0x01 (ClientHello).
 func isTLSClientHello(peek []byte) bool {
-	if len(peek) < 2 {
+	if len(peek) < 6 {
 		return false
 	}
-	return peek[0] == 0x16 && peek[1] == 0x03
+	return peek[0] == 0x16 && peek[1] == 0x03 && peek[5] == 0x01
 }
 
 // tlsVersionName returns a human-readable name for a TLS version constant.
