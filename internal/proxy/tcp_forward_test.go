@@ -214,7 +214,11 @@ func TestTCPForwardListener_ConnectionLimit(t *testing.T) {
 
 	// Third connection should be accepted at TCP level but rejected by the listener.
 	conn3, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	if err == nil {
+	if err != nil {
+		// Dial itself failed — connection limit is enforced at the OS/listener level.
+		// This is acceptable; the limit is working.
+		t.Logf("dial was rejected directly (connection limit enforced at dial): %v", err)
+	} else {
 		// The connection was accepted at TCP level; verify the server closes it.
 		conn3.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		buf := make([]byte, 1)

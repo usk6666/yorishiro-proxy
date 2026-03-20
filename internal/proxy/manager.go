@@ -233,8 +233,10 @@ func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, params
 		}
 
 		target := ""
+		proto := ""
 		if fc != nil {
 			target = fc.Target
+			proto = fc.Protocol
 		}
 		entry.tcpForwards[port] = &tcpForwardEntry{
 			listener: fl,
@@ -247,7 +249,7 @@ func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, params
 			"name", name,
 			"port", port,
 			"upstream", target,
-			"protocol", fc.Protocol,
+			"protocol", proto,
 			"listen_addr", fl.Addr())
 	}
 

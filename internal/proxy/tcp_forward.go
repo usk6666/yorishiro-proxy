@@ -80,6 +80,7 @@ func NewTCPForwardListener(cfg TCPForwardListenerConfig) *TCPForwardListener {
 
 // SetPluginEngine sets the plugin engine used to dispatch lifecycle hook events
 // (on_connect, on_disconnect). If engine is nil, hooks are silently skipped.
+// Must be called before Start.
 func (l *TCPForwardListener) SetPluginEngine(engine *plugin.Engine) {
 	l.pluginEngine = engine
 }
