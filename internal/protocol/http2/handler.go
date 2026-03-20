@@ -442,6 +442,9 @@ func (h *Handler) readAndTruncateBody(sc *streamContext) {
 }
 
 // resolveSchemeAndHost determines the scheme and host for the upstream request.
+// When a TCP forwarding target is present in the context, it overrides the host
+// so that the request is sent to the correct upstream server rather than
+// the localhost address that the client connected to via TCP forwarding.
 func (h *Handler) resolveSchemeAndHost(sc *streamContext) {
 	scheme := "http"
 	if sc.connectAuthority != "" {
@@ -457,6 +460,16 @@ func (h *Handler) resolveSchemeAndHost(sc *streamContext) {
 	}
 	if sc.req.URL.Scheme == "" || sc.connectAuthority != "" {
 		sc.req.URL.Scheme = scheme
+	}
+	// TCP forwarding: override host with the actual upstream target.
+	// When a forwarding target is set, the client connected to a local port
+	// (e.g. localhost:50051) and the real upstream is in the context.
+	if target, ok := proxy.ForwardTargetFromContext(sc.ctx); ok {
+		sc.req.URL.Host = target
+		sc.req.Host = target
+		if sc.req.URL.Scheme == "" {
+			sc.req.URL.Scheme = scheme
+		}
 	}
 	sc.reqURL = cloneURL(sc.req.URL)
 }

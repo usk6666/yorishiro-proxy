@@ -18,11 +18,11 @@ func ContextWithForwardTarget(ctx context.Context, target string) context.Contex
 }
 
 // ForwardTargetFromContext retrieves the TCP forward target address from the context.
-// Returns empty string if not present (i.e. the connection did not come through
-// a TCP forward listener).
-func ForwardTargetFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(forwardTargetCtxKey{}).(string); ok {
-		return v
+// Returns the target and true if set, or empty string and false if not present
+// (i.e. the connection did not come through a TCP forward listener).
+func ForwardTargetFromContext(ctx context.Context) (string, bool) {
+	if v, ok := ctx.Value(forwardTargetCtxKey{}).(string); ok && v != "" {
+		return v, true
 	}
-	return ""
+	return "", false
 }

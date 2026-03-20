@@ -74,6 +74,12 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 		req.URL.Scheme = "http"
 	}
 
+	// TCP forwarding: override the host with the actual upstream target.
+	if target, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		req.URL.Host = target
+		req.Host = target
+	}
+
 	// Determine upstream address.
 	host := req.URL.Host
 	if !strings.Contains(host, ":") {
@@ -164,13 +170,19 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	start := time.Now()
 
 	// Reconstruct the full URL.
+	// TCP forwarding: override the host with the actual upstream target.
+	effectiveHost := proxy.ResolveUpstreamTarget(ctx, connectHost)
 	if req.URL.Host == "" {
-		req.URL.Host = connectHost
+		req.URL.Host = effectiveHost
+	}
+	if _, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		req.URL.Host = effectiveHost
+		req.Host = effectiveHost
 	}
 	req.URL.Scheme = "wss"
 
 	// Determine upstream address.
-	host := connectHost
+	host := effectiveHost
 	if !strings.Contains(host, ":") {
 		host = host + ":443"
 	}

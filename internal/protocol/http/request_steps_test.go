@@ -20,11 +20,13 @@ import (
 
 func TestNormalizeRequestURL(t *testing.T) {
 	tests := []struct {
-		name       string
-		reqURL     string
-		reqHost    string
-		wantHost   string
-		wantScheme string
+		name          string
+		reqURL        string
+		reqHost       string
+		forwardTarget string // if non-empty, set in context
+		wantHost      string
+		wantScheme    string
+		wantReqHost   string // expected req.Host after normalization (empty means same as wantHost)
 	}{
 		{
 			name:       "missing host is set from req.Host",
@@ -54,6 +56,24 @@ func TestNormalizeRequestURL(t *testing.T) {
 			wantHost:   "secure.example.com",
 			wantScheme: "https",
 		},
+		{
+			name:          "forwarding target overrides host",
+			reqURL:        "/path",
+			reqHost:       "localhost:50051",
+			forwardTarget: "backend.example.com:8080",
+			wantHost:      "backend.example.com:8080",
+			wantScheme:    "http",
+			wantReqHost:   "backend.example.com:8080",
+		},
+		{
+			name:          "forwarding target overrides absolute URL host",
+			reqURL:        "http://localhost:50051/path",
+			reqHost:       "localhost:50051",
+			forwardTarget: "api.example.com:443",
+			wantHost:      "api.example.com:443",
+			wantScheme:    "http",
+			wantReqHost:   "api.example.com:443",
+		},
 	}
 
 	for _, tt := range tests {
@@ -64,13 +84,21 @@ func TestNormalizeRequestURL(t *testing.T) {
 				Host: tt.reqHost,
 			}
 
-			normalizeRequestURL(req)
+			ctx := context.Background()
+			if tt.forwardTarget != "" {
+				ctx = proxy.ContextWithForwardTarget(ctx, tt.forwardTarget)
+			}
+
+			normalizeRequestURL(ctx, req)
 
 			if req.URL.Host != tt.wantHost {
 				t.Errorf("Host = %q, want %q", req.URL.Host, tt.wantHost)
 			}
 			if req.URL.Scheme != tt.wantScheme {
 				t.Errorf("Scheme = %q, want %q", req.URL.Scheme, tt.wantScheme)
+			}
+			if tt.wantReqHost != "" && req.Host != tt.wantReqHost {
+				t.Errorf("req.Host = %q, want %q", req.Host, tt.wantReqHost)
 			}
 		})
 	}
