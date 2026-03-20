@@ -1,15 +1,18 @@
 import { useCallback, useState } from "react";
 import { Badge, Button, Input, useToast } from "../../components/ui/index.js";
 import { useProxyControl } from "../../lib/mcp/hooks.js";
-import type { ConfigResult } from "../../lib/mcp/types.js";
+import type { ConfigResult, ForwardConfig } from "../../lib/mcp/types.js";
 
 interface TcpForwardsProps {
   config: ConfigResult;
   onRefresh: () => void;
 }
 
+/** Valid protocol values for ForwardConfig. */
+const PROTOCOL_OPTIONS = ["auto", "raw", "http", "http2", "grpc", "websocket"] as const;
+
 /**
- * TcpForwards — manage TCP forward mappings (local port -> upstream host:port).
+ * TcpForwards — manage TCP forward mappings (local port -> ForwardConfig).
  *
  * TCP forwards are start-time configuration: they are applied when starting a
  * new listener via proxy_start. Adding a forward triggers a proxy restart.
@@ -24,6 +27,8 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
   const [localPort, setLocalPort] = useState("");
   const [upstreamHost, setUpstreamHost] = useState("");
   const [upstreamPort, setUpstreamPort] = useState("");
+  const [protocol, setProtocol] = useState("auto");
+  const [tlsEnabled, setTlsEnabled] = useState(false);
   const [showForm, setShowForm] = useState(false);
 
   const forwards = config.tcp_forwards ?? {};
@@ -63,9 +68,16 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
     }
 
     const upstream = `${host}:${uPort}`;
+    const newEntry: ForwardConfig = { target: upstream };
+    if (protocol && protocol !== "auto") {
+      newEntry.protocol = protocol;
+    }
+    if (tlsEnabled) {
+      newEntry.tls = true;
+    }
 
     // Build new forwards map: existing + new entry
-    const newForwards: Record<string, string> = { ...forwards, [port]: upstream };
+    const newForwards: Record<string, ForwardConfig> = { ...forwards, [port]: newEntry };
 
     try {
       await start({
@@ -73,11 +85,13 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
       });
       addToast({
         type: "success",
-        message: `TCP forward added: port ${port} -> ${upstream}`,
+        message: `TCP forward added: port ${port} -> ${upstream}${protocol !== "auto" ? ` (${protocol})` : ""}${tlsEnabled ? " [TLS]" : ""}`,
       });
       setLocalPort("");
       setUpstreamHost("");
       setUpstreamPort("");
+      setProtocol("auto");
+      setTlsEnabled(false);
       setShowForm(false);
       onRefresh();
     } catch (err) {
@@ -86,7 +100,7 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
         message: `Failed to add TCP forward: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [localPort, upstreamHost, upstreamPort, forwards, start, addToast, onRefresh]);
+  }, [localPort, upstreamHost, upstreamPort, protocol, tlsEnabled, forwards, start, addToast, onRefresh]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -97,11 +111,17 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
     [handleAdd],
   );
 
-  /** Parse "host:port" into display parts. */
-  function parseUpstream(value: string): { host: string; port: string } {
+  /** Parse "host:port" target into display parts. */
+  function parseTarget(value: string): { host: string; port: string } {
     const lastColon = value.lastIndexOf(":");
     if (lastColon === -1) return { host: value, port: "" };
     return { host: value.slice(0, lastColon), port: value.slice(lastColon + 1) };
+  }
+
+  /** Get display label for protocol. */
+  function protocolLabel(proto?: string): string {
+    if (!proto || proto === "auto") return "auto";
+    return proto;
   }
 
   return (
@@ -123,8 +143,9 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
         </div>
         <div className="settings-card-body">
           <p className="settings-section-desc">
-            Map local ports to upstream TCP addresses. Incoming connections on a mapped port
-            are forwarded to the specified upstream host:port via the Raw TCP handler.
+            Map local ports to upstream TCP addresses with optional protocol detection and TLS termination.
+            Incoming connections on a mapped port are forwarded to the specified upstream, with L7 protocol
+            parsing applied based on the configured protocol hint.
           </p>
           <p className="settings-section-desc">
             TCP forwards are configured when starting a new listener. Adding a forward
@@ -161,6 +182,33 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
                   placeholder="e.g., 3306"
                 />
               </div>
+              <div className="settings-form-row">
+                <div className="input-wrapper">
+                  <label className="input-label">Protocol</label>
+                  <select
+                    className="input"
+                    value={protocol}
+                    onChange={(e) => setProtocol(e.target.value)}
+                  >
+                    {PROTOCOL_OPTIONS.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="input-wrapper">
+                  <label className="input-label">TLS Termination</label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", cursor: "pointer", padding: "var(--space-xs) 0" }}>
+                    <input
+                      type="checkbox"
+                      checked={tlsEnabled}
+                      onChange={(e) => setTlsEnabled(e.target.checked)}
+                    />
+                    <span>Enable TLS MITM</span>
+                  </label>
+                </div>
+              </div>
               <div className="settings-add-form-actions">
                 <Button
                   variant="secondary"
@@ -184,8 +232,9 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
           {/* Mapping list */}
           {entries.length > 0 ? (
             <div className="settings-item-list">
-              {entries.map(([port, upstream]) => {
-                const parsed = parseUpstream(upstream);
+              {entries.map(([port, fc]) => {
+                const parsed = parseTarget(fc.target);
+                const proto = protocolLabel(fc.protocol);
                 return (
                   <div key={port} className="settings-item">
                     <div className="settings-item-content">
@@ -196,6 +245,18 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
                       <span className="settings-item-text">
                         {parsed.host}:{parsed.port}
                       </span>
+                      <span style={{ marginLeft: "var(--space-xs)" }}>
+                        <Badge variant={proto === "auto" ? "default" : "success"}>
+                          {proto}
+                        </Badge>
+                      </span>
+                      {fc.tls && (
+                        <span style={{ marginLeft: "var(--space-xs)" }}>
+                          <Badge variant="warning">
+                            TLS
+                          </Badge>
+                        </span>
+                      )}
                     </div>
                   </div>
                 );

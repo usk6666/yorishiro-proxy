@@ -58,6 +58,13 @@ export interface TransformRule {
   action: TransformAction;
 }
 
+/** TCP forward configuration for a single port. */
+export interface ForwardConfig {
+  target: string;
+  protocol?: string;
+  tls?: boolean;
+}
+
 /** Connection info for a flow. */
 export interface ConnInfo {
   client_addr?: string;
@@ -87,7 +94,7 @@ export interface ProxyStartParams {
   tls_passthrough?: string[];
   intercept_rules?: InterceptRule[];
   auto_transform?: TransformRule[];
-  tcp_forwards?: Record<string, string>;
+  tcp_forwards?: Record<string, string | ForwardConfig>;
   protocols?: string[];
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
@@ -99,7 +106,7 @@ export interface ProxyStartResult {
   name: string;
   listen_addr: string;
   status: string;
-  tcp_forwards?: Record<string, string>;
+  tcp_forwards?: Record<string, ForwardConfig>;
   protocols?: string[];
 }
 
@@ -421,7 +428,7 @@ export interface ConfigResult {
     patterns: string[];
     count: number;
   };
-  tcp_forwards?: Record<string, string>;
+  tcp_forwards?: Record<string, ForwardConfig>;
   enabled_protocols?: string[];
   socks5_enabled?: boolean;
   socks5_auth?: {
