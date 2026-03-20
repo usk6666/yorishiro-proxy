@@ -44,10 +44,19 @@ Each intercept rule has:
 Multiple rules use OR logic: a request/response is intercepted if any enabled rule matches.
 
 ### tcp_forwards (object, optional)
-Maps local listen ports to upstream TCP addresses for Raw TCP forwarding.
-- Format: `{"port": "upstream_host:port"}` (e.g. `{"3306": "db.example.com:3306"}`)
-- Connections arriving on a mapped port are forwarded to the specified upstream
-- If omitted, Raw TCP forwarding is not configured
+Maps local listen ports to upstream forwarding configurations for TCP forwarding with protocol detection.
+
+Each entry maps a local port number (string key) to either:
+- A **string** value `"upstream_host:port"` (legacy format, treated as raw TCP forwarding)
+- A **ForwardConfig object** with the following fields:
+  - **target** (string, required): Upstream address in `"host:port"` format (e.g. `"api.example.com:50051"`)
+  - **protocol** (string, optional): Expected protocol for L7 parsing. Default: `"auto"` (peek-based detection).
+    Valid values: `"auto"`, `"raw"`, `"http"`, `"http2"`, `"grpc"`, `"websocket"`
+  - **tls** (boolean, optional): Enable TLS MITM termination on the forwarded port. Default: `false`.
+    When true, the proxy terminates TLS using the target hostname for certificate generation, then applies L7 parsing.
+
+- If omitted, TCP forwarding is not configured
+- Both legacy string format and structured ForwardConfig can be mixed in the same object
 
 ### protocols (array of strings, optional)
 Specifies which protocols are enabled for detection.
@@ -113,13 +122,32 @@ Password for SOCKS5 password authentication.
 }
 ```
 
-### Start with TCP forwards
+### Start with TCP forwards (legacy string format)
 ```json
 {
   "listen_addr": "127.0.0.1:8080",
   "tcp_forwards": {
     "3306": "db.example.com:3306",
     "6379": "redis.example.com:6379"
+  }
+}
+```
+
+### Start with TCP forwards (structured ForwardConfig)
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "tcp_forwards": {
+    "50051": {
+      "target": "api.example.com:50051",
+      "protocol": "grpc"
+    },
+    "8443": {
+      "target": "secure.example.com:443",
+      "protocol": "http2",
+      "tls": true
+    },
+    "3306": "db.example.com:3306"
   }
 }
 ```

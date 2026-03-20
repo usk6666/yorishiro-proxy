@@ -45,7 +45,7 @@ function formatBytes(bytes: number): string {
 }
 
 /** Parse "host:port" into display parts for consistent upstream rendering. */
-function parseUpstream(value: string): { host: string; port: string } {
+function parseTarget(value: string): { host: string; port: string } {
   const lastColon = value.lastIndexOf(":");
   if (lastColon === -1) return { host: value, port: "" };
   return { host: value.slice(0, lastColon), port: value.slice(lastColon + 1) };
@@ -391,8 +391,9 @@ export function DashboardPage() {
         <div className="dashboard-section">
           <h2 className="dashboard-section-title">TCP Forwards</h2>
           <div className="dashboard-tcp-forwards">
-            {Object.entries(configData.tcp_forwards).map(([port, upstream]) => {
-              const parsed = parseUpstream(upstream);
+            {Object.entries(configData.tcp_forwards).map(([port, fc]) => {
+              const parsed = parseTarget(fc.target);
+              const proto = fc.protocol || "auto";
               return (
                 <div key={port} className="dashboard-tcp-forward">
                   <div className="dashboard-tcp-forward-info">
@@ -401,6 +402,12 @@ export function DashboardPage() {
                     <span className="dashboard-tcp-forward-upstream">
                       {parsed.host}:{parsed.port}
                     </span>
+                    <Badge variant={proto === "auto" ? "default" : "success"}>
+                      {proto}
+                    </Badge>
+                    {fc.tls && (
+                      <Badge variant="warning">TLS</Badge>
+                    )}
                   </div>
                 </div>
               );
