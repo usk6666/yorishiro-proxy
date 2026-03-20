@@ -625,3 +625,22 @@
   font-size: var(--font-size-sm);
   color: var(--text-primary);
 }
+
+/* Info display items (read-only, used in safety filter section etc.) */
+.settings-info-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.settings-info-label {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.settings-info-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
