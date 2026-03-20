@@ -58,7 +58,7 @@ Resend the raw bytes from a recorded flow over TCP/TLS. Useful for testing HTTP 
 - **override_raw_base64** (string, optional): Full raw bytes replacement (Base64-encoded). Replaces the entire original raw bytes.
 - **patches** (array, optional): Byte-level patches for partial raw bytes modification. Each patch is either:
   - **Offset overwrite**: `{"offset": 42, "data_base64": "AAAA"}` — overwrite bytes at the specified offset.
-  - **Find-replace (text)**: `{"find": "Host: old", "replace": "Host: new"}` — text-based find and replace.
+  - **Find-replace (text)**: `{"find_text": "Host: old", "replace_text": "Host: new"}` — text-based find and replace.
   - **Find-replace (binary)**: `{"find_base64": "...", "replace_base64": "..."}` — binary find and replace.
 - **dry_run** (boolean, optional): Preview modified raw bytes without sending.
 - **tag** (string, optional): Tag to attach to the result flow.
@@ -215,7 +215,7 @@ The `resend` action supports optional hooks that execute macros before sending t
   "params": {
     "flow_id": "abc-123",
     "patches": [
-      {"find": "Host: old.com", "replace": "Host: new.com"}
+      {"find_text": "Host: old.com", "replace_text": "Host: new.com"}
     ]
   }
 }

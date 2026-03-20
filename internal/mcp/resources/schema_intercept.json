@@ -13,6 +13,7 @@
     "params": {
       "type": "object",
       "description": "Action-specific parameters.",
+      "required": ["intercept_id"],
       "properties": {
         "intercept_id": {
           "type": "string",
