@@ -473,7 +473,7 @@ export interface ConfigResult {
     cert_path: string;
     key_path: string;
   };
-  safety_filter?: SafetyFilterStatus;
+  safety_filter: SafetyFilterStatus;
   max_connections: number;
   peek_timeout_ms: number;
   request_timeout_ms: number;
