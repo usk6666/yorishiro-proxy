@@ -241,8 +241,8 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 | `message_sequence` | resend | WebSocket メッセージシーケンス番号（WebSocket フロー必須） |
 | `timeout_ms` | resend, resend_raw, tcp_replay | タイムアウト（ミリ秒） |
 | `override_raw_base64` | resend_raw | Base64 エンコード済み生リクエストデータ |
-| `target_addr` | resend_raw | ターゲットアドレス（host:port） |
-| `use_tls` | resend_raw | TLS 使用フラグ |
+| `target_addr` | resend_raw, tcp_replay | ターゲットアドレス（host:port、未指定時はフローの接続先を使用） |
+| `use_tls` | resend_raw, tcp_replay | TLS 使用フラグ |
 | `patches` | resend_raw | バイトレベルパッチ |
 | `dry_run` | resend, resend_raw | 送信せず改変内容をプレビュー |
 | `tag` | resend, resend_raw, tcp_replay | 結果フローにタグを付与 |
@@ -652,8 +652,8 @@ SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DR
 | `peek_timeout_ms` | プロトコル検出タイムアウト（100-600000） |
 | `request_timeout_ms` | HTTP リクエストタイムアウト（100-600000） |
 | `tls_fingerprint` | TLS フィンガープリントプロファイル変更 |
-| `budget` | object | 診断バジェット（max_total_requests, max_duration） |
-| `client_cert` | object | mTLS クライアント証明書設定（cert_path, key_path） |
+| `budget` | 診断バジェット（max_total_requests, max_duration） |
+| `client_cert` | mTLS クライアント証明書設定（cert_path, key_path） |
 
 ### plugin -- プラグイン管理
 
