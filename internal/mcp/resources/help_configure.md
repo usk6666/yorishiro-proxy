@@ -9,6 +9,11 @@ How the configuration should be applied.
 - `"merge"` (default): Apply incremental add/remove changes to existing config.
 - `"replace"`: Replace entire configuration sections with new values.
 
+### upstream_proxy (string, optional)
+Upstream proxy URL. Set to a proxy URL to route traffic, set to `""` (empty string) to disable (direct connection). If omitted, the current setting is not changed.
+- Supported schemes: `http://host:port`, `socks5://host:port`
+- Authentication: `http://user:pass@host:port`, `socks5://user:pass@host:port`
+
 ### capture_scope (object, optional)
 Controls which requests are recorded. Only specified sections are modified.
 
@@ -431,6 +436,26 @@ For full-replace semantics, use the `security` tool's `set_budget` action instea
 }
 ```
 
+### intercept_queue (object, optional)
+Configures the intercept queue behavior.
+
+- **timeout_ms** (integer): Timeout in milliseconds for blocked requests.
+- **timeout_behavior** (string): Action when timeout is reached: `"auto_release"` (forward as-is, default) or `"auto_drop"` (discard).
+
+### max_connections (integer, optional)
+Dynamically changes the maximum number of concurrent proxy connections. Range: 1-100000.
+
+### peek_timeout_ms (integer, optional)
+Dynamically changes the protocol detection timeout in milliseconds. Range: 100-600000.
+
+### request_timeout_ms (integer, optional)
+Dynamically changes the HTTP request header read timeout in milliseconds. Range: 100-600000.
+
+### client_cert (object, optional)
+Global mTLS client certificate configuration for upstream connections.
+- **cert_path** (string): Path to PEM-encoded client certificate. Set to `""` to disable.
+- **key_path** (string): Path to PEM-encoded client private key. Set to `""` to disable.
+
 ### Combined update
 ```json
 {
@@ -467,6 +492,49 @@ For full-replace semantics, use the `security` tool's `set_budget` action instea
         }
       }
     ]
+  }
+}
+```
+
+### Set upstream proxy
+```json
+{
+  "upstream_proxy": "http://proxy.corp:3128"
+}
+```
+
+### Disable upstream proxy
+```json
+{
+  "upstream_proxy": ""
+}
+```
+
+### Configure intercept queue timeout
+```json
+{
+  "intercept_queue": {
+    "timeout_ms": 60000,
+    "timeout_behavior": "auto_release"
+  }
+}
+```
+
+### Set connection limits
+```json
+{
+  "max_connections": 256,
+  "peek_timeout_ms": 10000,
+  "request_timeout_ms": 30000
+}
+```
+
+### Configure mTLS client certificate
+```json
+{
+  "client_cert": {
+    "cert_path": "/path/to/client.crt",
+    "key_path": "/path/to/client.key"
   }
 }
 ```

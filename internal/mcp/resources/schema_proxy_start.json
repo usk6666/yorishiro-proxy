@@ -4,10 +4,18 @@
   "description": "Input schema for the proxy_start tool.",
   "type": "object",
   "properties": {
+    "name": {
+      "type": "string",
+      "description": "Listener name for multi-listener support. Defaults to 'default' if omitted."
+    },
     "listen_addr": {
       "type": "string",
       "description": "TCP address to listen on. Must be a loopback address. Defaults to 127.0.0.1:8080.",
       "examples": ["127.0.0.1:8080", "127.0.0.1:9090", "[::1]:8080"]
+    },
+    "upstream_proxy": {
+      "type": "string",
+      "description": "Upstream proxy URL to route all outgoing traffic through (e.g. http://host:port, socks5://host:port)."
     },
     "capture_scope": {
       "type": "object",
@@ -39,10 +47,43 @@
       "description": "Intercept rules for matching requests/responses. If omitted, no rules are active.",
       "items": { "$ref": "#/$defs/intercept_rule" }
     },
+    "auto_transform": {
+      "type": "array",
+      "description": "Auto-transform rules for automatic request/response modification at startup.",
+      "items": { "$ref": "#/$defs/transform_rule" }
+    },
     "tcp_forwards": {
       "type": "object",
-      "description": "Maps local listen ports to upstream TCP addresses for Raw TCP forwarding (e.g. {\"3306\": \"db.example.com:3306\"}).",
-      "additionalProperties": { "type": "string" }
+      "description": "Maps local listen ports to upstream forwarding configurations. Values can be strings (legacy: host:port) or ForwardConfig objects ({target, protocol, tls}).",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Legacy format: upstream host:port string."
+          },
+          {
+            "type": "object",
+            "description": "ForwardConfig with target, protocol, and TLS options.",
+            "required": ["target"],
+            "properties": {
+              "target": {
+                "type": "string",
+                "description": "Upstream address in host:port format."
+              },
+              "protocol": {
+                "type": "string",
+                "description": "Expected protocol for L7 parsing. Default: auto.",
+                "enum": ["auto", "raw", "http", "http2", "grpc", "websocket"]
+              },
+              "tls": {
+                "type": "boolean",
+                "description": "Enable TLS MITM termination on the forwarded port. Default: false."
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     "protocols": {
       "type": "array",
@@ -51,6 +92,11 @@
         "type": "string",
         "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "SOCKS5", "TCP"]
       }
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "TLS ClientHello fingerprint profile for upstream connections.",
+      "enum": ["chrome", "firefox", "safari", "edge", "random", "none"]
     },
     "socks5_auth": {
       "type": "string",
@@ -65,6 +111,32 @@
     "socks5_password": {
       "type": "string",
       "description": "Password for SOCKS5 password authentication. Required when socks5_auth is password."
+    },
+    "client_cert": {
+      "type": "string",
+      "description": "Path to PEM-encoded client certificate for mTLS with upstream servers (global)."
+    },
+    "client_key": {
+      "type": "string",
+      "description": "Path to PEM-encoded client private key for mTLS with upstream servers (global)."
+    },
+    "max_connections": {
+      "type": "integer",
+      "description": "Maximum number of concurrent proxy connections. Default: 128.",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "peek_timeout_ms": {
+      "type": "integer",
+      "description": "Protocol detection timeout in milliseconds. Default: 30000.",
+      "minimum": 100,
+      "maximum": 600000
+    },
+    "request_timeout_ms": {
+      "type": "integer",
+      "description": "HTTP request header read timeout in milliseconds. Default: 60000.",
+      "minimum": 100,
+      "maximum": 600000
     }
   },
   "additionalProperties": false,
@@ -131,6 +203,67 @@
           "type": "object",
           "description": "Header name to regex pattern mapping (AND logic).",
           "additionalProperties": { "type": "string" }
+        },
+        "upgrade_url_pattern": {
+          "type": "string",
+          "description": "Regex for WebSocket upgrade URL matching (WebSocket rules only)."
+        },
+        "flow_id": {
+          "type": "string",
+          "description": "WebSocket flow ID to intercept (WebSocket rules only)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "transform_rule": {
+      "type": "object",
+      "description": "An auto-transform rule with matching conditions and action.",
+      "required": ["id", "enabled", "direction", "conditions", "action"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique rule identifier."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the rule is active."
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Execution order (lower values applied first).",
+          "default": 0
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["request", "response", "both"],
+          "description": "Applies to requests, responses, or both."
+        },
+        "conditions": { "$ref": "#/$defs/intercept_conditions" },
+        "action": { "$ref": "#/$defs/transform_action" }
+      },
+      "additionalProperties": false
+    },
+    "transform_action": {
+      "type": "object",
+      "description": "Transformation action to apply.",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["add_header", "set_header", "remove_header", "replace_body"],
+          "description": "Action type."
+        },
+        "header": {
+          "type": "string",
+          "description": "Header name (for header actions)."
+        },
+        "value": {
+          "type": "string",
+          "description": "Header value or replacement string."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Search regex (for replace_body)."
         }
       },
       "additionalProperties": false

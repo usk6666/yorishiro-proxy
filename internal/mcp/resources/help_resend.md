@@ -55,6 +55,13 @@ Resend the raw bytes from a recorded flow over TCP/TLS. Useful for testing HTTP 
 - **target_addr** (string, optional): Target address as `"host:port"`. Defaults to the original flow's target.
 - **use_tls** (boolean, optional): Force TLS on/off. Defaults to the original flow's protocol.
 - **timeout_ms** (integer, optional): Request timeout in milliseconds (default: `30000`).
+- **override_raw_base64** (string, optional): Full raw bytes replacement (Base64-encoded). Replaces the entire original raw bytes.
+- **patches** (array, optional): Byte-level patches for partial raw bytes modification. Each patch is either:
+  - **Offset overwrite**: `{"offset": 42, "data_base64": "AAAA"}` — overwrite bytes at the specified offset.
+  - **Find-replace (text)**: `{"find": "Host: old", "replace": "Host: new"}` — text-based find and replace.
+  - **Find-replace (binary)**: `{"find_base64": "...", "replace_base64": "..."}` — binary find and replace.
+- **dry_run** (boolean, optional): Preview modified raw bytes without sending.
+- **tag** (string, optional): Tag to attach to the result flow.
 
 Returns: response_data (base64), response_size, duration_ms.
 
@@ -186,6 +193,42 @@ The `resend` action supports optional hooks that execute macros before sending t
     "message_sequence": 2,
     "target_addr": "ws.target.com:443",
     "use_tls": true
+  }
+}
+```
+
+### Resend raw with full replacement
+```json
+{
+  "action": "resend_raw",
+  "params": {
+    "flow_id": "abc-123",
+    "override_raw_base64": "R0VUIC8gSFRUUC8xLjENCkhvc3Q6IGV4YW1wbGUuY29tDQoNCg=="
+  }
+}
+```
+
+### Resend raw with byte-level patches
+```json
+{
+  "action": "resend_raw",
+  "params": {
+    "flow_id": "abc-123",
+    "patches": [
+      {"find": "Host: old.com", "replace": "Host: new.com"}
+    ]
+  }
+}
+```
+
+### Resend raw dry-run
+```json
+{
+  "action": "resend_raw",
+  "params": {
+    "flow_id": "abc-123",
+    "patches": [{"offset": 0, "data_base64": "UE9TVA=="}],
+    "dry_run": true
   }
 }
 ```

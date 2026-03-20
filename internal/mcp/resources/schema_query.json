@@ -24,7 +24,21 @@
       "properties": {
         "protocol": {
           "type": "string",
-          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)."
+          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP).",
+          "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"]
+        },
+        "scheme": {
+          "type": "string",
+          "description": "URL scheme / transport filter for flows (e.g. https, http, wss, ws, tcp).",
+          "enum": ["https", "http", "wss", "ws", "tcp"]
+        },
+        "conn_id": {
+          "type": "string",
+          "description": "Connection ID filter for flows (exact match)."
+        },
+        "host": {
+          "type": "string",
+          "description": "Host filter for flows (matches server_addr or request URL host)."
         },
         "direction": {
           "type": "string",
@@ -45,7 +59,8 @@
         },
         "blocked_by": {
           "type": "string",
-          "description": "Filter sessions by blocked_by value (e.g. target_scope, intercept_drop)."
+          "description": "Filter sessions by blocked_by value (e.g. target_scope, intercept_drop).",
+          "enum": ["target_scope", "intercept_drop", "rate_limit", "safety_filter"]
         },
         "state": {
           "type": "string",
@@ -56,13 +71,18 @@
           "type": "string",
           "description": "Technology name filter for flows (case-insensitive substring match, e.g. nginx, wordpress)."
         },
+        "outliers_only": {
+          "type": "boolean",
+          "description": "Return only outlier fuzz results (fuzz_results)."
+        },
         "body_contains": {
           "type": "string",
           "description": "Response body substring filter (fuzz_results)."
         },
         "status": {
           "type": "string",
-          "description": "Fuzz job status filter (e.g. running, completed)."
+          "description": "Fuzz job status filter (e.g. running, completed).",
+          "enum": ["running", "paused", "completed", "cancelled", "error"]
         },
         "tag": {
           "type": "string",
@@ -80,7 +100,7 @@
     },
     "sort_by": {
       "type": "string",
-      "description": "Field to sort results by (fuzz_results: index_num, status_code, duration_ms, response_length)."
+      "description": "Field to sort results by. Flows: timestamp, duration_ms. Fuzz results: index_num, status_code, duration_ms, response_length."
     },
     "limit": {
       "type": "integer",
