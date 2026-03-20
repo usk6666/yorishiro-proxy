@@ -395,14 +395,15 @@ func TestTCPForwardListener_RawMode_SkipsDetector(t *testing.T) {
 
 // contextCapturingHandler calls extractFunc on the context and sends the result to resultCh.
 type contextCapturingHandler struct {
-	extractFunc func(context.Context) string
+	extractFunc func(context.Context) (string, bool)
 	resultCh    chan string
 }
 
 func (h *contextCapturingHandler) Name() string         { return "ctx-capture" }
 func (h *contextCapturingHandler) Detect(_ []byte) bool { return true }
 func (h *contextCapturingHandler) Handle(ctx context.Context, _ net.Conn) error {
-	h.resultCh <- h.extractFunc(ctx)
+	val, _ := h.extractFunc(ctx)
+	h.resultCh <- val
 	return nil
 }
 
