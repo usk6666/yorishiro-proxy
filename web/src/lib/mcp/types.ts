@@ -264,13 +264,18 @@ export type QueryResource =
 /** Filter options for the query tool. */
 export interface QueryFilter {
   protocol?: string;
+  scheme?: string;
   method?: string;
   url_pattern?: string;
   status_code?: number;
   blocked_by?: string;
   state?: string;
   direction?: "send" | "receive";
+  technology?: string;
+  conn_id?: string;
+  host?: string;
   body_contains?: string;
+  outliers_only?: boolean;
   status?: string;
   tag?: string;
 }

@@ -128,6 +128,21 @@
   width: 140px;
 }
 
+.fuzz-results-outliers-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.fuzz-results-outliers-toggle input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+}
+
 .fuzz-results-sort {
   display: flex;
   align-items: center;

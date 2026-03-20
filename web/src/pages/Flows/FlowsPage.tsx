@@ -29,9 +29,11 @@ function useDebounce<T>(value: T, delay: number): T {
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP"] as const;
+const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"] as const;
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] as const;
 const FLOW_STATES = ["active", "complete", "error"] as const;
+const SCHEMES = ["https", "http", "wss", "ws", "tcp"] as const;
+const BLOCKED_BY = ["target_scope", "intercept_drop", "rate_limit", "safety_filter"] as const;
 const PAGE_SIZES = [25, 50, 100] as const;
 const POLL_INTERVALS = [
   { label: "Off", value: 0 },
@@ -74,6 +76,10 @@ function protocolVariant(protocol: string): "default" | "success" | "warning" | 
       return "warning";
     case "TCP":
       return "danger";
+    case "SOCKS5+HTTPS":
+      return "success";
+    case "SOCKS5+HTTP":
+      return "default";
     default:
       return "default";
   }
@@ -140,11 +146,15 @@ export function FlowsPage() {
   const [selectedState, setSelectedState] = useState<string>("");
   const [bodyContains, setBodyContains] = useState<string>("");
   const [tagFilter, setTagFilter] = useState<string>("");
+  const [selectedScheme, setSelectedScheme] = useState<string>("");
+  const [selectedBlockedBy, setSelectedBlockedBy] = useState<string>("");
+  const [hostFilter, setHostFilter] = useState<string>("");
 
   // Debounce text inputs to avoid firing expensive queries on every keystroke
   const debouncedUrlPattern = useDebounce(urlPattern, 300);
   const debouncedBodyContains = useDebounce(bodyContains, 300);
   const debouncedTagFilter = useDebounce(tagFilter, 300);
+  const debouncedHostFilter = useDebounce(hostFilter, 300);
 
   // --- Pagination state ---
   const [pageSize, setPageSize] = useState<number>(50);
@@ -172,6 +182,9 @@ export function FlowsPage() {
     if (selectedProtocol) {
       f.protocol = selectedProtocol;
     }
+    if (selectedScheme) {
+      f.scheme = selectedScheme;
+    }
     if (selectedMethod) {
       f.method = selectedMethod;
     }
@@ -184,8 +197,14 @@ export function FlowsPage() {
         f.status_code = code;
       }
     }
+    if (selectedBlockedBy) {
+      f.blocked_by = selectedBlockedBy;
+    }
     if (selectedState) {
       f.state = selectedState;
+    }
+    if (debouncedHostFilter.trim()) {
+      f.host = debouncedHostFilter.trim();
     }
     if (debouncedBodyContains.trim()) {
       f.body_contains = debouncedBodyContains.trim();
@@ -194,7 +213,7 @@ export function FlowsPage() {
       f.tag = debouncedTagFilter.trim();
     }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedState, debouncedBodyContains, debouncedTagFilter]);
+  }, [selectedProtocol, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedBodyContains, debouncedTagFilter]);
 
   // --- Query flows ---
   const { data, loading, error, refetch } = useQuery("flows", {
@@ -223,13 +242,13 @@ export function FlowsPage() {
   // Reset offset and selection when debounced text filters change
   const prevTextFilterKey = useRef("");
   useEffect(() => {
-    const key = JSON.stringify({ debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter });
+    const key = JSON.stringify({ debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter, debouncedHostFilter });
     if (prevTextFilterKey.current && prevTextFilterKey.current !== key) {
       setOffset(0);
       setSelectedIds(new Set());
     }
     prevTextFilterKey.current = key;
-  }, [debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter]);
+  }, [debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter, debouncedHostFilter]);
 
   // Reset offset when filter changes (used by non-debounced filter controls)
   const handleFilterChange = useCallback(() => {
@@ -271,6 +290,32 @@ export function FlowsPage() {
       handleFilterChange();
     },
     [handleFilterChange],
+  );
+
+  // --- Scheme select ---
+  const handleSchemeChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      setSelectedScheme(e.target.value);
+      handleFilterChange();
+    },
+    [handleFilterChange],
+  );
+
+  // --- Blocked by select ---
+  const handleBlockedByChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      setSelectedBlockedBy(e.target.value);
+      handleFilterChange();
+    },
+    [handleFilterChange],
+  );
+
+  // --- Host filter (debounced — offset/selection reset via effect) ---
+  const handleHostFilterChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setHostFilter(e.target.value);
+    },
+    [],
   );
 
   // --- URL pattern (debounced — offset/selection reset via effect) ---
@@ -619,6 +664,47 @@ export function FlowsPage() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">Scheme</span>
+            <select
+              className="flows-filter-select"
+              value={selectedScheme}
+              onChange={handleSchemeChange}
+            >
+              <option value="">All</option>
+              {SCHEMES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">Blocked By</span>
+            <select
+              className="flows-filter-select"
+              value={selectedBlockedBy}
+              onChange={handleBlockedByChange}
+            >
+              <option value="">All</option>
+              {BLOCKED_BY.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flows-filter-group flows-text-filter">
+            <span className="flows-filter-label">Host</span>
+            <Input
+              placeholder="Filter by host..."
+              value={hostFilter}
+              onChange={handleHostFilterChange}
+            />
           </div>
 
           <div className="flows-filter-group flows-url-filter">
