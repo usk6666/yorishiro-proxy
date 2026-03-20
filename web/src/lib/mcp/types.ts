@@ -58,10 +58,13 @@ export interface TransformRule {
   action: TransformAction;
 }
 
+/** Allowed protocols for TCP forwarding. */
+export type ForwardProtocol = "auto" | "raw" | "http" | "http2" | "grpc" | "websocket";
+
 /** TCP forward configuration for a single port. */
 export interface ForwardConfig {
   target: string;
-  protocol?: string;
+  protocol?: ForwardProtocol;
   tls?: boolean;
 }
 

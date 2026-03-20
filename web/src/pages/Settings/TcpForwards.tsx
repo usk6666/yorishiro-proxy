@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { Badge, Button, Input, useToast } from "../../components/ui/index.js";
 import { useProxyControl } from "../../lib/mcp/hooks.js";
-import type { ConfigResult, ForwardConfig } from "../../lib/mcp/types.js";
+import type { ConfigResult, ForwardConfig, ForwardProtocol } from "../../lib/mcp/types.js";
 
 interface TcpForwardsProps {
   config: ConfigResult;
@@ -27,7 +27,7 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
   const [localPort, setLocalPort] = useState("");
   const [upstreamHost, setUpstreamHost] = useState("");
   const [upstreamPort, setUpstreamPort] = useState("");
-  const [protocol, setProtocol] = useState("auto");
+  const [protocol, setProtocol] = useState<ForwardProtocol>("auto");
   const [tlsEnabled, setTlsEnabled] = useState(false);
   const [showForm, setShowForm] = useState(false);
 
@@ -188,7 +188,7 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
                   <select
                     className="input"
                     value={protocol}
-                    onChange={(e) => setProtocol(e.target.value)}
+                    onChange={(e) => setProtocol(e.target.value as ForwardProtocol)}
                   >
                     {PROTOCOL_OPTIONS.map((p) => (
                       <option key={p} value={p}>
