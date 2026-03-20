@@ -368,11 +368,11 @@ func TestUTLSTransport_TLSConnect_HandshakeFailure(t *testing.T) {
 	}
 }
 
-func TestTLSTransport_InterfaceCompliance(t *testing.T) {
-	// Compile-time check that both types implement TLSTransport.
-	var _ TLSTransport = (*StandardTransport)(nil)
-	var _ TLSTransport = (*UTLSTransport)(nil)
-}
+// Compile-time check that both types implement TLSTransport.
+var (
+	_ TLSTransport = (*StandardTransport)(nil)
+	_ TLSTransport = (*UTLSTransport)(nil)
+)
 
 func TestUTLSTransport_AllProfiles(t *testing.T) {
 	cert := generateTestCert(t, "localhost")

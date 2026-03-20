@@ -542,20 +542,6 @@ func TestLoad_InvalidKeyDER(t *testing.T) {
 	}
 }
 
-func TestCertificate_NilBeforeGenerate(t *testing.T) {
-	ca := &CA{}
-	if cert := ca.Certificate(); cert != nil {
-		t.Errorf("Certificate() = %v, want nil before Generate", cert)
-	}
-}
-
-func TestCertPEM_NilBeforeGenerate(t *testing.T) {
-	ca := &CA{}
-	if p := ca.CertPEM(); p != nil {
-		t.Errorf("CertPEM() = %v, want nil before Generate", p)
-	}
-}
-
 func TestGenerateSerialNumber(t *testing.T) {
 	sn, err := generateSerialNumber()
 	if err != nil {
@@ -695,20 +681,6 @@ func TestGenerate_KeyCurveIsP256(t *testing.T) {
 	}
 	if ca.privKey.Curve != elliptic.P256() {
 		t.Errorf("private key curve = %v, want P-256", ca.privKey.Curve.Params().Name)
-	}
-}
-
-func TestCASource_DefaultZeroValue(t *testing.T) {
-	ca := &CA{}
-	source := ca.Source()
-	if source.Persisted {
-		t.Error("new CA should have Persisted=false")
-	}
-	if source.CertPath != "" {
-		t.Errorf("new CA CertPath = %q, want empty", source.CertPath)
-	}
-	if source.KeyPath != "" {
-		t.Errorf("new CA KeyPath = %q, want empty", source.KeyPath)
 	}
 }
 

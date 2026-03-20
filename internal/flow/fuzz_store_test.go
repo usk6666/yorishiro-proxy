@@ -7,6 +7,7 @@ import (
 )
 
 func TestFuzzJobStore_SaveAndGet(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -50,6 +51,7 @@ func TestFuzzJobStore_SaveAndGet(t *testing.T) {
 }
 
 func TestFuzzJobStore_Update(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -95,6 +97,7 @@ func TestFuzzJobStore_Update(t *testing.T) {
 }
 
 func TestFuzzJobStore_GetNotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -105,6 +108,7 @@ func TestFuzzJobStore_GetNotFound(t *testing.T) {
 }
 
 func TestFuzzResultStore_SaveAndList(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -176,6 +180,7 @@ func TestFuzzResultStore_SaveAndList(t *testing.T) {
 }
 
 func TestFuzzResultStore_ListWithFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -240,6 +245,7 @@ func TestFuzzResultStore_ListWithFilter(t *testing.T) {
 }
 
 func TestFuzzResultStore_ErrorField(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -287,6 +293,7 @@ func TestFuzzResultStore_ErrorField(t *testing.T) {
 }
 
 func TestPayloadsToJSON(t *testing.T) {
+	t.Parallel()
 	m := map[string]string{"pos-0": "val1", "pos-1": "val2"}
 	got := PayloadsToJSON(m)
 	if got == "{}" || got == "" {
@@ -303,6 +310,7 @@ func TestPayloadsToJSON(t *testing.T) {
 }
 
 func TestPayloadsFromJSON_Invalid(t *testing.T) {
+	t.Parallel()
 	_, err := PayloadsFromJSON("not-json")
 	if err == nil {
 		t.Error("expected error for invalid JSON")
@@ -310,6 +318,7 @@ func TestPayloadsFromJSON_Invalid(t *testing.T) {
 }
 
 func TestSchemaV2_Migration(t *testing.T) {
+	t.Parallel()
 	// The newTestStore helper runs migrations; just verify the tables exist.
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -329,6 +338,7 @@ func TestSchemaV2_Migration(t *testing.T) {
 // --- ListFuzzJobs tests ---
 
 func TestListFuzzJobs_Empty(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -342,6 +352,7 @@ func TestListFuzzJobs_Empty(t *testing.T) {
 }
 
 func TestListFuzzJobs_WithData(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -425,6 +436,7 @@ func TestListFuzzJobs_WithData(t *testing.T) {
 }
 
 func TestCountFuzzJobs(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -460,6 +472,7 @@ func TestCountFuzzJobs(t *testing.T) {
 // --- CountFuzzResults tests ---
 
 func TestCountFuzzResults(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -517,6 +530,7 @@ func TestCountFuzzResults(t *testing.T) {
 // --- SortBy and BodyContains tests ---
 
 func TestListFuzzResults_SortBy(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -589,6 +603,7 @@ func TestListFuzzResults_SortBy(t *testing.T) {
 }
 
 func TestListFuzzResults_BodyContains(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 

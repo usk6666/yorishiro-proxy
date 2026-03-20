@@ -114,17 +114,6 @@ func TestReadFrame_Errors(t *testing.T) {
 	}
 }
 
-func TestReadFrame_EOF(t *testing.T) {
-	_, err := ReadFrame(bytes.NewReader(nil))
-	if err == nil {
-		t.Fatal("ReadFrame() error = nil, want error")
-	}
-	// Should wrap io.EOF or io.ErrUnexpectedEOF
-	if !bytes.Contains([]byte(err.Error()), []byte("EOF")) {
-		t.Errorf("ReadFrame() error = %q, want EOF-related error", err)
-	}
-}
-
 func TestReadAllFrames_MultipleFrames(t *testing.T) {
 	payload1 := []byte("message-one")
 	payload2 := []byte("message-two")

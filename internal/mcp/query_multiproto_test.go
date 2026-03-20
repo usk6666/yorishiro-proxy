@@ -53,6 +53,7 @@ func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionT
 // --- Test: sessions with protocol filter for multi-protocol ---
 
 func TestQuery_Sessions_FilterByProtocol_WebSocket(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
 	seedStreamingSession(t, store, "ws-1", "WebSocket", "bidirectional", 4, map[string]string{"opcode": "1"})
@@ -79,6 +80,7 @@ func TestQuery_Sessions_FilterByProtocol_WebSocket(t *testing.T) {
 }
 
 func TestQuery_Sessions_FilterByProtocol_TCP(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
 	seedStreamingSession(t, store, "tcp-1", "TCP", "bidirectional", 4, nil)
@@ -105,6 +107,7 @@ func TestQuery_Sessions_FilterByProtocol_TCP(t *testing.T) {
 }
 
 func TestQuery_Sessions_FilterByProtocol_GRPC(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
 	seedStreamingSession(t, store, "grpc-1", "gRPC", "unary", 2, map[string]string{"service": "UserService", "method": "GetUser", "grpc_status": "0"})
@@ -133,6 +136,7 @@ func TestQuery_Sessions_FilterByProtocol_GRPC(t *testing.T) {
 // --- Test: protocol summary in sessions ---
 
 func TestQuery_Sessions_ProtocolSummary_WebSocket(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedStreamingSession(t, store, "ws-1", "WebSocket", "bidirectional", 3, map[string]string{"opcode": "1"})
 
@@ -159,6 +163,7 @@ func TestQuery_Sessions_ProtocolSummary_WebSocket(t *testing.T) {
 }
 
 func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -224,6 +229,7 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 }
 
 func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -302,6 +308,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 // --- Test: flow resource for streaming flows ---
 
 func TestQuery_Session_StreamingPreview(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedStreamingSession(t, store, "ws-detail", "WebSocket", "bidirectional", 15, map[string]string{"opcode": "1"})
 
@@ -345,6 +352,7 @@ func TestQuery_Session_StreamingPreview(t *testing.T) {
 }
 
 func TestQuery_Session_UnaryNoPreview(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "http-detail", "HTTPS", "GET", "https://example.com/api", 200)
 
@@ -368,6 +376,7 @@ func TestQuery_Session_UnaryNoPreview(t *testing.T) {
 }
 
 func TestQuery_Session_StreamingPreview_FewMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedStreamingSession(t, store, "ws-small", "WebSocket", "bidirectional", 3, map[string]string{"opcode": "1"})
 
@@ -396,6 +405,7 @@ func TestQuery_Session_StreamingPreview_FewMessages(t *testing.T) {
 // --- Test: messages with direction filter ---
 
 func TestQuery_Messages_DirectionFilter_Send(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedStreamingSession(t, store, "ws-msgs", "WebSocket", "bidirectional", 6, map[string]string{"opcode": "1"})
 
@@ -428,6 +438,7 @@ func TestQuery_Messages_DirectionFilter_Send(t *testing.T) {
 }
 
 func TestQuery_Messages_DirectionFilter_Receive(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedStreamingSession(t, store, "ws-msgs", "WebSocket", "bidirectional", 6, map[string]string{"opcode": "1"})
 
@@ -457,6 +468,7 @@ func TestQuery_Messages_DirectionFilter_Receive(t *testing.T) {
 }
 
 func TestQuery_Messages_DirectionFilter_Invalid(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedStreamingSession(t, store, "ws-msgs", "WebSocket", "bidirectional", 4, nil)
 
@@ -475,6 +487,7 @@ func TestQuery_Messages_DirectionFilter_Invalid(t *testing.T) {
 // --- Test: messages with metadata ---
 
 func TestQuery_Messages_Metadata(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -527,6 +540,7 @@ func TestQuery_Messages_Metadata(t *testing.T) {
 }
 
 func TestQuery_Messages_GRPC_Metadata(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -585,6 +599,7 @@ func TestQuery_Messages_GRPC_Metadata(t *testing.T) {
 // --- Test: config with TCP forwards and enabled protocols ---
 
 func TestQuery_Config_WithTCPForwards(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	ctx := context.Background()

@@ -17,6 +17,7 @@ import (
 // --- validateFilePath unit tests ---
 
 func TestValidateFilePath_NormalPath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "export.jsonl")
 
@@ -30,6 +31,7 @@ func TestValidateFilePath_NormalPath(t *testing.T) {
 }
 
 func TestValidateFilePath_EmptyPath(t *testing.T) {
+	t.Parallel()
 	_, err := validateFilePath("")
 	if err == nil {
 		t.Fatal("expected error for empty path")
@@ -40,6 +42,7 @@ func TestValidateFilePath_EmptyPath(t *testing.T) {
 }
 
 func TestValidateFilePath_RelativePath(t *testing.T) {
+	t.Parallel()
 	result, err := validateFilePath("relative/path/file.jsonl")
 	if err != nil {
 		t.Fatalf("validateFilePath: %v", err)
@@ -50,6 +53,7 @@ func TestValidateFilePath_RelativePath(t *testing.T) {
 }
 
 func TestValidateFilePath_DotDotTraversal(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "subdir", "..", "..", "etc", "passwd")
 
@@ -63,6 +67,7 @@ func TestValidateFilePath_DotDotTraversal(t *testing.T) {
 }
 
 func TestValidateFilePath_SymlinkRejected(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	realFile := filepath.Join(dir, "real.txt")
@@ -85,6 +90,7 @@ func TestValidateFilePath_SymlinkRejected(t *testing.T) {
 }
 
 func TestValidateFilePath_NonExistentIsOK(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist.jsonl")
 
@@ -98,6 +104,7 @@ func TestValidateFilePath_NonExistentIsOK(t *testing.T) {
 }
 
 func TestValidateFilePath_RegularFileIsOK(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "existing.jsonl")
 	if err := os.WriteFile(path, []byte("data"), 0600); err != nil {
@@ -148,6 +155,7 @@ func makeExportTestSession(t *testing.T, store flow.Store, id string) {
 }
 
 func TestExportFlowsAction_FilePermissions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -179,6 +187,7 @@ func TestExportFlowsAction_FilePermissions(t *testing.T) {
 }
 
 func TestExportFlowsAction_SymlinkRejected(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -207,6 +216,7 @@ func TestExportFlowsAction_SymlinkRejected(t *testing.T) {
 }
 
 func TestExportFlowsAction_InlineLimit(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -243,6 +253,7 @@ func TestExportFlowsAction_InlineLimit(t *testing.T) {
 }
 
 func TestImportFlowsAction_SymlinkRejected(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -269,6 +280,7 @@ func TestImportFlowsAction_SymlinkRejected(t *testing.T) {
 }
 
 func TestExportFlowsAction_AtomicWrite(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -310,6 +322,7 @@ func TestExportFlowsAction_AtomicWrite(t *testing.T) {
 }
 
 func TestImportFlowsAction_ValidUUIDRequired(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -438,6 +451,7 @@ func parseMCPImportResult(t *testing.T, result *gomcp.CallToolResult) executeImp
 }
 
 func TestExportImportRoundTrip_MCP(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -530,6 +544,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 }
 
 func TestExportFlowsAction_PathTraversalCleaned(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)

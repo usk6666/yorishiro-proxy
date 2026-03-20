@@ -453,6 +453,13 @@ func relay(ctx context.Context, a, b net.Conn) error {
 	// Wait for the first goroutine to finish.
 	err := <-errCh
 
+	// Cancel the relay context so the watcher goroutine sets deadlines on
+	// both connections, which unblocks the second io.Copy goroutine.
+	relayCancel()
+
+	// Drain the second result to avoid goroutine leaks.
+	<-errCh
+
 	// If context was cancelled, return the context error.
 	if ctx.Err() != nil {
 		return ctx.Err()

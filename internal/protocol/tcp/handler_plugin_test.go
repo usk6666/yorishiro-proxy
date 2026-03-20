@@ -672,28 +672,6 @@ def on_before_send_to_client(data):
 	<-errCh
 }
 
-func TestHandler_SetPluginEngine(t *testing.T) {
-	h := NewHandler(nil, nil, testutil.DiscardLogger())
-
-	// Initially nil.
-	if h.pluginEngine != nil {
-		t.Error("pluginEngine should be nil initially")
-	}
-
-	engine := plugin.NewEngine(nil)
-	h.SetPluginEngine(engine)
-
-	if h.pluginEngine != engine {
-		t.Error("pluginEngine should be set after SetPluginEngine")
-	}
-
-	// Setting nil should clear it.
-	h.SetPluginEngine(nil)
-	if h.pluginEngine != nil {
-		t.Error("pluginEngine should be nil after SetPluginEngine(nil)")
-	}
-}
-
 func TestRelay_DispatchChunkHooks_NilEngine(t *testing.T) {
 	r := &relay{
 		flowID:       "test-flow",

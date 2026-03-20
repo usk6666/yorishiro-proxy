@@ -137,6 +137,7 @@ func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr st
 // --- Test: unknown and empty resource ---
 
 func TestQuery_EmptyResource(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -147,6 +148,7 @@ func TestQuery_EmptyResource(t *testing.T) {
 }
 
 func TestQuery_UnknownResource(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -167,6 +169,7 @@ func TestQuery_UnknownResource(t *testing.T) {
 // --- Test: sessions resource ---
 
 func TestQuery_Sessions_Empty(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -190,6 +193,7 @@ func TestQuery_Sessions_Empty(t *testing.T) {
 }
 
 func TestQuery_Sessions_WithData(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "sess-1", "HTTPS", "GET", "https://example.com/api", 200)
 	seedSession(t, store, "sess-2", "HTTP/1.x", "POST", "http://example.com/form", 302)
@@ -242,6 +246,7 @@ func TestQuery_Sessions_WithData(t *testing.T) {
 }
 
 func TestQuery_Sessions_WithFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "sess-get", "HTTPS", "GET", "https://example.com/api", 200)
 	seedSession(t, store, "sess-post", "HTTPS", "POST", "https://example.com/api", 201)
@@ -271,6 +276,7 @@ func TestQuery_Sessions_WithFilter(t *testing.T) {
 }
 
 func TestQuery_Sessions_Pagination(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	for i := 0; i < 5; i++ {
 		id := fmt.Sprintf("sess-%d", i)
@@ -317,6 +323,7 @@ func TestQuery_Sessions_Pagination(t *testing.T) {
 }
 
 func TestQuery_Sessions_NegativeOffset(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -330,6 +337,7 @@ func TestQuery_Sessions_NegativeOffset(t *testing.T) {
 }
 
 func TestQuery_Sessions_NilStore(t *testing.T) {
+	t.Parallel()
 	cs := setupQueryTestSession(t, nil)
 
 	result := callQuery(t, cs, queryInput{Resource: "flows"})
@@ -341,6 +349,7 @@ func TestQuery_Sessions_NilStore(t *testing.T) {
 // --- Test: flow resource ---
 
 func TestQuery_Session_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "sess-detail", "HTTPS", "GET", "https://example.com/api/users", 200)
 
@@ -387,6 +396,7 @@ func TestQuery_Session_Success(t *testing.T) {
 }
 
 func TestQuery_Session_MissingID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -397,6 +407,7 @@ func TestQuery_Session_MissingID(t *testing.T) {
 }
 
 func TestQuery_Session_NotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -410,6 +421,7 @@ func TestQuery_Session_NotFound(t *testing.T) {
 }
 
 func TestQuery_Session_NilStore(t *testing.T) {
+	t.Parallel()
 	cs := setupQueryTestSession(t, nil)
 
 	result := callQuery(t, cs, queryInput{
@@ -422,6 +434,7 @@ func TestQuery_Session_NilStore(t *testing.T) {
 }
 
 func TestQuery_Session_NilHeaders_ReturnsEmptyMap(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -482,6 +495,7 @@ func TestQuery_Session_NilHeaders_ReturnsEmptyMap(t *testing.T) {
 }
 
 func TestQuery_Session_NoMessages_ReturnsEmptyHeaders(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -522,6 +536,7 @@ func TestQuery_Session_NoMessages_ReturnsEmptyHeaders(t *testing.T) {
 // --- Test: messages resource ---
 
 func TestQuery_Messages_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "sess-msgs", "HTTPS", "GET", "https://example.com/api", 200)
 
@@ -567,6 +582,7 @@ func TestQuery_Messages_Success(t *testing.T) {
 }
 
 func TestQuery_Messages_Pagination(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -655,6 +671,7 @@ func TestQuery_Messages_Pagination(t *testing.T) {
 }
 
 func TestQuery_Messages_MissingID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -665,6 +682,7 @@ func TestQuery_Messages_MissingID(t *testing.T) {
 }
 
 func TestQuery_Messages_SessionNotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -678,6 +696,7 @@ func TestQuery_Messages_SessionNotFound(t *testing.T) {
 }
 
 func TestQuery_Messages_NegativeOffset(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -692,6 +711,7 @@ func TestQuery_Messages_NegativeOffset(t *testing.T) {
 }
 
 func TestQuery_Messages_NilStore(t *testing.T) {
+	t.Parallel()
 	cs := setupQueryTestSession(t, nil)
 
 	result := callQuery(t, cs, queryInput{
@@ -706,6 +726,7 @@ func TestQuery_Messages_NilStore(t *testing.T) {
 // --- Test: status resource ---
 
 func TestQuery_Status_Basic(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -731,6 +752,7 @@ func TestQuery_Status_Basic(t *testing.T) {
 }
 
 func TestQuery_Status_WithSessions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "s1", "HTTPS", "GET", "https://example.com", 200)
 	seedSession(t, store, "s2", "HTTPS", "POST", "https://example.com", 201)
@@ -753,6 +775,7 @@ func TestQuery_Status_WithSessions(t *testing.T) {
 // --- Test: config resource ---
 
 func TestQuery_Config_Default(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
 
@@ -783,6 +806,7 @@ func TestQuery_Config_Default(t *testing.T) {
 }
 
 func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	scope := proxy.NewCaptureScope()
 	scope.SetRules(
@@ -830,6 +854,7 @@ func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
 }
 
 func TestQuery_Config_WithManagerFields(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
@@ -889,6 +914,7 @@ func TestQuery_Config_WithManagerFields(t *testing.T) {
 }
 
 func TestQuery_Config_DefaultManagerValues(t *testing.T) {
+	t.Parallel()
 	// When manager is nil, max_connections and peek_timeout_ms should be zero.
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
@@ -919,6 +945,7 @@ func TestQuery_Config_DefaultManagerValues(t *testing.T) {
 // --- Test: ca_cert resource ---
 
 func TestQuery_CACert_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 
@@ -969,6 +996,7 @@ func TestQuery_CACert_Success(t *testing.T) {
 }
 
 func TestQuery_CACert_NilCA(t *testing.T) {
+	t.Parallel()
 	// Build server without CA.
 	ctx := context.Background()
 	s := NewServer(ctx, nil, nil, nil)
@@ -998,6 +1026,7 @@ func TestQuery_CACert_NilCA(t *testing.T) {
 // --- Test: sessions filter combinations ---
 
 func TestQuery_Sessions_FilterByProtocol(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "https-1", "HTTPS", "GET", "https://example.com", 200)
 	seedSession(t, store, "http-1", "HTTP/1.x", "GET", "http://example.com", 200)
@@ -1024,6 +1053,7 @@ func TestQuery_Sessions_FilterByProtocol(t *testing.T) {
 }
 
 func TestQuery_Sessions_FilterByURLPattern(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "api-1", "HTTPS", "GET", "https://example.com/api/users", 200)
 	seedSession(t, store, "page-1", "HTTPS", "GET", "https://example.com/pages/home", 200)
@@ -1050,6 +1080,7 @@ func TestQuery_Sessions_FilterByURLPattern(t *testing.T) {
 }
 
 func TestQuery_Sessions_FilterByStatusCode(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "ok-1", "HTTPS", "GET", "https://example.com/ok", 200)
 	seedSession(t, store, "err-1", "HTTPS", "GET", "https://example.com/error", 500)
@@ -1078,6 +1109,7 @@ func TestQuery_Sessions_FilterByStatusCode(t *testing.T) {
 // --- Test: ca_cert resource with persisted source ---
 
 func TestQuery_CACert_PersistedFields(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	ca.SetSource(cert.CASource{
@@ -1128,6 +1160,7 @@ func TestQuery_CACert_PersistedFields(t *testing.T) {
 }
 
 func TestQuery_CACert_EphemeralFields(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	// No SetSource — defaults to ephemeral (Persisted=false).
@@ -1208,6 +1241,7 @@ func seedBlockedSession(t *testing.T, store flow.Store, id, protocol, method, ur
 }
 
 func TestQuery_Sessions_FilterByBlockedBy(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "normal-1", "HTTPS", "GET", "https://example.com/ok", 200)
 	seedBlockedSession(t, store, "blocked-1", "HTTPS", "GET", "https://evil.com/admin", "target_scope")
@@ -1241,6 +1275,7 @@ func TestQuery_Sessions_FilterByBlockedBy(t *testing.T) {
 }
 
 func TestQuery_Sessions_BlockedByFieldInResponse(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedBlockedSession(t, store, "blocked-resp", "HTTPS", "GET", "https://evil.com/secret", "target_scope")
 
@@ -1263,6 +1298,7 @@ func TestQuery_Sessions_BlockedByFieldInResponse(t *testing.T) {
 }
 
 func TestQuery_Sessions_NormalSessionHasEmptyBlockedBy(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "normal-check", "HTTPS", "GET", "https://example.com/page", 200)
 
@@ -1285,6 +1321,7 @@ func TestQuery_Sessions_NormalSessionHasEmptyBlockedBy(t *testing.T) {
 }
 
 func TestQuery_Session_BlockedByInDetail(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedBlockedSession(t, store, "blocked-detail", "HTTPS", "GET", "https://evil.com/admin", "target_scope")
 
@@ -1323,6 +1360,7 @@ func TestQuery_Session_BlockedByInDetail(t *testing.T) {
 }
 
 func TestQuery_Session_NormalHasNoBlockedBy(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "normal-detail", "HTTPS", "GET", "https://example.com/ok", 200)
 
@@ -1398,6 +1436,7 @@ func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, 
 }
 
 func TestQuery_Sessions_FilterByState(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSessionWithState(t, store, "active-1", "HTTPS", "GET", "https://example.com/a", "active", 0)
 	seedSessionWithState(t, store, "complete-1", "HTTPS", "GET", "https://example.com/b", "complete", 200)
@@ -1445,6 +1484,7 @@ func TestQuery_Sessions_FilterByState(t *testing.T) {
 }
 
 func TestQuery_Session_ErrorStateNoResponse(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	// Error session with send only (no receive)
 	seedSessionWithState(t, store, "err-sess", "HTTPS", "POST", "https://example.com/fail", "error", 0)
@@ -1543,6 +1583,7 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 }
 
 func TestQuery_Session_VariantMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedVariantSession(t, store, "variant-sess")
 
@@ -1594,6 +1635,7 @@ func TestQuery_Session_VariantMessages(t *testing.T) {
 }
 
 func TestQuery_Session_NoVariantMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "normal-sess", "HTTPS", "GET", "https://example.com/normal", 200)
 
@@ -1617,6 +1659,7 @@ func TestQuery_Session_NoVariantMessages(t *testing.T) {
 }
 
 func TestQuery_Sessions_VariantUsesModifiedMethod(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedVariantSession(t, store, "variant-list")
 
@@ -1648,6 +1691,7 @@ func TestQuery_Sessions_VariantUsesModifiedMethod(t *testing.T) {
 // --- Test: intercept_drop blocked_by filter ---
 
 func TestQuery_Sessions_FilterByInterceptDrop(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "normal", "HTTPS", "GET", "https://example.com/ok", 200)
 	seedBlockedSession(t, store, "dropped", "HTTPS", "GET", "https://example.com/drop", "intercept_drop")
@@ -1749,6 +1793,7 @@ func seedResponseVariantSession(t *testing.T, store flow.Store, id string) {
 }
 
 func TestQuery_Session_ResponseVariantMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedResponseVariantSession(t, store, "resp-variant-sess")
 
@@ -1791,6 +1836,7 @@ func TestQuery_Session_ResponseVariantMessages(t *testing.T) {
 }
 
 func TestQuery_Session_NoResponseVariant(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	// Use a regular session (no response variant).
 	seedVariantSession(t, store, "no-resp-variant")
@@ -1815,6 +1861,7 @@ func TestQuery_Session_NoResponseVariant(t *testing.T) {
 }
 
 func TestQuery_Flows_ResponseVariantUsesModifiedStatus(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedResponseVariantSession(t, store, "resp-variant-flows")
 
@@ -1906,6 +1953,7 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 }
 
 func TestQuery_Session_BothRequestAndResponseVariants(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedBothVariantsSession(t, store, "both-variants")
 
@@ -1961,6 +2009,7 @@ func TestQuery_Session_BothRequestAndResponseVariants(t *testing.T) {
 // --- Test: conn_id filter ---
 
 func TestQuery_Sessions_FilterByConnID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -2084,6 +2133,7 @@ func seedFlowWithHost(t *testing.T, store flow.Store, id, serverAddr, urlStr str
 }
 
 func TestQuery_Sessions_FilterByHost(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Flow with server_addr matching host exactly (no port).
@@ -2129,6 +2179,7 @@ func TestQuery_Sessions_FilterByHost(t *testing.T) {
 }
 
 func TestQuery_Sessions_FilterByConnIDAndHost(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 

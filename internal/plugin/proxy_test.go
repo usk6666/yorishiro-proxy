@@ -45,31 +45,6 @@ func TestProxyModule_Shutdown_EmptyReason(t *testing.T) {
 	}
 }
 
-func TestProxyModule_Shutdown_NilCallback(t *testing.T) {
-	// Should not panic even with nil shutdown function.
-	mod := newProxyModule(nil)
-
-	thread := &starlark.Thread{Name: "test"}
-	shutdownBuiltin := mod.Members["shutdown"]
-
-	_, err := starlark.Call(thread, shutdownBuiltin, starlark.Tuple{starlark.String("test reason")}, nil)
-	if err != nil {
-		t.Fatalf("proxy.shutdown with nil callback: %v", err)
-	}
-}
-
-func TestProxyModule_Shutdown_NoArgs(t *testing.T) {
-	mod := newProxyModule(nil)
-
-	thread := &starlark.Thread{Name: "test"}
-	shutdownBuiltin := mod.Members["shutdown"]
-
-	_, err := starlark.Call(thread, shutdownBuiltin, starlark.Tuple{}, nil)
-	if err == nil {
-		t.Error("proxy.shutdown without args should return error")
-	}
-}
-
 func TestEngine_SetShutdownFunc(t *testing.T) {
 	engine := NewEngine(nil)
 

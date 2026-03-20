@@ -73,6 +73,7 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 }
 
 func TestExportImportRoundTrip(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -178,6 +179,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 }
 
 func TestExportWithProtocolFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -208,6 +210,7 @@ func TestExportWithProtocolFilter(t *testing.T) {
 }
 
 func TestExportWithURLPatternFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -229,6 +232,7 @@ func TestExportWithURLPatternFilter(t *testing.T) {
 }
 
 func TestExportWithTimeFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -260,6 +264,7 @@ func TestExportWithTimeFilter(t *testing.T) {
 }
 
 func TestExportMetadataOnly(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -297,6 +302,7 @@ func TestExportMetadataOnly(t *testing.T) {
 }
 
 func TestImportConflictSkip(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -336,6 +342,7 @@ func TestImportConflictSkip(t *testing.T) {
 }
 
 func TestImportConflictReplace(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -375,6 +382,7 @@ func TestImportConflictReplace(t *testing.T) {
 }
 
 func TestImportInvalidJSONL(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -417,6 +425,7 @@ func TestImportInvalidJSONL(t *testing.T) {
 }
 
 func TestImportInvalidVersion(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -445,6 +454,7 @@ func TestImportInvalidVersion(t *testing.T) {
 }
 
 func TestImportEmptyLines(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -462,6 +472,7 @@ func TestImportEmptyLines(t *testing.T) {
 }
 
 func TestExportJSONLFormat(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -510,6 +521,7 @@ func TestExportJSONLFormat(t *testing.T) {
 }
 
 func TestExportNoSessions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -527,6 +539,7 @@ func TestExportNoSessions(t *testing.T) {
 }
 
 func TestLargeExportImport(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping large export/import test in short mode")
 	}
@@ -561,6 +574,7 @@ func TestLargeExportImport(t *testing.T) {
 }
 
 func TestExportSessionWithNilConnInfo(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -606,6 +620,7 @@ func TestExportSessionWithNilConnInfo(t *testing.T) {
 }
 
 func TestExportImportWithURLMessage(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -669,6 +684,7 @@ func TestExportImportWithURLMessage(t *testing.T) {
 }
 
 func TestExportImportDefaultConflictPolicy(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -692,6 +708,7 @@ func TestExportImportDefaultConflictPolicy(t *testing.T) {
 }
 
 func TestExportCombinedFilters(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -731,6 +748,7 @@ func TestExportCombinedFilters(t *testing.T) {
 }
 
 func TestExportMaxFlows(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -762,6 +780,7 @@ func TestExportMaxFlows(t *testing.T) {
 }
 
 func TestExportMaxFlowsZeroMeansNoLimit(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -785,6 +804,7 @@ func TestExportMaxFlowsZeroMeansNoLimit(t *testing.T) {
 }
 
 func TestImportValidateIDs_ValidUUIDs(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -803,6 +823,7 @@ func TestImportValidateIDs_ValidUUIDs(t *testing.T) {
 }
 
 func TestImportValidateIDs_InvalidSessionID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -828,6 +849,7 @@ func TestImportValidateIDs_InvalidSessionID(t *testing.T) {
 }
 
 func TestImportValidateIDs_InvalidMessageID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -853,6 +875,7 @@ func TestImportValidateIDs_InvalidMessageID(t *testing.T) {
 }
 
 func TestImportValidateIDs_DisabledByDefault(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -868,6 +891,7 @@ func TestImportValidateIDs_DisabledByDefault(t *testing.T) {
 }
 
 func TestImportMaxScannerBuffer(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -893,6 +917,7 @@ func TestImportMaxScannerBuffer(t *testing.T) {
 }
 
 func TestImportDefaultScannerBuffer(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -908,6 +933,7 @@ func TestImportDefaultScannerBuffer(t *testing.T) {
 }
 
 func TestImportErrorDetails_SaveSessionFailure(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -950,6 +976,7 @@ func TestImportErrorDetails_SaveSessionFailure(t *testing.T) {
 }
 
 func TestImportErrorDetailsCap(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -971,6 +998,7 @@ func TestImportErrorDetailsCap(t *testing.T) {
 }
 
 func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
@@ -1067,6 +1095,7 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 // on the connection that executed the DELETE, causing UNIQUE constraint errors
 // on re-import.
 func TestExportDeleteAllImportRoundTrip(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)

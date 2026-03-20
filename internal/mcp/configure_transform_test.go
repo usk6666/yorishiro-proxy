@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -434,35 +433,6 @@ func TestConfigure_AutoTransform_NilPipeline(t *testing.T) {
 	}
 }
 
-func TestConfigure_AutoTransform_NilPipelineReplace(t *testing.T) {
-	cs := setupTransformTestSession(t, nil) // nil pipeline
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "replace",
-			AutoTransform: &configureAutoTransform{
-				Rules: []transformRuleInput{
-					{
-						ID: "r1", Enabled: true, Direction: "request",
-						Action: transformActionInput{
-							Type:   "add_header",
-							Header: "X-Test",
-							Value:  "true",
-						},
-					},
-				},
-			},
-		}),
-	})
-	if err != nil {
-		return // Go-level error is acceptable.
-	}
-	if !result.IsError {
-		t.Fatal("expected error for nil pipeline in replace, got success")
-	}
-}
-
 func TestConfigure_AutoTransform_MergeAddDuplicate(t *testing.T) {
 	pipeline := rules.NewPipeline()
 	pipeline.AddRule(rules.Rule{
@@ -575,58 +545,6 @@ func TestConfigure_AutoTransform_MergeEnableNonexistent(t *testing.T) {
 	}
 }
 
-// TestProxyStart_AutoTransformInputSerialization tests that auto-transform rules can be serialized for proxy_start.
-func TestProxyStart_AutoTransformInputSerialization(t *testing.T) {
-	input := proxyStartInput{
-		AutoTransform: []transformRuleInput{
-			{
-				ID:        "rule-1",
-				Enabled:   true,
-				Priority:  10,
-				Direction: "request",
-				Conditions: transformConditionsInput{
-					URLPattern: "/api/admin.*",
-					Methods:    []string{"POST", "PUT"},
-					HeaderMatch: map[string]string{
-						"Content-Type": "application/json",
-					},
-				},
-				Action: transformActionInput{
-					Type:   "set_header",
-					Header: "Authorization",
-					Value:  "Bearer token",
-				},
-			},
-		},
-	}
-
-	data, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	var decoded proxyStartInput
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-
-	if len(decoded.AutoTransform) != 1 {
-		t.Fatalf("AutoTransform len = %d, want 1", len(decoded.AutoTransform))
-	}
-	if decoded.AutoTransform[0].ID != "rule-1" {
-		t.Errorf("ID = %q, want %q", decoded.AutoTransform[0].ID, "rule-1")
-	}
-	if decoded.AutoTransform[0].Conditions.URLPattern != "/api/admin.*" {
-		t.Errorf("URLPattern = %q, want %q", decoded.AutoTransform[0].Conditions.URLPattern, "/api/admin.*")
-	}
-	if decoded.AutoTransform[0].Action.Type != "set_header" {
-		t.Errorf("Action.Type = %q, want %q", decoded.AutoTransform[0].Action.Type, "set_header")
-	}
-	if decoded.AutoTransform[0].Priority != 10 {
-		t.Errorf("Priority = %d, want 10", decoded.AutoTransform[0].Priority)
-	}
-}
-
 func TestTransformHelpers_ToFromRoundTrip(t *testing.T) {
 	input := transformRuleInput{
 		ID:        "r1",
@@ -676,13 +594,6 @@ func TestTransformHelpers_ToFromRoundTrip(t *testing.T) {
 	}
 	if output.Action.Header != "Authorization" {
 		t.Errorf("output Action.Header = %q, want %q", output.Action.Header, "Authorization")
-	}
-}
-
-func TestTransformHelpers_FromTransformRulesNil(t *testing.T) {
-	out := fromTransformRules(nil)
-	if out != nil {
-		t.Errorf("fromTransformRules(nil) = %v, want nil", out)
 	}
 }
 

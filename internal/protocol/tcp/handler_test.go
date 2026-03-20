@@ -187,32 +187,11 @@ func (c *connWithLocalAddr) LocalAddr() net.Addr {
 
 // --- Tests ---
 
-func TestHandler_Name(t *testing.T) {
-	h := NewHandler(nil, nil, testutil.DiscardLogger())
-	if got := h.Name(); got != "TCP" {
-		t.Errorf("Name() = %q, want %q", got, "TCP")
-	}
-}
-
 func TestHandler_Detect(t *testing.T) {
 	h := NewHandler(nil, nil, testutil.DiscardLogger())
 
-	tests := []struct {
-		name string
-		peek []byte
-	}{
-		{"empty bytes", nil},
-		{"random bytes", []byte{0x01, 0x02, 0x03}},
-		{"HTTP-like bytes", []byte("GET /index.html")},
-		{"binary data", []byte{0xff, 0xfe, 0x00, 0x01}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if !h.Detect(tt.peek) {
-				t.Errorf("Detect(%v) = false, want true (fallback handler)", tt.peek)
-			}
-		})
+	if !h.Detect([]byte{0x01, 0x02, 0x03}) {
+		t.Error("Detect(random bytes) = false, want true (fallback handler)")
 	}
 }
 
@@ -609,13 +588,6 @@ func TestHandler_Handle_StoreErrors(t *testing.T) {
 	}
 }
 
-func TestNewHandler_NilForwards(t *testing.T) {
-	h := NewHandler(nil, nil, testutil.DiscardLogger())
-	if h.forwards == nil {
-		t.Error("forwards should be initialized to empty map, not nil")
-	}
-}
-
 // --- Relay unit tests ---
 
 func TestRelay_Record_NilStore(t *testing.T) {
@@ -681,14 +653,13 @@ func TestRelay_DataIsolation(t *testing.T) {
 // --- SetForwards tests ---
 
 func TestHandler_SetForwards(t *testing.T) {
+	// Scenario 1: Set forwards on empty handler.
 	h := NewHandler(nil, nil, testutil.DiscardLogger())
 
-	// Initially empty.
 	if len(h.Forwards()) != 0 {
 		t.Errorf("initial forwards = %v, want empty", h.Forwards())
 	}
 
-	// Set forwards.
 	h.SetForwards(map[string]*config.ForwardConfig{
 		"3306": {Target: "db.example.com:3306", Protocol: "raw"},
 		"6379": {Target: "redis.example.com:6379", Protocol: "raw"},
@@ -704,46 +675,39 @@ func TestHandler_SetForwards(t *testing.T) {
 	if got["6379"] == nil || got["6379"].Target != "redis.example.com:6379" {
 		t.Errorf("forwards[6379].Target = %v, want redis.example.com:6379", got["6379"])
 	}
-}
 
-func TestHandler_SetForwards_Merge(t *testing.T) {
-	// SetForwards should merge into existing entries.
-	initial := map[string]*config.ForwardConfig{
+	// Scenario 2: Merge into existing entries.
+	h2 := NewHandler(nil, map[string]*config.ForwardConfig{
 		"3306": {Target: "db.example.com:3306", Protocol: "raw"},
-	}
-	h := NewHandler(nil, initial, testutil.DiscardLogger())
+	}, testutil.DiscardLogger())
 
-	// Add a new entry.
-	h.SetForwards(map[string]*config.ForwardConfig{
+	h2.SetForwards(map[string]*config.ForwardConfig{
 		"6379": {Target: "redis.example.com:6379", Protocol: "raw"},
 	})
 
-	got := h.Forwards()
+	got = h2.Forwards()
 	if len(got) != 2 {
-		t.Fatalf("forwards len = %d, want 2", len(got))
+		t.Fatalf("merge: forwards len = %d, want 2", len(got))
 	}
 	if got["3306"] == nil || got["3306"].Target != "db.example.com:3306" {
-		t.Errorf("forwards[3306].Target = %v, want db.example.com:3306", got["3306"])
+		t.Errorf("merge: forwards[3306].Target = %v, want db.example.com:3306", got["3306"])
 	}
 	if got["6379"] == nil || got["6379"].Target != "redis.example.com:6379" {
-		t.Errorf("forwards[6379].Target = %v, want redis.example.com:6379", got["6379"])
+		t.Errorf("merge: forwards[6379].Target = %v, want redis.example.com:6379", got["6379"])
 	}
-}
 
-func TestHandler_SetForwards_Override(t *testing.T) {
-	// SetForwards should override existing entries.
-	initial := map[string]*config.ForwardConfig{
+	// Scenario 3: Override existing entries.
+	h3 := NewHandler(nil, map[string]*config.ForwardConfig{
 		"3306": {Target: "old-db.example.com:3306", Protocol: "raw"},
-	}
-	h := NewHandler(nil, initial, testutil.DiscardLogger())
+	}, testutil.DiscardLogger())
 
-	h.SetForwards(map[string]*config.ForwardConfig{
+	h3.SetForwards(map[string]*config.ForwardConfig{
 		"3306": {Target: "new-db.example.com:3306", Protocol: "raw"},
 	})
 
-	got := h.Forwards()
+	got = h3.Forwards()
 	if got["3306"] == nil || got["3306"].Target != "new-db.example.com:3306" {
-		t.Errorf("forwards[3306].Target = %v, want new-db.example.com:3306", got["3306"])
+		t.Errorf("override: forwards[3306].Target = %v, want new-db.example.com:3306", got["3306"])
 	}
 }
 

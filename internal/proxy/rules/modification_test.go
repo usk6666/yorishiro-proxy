@@ -78,51 +78,41 @@ func TestCompileRule_InvalidActionType(t *testing.T) {
 	}
 }
 
-func TestCompileRule_AddHeaderNoName(t *testing.T) {
-	r := Rule{
-		ID:        "test",
-		Direction: DirectionRequest,
-		Action:    Action{Type: ActionAddHeader, Value: "val"},
+func TestCompileRule_MissingRequiredField(t *testing.T) {
+	tests := []struct {
+		name   string
+		action Action
+	}{
+		{
+			name:   "add_header without header name",
+			action: Action{Type: ActionAddHeader, Value: "val"},
+		},
+		{
+			name:   "set_header without header name",
+			action: Action{Type: ActionSetHeader, Value: "val"},
+		},
+		{
+			name:   "remove_header without header name",
+			action: Action{Type: ActionRemoveHeader},
+		},
+		{
+			name:   "replace_body without pattern",
+			action: Action{Type: ActionReplaceBody, Value: "replacement"},
+		},
 	}
-	_, err := compileRule(r)
-	if err == nil {
-		t.Fatal("expected error for add_header without header name")
-	}
-}
 
-func TestCompileRule_SetHeaderNoName(t *testing.T) {
-	r := Rule{
-		ID:        "test",
-		Direction: DirectionRequest,
-		Action:    Action{Type: ActionSetHeader, Value: "val"},
-	}
-	_, err := compileRule(r)
-	if err == nil {
-		t.Fatal("expected error for set_header without header name")
-	}
-}
-
-func TestCompileRule_RemoveHeaderNoName(t *testing.T) {
-	r := Rule{
-		ID:        "test",
-		Direction: DirectionRequest,
-		Action:    Action{Type: ActionRemoveHeader},
-	}
-	_, err := compileRule(r)
-	if err == nil {
-		t.Fatal("expected error for remove_header without header name")
-	}
-}
-
-func TestCompileRule_ReplaceBodyNoPattern(t *testing.T) {
-	r := Rule{
-		ID:        "test",
-		Direction: DirectionRequest,
-		Action:    Action{Type: ActionReplaceBody, Value: "replacement"},
-	}
-	_, err := compileRule(r)
-	if err == nil {
-		t.Fatal("expected error for replace_body without pattern")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Rule{
+				ID:        "test",
+				Direction: DirectionRequest,
+				Action:    tt.action,
+			}
+			_, err := compileRule(r)
+			if err == nil {
+				t.Fatalf("expected error for %s", tt.name)
+			}
+		})
 	}
 }
 

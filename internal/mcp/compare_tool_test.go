@@ -40,6 +40,7 @@ func parseCompareResult(t *testing.T, result *gomcp.CallToolResult) *compareResu
 }
 
 func TestCompare_Success_DifferentResponses(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	u, _ := url.Parse("http://example.com/api/test")
 
@@ -184,6 +185,7 @@ func TestCompare_Success_DifferentResponses(t *testing.T) {
 }
 
 func TestCompare_Success_IdenticalResponses(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	u, _ := url.Parse("http://example.com/test")
 
@@ -237,6 +239,7 @@ func TestCompare_Success_IdenticalResponses(t *testing.T) {
 }
 
 func TestCompare_HTMLResponse_NoJSONDiff(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	u, _ := url.Parse("http://example.com/page")
 
@@ -285,6 +288,7 @@ func TestCompare_HTMLResponse_NoJSONDiff(t *testing.T) {
 }
 
 func TestCompare_MissingFlowID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupTestSession(t, nil, store)
 
@@ -320,6 +324,7 @@ func TestCompare_MissingFlowID(t *testing.T) {
 }
 
 func TestCompare_NonexistentFlow(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	u, _ := url.Parse("http://example.com/test")
 
@@ -365,6 +370,7 @@ func TestCompare_NonexistentFlow(t *testing.T) {
 }
 
 func TestCompare_FlowWithNoReceiveMessage(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	u, _ := url.Parse("http://example.com/test")
 
@@ -396,6 +402,7 @@ func TestCompare_FlowWithNoReceiveMessage(t *testing.T) {
 }
 
 func TestCompare_NilStore(t *testing.T) {
+	t.Parallel()
 	// Create a session without a store.
 	cs := setupTestSession(t, nil)
 
@@ -412,6 +419,7 @@ func TestCompare_NilStore(t *testing.T) {
 }
 
 func TestCompare_EmptyBodies(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	u, _ := url.Parse("http://example.com/empty")
 
@@ -447,6 +455,7 @@ func TestCompare_EmptyBodies(t *testing.T) {
 }
 
 func TestCompare_JSONWithCharsetContentType(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	u, _ := url.Parse("http://example.com/api")
 
@@ -492,6 +501,7 @@ func TestCompare_JSONWithCharsetContentType(t *testing.T) {
 // --- Unit tests for internal functions ---
 
 func TestIsJSONContentType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		ct   string
 		want bool
@@ -517,6 +527,7 @@ func TestIsJSONContentType(t *testing.T) {
 }
 
 func TestFlattenJSONKeys(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -566,6 +577,7 @@ func TestFlattenJSONKeys(t *testing.T) {
 }
 
 func TestCompareHeaders(t *testing.T) {
+	t.Parallel()
 	a := map[string][]string{
 		"Content-Type": {"text/html"},
 		"Set-Cookie":   {"session=abc"},
@@ -596,6 +608,7 @@ func TestCompareHeaders(t *testing.T) {
 }
 
 func TestComputeJSONKeyDiff(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		bodyA       string
@@ -659,6 +672,7 @@ func TestComputeJSONKeyDiff(t *testing.T) {
 }
 
 func TestBytesEqual(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		a, b []byte

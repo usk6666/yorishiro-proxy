@@ -15,22 +15,27 @@ func TestNewDetector(t *testing.T) {
 	}
 }
 
-func TestAnalyze_NilInputs(t *testing.T) {
-	d := NewDetector()
-	result := d.Analyze(nil, nil)
-	if result == nil {
-		t.Fatal("Analyze(nil, nil) returned nil")
-	}
-	if len(result.Detections) != 0 {
-		t.Errorf("expected 0 detections for nil inputs, got %d", len(result.Detections))
-	}
-}
-
 func TestAnalyze_EmptyInputs(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers http.Header
+		body    []byte
+	}{
+		{"nil inputs", nil, nil},
+		{"empty inputs", http.Header{}, []byte{}},
+	}
+
 	d := NewDetector()
-	result := d.Analyze(http.Header{}, []byte{})
-	if len(result.Detections) != 0 {
-		t.Errorf("expected 0 detections for empty inputs, got %d", len(result.Detections))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := d.Analyze(tt.headers, tt.body)
+			if result == nil {
+				t.Fatal("Analyze() returned nil")
+			}
+			if len(result.Detections) != 0 {
+				t.Errorf("expected 0 detections, got %d", len(result.Detections))
+			}
+		})
 	}
 }
 

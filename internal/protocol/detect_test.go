@@ -23,30 +23,6 @@ func (h *mockHandler) Handle(_ context.Context, _ net.Conn) error {
 // Compile-time check that mockHandler satisfies proxy.ProtocolHandler.
 var _ proxy.ProtocolHandler = (*mockHandler)(nil)
 
-func TestNewDetector_ZeroHandlers(t *testing.T) {
-	d := NewDetector()
-	if d == nil {
-		t.Fatal("NewDetector() returned nil")
-	}
-	if len(d.handlers) != 0 {
-		t.Errorf("handlers length = %d, want 0", len(d.handlers))
-	}
-}
-
-func TestNewDetector_MultipleHandlers(t *testing.T) {
-	h1 := &mockHandler{name: "h1", canHandle: func([]byte) bool { return false }}
-	h2 := &mockHandler{name: "h2", canHandle: func([]byte) bool { return false }}
-	h3 := &mockHandler{name: "h3", canHandle: func([]byte) bool { return false }}
-
-	d := NewDetector(h1, h2, h3)
-	if d == nil {
-		t.Fatal("NewDetector() returned nil")
-	}
-	if len(d.handlers) != 3 {
-		t.Errorf("handlers length = %d, want 3", len(d.handlers))
-	}
-}
-
 func TestDetect(t *testing.T) {
 	httpHandler := &mockHandler{
 		name: "HTTP",

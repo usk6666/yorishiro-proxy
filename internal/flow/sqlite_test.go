@@ -84,6 +84,7 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 }
 
 func TestNewSQLiteStore_BusyTimeout(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "busy_timeout_test.db")
 	logger := testutil.DiscardLogger()
 	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
@@ -103,6 +104,7 @@ func TestNewSQLiteStore_BusyTimeout(t *testing.T) {
 }
 
 func TestSQLiteStore_SaveAndGetSession(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -141,6 +143,7 @@ func TestSQLiteStore_SaveAndGetSession(t *testing.T) {
 }
 
 func TestSQLiteStore_ConnInfo(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -178,6 +181,7 @@ func TestSQLiteStore_ConnInfo(t *testing.T) {
 }
 
 func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -235,6 +239,7 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 }
 
 func TestSQLiteStore_FilterByDirection(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -256,6 +261,7 @@ func TestSQLiteStore_FilterByDirection(t *testing.T) {
 }
 
 func TestSQLiteStore_CountMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -274,6 +280,7 @@ func TestSQLiteStore_CountMessages(t *testing.T) {
 }
 
 func TestSQLiteStore_UpdateSession(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -302,6 +309,7 @@ func TestSQLiteStore_UpdateSession(t *testing.T) {
 }
 
 func TestSQLiteStore_ListSessions_Filters(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -342,6 +350,7 @@ func TestSQLiteStore_ListSessions_Filters(t *testing.T) {
 }
 
 func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -410,6 +419,7 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 }
 
 func TestSQLiteStore_CountSessions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -435,6 +445,7 @@ func TestSQLiteStore_CountSessions(t *testing.T) {
 }
 
 func TestSQLiteStore_DeleteSession_CascadeMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -464,6 +475,7 @@ func TestSQLiteStore_DeleteSession_CascadeMessages(t *testing.T) {
 }
 
 func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -494,6 +506,7 @@ func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
 }
 
 func TestSQLiteStore_DeleteSessionsOlderThan(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -516,6 +529,7 @@ func TestSQLiteStore_DeleteSessionsOlderThan(t *testing.T) {
 }
 
 func TestSQLiteStore_DeleteSessionsByProtocol(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -557,6 +571,7 @@ func TestSQLiteStore_DeleteSessionsByProtocol(t *testing.T) {
 }
 
 func TestSQLiteStore_DeleteSessionsByProtocol_NoMatches(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -578,6 +593,7 @@ func TestSQLiteStore_DeleteSessionsByProtocol_NoMatches(t *testing.T) {
 }
 
 func TestSQLiteStore_DeleteSessionsByProtocol_CascadeMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -606,6 +622,7 @@ func TestSQLiteStore_DeleteSessionsByProtocol_CascadeMessages(t *testing.T) {
 }
 
 func TestSQLiteStore_DeleteExcessSessions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -629,6 +646,7 @@ func TestSQLiteStore_DeleteExcessSessions(t *testing.T) {
 }
 
 func TestSQLiteStore_RawBytes(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -654,6 +672,7 @@ func TestSQLiteStore_RawBytes(t *testing.T) {
 }
 
 func TestSQLiteStore_SequenceUniqueness(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -670,6 +689,7 @@ func TestSQLiteStore_SequenceUniqueness(t *testing.T) {
 }
 
 func TestSQLiteStore_CancelledContext(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -682,6 +702,7 @@ func TestSQLiteStore_CancelledContext(t *testing.T) {
 }
 
 func TestSQLiteStore_ConcurrentSaves(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -711,6 +732,7 @@ func TestSQLiteStore_ConcurrentSaves(t *testing.T) {
 }
 
 func TestSQLiteStore_LIKEWildcardEscape(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -728,6 +750,7 @@ func TestSQLiteStore_LIKEWildcardEscape(t *testing.T) {
 }
 
 func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "persist.db")
 	logger := testutil.DiscardLogger()
@@ -761,6 +784,7 @@ func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 }
 
 func TestSQLiteStore_Migration(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "migrate.db")
 	logger := testutil.DiscardLogger()
@@ -789,6 +813,7 @@ func TestSQLiteStore_Migration(t *testing.T) {
 }
 
 func TestSQLiteStore_FutureSchemaVersion(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "future.db")
 	logger := testutil.DiscardLogger()
@@ -813,6 +838,7 @@ func TestSQLiteStore_FutureSchemaVersion(t *testing.T) {
 }
 
 func TestSQLiteStore_GetNotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	_, err := store.GetFlow(context.Background(), "nonexistent")
 	if err == nil {
@@ -821,6 +847,7 @@ func TestSQLiteStore_GetNotFound(t *testing.T) {
 }
 
 func TestSQLiteStore_InvalidDBPath(t *testing.T) {
+	t.Parallel()
 	logger := testutil.DiscardLogger()
 	_, err := NewSQLiteStore(context.Background(), "/nonexistent/path/to/db", logger)
 	if err == nil {
@@ -829,6 +856,7 @@ func TestSQLiteStore_InvalidDBPath(t *testing.T) {
 }
 
 func TestSQLiteStore_Tags(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -849,6 +877,7 @@ func TestSQLiteStore_Tags(t *testing.T) {
 }
 
 func TestSQLiteStore_BodyTruncated(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -874,6 +903,7 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 }
 
 func TestSQLiteStore_DBFileCreated(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "created.db")
 	logger := testutil.DiscardLogger()
@@ -890,6 +920,7 @@ func TestSQLiteStore_DBFileCreated(t *testing.T) {
 }
 
 func TestSQLiteStore_BlockedBy_SaveAndGet(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -925,6 +956,7 @@ func TestSQLiteStore_BlockedBy_SaveAndGet(t *testing.T) {
 }
 
 func TestSQLiteStore_BlockedBy_ListFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -972,6 +1004,7 @@ func TestSQLiteStore_BlockedBy_ListFilter(t *testing.T) {
 }
 
 func TestSQLiteStore_BlockedBy_CountFilter(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1011,6 +1044,7 @@ func TestSQLiteStore_BlockedBy_CountFilter(t *testing.T) {
 }
 
 func TestSQLiteStore_BlockedBy_DefaultEmpty(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1033,6 +1067,7 @@ func TestSQLiteStore_BlockedBy_DefaultEmpty(t *testing.T) {
 }
 
 func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1085,6 +1120,7 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 }
 
 func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "v2_migrate.db")
 	logger := testutil.DiscardLogger()
@@ -1174,6 +1210,7 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 }
 
 func TestGetFlow_PrefixMatch(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1241,6 +1278,7 @@ func TestGetFlow_PrefixMatch(t *testing.T) {
 }
 
 func TestValidateFlowID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		id      string
@@ -1272,6 +1310,7 @@ func TestValidateFlowID(t *testing.T) {
 }
 
 func TestGetFlow_PrefixMatch_Ambiguous(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1330,6 +1369,7 @@ func TestGetFlow_PrefixMatch_Ambiguous(t *testing.T) {
 }
 
 func TestGetFlow_PrefixMatch_UniqueAfterAmbiguity(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1376,6 +1416,7 @@ func TestGetFlow_PrefixMatch_UniqueAfterAmbiguity(t *testing.T) {
 }
 
 func TestSQLiteStore_HostFilter_BoundaryAnchoring(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1424,6 +1465,7 @@ func TestSQLiteStore_HostFilter_BoundaryAnchoring(t *testing.T) {
 }
 
 func TestSQLiteStore_FlowTiming_SaveAndGet(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1462,6 +1504,7 @@ func TestSQLiteStore_FlowTiming_SaveAndGet(t *testing.T) {
 }
 
 func TestSQLiteStore_FlowTiming_NullByDefault(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1494,6 +1537,7 @@ func TestSQLiteStore_FlowTiming_NullByDefault(t *testing.T) {
 }
 
 func TestSQLiteStore_FlowTiming_UpdateFlow(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1551,6 +1595,7 @@ func TestSQLiteStore_FlowTiming_UpdateFlow(t *testing.T) {
 }
 
 func TestSQLiteStore_FlowTiming_ErrorFlowNullTiming(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1588,6 +1633,7 @@ func TestSQLiteStore_FlowTiming_ErrorFlowNullTiming(t *testing.T) {
 }
 
 func TestSQLiteStore_FlowTiming_ListFlows(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -1630,6 +1676,7 @@ func TestSQLiteStore_FlowTiming_ListFlows(t *testing.T) {
 }
 
 func Test_flowOrderClause(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		sortBy string
@@ -1651,6 +1698,7 @@ func Test_flowOrderClause(t *testing.T) {
 }
 
 func Test_ListFlows_SortByDuration(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -1703,6 +1751,7 @@ func Test_ListFlows_SortByDuration(t *testing.T) {
 }
 
 func TestSQLiteStore_SchemeField(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 

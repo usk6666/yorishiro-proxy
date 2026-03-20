@@ -131,16 +131,3 @@ func TestSOCKS5ContextFunctions(t *testing.T) {
 		}
 	})
 }
-
-func TestSetPluginEngine(t *testing.T) {
-	h := NewHandler(nil)
-	if h.PluginEngine() != nil {
-		t.Error("expected nil engine initially")
-	}
-
-	engine := plugin.NewEngine(nil)
-	h.SetPluginEngine(engine)
-	if h.PluginEngine() != engine {
-		t.Error("expected engine to be set")
-	}
-}

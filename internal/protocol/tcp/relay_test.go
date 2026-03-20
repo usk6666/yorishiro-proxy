@@ -182,7 +182,7 @@ func TestRunRelay_ContextCancellation(t *testing.T) {
 	if err != context.Canceled {
 		// err may be nil or context.Canceled depending on timing.
 		if err != nil {
-			t.Logf("expected context.Canceled or nil, got: %v", err)
+			t.Errorf("expected context.Canceled or nil, got: %v", err)
 		}
 	}
 

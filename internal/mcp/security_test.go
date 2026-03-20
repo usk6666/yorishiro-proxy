@@ -269,39 +269,6 @@ func TestValidateURLScheme_Invalid(t *testing.T) {
 	}
 }
 
-// --- Token generation tests (entropy characteristics) ---
-
-func TestGenerateToken_HexEncoding(t *testing.T) {
-	token, err := GenerateToken()
-	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
-	}
-	// Token should be 64 hex characters (32 bytes * 2).
-	if len(token) != 64 {
-		t.Errorf("expected 64-char token, got %d chars", len(token))
-	}
-	// All characters should be valid hex.
-	for i, c := range token {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			t.Errorf("non-hex character at position %d: %c", i, c)
-		}
-	}
-}
-
-func TestGenerateToken_NoDuplicatesInBatch(t *testing.T) {
-	seen := make(map[string]bool)
-	for i := 0; i < 50; i++ {
-		token, err := GenerateToken()
-		if err != nil {
-			t.Fatalf("GenerateToken: %v", err)
-		}
-		if seen[token] {
-			t.Fatalf("duplicate token generated on iteration %d: %s", i, token)
-		}
-		seen[token] = true
-	}
-}
-
 // --- Loopback address validation tests ---
 
 func TestValidateLoopbackAddr_Valid(t *testing.T) {

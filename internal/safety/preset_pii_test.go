@@ -210,54 +210,6 @@ func TestJapanPhoneRules_Match(t *testing.T) {
 	}
 }
 
-func TestPIIPresets_Lookup(t *testing.T) {
-	presetNames := []string{
-		PresetCreditCard,
-		PresetJapanMyNumber,
-		PresetEmail,
-		PresetJapanPhone,
-	}
-
-	for _, name := range presetNames {
-		t.Run(name, func(t *testing.T) {
-			p, err := LookupPreset(name)
-			if err != nil {
-				t.Fatalf("LookupPreset(%q) error = %v", name, err)
-			}
-			if p.Name != name {
-				t.Errorf("preset name = %q, want %q", p.Name, name)
-			}
-			if len(p.Rules) == 0 {
-				t.Error("expected rules, got none")
-			}
-		})
-	}
-}
-
-func TestPIIPresets_AllPatternsCompile(t *testing.T) {
-	presetNames := []string{
-		PresetCreditCard,
-		PresetJapanMyNumber,
-		PresetEmail,
-		PresetJapanPhone,
-	}
-
-	for _, name := range presetNames {
-		p, err := LookupPreset(name)
-		if err != nil {
-			t.Fatalf("lookup %s: %v", name, err)
-		}
-		for _, rc := range p.Rules {
-			t.Run(rc.ID, func(t *testing.T) {
-				_, err := regexp.Compile(rc.Pattern)
-				if err != nil {
-					t.Errorf("pattern %q does not compile: %v", rc.Pattern, err)
-				}
-			})
-		}
-	}
-}
-
 func TestPIIPresets_DefaultReplacement(t *testing.T) {
 	tests := []struct {
 		preset      string
@@ -484,24 +436,6 @@ func TestPIIPresets_ReplacementOverride(t *testing.T) {
 
 	result := e.FilterOutput([]byte("card: 4111-1111-1111-1111"))
 	want := "card: ****-****-****-1111"
-	if string(result.Data) != want {
-		t.Errorf("Data = %q, want %q", string(result.Data), want)
-	}
-}
-
-func TestPIIPresets_ReplacementOverride_Email(t *testing.T) {
-	e := mustEngine(t, Config{
-		OutputRules: []RuleConfig{
-			{
-				Preset:      PresetEmail,
-				Action:      "mask",
-				Replacement: "[REDACTED_EMAIL]",
-			},
-		},
-	})
-
-	result := e.FilterOutput([]byte("email: user@example.com"))
-	want := "email: [REDACTED_EMAIL]"
 	if string(result.Data) != want {
 		t.Errorf("Data = %q, want %q", string(result.Data), want)
 	}

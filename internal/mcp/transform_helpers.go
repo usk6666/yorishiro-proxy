@@ -122,18 +122,6 @@ func fromTransformRule(r rules.Rule) transformRuleOutput {
 	}
 }
 
-// fromTransformRules converts a slice of rules.Rule to MCP output rules.
-func fromTransformRules(rulesList []rules.Rule) []transformRuleOutput {
-	if rulesList == nil {
-		return nil
-	}
-	out := make([]transformRuleOutput, len(rulesList))
-	for i, r := range rulesList {
-		out[i] = fromTransformRule(r)
-	}
-	return out
-}
-
 // validateTransformRuleInput checks a transform rule for CRLF injection in
 // header names and values (CWE-113).
 func validateTransformRuleInput(input transformRuleInput) error {

@@ -82,6 +82,7 @@ func unmarshalExecMultiProtoResult(t *testing.T, result *gomcp.CallToolResult, d
 // --- Test: tcp_replay action ---
 
 func TestExecuteMultiProto_TCPReplay_RequiresFlowID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMultiProtoExecSession(t, store)
 
@@ -95,6 +96,7 @@ func TestExecuteMultiProto_TCPReplay_RequiresFlowID(t *testing.T) {
 }
 
 func TestExecuteMultiProto_TCPReplay_RequiresTCPProtocol(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
 
@@ -112,6 +114,7 @@ func TestExecuteMultiProto_TCPReplay_RequiresTCPProtocol(t *testing.T) {
 }
 
 func TestExecuteMultiProto_TCPReplay_NoSendMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -141,6 +144,7 @@ func TestExecuteMultiProto_TCPReplay_NoSendMessages(t *testing.T) {
 }
 
 func TestExecuteMultiProto_TCPReplay_NoTargetAddr(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -181,6 +185,7 @@ func TestExecuteMultiProto_TCPReplay_NoTargetAddr(t *testing.T) {
 }
 
 func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -246,6 +251,7 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 }
 
 func TestExecuteMultiProto_TCPReplay_RawBytesOnly(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -349,6 +355,7 @@ func TestExecuteMultiProto_TCPReplay_RawBytesOnly(t *testing.T) {
 }
 
 func TestExecuteMultiProto_TCPReplay_BodyPreferredOverRawBytes(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -408,6 +415,7 @@ func TestExecuteMultiProto_TCPReplay_BodyPreferredOverRawBytes(t *testing.T) {
 }
 
 func TestExecuteMultiProto_TCPReplay_NilStore(t *testing.T) {
+	t.Parallel()
 	cs := setupMultiProtoExecSession(t, nil)
 
 	result := callExecMultiProto(t, cs, map[string]any{
@@ -424,6 +432,7 @@ func TestExecuteMultiProto_TCPReplay_NilStore(t *testing.T) {
 // --- Test: resend for WebSocket flows ---
 
 func TestExecuteMultiProto_Resend_WebSocket_RequiresMessageSequence(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -453,6 +462,7 @@ func TestExecuteMultiProto_Resend_WebSocket_RequiresMessageSequence(t *testing.T
 }
 
 func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -496,6 +506,7 @@ func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
 }
 
 func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -540,6 +551,7 @@ func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
 // --- Test: proxy_start tcp_forwards and protocols validation ---
 
 func TestValidateTCPForwards(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		forwards map[string]string
@@ -628,6 +640,7 @@ func TestValidateTCPForwards(t *testing.T) {
 }
 
 func TestValidateProtocols(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		protocols []string
@@ -678,6 +691,7 @@ func (m *mockTLSTransportForResend) TLSConnect(ctx context.Context, conn net.Con
 }
 
 func TestUpgradeTLS_UsesProvidedTransport(t *testing.T) {
+	t.Parallel()
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
@@ -704,6 +718,7 @@ func TestUpgradeTLS_UsesProvidedTransport(t *testing.T) {
 }
 
 func TestUpgradeTLS_NilTransportFallsBackToStandard(t *testing.T) {
+	t.Parallel()
 	// With nil transport, upgradeTLS should fall back to StandardTransport.
 	// We can't easily test the actual handshake without a TLS server,
 	// but we verify it doesn't panic with nil transport.

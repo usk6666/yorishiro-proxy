@@ -174,7 +174,6 @@ func TestTCPForwardListener_TLS_MITM_SNIDiffersFromTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS dial: %v", err)
 	}
-	defer tlsConn.Close()
 
 	// Certificate should use the SNI value, not the target.
 	state := tlsConn.ConnectionState()
@@ -492,7 +491,6 @@ func TestTCPForwardListener_TLS_MITM_ALPN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS dial: %v", err)
 	}
-	defer tlsConn.Close()
 
 	// Verify ALPN negotiation.
 	state := tlsConn.ConnectionState()
@@ -558,10 +556,10 @@ func TestTCPForwardListener_TLS_MITM_IPAddress_Target(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS dial: %v", err)
 	}
-	defer tlsConn.Close()
 
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
+		tlsConn.Close()
 		t.Fatal("no peer certificates")
 	}
 	cert := state.PeerCertificates[0]
@@ -583,6 +581,9 @@ func TestTCPForwardListener_TLS_MITM_IPAddress_Target(t *testing.T) {
 	if len(cert.DNSNames) != 0 {
 		t.Errorf("certificate DNSNames = %v, want empty for IP target", cert.DNSNames)
 	}
+
+	// Close the connection before cancelling so echoHandler's io.Copy unblocks.
+	tlsConn.Close()
 
 	cancel()
 	<-errCh

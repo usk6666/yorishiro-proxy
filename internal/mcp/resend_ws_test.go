@@ -179,6 +179,7 @@ func seedWebSocketFlow(t *testing.T, store flow.Store, id, targetAddr string) {
 // --- Tests ---
 
 func TestWebSocketResend_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newWebSocketEchoServer(t)
 	defer cleanup()
@@ -263,6 +264,7 @@ func TestWebSocketResend_Success(t *testing.T) {
 }
 
 func TestWebSocketResend_OverrideBody(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newWebSocketEchoServer(t)
 	defer cleanup()
@@ -296,6 +298,7 @@ func TestWebSocketResend_OverrideBody(t *testing.T) {
 }
 
 func TestWebSocketResend_OverrideBodyBase64(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newWebSocketEchoServer(t)
 	defer cleanup()
@@ -331,6 +334,7 @@ func TestWebSocketResend_OverrideBodyBase64(t *testing.T) {
 }
 
 func TestWebSocketResend_BinaryFrame(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newWebSocketEchoServer(t)
 	defer cleanup()
@@ -426,6 +430,7 @@ func TestWebSocketResend_BinaryFrame(t *testing.T) {
 }
 
 func TestWebSocketResend_NoUpgradeMessage(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -466,6 +471,7 @@ func TestWebSocketResend_NoUpgradeMessage(t *testing.T) {
 }
 
 func TestWebSocketResend_TargetAddrFromURL(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newWebSocketEchoServer(t)
 	defer cleanup()
@@ -539,6 +545,7 @@ func TestWebSocketResend_TargetAddrFromURL(t *testing.T) {
 }
 
 func TestWebSocketResend_ExplicitTargetAddr(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newWebSocketEchoServer(t)
 	defer cleanup()
@@ -615,6 +622,7 @@ func TestWebSocketResend_ExplicitTargetAddr(t *testing.T) {
 // --- Unit tests for helper functions ---
 
 func TestResolveWebSocketOpcode(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		metadata map[string]string
@@ -638,6 +646,7 @@ func TestResolveWebSocketOpcode(t *testing.T) {
 }
 
 func TestEnsureWebSocketHeaders(t *testing.T) {
+	t.Parallel()
 	// Test with empty headers.
 	h := make(http.Header)
 	ensureWebSocketHeaders(h)
@@ -670,6 +679,7 @@ func TestEnsureWebSocketHeaders(t *testing.T) {
 }
 
 func TestClassifyWebSocketPayload(t *testing.T) {
+	t.Parallel()
 	payload := []byte("hello")
 
 	body, raw := classifyWebSocketPayload(payload, ws.OpcodeText)
@@ -684,6 +694,7 @@ func TestClassifyWebSocketPayload(t *testing.T) {
 }
 
 func TestFindUpgradeRequestMessage_NotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -763,6 +774,7 @@ func newWebSocketHeaderCaptureServer(t *testing.T) (addr string, receivedReq fun
 }
 
 func TestWebSocketResend_OverrideHeaders(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
 	defer cleanup()
@@ -795,6 +807,7 @@ func TestWebSocketResend_OverrideHeaders(t *testing.T) {
 }
 
 func TestWebSocketResend_AddHeaders(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
 	defer cleanup()
@@ -824,6 +837,7 @@ func TestWebSocketResend_AddHeaders(t *testing.T) {
 }
 
 func TestWebSocketResend_RemoveHeaders(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
 	defer cleanup()
@@ -894,6 +908,7 @@ func TestWebSocketResend_RemoveHeaders(t *testing.T) {
 }
 
 func TestWebSocketResend_RemoveHeaders_AutoAdded(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
 	defer cleanup()
@@ -965,6 +980,7 @@ func TestWebSocketResend_RemoveHeaders_AutoAdded(t *testing.T) {
 }
 
 func TestWebSocketResend_OverrideURL(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
 	defer cleanup()
@@ -1058,6 +1074,7 @@ func TestWebSocketResend_OverrideURL(t *testing.T) {
 }
 
 func TestWebSocketResend_NoOverrides_PreservesOriginalHeaders(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, getReq, cleanup := newWebSocketHeaderCaptureServer(t)
 	defer cleanup()
@@ -1091,6 +1108,7 @@ func TestWebSocketResend_NoOverrides_PreservesOriginalHeaders(t *testing.T) {
 }
 
 func TestWebSocketResend_DeflateExtensionStripped(t *testing.T) {
+	t.Parallel()
 	// Verify that when the original Upgrade request has Sec-WebSocket-Extensions,
 	// the resend strips it to avoid permessage-deflate negotiation (since stored
 	// bodies are already decompressed).
@@ -1217,6 +1235,7 @@ func seedWebSocketFlowWithExtensions(t *testing.T, store flow.Store, id, targetA
 }
 
 func TestCopyHTTPResponseHeaders(t *testing.T) {
+	t.Parallel()
 	// Nil response.
 	if h := copyHTTPResponseHeaders(nil); h != nil {
 		t.Errorf("nil response: got %v, want nil", h)
