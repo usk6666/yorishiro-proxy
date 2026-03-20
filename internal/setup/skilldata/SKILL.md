@@ -101,6 +101,8 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 | `peek_timeout_ms` | int | プロトコル検出タイムアウト（デフォルト: 30000） |
 | `request_timeout_ms` | int | HTTP リクエストヘッダ読み込みタイムアウト（デフォルト: 60000） |
 | `tls_fingerprint` | string | TLS フィンガープリントプロファイル（"chrome", "firefox", "safari", "edge", "random", "none"。デフォルト: "chrome"） |
+| `client_cert` | string | PEM クライアント証明書パス（mTLS 用、client_key と併用） |
+| `client_key` | string | PEM クライアント秘密鍵パス（mTLS 用、client_cert と併用） |
 
 ### proxy_stop -- プロキシ停止
 
@@ -157,17 +159,18 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 | パラメータ | 対象リソース | 説明 |
 |-----------|-------------|------|
 | `protocol` | flows | プロトコル名（HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS 等） |
+| `scheme` | flows | URL スキーム / トランスポートフィルタ（"https", "http", "wss", "ws", "tcp"）。TLS フローの検索に使用 |
 | `method` | flows | HTTP メソッド |
 | `url_pattern` | flows | URL サブストリング検索 |
 | `status_code` | flows, fuzz_results | HTTP レスポンスコード |
 | `state` | flows | フロー状態（"active", "complete", "error"） |
-| `blocked_by` | flows | ブロック理由（"target_scope", "intercept_drop"） |
+| `blocked_by` | flows | ブロック理由（"target_scope", "intercept_drop", "rate_limit", "safety_filter"） |
 | `conn_id` | flows | コネクション ID 完全一致。同一接続のフローを検索 |
 | `host` | flows | ホスト名フィルタ。server_addr または URL のホスト部分にマッチ |
 | `technology` | flows | 技術スタック名（大文字小文字不問のサブストリングマッチ、例: "nginx"） |
-| `tag` | flows, fuzz_jobs | タグ完全一致 |
+| `tag` | fuzz_jobs | タグ完全一致 |
 | `direction` | messages | メッセージ方向（"send", "receive"） |
-| `status` | fuzz_jobs | ジョブ状態 |
+| `status` | fuzz_jobs | ジョブ状態（"running", "paused", "completed", "cancelled", "error"） |
 | `body_contains` | fuzz_results | レスポンスボディサブストリング |
 | `outliers_only` | fuzz_results | 外れ値のみ返す（ステータスコード・ボディ長・タイミングの偏差で検出） |
 
@@ -235,12 +238,14 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 | `remove_headers` | resend | ヘッダ削除 |
 | `override_host` | resend | ホスト上書き（host:port 形式） |
 | `follow_redirects` | resend | リダイレクト追従（デフォルト: false） |
-| `message_sequence` | resend, tcp_replay | WebSocket メッセージシーケンス番号 |
+| `message_sequence` | resend | WebSocket メッセージシーケンス番号（WebSocket フロー必須） |
 | `timeout_ms` | resend, resend_raw, tcp_replay | タイムアウト（ミリ秒） |
 | `override_raw_base64` | resend_raw | Base64 エンコード済み生リクエストデータ |
-| `target_addr` | resend_raw | ターゲットアドレス（host:port） |
-| `use_tls` | resend_raw | TLS 使用フラグ |
+| `target_addr` | resend_raw, tcp_replay | ターゲットアドレス（host:port、未指定時はフローの接続先を使用） |
+| `use_tls` | resend_raw, tcp_replay | TLS 使用フラグ |
 | `patches` | resend_raw | バイトレベルパッチ |
+| `dry_run` | resend, resend_raw | 送信せず改変内容をプレビュー |
+| `tag` | resend, resend_raw, tcp_replay | 結果フローにタグを付与 |
 
 ### fuzz -- ファジング
 
@@ -435,6 +440,16 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 
 // リクエストをドロップ
 {"action": "drop", "params": {"intercept_id": "<intercept-id>"}}
+
+// raw モードで生バイトを転送
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "<intercept-id>",
+    "mode": "raw",
+    "raw_override_base64": "R0VUIC8gSFRUUC8xLjENCkhvc3Q6IGV4YW1wbGUuY29tDQoNCg=="
+  }
+}
 ```
 
 #### intercept パラメータ
@@ -452,6 +467,9 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 | `add_response_headers` | response | レスポンスヘッダ追加 |
 | `remove_response_headers` | response | レスポンスヘッダ削除 |
 | `override_response_body` | response | レスポンスボディ上書き |
+| `override_body` | websocket_frame | WebSocket フレームペイロード上書き |
+| `mode` | all | 転送モード（"structured" or "raw"。デフォルト: "structured"） |
+| `raw_override_base64` | all (raw mode) | Base64 エンコード済み生バイト（raw モード時の modify_and_forward 用） |
 
 ### security -- ターゲットスコープ制御
 
@@ -634,6 +652,8 @@ SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DR
 | `peek_timeout_ms` | プロトコル検出タイムアウト（100-600000） |
 | `request_timeout_ms` | HTTP リクエストタイムアウト（100-600000） |
 | `tls_fingerprint` | TLS フィンガープリントプロファイル変更 |
+| `budget` | 診断バジェット（max_total_requests, max_duration） |
+| `client_cert` | mTLS クライアント証明書設定（cert_path, key_path） |
 
 ### plugin -- プラグイン管理
 
