@@ -458,13 +458,23 @@ export interface CACertResult {
 /** Intercept queue entry. */
 export interface InterceptQueueEntry {
   id: string;
+  phase?: string; // "request" | "response" | "websocket_frame"
+  protocol?: string; // "http" | "websocket"
   method: string;
   url: string;
+  status_code?: number; // response phase: HTTP status code
   headers: Record<string, string[]>;
   body_encoding: string;
   body: string;
   timestamp: string;
   matched_rules: string[];
+  metadata?: Record<string, string>; // protocol-specific metadata (e.g. gRPC encoding)
+  // WebSocket frame fields (phase=websocket_frame only)
+  opcode?: string; // e.g. "Text", "Binary"
+  direction?: string; // "client_to_server" | "server_to_client"
+  flow_id?: string;
+  upgrade_url?: string;
+  sequence?: number;
   raw_bytes_available?: boolean;
   raw_bytes_size?: number;
   raw_bytes?: string;
@@ -1041,13 +1051,20 @@ export interface InterceptActionParams {
     // Mode: "structured" (default) or "raw"
     mode?: "structured" | "raw";
 
-    // modify_and_forward mutation parameters (structured mode)
+    // modify_and_forward mutation parameters — request phase (structured mode)
     override_method?: string;
     override_url?: string;
     override_headers?: Record<string, string>;
     add_headers?: Record<string, string>;
     remove_headers?: string[];
     override_body?: string | null;
+
+    // modify_and_forward mutation parameters — response phase (structured mode)
+    override_status?: number;
+    override_response_headers?: Record<string, string>;
+    add_response_headers?: Record<string, string>;
+    remove_response_headers?: string[];
+    override_response_body?: string | null;
 
     // modify_and_forward mutation parameters (raw mode)
     raw_override_base64?: string;

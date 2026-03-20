@@ -399,3 +399,57 @@
   line-height: 1.6;
   min-height: 300px;
 }
+
+/* Phase badge in detail title */
+.intercept-phase-badge {
+  vertical-align: middle;
+}
+
+/* Status code select (slightly wider than method select) */
+.intercept-status-select {
+  width: 80px;
+}
+
+/* WebSocket frame metadata panel */
+.intercept-ws-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-primary);
+}
+
+.intercept-ws-meta-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.intercept-ws-meta-label {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.intercept-ws-meta-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+/* WebSocket info in queue table cell */
+.intercept-ws-info {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.intercept-ws-direction {
+  font-size: var(--font-size-md);
+  color: var(--text-secondary);
+}
