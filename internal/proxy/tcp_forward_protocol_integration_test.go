@@ -37,7 +37,7 @@ type tcpForwardTestEnv struct {
 }
 
 // startTCPForwardEnv creates a TCPForwardListener with the given config and full protocol detection.
-// The detector includes HTTP/2, HTTP/1.x, and TCP (fallback) handlers.
+// The detector includes HTTP/2 and HTTP/1.x handlers; TCP is the fallback handler (not in detector).
 func startTCPForwardEnv(t *testing.T, ctx context.Context, fwdConfig *config.ForwardConfig, issuer *cert.Issuer) *tcpForwardTestEnv {
 	t.Helper()
 
@@ -685,8 +685,8 @@ func TestTCPForward_Auto_DetectsHTTP1AndH2C(t *testing.T) {
 		protocolSet[f.Protocol] = true
 	}
 
-	if !protocolSet["HTTP/2"] {
-		t.Error("expected HTTP/2 flow from h2c request")
+	if !protocolSet["HTTP/2 (h2c)"] {
+		t.Error("expected HTTP/2 (h2c) flow from h2c request")
 	}
 	if !protocolSet["HTTP/1.x"] {
 		t.Error("expected HTTP/1.x flow from HTTP/1.1 request")
@@ -790,8 +790,13 @@ func TestTCPForward_ErrorPath_UpstreamFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Use an address that nothing is listening on.
-	unreachableAddr := "127.0.0.1:1"
+	// Reserve an unused port, then close the listener to get a "connection refused" target.
+	tmpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreachableAddr := tmpLn.Addr().String()
+	tmpLn.Close()
 
 	env := startTCPForwardEnv(t, ctx, &config.ForwardConfig{
 		Target:   unreachableAddr,
@@ -807,7 +812,9 @@ func TestTCPForward_ErrorPath_UpstreamFailure(t *testing.T) {
 
 	// Send 16+ bytes to pass the peek requirement.
 	testData := []byte("0123456789abcdef")
-	conn.Write(testData)
+	if _, err := conn.Write(testData); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 
 	// Read should return EOF or error because upstream is unreachable.
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -831,7 +838,7 @@ func TestTCPForward_ErrorPath_UpstreamFailure(t *testing.T) {
 		}
 	}
 	// Some handlers may not record flows on immediate upstream failure.
-	t.Logf("no error-state flow found (got %d TCP flows); acceptable for immediate upstream failure", len(flows))
+	t.Errorf("no error-state flow found (got %d TCP flows); expected error state on upstream failure", len(flows))
 }
 
 // --- Test: State transition active -> complete ---
