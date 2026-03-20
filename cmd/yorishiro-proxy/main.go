@@ -731,6 +731,7 @@ func buildMCPOptions(
 		mcp.WithFuzzStore(store),
 		mcp.WithIssuer(issuer),
 		mcp.WithTCPHandler(proto.tcpHandler),
+		mcp.WithDetector(proto.detector),
 		mcp.WithUpstreamProxySetter(proto.httpHandler),
 		mcp.WithUpstreamProxySetter(proto.http2Handler),
 		mcp.WithTargetScopeSetter(proto.httpHandler),

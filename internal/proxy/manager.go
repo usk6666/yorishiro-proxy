@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // shutdownTimeout is the maximum time to wait for graceful shutdown.
@@ -145,22 +148,28 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 	return nil
 }
 
-// StartTCPForwards creates and starts a TCP forward listener for each entry in
-// the forwards map on the default listener.
-// The map keys are local port numbers and values are upstream
-// addresses in "host:port" format. The handler is the protocol handler that
-// will process connections on each forward listener (typically the raw TCP handler).
-//
-// This method must be called while the default listener is running (after Start).
-// All forward listeners share the listener's lifecycle and are stopped when Stop is called.
-// If any listener fails to start, all previously started listeners in this call are
-// cleaned up and an error is returned.
-func (m *Manager) StartTCPForwards(ctx context.Context, forwards map[string]string, handler ProtocolHandler) error {
-	return m.StartTCPForwardsNamed(ctx, DefaultListenerName, forwards, handler)
+// TCPForwardParams holds the parameters needed to start TCP forward listeners.
+type TCPForwardParams struct {
+	// Forwards maps local port numbers to forward configurations.
+	Forwards map[string]*config.ForwardConfig
+
+	// Handler is the fallback protocol handler (typically raw TCP).
+	Handler ProtocolHandler
+
+	// Detector is the protocol detector for "auto" mode. May be nil.
+	Detector ProtocolDetector
+
+	// PluginEngine is the optional plugin engine for lifecycle hooks.
+	PluginEngine *plugin.Engine
+}
+
+// StartTCPForwards creates and starts TCP forward listeners on the default listener.
+func (m *Manager) StartTCPForwards(ctx context.Context, params TCPForwardParams) error {
+	return m.StartTCPForwardsNamed(ctx, DefaultListenerName, params)
 }
 
 // StartTCPForwardsNamed creates and starts TCP forward listeners associated with the named listener.
-func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, forwards map[string]string, handler ProtocolHandler) error {
+func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, params TCPForwardParams) error {
 	if name == "" {
 		name = DefaultListenerName
 	}
@@ -180,14 +189,25 @@ func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, forwar
 	// Track newly started listeners for rollback on failure.
 	var started []string
 
-	for port := range forwards {
+	for port, fc := range params.Forwards {
 		if _, exists := entry.tcpForwards[port]; exists {
 			// Skip ports that already have a forward listener.
 			continue
 		}
 
 		addr := fmt.Sprintf("127.0.0.1:%s", port)
-		fl := NewTCPForwardListener(addr, handler, m.logger)
+		fl := NewTCPForwardListener(TCPForwardListenerConfig{
+			Addr:           addr,
+			Handler:        params.Handler,
+			Detector:       params.Detector,
+			Config:         fc,
+			Logger:         m.logger,
+			MaxConnections: m.maxConnections,
+			PeekTimeout:    m.peekTimeout,
+		})
+		if params.PluginEngine != nil {
+			fl.SetPluginEngine(params.PluginEngine)
+		}
 		flCtx, flCancel := context.WithCancel(ctx)
 
 		done := make(chan struct{})
@@ -212,6 +232,12 @@ func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, forwar
 			return fmt.Errorf("start tcp forward on port %s: listener exited unexpectedly", port)
 		}
 
+		target := ""
+		proto := ""
+		if fc != nil {
+			target = fc.Target
+			proto = fc.Protocol
+		}
 		entry.tcpForwards[port] = &tcpForwardEntry{
 			listener: fl,
 			cancel:   flCancel,
@@ -219,7 +245,12 @@ func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, forwar
 		}
 		started = append(started, port)
 
-		m.logger.Info("tcp forward listener started", "name", name, "port", port, "upstream", forwards[port], "listen_addr", fl.Addr())
+		m.logger.Info("tcp forward listener started",
+			"name", name,
+			"port", port,
+			"upstream", target,
+			"protocol", proto,
+			"listen_addr", fl.Addr())
 	}
 
 	return nil

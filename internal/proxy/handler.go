@@ -16,3 +16,11 @@ type ProtocolHandler interface {
 	// Handle takes ownership of the connection and processes it according to the protocol.
 	Handle(ctx context.Context, conn net.Conn) error
 }
+
+// HandlerLister is an optional interface implemented by ProtocolDetector
+// implementations that can enumerate their registered handlers.
+// This is used by TCPForwardListener to find a handler by name for
+// fixed-protocol dispatch (e.g. protocol: "http").
+type HandlerLister interface {
+	Handlers() []ProtocolHandler
+}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -339,6 +340,18 @@ func TestManager_ConcurrentStatus(t *testing.T) {
 	}
 }
 
+// newTestForwardParams creates TCPForwardParams for testing with a raw protocol config.
+func newTestForwardParams(handler proxy.ProtocolHandler, targets map[string]string) proxy.TCPForwardParams {
+	forwards := make(map[string]*config.ForwardConfig, len(targets))
+	for port, target := range targets {
+		forwards[port] = &config.ForwardConfig{Target: target, Protocol: "raw"}
+	}
+	return proxy.TCPForwardParams{
+		Forwards: forwards,
+		Handler:  handler,
+	}
+}
+
 func TestManager_StartTCPForwards(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
@@ -351,11 +364,11 @@ func TestManager_StartTCPForwards(t *testing.T) {
 	defer manager.Stop(context.Background())
 
 	handler := &echoHandler{}
-	forwards := map[string]string{
+	params := newTestForwardParams(handler, map[string]string{
 		"0": "127.0.0.1:9999", // port 0 = random
-	}
+	})
 
-	if err := manager.StartTCPForwards(ctx, forwards, handler); err != nil {
+	if err := manager.StartTCPForwards(ctx, params); err != nil {
 		t.Fatalf("StartTCPForwards: %v", err)
 	}
 
@@ -375,11 +388,11 @@ func TestManager_StartTCPForwards_NotRunning(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 
 	handler := &echoHandler{}
-	forwards := map[string]string{
+	params := newTestForwardParams(handler, map[string]string{
 		"0": "127.0.0.1:9999",
-	}
+	})
 
-	err := manager.StartTCPForwards(context.Background(), forwards, handler)
+	err := manager.StartTCPForwards(context.Background(), params)
 	if err == nil {
 		t.Fatal("expected error when not running")
 	}
@@ -400,11 +413,11 @@ func TestManager_StartTCPForwards_Connectable(t *testing.T) {
 	defer manager.Stop(context.Background())
 
 	handler := &echoHandler{}
-	forwards := map[string]string{
+	params := newTestForwardParams(handler, map[string]string{
 		"0": "127.0.0.1:9999",
-	}
+	})
 
-	if err := manager.StartTCPForwards(ctx, forwards, handler); err != nil {
+	if err := manager.StartTCPForwards(ctx, params); err != nil {
 		t.Fatalf("StartTCPForwards: %v", err)
 	}
 
@@ -433,11 +446,11 @@ func TestManager_StopCleansUpTCPForwards(t *testing.T) {
 	}
 
 	handler := &echoHandler{}
-	forwards := map[string]string{
+	params := newTestForwardParams(handler, map[string]string{
 		"0": "127.0.0.1:9999",
-	}
+	})
 
-	if err := manager.StartTCPForwards(ctx, forwards, handler); err != nil {
+	if err := manager.StartTCPForwards(ctx, params); err != nil {
 		t.Fatalf("StartTCPForwards: %v", err)
 	}
 
