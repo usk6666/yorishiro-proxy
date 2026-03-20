@@ -97,6 +97,7 @@ export function FuzzResultsPage() {
   // --- Filter state ---
   const [statusCodeFilter, setStatusCodeFilter] = useState<string>("");
   const [bodyContainsFilter, setBodyContainsFilter] = useState<string>("");
+  const [outliersOnly, setOutliersOnly] = useState(false);
   const [sortBy, setSortBy] = useState<string>("");
 
   // --- Pagination state ---
@@ -141,8 +142,11 @@ export function FuzzResultsPage() {
     if (bodyContainsFilter.trim()) {
       f.body_contains = bodyContainsFilter.trim();
     }
+    if (outliersOnly) {
+      f.outliers_only = true;
+    }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [statusCodeFilter, bodyContainsFilter]);
+  }, [statusCodeFilter, bodyContainsFilter, outliersOnly]);
 
   // --- Query fuzz results ---
   const {
@@ -431,6 +435,17 @@ export function FuzzResultsPage() {
             value={bodyContainsFilter}
             onChange={handleBodyContainsChange}
           />
+          <label className="fuzz-results-outliers-toggle">
+            <input
+              type="checkbox"
+              checked={outliersOnly}
+              onChange={(e) => {
+                setOutliersOnly(e.target.checked);
+                handleFilterChange();
+              }}
+            />
+            Outliers only
+          </label>
           <div className="fuzz-results-sort">
             <span>Sort:</span>
             <select
