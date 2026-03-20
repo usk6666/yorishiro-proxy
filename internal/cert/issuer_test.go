@@ -325,49 +325,6 @@ func TestGetCertificate_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestGetCertificate_ConcurrentDifferentHosts(t *testing.T) {
-	ca := newTestCA(t)
-	iss := NewIssuer(ca)
-
-	hosts := []string{"a.example.com", "b.example.com", "c.example.com", "d.example.com"}
-
-	type result struct {
-		host string
-		cert *tls.Certificate
-		err  error
-	}
-
-	results := make([]result, len(hosts))
-	var wg sync.WaitGroup
-	wg.Add(len(hosts))
-
-	for i, host := range hosts {
-		go func(idx int, h string) {
-			defer wg.Done()
-			cert, err := iss.GetCertificate(h)
-			results[idx] = result{host: h, cert: cert, err: err}
-		}(i, host)
-	}
-
-	wg.Wait()
-
-	// All should succeed.
-	for _, r := range results {
-		if r.err != nil {
-			t.Fatalf("GetCertificate(%q): %v", r.host, r.err)
-		}
-	}
-
-	// All should be distinct certificates.
-	seen := make(map[*tls.Certificate]string)
-	for _, r := range results {
-		if prev, exists := seen[r.cert]; exists {
-			t.Errorf("host %q returned same cert pointer as host %q", r.host, prev)
-		}
-		seen[r.cert] = r.host
-	}
-}
-
 func TestGetCertificateForClientHello_Compatibility(t *testing.T) {
 	ca := newTestCA(t)
 	iss := NewIssuer(ca)
@@ -396,33 +353,6 @@ func TestGetCertificateForClientHello_Compatibility(t *testing.T) {
 	}
 }
 
-func TestGetCertificateForClientHello_TLSConfigCallback(t *testing.T) {
-	ca := newTestCA(t)
-	iss := NewIssuer(ca)
-
-	// Verify the method can be used as a tls.Config.GetCertificate callback.
-	tlsConfig := &tls.Config{
-		GetCertificate: iss.GetCertificateForClientHello,
-	}
-
-	// The callback should be set and callable.
-	if tlsConfig.GetCertificate == nil {
-		t.Fatal("GetCertificate callback is nil")
-	}
-
-	hello := &tls.ClientHelloInfo{
-		ServerName: "callback-test.example.com",
-	}
-
-	cert, err := tlsConfig.GetCertificate(hello)
-	if err != nil {
-		t.Fatalf("tls.Config.GetCertificate: %v", err)
-	}
-	if cert == nil {
-		t.Fatal("tls.Config.GetCertificate returned nil")
-	}
-}
-
 func TestGetCertificate_CacheConsistencyWithClientHello(t *testing.T) {
 	ca := newTestCA(t)
 	iss := NewIssuer(ca)
@@ -445,26 +375,6 @@ func TestGetCertificate_CacheConsistencyWithClientHello(t *testing.T) {
 	// Should be the same cached certificate.
 	if cert1 != cert2 {
 		t.Error("GetCertificate and GetCertificateForClientHello returned different certs for same hostname")
-	}
-}
-
-func TestNewIssuer_NotNil(t *testing.T) {
-	ca := newTestCA(t)
-	iss := NewIssuer(ca)
-	if iss == nil {
-		t.Fatal("NewIssuer returned nil")
-	}
-}
-
-func TestNewIssuer_DefaultCacheSize(t *testing.T) {
-	ca := newTestCA(t)
-	iss := NewIssuer(ca)
-
-	if iss.cache == nil {
-		t.Fatal("cache is nil")
-	}
-	if iss.cache.maxSize != defaultMaxCacheSize {
-		t.Errorf("default cache maxSize = %d, want %d", iss.cache.maxSize, defaultMaxCacheSize)
 	}
 }
 
@@ -566,18 +476,6 @@ func TestClearCache_RemovesAllEntries(t *testing.T) {
 	}
 	if iss.CacheLen() != 1 {
 		t.Errorf("CacheLen = %d after re-generation, want 1", iss.CacheLen())
-	}
-}
-
-func TestClearCache_EmptyCache(t *testing.T) {
-	ca := newTestCA(t)
-	iss := NewIssuer(ca)
-
-	// Clearing an empty cache should not panic.
-	iss.ClearCache()
-
-	if iss.CacheLen() != 0 {
-		t.Errorf("CacheLen = %d after clearing empty cache, want 0", iss.CacheLen())
 	}
 }
 

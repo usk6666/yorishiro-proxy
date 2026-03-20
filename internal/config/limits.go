@@ -21,18 +21,14 @@ package config
 // memory capacity and adjust MaxConnections via the proxy_start MCP tool or
 // configure_limits when running under heavy load.
 
-var (
+const (
 	// MaxBodySize is the unified maximum size for both reading upstream
 	// response bodies into memory and recording bodies to the flow store.
 	// Previously two separate limits (maxResponseBodySize=64MB and
 	// maxBodyRecordSize=1MB), now unified at 254 MB so that entire
 	// responses can be captured and stored.
-	// Declared as var (not const) to allow test overrides in resource-
-	// constrained environments.
 	MaxBodySize int64 = 254 << 20 // 254 MB
-)
 
-const (
 	// MaxGRPCMessageSize limits the maximum gRPC Length-Prefixed Message
 	// payload size. This prevents memory exhaustion from malicious or
 	// malformed gRPC messages.

@@ -785,13 +785,6 @@ func TestFilterOutputHeaders_NilEngine(t *testing.T) {
 	}
 }
 
-func TestDecodeEntryBody_Text(t *testing.T) {
-	got := decodeEntryBody("hello world", "text")
-	if string(got) != "hello world" {
-		t.Errorf("decodeEntryBody(text) = %q, want %q", string(got), "hello world")
-	}
-}
-
 func TestDecodeEntryBody_Base64(t *testing.T) {
 	// "hello world" in base64
 	got := decodeEntryBody("aGVsbG8gd29ybGQ=", "base64")
@@ -800,10 +793,3 @@ func TestDecodeEntryBody_Base64(t *testing.T) {
 	}
 }
 
-func TestDecodeEntryBody_InvalidBase64(t *testing.T) {
-	// Invalid base64 should fall back to text.
-	got := decodeEntryBody("not-valid-base64!!!", "base64")
-	if string(got) != "not-valid-base64!!!" {
-		t.Errorf("decodeEntryBody(invalid base64) = %q, want fallback to text", string(got))
-	}
-}

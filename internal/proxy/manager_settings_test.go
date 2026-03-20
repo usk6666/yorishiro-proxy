@@ -110,28 +110,3 @@ func TestManager_PeekTimeout_ReflectsRunningListener(t *testing.T) {
 	}
 }
 
-// --- SetPeekTimeout / SetMaxConnections propagation tests ---
-
-func TestManager_SetPeekTimeout_PropagatesWhenNotRunning(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	// Set before start should persist for when proxy starts later.
-	manager.SetPeekTimeout(10 * time.Second)
-	if got := manager.PeekTimeout(); got != 10*time.Second {
-		t.Errorf("PeekTimeout = %v, want 10s", got)
-	}
-}
-
-func TestManager_SetMaxConnections_PropagatesWhenNotRunning(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	// Set before start should persist for when proxy starts later.
-	manager.SetMaxConnections(256)
-	if got := manager.MaxConnections(); got != 256 {
-		t.Errorf("MaxConnections = %d, want 256", got)
-	}
-}

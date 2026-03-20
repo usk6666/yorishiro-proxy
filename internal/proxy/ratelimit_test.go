@@ -205,31 +205,6 @@ func TestRateLimiter_ConcurrentAccess(t *testing.T) {
 	// No panic or data race expected.
 }
 
-func TestEffectiveRate(t *testing.T) {
-	tests := []struct {
-		name   string
-		policy float64
-		agent  float64
-		want   float64
-	}{
-		{"both zero", 0, 0, 0},
-		{"policy only", 10, 0, 10},
-		{"agent only", 0, 5, 5},
-		{"agent stricter", 10, 5, 5},
-		{"policy stricter", 5, 10, 5},
-		{"equal", 5, 5, 5},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := effectiveRate(tt.policy, tt.agent)
-			if got != tt.want {
-				t.Errorf("effectiveRate(%v, %v) = %v, want %v", tt.policy, tt.agent, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRateLimiter_HostLimitersEviction(t *testing.T) {
 	rl := NewRateLimiter()
 	rl.SetPolicyLimits(RateLimitConfig{

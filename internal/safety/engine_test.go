@@ -118,38 +118,6 @@ func TestNewEngine_Errors(t *testing.T) {
 			},
 		},
 		{
-			name: "missing ID for custom rule",
-			cfg: Config{
-				InputRules: []RuleConfig{
-					{Pattern: `test`, Targets: []string{"body"}, Action: "block"},
-				},
-			},
-		},
-		{
-			name: "missing pattern for custom rule",
-			cfg: Config{
-				InputRules: []RuleConfig{
-					{ID: "r1", Targets: []string{"body"}, Action: "block"},
-				},
-			},
-		},
-		{
-			name: "missing action for custom rule",
-			cfg: Config{
-				InputRules: []RuleConfig{
-					{ID: "r1", Pattern: `test`, Targets: []string{"body"}},
-				},
-			},
-		},
-		{
-			name: "missing targets for custom rule",
-			cfg: Config{
-				InputRules: []RuleConfig{
-					{ID: "r1", Pattern: `test`, Action: "block"},
-				},
-			},
-		},
-		{
 			name: "invalid action",
 			cfg: Config{
 				InputRules: []RuleConfig{

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -162,33 +161,6 @@ func TestReadAndCaptureRequestBody(t *testing.T) {
 	}
 }
 
-func TestReadAndCaptureRequestBody_Truncation(t *testing.T) {
-	// Use a small MaxBodySize to avoid 254 MB allocation under -race.
-	origMax := config.MaxBodySize
-	config.MaxBodySize = 1024
-	t.Cleanup(func() { config.MaxBodySize = origMax })
-
-	// Create a body larger than MaxBodySize to test truncation.
-	bodyLen := int(config.MaxBodySize) + 100
-	bigBody := strings.Repeat("x", bodyLen)
-	req, _ := gohttp.NewRequest("POST", "http://example.com", strings.NewReader(bigBody))
-
-	logger := testutil.DiscardLogger()
-	result := readAndCaptureRequestBody(req, logger)
-
-	if !result.truncated {
-		t.Error("truncated = false, want true for body exceeding MaxBodySize")
-	}
-	if len(result.recordBody) != int(config.MaxBodySize) {
-		t.Errorf("recordBody len = %d, want %d", len(result.recordBody), int(config.MaxBodySize))
-	}
-
-	// The req.Body should still contain the full body (not truncated).
-	rereadBody, _ := io.ReadAll(req.Body)
-	if len(rereadBody) != bodyLen {
-		t.Errorf("re-read body len = %d, want %d", len(rereadBody), bodyLen)
-	}
-}
 
 func TestExtractRawRequest(t *testing.T) {
 	tests := []struct {

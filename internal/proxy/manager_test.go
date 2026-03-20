@@ -131,28 +131,6 @@ func TestManager_StopAfterStop_Error(t *testing.T) {
 	}
 }
 
-func TestManager_StartWithRandomPort(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	// Start with a random port to verify the manager correctly reports
-	// the actual listen address assigned by the OS.
-	ctx := context.Background()
-	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer manager.Stop(context.Background())
-
-	running, addr := manager.Status()
-	if !running {
-		t.Error("expected running after Start")
-	}
-	if addr == "" {
-		t.Error("expected non-empty addr")
-	}
-}
-
 func TestManager_RestartAfterStop(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}

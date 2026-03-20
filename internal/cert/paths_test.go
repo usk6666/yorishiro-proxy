@@ -7,7 +7,12 @@ import (
 	"testing"
 )
 
-func TestDefaultCADir(t *testing.T) {
+func TestDefaultCAPaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+
 	dir := DefaultCADir()
 	if dir == "" {
 		t.Fatal("DefaultCADir returned empty string")
@@ -15,29 +20,17 @@ func TestDefaultCADir(t *testing.T) {
 	if !strings.HasSuffix(dir, filepath.Join(".yorishiro-proxy", "ca")) {
 		t.Errorf("DefaultCADir = %q, want suffix %q", dir, filepath.Join(".yorishiro-proxy", "ca"))
 	}
-}
-
-func TestDefaultCACertPath(t *testing.T) {
-	p := DefaultCACertPath()
-	if !strings.HasSuffix(p, filepath.Join(".yorishiro-proxy", "ca", "ca.crt")) {
-		t.Errorf("DefaultCACertPath = %q, want suffix ca/ca.crt", p)
-	}
-}
-
-func TestDefaultCAKeyPath(t *testing.T) {
-	p := DefaultCAKeyPath()
-	if !strings.HasSuffix(p, filepath.Join(".yorishiro-proxy", "ca", "ca.key")) {
-		t.Errorf("DefaultCAKeyPath = %q, want suffix ca/ca.key", p)
-	}
-}
-
-func TestDefaultCADir_UsesHomeDir(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home directory")
-	}
-	dir := DefaultCADir()
 	if !strings.HasPrefix(dir, home) {
 		t.Errorf("DefaultCADir = %q, want prefix %q", dir, home)
+	}
+
+	certPath := DefaultCACertPath()
+	if !strings.HasSuffix(certPath, filepath.Join(".yorishiro-proxy", "ca", "ca.crt")) {
+		t.Errorf("DefaultCACertPath = %q, want suffix ca/ca.crt", certPath)
+	}
+
+	keyPath := DefaultCAKeyPath()
+	if !strings.HasSuffix(keyPath, filepath.Join(".yorishiro-proxy", "ca", "ca.key")) {
+		t.Errorf("DefaultCAKeyPath = %q, want suffix ca/ca.key", keyPath)
 	}
 }

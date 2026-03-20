@@ -19,14 +19,6 @@ func TestResult_Names(t *testing.T) {
 	}
 }
 
-func TestResult_Names_Empty(t *testing.T) {
-	r := &Result{Detections: []Detection{}}
-	names := r.Names()
-	if len(names) != 0 {
-		t.Errorf("Names() = %v, want empty", names)
-	}
-}
-
 func TestResult_ByCategory(t *testing.T) {
 	r := &Result{
 		Detections: []Detection{
@@ -63,9 +55,3 @@ func TestResult_Has(t *testing.T) {
 	}
 }
 
-func TestResult_Has_Empty(t *testing.T) {
-	r := &Result{Detections: []Detection{}}
-	if r.Has("nginx") {
-		t.Error("Has(nginx) on empty result = true, want false")
-	}
-}

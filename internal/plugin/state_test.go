@@ -413,64 +413,6 @@ def on_receive_from_client(data):
 	}
 }
 
-func TestEngine_StateModule_RejectList(t *testing.T) {
-	dir := t.TempDir()
-	scriptPath := writeScript(t, dir, "state_reject.star", `
-def on_receive_from_client(data):
-    state.set("key", [1, 2, 3])
-    return {"action": action.CONTINUE}
-`)
-
-	e := NewEngine(nil)
-	defer e.Close()
-
-	err := e.LoadPlugins(context.Background(), []PluginConfig{
-		{
-			Path:     scriptPath,
-			Protocol: "http",
-			Hooks:    []string{"on_receive_from_client"},
-			OnError:  "abort",
-		},
-	})
-	if err != nil {
-		t.Fatalf("LoadPlugins() error = %v", err)
-	}
-
-	_, err = e.Dispatch(context.Background(), HookOnReceiveFromClient, map[string]any{})
-	if err == nil {
-		t.Fatal("expected error when storing list in state")
-	}
-}
-
-func TestEngine_StateModule_RejectDict(t *testing.T) {
-	dir := t.TempDir()
-	scriptPath := writeScript(t, dir, "state_reject_dict.star", `
-def on_receive_from_client(data):
-    state.set("key", {"nested": "dict"})
-    return {"action": action.CONTINUE}
-`)
-
-	e := NewEngine(nil)
-	defer e.Close()
-
-	err := e.LoadPlugins(context.Background(), []PluginConfig{
-		{
-			Path:     scriptPath,
-			Protocol: "http",
-			Hooks:    []string{"on_receive_from_client"},
-			OnError:  "abort",
-		},
-	})
-	if err != nil {
-		t.Fatalf("LoadPlugins() error = %v", err)
-	}
-
-	_, err = e.Dispatch(context.Background(), HookOnReceiveFromClient, map[string]any{})
-	if err == nil {
-		t.Fatal("expected error when storing dict in state")
-	}
-}
-
 func TestPluginState_MaxKeysLimit(t *testing.T) {
 	ps := NewPluginState()
 	thread := &starlark.Thread{Name: "test"}

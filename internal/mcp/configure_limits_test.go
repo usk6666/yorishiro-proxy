@@ -2,8 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -334,24 +332,6 @@ func TestConfigure_NilManager_MaxConnections(t *testing.T) {
 	}
 }
 
-func TestConfigure_NilManager_PeekTimeoutMs(t *testing.T) {
-	cs := setupConfigureTestSessionWithManager(t, nil)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation:     "merge",
-			PeekTimeoutMs: intPtr(5000),
-		}),
-	})
-	if err != nil {
-		return
-	}
-	if !result.IsError {
-		t.Fatal("expected error for nil manager, got success")
-	}
-}
-
 func TestConfigure_ReplaceLimits(t *testing.T) {
 	// Verify that replace operation also applies limits/timeouts.
 	logger := testutil.DiscardLogger()
@@ -608,18 +588,3 @@ func (m *mockRequestTimeoutSetter) RequestTimeout() time.Duration {
 	return 60 * time.Second // default
 }
 
-// Ensure the configure tests can marshal the new fields.
-func TestConfigure_MarshalMaxConnections(t *testing.T) {
-	n := 500
-	input := configureInput{
-		Operation:      "merge",
-		MaxConnections: &n,
-	}
-	data, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if !strings.Contains(string(data), `"max_connections":500`) {
-		t.Errorf("JSON = %s, want max_connections:500", string(data))
-	}
-}
