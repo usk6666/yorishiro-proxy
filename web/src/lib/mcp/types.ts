@@ -455,16 +455,32 @@ export interface CACertResult {
   install_hint?: string;
 }
 
+/** Intercept phase: request (pre-send), response (post-receive), or websocket_frame. */
+export type InterceptPhase = "request" | "response" | "websocket_frame";
+
+/** Intercept protocol type. */
+export type InterceptProtocol = "http" | "websocket";
+
 /** Intercept queue entry. */
 export interface InterceptQueueEntry {
   id: string;
-  method: string;
-  url: string;
-  headers: Record<string, string[]>;
+  phase?: InterceptPhase;
+  protocol?: InterceptProtocol;
+  method?: string; // HTTP-only (omitempty in backend)
+  url?: string; // HTTP-only (omitempty in backend)
+  status_code?: number; // response phase: HTTP status code
+  headers?: Record<string, string[]>; // HTTP-only (omitempty in backend)
   body_encoding: string;
   body: string;
   timestamp: string;
   matched_rules: string[];
+  metadata?: Record<string, string>; // protocol-specific metadata (e.g. gRPC encoding)
+  // WebSocket frame fields (phase=websocket_frame only)
+  opcode?: string; // e.g. "Text", "Binary"
+  direction?: "client_to_server" | "server_to_client";
+  flow_id?: string;
+  upgrade_url?: string;
+  sequence?: number;
   raw_bytes_available?: boolean;
   raw_bytes_size?: number;
   raw_bytes?: string;
@@ -1041,13 +1057,20 @@ export interface InterceptActionParams {
     // Mode: "structured" (default) or "raw"
     mode?: "structured" | "raw";
 
-    // modify_and_forward mutation parameters (structured mode)
+    // modify_and_forward mutation parameters — request phase (structured mode)
     override_method?: string;
     override_url?: string;
     override_headers?: Record<string, string>;
     add_headers?: Record<string, string>;
     remove_headers?: string[];
     override_body?: string | null;
+
+    // modify_and_forward mutation parameters — response phase (structured mode)
+    override_status?: number;
+    override_response_headers?: Record<string, string>;
+    add_response_headers?: Record<string, string>;
+    remove_response_headers?: string[];
+    override_response_body?: string | null;
 
     // modify_and_forward mutation parameters (raw mode)
     raw_override_base64?: string;
