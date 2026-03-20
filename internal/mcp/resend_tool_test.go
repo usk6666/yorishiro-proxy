@@ -106,6 +106,7 @@ func manageCallTool(t *testing.T, cs *gomcp.ClientSession, args map[string]any) 
 // --- Replay action tests ---
 
 func TestExecute_Replay_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -195,6 +196,7 @@ func TestExecute_Replay_Success(t *testing.T) {
 }
 
 func TestExecute_Replay_AllOverrides(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -266,6 +268,7 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 }
 
 func TestExecute_Replay_EmptyFlowID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
 
@@ -281,6 +284,7 @@ func TestExecute_Replay_EmptyFlowID(t *testing.T) {
 }
 
 func TestExecute_Replay_NonexistentSession(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
 
@@ -296,6 +300,7 @@ func TestExecute_Replay_NonexistentSession(t *testing.T) {
 }
 
 func TestExecute_Replay_NilStore(t *testing.T) {
+	t.Parallel()
 	cs := setupTestSessionWithExecuteDoer(t, nil, newPermissiveClient())
 
 	result := executeCallTool(t, cs, map[string]any{
@@ -310,6 +315,7 @@ func TestExecute_Replay_NilStore(t *testing.T) {
 }
 
 func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -366,6 +372,7 @@ func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
 }
 
 func TestExecute_Replay_NoSendMessages(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	entry := saveTestEntry(t, store,
@@ -399,6 +406,7 @@ func TestExecute_Replay_NoSendMessages(t *testing.T) {
 }
 
 func TestExecute_Replay_GRPCStreamingUnsupported(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		flowType string
@@ -462,6 +470,7 @@ func TestExecute_Replay_GRPCStreamingUnsupported(t *testing.T) {
 }
 
 func TestExecute_Replay_GRPCUnaryAllowed(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -506,6 +515,7 @@ func TestExecute_Replay_GRPCUnaryAllowed(t *testing.T) {
 }
 
 func TestExecute_Replay_GRPCDataFrameBody(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -600,6 +610,7 @@ func TestExecute_Replay_GRPCDataFrameBody(t *testing.T) {
 }
 
 func TestExecute_Replay_GRPCTrailersRecorded(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Create a test server that returns gRPC trailers.
@@ -695,6 +706,7 @@ func TestExecute_Replay_GRPCTrailersRecorded(t *testing.T) {
 }
 
 func TestExecute_Replay_GRPCBodyPatchesRejected(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -749,6 +761,7 @@ func TestExecute_Replay_GRPCBodyPatchesRejected(t *testing.T) {
 // --- ReplayRaw action tests ---
 
 func TestExecute_ReplayRaw_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -823,6 +836,7 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 }
 
 func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	u, _ := url.Parse("http://example.com/no-raw")
@@ -864,6 +878,7 @@ func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
 }
 
 func TestExecute_ReplayRaw_EmptyFlowID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
 
@@ -879,6 +894,7 @@ func TestExecute_ReplayRaw_EmptyFlowID(t *testing.T) {
 }
 
 func TestExecute_ReplayRaw_NonexistentSession(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
 
@@ -894,6 +910,7 @@ func TestExecute_ReplayRaw_NonexistentSession(t *testing.T) {
 }
 
 func TestExecute_ReplayRaw_NilStore(t *testing.T) {
+	t.Parallel()
 	cs := setupTestSessionWithExecuteRawDialer(t, nil, &testDialer{})
 
 	result := executeCallTool(t, cs, map[string]any{
@@ -908,6 +925,7 @@ func TestExecute_ReplayRaw_NilStore(t *testing.T) {
 }
 
 func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -968,6 +986,7 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 // --- DeleteFlows action tests ---
 
 func TestExecute_DeleteFlows_ByID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1024,6 +1043,7 @@ func TestExecute_DeleteFlows_ByID(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_All(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1085,6 +1105,7 @@ func TestExecute_DeleteFlows_All(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_OlderThanDays(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1168,6 +1189,7 @@ func TestExecute_DeleteFlows_OlderThanDays(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_OlderThanDays_InvalidDays(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1185,6 +1207,7 @@ func TestExecute_DeleteFlows_OlderThanDays_InvalidDays(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_OlderThanDays_RequiresConfirm(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1202,6 +1225,7 @@ func TestExecute_DeleteFlows_OlderThanDays_RequiresConfirm(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_NoParamsError(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1216,6 +1240,7 @@ func TestExecute_DeleteFlows_NoParamsError(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_NonexistentSession(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1232,6 +1257,7 @@ func TestExecute_DeleteFlows_NonexistentSession(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_NilStore(t *testing.T) {
+	t.Parallel()
 	cs := setupTestSessionWithExecuteDoer(t, nil, newPermissiveClient())
 
 	result := manageCallTool(t, cs, map[string]any{
@@ -1248,6 +1274,7 @@ func TestExecute_DeleteFlows_NilStore(t *testing.T) {
 // --- Invalid action tests ---
 
 func TestExecute_InvalidAction(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1271,6 +1298,7 @@ func TestExecute_InvalidAction(t *testing.T) {
 }
 
 func TestExecute_EmptyAction(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1291,6 +1319,7 @@ func TestExecute_EmptyAction(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1406,6 +1435,7 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_ByProtocol_RequiresConfirm(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1427,6 +1457,7 @@ func TestExecute_DeleteFlows_ByProtocol_RequiresConfirm(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_ByProtocol_NoMatches(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1487,6 +1518,7 @@ func TestExecute_DeleteFlows_ByProtocol_NoMatches(t *testing.T) {
 }
 
 func TestExecute_DeleteFlows_NothingToDelete(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
 	cs := setupTestSession(t, ca, store)
@@ -1571,6 +1603,7 @@ func setupTestSessionForRegenerate(t *testing.T, ca *cert.CA, issuer *cert.Issue
 }
 
 func TestExecute_RegenerateCA_AutoPersistMode(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "ca.crt")
 	keyPath := filepath.Join(dir, "ca.key")
@@ -1651,6 +1684,7 @@ func TestExecute_RegenerateCA_AutoPersistMode(t *testing.T) {
 }
 
 func TestExecute_RegenerateCA_ExplicitMode_Error(t *testing.T) {
+	t.Parallel()
 	ca := newTestCA(t)
 	// Simulate explicit mode: persisted with user-provided paths.
 	ca.SetSource(cert.CASource{
@@ -1677,6 +1711,7 @@ func TestExecute_RegenerateCA_ExplicitMode_Error(t *testing.T) {
 }
 
 func TestExecute_RegenerateCA_EphemeralMode(t *testing.T) {
+	t.Parallel()
 	ca := newTestCA(t)
 	// Ephemeral mode: no source set (Persisted=false).
 
@@ -1715,6 +1750,7 @@ func TestExecute_RegenerateCA_EphemeralMode(t *testing.T) {
 }
 
 func TestExecute_RegenerateCA_NilCA(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := NewServer(ctx, nil, nil, nil)
 	ct, st := gomcp.NewInMemoryTransports()
@@ -1744,6 +1780,7 @@ func TestExecute_RegenerateCA_NilCA(t *testing.T) {
 }
 
 func TestSafeCheckRedirect(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		scheme  string

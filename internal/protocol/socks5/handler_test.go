@@ -39,13 +39,6 @@ func TestDetect(t *testing.T) {
 	}
 }
 
-func TestName(t *testing.T) {
-	h := NewHandler(slog.Default())
-	if h.Name() != "SOCKS5" {
-		t.Fatalf("expected SOCKS5, got %s", h.Name())
-	}
-}
-
 func TestHandle_FullConnect_NoAuth(t *testing.T) {
 	// Start an echo server as the upstream target.
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")

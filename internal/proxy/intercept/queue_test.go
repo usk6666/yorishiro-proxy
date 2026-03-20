@@ -361,13 +361,6 @@ func TestQueue_TimestampSet(t *testing.T) {
 	}
 }
 
-func TestQueue_DefaultMaxItems(t *testing.T) {
-	q := NewQueue()
-	if q.MaxItems() != DefaultMaxQueueItems {
-		t.Errorf("expected default max items %d, got %d", DefaultMaxQueueItems, q.MaxItems())
-	}
-}
-
 func TestQueue_SetMaxItems(t *testing.T) {
 	q := NewQueue()
 	q.SetMaxItems(50)

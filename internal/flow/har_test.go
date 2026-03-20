@@ -40,6 +40,7 @@ func (m *mockFlowReader) CountMessages(_ context.Context, flowID string) (int, e
 }
 
 func TestExportHAR_BasicHTTP(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
 	sendMs := int64(5)
 	waitMs := int64(100)
@@ -172,6 +173,7 @@ func TestExportHAR_BasicHTTP(t *testing.T) {
 }
 
 func TestExportHAR_BinaryBody(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	binaryBody := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A} // PNG header
 
@@ -239,6 +241,7 @@ func TestExportHAR_BinaryBody(t *testing.T) {
 }
 
 func TestExportHAR_WebSocket(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 
 	store := &mockFlowReader{
@@ -355,6 +358,7 @@ func TestExportHAR_WebSocket(t *testing.T) {
 }
 
 func TestExportHAR_SkipsTCPAndGRPC(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	store := &mockFlowReader{
 		flows: []*Flow{
@@ -383,6 +387,7 @@ func TestExportHAR_SkipsTCPAndGRPC(t *testing.T) {
 }
 
 func TestExportHAR_NilTimings(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	store := &mockFlowReader{
 		flows: []*Flow{
@@ -428,6 +433,7 @@ func TestExportHAR_NilTimings(t *testing.T) {
 }
 
 func TestExportHAR_TimeFilter(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
 	after := base.Add(30 * time.Minute)
 	before := base.Add(90 * time.Minute)
@@ -461,6 +467,7 @@ func TestExportHAR_TimeFilter(t *testing.T) {
 }
 
 func TestExportHAR_MaxFlows(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	var flows []*Flow
 	msgs := map[string][]*Message{}
@@ -488,6 +495,7 @@ func TestExportHAR_MaxFlows(t *testing.T) {
 }
 
 func TestExportHAR_LargeFlowCount(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	count := 1100
 	var flows []*Flow
@@ -526,6 +534,7 @@ func TestExportHAR_LargeFlowCount(t *testing.T) {
 }
 
 func TestExportHAR_ContextCancellation(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	store := &mockFlowReader{
 		flows: []*Flow{
@@ -547,6 +556,7 @@ func TestExportHAR_ContextCancellation(t *testing.T) {
 }
 
 func TestExportHAR_EmptyFlows(t *testing.T) {
+	t.Parallel()
 	store := &mockFlowReader{
 		flows:    []*Flow{},
 		messages: map[string][]*Message{},
@@ -571,6 +581,7 @@ func TestExportHAR_EmptyFlows(t *testing.T) {
 }
 
 func TestExportHAR_NoBodiesOption(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	store := &mockFlowReader{
 		flows: []*Flow{
@@ -605,6 +616,7 @@ func TestExportHAR_NoBodiesOption(t *testing.T) {
 }
 
 func TestIsBinaryContent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		mimeType string
@@ -637,6 +649,7 @@ func TestIsBinaryContent(t *testing.T) {
 }
 
 func TestExtractIP(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		addr string
 		want string
@@ -659,6 +672,7 @@ func TestExtractIP(t *testing.T) {
 }
 
 func TestProtocolToHTTPVersion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		protocol string
 		want     string
@@ -683,6 +697,7 @@ func TestProtocolToHTTPVersion(t *testing.T) {
 }
 
 func TestHeadersToHAR_Sorted(t *testing.T) {
+	t.Parallel()
 	headers := map[string][]string{
 		"Zebra":   {"z-val"},
 		"Alpha":   {"a-val"},
@@ -710,6 +725,7 @@ func TestHeadersToHAR_Sorted(t *testing.T) {
 }
 
 func TestHARSchemaValidation(t *testing.T) {
+	t.Parallel()
 	// Validates that the HAR output matches the expected JSON structure.
 	now := time.Now().UTC()
 	store := &mockFlowReader{

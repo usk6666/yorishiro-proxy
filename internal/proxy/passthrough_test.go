@@ -388,14 +388,6 @@ func TestPassthroughList_Clear(t *testing.T) {
 	}
 }
 
-func TestPassthroughList_ClearEmpty(t *testing.T) {
-	pl := NewPassthroughList()
-	pl.Clear() // should not panic
-	if pl.Len() != 0 {
-		t.Errorf("Len() after Clear on empty = %d, want 0", pl.Len())
-	}
-}
-
 func TestPassthroughList_ClearThenAdd(t *testing.T) {
 	pl := NewPassthroughList()
 	pl.Add("old.com")

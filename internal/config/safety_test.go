@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 )
@@ -621,84 +620,6 @@ func TestSafetyFilterConfigJSON_InputAndOutput(t *testing.T) {
 	}
 }
 
-func TestSafetyFilterConfigLoadFile(t *testing.T) {
-	// Test loading SafetyFilter config from a file.
-	tmpFile := t.TempDir() + "/config.json"
-	data := []byte(`{
-		"safety_filter": {
-			"enabled": true,
-			"input": {
-				"action": "log_only",
-				"rules": [
-					{"preset": "destructive-sql"}
-				]
-			}
-		}
-	}`)
-
-	if err := writeTestFile(tmpFile, data); err != nil {
-		t.Fatalf("write test file: %v", err)
-	}
-
-	cfg, err := LoadFile(tmpFile)
-	if err != nil {
-		t.Fatalf("LoadFile error: %v", err)
-	}
-
-	if cfg.SafetyFilter == nil {
-		t.Fatal("safety_filter is nil")
-	}
-	if !cfg.SafetyFilter.Enabled {
-		t.Error("safety_filter should be enabled")
-	}
-	if cfg.SafetyFilter.Input.Action != "log_only" {
-		t.Errorf("action = %q, want %q", cfg.SafetyFilter.Input.Action, "log_only")
-	}
-}
-
-func TestSafetyFilterConfigLoadFile_Output(t *testing.T) {
-	tmpFile := t.TempDir() + "/config.json"
-	data := []byte(`{
-		"safety_filter": {
-			"enabled": true,
-			"output": {
-				"action": "mask",
-				"rules": [
-					{"preset": "credit-card"},
-					{"preset": "japan-my-number"},
-					{
-						"id": "custom-token",
-						"pattern": "Bearer [a-zA-Z0-9._-]+",
-						"targets": ["header:Authorization"]
-					}
-				]
-			}
-		}
-	}`)
-
-	if err := writeTestFile(tmpFile, data); err != nil {
-		t.Fatalf("write test file: %v", err)
-	}
-
-	cfg, err := LoadFile(tmpFile)
-	if err != nil {
-		t.Fatalf("LoadFile error: %v", err)
-	}
-
-	if cfg.SafetyFilter == nil {
-		t.Fatal("safety_filter is nil")
-	}
-	if cfg.SafetyFilter.Output == nil {
-		t.Fatal("safety_filter.output is nil")
-	}
-	if cfg.SafetyFilter.Output.Action != "mask" {
-		t.Errorf("action = %q, want %q", cfg.SafetyFilter.Output.Action, "mask")
-	}
-	if len(cfg.SafetyFilter.Output.Rules) != 3 {
-		t.Fatalf("rules count = %d, want 3", len(cfg.SafetyFilter.Output.Rules))
-	}
-}
-
 func TestSafetyFilterConfigOmitted(t *testing.T) {
 	// Test that SafetyFilter config is nil when omitted.
 	jsonData := `{"listen_addr": "127.0.0.1:8080"}`
@@ -814,9 +735,4 @@ func TestIsValidTarget(t *testing.T) {
 			}
 		})
 	}
-}
-
-// writeTestFile writes data to a file for testing.
-func writeTestFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0644)
 }

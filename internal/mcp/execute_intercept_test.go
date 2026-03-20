@@ -52,6 +52,7 @@ func interceptCallTool(t *testing.T, cs *gomcp.ClientSession, args map[string]an
 }
 
 func TestExecuteRelease(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
@@ -95,6 +96,7 @@ func TestExecuteRelease(t *testing.T) {
 }
 
 func TestExecuteDrop(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
@@ -134,6 +136,7 @@ func TestExecuteDrop(t *testing.T) {
 }
 
 func TestExecuteModifyAndForward(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
@@ -190,6 +193,7 @@ func TestExecuteModifyAndForward(t *testing.T) {
 }
 
 func TestExecuteRelease_MissingInterceptID(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
@@ -203,6 +207,7 @@ func TestExecuteRelease_MissingInterceptID(t *testing.T) {
 }
 
 func TestExecuteRelease_NotFound(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
@@ -218,6 +223,7 @@ func TestExecuteRelease_NotFound(t *testing.T) {
 }
 
 func TestExecuteRelease_NoQueue(t *testing.T) {
+	t.Parallel()
 	// Server without intercept queue.
 	cs := setupTestSession(t, nil)
 
@@ -233,6 +239,7 @@ func TestExecuteRelease_NoQueue(t *testing.T) {
 }
 
 func TestQueryInterceptQueue_Empty(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
@@ -257,6 +264,7 @@ func TestQueryInterceptQueue_Empty(t *testing.T) {
 }
 
 func TestQueryInterceptQueue_WithItems(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 
@@ -285,6 +293,7 @@ func TestQueryInterceptQueue_WithItems(t *testing.T) {
 }
 
 func TestQueryInterceptQueue_NoQueue(t *testing.T) {
+	t.Parallel()
 	cs := setupTestSession(t, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -302,6 +311,7 @@ func TestQueryInterceptQueue_NoQueue(t *testing.T) {
 }
 
 func TestQueryInterceptQueue_WithLimit(t *testing.T) {
+	t.Parallel()
 	queue := intercept.NewQueue()
 	cs := setupTestSessionWithInterceptQueue(t, queue)
 

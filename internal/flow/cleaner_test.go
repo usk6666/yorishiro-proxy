@@ -49,6 +49,7 @@ func saveCleanerSession(t *testing.T, store *SQLiteStore, ts time.Time, reqURL s
 }
 
 func TestCleaner_RunOnce_MaxAge(t *testing.T) {
+	t.Parallel()
 	cleaner, store := newTestCleaner(t, CleanerConfig{
 		MaxAge: 12 * time.Hour,
 	})
@@ -76,6 +77,7 @@ func TestCleaner_RunOnce_MaxAge(t *testing.T) {
 }
 
 func TestCleaner_RunOnce_MaxSessions(t *testing.T) {
+	t.Parallel()
 	cleaner, store := newTestCleaner(t, CleanerConfig{
 		MaxFlows: 2,
 	})
@@ -104,6 +106,7 @@ func TestCleaner_RunOnce_MaxSessions(t *testing.T) {
 }
 
 func TestCleaner_RunOnce_Disabled(t *testing.T) {
+	t.Parallel()
 	cleaner, store := newTestCleaner(t, CleanerConfig{})
 	ctx := context.Background()
 
@@ -119,6 +122,7 @@ func TestCleaner_RunOnce_Disabled(t *testing.T) {
 }
 
 func TestCleaner_Start_RunsAtStartup(t *testing.T) {
+	t.Parallel()
 	cleaner, store := newTestCleaner(t, CleanerConfig{
 		MaxFlows: 1,
 		Interval: time.Hour,
@@ -144,6 +148,7 @@ func TestCleaner_Start_RunsAtStartup(t *testing.T) {
 }
 
 func TestCleaner_Start_Periodic(t *testing.T) {
+	t.Parallel()
 	cleaner, store := newTestCleaner(t, CleanerConfig{
 		MaxAge:   50 * time.Millisecond,
 		Interval: 100 * time.Millisecond,
@@ -166,6 +171,7 @@ func TestCleaner_Start_Periodic(t *testing.T) {
 }
 
 func TestCleanerConfig_Enabled(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		config CleanerConfig

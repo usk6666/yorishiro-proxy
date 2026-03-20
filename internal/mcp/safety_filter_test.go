@@ -67,6 +67,7 @@ func setupTestSessionWithSafety(t *testing.T, store flow.Store, doer httpDoer, e
 }
 
 func TestSafetyFilter_Resend_BlocksDestructiveBody(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	safetyEngine := newBlockingSafetyEngine(t)
 
@@ -129,6 +130,7 @@ func TestSafetyFilter_Resend_BlocksDestructiveBody(t *testing.T) {
 }
 
 func TestSafetyFilter_Resend_AllowsSafeBody(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	safetyEngine := newBlockingSafetyEngine(t)
 
@@ -181,6 +183,7 @@ func TestSafetyFilter_Resend_AllowsSafeBody(t *testing.T) {
 }
 
 func TestSafetyFilter_Resend_BlocksDestructiveHeaders(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	safetyEngine := newBlockingSafetyEngine(t)
 
@@ -234,6 +237,7 @@ func TestSafetyFilter_Resend_BlocksDestructiveHeaders(t *testing.T) {
 }
 
 func TestSafetyFilter_Intercept_ModifyAndForward_BlocksDestructiveBody(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	safetyEngine := newBlockingSafetyEngine(t)
 
@@ -286,6 +290,7 @@ func TestSafetyFilter_Intercept_ModifyAndForward_BlocksDestructiveBody(t *testin
 }
 
 func TestSafetyFilter_Intercept_ModifyAndForward_AllowsSafe(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	safetyEngine := newBlockingSafetyEngine(t)
 
@@ -340,6 +345,7 @@ func TestSafetyFilter_Intercept_ModifyAndForward_AllowsSafe(t *testing.T) {
 }
 
 func TestSafetyFilter_ErrorFormat(t *testing.T) {
+	t.Parallel()
 	v := &safety.InputViolation{
 		RuleID:    "destructive-sql:drop-table",
 		RuleName:  "DROP TABLE pattern",
@@ -366,6 +372,7 @@ func TestSafetyFilter_ErrorFormat(t *testing.T) {
 }
 
 func TestSafetyFilter_FuzzTemplate_BlocksDestructiveBody(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	safetyEngine := newBlockingSafetyEngine(t)
 
@@ -460,6 +467,7 @@ func TestSafetyFilter_FuzzTemplate_BlocksDestructiveBody(t *testing.T) {
 }
 
 func TestSafetyFilter_NoEngine_PassesThrough(t *testing.T) {
+	t.Parallel()
 	// When no safety engine is configured, all operations should pass through.
 	store := newTestStore(t)
 

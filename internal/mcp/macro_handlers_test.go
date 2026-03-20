@@ -87,6 +87,7 @@ func unmarshalExecuteResult(t *testing.T, result *gomcp.CallToolResult, dest any
 }
 
 func TestExecute_DefineMacro_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -129,6 +130,7 @@ func TestExecute_DefineMacro_Success(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_Upsert(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -178,6 +180,7 @@ func TestExecute_DefineMacro_Upsert(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_MissingName(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -196,6 +199,7 @@ func TestExecute_DefineMacro_MissingName(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_MissingSteps(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -212,6 +216,7 @@ func TestExecute_DefineMacro_MissingSteps(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_InvalidStep_MissingID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -240,6 +245,7 @@ func TestExecute_DefineMacro_InvalidStep_MissingID(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_InvalidStep_MissingFlowID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -268,6 +274,7 @@ func TestExecute_DefineMacro_InvalidStep_MissingFlowID(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_DuplicateStepID(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -288,6 +295,7 @@ func TestExecute_DefineMacro_DuplicateStepID(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_InvalidExtractSource(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -333,6 +341,7 @@ func TestExecute_DefineMacro_InvalidExtractSource(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_InvalidExtractFrom(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -376,6 +385,7 @@ func TestExecute_DefineMacro_InvalidExtractFrom(t *testing.T) {
 }
 
 func TestExecute_RunMacro_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Create an echo server that returns a response with a token.
@@ -481,6 +491,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 }
 
 func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	echoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -553,6 +564,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 }
 
 func TestExecute_RunMacro_NotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -569,6 +581,7 @@ func TestExecute_RunMacro_NotFound(t *testing.T) {
 }
 
 func TestExecute_RunMacro_MissingName(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -583,6 +596,7 @@ func TestExecute_RunMacro_MissingName(t *testing.T) {
 }
 
 func TestExecute_DeleteMacro_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -632,6 +646,7 @@ func TestExecute_DeleteMacro_Success(t *testing.T) {
 }
 
 func TestExecute_DeleteMacro_NotFound(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -648,6 +663,7 @@ func TestExecute_DeleteMacro_NotFound(t *testing.T) {
 }
 
 func TestExecute_DeleteMacro_MissingName(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -662,6 +678,7 @@ func TestExecute_DeleteMacro_MissingName(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	cs := setupMacroTestSession(t, store)
 
@@ -713,6 +730,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 }
 
 func TestExecute_DefineMacro_NoStore(t *testing.T) {
+	t.Parallel()
 	// Test with nil store.
 	ctx := context.Background()
 	s := NewServer(context.Background(), nil, nil, nil)
@@ -751,6 +769,7 @@ func TestExecute_DefineMacro_NoStore(t *testing.T) {
 }
 
 func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Create an echo server that returns a predictable response.
@@ -948,6 +967,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 }
 
 func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Login server returns 200 (not 302), so the guarded step should be skipped.
@@ -1051,6 +1071,7 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 }
 
 func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Token server for the hook macro step.

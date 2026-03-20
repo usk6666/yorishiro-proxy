@@ -19,6 +19,7 @@ import (
 // --- resend_raw with patches tests ---
 
 func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -88,6 +89,7 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -152,6 +154,7 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -218,6 +221,7 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 // --- dry_run tests ---
 
 func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -300,6 +304,7 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -387,6 +392,7 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -460,6 +466,7 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 // --- override_raw_base64 tests ---
 
 func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
+	t.Parallel()
 	// Start an HTTP/2 echo server (no TLS).
 	echoAddr, cleanup := newH2EchoServer(t)
 	defer cleanup()
@@ -585,6 +592,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes_DryRun(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	u, _ := url.Parse("http://example.com/test")
@@ -653,6 +661,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes_DryRun(t *testin
 }
 
 func TestExecute_ResendRaw_NoRawBytesNoOverride_Error(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	u, _ := url.Parse("http://example.com/test")
@@ -699,6 +708,7 @@ func TestExecute_ResendRaw_NoRawBytesNoOverride_Error(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -762,6 +772,7 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -832,6 +843,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 // --- Tag tests ---
 
 func TestExecute_ResendRaw_Tag(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -902,6 +914,7 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 // --- Session recording tests ---
 
 func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
 	defer cleanup()
@@ -1001,6 +1014,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 // --- Error case tests ---
 
 func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -1047,6 +1061,7 @@ func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_InvalidPatch(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -1099,6 +1114,7 @@ func TestExecute_ResendRaw_InvalidPatch(t *testing.T) {
 }
 
 func TestExecute_ResendRaw_PatchOffsetBeyondData(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	rawReq := []byte("Hello")

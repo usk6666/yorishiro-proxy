@@ -17,6 +17,7 @@ import (
 // --- Resend action (new name) tests ---
 
 func TestExecute_Resend_Success(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -74,6 +75,7 @@ func TestExecute_Resend_Success(t *testing.T) {
 }
 
 func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
+	t.Parallel()
 	// Verify that "resend_raw" also works (alongside "replay_raw" backward compat).
 	store := newTestStore(t)
 	addr, cleanup := newRawEchoServer(t)
@@ -125,6 +127,7 @@ func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
 // --- Header mutation tests ---
 
 func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -222,6 +225,7 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 // --- Body mutation tests ---
 
 func TestExecute_Resend_OverrideBody(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -277,6 +281,7 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 }
 
 func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -336,6 +341,7 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 }
 
 func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -381,6 +387,7 @@ func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
 }
 
 func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -441,6 +448,7 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 }
 
 func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -508,6 +516,7 @@ func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
 }
 
 func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -569,6 +578,7 @@ func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
 // --- Dry-run tests ---
 
 func TestExecute_Resend_DryRun(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -653,6 +663,7 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 // --- Tag tests ---
 
 func TestExecute_Resend_Tag(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -717,6 +728,7 @@ func TestExecute_Resend_Tag(t *testing.T) {
 // --- override_host validation tests ---
 
 func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -774,6 +786,7 @@ func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
 // --- buildResendHeaders unit tests ---
 
 func TestBuildResendHeaders(t *testing.T) {
+	t.Parallel()
 	original := map[string][]string{
 		"Content-Type":  {"application/json"},
 		"Authorization": {"Bearer old-token"},
@@ -818,6 +831,7 @@ func TestBuildResendHeaders(t *testing.T) {
 }
 
 func TestBuildResendHeaders_DuplicateKeys(t *testing.T) {
+	t.Parallel()
 	original := map[string][]string{
 		"Host": {"original.com"},
 	}
@@ -839,6 +853,7 @@ func TestBuildResendHeaders_DuplicateKeys(t *testing.T) {
 }
 
 func TestBuildResendHeaders_DuplicateAddHeaders(t *testing.T) {
+	t.Parallel()
 	original := map[string][]string{
 		"Set-Cookie": {"cookie1=a"},
 	}
@@ -859,6 +874,7 @@ func TestBuildResendHeaders_DuplicateAddHeaders(t *testing.T) {
 }
 
 func TestBuildResendHeaders_CaseInsensitiveRemove(t *testing.T) {
+	t.Parallel()
 	original := map[string][]string{
 		"Content-Type": {"application/json"},
 	}
@@ -880,6 +896,7 @@ func TestBuildResendHeaders_CaseInsensitiveRemove(t *testing.T) {
 // --- buildResendBody unit tests ---
 
 func TestBuildResendBody(t *testing.T) {
+	t.Parallel()
 	originalBody := []byte(`{"original":"body"}`)
 
 	t.Run("no mutations returns original", func(t *testing.T) {
@@ -948,6 +965,7 @@ func TestBuildResendBody(t *testing.T) {
 // --- validateOverrideHost unit tests ---
 
 func TestValidateOverrideHost(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		host    string
@@ -973,6 +991,7 @@ func TestValidateOverrideHost(t *testing.T) {
 // --- Actual HTTP send tests (not dry-run) ---
 
 func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -1047,6 +1066,7 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 // completely suppresses headers including Go's auto-added defaults (e.g., User-Agent).
 // This is the regression test for USK-95.
 func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -1124,6 +1144,7 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 // TestExecute_Resend_RemoveHeaders_DryRun verifies that removed headers do not
 // appear in the dry-run preview.
 func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -1189,6 +1210,7 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 // TestBuildResendHeaders_RemoveHeaders_EmptySlice verifies that removed headers
 // are set to empty slices (not deleted) to suppress Go's net/http defaults.
 func TestBuildResendHeaders_RemoveHeaders_EmptySlice(t *testing.T) {
+	t.Parallel()
 	original := map[string][]string{
 		"User-Agent":   {"curl/7.88.1"},
 		"Content-Type": {"application/json"},
@@ -1216,6 +1238,7 @@ func TestBuildResendHeaders_RemoveHeaders_EmptySlice(t *testing.T) {
 // --- HeaderEntries UnmarshalJSON tests ---
 
 func TestHeaderEntries_UnmarshalJSON_ArrayFormat(t *testing.T) {
+	t.Parallel()
 	input := `[{"key":"Host","value":"evil.com"},{"key":"Host","value":"evil2.com"}]`
 	var h HeaderEntries
 	if err := json.Unmarshal([]byte(input), &h); err != nil {
@@ -1233,6 +1256,7 @@ func TestHeaderEntries_UnmarshalJSON_ArrayFormat(t *testing.T) {
 }
 
 func TestHeaderEntries_UnmarshalJSON_LegacyMapFormat(t *testing.T) {
+	t.Parallel()
 	input := `{"Content-Type":"application/json","X-Custom":"value"}`
 	var h HeaderEntries
 	if err := json.Unmarshal([]byte(input), &h); err != nil {
@@ -1255,6 +1279,7 @@ func TestHeaderEntries_UnmarshalJSON_LegacyMapFormat(t *testing.T) {
 }
 
 func TestHeaderEntries_UnmarshalJSON_EmptyArray(t *testing.T) {
+	t.Parallel()
 	input := `[]`
 	var h HeaderEntries
 	if err := json.Unmarshal([]byte(input), &h); err != nil {
@@ -1266,6 +1291,7 @@ func TestHeaderEntries_UnmarshalJSON_EmptyArray(t *testing.T) {
 }
 
 func TestHeaderEntries_UnmarshalJSON_EmptyMap(t *testing.T) {
+	t.Parallel()
 	input := `{}`
 	var h HeaderEntries
 	if err := json.Unmarshal([]byte(input), &h); err != nil {
@@ -1277,6 +1303,7 @@ func TestHeaderEntries_UnmarshalJSON_EmptyMap(t *testing.T) {
 }
 
 func TestHeaderEntries_UnmarshalJSON_Invalid(t *testing.T) {
+	t.Parallel()
 	input := `"not valid"`
 	var h HeaderEntries
 	if err := json.Unmarshal([]byte(input), &h); err == nil {
@@ -1287,6 +1314,7 @@ func TestHeaderEntries_UnmarshalJSON_Invalid(t *testing.T) {
 // --- Backward compatibility integration tests ---
 
 func TestExecute_Resend_DuplicateHeaders_ArrayFormat(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -1350,6 +1378,7 @@ func TestExecute_Resend_DuplicateHeaders_ArrayFormat(t *testing.T) {
 }
 
 func TestExecute_Resend_LegacyMapFormat_BackwardCompat(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	echoServer := newEchoServer(t)
 
@@ -1419,6 +1448,7 @@ func TestExecute_Resend_LegacyMapFormat_BackwardCompat(t *testing.T) {
 // the Host header via override_headers actually sets httpReq.Host so that
 // the server receives the modified Host (important for HTTP/2 :authority).
 func TestExecute_Resend_HostHeaderOverride_SetsReqHost(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Custom server that echoes r.Host (Go strips Host from r.Header).
