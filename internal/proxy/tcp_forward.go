@@ -334,7 +334,7 @@ func (l *TCPForwardListener) handleFixed(ctx context.Context, conn net.Conn, pro
 // protocolNameMap maps ForwardConfig.Protocol values to handler Name() values.
 var protocolNameMap = map[string]string{
 	"http":      "HTTP/1.x",
-	"http2":     "HTTP/2",
+	"http2":     "HTTP/2 (h2c)",
 	"grpc":      "gRPC",
 	"websocket": "WebSocket",
 }
