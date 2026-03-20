@@ -905,3 +905,99 @@ func TestHandle_H2C_RealConnection(t *testing.T) {
 		t.Errorf("conn_id = %q, want %q", entries[0].Session.ConnID, "test-h2c-real")
 	}
 }
+
+func TestResolveSchemeAndHost(t *testing.T) {
+	tests := []struct {
+		name             string
+		connectAuthority string
+		reqHost          string
+		reqURLHost       string
+		reqURLScheme     string
+		forwardTarget    string
+		wantScheme       string
+		wantURLHost      string
+		wantReqHost      string
+	}{
+		{
+			name:        "h2c without forwarding target uses req.Host",
+			reqHost:     "example.com",
+			wantScheme:  "http",
+			wantURLHost: "example.com",
+			wantReqHost: "example.com",
+		},
+		{
+			name:             "h2 with CONNECT authority uses authority",
+			connectAuthority: "example.com:443",
+			reqHost:          "",
+			wantScheme:       "https",
+			wantURLHost:      "example.com:443",
+		},
+		{
+			name:          "h2c with forwarding target overrides host",
+			reqHost:       "localhost:50051",
+			forwardTarget: "backend.example.com:8080",
+			wantScheme:    "http",
+			wantURLHost:   "backend.example.com:8080",
+			wantReqHost:   "backend.example.com:8080",
+		},
+		{
+			name:             "h2 with CONNECT and forwarding target uses forwarding target",
+			connectAuthority: "localhost:443",
+			reqHost:          "localhost:443",
+			forwardTarget:    "api.example.com:443",
+			wantScheme:       "https",
+			wantURLHost:      "api.example.com:443",
+			wantReqHost:      "api.example.com:443",
+		},
+		{
+			name:          "forwarding target overrides when URL host already set",
+			reqHost:       "localhost:8080",
+			reqURLHost:    "localhost:8080",
+			forwardTarget: "real-server.internal:9090",
+			wantScheme:    "http",
+			wantURLHost:   "real-server.internal:9090",
+			wantReqHost:   "real-server.internal:9090",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.forwardTarget != "" {
+				ctx = proxy.ContextWithForwardTarget(ctx, tt.forwardTarget)
+			}
+
+			handler := &Handler{}
+			reqURL := &url.URL{
+				Host:   tt.reqURLHost,
+				Scheme: tt.reqURLScheme,
+				Path:   "/test",
+			}
+			req := &gohttp.Request{
+				Host:   tt.reqHost,
+				URL:    reqURL,
+				Header: gohttp.Header{},
+			}
+			sc := &streamContext{
+				ctx:              ctx,
+				req:              req,
+				connectAuthority: tt.connectAuthority,
+			}
+
+			handler.resolveSchemeAndHost(sc)
+
+			if sc.flowScheme != tt.wantScheme {
+				t.Errorf("flowScheme = %q, want %q", sc.flowScheme, tt.wantScheme)
+			}
+			if sc.req.URL.Host != tt.wantURLHost {
+				t.Errorf("req.URL.Host = %q, want %q", sc.req.URL.Host, tt.wantURLHost)
+			}
+			if sc.reqURL.Host != tt.wantURLHost {
+				t.Errorf("reqURL.Host = %q, want %q", sc.reqURL.Host, tt.wantURLHost)
+			}
+			if tt.wantReqHost != "" && sc.req.Host != tt.wantReqHost {
+				t.Errorf("req.Host = %q, want %q", sc.req.Host, tt.wantReqHost)
+			}
+		})
+	}
+}

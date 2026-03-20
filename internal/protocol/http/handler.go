@@ -380,7 +380,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
-	normalizeRequestURL(req)
+	normalizeRequestURL(ctx, req)
 
 	// Target scope enforcement (before WebSocket — S-1: CWE-863).
 	if blocked, reason := h.checkTargetScope(req.URL); blocked {
