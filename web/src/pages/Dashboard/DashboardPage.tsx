@@ -484,6 +484,43 @@ export function DashboardPage() {
                 {statusData.ca_initialized ? "Yes" : "No"}
               </span>
             </div>
+            <div className="dashboard-config-item">
+              <span className="dashboard-config-label">SOCKS5</span>
+              <span className="dashboard-config-value">
+                {statusData.socks5_enabled
+                  ? `Enabled${statusData.socks5_auth ? ` (${statusData.socks5_auth})` : ""}`
+                  : "Disabled"}
+              </span>
+            </div>
+            {statusData.tls_fingerprint && (
+              <div className="dashboard-config-item">
+                <span className="dashboard-config-label">TLS Fingerprint</span>
+                <span className="dashboard-config-value">{statusData.tls_fingerprint}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Safety Filter status */}
+      {configData?.safety_filter && (
+        <div className="dashboard-section">
+          <h2 className="dashboard-section-title">Safety Filter</h2>
+          <div className="dashboard-config-grid">
+            <div className="dashboard-config-item">
+              <span className="dashboard-config-label">Status</span>
+              <Badge variant={configData.safety_filter.enabled ? "success" : "default"}>
+                {configData.safety_filter.enabled ? "Enabled" : "Disabled"}
+              </Badge>
+            </div>
+            <div className="dashboard-config-item">
+              <span className="dashboard-config-label">Input Rules</span>
+              <span className="dashboard-config-value">{configData.safety_filter.input_rules}</span>
+            </div>
+            <div className="dashboard-config-item">
+              <span className="dashboard-config-label">Output Rules</span>
+              <span className="dashboard-config-value">{configData.safety_filter.output_rules}</span>
+            </div>
           </div>
         </div>
       )}

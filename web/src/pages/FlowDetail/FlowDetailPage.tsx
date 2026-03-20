@@ -438,6 +438,28 @@ export function FlowDetailPage() {
               {formatDuration(flowData.duration_ms)}
             </span>
           </div>
+          {(flowData.send_ms != null || flowData.wait_ms != null || flowData.receive_ms != null) && (
+            <div className="sd-meta-item">
+              <span className="sd-meta-label">Timing</span>
+              <span className="sd-meta-value sd-timing-breakdown">
+                {flowData.send_ms != null && (
+                  <span className="sd-timing-part" title="Request send time">
+                    Send: {formatDuration(flowData.send_ms)}
+                  </span>
+                )}
+                {flowData.wait_ms != null && (
+                  <span className="sd-timing-part" title="Server processing wait time">
+                    Wait: {formatDuration(flowData.wait_ms)}
+                  </span>
+                )}
+                {flowData.receive_ms != null && (
+                  <span className="sd-timing-part" title="Response receive time">
+                    Recv: {formatDuration(flowData.receive_ms)}
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
           <div className="sd-meta-item">
             <span className="sd-meta-label">Timestamp</span>
             <span className="sd-meta-value">
