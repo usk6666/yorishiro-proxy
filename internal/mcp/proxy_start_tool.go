@@ -564,6 +564,7 @@ func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forw
 		Handler:      s.deps.tcpHandler,
 		Detector:     s.deps.detector,
 		PluginEngine: s.deps.pluginEngine,
+		Issuer:       s.deps.issuer,
 	}
 
 	if err := s.deps.manager.StartTCPForwardsNamed(s.deps.appCtx, listenerName, params); err != nil {
