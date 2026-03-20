@@ -306,4 +306,3 @@ func TestQuery_Flows_ValidFiltersStillWork(t *testing.T) {
 		t.Fatalf("expected success for valid filters, got error: %v", result.Content)
 	}
 }
-

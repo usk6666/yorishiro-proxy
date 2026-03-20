@@ -109,4 +109,3 @@ func TestManager_PeekTimeout_ReflectsRunningListener(t *testing.T) {
 		t.Errorf("PeekTimeout after dynamic change = %v, want 10s", got)
 	}
 }
-

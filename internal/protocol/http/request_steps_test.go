@@ -161,7 +161,6 @@ func TestReadAndCaptureRequestBody(t *testing.T) {
 	}
 }
 
-
 func TestExtractRawRequest(t *testing.T) {
 	tests := []struct {
 		name         string

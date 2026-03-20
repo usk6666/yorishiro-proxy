@@ -54,4 +54,3 @@ func TestResult_Has(t *testing.T) {
 		t.Error("Has(Apache) = true, want false")
 	}
 }
-

@@ -792,4 +792,3 @@ func TestDecodeEntryBody_Base64(t *testing.T) {
 		t.Errorf("decodeEntryBody(base64) = %q, want %q", string(got), "hello world")
 	}
 }
-

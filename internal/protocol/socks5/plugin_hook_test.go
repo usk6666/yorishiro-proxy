@@ -131,4 +131,3 @@ func TestSOCKS5ContextFunctions(t *testing.T) {
 		}
 	})
 }
-

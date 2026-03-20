@@ -359,4 +359,3 @@ func TestQuery_Status_TLSFingerprint_AfterSet(t *testing.T) {
 		t.Errorf("tls_fingerprint = %q, want edge", out.TLSFingerprint)
 	}
 }
-

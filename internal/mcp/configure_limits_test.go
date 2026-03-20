@@ -587,4 +587,3 @@ func (m *mockRequestTimeoutSetter) RequestTimeout() time.Duration {
 	}
 	return 60 * time.Second // default
 }
-
