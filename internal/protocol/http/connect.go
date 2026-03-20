@@ -608,13 +608,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	// TCP forwarding: resolve the effective host before scope checks so that
 	// forwarding target traffic is checked against the real upstream host
 	// rather than the localhost address the client connected to.
-	effectiveHost := proxy.ResolveUpstreamTarget(ctx, connectHost)
-	if _, ok := proxy.ForwardTargetFromContext(ctx); ok {
-		if req.URL.Host == "" || req.URL.Host == connectHost {
-			req.URL.Host = effectiveHost
-		}
-		req.Host = effectiveHost
-	}
+	effectiveHost := h.resolveEffectiveHost(ctx, connectHost, req)
 
 	// Step 1: Target scope enforcement for HTTPS requests inside the MITM tunnel.
 	// The CONNECT target was already checked, but the Host header inside
@@ -781,6 +775,20 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
 
 	return nil
+}
+
+// resolveEffectiveHost determines the effective upstream host for an HTTPS request.
+// If a TCP forwarding target is set in the context, it overrides the connect host
+// and updates the request's Host and URL.Host accordingly.
+func (h *Handler) resolveEffectiveHost(ctx context.Context, connectHost string, req *gohttp.Request) string {
+	effectiveHost := proxy.ResolveUpstreamTarget(ctx, connectHost)
+	if _, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		if req.URL.Host == "" || req.URL.Host == connectHost {
+			req.URL.Host = effectiveHost
+		}
+		req.Host = effectiveHost
+	}
+	return effectiveHost
 }
 
 // checkHTTPSScopeRewrite re-checks the target scope when the Host header inside
