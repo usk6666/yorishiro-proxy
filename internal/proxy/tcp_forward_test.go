@@ -2,11 +2,14 @@ package proxy_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -429,4 +432,461 @@ type staticDetector struct {
 
 func (d *staticDetector) Detect(_ []byte) proxy.ProtocolHandler {
 	return d.handler
+}
+
+// newTestCAAndIssuer creates a test CA and Issuer for TLS tests.
+func newTestCAAndIssuer(t *testing.T) (*cert.CA, *cert.Issuer, *x509.CertPool) {
+	t.Helper()
+	ca := &cert.CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("CA.Generate: %v", err)
+	}
+	issuer := cert.NewIssuer(ca)
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.Certificate())
+	return ca, issuer, pool
+}
+
+func TestTCPForwardListener_TLS_Termination(t *testing.T) {
+	// Verify that when TLS=true, the listener terminates TLS and passes
+	// cleartext to the handler.
+	_, issuer, certPool := newTestCAAndIssuer(t)
+
+	handlerCalled := make(chan string, 1)
+	handler := &namedHandler{name: "test-handler"}
+	handler.handleFunc = func(ctx context.Context, conn net.Conn) error {
+		// Read data from the cleartext connection.
+		buf := make([]byte, 64)
+		n, _ := conn.Read(buf)
+		handlerCalled <- string(buf[:n])
+		return nil
+	}
+
+	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: handler,
+		Issuer:  issuer,
+		Logger:  testutil.DiscardLogger(),
+		Config:  &config.ForwardConfig{Target: "example.com:443", Protocol: "raw", TLS: true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fl.Start(ctx)
+	}()
+
+	select {
+	case <-fl.Ready():
+	case err := <-errCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Connect with TLS.
+	tlsConn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 2 * time.Second},
+		"tcp",
+		fl.Addr(),
+		&tls.Config{
+			RootCAs:    certPool,
+			ServerName: "example.com",
+		},
+	)
+	if err != nil {
+		t.Fatalf("TLS dial failed: %v", err)
+	}
+
+	// Send data through the TLS connection.
+	testData := "hello-tls"
+	if _, err := tlsConn.Write([]byte(testData)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tlsConn.Close()
+
+	select {
+	case got := <-handlerCalled:
+		if got != testData {
+			t.Errorf("handler received %q, want %q", got, testData)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for handler to receive data")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestTCPForwardListener_TLS_CertificateHostname(t *testing.T) {
+	// Verify that the MITM certificate is issued for the target hostname.
+	_, issuer, certPool := newTestCAAndIssuer(t)
+
+	certHostCh := make(chan string, 1)
+	handler := &namedHandler{name: "test-handler"}
+	handler.handleFunc = func(ctx context.Context, conn net.Conn) error {
+		return nil
+	}
+
+	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: handler,
+		Issuer:  issuer,
+		Logger:  testutil.DiscardLogger(),
+		Config:  &config.ForwardConfig{Target: "api.example.com:50051", Protocol: "raw", TLS: true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fl.Start(ctx)
+	}()
+
+	select {
+	case <-fl.Ready():
+	case err := <-errCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Connect with TLS, verify peer certificate.
+	tlsConn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 2 * time.Second},
+		"tcp",
+		fl.Addr(),
+		&tls.Config{
+			RootCAs:    certPool,
+			ServerName: "api.example.com",
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				if len(verifiedChains) > 0 && len(verifiedChains[0]) > 0 {
+					certHostCh <- verifiedChains[0][0].Subject.CommonName
+				}
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("TLS dial failed: %v", err)
+	}
+	tlsConn.Close()
+
+	select {
+	case cn := <-certHostCh:
+		if cn != "api.example.com" {
+			t.Errorf("certificate CN = %q, want %q", cn, "api.example.com")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for certificate verification")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestTCPForwardListener_TLS_SNIOverride(t *testing.T) {
+	// When client sends SNI different from the target hostname, the certificate
+	// should use the SNI value.
+	_, issuer, certPool := newTestCAAndIssuer(t)
+
+	handler := &namedHandler{name: "test-handler"}
+	handler.handleFunc = func(ctx context.Context, conn net.Conn) error {
+		return nil
+	}
+
+	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: handler,
+		Issuer:  issuer,
+		Logger:  testutil.DiscardLogger(),
+		Config:  &config.ForwardConfig{Target: "default.example.com:443", Protocol: "raw", TLS: true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fl.Start(ctx)
+	}()
+
+	select {
+	case <-fl.Ready():
+	case err := <-errCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Connect with a different SNI.
+	sniCertCh := make(chan string, 1)
+	tlsConn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 2 * time.Second},
+		"tcp",
+		fl.Addr(),
+		&tls.Config{
+			RootCAs:    certPool,
+			ServerName: "override.example.com",
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				if len(verifiedChains) > 0 && len(verifiedChains[0]) > 0 {
+					sniCertCh <- verifiedChains[0][0].Subject.CommonName
+				}
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("TLS dial failed: %v", err)
+	}
+	tlsConn.Close()
+
+	select {
+	case cn := <-sniCertCh:
+		if cn != "override.example.com" {
+			t.Errorf("certificate CN = %q, want %q (SNI override)", cn, "override.example.com")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for certificate verification")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestTCPForwardListener_TLS_NoClientHello_FallbackCleartext(t *testing.T) {
+	// When TLS=true but client sends non-TLS data, the connection should
+	// fall back to cleartext handling.
+	_, issuer, _ := newTestCAAndIssuer(t)
+
+	handlerCalled := make(chan string, 1)
+	handler := &namedHandler{name: "test-handler"}
+	handler.handleFunc = func(ctx context.Context, conn net.Conn) error {
+		buf := make([]byte, 64)
+		n, _ := conn.Read(buf)
+		handlerCalled <- string(buf[:n])
+		return nil
+	}
+
+	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: handler,
+		Issuer:  issuer,
+		Logger:  testutil.DiscardLogger(),
+		Config:  &config.ForwardConfig{Target: "example.com:443", Protocol: "raw", TLS: true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fl.Start(ctx)
+	}()
+
+	select {
+	case <-fl.Ready():
+	case err := <-errCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Connect with plain TCP (no TLS).
+	conn, err := net.DialTimeout("tcp", fl.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	testData := "plain-data"
+	if _, err := conn.Write([]byte(testData)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	conn.Close()
+
+	select {
+	case got := <-handlerCalled:
+		if got != testData {
+			t.Errorf("handler received %q, want %q", got, testData)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for handler to receive data")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestTCPForwardListener_TLS_False_NoTermination(t *testing.T) {
+	// When TLS=false (default), no TLS termination should occur even if
+	// the client sends TLS data. The raw handler should receive the TLS bytes.
+	handler := &namedHandler{name: "raw-handler"}
+	gotCh := make(chan []byte, 1)
+	handler.handleFunc = func(ctx context.Context, conn net.Conn) error {
+		buf := make([]byte, 64)
+		n, _ := conn.Read(buf)
+		gotCh <- buf[:n]
+		return nil
+	}
+
+	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: handler,
+		Logger:  testutil.DiscardLogger(),
+		Config:  &config.ForwardConfig{Target: "example.com:443", Protocol: "raw", TLS: false},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fl.Start(ctx)
+	}()
+
+	select {
+	case <-fl.Ready():
+	case err := <-errCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", fl.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// Send fake TLS-like bytes (0x16, 0x03 prefix).
+	fakeData := []byte{0x16, 0x03, 0x01, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o'}
+	if _, err := conn.Write(fakeData); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	conn.Close()
+
+	select {
+	case got := <-gotCh:
+		// Handler should receive the raw bytes, not decrypted.
+		if got[0] != 0x16 || got[1] != 0x03 {
+			t.Errorf("handler received unexpected first bytes: %x", got[:2])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for handler")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestTCPForwardListener_TLS_NoIssuer(t *testing.T) {
+	// When TLS=true but no issuer is configured, the connection should be closed.
+	handler := &namedHandler{name: "test-handler"}
+	handler.handleFunc = func(ctx context.Context, conn net.Conn) error {
+		return nil
+	}
+
+	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: handler,
+		Issuer:  nil, // No issuer
+		Logger:  testutil.DiscardLogger(),
+		Config:  &config.ForwardConfig{Target: "example.com:443", Protocol: "raw", TLS: true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fl.Start(ctx)
+	}()
+
+	select {
+	case <-fl.Ready():
+	case err := <-errCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Send a TLS ClientHello-like data.
+	conn, err := net.DialTimeout("tcp", fl.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn.Write([]byte{0x16, 0x03})
+
+	// Connection should be closed by the proxy since no issuer is available.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, readErr := conn.Read(buf)
+	if readErr == nil {
+		t.Error("expected connection to be closed when no issuer configured")
+	}
+	conn.Close()
+
+	cancel()
+	<-errCh
+}
+
+func TestTCPForwardListener_TLS_AutoMode(t *testing.T) {
+	// Verify TLS termination works with auto protocol detection.
+	_, issuer, certPool := newTestCAAndIssuer(t)
+
+	handlerCalled := make(chan string, 1)
+	httpHandler := &namedHandler{name: "HTTP/1.x"}
+	httpHandler.handleFunc = func(ctx context.Context, conn net.Conn) error {
+		buf := make([]byte, 128)
+		n, _ := conn.Read(buf)
+		handlerCalled <- string(buf[:n])
+		return nil
+	}
+
+	detector := &staticDetector{handler: httpHandler}
+
+	fl := proxy.NewTCPForwardListener(proxy.TCPForwardListenerConfig{
+		Addr:     "127.0.0.1:0",
+		Handler:  &echoHandler{}, // fallback
+		Detector: detector,
+		Issuer:   issuer,
+		Logger:   testutil.DiscardLogger(),
+		Config:   &config.ForwardConfig{Target: "example.com:443", Protocol: "auto", TLS: true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fl.Start(ctx)
+	}()
+
+	select {
+	case <-fl.Ready():
+	case err := <-errCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Connect with TLS and send HTTP-like data.
+	tlsConn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 2 * time.Second},
+		"tcp",
+		fl.Addr(),
+		&tls.Config{
+			RootCAs:    certPool,
+			ServerName: "example.com",
+		},
+	)
+	if err != nil {
+		t.Fatalf("TLS dial failed: %v", err)
+	}
+
+	httpReq := "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+	if _, err := tlsConn.Write([]byte(httpReq)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tlsConn.Close()
+
+	select {
+	case got := <-handlerCalled:
+		if len(got) == 0 {
+			t.Error("handler received empty data")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for handler")
+	}
+
+	cancel()
+	<-errCh
 }

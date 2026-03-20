@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
@@ -161,6 +162,10 @@ type TCPForwardParams struct {
 
 	// PluginEngine is the optional plugin engine for lifecycle hooks.
 	PluginEngine *plugin.Engine
+
+	// Issuer is the optional TLS certificate issuer for TLS MITM.
+	// Required when any ForwardConfig has TLS=true.
+	Issuer *cert.Issuer
 }
 
 // StartTCPForwards creates and starts TCP forward listeners on the default listener.
@@ -201,6 +206,7 @@ func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, params
 			Handler:        params.Handler,
 			Detector:       params.Detector,
 			Config:         fc,
+			Issuer:         params.Issuer,
 			Logger:         m.logger,
 			MaxConnections: m.maxConnections,
 			PeekTimeout:    m.peekTimeout,

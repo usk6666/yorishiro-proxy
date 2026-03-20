@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
@@ -19,6 +21,7 @@ type TCPForwardListenerConfig struct {
 	Handler        ProtocolHandler  // fallback handler (raw TCP)
 	Detector       ProtocolDetector // optional: for "auto" protocol detection
 	Config         *config.ForwardConfig
+	Issuer         *cert.Issuer // optional: for TLS MITM when Config.TLS is true
 	Logger         *slog.Logger
 	MaxConnections int           // 0 = defaultMaxConnections (128)
 	PeekTimeout    time.Duration // 0 = defaultPeekTimeout (30s)
@@ -39,6 +42,7 @@ type TCPForwardListener struct {
 	handler        ProtocolHandler  // fallback (raw TCP) handler
 	detector       ProtocolDetector // for "auto" mode protocol detection
 	config         *config.ForwardConfig
+	issuer         *cert.Issuer // for TLS MITM certificate issuance
 	logger         *slog.Logger
 	maxConnections int
 	activeConns    atomic.Int64
@@ -70,6 +74,7 @@ func NewTCPForwardListener(cfg TCPForwardListenerConfig) *TCPForwardListener {
 		handler:        cfg.Handler,
 		detector:       cfg.Detector,
 		config:         cfg.Config,
+		issuer:         cfg.Issuer,
 		logger:         cfg.Logger,
 		maxConnections: maxConns,
 		ready:          make(chan struct{}),
@@ -179,6 +184,27 @@ func (l *TCPForwardListener) handleConn(ctx context.Context, conn net.Conn) {
 	// Dispatch on_disconnect lifecycle hook when this connection closes.
 	defer l.dispatchOnDisconnect(ctx, remoteAddr, connStart, connLogger)
 
+	// TLS termination step: when config.TLS is true, perform TLS MITM before
+	// dispatching to protocol handlers. The cleartext connection replaces conn
+	// for all subsequent protocol dispatch.
+	var dispatchConn net.Conn = conn
+	if l.config != nil && l.config.TLS {
+		tlsConn, pc, err := l.terminateTLS(ctx, conn, connLogger)
+		if err != nil {
+			// terminateTLS logs the warning for non-TLS traffic.
+			// If we got a PeekConn back (no ClientHello), use it for cleartext dispatch.
+			if pc != nil {
+				dispatchConn = pc
+			} else {
+				connLogger.Debug("tcp forward TLS termination failed", "error", err)
+				return
+			}
+		} else {
+			defer tlsConn.Close()
+			dispatchConn = tlsConn
+		}
+	}
+
 	// Determine the protocol mode.
 	proto := ""
 	if l.config != nil {
@@ -188,13 +214,13 @@ func (l *TCPForwardListener) handleConn(ctx context.Context, conn net.Conn) {
 	switch proto {
 	case "raw":
 		// Direct dispatch to fallback handler (existing behavior).
-		l.handleRaw(ctx, conn, connLogger, connStart)
+		l.handleRaw(ctx, dispatchConn, connLogger, connStart)
 	case "auto", "":
 		// Peek-based protocol detection (same as Listener).
-		l.handleAuto(ctx, conn, connLogger, connStart)
+		l.handleAuto(ctx, dispatchConn, connLogger, connStart)
 	default:
 		// Fixed handler selection by protocol name.
-		l.handleFixed(ctx, conn, proto, connLogger, connStart)
+		l.handleFixed(ctx, dispatchConn, proto, connLogger, connStart)
 	}
 }
 
@@ -374,6 +400,116 @@ func (l *TCPForwardListener) refineDetection(pc *PeekConn, quickHandler Protocol
 		}
 	}
 	return handler, peek
+}
+
+// isTLSClientHello checks if the peeked bytes begin with a TLS ClientHello.
+// TLS records start with ContentType (0x16) followed by the protocol version
+// (0x03, 0x0N where N is the minor version).
+func isTLSClientHello(peek []byte) bool {
+	if len(peek) < 2 {
+		return false
+	}
+	return peek[0] == 0x16 && peek[1] == 0x03
+}
+
+// extractHostnameFromTarget extracts the hostname (without port) from a
+// ForwardConfig.Target address string. For example, "api.example.com:50051"
+// returns "api.example.com". If the target has no port suffix, it is returned
+// as-is. Returns an empty string if target is empty.
+func extractHostnameFromTarget(target string) string {
+	if target == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		// No port suffix; return as-is.
+		return target
+	}
+	return host
+}
+
+// terminateTLS performs TLS termination on the incoming connection when
+// ForwardConfig.TLS is true. It peeks the first bytes to verify a TLS
+// ClientHello, resolves the hostname for certificate generation from the
+// config target (with SNI as override), and performs a TLS handshake using
+// a dynamically issued MITM certificate.
+//
+// On success, returns (tlsConn, nil, nil). The caller must close tlsConn.
+// When the peeked bytes are not a TLS ClientHello, returns (nil, peekConn, err)
+// so the caller can fall back to cleartext dispatch using the PeekConn.
+// On fatal errors (e.g. issuer not configured, peek failure), returns (nil, nil, err).
+func (l *TCPForwardListener) terminateTLS(ctx context.Context, conn net.Conn, logger *slog.Logger) (*tls.Conn, *PeekConn, error) {
+	if l.issuer == nil {
+		return nil, nil, fmt.Errorf("tcp forward TLS MITM: issuer not configured")
+	}
+
+	// Determine the default hostname from the config target.
+	defaultHostname := ""
+	if l.config != nil {
+		defaultHostname = extractHostnameFromTarget(l.config.Target)
+	}
+
+	// Peek first 2 bytes to verify TLS ClientHello.
+	pc := NewPeekConn(conn)
+
+	peekTimeout := time.Duration(l.peekTimeoutNs.Load())
+	if peekTimeout > 0 {
+		conn.SetReadDeadline(time.Now().Add(peekTimeout))
+	}
+
+	peek, err := pc.Peek(2)
+
+	// Reset deadline before handshake.
+	conn.SetReadDeadline(time.Time{})
+
+	if err != nil {
+		return nil, nil, fmt.Errorf("tcp forward TLS peek: %w", err)
+	}
+
+	if !isTLSClientHello(peek) {
+		logger.Warn("tcp forward TLS configured but no TLS ClientHello detected, treating as cleartext",
+			"peek_bytes", fmt.Sprintf("%x", peek))
+		return nil, pc, fmt.Errorf("tcp forward TLS: no TLS ClientHello detected")
+	}
+
+	logger.Debug("tcp forward TLS ClientHello detected")
+
+	// Build TLS config with dynamic certificate issuance.
+	tlsConfig := &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			name := hello.ServerName
+			if name == "" {
+				// No SNI; use the hostname from the forward target.
+				logger.Debug("tcp forward TLS ClientHello without SNI, using target hostname",
+					"hostname", defaultHostname)
+				name = defaultHostname
+			} else {
+				logger.Debug("tcp forward TLS ClientHello SNI received", "sni", name)
+			}
+			if name == "" {
+				return nil, fmt.Errorf("tcp forward TLS: no hostname available for certificate")
+			}
+			return l.issuer.GetCertificate(name)
+		},
+		MinVersion: tls.VersionTLS12,
+		// Advertise both h2 and http/1.1 so clients can negotiate HTTP/2.
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+
+	tlsConn := tls.Server(pc, tlsConfig)
+
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return nil, nil, fmt.Errorf("tcp forward TLS handshake: %w", err)
+	}
+
+	state := tlsConn.ConnectionState()
+	logger.Debug("tcp forward TLS handshake complete",
+		"hostname", defaultHostname,
+		"tls_version", state.Version,
+		"alpn", state.NegotiatedProtocol,
+	)
+
+	return tlsConn, nil, nil
 }
 
 // dispatchOnConnect dispatches the on_connect lifecycle hook.
