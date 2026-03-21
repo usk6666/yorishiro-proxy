@@ -25,13 +25,27 @@ type deflateParams struct {
 	windowBits int
 }
 
+// maxDictSize is the maximum LZ77 sliding window size (32 KB) used for
+// context takeover. The DEFLATE specification limits back-references to 32768
+// bytes, so only the last 32 KB of decompressed output are relevant as
+// dictionary context for subsequent messages.
+const maxDictSize = 32768
+
 // deflateState manages the decompression state for one relay direction.
-// A fresh flate.Reader is created for each message because Go's compress/flate
-// Reset() clears the LZ77 sliding window, making it impossible to implement
-// true context takeover. This approach is correct for no_context_takeover and
-// safe (though suboptimal) when context takeover is negotiated.
+//
+// For contextTakeover=false (no_context_takeover), a fresh flate.Reader is
+// created per message — each message is independently compressed.
+//
+// For contextTakeover=true (the RFC 7692 default), each message is decompressed
+// with flate.NewReaderDict using the accumulated decompressed output (last 32 KB)
+// as the dictionary. This provides the LZ77 sliding window context that the
+// compressor references in subsequent messages.
 type deflateState struct {
 	params deflateParams
+
+	// dict holds the accumulated decompressed output (last maxDictSize bytes)
+	// used as the dictionary for context takeover mode.
+	dict []byte
 }
 
 // newDeflateState creates a new deflateState for the given parameters.
@@ -58,21 +72,56 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 	copy(src, payload)
 	copy(src[len(payload):], flateTrailer)
 
-	// Always create a fresh reader per message. Go's compress/flate Reset()
-	// clears the LZ77 sliding window, so reusing the reader does not provide
-	// true context takeover semantics — it would silently produce incorrect
-	// output. A fresh reader is correct for no_context_takeover and safe
-	// (though unable to leverage cross-message references) when context
-	// takeover is negotiated.
+	if ds.params.contextTakeover {
+		return ds.decompressWithContext(src, maxSize)
+	}
+	return ds.decompressFresh(src, maxSize)
+}
+
+// decompressFresh creates a new flate reader for each message. Used when
+// no_context_takeover is negotiated — each message is independently compressed.
+func (ds *deflateState) decompressFresh(src []byte, maxSize int64) ([]byte, error) {
 	reader := flate.NewReader(bytes.NewReader(src))
 	defer reader.Close()
 
+	return ds.readDecompressed(reader, maxSize)
+}
+
+// decompressWithContext creates a new flate reader per message, providing the
+// accumulated decompressed output as a dictionary via flate.NewReaderDict.
+// This preserves the LZ77 sliding window context across messages without
+// needing to keep a single reader alive (which is problematic because Go's
+// flate reader caches errors permanently).
+func (ds *deflateState) decompressWithContext(src []byte, maxSize int64) ([]byte, error) {
+	var reader io.ReadCloser
+	if len(ds.dict) > 0 {
+		reader = flate.NewReaderDict(bytes.NewReader(src), ds.dict)
+	} else {
+		reader = flate.NewReader(bytes.NewReader(src))
+	}
+	defer reader.Close()
+
+	decoded, err := ds.readDecompressed(reader, maxSize)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update the dictionary with the decompressed output for subsequent messages.
+	ds.dict = append(ds.dict, decoded...)
+	if len(ds.dict) > maxDictSize {
+		ds.dict = ds.dict[len(ds.dict)-maxDictSize:]
+	}
+
+	return decoded, nil
+}
+
+// readDecompressed reads decompressed data from a flate reader up to maxSize.
+// permessage-deflate streams lack a BFINAL block, so io.ErrUnexpectedEOF is
+// expected and treated as success when data was read.
+func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) ([]byte, error) {
 	decoded, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
 	if err != nil {
-		// permessage-deflate streams lack proper termination (no BFINAL block),
-		// so io.ErrUnexpectedEOF is expected after successfully reading all data.
 		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-			// Expected for permessage-deflate — treat as success if we got data.
 			if len(decoded) == 0 {
 				return nil, fmt.Errorf("deflate decompress: %w", err)
 			}
@@ -87,10 +136,10 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 	return decoded, nil
 }
 
-// close releases the decompression resources.
-// Since each message creates a fresh reader (closed via defer), this is a no-op.
-// Retained for interface compatibility with defer calls in HandleUpgrade.
+// close releases the decompression resources. Each message creates and closes
+// its own flate reader, so this only needs to clear the accumulated dictionary.
 func (ds *deflateState) close() {
+	ds.dict = nil
 }
 
 // parseDeflateExtension parses the Sec-WebSocket-Extensions header value for

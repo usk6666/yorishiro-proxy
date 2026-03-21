@@ -350,3 +350,108 @@ func TestHandleUpgrade_DeflateCompressedBinaryFrame(t *testing.T) {
 		t.Errorf("metadata[compressed] = %q, want %q", binaryMsg.Metadata["compressed"], "true")
 	}
 }
+
+func TestHandleUpgrade_DeflateContextTakeover_MultipleMessages(t *testing.T) {
+	// Verify that with context_takeover=true (the default, no
+	// client_no_context_takeover), multiple messages compressed with a shared
+	// LZ77 context are correctly decompressed and stored.
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	clientConn, clientEnd := net.Pipe()
+	upstreamConn, upstreamEnd := net.Pipe()
+	defer clientConn.Close()
+	defer clientEnd.Close()
+	defer upstreamConn.Close()
+	defer upstreamEnd.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
+	respHeader := gohttp.Header{}
+	// No no_context_takeover flags — context takeover is enabled (default).
+	respHeader.Set("Sec-WebSocket-Extensions", "permessage-deflate")
+	resp := &gohttp.Response{StatusCode: 101, Header: respHeader}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-ctx-takeover", "127.0.0.1:5678", nil)
+	}()
+
+	// Compress 3 messages with shared context (simulating a real client with
+	// context takeover enabled).
+	originals := []string{"first message", "second message", "third message"}
+	var originalBytes [][]byte
+	for _, s := range originals {
+		originalBytes = append(originalBytes, []byte(s))
+	}
+	compressedMsgs := deflateCompressWithContext(t, originalBytes)
+
+	// Send each compressed message as a client frame and drain from upstream.
+	for i, compressed := range compressedMsgs {
+		frame := &Frame{
+			Fin:     true,
+			RSV1:    true,
+			Opcode:  OpcodeText,
+			Masked:  true,
+			MaskKey: [4]byte{byte(i), 0x34, 0x56, 0x78},
+			Payload: compressed,
+		}
+		go func() {
+			WriteFrame(clientEnd, frame)
+		}()
+		// Drain the relayed frame from upstream.
+		if _, err := ReadFrame(upstreamEnd); err != nil {
+			t.Fatalf("upstream read message %d: %v", i, err)
+		}
+	}
+
+	// Close.
+	closePayload := make([]byte, 2)
+	binary.BigEndian.PutUint16(closePayload, 1000)
+	closeFrame := &Frame{
+		Fin:     true,
+		Opcode:  OpcodeClose,
+		Masked:  true,
+		MaskKey: [4]byte{0xAA, 0xBB, 0xCC, 0xDD},
+		Payload: closePayload,
+	}
+	go func() {
+		WriteFrame(clientEnd, closeFrame)
+	}()
+	ReadFrame(upstreamEnd)
+	upstreamEnd.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("HandleUpgrade returned unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler timeout")
+	}
+
+	// Verify all 3 messages were stored decompressed.
+	messages := store.Messages()
+	for _, original := range originals {
+		found := false
+		for _, msg := range messages {
+			if msg.Direction == "send" && msg.Body != nil && string(msg.Body) == original {
+				found = true
+				if msg.Metadata["compressed"] != "true" {
+					t.Errorf("message %q metadata[compressed] = %q, want %q",
+						original, msg.Metadata["compressed"], "true")
+				}
+				break
+			}
+		}
+		if !found {
+			for _, msg := range messages {
+				t.Logf("stored: seq=%d dir=%s body=%q raw=%v meta=%v",
+					msg.Sequence, msg.Direction, msg.Body, msg.RawBytes, msg.Metadata)
+			}
+			t.Fatalf("decompressed message %q not found in store", original)
+		}
+	}
+}
