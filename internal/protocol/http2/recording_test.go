@@ -999,7 +999,7 @@ func TestRecordBlocked_TargetScope(t *testing.T) {
 		rawFrames:  [][]byte{{0x01, 0x02}},
 	}
 
-	handler.recordBlocked(ctx, p, "target_scope", nil, handler.Logger)
+	handler.recordBlocked(ctx, p, "target_scope", nil, nil, handler.Logger)
 
 	entries := store.Entries()
 	if len(entries) != 1 {
@@ -1064,7 +1064,7 @@ func TestRecordBlocked_RateLimit(t *testing.T) {
 		reqBody:    []byte("request-body"),
 	}
 
-	handler.recordBlocked(ctx, p, "rate_limit", nil, handler.Logger)
+	handler.recordBlocked(ctx, p, "rate_limit", nil, nil, handler.Logger)
 
 	entries := store.Entries()
 	if len(entries) != 1 {
@@ -1092,6 +1092,49 @@ func TestRecordBlocked_RateLimit(t *testing.T) {
 	}
 	if entry.Receive != nil {
 		t.Error("blocked flow should not have a receive message")
+	}
+}
+
+func TestRecordBlocked_RateLimitWithTags(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	reqURL, _ := url.Parse("http://example.com/api/data")
+	req, _ := gohttp.NewRequest("POST", reqURL.String(), nil)
+	req.Host = "example.com"
+
+	p := sendRecordParams{
+		connID:     "conn-rl-tags",
+		clientAddr: "127.0.0.1:23456",
+		scheme:     "http",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:23456"},
+		req:        req,
+		reqURL:     reqURL,
+	}
+
+	extraTags := map[string]string{
+		"rate_limit_type":          "per_host",
+		"rate_limit_effective_rps": "5.0",
+	}
+
+	handler.recordBlocked(ctx, p, "rate_limit", nil, extraTags, handler.Logger)
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Session.BlockedBy != "rate_limit" {
+		t.Errorf("blocked_by = %q, want %q", entry.Session.BlockedBy, "rate_limit")
+	}
+	if got := entry.Session.Tags["rate_limit_type"]; got != "per_host" {
+		t.Errorf("rate_limit_type tag = %q, want %q", got, "per_host")
+	}
+	if got := entry.Session.Tags["rate_limit_effective_rps"]; got != "5.0" {
+		t.Errorf("rate_limit_effective_rps tag = %q, want %q", got, "5.0")
 	}
 }
 
@@ -1123,7 +1166,7 @@ func TestRecordBlocked_SafetyFilter(t *testing.T) {
 		MatchedOn: "DROP TABLE",
 	}
 
-	handler.recordBlocked(ctx, p, "safety_filter", violation, handler.Logger)
+	handler.recordBlocked(ctx, p, "safety_filter", violation, nil, handler.Logger)
 
 	entries := store.Entries()
 	if len(entries) != 1 {
@@ -1178,7 +1221,7 @@ func TestRecordBlocked_NilStore(t *testing.T) {
 	}
 
 	// Should not panic with nil store.
-	handler.recordBlocked(ctx, p, "target_scope", nil, handler.Logger)
+	handler.recordBlocked(ctx, p, "target_scope", nil, nil, handler.Logger)
 }
 
 func TestRecordBlocked_CaptureScope(t *testing.T) {
@@ -1202,7 +1245,7 @@ func TestRecordBlocked_CaptureScope(t *testing.T) {
 		reqURL: reqURL,
 	}
 
-	handler.recordBlocked(ctx, p, "rate_limit", nil, handler.Logger)
+	handler.recordBlocked(ctx, p, "rate_limit", nil, nil, handler.Logger)
 
 	entries := store.Entries()
 	if len(entries) != 0 {

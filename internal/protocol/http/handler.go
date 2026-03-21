@@ -390,9 +390,9 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 
 	// Rate limit enforcement (after target scope, before WebSocket).
-	if blocked := h.checkRateLimit(req.URL.Hostname()); blocked {
+	if denial := h.checkRateLimit(req.URL.Hostname()); denial != nil {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, logger)
+		h.recordBlockedSessionWithTags(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, denial.Tags(), logger)
 		return nil
 	}
 	// NOTE (S-LOW-1): WebSocket upgrade requests bypass the safety filter
@@ -751,12 +751,12 @@ func (h *Handler) checkTargetScopeHost(hostname string, port int) (blocked bool,
 }
 
 // checkRateLimit checks whether the request is rate limited.
-// Returns true if the request should be blocked due to rate limiting.
-func (h *Handler) checkRateLimit(hostname string) bool {
+// Returns nil if the request is allowed, or a *proxy.RateLimitDenial if blocked.
+func (h *Handler) checkRateLimit(hostname string) *proxy.RateLimitDenial {
 	if h.RateLimiter == nil || !h.RateLimiter.HasLimits() {
-		return false
+		return nil
 	}
-	return !h.RateLimiter.Allow(hostname)
+	return h.RateLimiter.Check(hostname)
 }
 
 // writeRateLimitResponse writes a 429 Too Many Requests response with
@@ -800,6 +800,13 @@ func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, log
 // recordBlockedSession records a blocked request as a flow with the given blockedBy reason.
 // If violation is non-nil and blockedBy is "safety_filter", safety rule tags are added.
 func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
+	h.recordBlockedSessionWithTags(ctx, req, reqBody, rawRequest, reqTruncated, smuggling, start, connID, clientAddr, blockedBy, violation, nil, logger)
+}
+
+// recordBlockedSessionWithTags records a blocked request as a flow with the given blockedBy reason.
+// If violation is non-nil and blockedBy is "safety_filter", safety rule tags are added.
+// extraTags are merged into the flow tags (e.g., rate limit detail tags).
+func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr, blockedBy string, violation *safety.InputViolation, extraTags map[string]string, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
@@ -815,6 +822,12 @@ func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request,
 		}
 		tags["safety_rule"] = violation.RuleID
 		tags["safety_target"] = violation.Target.String()
+	}
+	for k, v := range extraTags {
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+		tags[k] = v
 	}
 	fl := &flow.Flow{
 		ConnID:    connID,
