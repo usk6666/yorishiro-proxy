@@ -123,7 +123,8 @@ func TestHTTP2SafetyFilter_BlocksMatchingRequest(t *testing.T) {
 	}
 
 	// Verify flow recording: blocked request should be recorded.
-	time.Sleep(200 * time.Millisecond)
+	// recordBlocked is called synchronously before the response is sent,
+	// so no sleep is needed.
 	entries := store.Entries()
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 flow entry, got %d", len(entries))
@@ -279,7 +280,9 @@ func TestHTTP2TargetScope_BlockedFlowRecording(t *testing.T) {
 
 	// Create a target scope that denies the upstream host.
 	scope := proxy.NewTargetScope()
-	scope.SetAgentRules(nil, []proxy.TargetRule{{Hostname: "127.0.0.1"}})
+	if err := scope.SetAgentRules(nil, []proxy.TargetRule{{Hostname: "127.0.0.1"}}); err != nil {
+		t.Fatalf("SetAgentRules: %v", err)
+	}
 	handler.SetTargetScope(scope)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -301,8 +304,7 @@ func TestHTTP2TargetScope_BlockedFlowRecording(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusForbidden)
 	}
 
-	// Verify flow recording.
-	time.Sleep(200 * time.Millisecond)
+	// Verify flow recording. recordBlocked is synchronous, no sleep needed.
 	entries := store.Entries()
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 flow entry, got %d", len(entries))
@@ -373,7 +375,7 @@ func TestHTTP2RateLimit_BlockedFlowRecording(t *testing.T) {
 	}
 
 	// Verify flow recording — should have 2 entries (1 normal + 1 rate-limited).
-	time.Sleep(200 * time.Millisecond)
+	// recordBlocked is synchronous, no sleep needed.
 	entries := store.Entries()
 
 	var rateLimitedEntry *mockEntry

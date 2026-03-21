@@ -512,6 +512,11 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 // with BlockedBy set to the blocking reason, and only a send message (no
 // receive). For safety_filter blocks, violation tags (safety_rule,
 // safety_target) are added.
+//
+// Valid blockedBy values (consistent with HTTP/1.x recordBlockedSession):
+//   - "target_scope"  — request hostname not in the allowed target scope
+//   - "safety_filter" — request matched a safety filter block rule
+//   - "rate_limit"    — request exceeded the configured rate limit
 func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
 	if h.Store == nil {
 		return
