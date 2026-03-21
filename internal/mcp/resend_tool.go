@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -1013,7 +1014,15 @@ func resolveTargetAddrRaw(sendMsg *flow.Message, params resendParams) (string, e
 	return net.JoinHostPort(host, port), nil
 }
 
+// isHTTP1Protocol reports whether the protocol string indicates an HTTP/1.x flow.
+func isHTTP1Protocol(protocol string) bool {
+	return protocol == "HTTP" || protocol == "HTTPS"
+}
+
 // buildAndSendRaw establishes a TCP/TLS connection, sends raw bytes, and reads the response.
+// For HTTP/1.x flows, it uses http.ReadResponse to correctly detect the end of the response,
+// avoiding indefinite blocking when the server uses keep-alive connections.
+// For other protocols (Raw TCP, WebSocket), it falls back to io.ReadAll.
 func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Flow, params resendParams, targetAddr string, rawBytes []byte) ([]byte, time.Time, time.Duration, error) {
 	useTLS := fl.Protocol == "HTTPS"
 	if params.UseTLS != nil {
@@ -1048,13 +1057,54 @@ func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Flow, params rese
 		return nil, start, 0, fmt.Errorf("send raw request: %w", err)
 	}
 
-	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
+	var respData []byte
+	if isHTTP1Protocol(fl.Protocol) {
+		respData, err = readHTTP1RawResponse(conn, rawBytes)
+	} else {
+		respData, err = io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
+	}
 	if err != nil && len(respData) == 0 {
 		return nil, start, 0, fmt.Errorf("read raw response: %w", err)
 	}
 	duration := time.Since(start)
 
 	return respData, start, duration, nil
+}
+
+// readHTTP1RawResponse reads an HTTP/1.x response from conn using http.ReadResponse
+// to correctly detect message boundaries (Content-Length, chunked transfer encoding,
+// Connection: close). A TeeReader captures the wire-observed raw bytes for L4-capable
+// recording. The request method is inferred from rawBytes to handle HEAD responses
+// (which have no body despite Content-Length).
+func readHTTP1RawResponse(conn net.Conn, rawBytes []byte) ([]byte, error) {
+	// Parse the request method from raw bytes so http.ReadResponse can handle
+	// HEAD responses correctly (no body even if Content-Length is present).
+	req, _ := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawBytes)))
+
+	var rawBuf bytes.Buffer
+	br := bufio.NewReader(io.TeeReader(
+		io.LimitReader(conn, config.MaxReplayResponseSize),
+		&rawBuf,
+	))
+
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		// If parsing fails, return whatever raw bytes were captured so far.
+		if rawBuf.Len() > 0 {
+			return rawBuf.Bytes(), fmt.Errorf("parse HTTP response: %w", err)
+		}
+		return nil, fmt.Errorf("parse HTTP response: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Drain the body to ensure TeeReader captures all bytes.
+	_, err = io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		// Return partial data on body read error.
+		return rawBuf.Bytes(), fmt.Errorf("read HTTP response body: %w", err)
+	}
+
+	return rawBuf.Bytes(), nil
 }
 
 // recordRawResend saves the raw resend flow and its send/receive messages.
