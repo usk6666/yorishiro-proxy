@@ -439,7 +439,7 @@ func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
 		}
 
 		// Target scope enforcement after template expansion: the pre-run check
-		// validates static URLs, but templates like {{target_url}} produce the
+		// validates static URLs, but templates like §target_url§ produce the
 		// final URL only at send time. Check httpReq.URL to close the TOCTOU gap.
 		if err := checkTargetScopeURLHelper(d.targetScope, httpReq.URL); err != nil {
 			return nil, fmt.Errorf("hook macro step target scope check: %w", err)

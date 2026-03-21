@@ -239,8 +239,8 @@ func TestHookMacroSendFunc_TargetScope_NilScope(t *testing.T) {
 // It simulates the attack described in USK-210:
 //  1. Target Scope allows only allowed.example.com
 //  2. Macro step 1: requests allowed.example.com, extracts target_url from response
-//  3. Macro step 2: override_url is {{target_url}} (template)
-//  4. The pre-run check skips {{target_url}} (unparseable host),
+//  3. Macro step 2: override_url is §target_url§ (template)
+//  4. The pre-run check skips §target_url§ (unparseable host),
 //     but the send-time check blocks the expanded URL.
 func TestRunMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	// Step 1 server: returns an evil URL in response body.
@@ -315,7 +315,7 @@ func TestRunMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	}
 	t.Cleanup(func() { cs.Close() })
 
-	// Define macro: step 1 extracts target_url, step 2 uses {{target_url}} as override_url.
+	// Define macro: step 1 extracts target_url, step 2 uses §target_url§ as override_url.
 	defineResult := callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
@@ -336,7 +336,7 @@ func TestRunMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 				map[string]any{
 					"id":           "use-url",
 					"flow_id":      fl2.ID,
-					"override_url": "{{target_url}}",
+					"override_url": "§target_url§",
 				},
 			},
 		},
@@ -455,7 +455,7 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 			{
 				ID:          "visit-target",
 				FlowID:      fl2.ID,
-				OverrideURL: "{{evil_url}}",
+				OverrideURL: "§evil_url§",
 			},
 		},
 	}

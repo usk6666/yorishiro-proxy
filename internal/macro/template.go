@@ -5,7 +5,15 @@ import (
 	"strings"
 )
 
-// ExpandTemplate replaces all {{variable}} and {{variable | encoder1 | encoder2}}
+// DelimOpen is the opening delimiter for template expressions.
+// Uses the section sign (§, U+00A7) to avoid collisions with common payloads
+// such as Handlebars/Mustache templates, Angular expressions, and SSTI test vectors.
+const DelimOpen = "§"
+
+// DelimClose is the closing delimiter for template expressions.
+const DelimClose = "§"
+
+// ExpandTemplate replaces all §variable§ and §variable | encoder1 | encoder2§
 // expressions in the input string with values from the KV Store.
 // Unknown variables are left as-is (no error). Unknown encoders cause an error.
 func ExpandTemplate(input string, kvStore map[string]string) (string, error) {
@@ -14,7 +22,7 @@ func ExpandTemplate(input string, kvStore map[string]string) (string, error) {
 
 	for {
 		// Find the next opening delimiter.
-		openIdx := strings.Index(remaining, "{{")
+		openIdx := strings.Index(remaining, DelimOpen)
 		if openIdx == -1 {
 			result.WriteString(remaining)
 			break
@@ -23,24 +31,24 @@ func ExpandTemplate(input string, kvStore map[string]string) (string, error) {
 		// Write everything before the delimiter.
 		result.WriteString(remaining[:openIdx])
 
-		// Find the closing delimiter.
-		closeIdx := strings.Index(remaining[openIdx:], "}}")
+		// Find the closing delimiter after the opening one.
+		after := remaining[openIdx+len(DelimOpen):]
+		closeIdx := strings.Index(after, DelimClose)
 		if closeIdx == -1 {
 			// No closing delimiter — write the rest as literal.
 			result.WriteString(remaining[openIdx:])
 			break
 		}
-		closeIdx += openIdx // Adjust to absolute position.
 
-		// Extract the expression inside {{ }}.
-		expr := remaining[openIdx+2 : closeIdx]
+		// Extract the expression inside § §.
+		expr := after[:closeIdx]
 		expanded, err := expandExpression(expr, kvStore)
 		if err != nil {
-			return "", fmt.Errorf("template expression {{%s}}: %w", expr, err)
+			return "", fmt.Errorf("template expression %s%s%s: %w", DelimOpen, expr, DelimClose, err)
 		}
 		result.WriteString(expanded)
 
-		remaining = remaining[closeIdx+2:]
+		remaining = after[closeIdx+len(DelimClose):]
 	}
 
 	return result.String(), nil
@@ -59,7 +67,7 @@ func expandExpression(expr string, kvStore map[string]string) (string, error) {
 	value, ok := kvStore[varName]
 	if !ok {
 		// Unknown variable — return the original expression unchanged.
-		return "{{" + expr + "}}", nil
+		return DelimOpen + expr + DelimClose, nil
 	}
 
 	// Apply encoder chain if present.
