@@ -869,7 +869,7 @@ func TestExecute_DefineMacro_WithExtractAndGuard(t *testing.T) {
 						"status_code": 302,
 					},
 					"override_headers": map[string]any{
-						"Cookie": "sid={{cookie}}",
+						"Cookie": "sid=§cookie§",
 					},
 				},
 			},

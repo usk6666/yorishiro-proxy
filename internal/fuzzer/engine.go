@@ -9,11 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
 
 // maxResponseSize is the maximum response body size (1 MB) to prevent OOM.
@@ -523,7 +523,16 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	// with template expansion applied.
 	effectiveBaseData := baseData
 	if len(kvStore) > 0 {
-		effectiveBaseData = expandRequestData(baseData, kvStore)
+		expanded, expandErr := expandRequestData(baseData, kvStore)
+		if expandErr != nil {
+			return &flow.FuzzResult{
+				FuzzID:   fuzzID,
+				IndexNum: fc.Index,
+				Payloads: flow.PayloadsToJSON(fc.Payloads),
+				Error:    fmt.Sprintf("template expansion: %s", expandErr.Error()),
+			}
+		}
+		effectiveBaseData = expanded
 	}
 
 	// Execute the fuzz case with the (potentially modified) base data.
@@ -549,10 +558,10 @@ func (e *Engine) executeFuzzCaseWithHooks(
 }
 
 // expandRequestData creates a clone of baseData with template expansion applied
-// to the URL, headers, and body using the KV Store values.
+// to the URL, headers, and body using the KV Store values via macro.ExpandTemplate.
 // It obtains the raw URL string from the original baseData before cloning,
-// because Clone() re-encodes the query string (escaping {{ }}).
-func expandRequestData(baseData *RequestData, kvStore map[string]string) *RequestData {
+// because Clone() re-encodes the query string (escaping delimiters).
+func expandRequestData(baseData *RequestData, kvStore map[string]string) (*RequestData, error) {
 	// Get the raw URL string before cloning (Clone re-encodes query params).
 	var rawURL string
 	if baseData.URL != nil {
@@ -563,9 +572,12 @@ func expandRequestData(baseData *RequestData, kvStore map[string]string) *Reques
 
 	// Expand URL using the raw string from the original.
 	if rawURL != "" {
-		expanded := expandSimpleTemplate(rawURL, kvStore)
+		expanded, err := macro.ExpandTemplate(rawURL, kvStore)
+		if err != nil {
+			return nil, fmt.Errorf("expand URL: %w", err)
+		}
 		if expanded != rawURL {
-			if u, err := url.Parse(expanded); err == nil {
+			if u, parseErr := url.Parse(expanded); parseErr == nil {
 				data.URL = u
 			}
 		}
@@ -574,33 +586,27 @@ func expandRequestData(baseData *RequestData, kvStore map[string]string) *Reques
 	// Expand headers.
 	for key, values := range data.Headers {
 		for i, v := range values {
-			data.Headers[key][i] = expandSimpleTemplate(v, kvStore)
+			expanded, err := macro.ExpandTemplate(v, kvStore)
+			if err != nil {
+				return nil, fmt.Errorf("expand header %q: %w", key, err)
+			}
+			data.Headers[key][i] = expanded
 		}
 	}
 
 	// Expand body.
 	if len(data.Body) > 0 {
 		bodyStr := string(data.Body)
-		expanded := expandSimpleTemplate(bodyStr, kvStore)
+		expanded, err := macro.ExpandTemplate(bodyStr, kvStore)
+		if err != nil {
+			return nil, fmt.Errorf("expand body: %w", err)
+		}
 		if expanded != bodyStr {
 			data.Body = []byte(expanded)
 		}
 	}
 
-	return data
-}
-
-// expandSimpleTemplate replaces {{var}} placeholders in the input string
-// with values from the KV Store. It ignores encoder pipes (those are handled
-// by the macro.ExpandTemplate function in the MCP layer).
-// This is a lightweight expansion for the fuzzer layer.
-func expandSimpleTemplate(input string, kvStore map[string]string) string {
-	result := input
-	for k, v := range kvStore {
-		placeholder := "{{" + k + "}}"
-		result = strings.ReplaceAll(result, placeholder, v)
-	}
-	return result
+	return data, nil
 }
 
 // fetchResponseBody retrieves the response body from a recorded flow.

@@ -931,7 +931,7 @@ func TestExecuteFuzzCaseWithHooks_TargetScopeChecker_AfterTemplateExpansion(t *t
 	// Verify that the target scope checker is called after KV Store template
 	// expansion via pre_send hooks. The checker blocks all requests, so
 	// we can verify it was called with the expanded URL.
-	baseURL, _ := url.Parse("http://example.com/api?redirect={{target}}")
+	baseURL, _ := url.Parse("http://example.com/api?redirect=§target§")
 
 	var checkedQuery string
 	checker := func(u *url.URL) error {
@@ -954,7 +954,7 @@ func TestExecuteFuzzCaseWithHooks_TargetScopeChecker_AfterTemplateExpansion(t *t
 	fc := FuzzCase{Index: 0, Payloads: map[string]string{}}
 
 	// The pre_send hook returns KV Store values. expandRequestData expands
-	// the URL string, replacing {{target}} with "evil.internal".
+	// the URL string, replacing §target§ with "evil.internal".
 	hooks := &mockHookCallbacksWithKV{
 		kvStore: map[string]string{"target": "evil.internal"},
 	}
@@ -970,7 +970,7 @@ func TestExecuteFuzzCaseWithHooks_TargetScopeChecker_AfterTemplateExpansion(t *t
 	}
 
 	// Verify the template was expanded before the checker was called.
-	if strings.Contains(checkedQuery, "{{target}}") {
+	if strings.Contains(checkedQuery, "§target§") {
 		t.Errorf("checker saw unexpanded template in query: %q", checkedQuery)
 	}
 	if !strings.Contains(checkedQuery, "evil.internal") {

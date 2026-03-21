@@ -47,7 +47,7 @@ func TestExpandRequestData_URL(t *testing.T) {
 	// Note: url.Parse URL-encodes braces, so we set the RawPath manually
 	// to simulate a URL with template placeholders. In practice, the
 	// template vars in the URL are more commonly in query parameters.
-	u, _ := url.Parse("https://example.com/api?token={{token}}")
+	u, _ := url.Parse("https://example.com/api?token=§token§")
 	baseData := &RequestData{
 		Method:  "GET",
 		URL:     u,
@@ -55,7 +55,10 @@ func TestExpandRequestData_URL(t *testing.T) {
 	}
 
 	kvStore := map[string]string{"token": "abc123"}
-	result := expandRequestData(baseData, kvStore)
+	result, err := expandRequestData(baseData, kvStore)
+	if err != nil {
+		t.Fatalf("expandRequestData() error = %v", err)
+	}
 
 	wantURL := "https://example.com/api?token=abc123"
 	if result.URL.String() != wantURL {
@@ -75,8 +78,8 @@ func TestExpandRequestData_Headers(t *testing.T) {
 		Method: "GET",
 		URL:    u,
 		Headers: map[string][]string{
-			"Cookie":       {"sid={{session_cookie}}"},
-			"X-CSRF-Token": {"{{csrf_token}}"},
+			"Cookie":       {"sid=§session_cookie§"},
+			"X-CSRF-Token": {"§csrf_token§"},
 		},
 	}
 
@@ -84,7 +87,10 @@ func TestExpandRequestData_Headers(t *testing.T) {
 		"session_cookie": "abc123",
 		"csrf_token":     "x9f2k",
 	}
-	result := expandRequestData(baseData, kvStore)
+	result, err := expandRequestData(baseData, kvStore)
+	if err != nil {
+		t.Fatalf("expandRequestData() error = %v", err)
+	}
 
 	if result.Headers["Cookie"][0] != "sid=abc123" {
 		t.Errorf("Cookie = %q, want %q", result.Headers["Cookie"][0], "sid=abc123")
@@ -100,11 +106,14 @@ func TestExpandRequestData_Body(t *testing.T) {
 		Method:  "POST",
 		URL:     u,
 		Headers: map[string][]string{},
-		Body:    []byte(`{"token":"{{token}}"}`),
+		Body:    []byte(`{"token":"§token§"}`),
 	}
 
 	kvStore := map[string]string{"token": "jwt-value"}
-	result := expandRequestData(baseData, kvStore)
+	result, err := expandRequestData(baseData, kvStore)
+	if err != nil {
+		t.Fatalf("expandRequestData() error = %v", err)
+	}
 
 	wantBody := `{"token":"jwt-value"}`
 	if string(result.Body) != wantBody {
@@ -112,79 +121,29 @@ func TestExpandRequestData_Body(t *testing.T) {
 	}
 
 	// Original should be unchanged.
-	if string(baseData.Body) != `{"token":"{{token}}"}` {
+	if string(baseData.Body) != `{"token":"§token§"}` {
 		t.Errorf("original Body was modified: %q", string(baseData.Body))
 	}
 }
 
 func TestExpandRequestData_EmptyKVStore(t *testing.T) {
-	u, _ := url.Parse("https://example.com/api/{{version}}")
+	u, _ := url.Parse("https://example.com/api/§version§")
 	baseData := &RequestData{
 		Method:  "GET",
 		URL:     u,
-		Headers: map[string][]string{"X-Token": {"{{token}}"}},
+		Headers: map[string][]string{"X-Token": {"§token§"}},
 	}
 
-	result := expandRequestData(baseData, map[string]string{})
-
-	// Should remain unchanged.
-	if result.URL.String() != "https://example.com/api/%7B%7Bversion%7D%7D" {
-		// URL parsing normalizes the braces.
-		t.Logf("URL = %q (URL-encoded braces are expected)", result.URL.String())
-	}
-	if result.Headers["X-Token"][0] != "{{token}}" {
-		t.Errorf("Header unchanged = %q, want %q", result.Headers["X-Token"][0], "{{token}}")
-	}
-}
-
-// --- expandSimpleTemplate tests ---
-
-func TestExpandSimpleTemplate(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		kvStore map[string]string
-		want    string
-	}{
-		{
-			name:    "no_placeholders",
-			input:   "hello world",
-			kvStore: map[string]string{"key": "val"},
-			want:    "hello world",
-		},
-		{
-			name:    "single_placeholder",
-			input:   "token={{token}}",
-			kvStore: map[string]string{"token": "abc"},
-			want:    "token=abc",
-		},
-		{
-			name:    "multiple_placeholders",
-			input:   "{{a}} and {{b}}",
-			kvStore: map[string]string{"a": "1", "b": "2"},
-			want:    "1 and 2",
-		},
-		{
-			name:    "unknown_placeholder",
-			input:   "{{unknown}}",
-			kvStore: map[string]string{"key": "val"},
-			want:    "{{unknown}}",
-		},
-		{
-			name:    "empty_kvstore",
-			input:   "{{key}}",
-			kvStore: map[string]string{},
-			want:    "{{key}}",
-		},
+	result, err := expandRequestData(baseData, map[string]string{})
+	if err != nil {
+		t.Fatalf("expandRequestData() error = %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := expandSimpleTemplate(tt.input, tt.kvStore)
-			if got != tt.want {
-				t.Errorf("expandSimpleTemplate(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
+	// §version§ is unknown, so macro.ExpandTemplate leaves it as-is.
+	// URL.String() may encode the § character.
+	t.Logf("URL = %q (URL encoding of § is expected)", result.URL.String())
+	if result.Headers["X-Token"][0] != "§token§" {
+		t.Errorf("Header unchanged = %q, want %q", result.Headers["X-Token"][0], "§token§")
 	}
 }
 
@@ -237,7 +196,7 @@ func TestExecuteFuzzCaseWithHooks_WithPreSend(t *testing.T) {
 	baseData := &RequestData{
 		Method:  "GET",
 		URL:     u,
-		Headers: map[string][]string{"X-Token": {"{{token}}"}},
+		Headers: map[string][]string{"X-Token": {"§token§"}},
 	}
 
 	hooks := &mockHookCallbacks{
