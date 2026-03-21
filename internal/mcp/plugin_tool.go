@@ -60,7 +60,7 @@ func (s *Server) handlePlugin(ctx context.Context, _ *gomcp.CallToolRequest, inp
 	}()
 
 	if s.deps.pluginEngine == nil {
-		return nil, nil, fmt.Errorf("plugin engine is not initialized")
+		return nil, nil, fmt.Errorf("plugin engine is not initialized: configure plugins in the config file (-config flag) with a 'plugins' section")
 	}
 
 	switch input.Action {
