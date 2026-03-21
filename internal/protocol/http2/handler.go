@@ -1029,15 +1029,13 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 
 	logger.Info("HTTP/2 request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
-	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
-
-	// Attach raw frame bytes to the enqueued item so AI agents can view/edit them.
+	var opts []intercept.EnqueueOpts
 	if joined := joinRawFrames(rawFrames); len(joined) > 0 {
-		if err := h.InterceptQueue.SetRawBytes(id, joined); err != nil {
-			logger.Warn("HTTP/2 intercept: failed to set raw bytes", "id", id, "error", err)
-		}
+		opts = append(opts, intercept.EnqueueOpts{RawBytes: joined})
 	}
+
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules, opts...)
+	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
 
 	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)

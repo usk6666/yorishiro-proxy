@@ -678,15 +678,13 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 
 	logger.Info("request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
-	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
-
-	// Attach raw bytes to the queued item so the AI agent can view/edit them.
+	var opts []intercept.EnqueueOpts
 	if len(rawBytes) > 0 {
-		if err := h.InterceptQueue.SetRawBytes(id, rawBytes); err != nil {
-			logger.Warn("failed to attach raw bytes to intercepted request", "id", id, "error", err)
-		}
+		opts = append(opts, intercept.EnqueueOpts{RawBytes: rawBytes})
 	}
+
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules, opts...)
+	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
 
 	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)

@@ -235,6 +235,40 @@ func (q *Queue) MaxItems() int {
 	return q.maxItems
 }
 
+// applyEnqueueOpts copies RawBytes and Metadata from opts into the item
+// before it is inserted into the queue map. This ensures the fields are
+// visible the moment the item appears in List().
+func applyEnqueueOpts(item *InterceptedRequest, opts []EnqueueOpts) {
+	if len(opts) == 0 {
+		return
+	}
+	o := opts[0]
+	if len(o.RawBytes) > 0 {
+		cp := make([]byte, len(o.RawBytes))
+		copy(cp, o.RawBytes)
+		item.RawBytes = cp
+	}
+	if len(o.Metadata) > 0 {
+		cp := make(map[string]string, len(o.Metadata))
+		for k, v := range o.Metadata {
+			cp[k] = v
+		}
+		item.Metadata = cp
+	}
+}
+
+// EnqueueOpts carries optional fields that must be atomically visible when
+// an item first appears in the queue. Without this, callers that set
+// RawBytes or Metadata via separate SetRawBytes/SetMetadata calls after
+// Enqueue create a race: another goroutine can List() the item before the
+// metadata is attached.
+type EnqueueOpts struct {
+	// RawBytes holds the raw bytes of the intercepted request or response.
+	RawBytes []byte
+	// Metadata holds protocol-specific metadata (e.g. gRPC encoding info).
+	Metadata map[string]string
+}
+
 // Enqueue adds a new intercepted request to the queue and returns its ID
 // along with a channel that will receive the action to perform.
 // The caller should block on the returned channel until an action is received.
@@ -242,7 +276,11 @@ func (q *Queue) MaxItems() int {
 // If the queue has reached its maxItems limit, the request is immediately
 // auto-released (ActionRelease is sent on the channel) to prevent memory
 // exhaustion from unbounded queue growth.
-func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []byte, matchedRules []string) (string, <-chan InterceptAction) {
+//
+// An optional EnqueueOpts may be provided to atomically attach RawBytes
+// and/or Metadata at enqueue time, avoiding the race window that exists
+// when using SetRawBytes/SetMetadata after Enqueue.
+func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []byte, matchedRules []string, opts ...EnqueueOpts) (string, <-chan InterceptAction) {
 	id := uuid.New().String()
 	actionCh := make(chan InterceptAction, 1)
 
@@ -297,6 +335,10 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []b
 		actionCh:     actionCh,
 	}
 
+	// Apply optional RawBytes/Metadata before inserting into the map,
+	// so the item is fully populated when it becomes visible via List().
+	applyEnqueueOpts(item, opts)
+
 	q.mu.Lock()
 	// Re-check under lock in case another goroutine filled the queue
 	// between our capacity check and now.
@@ -329,7 +371,7 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers http.Header, body []b
 //
 // If the queue has reached its maxItems limit, the response is immediately
 // auto-released.
-func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, headers http.Header, body []byte, matchedRules []string) (string, <-chan InterceptAction) {
+func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, headers http.Header, body []byte, matchedRules []string, opts ...EnqueueOpts) (string, <-chan InterceptAction) {
 	id := uuid.New().String()
 	actionCh := make(chan InterceptAction, 1)
 
@@ -384,6 +426,8 @@ func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, 
 		actionCh:     actionCh,
 	}
 
+	applyEnqueueOpts(item, opts)
+
 	q.mu.Lock()
 	if q.maxItems > 0 && len(q.items) >= q.maxItems {
 		q.mu.Unlock()
@@ -413,7 +457,7 @@ func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, 
 //
 // If the queue has reached its maxItems limit, the frame is immediately
 // auto-released.
-func (q *Queue) EnqueueWebSocketFrame(opcode int, direction, flowID, upgradeURL string, sequence int64, payload []byte, matchedRules []string) (string, <-chan InterceptAction) {
+func (q *Queue) EnqueueWebSocketFrame(opcode int, direction, flowID, upgradeURL string, sequence int64, payload []byte, matchedRules []string, opts ...EnqueueOpts) (string, <-chan InterceptAction) {
 	id := uuid.New().String()
 	actionCh := make(chan InterceptAction, 1)
 
@@ -453,6 +497,8 @@ func (q *Queue) EnqueueWebSocketFrame(opcode int, direction, flowID, upgradeURL 
 		WSSequence:   sequence,
 		actionCh:     actionCh,
 	}
+
+	applyEnqueueOpts(item, opts)
 
 	q.mu.Lock()
 	if q.maxItems > 0 && len(q.items) >= q.maxItems {
