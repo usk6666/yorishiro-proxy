@@ -11,6 +11,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // requestHeaders returns a clone of the request headers with the Host header
@@ -503,5 +504,67 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("HTTP/2 outReq error send message save failed", "error", err)
+	}
+}
+
+// recordBlocked records an HTTP/2 session that was blocked by target scope,
+// rate limit, or safety filter. The session is recorded as State="complete"
+// with BlockedBy set to the blocking reason, and only a send message (no
+// receive). For safety_filter blocks, violation tags (safety_rule,
+// safety_target) are added.
+func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
+	if h.Store == nil {
+		return
+	}
+
+	if !h.shouldCapture(p.req.Method, p.reqURL) {
+		return
+	}
+
+	duration := time.Since(p.start)
+	protocol := proxy.SOCKS5Protocol(ctx, "HTTP/2")
+	tags := proxy.MergeSOCKS5Tags(ctx, nil)
+
+	if violation != nil {
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+		tags["safety_rule"] = violation.RuleID
+		tags["safety_target"] = violation.Target.String()
+	}
+
+	fl := &flow.Flow{
+		ConnID:    p.connID,
+		Protocol:  protocol,
+		Scheme:    p.scheme,
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: p.start,
+		Duration:  duration,
+		Tags:      tags,
+		BlockedBy: blockedBy,
+		ConnInfo:  p.connInfo,
+	}
+	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+		logger.Error("HTTP/2 blocked flow save failed",
+			"blocked_by", blockedBy, "method", p.req.Method, "url", p.reqURL.String(), "error", err)
+		return
+	}
+
+	sendMsg := &flow.Message{
+		FlowID:        fl.ID,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     p.start,
+		Method:        p.req.Method,
+		URL:           p.reqURL,
+		Headers:       requestHeaders(p.req),
+		Body:          p.reqBody,
+		RawBytes:      joinRawFrames(p.rawFrames),
+		BodyTruncated: p.reqTruncated,
+		Metadata:      buildFrameMetadata(p.rawFrames, nil),
+	}
+	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+		logger.Error("HTTP/2 blocked send message save failed", "error", err)
 	}
 }
