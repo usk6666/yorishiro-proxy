@@ -572,3 +572,25 @@ func TestParseDeflateExtension_Basic(t *testing.T) {
 		})
 	}
 }
+
+func TestDeflateState_Decompress_CompressedPayloadTooLarge(t *testing.T) {
+	params := deflateParams{
+		enabled:         true,
+		contextTakeover: false,
+		windowBits:      15,
+	}
+	ds := newDeflateState(params)
+	defer ds.close()
+
+	// Create a payload that exceeds maxCompressedPayloadSize (= maxFramePayloadSize).
+	oversized := make([]byte, maxCompressedPayloadSize+1)
+	_, err := ds.decompress(oversized, 1<<30)
+	if err == nil {
+		t.Fatal("expected error for oversized compressed payload, got nil")
+	}
+
+	want := fmt.Sprintf("compressed payload too large: %d > %d", len(oversized), maxCompressedPayloadSize)
+	if got := err.Error(); !bytes.Contains([]byte(got), []byte(want)) {
+		t.Errorf("error message = %q, want it to contain %q", got, want)
+	}
+}

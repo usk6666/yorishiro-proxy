@@ -35,14 +35,10 @@ type deflateParams struct {
 const maxDictSize = 32768
 
 // maxCompressedPayloadSize is a hard upper bound on the compressed payload size
-// accepted by the permessage-deflate decompressor. This prevents integer
-// overflow in size computations and avoids attempting to allocate absurdly
-// large buffers when handling attacker-controlled data.
-//
-// The limit is intentionally very large so that it does not interfere with
-// normal use cases, while still satisfying static analysis requirements and
-// providing a safety net against pathological inputs.
-const maxCompressedPayloadSize = math.MaxInt32
+// accepted by the permessage-deflate decompressor. It is derived from
+// maxFramePayloadSize (the WebSocket frame payload cap) to maintain a single
+// source of truth and prevent oversized allocations from attacker-controlled data.
+const maxCompressedPayloadSize = maxFramePayloadSize
 
 // deflateState manages the decompression state for one relay direction.
 //
@@ -93,7 +89,7 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 	// pathological allocations and satisfy static analysis that this value
 	// cannot be arbitrarily large.
 	if len(payload) > maxCompressedPayloadSize {
-		return nil, fmt.Errorf("deflate decompress: compressed payload too large (%d bytes)", len(payload))
+		return nil, fmt.Errorf("deflate decompress: compressed payload too large: %d > %d", len(payload), maxCompressedPayloadSize)
 	}
 
 	// Guard against integer overflow when computing the allocation size
