@@ -80,6 +80,12 @@ func TestReadHTTP1RawResponse(t *testing.T) {
 			wantBody:   "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
 		},
 		{
+			name:       "100 continue followed by 200",
+			rawReq:     []byte("POST /upload HTTP/1.1\r\nHost: example.com\r\nExpect: 100-continue\r\n\r\n"),
+			serverResp: "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+			wantBody:   "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+		},
+		{
 			name:    "invalid HTTP response",
 			rawReq:  []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
 			wantErr: true,
@@ -146,7 +152,7 @@ func newKeepAliveHTTPServer(t *testing.T) (string, func()) {
 				resp := "HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: keep-alive\r\n\r\nhello keepaliv"
 				c.Write([]byte(resp))
 				// Block to keep connection open (simulating keep-alive).
-				// The connection will be closed when the listener closes.
+				// The connection blocks here until the client closes or the test ends.
 				buf := make([]byte, 1)
 				c.Read(buf) //nolint:errcheck // intentional block
 			}(conn)

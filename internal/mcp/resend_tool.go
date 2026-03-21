@@ -1095,24 +1095,33 @@ func readHTTP1RawResponse(conn net.Conn, rawBytes []byte) ([]byte, error) {
 		&rawBuf,
 	))
 
-	resp, err := http.ReadResponse(br, req)
-	if err != nil {
-		// If parsing fails, return whatever raw bytes were captured so far.
-		if rawBuf.Len() > 0 {
-			return rawBuf.Bytes(), fmt.Errorf("parse HTTP response: %w", err)
+	// Loop to skip 1xx informational responses (except 101 Switching Protocols).
+	// The TeeReader accumulates all raw bytes including 1xx responses in rawBuf.
+	for {
+		resp, err := http.ReadResponse(br, req)
+		if err != nil {
+			// If parsing fails, return whatever raw bytes were captured so far.
+			if rawBuf.Len() > 0 {
+				return rawBuf.Bytes(), fmt.Errorf("parse HTTP response: %w", err)
+			}
+			return nil, fmt.Errorf("parse HTTP response: %w", err)
 		}
-		return nil, fmt.Errorf("parse HTTP response: %w", err)
-	}
-	defer resp.Body.Close()
 
-	// Drain the body to ensure TeeReader captures all bytes.
-	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		// Return partial data on body read error.
-		return rawBuf.Bytes(), fmt.Errorf("read HTTP response body: %w", err)
-	}
+		// 101 Switching Protocols is a final response (e.g. WebSocket upgrade).
+		if resp.StatusCode >= 200 || resp.StatusCode == http.StatusSwitchingProtocols {
+			defer resp.Body.Close()
+			// Drain the body to ensure TeeReader captures all bytes.
+			_, err = io.Copy(io.Discard, resp.Body)
+			if err != nil {
+				return rawBuf.Bytes(), fmt.Errorf("read HTTP response body: %w", err)
+			}
+			return rawBuf.Bytes(), nil
+		}
 
-	return rawBuf.Bytes(), nil
+		// 1xx informational response: drain body and continue to next response.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
 }
 
 // extractHTTPMethod extracts the HTTP method from the first line of raw request bytes.
