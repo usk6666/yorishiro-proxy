@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -611,6 +612,46 @@ func expandParamsWithKVStore(params *resendParams, kvStore map[string]string) er
 		params.OverrideBody = &expanded
 	}
 
+	return nil
+}
+
+// isHTTPLikeProtocol reports whether the protocol string indicates an HTTP-like
+// protocol where template expansion of raw bytes is meaningful.
+// This includes HTTP/1.x, HTTPS, HTTP/2, gRPC, and WebSocket.
+func isHTTPLikeProtocol(protocol string) bool {
+	protocol = strings.TrimPrefix(protocol, "SOCKS5+")
+	switch protocol {
+	case "HTTP", "HTTPS", "HTTP/2", "gRPC", "WebSocket":
+		return true
+	default:
+		return strings.HasPrefix(protocol, "HTTP/1")
+	}
+}
+
+// expandRawParamsWithKVStore applies template expansion to override_raw_base64
+// using KV Store values from a pre_send hook execution. Template expansion is
+// limited to HTTP-like protocols where the raw bytes are textual.
+func expandRawParamsWithKVStore(params *resendParams, kvStore map[string]string, protocol string) error {
+	if len(kvStore) == 0 || params.OverrideRawBase64 == "" {
+		return nil
+	}
+
+	if !isHTTPLikeProtocol(protocol) {
+		return nil
+	}
+
+	// Decode base64 → treat as UTF-8 text → expand templates → re-encode.
+	decoded, err := base64.StdEncoding.DecodeString(params.OverrideRawBase64)
+	if err != nil {
+		return fmt.Errorf("decode override_raw_base64: %w", err)
+	}
+
+	expanded, err := macro.ExpandTemplate(string(decoded), kvStore)
+	if err != nil {
+		return fmt.Errorf("expand override_raw_base64: %w", err)
+	}
+
+	params.OverrideRawBase64 = base64.StdEncoding.EncodeToString([]byte(expanded))
 	return nil
 }
 

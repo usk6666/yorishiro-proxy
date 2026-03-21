@@ -869,7 +869,18 @@ type rawPreview struct {
 }
 
 func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams) (*gomcp.CallToolResult, any, error) {
+	// Validate hooks before loading the flow.
+	if err := validateHooks(params.Hooks); err != nil {
+		return nil, nil, fmt.Errorf("invalid hooks: %w", err)
+	}
+
 	fl, sendMsg, err := s.loadRawResendFlow(ctx, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Execute pre-send hook and expand templates in override_raw_base64.
+	kvStore, err := s.executeRawPreSendHook(ctx, &params, fl.Protocol)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -894,9 +905,61 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
-	targetAddr, err := resolveTargetAddrRaw(sendMsg, params)
+	respData, newFlowID, duration, err := s.sendAndRecordRaw(ctx, fl, params, sendMsg, rawBytes)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Execute post-receive hook if configured.
+	if params.Hooks != nil && params.Hooks.PostReceive != nil {
+		state := &hookState{}
+		executor := newHookExecutor(s.deps, params.Hooks, state)
+		// Raw mode does not have a structured status code; pass 0.
+		if err := executor.executePostReceive(ctx, 0, respData, kvStore); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Apply SafetyFilter output masking before returning to AI agent.
+	// Raw data is already saved to the store above.
+	maskedResp := s.filterOutputBody(respData)
+
+	return nil, &resendRawResult{
+		NewFlowID:    newFlowID,
+		ResponseData: base64.StdEncoding.EncodeToString(maskedResp),
+		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
+		Tag: params.Tag,
+	}, nil
+}
+
+// executeRawPreSendHook runs the pre-send hook for raw resend and applies
+// template expansion to override_raw_base64 for HTTP-like protocols.
+func (s *Server) executeRawPreSendHook(ctx context.Context, params *resendParams, protocol string) (map[string]string, error) {
+	if params.Hooks == nil || params.Hooks.PreSend == nil {
+		return nil, nil
+	}
+
+	state := &hookState{}
+	executor := newHookExecutor(s.deps, params.Hooks, state)
+	kvStore, err := executor.executePreSend(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(kvStore) > 0 {
+		if err := expandRawParamsWithKVStore(params, kvStore, protocol); err != nil {
+			return nil, fmt.Errorf("template expansion: %w", err)
+		}
+	}
+	return kvStore, nil
+}
+
+// sendAndRecordRaw handles target resolution, scope checking, sending raw bytes,
+// and recording the flow. It returns the response data, new flow ID, and duration.
+func (s *Server) sendAndRecordRaw(ctx context.Context, fl *flow.Flow, params resendParams, sendMsg *flow.Message, rawBytes []byte) ([]byte, string, time.Duration, error) {
+	targetAddr, err := resolveTargetAddrRaw(sendMsg, params)
+	if err != nil {
+		return nil, "", 0, err
 	}
 
 	// Determine useTLS for scope checking and connection establishment.
@@ -910,12 +973,10 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 	}
 
 	if err := s.checkRawTargetScope(fl, targetAddr, useTLS); err != nil {
-		return nil, nil, err
+		return nil, "", 0, err
 	}
 
 	// Route to the appropriate raw send implementation based on protocol.
-	// HTTP/2 and gRPC flows require an HTTP/2 connection handshake before
-	// sending the raw frames; all other protocols use plain TCP/TLS.
 	var respData []byte
 	var start time.Time
 	var duration time.Duration
@@ -925,24 +986,15 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		respData, start, duration, err = s.buildAndSendRaw(ctx, fl, params, targetAddr, rawBytes)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, "", 0, err
 	}
 
 	newFlowID, err := s.recordRawResend(ctx, fl, params, rawBytes, respData, start, duration)
 	if err != nil {
-		return nil, nil, err
+		return nil, "", 0, err
 	}
 
-	// Apply SafetyFilter output masking before returning to AI agent.
-	// Raw data is already saved to the store above.
-	maskedResp := s.filterOutputBody(respData)
-
-	return nil, &resendRawResult{
-		NewFlowID:    newFlowID,
-		ResponseData: base64.StdEncoding.EncodeToString(maskedResp),
-		ResponseSize: len(respData), DurationMs: duration.Milliseconds(),
-		Tag: params.Tag,
-	}, nil
+	return respData, newFlowID, duration, nil
 }
 
 // loadRawResendFlow validates parameters, loads the flow and its first send message,

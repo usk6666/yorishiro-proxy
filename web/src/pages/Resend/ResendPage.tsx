@@ -520,6 +520,11 @@ export function ResendPage() {
 
       try {
         const rawBase64 = stringToBase64(rawHttpText);
+
+        // Build hooks param if any hook is configured.
+        const hooksParam =
+          hooks.pre_send || hooks.post_receive ? hooks : undefined;
+
         const result = await resend<TcpResendResult>({
           action: "resend_raw",
           params: {
@@ -529,6 +534,7 @@ export function ResendPage() {
             override_raw_base64: rawBase64,
             dry_run: isDryRun,
             tag: tag || undefined,
+            hooks: hooksParam,
           },
         });
 
@@ -563,7 +569,7 @@ export function ResendPage() {
         });
       }
     },
-    [activeFlowId, rawTargetAddr, rawUseTls, rawHttpText, tag, resend, addToast],
+    [activeFlowId, rawTargetAddr, rawUseTls, rawHttpText, tag, hooks, resend, addToast],
   );
 
   /** Send TCP resend_raw request. */
@@ -820,6 +826,12 @@ export function ResendPage() {
                       hooks={hooks}
                       onChange={setHooks}
                     />
+                    {hooks.pre_send?.macro && (
+                      <p className="resend-hooks-help">
+                        Use <code>{"\u00A7key\u00A7"}</code> syntax in URL, headers, and body fields to reference KV Store values set by the pre-send macro.
+                        Encoder chains are supported: <code>{"\u00A7key | url\u00A7"}</code>, <code>{"\u00A7key | base64\u00A7"}</code>.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -899,6 +911,24 @@ export function ResendPage() {
                     spellCheck={false}
                   />
                 </div>
+
+                {/* Hooks configuration */}
+                {availableMacros.length > 0 && (
+                  <div className="resend-hooks-section">
+                    <h4 className="resend-hooks-title">Hooks (optional)</h4>
+                    <HookConfigEditor
+                      macros={availableMacros}
+                      hooks={hooks}
+                      onChange={setHooks}
+                    />
+                    {hooks.pre_send?.macro && (
+                      <p className="resend-hooks-help">
+                        Use <code>{"\u00A7key\u00A7"}</code> syntax in the raw editor to reference KV Store values set by the pre-send macro.
+                        Encoder chains are supported: <code>{"\u00A7key | url\u00A7"}</code>, <code>{"\u00A7key | base64\u00A7"}</code>.
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {/* Raw mode action buttons */}
                 <div className="resend-actions">
