@@ -563,6 +563,166 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 	}
 }
 
+func TestExecute_RunMacro_TimeoutOverride(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+
+	// Create a slow server that takes 500ms to respond.
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer slowServer.Close()
+
+	u, _ := url.Parse(slowServer.URL + "/api/slow")
+	ctx := context.Background()
+
+	fl := &flow.Flow{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	sendMsg := &flow.Message{
+		FlowID:    fl.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       u,
+		Headers:   map[string][]string{},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	// Define a macro with a generous timeout (10s).
+	callMacro(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name":             "timeout-macro",
+			"macro_timeout_ms": 10000,
+			"steps": []any{
+				map[string]any{
+					"id":      "slow-step",
+					"flow_id": fl.ID,
+				},
+			},
+		},
+	})
+
+	// Run without timeout override — should succeed (10s timeout, 500ms response).
+	result := callMacro(t, cs, map[string]any{
+		"action": "run_macro",
+		"params": map[string]any{
+			"name": "timeout-macro",
+		},
+	})
+	if result.IsError {
+		t.Fatalf("run_macro without override should succeed, got error: %v", result.Content)
+	}
+	var out macroRunMacroResult
+	unmarshalExecuteResult(t, result, &out)
+	if out.Status != "completed" {
+		t.Errorf("without override: Status = %q, want %q", out.Status, "completed")
+	}
+
+	// Run with a very short timeout override (50ms) — should timeout
+	// because the server takes 500ms to respond.
+	result2 := callMacro(t, cs, map[string]any{
+		"action": "run_macro",
+		"params": map[string]any{
+			"name":             "timeout-macro",
+			"macro_timeout_ms": 50,
+		},
+	})
+	// The engine returns a result with Status="timeout" (not an MCP error).
+	if result2.IsError {
+		t.Fatalf("run_macro returned MCP error: %v", result2.Content)
+	}
+	var out2 macroRunMacroResult
+	unmarshalExecuteResult(t, result2, &out2)
+	if out2.Status != "timeout" {
+		t.Errorf("with 50ms override: Status = %q, want %q", out2.Status, "timeout")
+	}
+}
+
+func TestExecute_RunMacro_TimeoutOverrideZeroUsesDefinition(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+
+	// Create a slow server that takes 200ms to respond.
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer slowServer.Close()
+
+	u, _ := url.Parse(slowServer.URL + "/api/test")
+	ctx := context.Background()
+
+	fl := &flow.Flow{
+		Protocol:  "HTTP/1.x",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	sendMsg := &flow.Message{
+		FlowID:    fl.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       u,
+		Headers:   map[string][]string{},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	// Define macro with a very short timeout (50ms) — shorter than the
+	// server's 200ms response time, so it will timeout if this value is used.
+	callMacro(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name":             "zero-timeout-macro",
+			"macro_timeout_ms": 50,
+			"steps": []any{
+				map[string]any{
+					"id":      "step1",
+					"flow_id": fl.ID,
+				},
+			},
+		},
+	})
+
+	// Run with macro_timeout_ms=0 — should fall back to definition timeout (50ms),
+	// which is shorter than the server's 200ms delay, causing a timeout.
+	result := callMacro(t, cs, map[string]any{
+		"action": "run_macro",
+		"params": map[string]any{
+			"name":             "zero-timeout-macro",
+			"macro_timeout_ms": 0,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("run_macro returned MCP error: %v", result.Content)
+	}
+	var out macroRunMacroResult
+	unmarshalExecuteResult(t, result, &out)
+	if out.Status != "timeout" {
+		t.Errorf("with macro_timeout_ms=0 (fallback to 50ms definition): Status = %q, want %q", out.Status, "timeout")
+	}
+}
+
 func TestExecute_RunMacro_NotFound(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
