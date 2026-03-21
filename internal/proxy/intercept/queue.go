@@ -491,6 +491,9 @@ func (q *Queue) Get(id string) (*InterceptedRequest, error) {
 }
 
 // List returns all currently intercepted (blocked) requests.
+// The returned items are deep copies — callers may read fields without
+// holding the queue lock. Mutations to the copies do not affect the
+// queue's internal state.
 func (q *Queue) List() []*InterceptedRequest {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -501,7 +504,19 @@ func (q *Queue) List() []*InterceptedRequest {
 
 	result := make([]*InterceptedRequest, 0, len(q.items))
 	for _, item := range q.items {
-		result = append(result, item)
+		cp := *item // shallow value copy
+		if item.Metadata != nil {
+			cp.Metadata = make(map[string]string, len(item.Metadata))
+			for k, v := range item.Metadata {
+				cp.Metadata[k] = v
+			}
+		}
+		if item.Headers != nil {
+			cp.Headers = item.Headers.Clone()
+		}
+		// RawBytes, Body, MatchedRules are append-only or read-only after
+		// enqueue, so shallow copies are safe.
+		result = append(result, &cp)
 	}
 	return result
 }
