@@ -55,8 +55,10 @@ type queryInput struct {
 
 // queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
-	// Protocol filters flows by protocol label (e.g. "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP").
-	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP)"`
+	// Protocol filters flows by exact protocol label. Note: protocol=HTTPS matches only HTTP/1.x over TLS.
+	// HTTPS MITM connections negotiated as HTTP/2 are recorded as protocol=HTTP/2, not HTTPS.
+	// To find all flows over TLS regardless of protocol, use scheme=https instead.
+	Protocol string `json:"protocol,omitempty" jsonschema:"exact protocol label filter (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP). HTTPS matches only HTTP/1.x over TLS; HTTP/2 over TLS is recorded as HTTP/2. To find all TLS flows use scheme=https instead."`
 	// Scheme filters flows by URL scheme / transport (e.g. "https", "http", "wss", "ws", "tcp").
 	// Use scheme to find TLS flows: filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
 	// WebSocket over TLS uses scheme="wss", not "https".
