@@ -418,7 +418,7 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 				ID:     "get-csrf",
 				FlowID: "csrf-session",
 				OverrideHeaders: map[string]string{
-					"Cookie": "PHPSESSID={{session_cookie}}",
+					"Cookie": "PHPSESSID=§session_cookie§",
 				},
 				Extract: []ExtractionRule{
 					{
@@ -922,7 +922,7 @@ func TestEngine_Run_TemplateExpansion(t *testing.T) {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
 
-	body := `{"token":"{{csrf | url_encode}}"}`
+	body := `{"token":"§csrf | url_encode§"}`
 	macro := &Macro{
 		Name: "template-test",
 		Steps: []Step{
@@ -930,8 +930,8 @@ func TestEngine_Run_TemplateExpansion(t *testing.T) {
 				ID:     "s1",
 				FlowID: "sess1",
 				OverrideHeaders: map[string]string{
-					"Cookie":       "sid={{session_cookie}}",
-					"X-CSRF-Token": "{{csrf}}",
+					"Cookie":       "sid=§session_cookie§",
+					"X-CSRF-Token": "§csrf§",
 				},
 				OverrideBody: &body,
 			},
@@ -1176,7 +1176,7 @@ func TestEngine_Run_OverrideURL(t *testing.T) {
 			{
 				ID:          "s1",
 				FlowID:      "sess1",
-				OverrideURL: "https://example.com/{{path}}",
+				OverrideURL: "https://example.com/§path§",
 			},
 		},
 		InitialVars: map[string]string{"path": "new-path"},
@@ -1245,14 +1245,14 @@ func TestBuildRequest(t *testing.T) {
 		"token": "abc123",
 	}
 
-	body := "new body with {{token}}"
+	body := "new body with §token§"
 	step := &Step{
 		ID:             "s1",
 		FlowID:         "sess1",
 		OverrideMethod: "POST",
 		OverrideURL:    "https://example.com/new",
 		OverrideHeaders: map[string]string{
-			"Cookie":   "session={{token}}",
+			"Cookie":   "session=§token§",
 			"X-Custom": "static",
 		},
 		OverrideBody: &body,
@@ -1348,17 +1348,17 @@ func TestBuildRequest_OverrideHeaders_CRLFInExpandedValue(t *testing.T) {
 	}{
 		{
 			name:    "CR in expanded value",
-			headers: map[string]string{"X-Custom": "{{token}}"},
+			headers: map[string]string{"X-Custom": "§token§"},
 			kvStore: map[string]string{"token": "value\rInjected: evil"},
 		},
 		{
 			name:    "LF in expanded value",
-			headers: map[string]string{"X-Custom": "{{token}}"},
+			headers: map[string]string{"X-Custom": "§token§"},
 			kvStore: map[string]string{"token": "value\nInjected: evil"},
 		},
 		{
 			name:    "CRLF in expanded value",
-			headers: map[string]string{"X-Custom": "{{token}}"},
+			headers: map[string]string{"X-Custom": "§token§"},
 			kvStore: map[string]string{"token": "value\r\nInjected: evil"},
 		},
 		{
@@ -1393,8 +1393,8 @@ func TestBuildRequest_OverrideHeaders_CleanExpanded(t *testing.T) {
 		ID:     "step1",
 		FlowID: "sess1",
 		OverrideHeaders: map[string]string{
-			"Authorization": "Bearer {{token}}",
-			"X-Request-ID":  "{{req_id}}",
+			"Authorization": "Bearer §token§",
+			"X-Request-ID":  "§req_id§",
 		},
 	}
 	base := &SendRequest{

@@ -57,7 +57,7 @@ pre_send macro はメインリクエスト送信前に毎回実行される。
       {
         "id": "get-csrf",
         "flow_id": "<csrf-page-flow-id>",
-        "override_headers": {"Cookie": "PHPSESSID={{session_cookie}}"},
+        "override_headers": {"Cookie": "PHPSESSID=§session_cookie§"},
         "extract": [
           {
             "name": "csrf_token",
@@ -72,8 +72,8 @@ pre_send macro はメインリクエスト送信前に毎回実行される。
         "id": "create-item",
         "flow_id": "<create-item-flow-id>",
         "override_headers": {
-          "Cookie": "PHPSESSID={{session_cookie}}",
-          "X-CSRF-Token": "{{csrf_token}}"
+          "Cookie": "PHPSESSID=§session_cookie§",
+          "X-CSRF-Token": "§csrf_token§"
         },
         "override_body": "{\"name\": \"test-item-for-delete\"}",
         "extract": [
@@ -106,7 +106,7 @@ pre_send の KV Store (session_cookie 等) が自動的に引き継がれる。
       {
         "id": "logout",
         "flow_id": "<logout-flow-id>",
-        "override_headers": {"Cookie": "PHPSESSID={{session_cookie}}"}
+        "override_headers": {"Cookie": "PHPSESSID=§session_cookie§"}
       }
     ]
   }
@@ -133,7 +133,7 @@ pre_send の KV Store (session_cookie 等) が自動的に引き継がれる。
     "payload_sets": {
       "item-ids": {
         "type": "wordlist",
-        "values": ["{{item_id}}"]
+        "values": ["§item_id§"]
       }
     },
     "hooks": {
@@ -158,10 +158,10 @@ pre_send の KV Store (session_cookie 等) が自動的に引き継がれる。
 ```
 pre_send macro 実行
   -> KV Store: {session_cookie: "abc", csrf_token: "xyz", item_id: "42"}
-    -> メインリクエスト送信 (テンプレート展開で {{item_id}} 等を使用)
+    -> メインリクエスト送信 (テンプレート展開で §item_id§ 等を使用)
       -> レスポンス受信
         -> post_receive macro 実行 (pre_send の KV Store が自動的に渡される)
-           -> {{session_cookie}} で正しいセッションを logout
+           -> §session_cookie§ で正しいセッションを logout
 ```
 
 **重要**: pre_send の KV Store と post_receive の vars 設定が同じキーを持つ場合、
@@ -177,7 +177,7 @@ fuzz の前に resend で単発テストして動作確認する:
   "action": "resend",
   "params": {
     "flow_id": "<delete-endpoint-flow-id>",
-    "body_patches": [{"json_path": "$.id", "value": "{{item_id}}"}],
+    "body_patches": [{"json_path": "$.id", "value": "§item_id§"}],
     "hooks": {
       "pre_send": {
         "macro": "setup-item",

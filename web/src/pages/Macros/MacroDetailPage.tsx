@@ -957,7 +957,7 @@ function StepEditor({
               <label className="macro-field-label">Override Body</label>
               <textarea
                 className="macro-textarea"
-                placeholder="Leave empty to use original body. Supports {{variable}} templates."
+                placeholder="Leave empty to use original body. Supports §variable§ templates."
                 value={step.overrideBody}
                 onChange={(e) => onUpdate({ overrideBody: e.target.value })}
                 rows={3}

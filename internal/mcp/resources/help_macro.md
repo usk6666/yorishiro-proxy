@@ -22,7 +22,7 @@ Save a macro definition (upsert) with steps, extraction rules, and guards. If a 
   - **id** (string, required): Unique step identifier within the macro.
   - **flow_id** (string, required): Recorded flow to use as a template.
   - **override_method** (string, optional): Override HTTP method.
-  - **override_url** (string, optional): Override request URL. Supports `{{variable}}` templates.
+  - **override_url** (string, optional): Override request URL. Supports `§variable§` templates.
   - **override_headers** (object, optional): Header overrides as key-value pairs. Supports templates.
   - **override_body** (string, optional): Override request body. Supports templates.
   - **on_error** (string, optional): Error handling: `"abort"` (default), `"skip"`, or `"retry"`.
@@ -66,7 +66,7 @@ Returns: name, deleted.
       {
         "id": "login",
         "flow_id": "recorded-login-flow",
-        "override_body": "username=admin&password={{password}}",
+        "override_body": "username=admin&password=§password§",
         "extract": [
           {
             "name": "session_cookie",
@@ -81,7 +81,7 @@ Returns: name, deleted.
       {
         "id": "get-csrf",
         "flow_id": "recorded-csrf-flow",
-        "override_headers": {"Cookie": "PHPSESSID={{session_cookie}}"},
+        "override_headers": {"Cookie": "PHPSESSID=§session_cookie§"},
         "extract": [
           {
             "name": "csrf_token",

@@ -44,7 +44,7 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 		FlowID: fl.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: tokenURL,
 		Headers: map[string][]string{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"username":"admin","password":"{{password}}"}`),
+		Body:    []byte(`{"username":"admin","password":"§password§"}`),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestM3_Hook_ResendPreSendTemplateExpansion(t *testing.T) {
 		"params": map[string]any{
 			"flow_id": targetSess.ID,
 			"override_headers": map[string]any{
-				"Authorization": "Bearer {{auth_token}}",
+				"Authorization": "Bearer §auth_token§",
 			},
 			"hooks": map[string]any{
 				"pre_send": map[string]any{

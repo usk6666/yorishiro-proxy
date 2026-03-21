@@ -279,7 +279,7 @@ func TestShouldRunPostReceive_OnMatch(t *testing.T) {
 
 func TestExpandParamsWithKVStore_URL(t *testing.T) {
 	params := resendParams{
-		OverrideURL: "https://{{host}}/api/{{path}}",
+		OverrideURL: "https://§host§/api/§path§",
 	}
 	kvStore := map[string]string{
 		"host": "example.com",
@@ -297,11 +297,11 @@ func TestExpandParamsWithKVStore_URL(t *testing.T) {
 func TestExpandParamsWithKVStore_Headers(t *testing.T) {
 	params := resendParams{
 		OverrideHeaders: HeaderEntries{
-			{Key: "Cookie", Value: "sid={{session_cookie}}"},
-			{Key: "X-CSRF-Token", Value: "{{csrf_token}}"},
+			{Key: "Cookie", Value: "sid=§session_cookie§"},
+			{Key: "X-CSRF-Token", Value: "§csrf_token§"},
 		},
 		AddHeaders: HeaderEntries{
-			{Key: "Authorization", Value: "Bearer {{token}}"},
+			{Key: "Authorization", Value: "Bearer §token§"},
 		},
 	}
 	kvStore := map[string]string{
@@ -333,7 +333,7 @@ func TestExpandParamsWithKVStore_Headers(t *testing.T) {
 }
 
 func TestExpandParamsWithKVStore_Body(t *testing.T) {
-	body := `{"username":"admin","password":"{{password}}"}`
+	body := `{"username":"admin","password":"§password§"}`
 	params := resendParams{
 		OverrideBody: &body,
 	}
@@ -351,13 +351,13 @@ func TestExpandParamsWithKVStore_Body(t *testing.T) {
 
 func TestExpandParamsWithKVStore_EmptyKVStore(t *testing.T) {
 	params := resendParams{
-		OverrideURL: "https://{{host}}/api",
+		OverrideURL: "https://§host§/api",
 	}
 	if err := expandParamsWithKVStore(&params, nil); err != nil {
 		t.Fatalf("expandParamsWithKVStore: %v", err)
 	}
 	// URL should remain unchanged.
-	if params.OverrideURL != "https://{{host}}/api" {
+	if params.OverrideURL != "https://§host§/api" {
 		t.Errorf("OverrideURL changed despite empty KV store")
 	}
 }
@@ -520,7 +520,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 		"params": map[string]any{
 			"flow_id": targetSess.ID,
 			"override_headers": map[string]any{
-				"X-Token": "{{token}}",
+				"X-Token": "§token§",
 			},
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
@@ -761,13 +761,13 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 		},
 	})
 
-	// Resend with hook, using {{token | base64}} encoder in header.
+	// Resend with hook, using §token | base64§ encoder in header.
 	result := callExecute(t, cs, map[string]any{
 		"action": "resend",
 		"params": map[string]any{
 			"flow_id": targetSess.ID,
 			"override_headers": map[string]any{
-				"Authorization": "Bearer {{token | base64}}",
+				"Authorization": "Bearer §token | base64§",
 			},
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
@@ -891,7 +891,7 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
-		Body:    []byte("password={{password}}"),
+		Body:    []byte("password=§password§"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
@@ -921,7 +921,7 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 				map[string]any{
 					"id":            "login",
 					"flow_id":       macroSess.ID,
-					"override_body": stringPtr("password={{password}}"),
+					"override_body": stringPtr("password=§password§"),
 					"extract": []any{
 						map[string]any{
 							"name":        "flow_id",
@@ -942,7 +942,7 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 		"params": map[string]any{
 			"flow_id": targetSess.ID,
 			"override_headers": map[string]any{
-				"Cookie": "sid={{flow_id}}",
+				"Cookie": "sid=§flow_id§",
 			},
 			"hooks": map[string]any{
 				"pre_send": map[string]any{
@@ -986,14 +986,14 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
-		Headers: map[string][]string{"Cookie": {"{{auth_session}}"}},
+		Headers: map[string][]string{"Cookie": {"§auth_session§"}},
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
 	cs := setupMacroTestSession(t, store)
 
-	// Define logout macro that uses {{auth_session}} from its vars.
+	// Define logout macro that uses §auth_session§ from its vars.
 	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
@@ -1197,7 +1197,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 	if err := store.AppendMessage(ctx, &flow.Message{
 		FlowID: logoutSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: logoutURL,
-		Headers: map[string][]string{"Cookie": {"{{auth_session}}"}},
+		Headers: map[string][]string{"Cookie": {"§auth_session§"}},
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
@@ -1252,7 +1252,7 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 				map[string]any{
 					"id":               "logout",
 					"flow_id":          logoutSess.ID,
-					"override_headers": map[string]any{"Cookie": "{{auth_session}}"},
+					"override_headers": map[string]any{"Cookie": "§auth_session§"},
 				},
 			},
 		},
