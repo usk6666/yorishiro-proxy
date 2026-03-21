@@ -655,13 +655,15 @@ func TestExecute_RunMacro_TimeoutOverrideZeroUsesDefinition(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 
-	echoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Create a slow server that takes 200ms to respond.
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(200)
 		w.Write([]byte(`{"ok":true}`))
 	}))
-	defer echoServer.Close()
+	defer slowServer.Close()
 
-	u, _ := url.Parse(echoServer.URL + "/api/test")
+	u, _ := url.Parse(slowServer.URL + "/api/test")
 	ctx := context.Background()
 
 	fl := &flow.Flow{
@@ -686,12 +688,13 @@ func TestExecute_RunMacro_TimeoutOverrideZeroUsesDefinition(t *testing.T) {
 
 	cs := setupMacroTestSession(t, store)
 
-	// Define macro with a specific timeout.
+	// Define macro with a very short timeout (50ms) — shorter than the
+	// server's 200ms response time, so it will timeout if this value is used.
 	callMacro(t, cs, map[string]any{
 		"action": "define_macro",
 		"params": map[string]any{
 			"name":             "zero-timeout-macro",
-			"macro_timeout_ms": 5000,
+			"macro_timeout_ms": 50,
 			"steps": []any{
 				map[string]any{
 					"id":      "step1",
@@ -701,7 +704,8 @@ func TestExecute_RunMacro_TimeoutOverrideZeroUsesDefinition(t *testing.T) {
 		},
 	})
 
-	// Run with macro_timeout_ms=0 — should use the definition timeout (5s), not override.
+	// Run with macro_timeout_ms=0 — should fall back to definition timeout (50ms),
+	// which is shorter than the server's 200ms delay, causing a timeout.
 	result := callMacro(t, cs, map[string]any{
 		"action": "run_macro",
 		"params": map[string]any{
@@ -710,7 +714,12 @@ func TestExecute_RunMacro_TimeoutOverrideZeroUsesDefinition(t *testing.T) {
 		},
 	})
 	if result.IsError {
-		t.Fatalf("run_macro with timeout_ms=0 should use definition timeout, got error: %v", result.Content)
+		t.Fatalf("run_macro returned MCP error: %v", result.Content)
+	}
+	var out macroRunMacroResult
+	unmarshalExecuteResult(t, result, &out)
+	if out.Status != "timeout" {
+		t.Errorf("with macro_timeout_ms=0 (fallback to 50ms definition): Status = %q, want %q", out.Status, "timeout")
 	}
 }
 
