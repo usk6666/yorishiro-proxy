@@ -664,8 +664,9 @@ func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
 // zero-value action and false if not intercepted.
 //
 // The rawBytes parameter is the captured raw request bytes from captureReader.
-// When non-nil, they are attached to the queued item via SetRawBytes so that
-// the AI agent can view/edit the raw bytes and select raw forwarding mode.
+// When non-nil, they are atomically attached to the queued item via
+// EnqueueOpts so that the AI agent can view/edit the raw bytes and select
+// raw forwarding mode.
 func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, body []byte, rawBytes []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false

@@ -1015,8 +1015,9 @@ func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 // or the timeout expires. Returns the action and true if intercepted, or a
 // zero-value action and false if not intercepted.
 //
-// rawFrames are the raw HTTP/2 frame bytes for this request. They are attached
-// to the enqueued item so that AI agents can inspect and edit them in raw mode.
+// rawFrames are the raw HTTP/2 frame bytes for this request. They are
+// atomically attached to the enqueued item via EnqueueOpts so that AI agents
+// can inspect and edit them in raw mode.
 func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, body []byte, rawFrames [][]byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false

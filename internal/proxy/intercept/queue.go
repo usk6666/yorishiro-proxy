@@ -235,15 +235,18 @@ func (q *Queue) MaxItems() int {
 	return q.maxItems
 }
 
-// applyEnqueueOpts copies RawBytes and Metadata from opts into the item
-// before it is inserted into the queue map. This ensures the fields are
-// visible the moment the item appears in List().
+// applyEnqueueOpts copies RawBytes and Metadata from the first element of
+// opts into the item before it is inserted into the queue map. This ensures
+// the fields are visible the moment the item appears in List().
+// Only the first EnqueueOpts is used; additional elements are ignored.
+// RawBytes exceeding MaxRawBytesSize are silently discarded (same policy
+// as SetRawBytes).
 func applyEnqueueOpts(item *InterceptedRequest, opts []EnqueueOpts) {
 	if len(opts) == 0 {
 		return
 	}
 	o := opts[0]
-	if len(o.RawBytes) > 0 {
+	if len(o.RawBytes) > 0 && len(o.RawBytes) <= MaxRawBytesSize {
 		cp := make([]byte, len(o.RawBytes))
 		copy(cp, o.RawBytes)
 		item.RawBytes = cp
