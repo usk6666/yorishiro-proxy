@@ -514,11 +514,11 @@ func (h *Handler) checkTargetScope(sc *streamContext) bool {
 	writeScopeBlockResponse(sc.w, sc.req.URL.Hostname(), reason)
 	sc.logger.Info("HTTP/2 request blocked by target scope",
 		"host", sc.req.URL.Host, "reason", reason)
+	h.recordBlocked(sc.ctx, sc.srp, "target_scope", nil, sc.logger)
 	return true
 }
 
 // checkSafetyFilter enforces safety filter rules. Returns true if the request was blocked.
-// NOTE: HTTP/2 blocked flow recording is not implemented yet (consistent with checkTargetScope/checkRateLimit).
 func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
 	violation := h.CheckSafetyFilter(sc.reqBody, sc.req.URL.String(), sc.req.Header)
 	if violation == nil {
@@ -538,6 +538,7 @@ func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
 	sc.logger.Info("HTTP/2 request blocked by safety filter",
 		"rule_id", violation.RuleID, "rule_name", violation.RuleName,
 		"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
+	h.recordBlocked(sc.ctx, sc.srp, "safety_filter", violation, sc.logger)
 	return true
 }
 
@@ -563,6 +564,7 @@ func (h *Handler) checkRateLimit(sc *streamContext) bool {
 	writeRateLimitResponse(sc.w)
 	sc.logger.Info("HTTP/2 request blocked by rate limit",
 		"host", sc.req.URL.Host)
+	h.recordBlocked(sc.ctx, sc.srp, "rate_limit", nil, sc.logger)
 	return true
 }
 

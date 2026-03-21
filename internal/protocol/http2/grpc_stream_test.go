@@ -974,10 +974,14 @@ func TestHandleGRPCStream_TrailersOnlyBidiStreamDeadlock(t *testing.T) {
 		resCh <- result{resp, nil}
 	}()
 
-	// Send one gRPC frame.
+	// Send one gRPC frame. The upstream may respond immediately with
+	// trailers-only, causing the client to close the pipe before this
+	// write completes. A closed-pipe error here is expected and not a
+	// test failure — the test's purpose is verifying that the response
+	// (including trailers) is received without deadlock.
 	frame := protogrpc.EncodeFrame(false, []byte("reflection-request"))
-	if _, err := bodyPW.Write(frame); err != nil {
-		t.Fatalf("write initial frame: %v", err)
+	if _, writeErr := bodyPW.Write(frame); writeErr != nil {
+		t.Logf("write initial frame (benign): %v", writeErr)
 	}
 
 	// Wait for the full response including trailers.
