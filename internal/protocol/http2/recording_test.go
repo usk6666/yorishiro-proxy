@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -972,5 +974,238 @@ func TestRecordReceive_WithRawFrames(t *testing.T) {
 	}
 	if recv.Metadata["h2_frame_count"] != "2" {
 		t.Errorf("h2_frame_count = %q, want %q", recv.Metadata["h2_frame_count"], "2")
+	}
+}
+
+// --- recordBlocked tests ---
+
+func TestRecordBlocked_TargetScope(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	reqURL, _ := url.Parse("http://example.com/api/test")
+	req, _ := gohttp.NewRequest("GET", reqURL.String(), nil)
+	req.Host = "example.com"
+
+	p := sendRecordParams{
+		connID:     "conn-1",
+		clientAddr: "127.0.0.1:12345",
+		scheme:     "http",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:12345"},
+		req:        req,
+		reqURL:     reqURL,
+		rawFrames:  [][]byte{{0x01, 0x02}},
+	}
+
+	handler.recordBlocked(ctx, p, "target_scope", nil, handler.Logger)
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Session.State != "complete" {
+		t.Errorf("state = %q, want %q", entry.Session.State, "complete")
+	}
+	if entry.Session.BlockedBy != "target_scope" {
+		t.Errorf("blocked_by = %q, want %q", entry.Session.BlockedBy, "target_scope")
+	}
+	if entry.Session.Protocol != "HTTP/2" {
+		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/2")
+	}
+	if entry.Session.FlowType != "unary" {
+		t.Errorf("flow_type = %q, want %q", entry.Session.FlowType, "unary")
+	}
+	if entry.Session.Duration <= 0 {
+		t.Errorf("duration = %v, want positive", entry.Session.Duration)
+	}
+	if entry.Send == nil {
+		t.Fatal("send message is nil")
+	}
+	if entry.Send.Method != "GET" {
+		t.Errorf("send method = %q, want %q", entry.Send.Method, "GET")
+	}
+	if entry.Send.URL.String() != reqURL.String() {
+		t.Errorf("send URL = %q, want %q", entry.Send.URL.String(), reqURL.String())
+	}
+	if entry.Receive != nil {
+		t.Error("blocked flow should not have a receive message")
+	}
+	// No safety tags for target_scope.
+	if _, ok := entry.Session.Tags["safety_rule"]; ok {
+		t.Error("target_scope block should not have safety_rule tag")
+	}
+	// RawBytes should be recorded.
+	if len(entry.Send.RawBytes) == 0 {
+		t.Error("send RawBytes should not be empty")
+	}
+}
+
+func TestRecordBlocked_RateLimit(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	reqURL, _ := url.Parse("http://example.com/api/data")
+	req, _ := gohttp.NewRequest("POST", reqURL.String(), nil)
+	req.Host = "example.com"
+
+	p := sendRecordParams{
+		connID:     "conn-2",
+		clientAddr: "127.0.0.1:23456",
+		scheme:     "http",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:23456"},
+		req:        req,
+		reqURL:     reqURL,
+		reqBody:    []byte("request-body"),
+	}
+
+	handler.recordBlocked(ctx, p, "rate_limit", nil, handler.Logger)
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Session.State != "complete" {
+		t.Errorf("state = %q, want %q", entry.Session.State, "complete")
+	}
+	if entry.Session.BlockedBy != "rate_limit" {
+		t.Errorf("blocked_by = %q, want %q", entry.Session.BlockedBy, "rate_limit")
+	}
+	if entry.Session.Protocol != "HTTP/2" {
+		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/2")
+	}
+	if entry.Send == nil {
+		t.Fatal("send message is nil")
+	}
+	if entry.Send.Method != "POST" {
+		t.Errorf("send method = %q, want %q", entry.Send.Method, "POST")
+	}
+	if string(entry.Send.Body) != "request-body" {
+		t.Errorf("send body = %q, want %q", entry.Send.Body, "request-body")
+	}
+	if entry.Receive != nil {
+		t.Error("blocked flow should not have a receive message")
+	}
+}
+
+func TestRecordBlocked_SafetyFilter(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	reqURL, _ := url.Parse("http://example.com/api/sql")
+	req, _ := gohttp.NewRequest("POST", reqURL.String(), nil)
+	req.Host = "example.com"
+
+	p := sendRecordParams{
+		connID:     "conn-3",
+		clientAddr: "127.0.0.1:34567",
+		scheme:     "http",
+		start:      time.Now(),
+		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:34567"},
+		req:        req,
+		reqURL:     reqURL,
+		reqBody:    []byte("DROP TABLE users"),
+		rawFrames:  [][]byte{{0xAA, 0xBB}, {0xCC, 0xDD}},
+	}
+
+	violation := &safety.InputViolation{
+		RuleID:    "destructive-sql",
+		RuleName:  "Destructive SQL",
+		Target:    safety.TargetBody,
+		MatchedOn: "DROP TABLE",
+	}
+
+	handler.recordBlocked(ctx, p, "safety_filter", violation, handler.Logger)
+
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Session.State != "complete" {
+		t.Errorf("state = %q, want %q", entry.Session.State, "complete")
+	}
+	if entry.Session.BlockedBy != "safety_filter" {
+		t.Errorf("blocked_by = %q, want %q", entry.Session.BlockedBy, "safety_filter")
+	}
+	if entry.Session.Protocol != "HTTP/2" {
+		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/2")
+	}
+	if entry.Send == nil {
+		t.Fatal("send message is nil")
+	}
+	if string(entry.Send.Body) != "DROP TABLE users" {
+		t.Errorf("send body = %q, want %q", entry.Send.Body, "DROP TABLE users")
+	}
+	if entry.Receive != nil {
+		t.Error("blocked flow should not have a receive message")
+	}
+	// Verify safety tags.
+	if got := entry.Session.Tags["safety_rule"]; got != "destructive-sql" {
+		t.Errorf("safety_rule tag = %q, want %q", got, "destructive-sql")
+	}
+	if got := entry.Session.Tags["safety_target"]; got != "body" {
+		t.Errorf("safety_target tag = %q, want %q", got, "body")
+	}
+	// Verify raw bytes are recorded.
+	expectedRaw := []byte{0xAA, 0xBB, 0xCC, 0xDD}
+	if !bytes.Equal(entry.Send.RawBytes, expectedRaw) {
+		t.Errorf("RawBytes = %v, want %v", entry.Send.RawBytes, expectedRaw)
+	}
+}
+
+func TestRecordBlocked_NilStore(t *testing.T) {
+	handler := NewHandler(nil, testutil.DiscardLogger())
+
+	ctx := context.Background()
+	reqURL, _ := url.Parse("http://example.com/api")
+	req, _ := gohttp.NewRequest("GET", reqURL.String(), nil)
+
+	p := sendRecordParams{
+		connID: "conn-nil",
+		start:  time.Now(),
+		req:    req,
+		reqURL: reqURL,
+	}
+
+	// Should not panic with nil store.
+	handler.recordBlocked(ctx, p, "target_scope", nil, handler.Logger)
+}
+
+func TestRecordBlocked_CaptureScope(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, testutil.DiscardLogger())
+	// Set capture scope to only capture requests matching "/captured/".
+	scope := proxy.NewCaptureScope()
+	scope.SetRules([]proxy.ScopeRule{{URLPrefix: "/captured/"}}, nil)
+	handler.SetCaptureScope(scope)
+
+	ctx := context.Background()
+
+	// Request outside capture scope.
+	reqURL, _ := url.Parse("http://example.com/not-captured/api")
+	req, _ := gohttp.NewRequest("GET", reqURL.String(), nil)
+
+	p := sendRecordParams{
+		connID: "conn-scope",
+		start:  time.Now(),
+		req:    req,
+		reqURL: reqURL,
+	}
+
+	handler.recordBlocked(ctx, p, "rate_limit", nil, handler.Logger)
+
+	entries := store.Entries()
+	if len(entries) != 0 {
+		t.Errorf("expected 0 flow entries for out-of-scope request, got %d", len(entries))
 	}
 }
