@@ -44,7 +44,7 @@ func ExpandTemplate(input string, kvStore map[string]string) (string, error) {
 		expr := after[:closeIdx]
 		expanded, err := expandExpression(expr, kvStore)
 		if err != nil {
-			return "", fmt.Errorf("template expression §%s§: %w", expr, err)
+			return "", fmt.Errorf("template expression %s%s%s: %w", DelimOpen, expr, DelimClose, err)
 		}
 		result.WriteString(expanded)
 

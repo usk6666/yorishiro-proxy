@@ -44,9 +44,9 @@ func (m *mockHookCallbacks) UpdateState(state *HookState, statusCode int, hadErr
 // --- expandRequestData tests ---
 
 func TestExpandRequestData_URL(t *testing.T) {
-	// Note: url.Parse URL-encodes braces, so we set the RawPath manually
-	// to simulate a URL with template placeholders. In practice, the
-	// template vars in the URL are more commonly in query parameters.
+	// Note: url.Parse percent-encodes § delimiters, so template vars in the
+	// URL path get encoded. In practice, template vars in the URL are more
+	// commonly placed in query parameters where they remain unencoded.
 	u, _ := url.Parse("https://example.com/api?token=§token§")
 	baseData := &RequestData{
 		Method:  "GET",
@@ -140,8 +140,11 @@ func TestExpandRequestData_EmptyKVStore(t *testing.T) {
 	}
 
 	// §version§ is unknown, so macro.ExpandTemplate leaves it as-is.
-	// URL.String() may encode the § character.
-	t.Logf("URL = %q (URL encoding of § is expected)", result.URL.String())
+	// url.Parse percent-encodes § (U+00A7, UTF-8: C2 A7) in the path.
+	wantURL := "https://example.com/api/%C2%A7version%C2%A7"
+	if result.URL.String() != wantURL {
+		t.Errorf("URL = %q, want %q", result.URL.String(), wantURL)
+	}
 	if result.Headers["X-Token"][0] != "§token§" {
 		t.Errorf("Header unchanged = %q, want %q", result.Headers["X-Token"][0], "§token§")
 	}

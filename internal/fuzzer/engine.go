@@ -577,9 +577,11 @@ func expandRequestData(baseData *RequestData, kvStore map[string]string) (*Reque
 			return nil, fmt.Errorf("expand URL: %w", err)
 		}
 		if expanded != rawURL {
-			if u, parseErr := url.Parse(expanded); parseErr == nil {
-				data.URL = u
+			u, parseErr := url.Parse(expanded)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse expanded URL %q: %w", expanded, parseErr)
 			}
+			data.URL = u
 		}
 	}
 
