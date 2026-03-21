@@ -676,3 +676,94 @@ func TestQueue_MaxItemsConcurrent(t *testing.T) {
 		t.Errorf("queue size %d exceeds maxItems 10", q.Len())
 	}
 }
+
+func TestQueue_EnqueueOpts_AtomicVisibility(t *testing.T) {
+	q := NewQueue()
+	rawBytes := []byte("raw request bytes")
+	metadata := map[string]string{
+		"grpc_content_type": "application/grpc+proto",
+		"grpc_compressed":   "false",
+	}
+
+	q.Enqueue("POST", nil, nil, nil, nil, EnqueueOpts{
+		RawBytes: rawBytes,
+		Metadata: metadata,
+	})
+
+	items := q.List()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	item := items[0]
+
+	if string(item.RawBytes) != string(rawBytes) {
+		t.Errorf("RawBytes = %q, want %q", item.RawBytes, rawBytes)
+	}
+	if item.Metadata["grpc_content_type"] != "application/grpc+proto" {
+		t.Errorf("Metadata[grpc_content_type] = %q", item.Metadata["grpc_content_type"])
+	}
+	if item.Metadata["grpc_compressed"] != "false" {
+		t.Errorf("Metadata[grpc_compressed] = %q", item.Metadata["grpc_compressed"])
+	}
+}
+
+func TestQueue_EnqueueOpts_DeepCopy(t *testing.T) {
+	q := NewQueue()
+	rawBytes := []byte("original")
+	metadata := map[string]string{"key": "value"}
+
+	q.Enqueue("GET", nil, nil, nil, nil, EnqueueOpts{
+		RawBytes: rawBytes,
+		Metadata: metadata,
+	})
+
+	// Mutate the inputs after enqueue.
+	rawBytes[0] = 'X'
+	metadata["key"] = "mutated"
+
+	item, _ := q.Get(q.List()[0].ID)
+	if item.RawBytes[0] != 'o' {
+		t.Error("EnqueueOpts should deep-copy RawBytes")
+	}
+	if item.Metadata["key"] != "value" {
+		t.Error("EnqueueOpts should deep-copy Metadata")
+	}
+}
+
+func TestQueue_EnqueueOpts_RawBytesExceedsMaxSize(t *testing.T) {
+	q := NewQueue()
+	oversized := make([]byte, MaxRawBytesSize+1)
+
+	q.Enqueue("GET", nil, nil, nil, nil, EnqueueOpts{
+		RawBytes: oversized,
+	})
+
+	items := q.List()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].RawBytes != nil {
+		t.Error("RawBytes exceeding MaxRawBytesSize should be discarded")
+	}
+}
+
+func TestQueue_EnqueueResponseOpts(t *testing.T) {
+	q := NewQueue()
+	metadata := map[string]string{"grpc_compressed": "true"}
+
+	q.EnqueueResponse("POST", nil, 200, nil, nil, nil, EnqueueOpts{
+		RawBytes: []byte("resp"),
+		Metadata: metadata,
+	})
+
+	items := q.List()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if string(items[0].RawBytes) != "resp" {
+		t.Errorf("RawBytes = %q, want %q", items[0].RawBytes, "resp")
+	}
+	if items[0].Metadata["grpc_compressed"] != "true" {
+		t.Errorf("Metadata[grpc_compressed] = %q", items[0].Metadata["grpc_compressed"])
+	}
+}

@@ -809,39 +809,34 @@ func (h *Handler) enqueueGRPCIntercept(sc *streamContext, body []byte, jsonBody 
 	sc.logger.Info("gRPC unary request intercepted",
 		"method", sc.req.Method, "url", sc.reqURL.String(), "matched_rules", matchedRules)
 
-	id, actionCh := h.InterceptQueue.Enqueue(sc.req.Method, sc.req.URL, sc.req.Header, []byte(jsonBody), matchedRules)
-	defer h.InterceptQueue.Remove(id)
-
-	// Attach raw bytes (the original gRPC wire body).
-	if len(body) > 0 {
-		if err := h.InterceptQueue.SetRawBytes(id, body); err != nil {
-			sc.logger.Warn("gRPC intercept: failed to set raw bytes", "id", id, "error", err)
-		}
+	// Build metadata and raw bytes before Enqueue so they are atomically
+	// visible the moment the item appears in the queue (no race window).
+	opts := intercept.EnqueueOpts{
+		RawBytes: body,
+		Metadata: h.buildGRPCInterceptMetadata(sc, frame),
 	}
 
-	// Attach gRPC metadata for re-encoding on modify_and_forward.
-	h.attachGRPCInterceptMetadata(sc, id, frame)
+	id, actionCh := h.InterceptQueue.Enqueue(sc.req.Method, sc.req.URL, sc.req.Header, []byte(jsonBody), matchedRules, opts)
+	defer h.InterceptQueue.Remove(id)
 
 	return h.waitGRPCInterceptAction(sc, id, actionCh)
 }
 
-// attachGRPCInterceptMetadata sets gRPC-specific metadata on the enqueued
-// intercept item so the MCP tool layer can re-encode the body correctly.
-func (h *Handler) attachGRPCInterceptMetadata(sc *streamContext, id string, frame protobuf.Frame) {
+// buildGRPCInterceptMetadata returns gRPC-specific metadata for attaching
+// to an enqueued intercept item so the MCP tool layer can re-encode the
+// body correctly.
+func (h *Handler) buildGRPCInterceptMetadata(sc *streamContext, frame protobuf.Frame) map[string]string {
 	contentType := sc.req.Header.Get("Content-Type")
 	grpcEncoding := sc.req.Header.Get("Grpc-Encoding")
 	compressed := "false"
 	if frame.Compressed != 0 {
 		compressed = "true"
 	}
-	metadata := map[string]string{
+	return map[string]string{
 		"grpc_content_type": contentType,
 		"grpc_encoding":     grpcEncoding,
 		"grpc_compressed":   compressed,
 		"original_frames":   "1",
-	}
-	if err := h.InterceptQueue.SetMetadata(id, metadata); err != nil {
-		sc.logger.Warn("gRPC intercept: failed to set metadata", "id", id, "error", err)
 	}
 }
 
@@ -1097,28 +1092,23 @@ func (h *Handler) enqueueGRPCResponseIntercept(sc *streamContext, resp *gohttp.R
 		"method", sc.req.Method, "url", sc.reqURL.String(),
 		"status", resp.StatusCode, "matched_rules", matchedRules)
 
-	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		sc.req.Method, sc.req.URL, resp.StatusCode, resp.Header, []byte(jsonBody), matchedRules,
-	)
-	defer h.InterceptQueue.Remove(id)
-
-	// Attach raw bytes (the original gRPC wire body).
-	if len(body) > 0 {
-		if err := h.InterceptQueue.SetRawBytes(id, body); err != nil {
-			sc.logger.Warn("gRPC response intercept: failed to set raw bytes", "id", id, "error", err)
-		}
+	opts := intercept.EnqueueOpts{
+		RawBytes: body,
+		Metadata: h.buildGRPCResponseInterceptMetadata(sc, resp, frame, trailers),
 	}
 
-	// Attach gRPC metadata for re-encoding on modify_and_forward.
-	h.attachGRPCResponseInterceptMetadata(sc, resp, id, frame, trailers)
+	id, actionCh := h.InterceptQueue.EnqueueResponse(
+		sc.req.Method, sc.req.URL, resp.StatusCode, resp.Header, []byte(jsonBody), matchedRules, opts,
+	)
+	defer h.InterceptQueue.Remove(id)
 
 	return h.waitGRPCInterceptAction(sc, id, actionCh)
 }
 
-// attachGRPCResponseInterceptMetadata sets gRPC-specific metadata on the
-// enqueued response intercept item. This includes encoding info for
-// re-encoding and trailer values so the AI agent can see them.
-func (h *Handler) attachGRPCResponseInterceptMetadata(sc *streamContext, resp *gohttp.Response, id string, frame protobuf.Frame, trailers gohttp.Header) {
+// buildGRPCResponseInterceptMetadata returns gRPC-specific metadata for
+// attaching to an enqueued response intercept item. This includes encoding
+// info for re-encoding and trailer values so the AI agent can see them.
+func (h *Handler) buildGRPCResponseInterceptMetadata(sc *streamContext, resp *gohttp.Response, frame protobuf.Frame, trailers gohttp.Header) map[string]string {
 	contentType := resp.Header.Get("Content-Type")
 	respEncoding := resp.Header.Get("Grpc-Encoding")
 	compressed := "false"
@@ -1139,9 +1129,7 @@ func (h *Handler) attachGRPCResponseInterceptMetadata(sc *streamContext, resp *g
 		}
 	}
 
-	if err := h.InterceptQueue.SetMetadata(id, metadata); err != nil {
-		sc.logger.Warn("gRPC response intercept: failed to set metadata", "id", id, "error", err)
-	}
+	return metadata
 }
 
 // applyGRPCResponseInterceptAction applies the AI agent's action to the
