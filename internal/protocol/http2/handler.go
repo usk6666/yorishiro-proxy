@@ -1015,8 +1015,9 @@ func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 // or the timeout expires. Returns the action and true if intercepted, or a
 // zero-value action and false if not intercepted.
 //
-// rawFrames are the raw HTTP/2 frame bytes for this request. They are attached
-// to the enqueued item so that AI agents can inspect and edit them in raw mode.
+// rawFrames are the raw HTTP/2 frame bytes for this request. They are
+// atomically attached to the enqueued item via EnqueueOpts so that AI agents
+// can inspect and edit them in raw mode.
 func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, body []byte, rawFrames [][]byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
@@ -1029,15 +1030,13 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 
 	logger.Info("HTTP/2 request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules)
-	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
-
-	// Attach raw frame bytes to the enqueued item so AI agents can view/edit them.
+	var opts []intercept.EnqueueOpts
 	if joined := joinRawFrames(rawFrames); len(joined) > 0 {
-		if err := h.InterceptQueue.SetRawBytes(id, joined); err != nil {
-			logger.Warn("HTTP/2 intercept: failed to set raw bytes", "id", id, "error", err)
-		}
+		opts = append(opts, intercept.EnqueueOpts{RawBytes: joined})
 	}
+
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules, opts...)
+	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
 
 	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
