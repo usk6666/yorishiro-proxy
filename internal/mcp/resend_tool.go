@@ -1015,7 +1015,10 @@ func resolveTargetAddrRaw(sendMsg *flow.Message, params resendParams) (string, e
 }
 
 // isHTTP1Protocol reports whether the protocol string indicates an HTTP/1.x flow.
+// It handles the SOCKS5+ prefix (e.g., "SOCKS5+HTTP", "SOCKS5+HTTPS") used for
+// flows captured through the SOCKS5 proxy listener.
 func isHTTP1Protocol(protocol string) bool {
+	protocol = strings.TrimPrefix(protocol, "SOCKS5+")
 	return protocol == "HTTP" || protocol == "HTTPS" || strings.HasPrefix(protocol, "HTTP/1")
 }
 
