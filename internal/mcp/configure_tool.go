@@ -281,7 +281,8 @@ func (s *Server) registerConfigure() {
 			"Auto-transform rules automatically modify matching requests/responses (add/set/remove headers, replace body patterns). " +
 			"max_connections dynamically changes the concurrent connection limit. " +
 			"peek_timeout_ms and request_timeout_ms dynamically change protocol detection and HTTP request timeouts. " +
-			"All sections are optional; only specified sections are modified.",
+			"All sections are optional; only specified sections are modified. " +
+			"Note: all settings are session-only (in-memory); they are lost when the proxy restarts. To persist settings, define them in the config file (-config flag).",
 	}, s.handleConfigure)
 }
 
