@@ -43,10 +43,29 @@ func (m *mockHookCallbacks) UpdateState(state *HookState, statusCode int, hadErr
 
 // --- expandRequestData tests ---
 
+func TestExpandRequestData_URLPath(t *testing.T) {
+	// Template vars in URL paths are expanded correctly because expandRequestData
+	// operates on url.URL.Path directly (not via URL.String() which percent-encodes §).
+	u, _ := url.Parse("https://example.com/api/§version§/items")
+	baseData := &RequestData{
+		Method:  "GET",
+		URL:     u,
+		Headers: map[string][]string{},
+	}
+
+	kvStore := map[string]string{"version": "v2"}
+	result, err := expandRequestData(baseData, kvStore)
+	if err != nil {
+		t.Fatalf("expandRequestData() error = %v", err)
+	}
+
+	wantURL := "https://example.com/api/v2/items"
+	if result.URL.String() != wantURL {
+		t.Errorf("URL = %q, want %q", result.URL.String(), wantURL)
+	}
+}
+
 func TestExpandRequestData_URL(t *testing.T) {
-	// Note: url.Parse preserves the raw § delimiters; they are percent-encoded
-	// when the URL is re-serialized (e.g., via URL.String() or EscapedPath()).
-	// In practice, template vars in URLs are more commonly placed in query parameters.
 	u, _ := url.Parse("https://example.com/api?token=§token§")
 	baseData := &RequestData{
 		Method:  "GET",
@@ -139,8 +158,8 @@ func TestExpandRequestData_EmptyKVStore(t *testing.T) {
 		t.Fatalf("expandRequestData() error = %v", err)
 	}
 
-	// §version§ is unknown, so macro.ExpandTemplate leaves it as-is.
-	// url.Parse percent-encodes § (U+00A7, UTF-8: C2 A7) in the path.
+	// §version§ is unknown, so macro.ExpandTemplate leaves it as-is in the Path.
+	// URL.String() percent-encodes the non-ASCII § when serializing the path.
 	wantURL := "https://example.com/api/%C2%A7version%C2%A7"
 	if result.URL.String() != wantURL {
 		t.Errorf("URL = %q, want %q", result.URL.String(), wantURL)

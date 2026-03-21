@@ -559,29 +559,48 @@ func (e *Engine) executeFuzzCaseWithHooks(
 
 // expandRequestData creates a clone of baseData with template expansion applied
 // to the URL, headers, and body using the KV Store values via macro.ExpandTemplate.
-// It obtains the raw URL string from the original baseData before cloning,
-// because Clone() re-encodes the query string (escaping delimiters).
+// URL components (Path, RawQuery) are expanded individually to avoid the § delimiter
+// being percent-encoded by url.URL.String(), which would prevent template matching.
 func expandRequestData(baseData *RequestData, kvStore map[string]string) (*RequestData, error) {
-	// Get the raw URL string before cloning (Clone re-encodes query params).
-	var rawURL string
+	// Preserve original RawQuery before Clone(), which calls Query().Encode()
+	// and re-encodes the non-ASCII § delimiter as %C2%A7.
+	var origRawQuery string
 	if baseData.URL != nil {
-		rawURL = baseData.URL.String()
+		origRawQuery = baseData.URL.RawQuery
 	}
 
 	data := baseData.Clone()
 
-	// Expand URL using the raw string from the original.
-	if rawURL != "" {
-		expanded, err := macro.ExpandTemplate(rawURL, kvStore)
-		if err != nil {
-			return nil, fmt.Errorf("expand URL: %w", err)
-		}
-		if expanded != rawURL {
-			u, parseErr := url.Parse(expanded)
-			if parseErr != nil {
-				return nil, fmt.Errorf("parse expanded URL %q: %w", expanded, parseErr)
+	// Expand URL components individually. url.URL.String() percent-encodes the
+	// non-ASCII § delimiter (U+00A7) in paths, making templates like /api/§version§
+	// appear as /api/%C2%A7version%C2%A7 and unmatchable by ExpandTemplate.
+	if data.URL != nil {
+		// Restore original RawQuery before expansion.
+		data.URL.RawQuery = origRawQuery
+		// Expand path.
+		if data.URL.Path != "" {
+			expanded, err := macro.ExpandTemplate(data.URL.Path, kvStore)
+			if err != nil {
+				return nil, fmt.Errorf("expand URL path: %w", err)
 			}
-			data.URL = u
+			data.URL.Path = expanded
+			data.URL.RawPath = "" // Clear RawPath so Path is used as-is.
+		}
+		// Expand query string (uses RawQuery to preserve original encoding).
+		if data.URL.RawQuery != "" {
+			expanded, err := macro.ExpandTemplate(data.URL.RawQuery, kvStore)
+			if err != nil {
+				return nil, fmt.Errorf("expand URL query: %w", err)
+			}
+			data.URL.RawQuery = expanded
+		}
+		// Expand fragment.
+		if data.URL.Fragment != "" {
+			expanded, err := macro.ExpandTemplate(data.URL.Fragment, kvStore)
+			if err != nil {
+				return nil, fmt.Errorf("expand URL fragment: %w", err)
+			}
+			data.URL.Fragment = expanded
 		}
 	}
 
