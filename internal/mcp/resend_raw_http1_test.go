@@ -26,6 +26,8 @@ func TestIsHTTP1Protocol(t *testing.T) {
 	}{
 		{"HTTP", true},
 		{"HTTPS", true},
+		{"HTTP/1.x", true},
+		{"HTTP/1.1", true},
 		{"HTTP/2", false},
 		{"gRPC", false},
 		{"WebSocket", false},
@@ -141,7 +143,7 @@ func newKeepAliveHTTPServer(t *testing.T) (string, func()) {
 				}
 				// Send response with keep-alive (default for HTTP/1.1).
 				// Do NOT close the connection — wait for the client to close.
-				resp := "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\nhello keepaliv"
+				resp := "HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: keep-alive\r\n\r\nhello keepaliv"
 				c.Write([]byte(resp))
 				// Block to keep connection open (simulating keep-alive).
 				// The connection will be closed when the listener closes.
@@ -166,7 +168,7 @@ func TestResendRaw_HTTP1KeepAlive_NoTimeout(t *testing.T) {
 
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
-			Protocol:  "HTTP",
+			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},

@@ -1016,7 +1016,7 @@ func resolveTargetAddrRaw(sendMsg *flow.Message, params resendParams) (string, e
 
 // isHTTP1Protocol reports whether the protocol string indicates an HTTP/1.x flow.
 func isHTTP1Protocol(protocol string) bool {
-	return protocol == "HTTP" || protocol == "HTTPS"
+	return protocol == "HTTP" || protocol == "HTTPS" || strings.HasPrefix(protocol, "HTTP/1")
 }
 
 // buildAndSendRaw establishes a TCP/TLS connection, sends raw bytes, and reads the response.
@@ -1081,6 +1081,14 @@ func readHTTP1RawResponse(conn net.Conn, rawBytes []byte) ([]byte, error) {
 	// HEAD responses correctly (no body even if Content-Length is present).
 	req, _ := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawBytes)))
 
+	// If ReadRequest failed but the raw bytes contain a HEAD request,
+	// construct a minimal request so ReadResponse skips the body.
+	if req == nil {
+		if method := extractHTTPMethod(rawBytes); strings.EqualFold(method, "HEAD") {
+			req = &http.Request{Method: "HEAD"}
+		}
+	}
+
 	var rawBuf bytes.Buffer
 	br := bufio.NewReader(io.TeeReader(
 		io.LimitReader(conn, config.MaxReplayResponseSize),
@@ -1105,6 +1113,15 @@ func readHTTP1RawResponse(conn net.Conn, rawBytes []byte) ([]byte, error) {
 	}
 
 	return rawBuf.Bytes(), nil
+}
+
+// extractHTTPMethod extracts the HTTP method from the first line of raw request bytes.
+func extractHTTPMethod(rawBytes []byte) string {
+	// Find the first space to extract the method from "METHOD /path HTTP/1.1\r\n".
+	if idx := bytes.IndexByte(rawBytes, ' '); idx > 0 {
+		return string(rawBytes[:idx])
+	}
+	return ""
 }
 
 // recordRawResend saves the raw resend flow and its send/receive messages.
