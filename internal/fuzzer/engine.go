@@ -577,14 +577,18 @@ func expandRequestData(baseData *RequestData, kvStore map[string]string) (*Reque
 	if data.URL != nil {
 		// Restore original RawQuery before expansion.
 		data.URL.RawQuery = origRawQuery
-		// Expand path.
+		// Expand path. Only clear RawPath when the path actually changes,
+		// to preserve the original encoding (e.g., encoded slashes).
 		if data.URL.Path != "" {
-			expanded, err := macro.ExpandTemplate(data.URL.Path, kvStore)
+			origPath := data.URL.Path
+			expanded, err := macro.ExpandTemplate(origPath, kvStore)
 			if err != nil {
 				return nil, fmt.Errorf("expand URL path: %w", err)
 			}
-			data.URL.Path = expanded
-			data.URL.RawPath = "" // Clear RawPath so Path is used as-is.
+			if expanded != origPath {
+				data.URL.Path = expanded
+				data.URL.RawPath = ""
+			}
 		}
 		// Expand query string (uses RawQuery to preserve original encoding).
 		if data.URL.RawQuery != "" {
