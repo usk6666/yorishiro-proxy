@@ -70,9 +70,9 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	}
 
 	// Rate limit check for CONNECT tunnels.
-	if blocked := h.checkRateLimit(hostname); blocked {
+	if denial := h.checkRateLimit(hostname); denial != nil {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedCONNECTSession(ctx, req, hostname, connectAuthority, "rate_limit", logger)
+		h.recordBlockedCONNECTSessionWithTags(ctx, req, hostname, connectAuthority, "rate_limit", rateLimitTags(denial), logger)
 		return nil
 	}
 
@@ -220,9 +220,9 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	}
 
 	// Rate limit enforcement.
-	if blocked := h.checkRateLimit(req.URL.Hostname()); blocked {
+	if denial := h.checkRateLimit(req.URL.Hostname()); denial != nil {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, logger)
+		h.recordBlockedSessionWithTags(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, rateLimitTags(denial), logger)
 		return nil
 	}
 
@@ -893,6 +893,12 @@ func parseConnectPort(hostPort string) int {
 // recordBlockedCONNECTSession records a blocked CONNECT request as a flow
 // with the specified blockedBy reason (e.g. "target_scope", "rate_limit").
 func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.Request, hostname, authority, blockedBy string, logger *slog.Logger) {
+	h.recordBlockedCONNECTSessionWithTags(ctx, req, hostname, authority, blockedBy, nil, logger)
+}
+
+// recordBlockedCONNECTSessionWithTags records a blocked CONNECT request as a flow
+// with the specified blockedBy reason and extra tags (e.g., rate limit detail tags).
+func (h *Handler) recordBlockedCONNECTSessionWithTags(ctx context.Context, req *gohttp.Request, hostname, authority, blockedBy string, extraTags map[string]string, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
@@ -911,6 +917,14 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 		return
 	}
 
+	var tags map[string]string
+	for k, v := range extraTags {
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+		tags[k] = v
+	}
+
 	fl := &flow.Flow{
 		ConnID:    connID,
 		Protocol:  "HTTPS",
@@ -918,6 +932,7 @@ func (h *Handler) recordBlockedCONNECTSession(ctx context.Context, req *gohttp.R
 		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
+		Tags:      tags,
 		BlockedBy: blockedBy,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: clientAddr,

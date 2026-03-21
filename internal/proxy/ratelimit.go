@@ -8,6 +8,17 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// RateLimitDenial describes why a request was denied by the rate limiter.
+// It is returned by Check when a request is rate limited.
+type RateLimitDenial struct {
+	// LimitType indicates which limit was hit: "global" or "per_host".
+	LimitType string
+
+	// EffectiveRPS is the effective rate limit (requests per second) that
+	// caused the denial.
+	EffectiveRPS float64
+}
+
 // RateLimitConfig holds the rate limit settings for the TargetScope.
 // It supports two levels: global (all requests) and per-host.
 // Both Policy and Agent layers can set rate limits. The Agent layer
@@ -111,17 +122,20 @@ func (rl *RateLimiter) EffectiveLimits() RateLimitConfig {
 	}
 }
 
-// Allow checks whether a request to the given hostname is allowed by the
+// Check checks whether a request to the given hostname is allowed by the
 // rate limiter. It consumes one token from both the global limiter and
-// the per-host limiter (if configured). Returns true if the request is
-// allowed, false if rate limited.
-func (rl *RateLimiter) Allow(hostname string) bool {
+// the per-host limiter (if configured). Returns nil if the request is
+// allowed, or a *RateLimitDenial describing why the request was blocked.
+func (rl *RateLimiter) Check(hostname string) *RateLimitDenial {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	// Check global limiter first.
 	if rl.globalLimiter != nil && !rl.globalLimiter.Allow() {
-		return false
+		return &RateLimitDenial{
+			LimitType:    "global",
+			EffectiveRPS: rl.effectiveGlobalRPS,
+		}
 	}
 
 	// Check per-host limiter.
@@ -142,11 +156,21 @@ func (rl *RateLimiter) Allow(hostname string) bool {
 			rl.hostLimiters[key] = limiter
 		}
 		if !limiter.Allow() {
-			return false
+			return &RateLimitDenial{
+				LimitType:    "per_host",
+				EffectiveRPS: rl.effectiveHostRPS,
+			}
 		}
 	}
 
-	return true
+	return nil
+}
+
+// Allow checks whether a request to the given hostname is allowed by the
+// rate limiter. It is a convenience wrapper around Check that returns true
+// if the request is allowed, false if rate limited.
+func (rl *RateLimiter) Allow(hostname string) bool {
+	return rl.Check(hostname) == nil
 }
 
 // HasLimits reports whether any rate limits are configured (either policy or agent).

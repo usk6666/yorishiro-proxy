@@ -514,7 +514,7 @@ func (h *Handler) checkTargetScope(sc *streamContext) bool {
 	writeScopeBlockResponse(sc.w, sc.req.URL.Hostname(), reason)
 	sc.logger.Info("HTTP/2 request blocked by target scope",
 		"host", sc.req.URL.Host, "reason", reason)
-	h.recordBlocked(sc.ctx, sc.srp, "target_scope", nil, sc.logger)
+	h.recordBlocked(sc.ctx, sc.srp, "target_scope", nil, nil, sc.logger)
 	return true
 }
 
@@ -538,7 +538,7 @@ func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
 	sc.logger.Info("HTTP/2 request blocked by safety filter",
 		"rule_id", violation.RuleID, "rule_name", violation.RuleName,
 		"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
-	h.recordBlocked(sc.ctx, sc.srp, "safety_filter", violation, sc.logger)
+	h.recordBlocked(sc.ctx, sc.srp, "safety_filter", violation, nil, sc.logger)
 	return true
 }
 
@@ -558,14 +558,26 @@ func (h *Handler) checkRateLimit(sc *streamContext) bool {
 	if h.RateLimiter == nil || !h.RateLimiter.HasLimits() {
 		return false
 	}
-	if h.RateLimiter.Allow(sc.req.URL.Hostname()) {
+	denial := h.RateLimiter.Check(sc.req.URL.Hostname())
+	if denial == nil {
 		return false
 	}
 	writeRateLimitResponse(sc.w)
 	sc.logger.Info("HTTP/2 request blocked by rate limit",
 		"host", sc.req.URL.Host)
-	h.recordBlocked(sc.ctx, sc.srp, "rate_limit", nil, sc.logger)
+	h.recordBlocked(sc.ctx, sc.srp, "rate_limit", nil, rateLimitTags(denial), sc.logger)
 	return true
+}
+
+// rateLimitTags builds flow tags from a proxy.RateLimitDenial.
+func rateLimitTags(denial *proxy.RateLimitDenial) map[string]string {
+	if denial == nil {
+		return nil
+	}
+	return map[string]string{
+		"rate_limit_type":          denial.LimitType,
+		"rate_limit_effective_rps": fmt.Sprintf("%.1f", denial.EffectiveRPS),
+	}
 }
 
 // writeRateLimitResponse writes a 429 Too Many Requests response for rate limiting.

@@ -511,13 +511,14 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 // rate limit, or safety filter. The session is recorded as State="complete"
 // with BlockedBy set to the blocking reason, and only a send message (no
 // receive). For safety_filter blocks, violation tags (safety_rule,
-// safety_target) are added.
+// safety_target) are added. extraTags are merged into the flow tags
+// (e.g., rate limit detail tags).
 //
 // Valid blockedBy values (consistent with HTTP/1.x recordBlockedSession):
 //   - "target_scope"  — request hostname not in the allowed target scope
 //   - "safety_filter" — request matched a safety filter block rule
 //   - "rate_limit"    — request exceeded the configured rate limit
-func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
+func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blockedBy string, violation *safety.InputViolation, extraTags map[string]string, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
@@ -536,6 +537,12 @@ func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blocked
 		}
 		tags["safety_rule"] = violation.RuleID
 		tags["safety_target"] = violation.Target.String()
+	}
+	for k, v := range extraTags {
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+		tags[k] = v
 	}
 
 	fl := &flow.Flow{
