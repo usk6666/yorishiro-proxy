@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -1013,7 +1014,18 @@ func resolveTargetAddrRaw(sendMsg *flow.Message, params resendParams) (string, e
 	return net.JoinHostPort(host, port), nil
 }
 
+// isHTTP1Protocol reports whether the protocol string indicates an HTTP/1.x flow.
+// It handles the SOCKS5+ prefix (e.g., "SOCKS5+HTTP", "SOCKS5+HTTPS") used for
+// flows captured through the SOCKS5 proxy listener.
+func isHTTP1Protocol(protocol string) bool {
+	protocol = strings.TrimPrefix(protocol, "SOCKS5+")
+	return protocol == "HTTP" || protocol == "HTTPS" || strings.HasPrefix(protocol, "HTTP/1")
+}
+
 // buildAndSendRaw establishes a TCP/TLS connection, sends raw bytes, and reads the response.
+// For HTTP/1.x flows, it uses http.ReadResponse to correctly detect the end of the response,
+// avoiding indefinite blocking when the server uses keep-alive connections.
+// For other protocols (Raw TCP, WebSocket), it falls back to io.ReadAll.
 func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Flow, params resendParams, targetAddr string, rawBytes []byte) ([]byte, time.Time, time.Duration, error) {
 	useTLS := fl.Protocol == "HTTPS"
 	if params.UseTLS != nil {
@@ -1048,13 +1060,80 @@ func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Flow, params rese
 		return nil, start, 0, fmt.Errorf("send raw request: %w", err)
 	}
 
-	respData, err := io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
+	var respData []byte
+	if isHTTP1Protocol(fl.Protocol) {
+		respData, err = readHTTP1RawResponse(conn, rawBytes)
+	} else {
+		respData, err = io.ReadAll(io.LimitReader(conn, config.MaxReplayResponseSize))
+	}
 	if err != nil && len(respData) == 0 {
 		return nil, start, 0, fmt.Errorf("read raw response: %w", err)
 	}
 	duration := time.Since(start)
 
 	return respData, start, duration, nil
+}
+
+// readHTTP1RawResponse reads an HTTP/1.x response from conn using http.ReadResponse
+// to correctly detect message boundaries (Content-Length, chunked transfer encoding,
+// Connection: close). A TeeReader captures the wire-observed raw bytes for L4-capable
+// recording. The request method is inferred from rawBytes to handle HEAD responses
+// (which have no body despite Content-Length).
+func readHTTP1RawResponse(conn net.Conn, rawBytes []byte) ([]byte, error) {
+	// Parse the request method from raw bytes so http.ReadResponse can handle
+	// HEAD responses correctly (no body even if Content-Length is present).
+	req, _ := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawBytes)))
+
+	// If ReadRequest failed but the raw bytes contain a HEAD request,
+	// construct a minimal request so ReadResponse skips the body.
+	if req == nil {
+		if method := extractHTTPMethod(rawBytes); strings.EqualFold(method, "HEAD") {
+			req = &http.Request{Method: "HEAD"}
+		}
+	}
+
+	var rawBuf bytes.Buffer
+	br := bufio.NewReader(io.TeeReader(
+		io.LimitReader(conn, config.MaxReplayResponseSize),
+		&rawBuf,
+	))
+
+	// Loop to skip 1xx informational responses (except 101 Switching Protocols).
+	// The TeeReader accumulates all raw bytes including 1xx responses in rawBuf.
+	for {
+		resp, err := http.ReadResponse(br, req)
+		if err != nil {
+			// If parsing fails, return whatever raw bytes were captured so far.
+			if rawBuf.Len() > 0 {
+				return rawBuf.Bytes(), fmt.Errorf("parse HTTP response: %w", err)
+			}
+			return nil, fmt.Errorf("parse HTTP response: %w", err)
+		}
+
+		// 101 Switching Protocols is a final response (e.g. WebSocket upgrade).
+		if resp.StatusCode >= 200 || resp.StatusCode == http.StatusSwitchingProtocols {
+			defer resp.Body.Close()
+			// Drain the body to ensure TeeReader captures all bytes.
+			_, err = io.Copy(io.Discard, resp.Body)
+			if err != nil {
+				return rawBuf.Bytes(), fmt.Errorf("read HTTP response body: %w", err)
+			}
+			return rawBuf.Bytes(), nil
+		}
+
+		// 1xx informational response: drain body and continue to next response.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// extractHTTPMethod extracts the HTTP method from the first line of raw request bytes.
+func extractHTTPMethod(rawBytes []byte) string {
+	// Find the first space to extract the method from "METHOD /path HTTP/1.1\r\n".
+	if idx := bytes.IndexByte(rawBytes, ' '); idx > 0 {
+		return string(rawBytes[:idx])
+	}
+	return ""
 }
 
 // recordRawResend saves the raw resend flow and its send/receive messages.
