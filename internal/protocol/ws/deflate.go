@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -69,9 +70,10 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 		return payload, nil
 	}
 
-	// Guard against integer overflow when computing the allocation size.
-	if int64(len(payload))+int64(len(flateTrailer)) > maxSize {
-		return nil, fmt.Errorf("deflate decompress: compressed payload too large (%d bytes)", len(payload))
+	// Guard against integer overflow when computing the allocation size
+	// for make([]byte, len(payload)+len(flateTrailer)).
+	if len(payload) > math.MaxInt-len(flateTrailer) {
+		return nil, fmt.Errorf("deflate decompress: allocation size overflow (%d + %d bytes)", len(payload), len(flateTrailer))
 	}
 
 	// Append the DEFLATE trailer per RFC 7692 Section 7.2.2.
