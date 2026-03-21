@@ -44,9 +44,9 @@ func (m *mockHookCallbacks) UpdateState(state *HookState, statusCode int, hadErr
 // --- expandRequestData tests ---
 
 func TestExpandRequestData_URL(t *testing.T) {
-	// Note: url.Parse percent-encodes § delimiters, so template vars in the
-	// URL path get encoded. In practice, template vars in the URL are more
-	// commonly placed in query parameters where they remain unencoded.
+	// Note: url.Parse preserves the raw § delimiters; they are percent-encoded
+	// when the URL is re-serialized (e.g., via URL.String() or EscapedPath()).
+	// In practice, template vars in URLs are more commonly placed in query parameters.
 	u, _ := url.Parse("https://example.com/api?token=§token§")
 	baseData := &RequestData{
 		Method:  "GET",
