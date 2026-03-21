@@ -618,10 +618,10 @@ func TestHandleGRPCStream_TrailersOnlyNoDeadlock(t *testing.T) {
 
 	// Write one gRPC frame so the proxy can forward it to the upstream.
 	// The upstream will respond immediately with Trailers-Only.
+	// The write may fail if the upstream responds before the frame is sent,
+	// which is fine — the test verifies no deadlock, not frame delivery.
 	frame := protogrpc.EncodeFrame(false, []byte("reflection-request"))
-	if _, err := bodyPW.Write(frame); err != nil {
-		t.Fatalf("write initial frame: %v", err)
-	}
+	bodyPW.Write(frame) // best-effort; may fail if upstream already responded
 
 	// Wait for the response with a timeout. Before the fix, this would
 	// deadlock because the proxy never flushed the trailers-only response.
