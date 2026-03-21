@@ -19,6 +19,18 @@ type RateLimitDenial struct {
 	EffectiveRPS float64
 }
 
+// Tags returns a map of tags describing the denial for inclusion in flow records.
+// Returns nil if d is nil.
+func (d *RateLimitDenial) Tags() map[string]string {
+	if d == nil {
+		return nil
+	}
+	return map[string]string{
+		"rate_limit_type":          d.LimitType,
+		"rate_limit_effective_rps": fmt.Sprintf("%.1f", d.EffectiveRPS),
+	}
+}
+
 // RateLimitConfig holds the rate limit settings for the TargetScope.
 // It supports two levels: global (all requests) and per-host.
 // Both Policy and Agent layers can set rate limits. The Agent layer
@@ -123,9 +135,12 @@ func (rl *RateLimiter) EffectiveLimits() RateLimitConfig {
 }
 
 // Check checks whether a request to the given hostname is allowed by the
-// rate limiter. It consumes one token from both the global limiter and
-// the per-host limiter (if configured). Returns nil if the request is
-// allowed, or a *RateLimitDenial describing why the request was blocked.
+// rate limiter. It checks the global limiter first, then the per-host limiter.
+// Each limiter consumes a token only when it allows the request. If the global
+// limiter denies, the per-host limiter is not checked. If the global limiter
+// allows (consuming a global token) but the per-host limiter denies, the
+// global token remains consumed. Returns nil if the request is allowed,
+// or a *RateLimitDenial describing why the request was blocked.
 func (rl *RateLimiter) Check(hostname string) *RateLimitDenial {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()

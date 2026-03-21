@@ -72,7 +72,7 @@ func (h *Handler) handleCONNECT(ctx context.Context, conn net.Conn, req *gohttp.
 	// Rate limit check for CONNECT tunnels.
 	if denial := h.checkRateLimit(hostname); denial != nil {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedCONNECTSessionWithTags(ctx, req, hostname, connectAuthority, "rate_limit", rateLimitTags(denial), logger)
+		h.recordBlockedCONNECTSessionWithTags(ctx, req, hostname, connectAuthority, "rate_limit", denial.Tags(), logger)
 		return nil
 	}
 
@@ -222,7 +222,7 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	// Rate limit enforcement.
 	if denial := h.checkRateLimit(req.URL.Hostname()); denial != nil {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedSessionWithTags(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, rateLimitTags(denial), logger)
+		h.recordBlockedSessionWithTags(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, denial.Tags(), logger)
 		return nil
 	}
 
@@ -917,7 +917,7 @@ func (h *Handler) recordBlockedCONNECTSessionWithTags(ctx context.Context, req *
 		return
 	}
 
-	var tags map[string]string
+	tags := mergeSOCKS5Tags(ctx, nil)
 	for k, v := range extraTags {
 		if tags == nil {
 			tags = make(map[string]string)
@@ -925,9 +925,11 @@ func (h *Handler) recordBlockedCONNECTSessionWithTags(ctx context.Context, req *
 		tags[k] = v
 	}
 
+	protocol := socks5Protocol(ctx, "HTTPS")
+
 	fl := &flow.Flow{
 		ConnID:    connID,
-		Protocol:  "HTTPS",
+		Protocol:  protocol,
 		Scheme:    "https",
 		FlowType:  "unary",
 		State:     "complete",

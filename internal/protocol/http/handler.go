@@ -392,7 +392,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	// Rate limit enforcement (after target scope, before WebSocket).
 	if denial := h.checkRateLimit(req.URL.Hostname()); denial != nil {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedSessionWithTags(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, rateLimitTags(denial), logger)
+		h.recordBlockedSessionWithTags(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, denial.Tags(), logger)
 		return nil
 	}
 	// NOTE (S-LOW-1): WebSocket upgrade requests bypass the safety filter
@@ -757,17 +757,6 @@ func (h *Handler) checkRateLimit(hostname string) *proxy.RateLimitDenial {
 		return nil
 	}
 	return h.RateLimiter.Check(hostname)
-}
-
-// rateLimitTags builds flow tags from a RateLimitDenial.
-func rateLimitTags(denial *proxy.RateLimitDenial) map[string]string {
-	if denial == nil {
-		return nil
-	}
-	return map[string]string{
-		"rate_limit_type":          denial.LimitType,
-		"rate_limit_effective_rps": fmt.Sprintf("%.1f", denial.EffectiveRPS),
-	}
 }
 
 // writeRateLimitResponse writes a 429 Too Many Requests response with

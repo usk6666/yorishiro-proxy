@@ -565,19 +565,8 @@ func (h *Handler) checkRateLimit(sc *streamContext) bool {
 	writeRateLimitResponse(sc.w)
 	sc.logger.Info("HTTP/2 request blocked by rate limit",
 		"host", sc.req.URL.Host)
-	h.recordBlocked(sc.ctx, sc.srp, "rate_limit", nil, rateLimitTags(denial), sc.logger)
+	h.recordBlocked(sc.ctx, sc.srp, "rate_limit", nil, denial.Tags(), sc.logger)
 	return true
-}
-
-// rateLimitTags builds flow tags from a proxy.RateLimitDenial.
-func rateLimitTags(denial *proxy.RateLimitDenial) map[string]string {
-	if denial == nil {
-		return nil
-	}
-	return map[string]string{
-		"rate_limit_type":          denial.LimitType,
-		"rate_limit_effective_rps": fmt.Sprintf("%.1f", denial.EffectiveRPS),
-	}
 }
 
 // writeRateLimitResponse writes a 429 Too Many Requests response for rate limiting.

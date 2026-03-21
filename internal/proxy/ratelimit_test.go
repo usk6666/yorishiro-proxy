@@ -361,6 +361,37 @@ func TestRateLimiter_Check_EffectiveRPS_AgentStricter(t *testing.T) {
 	}
 }
 
+func TestRateLimitDenial_Tags(t *testing.T) {
+	t.Run("nil denial returns nil", func(t *testing.T) {
+		var d *RateLimitDenial
+		if tags := d.Tags(); tags != nil {
+			t.Errorf("Tags() = %v, want nil", tags)
+		}
+	})
+
+	t.Run("global denial", func(t *testing.T) {
+		d := &RateLimitDenial{LimitType: "global", EffectiveRPS: 10}
+		tags := d.Tags()
+		if tags["rate_limit_type"] != "global" {
+			t.Errorf("rate_limit_type = %q, want %q", tags["rate_limit_type"], "global")
+		}
+		if tags["rate_limit_effective_rps"] != "10.0" {
+			t.Errorf("rate_limit_effective_rps = %q, want %q", tags["rate_limit_effective_rps"], "10.0")
+		}
+	})
+
+	t.Run("per_host denial", func(t *testing.T) {
+		d := &RateLimitDenial{LimitType: "per_host", EffectiveRPS: 5.5}
+		tags := d.Tags()
+		if tags["rate_limit_type"] != "per_host" {
+			t.Errorf("rate_limit_type = %q, want %q", tags["rate_limit_type"], "per_host")
+		}
+		if tags["rate_limit_effective_rps"] != "5.5" {
+			t.Errorf("rate_limit_effective_rps = %q, want %q", tags["rate_limit_effective_rps"], "5.5")
+		}
+	})
+}
+
 func TestRateLimitConfig_IsZero(t *testing.T) {
 	if !(RateLimitConfig{}).IsZero() {
 		t.Error("zero config should be zero")
