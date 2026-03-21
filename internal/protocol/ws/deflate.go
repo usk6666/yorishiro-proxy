@@ -17,7 +17,9 @@ type deflateParams struct {
 	enabled bool
 
 	// contextTakeover indicates whether the compressor/decompressor context
-	// is preserved across messages. When true, a single flate.Reader is reused.
+	// is preserved across messages. When true, decompressed output is accumulated
+	// as a dictionary and passed to subsequent messages via flate.NewReaderDict
+	// to maintain the LZ77 sliding window.
 	// When false (no_context_takeover), a fresh reader is created per message.
 	contextTakeover bool
 
@@ -84,7 +86,8 @@ func (ds *deflateState) decompressFresh(src []byte, maxSize int64) ([]byte, erro
 	reader := flate.NewReader(bytes.NewReader(src))
 	defer reader.Close()
 
-	return ds.readDecompressed(reader, maxSize)
+	decoded, _, err := ds.readDecompressed(reader, maxSize)
+	return decoded, err
 }
 
 // decompressWithContext creates a new flate reader per message, providing the
@@ -101,15 +104,26 @@ func (ds *deflateState) decompressWithContext(src []byte, maxSize int64) ([]byte
 	}
 	defer reader.Close()
 
-	decoded, err := ds.readDecompressed(reader, maxSize)
+	decoded, truncated, err := ds.readDecompressed(reader, maxSize)
 	if err != nil {
 		return nil, err
+	}
+
+	// If maxSize truncation occurred, the dictionary would be inconsistent with
+	// the peer's compressor state (LZ77 window desync). Reset the dictionary to
+	// avoid silently producing incorrect decompression for subsequent messages.
+	if truncated {
+		ds.dict = nil
+		return decoded, nil
 	}
 
 	// Update the dictionary with the decompressed output for subsequent messages.
 	ds.dict = append(ds.dict, decoded...)
 	if len(ds.dict) > maxDictSize {
-		ds.dict = ds.dict[len(ds.dict)-maxDictSize:]
+		start := len(ds.dict) - maxDictSize
+		newDict := make([]byte, maxDictSize)
+		copy(newDict, ds.dict[start:])
+		ds.dict = newDict
 	}
 
 	return decoded, nil
@@ -118,22 +132,24 @@ func (ds *deflateState) decompressWithContext(src []byte, maxSize int64) ([]byte
 // readDecompressed reads decompressed data from a flate reader up to maxSize.
 // permessage-deflate streams lack a BFINAL block, so io.ErrUnexpectedEOF is
 // expected and treated as success when data was read.
-func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) ([]byte, error) {
-	decoded, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+// The returned truncated flag indicates whether the output was limited by maxSize.
+func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) (decoded []byte, truncated bool, err error) {
+	decoded, err = io.ReadAll(io.LimitReader(reader, maxSize+1))
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 			if len(decoded) == 0 {
-				return nil, fmt.Errorf("deflate decompress: %w", err)
+				return nil, false, fmt.Errorf("deflate decompress: %w", err)
 			}
 		} else {
-			return nil, fmt.Errorf("deflate decompress: %w", err)
+			return nil, false, fmt.Errorf("deflate decompress: %w", err)
 		}
 	}
 	if int64(len(decoded)) > maxSize {
 		decoded = decoded[:maxSize]
+		truncated = true
 	}
 
-	return decoded, nil
+	return decoded, truncated, nil
 }
 
 // close releases the decompression resources. Each message creates and closes

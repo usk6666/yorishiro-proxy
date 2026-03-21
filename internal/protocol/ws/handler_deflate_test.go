@@ -398,12 +398,16 @@ func TestHandleUpgrade_DeflateContextTakeover_MultipleMessages(t *testing.T) {
 			MaskKey: [4]byte{byte(i), 0x34, 0x56, 0x78},
 			Payload: compressed,
 		}
+		writeErrCh := make(chan error, 1)
 		go func() {
-			WriteFrame(clientEnd, frame)
+			writeErrCh <- WriteFrame(clientEnd, frame)
 		}()
 		// Drain the relayed frame from upstream.
 		if _, err := ReadFrame(upstreamEnd); err != nil {
 			t.Fatalf("upstream read message %d: %v", i, err)
+		}
+		if err := <-writeErrCh; err != nil {
+			t.Fatalf("WriteFrame message %d: %v", i, err)
 		}
 	}
 
@@ -417,8 +421,9 @@ func TestHandleUpgrade_DeflateContextTakeover_MultipleMessages(t *testing.T) {
 		MaskKey: [4]byte{0xAA, 0xBB, 0xCC, 0xDD},
 		Payload: closePayload,
 	}
+	closeWriteErrCh := make(chan error, 1)
 	go func() {
-		WriteFrame(clientEnd, closeFrame)
+		closeWriteErrCh <- WriteFrame(clientEnd, closeFrame)
 	}()
 	ReadFrame(upstreamEnd)
 	upstreamEnd.Close()

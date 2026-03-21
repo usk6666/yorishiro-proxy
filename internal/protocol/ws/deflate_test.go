@@ -346,6 +346,54 @@ func TestDeflateState_Close_ContextTakeover(t *testing.T) {
 	ds.close()
 }
 
+func TestDeflateState_Decompress_ContextTakeover_MaxSizeTruncationResetsDictionary(t *testing.T) {
+	// When maxSize truncation occurs during context takeover decompression, the
+	// dictionary must be reset to prevent LZ77 window desync with the peer's
+	// compressor. After truncation, subsequent messages should still decompress
+	// (without context) rather than silently produce incorrect data.
+	params := deflateParams{
+		enabled:         true,
+		contextTakeover: true,
+		windowBits:      15,
+	}
+	ds := newDeflateState(params)
+	defer ds.close()
+
+	// Compress 3 messages with shared context.
+	messages := [][]byte{
+		[]byte("first message with some content"),
+		bytes.Repeat([]byte("X"), 200), // This will be truncated by maxSize=50
+		[]byte("third message"),        // Must still be processable after reset
+	}
+	compressedMsgs := deflateCompressWithContext(t, messages)
+
+	// Decompress first message normally (large maxSize).
+	decompressed, err := ds.decompress(compressedMsgs[0], 1<<20)
+	if err != nil {
+		t.Fatalf("decompress message 0: %v", err)
+	}
+	if !bytes.Equal(decompressed, messages[0]) {
+		t.Errorf("message 0 = %q, want %q", decompressed, messages[0])
+	}
+	// Dictionary should be populated.
+	if ds.dict == nil {
+		t.Fatal("dict should be non-nil after first message")
+	}
+
+	// Decompress second message with a small maxSize that forces truncation.
+	decompressed, err = ds.decompress(compressedMsgs[1], 50)
+	if err != nil {
+		t.Fatalf("decompress message 1 (truncated): %v", err)
+	}
+	if len(decompressed) != 50 {
+		t.Errorf("truncated message length = %d, want 50", len(decompressed))
+	}
+	// After truncation, dictionary must be reset to nil.
+	if ds.dict != nil {
+		t.Error("dict should be nil after maxSize truncation (LZ77 window desync prevention)")
+	}
+}
+
 func TestParseDeflateExtension_Basic(t *testing.T) {
 	tests := []struct {
 		name                    string
