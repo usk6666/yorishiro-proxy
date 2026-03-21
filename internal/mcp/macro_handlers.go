@@ -189,6 +189,11 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 		return nil, err
 	}
 
+	// Allow run_macro to override the macro-level timeout.
+	if params.TimeoutMs > 0 {
+		m.TimeoutMs = params.TimeoutMs
+	}
+
 	// Target scope enforcement: check each step's target URL before running.
 	if err := s.checkMacroStepsTargetScope(ctx, cfg.Steps); err != nil {
 		return nil, err
