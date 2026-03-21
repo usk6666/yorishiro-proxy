@@ -34,6 +34,16 @@ type deflateParams struct {
 // dictionary context for subsequent messages.
 const maxDictSize = 32768
 
+// maxCompressedPayloadSize is a hard upper bound on the compressed payload size
+// accepted by the permessage-deflate decompressor. This prevents integer
+// overflow in size computations and avoids attempting to allocate absurdly
+// large buffers when handling attacker-controlled data.
+//
+// The limit is intentionally very large so that it does not interfere with
+// normal use cases, while still satisfying static analysis requirements and
+// providing a safety net against pathological inputs.
+const maxCompressedPayloadSize = math.MaxInt32
+
 // deflateState manages the decompression state for one relay direction.
 //
 // For contextTakeover=false (no_context_takeover), a fresh flate.Reader is
@@ -77,6 +87,13 @@ func checkAllocationOverflow(payloadLen, trailerLen int) error {
 func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error) {
 	if len(payload) == 0 {
 		return payload, nil
+	}
+
+	// Enforce a hard upper bound on the compressed payload size to avoid
+	// pathological allocations and satisfy static analysis that this value
+	// cannot be arbitrarily large.
+	if len(payload) > maxCompressedPayloadSize {
+		return nil, fmt.Errorf("deflate decompress: compressed payload too large (%d bytes)", len(payload))
 	}
 
 	// Guard against integer overflow when computing the allocation size
