@@ -60,6 +60,15 @@ func newDeflateState(params deflateParams) *deflateState {
 // before decompression, as specified in RFC 7692 Section 7.2.2.
 var flateTrailer = []byte{0x00, 0x00, 0xff, 0xff}
 
+// checkAllocationOverflow checks whether adding trailerLen to payloadLen
+// would overflow int, which would cause a runtime panic in make().
+func checkAllocationOverflow(payloadLen, trailerLen int) error {
+	if payloadLen > math.MaxInt-trailerLen {
+		return fmt.Errorf("deflate decompress: allocation size overflow (%d + %d bytes)", payloadLen, trailerLen)
+	}
+	return nil
+}
+
 // decompress decompresses a permessage-deflate payload.
 // Per RFC 7692 Section 7.2.2, the 4-byte trailer (0x00 0x00 0xFF 0xFF) must be
 // appended before decompression.
@@ -72,8 +81,8 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 
 	// Guard against integer overflow when computing the allocation size
 	// for make([]byte, len(payload)+len(flateTrailer)).
-	if len(payload) > math.MaxInt-len(flateTrailer) {
-		return nil, fmt.Errorf("deflate decompress: allocation size overflow (%d + %d bytes)", len(payload), len(flateTrailer))
+	if err := checkAllocationOverflow(len(payload), len(flateTrailer)); err != nil {
+		return nil, err
 	}
 
 	// Append the DEFLATE trailer per RFC 7692 Section 7.2.2.
