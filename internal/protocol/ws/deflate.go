@@ -69,6 +69,11 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 		return payload, nil
 	}
 
+	// Guard against integer overflow when computing the allocation size.
+	if int64(len(payload))+int64(len(flateTrailer)) > maxSize {
+		return nil, fmt.Errorf("deflate decompress: compressed payload too large (%d bytes)", len(payload))
+	}
+
 	// Append the DEFLATE trailer per RFC 7692 Section 7.2.2.
 	src := make([]byte, len(payload)+len(flateTrailer))
 	copy(src, payload)
