@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -391,6 +392,52 @@ func TestDeflateState_Decompress_ContextTakeover_MaxSizeTruncationResetsDictiona
 	// After truncation, dictionary must be reset to nil.
 	if ds.dict != nil {
 		t.Error("dict should be nil after maxSize truncation (LZ77 window desync prevention)")
+	}
+}
+
+func TestCheckAllocationOverflow(t *testing.T) {
+	trailerLen := len(flateTrailer)
+
+	tests := []struct {
+		name       string
+		payloadLen int
+		wantErr    bool
+	}{
+		{
+			name:       "normal size",
+			payloadLen: 1024,
+			wantErr:    false,
+		},
+		{
+			name:       "zero payload",
+			payloadLen: 0,
+			wantErr:    false,
+		},
+		{
+			name:       "overflow: math.MaxInt",
+			payloadLen: math.MaxInt,
+			wantErr:    true,
+		},
+		{
+			name:       "overflow: math.MaxInt - trailerLen + 1",
+			payloadLen: math.MaxInt - trailerLen + 1,
+			wantErr:    true,
+		},
+		{
+			name:       "boundary: exactly math.MaxInt - trailerLen",
+			payloadLen: math.MaxInt - trailerLen,
+			wantErr:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkAllocationOverflow(tt.payloadLen, trailerLen)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkAllocationOverflow(%d, %d) error = %v, wantErr %v",
+					tt.payloadLen, trailerLen, err, tt.wantErr)
+			}
+		})
 	}
 }
 
