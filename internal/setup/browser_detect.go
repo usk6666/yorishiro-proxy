@@ -14,7 +14,7 @@ import (
 
 // browserDetection holds the result of browser auto-detection.
 type browserDetection struct {
-	// browserName is the Playwright browser name ("chromium" or "firefox").
+	// browserName is the Playwright browser name (e.g., "chromium", "firefox", "webkit").
 	browserName string
 	// channel is the Playwright channel (e.g., "chromium", "chrome"), empty for Firefox.
 	channel string
@@ -269,15 +269,11 @@ func detectionFromChannel(channel string) browserDetection {
 }
 
 // resolveInstallTarget determines the browser install target from config data.
-// It checks both channel and browserName to avoid mismatches (e.g., installing
-// chromium when the config specifies firefox).
+// It prioritizes explicit browserName over channel to prevent mismatches
+// (e.g., browserName: "firefox" with a stale channel: "chrome").
 func resolveInstallTarget(configData []byte) browserDetection {
-	ch := extractChannel(configData)
-	if ch != "" {
-		return detectionFromChannel(ch)
-	}
-
-	// Honor explicit browserName when channel is absent.
+	// Check browserName first — it takes priority over channel for non-chromium
+	// browsers to prevent stale channel values from causing wrong installs.
 	bn := extractBrowserName(configData)
 	switch bn {
 	case "firefox":
@@ -288,6 +284,11 @@ func resolveInstallTarget(configData []byte) browserDetection {
 			installTarget: "firefox",
 		}
 	case "chromium":
+		// For chromium, check if a channel specifies a more specific target (e.g., "chrome").
+		ch := extractChannel(configData)
+		if ch != "" {
+			return detectionFromChannel(ch)
+		}
 		return browserDetection{
 			browserName:   "chromium",
 			channel:       "",
@@ -301,6 +302,12 @@ func resolveInstallTarget(configData []byte) browserDetection {
 			isChromium:    false,
 			installTarget: "webkit",
 		}
+	}
+
+	// No recognized browserName — check channel as fallback.
+	ch := extractChannel(configData)
+	if ch != "" {
+		return detectionFromChannel(ch)
 	}
 
 	// Fall back to auto-detection only when neither channel nor a recognized

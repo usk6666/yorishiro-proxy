@@ -83,18 +83,13 @@ func WritePlaywrightConfig(projectDir, listenAddr string, httpsOption Playwright
 	}
 
 	// Determine if the browser is Chromium-based for --no-sandbox.
-	// Use the effective browserName from the merged config, not just the detection result,
-	// to handle cases where config explicitly sets a different browser than auto-detected.
+	// Derive from the effective browserName in the merged config: only "chromium"
+	// is Chromium-based; all others (firefox, webkit, etc.) are not.
 	isChromium := det.isChromium
 	if raw, ok := browser["browserName"]; ok {
 		var bn string
-		if json.Unmarshal(raw, &bn) == nil {
-			switch bn {
-			case "firefox":
-				isChromium = false
-			case "chromium":
-				isChromium = true
-			}
+		if json.Unmarshal(raw, &bn) == nil && bn != "" {
+			isChromium = (bn == "chromium")
 		}
 	}
 
@@ -156,15 +151,16 @@ func applyProxySettings(browser map[string]json.RawMessage, listenAddr string, d
 	}
 
 	// Set channel based on detected browser if not already set.
-	// Firefox does not use a channel; skip injection if browserName is "firefox".
-	isFirefox := false
+	// Only inject a Chromium channel when the effective browserName is "chromium";
+	// non-Chromium browsers (firefox, webkit, etc.) do not use channels.
+	effectiveIsChromium := true
 	if raw, ok := browser["browserName"]; ok {
 		var bn string
-		if json.Unmarshal(raw, &bn) == nil && bn == "firefox" {
-			isFirefox = true
+		if json.Unmarshal(raw, &bn) == nil && bn != "" {
+			effectiveIsChromium = (bn == "chromium")
 		}
 	}
-	if _, ok := launchOptions["channel"]; !ok && det.channel != "" && !isFirefox {
+	if _, ok := launchOptions["channel"]; !ok && det.channel != "" && effectiveIsChromium {
 		launchOptions["channel"] = json.RawMessage(fmt.Sprintf("%q", det.channel))
 	}
 

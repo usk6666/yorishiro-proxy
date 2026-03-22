@@ -605,6 +605,18 @@ func TestResolveInstallTarget(t *testing.T) {
 			wantBrowser: "chromium",
 		},
 		{
+			name:        "browserName chromium with channel chrome",
+			configJSON:  `{"browser":{"browserName":"chromium","launchOptions":{"channel":"chrome"}}}`,
+			wantInstall: "chrome",
+			wantBrowser: "chromium",
+		},
+		{
+			name:        "browserName firefox with stale channel chrome",
+			configJSON:  `{"browser":{"browserName":"firefox","launchOptions":{"channel":"chrome"}}}`,
+			wantInstall: "firefox",
+			wantBrowser: "firefox",
+		},
+		{
 			name:        "browserName webkit without channel",
 			configJSON:  `{"browser":{"browserName":"webkit"}}`,
 			wantInstall: "webkit",
