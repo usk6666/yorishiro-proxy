@@ -351,10 +351,9 @@ func (s *Server) resetSettingsToDefaults() {
 		setter.SetUpstreamProxy(nil)
 	}
 
-	// Reset TLS fingerprint to default ("chrome").
-	for _, setter := range s.deps.tlsFingerprintSetters {
-		setter.SetTLSFingerprint("chrome")
-	}
+	// Reset TLS fingerprint to default ("chrome"), including transport rebuild.
+	// Use applyTLSFingerprint to ensure transport is reconstructed (USK-467).
+	_ = s.applyTLSFingerprint("chrome")
 
 	// Reset global client certificate.
 	if s.deps.hostTLSRegistry != nil {
@@ -925,17 +924,69 @@ var validTLSFingerprints = map[string]bool{
 	"none":    true,
 }
 
-// applyTLSFingerprint validates the profile name and applies it to all registered handlers.
+// applyTLSFingerprint validates the profile name, builds the corresponding
+// TLSTransport, and applies both the profile name and transport to all
+// registered handlers and deps.tlsTransport (used by resend).
 // The profile name is normalized to lowercase before validation.
 func (s *Server) applyTLSFingerprint(profile string) error {
 	profile = strings.ToLower(profile)
 	if !validTLSFingerprints[profile] {
 		return fmt.Errorf("invalid tls_fingerprint %q: valid values are chrome, firefox, safari, edge, random, none", profile)
 	}
+
+	transport := s.buildTLSTransport(profile)
+
 	for _, setter := range s.deps.tlsFingerprintSetters {
 		setter.SetTLSFingerprint(profile)
+		setter.SetTLSTransport(transport)
 	}
+
+	// Update resend transport so that resend/resend_raw also use the new profile.
+	s.deps.tlsTransport = transport
+
 	return nil
+}
+
+// buildTLSTransport creates a TLSTransport for the given profile name.
+// "none" produces a StandardTransport (Go crypto/tls); all others produce
+// a UTLSTransport with the matching browser fingerprint.
+func (s *Server) buildTLSTransport(profile string) httputil.TLSTransport {
+	insecure := s.currentInsecureSkipVerify()
+
+	if profile == "none" {
+		return &httputil.StandardTransport{
+			InsecureSkipVerify: insecure,
+			HostTLS:            s.deps.hostTLSRegistry,
+		}
+	}
+
+	bp, err := httputil.ParseBrowserProfile(profile)
+	if err != nil {
+		// Fallback — should not happen since profile was validated above.
+		return &httputil.StandardTransport{
+			InsecureSkipVerify: insecure,
+			HostTLS:            s.deps.hostTLSRegistry,
+		}
+	}
+
+	return &httputil.UTLSTransport{
+		Profile:            bp,
+		InsecureSkipVerify: insecure,
+		HostTLS:            s.deps.hostTLSRegistry,
+	}
+}
+
+// currentInsecureSkipVerify reads the InsecureSkipVerify setting from the
+// current deps.tlsTransport. Returns false when no transport is set.
+func (s *Server) currentInsecureSkipVerify() bool {
+	switch t := s.deps.tlsTransport.(type) {
+	case *httputil.UTLSTransport:
+		return t.InsecureSkipVerify
+	case *httputil.StandardTransport:
+		return t.InsecureSkipVerify
+	default:
+		return false
+	}
 }
 
 // currentTLSFingerprint returns the current TLS fingerprint profile from the first
