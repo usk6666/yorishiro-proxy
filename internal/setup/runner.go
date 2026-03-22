@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -86,7 +87,7 @@ func (r *Runner) Install(ctx context.Context) error {
 	case TargetSkills:
 		return r.installSkills()
 	case TargetPlaywright:
-		return r.installPlaywright()
+		return r.installPlaywright(ctx)
 	default:
 		return r.installAll(ctx, binaryPath)
 	}
@@ -245,7 +246,7 @@ func (r *Runner) installSkills() error {
 }
 
 // installPlaywright configures Playwright integration.
-func (r *Runner) installPlaywright() error {
+func (r *Runner) installPlaywright(ctx context.Context) error {
 	r.printf("--- Playwright integration ---\n\n")
 
 	projectDir, err := os.Getwd()
@@ -276,7 +277,7 @@ func (r *Runner) installPlaywright() error {
 	}
 
 	if httpsOption == PlaywrightHTTPSIgnore || httpsOption == PlaywrightHTTPSBoth {
-		if err := r.writePlaywrightConfigFile(projectDir, httpsOption); err != nil {
+		if err := r.writePlaywrightConfigFile(ctx, projectDir, httpsOption); err != nil {
 			return err
 		}
 	}
@@ -309,7 +310,7 @@ func (r *Runner) resolvePlaywrightHTTPSOption() PlaywrightHTTPSOption {
 
 // writePlaywrightConfigFile writes the Playwright configuration and reports the result.
 // After writing, it attempts to ensure the configured browser is installed.
-func (r *Runner) writePlaywrightConfigFile(projectDir string, httpsOption PlaywrightHTTPSOption) error {
+func (r *Runner) writePlaywrightConfigFile(ctx context.Context, projectDir string, httpsOption PlaywrightHTTPSOption) error {
 	backupPath, err := WritePlaywrightConfig(projectDir, r.opts.ListenAddr, httpsOption, r.now())
 	if err != nil {
 		return err
@@ -322,14 +323,11 @@ func (r *Runner) writePlaywrightConfigFile(projectDir string, httpsOption Playwr
 
 	// Read the written config to determine which browser to install.
 	configData, readErr := os.ReadFile(configPath)
-	if readErr == nil {
-		det := detectBrowserChannel()
-		ch := extractChannel(configData)
-		if ch != "" {
-			// Override detection with the actual channel from config.
-			det = detectionFromChannel(ch)
-		}
-		if installErr := EnsureBrowserInstalled(det); installErr != nil {
+	if readErr != nil {
+		slog.Debug("failed to read config for browser install", "error", readErr)
+	} else {
+		det := resolveInstallTarget(configData)
+		if installErr := EnsureBrowserInstalled(ctx, det); installErr != nil {
 			r.printf("  Warning: %v\n", installErr)
 		}
 	}

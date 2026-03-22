@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -130,6 +131,11 @@ func TestWritePlaywrightConfig_NewFile(t *testing.T) {
 }
 
 func TestWritePlaywrightConfig_NewFile_WithChromiumDetected(t *testing.T) {
+	chromiumPath := candidatePath("chromium")
+	if chromiumPath == "" {
+		t.Skipf("no chromium paths defined for %s", runtime.GOOS)
+	}
+
 	origFile := fileExistsFunc
 	origContainer := containerCheckFunc
 	t.Cleanup(func() {
@@ -137,7 +143,7 @@ func TestWritePlaywrightConfig_NewFile_WithChromiumDetected(t *testing.T) {
 		containerCheckFunc = origContainer
 	})
 	fileExistsFunc = func(path string) bool {
-		return path == "/usr/bin/chromium"
+		return path == chromiumPath
 	}
 	containerCheckFunc = func() containerCheck {
 		return containerCheck{}
@@ -178,6 +184,69 @@ func TestWritePlaywrightConfig_NewFile_WithChromiumDetected(t *testing.T) {
 	}
 	if channel != "chromium" {
 		t.Errorf("launchOptions.channel = %q, want %q", channel, "chromium")
+	}
+}
+
+func TestWritePlaywrightConfig_ExistingFirefox_NoChannelInjected(t *testing.T) {
+	// When existing config has browserName: "firefox", auto-detected chromium
+	// channel must NOT be injected (Copilot review finding).
+	chromiumPath := candidatePath("chromium")
+	if chromiumPath == "" {
+		t.Skipf("no chromium paths defined for %s", runtime.GOOS)
+	}
+
+	origFile := fileExistsFunc
+	origContainer := containerCheckFunc
+	t.Cleanup(func() {
+		fileExistsFunc = origFile
+		containerCheckFunc = origContainer
+	})
+	// Simulate chromium installed (would set channel: "chromium" by auto-detect).
+	fileExistsFunc = func(path string) bool {
+		return path == chromiumPath
+	}
+	containerCheckFunc = func() containerCheck { return containerCheck{} }
+
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
+
+	// Create existing config with browserName: "firefox".
+	playwrightDir := filepath.Join(dir, ".playwright")
+	if err := os.MkdirAll(playwrightDir, 0755); err != nil {
+		t.Fatalf("create .playwright dir: %v", err)
+	}
+	configPath := PlaywrightConfigPath(dir)
+	existing := `{"browser":{"browserName":"firefox","launchOptions":{}}}`
+	if err := os.WriteFile(configPath, []byte(existing), 0644); err != nil {
+		t.Fatalf("write existing: %v", err)
+	}
+
+	_, err := WritePlaywrightConfig(dir, "127.0.0.1:8080", PlaywrightHTTPSSkip, now)
+	if err != nil {
+		t.Fatalf("WritePlaywrightConfig() error: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	var browser map[string]json.RawMessage
+	if err := json.Unmarshal(cfg["browser"], &browser); err != nil {
+		t.Fatalf("parse browser: %v", err)
+	}
+	var lo map[string]json.RawMessage
+	if err := json.Unmarshal(browser["launchOptions"], &lo); err != nil {
+		t.Fatalf("parse launchOptions: %v", err)
+	}
+
+	// Channel must NOT be set when browserName is firefox.
+	if _, ok := lo["channel"]; ok {
+		t.Error("expected no channel injection when browserName is firefox")
 	}
 }
 

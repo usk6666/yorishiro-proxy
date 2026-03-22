@@ -1,16 +1,37 @@
 package setup
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 )
 
+// candidatePath returns the first known path for a browser candidate on the current OS.
+// Returns empty string if no paths are defined for this OS (e.g., chromium on Windows).
+func candidatePath(name string) string {
+	for _, c := range defaultCandidates {
+		if c.name == name {
+			paths := c.paths[runtime.GOOS]
+			if len(paths) > 0 {
+				return paths[0]
+			}
+		}
+	}
+	return ""
+}
+
 func TestDetectBrowserChannel(t *testing.T) {
+	chromiumPath := candidatePath("chromium")
+	firefoxPath := candidatePath("firefox")
+	chromePath := candidatePath("chrome")
+
 	tests := []struct {
 		name          string
 		existingFiles map[string]bool
+		skipIf        string // candidate name that must have a path on this OS
 		wantBrowser   string
 		wantChannel   string
 		wantChromium  bool
@@ -18,7 +39,8 @@ func TestDetectBrowserChannel(t *testing.T) {
 	}{
 		{
 			name:          "chromium found",
-			existingFiles: map[string]bool{"/usr/bin/chromium": true},
+			existingFiles: map[string]bool{chromiumPath: true},
+			skipIf:        "chromium",
 			wantBrowser:   "chromium",
 			wantChannel:   "chromium",
 			wantChromium:  true,
@@ -26,7 +48,8 @@ func TestDetectBrowserChannel(t *testing.T) {
 		},
 		{
 			name:          "firefox found",
-			existingFiles: map[string]bool{"/usr/bin/firefox": true},
+			existingFiles: map[string]bool{firefoxPath: true},
+			skipIf:        "firefox",
 			wantBrowser:   "firefox",
 			wantChannel:   "",
 			wantChromium:  false,
@@ -34,7 +57,8 @@ func TestDetectBrowserChannel(t *testing.T) {
 		},
 		{
 			name:          "chrome found",
-			existingFiles: map[string]bool{"/usr/bin/google-chrome": true},
+			existingFiles: map[string]bool{chromePath: true},
+			skipIf:        "chrome",
 			wantBrowser:   "chromium",
 			wantChannel:   "chrome",
 			wantChromium:  true,
@@ -42,7 +66,8 @@ func TestDetectBrowserChannel(t *testing.T) {
 		},
 		{
 			name:          "chromium takes priority over firefox",
-			existingFiles: map[string]bool{"/usr/bin/chromium": true, "/usr/bin/firefox": true},
+			existingFiles: map[string]bool{chromiumPath: true, firefoxPath: true},
+			skipIf:        "chromium",
 			wantBrowser:   "chromium",
 			wantChannel:   "chromium",
 			wantChromium:  true,
@@ -50,7 +75,8 @@ func TestDetectBrowserChannel(t *testing.T) {
 		},
 		{
 			name:          "firefox takes priority over chrome",
-			existingFiles: map[string]bool{"/usr/bin/firefox": true, "/usr/bin/google-chrome": true},
+			existingFiles: map[string]bool{firefoxPath: true, chromePath: true},
+			skipIf:        "firefox",
 			wantBrowser:   "firefox",
 			wantChannel:   "",
 			wantChromium:  false,
@@ -68,6 +94,10 @@ func TestDetectBrowserChannel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.skipIf != "" && candidatePath(tt.skipIf) == "" {
+				t.Skipf("no %s paths defined for %s", tt.skipIf, runtime.GOOS)
+			}
+
 			orig := fileExistsFunc
 			defer func() { fileExistsFunc = orig }()
 			fileExistsFunc = func(path string) bool {
@@ -339,11 +369,16 @@ func TestWritePlaywrightConfig_ContainerAddsNoSandbox(t *testing.T) {
 		return containerCheck{hasDockerenv: true}
 	}
 
+	chromiumPath := candidatePath("chromium")
+	if chromiumPath == "" {
+		t.Skipf("no chromium paths defined for %s", runtime.GOOS)
+	}
+
 	// Mock chromium as detected browser.
 	origFile := fileExistsFunc
 	defer func() { fileExistsFunc = origFile }()
 	fileExistsFunc = func(path string) bool {
-		return path == "/usr/bin/chromium"
+		return path == chromiumPath
 	}
 
 	dir := t.TempDir()
@@ -396,11 +431,16 @@ func TestWritePlaywrightConfig_ContainerFirefoxNoSandboxSkipped(t *testing.T) {
 		return containerCheck{hasDockerenv: true}
 	}
 
+	firefoxPath := candidatePath("firefox")
+	if firefoxPath == "" {
+		t.Skipf("no firefox paths defined for %s", runtime.GOOS)
+	}
+
 	// Mock firefox as detected browser.
 	origFile := fileExistsFunc
 	defer func() { fileExistsFunc = origFile }()
 	fileExistsFunc = func(path string) bool {
-		return path == "/usr/bin/firefox"
+		return path == firefoxPath
 	}
 
 	dir := t.TempDir()
@@ -490,10 +530,15 @@ func TestIsBrowserInstalled(t *testing.T) {
 	defer func() { fileExistsFunc = orig }()
 
 	t.Run("installed", func(t *testing.T) {
-		fileExistsFunc = func(path string) bool {
-			return path == "/usr/bin/chromium"
+		// Use a browser that has paths on the current OS.
+		firefoxPath := candidatePath("firefox")
+		if firefoxPath == "" {
+			t.Skipf("no firefox paths defined for %s", runtime.GOOS)
 		}
-		det := browserDetection{installTarget: "chromium"}
+		fileExistsFunc = func(path string) bool {
+			return path == firefoxPath
+		}
+		det := browserDetection{installTarget: "firefox"}
 		if !isBrowserInstalled(det) {
 			t.Error("expected browser to be detected as installed")
 		}
@@ -506,6 +551,89 @@ func TestIsBrowserInstalled(t *testing.T) {
 			t.Error("expected browser to be detected as not installed")
 		}
 	})
+}
+
+func TestExtractBrowserName(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"present", []byte(`{"browser":{"browserName":"firefox"}}`), "firefox"},
+		{"absent", []byte(`{"browser":{}}`), ""},
+		{"invalid JSON", []byte(`{invalid`), ""},
+		{"empty", []byte{}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractBrowserName(tt.data)
+			if got != tt.want {
+				t.Errorf("extractBrowserName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveInstallTarget(t *testing.T) {
+	orig := fileExistsFunc
+	defer func() { fileExistsFunc = orig }()
+	fileExistsFunc = func(_ string) bool { return false }
+
+	tests := []struct {
+		name        string
+		configJSON  string
+		wantInstall string
+		wantBrowser string
+	}{
+		{
+			name:        "channel chrome overrides detection",
+			configJSON:  `{"browser":{"launchOptions":{"channel":"chrome"}}}`,
+			wantInstall: "chrome",
+			wantBrowser: "chromium",
+		},
+		{
+			name:        "browserName firefox without channel",
+			configJSON:  `{"browser":{"browserName":"firefox"}}`,
+			wantInstall: "firefox",
+			wantBrowser: "firefox",
+		},
+		{
+			name:        "no channel no browserName falls back to detect",
+			configJSON:  `{"browser":{}}`,
+			wantInstall: "chromium",
+			wantBrowser: "chromium",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			det := resolveInstallTarget([]byte(tt.configJSON))
+			if det.installTarget != tt.wantInstall {
+				t.Errorf("installTarget = %q, want %q", det.installTarget, tt.wantInstall)
+			}
+			if det.browserName != tt.wantBrowser {
+				t.Errorf("browserName = %q, want %q", det.browserName, tt.wantBrowser)
+			}
+		})
+	}
+}
+
+func TestEnsureBrowserInstalled_WithContext(t *testing.T) {
+	orig := fileExistsFunc
+	defer func() { fileExistsFunc = orig }()
+	// Simulate browser already installed.
+	firefoxPath := candidatePath("firefox")
+	if firefoxPath == "" {
+		t.Skipf("no firefox paths defined for %s", runtime.GOOS)
+	}
+	fileExistsFunc = func(path string) bool {
+		return path == firefoxPath
+	}
+
+	ctx := context.Background()
+	det := browserDetection{installTarget: "firefox"}
+	if err := EnsureBrowserInstalled(ctx, det); err != nil {
+		t.Errorf("expected no error for installed browser, got: %v", err)
+	}
 }
 
 // Helper functions for tests.

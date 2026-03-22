@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -42,7 +43,7 @@ var defaultCandidates = []browserCandidate{
 		paths: map[string][]string{
 			"linux":   {"/usr/bin/chromium", "/usr/bin/chromium-browser"},
 			"darwin":  {"/Applications/Chromium.app/Contents/MacOS/Chromium"},
-			"windows": {},
+			"windows": {}, // Chromium has no standard install path on Windows.
 		},
 	},
 	{
@@ -72,7 +73,7 @@ var defaultCandidates = []browserCandidate{
 }
 
 // fileExistsFunc is the function used to check file existence.
-// Replaceable for testing.
+// Replaceable for testing. Must not be modified concurrently (no t.Parallel).
 var fileExistsFunc = fileExists
 
 func fileExists(path string) bool {
@@ -109,7 +110,7 @@ func detectBrowserChannel() browserDetection {
 }
 
 // containerCheckFunc is the function used to check container indicators.
-// Replaceable for testing.
+// Replaceable for testing. Must not be modified concurrently (no t.Parallel).
 var containerCheckFunc = defaultContainerCheck
 
 type containerCheck struct {
@@ -190,10 +191,10 @@ func applyNoSandbox(browser map[string]json.RawMessage, isChromium bool) error {
 	}
 
 	args = append(args, "--no-sandbox")
-	argsJSON, _ := json.Marshal(args)
+	argsJSON, _ := json.Marshal(args) // json.Marshal on []string cannot fail.
 	launchOptions["args"] = argsJSON
 
-	launchOptionsJSON, _ := json.Marshal(launchOptions)
+	launchOptionsJSON, _ := json.Marshal(launchOptions) // json.Marshal on map[string]json.RawMessage cannot fail.
 	browser["launchOptions"] = launchOptionsJSON
 
 	slog.Debug("added --no-sandbox to launchOptions.args")
@@ -266,6 +267,28 @@ func detectionFromChannel(channel string) browserDetection {
 	}
 }
 
+// resolveInstallTarget determines the browser install target from config data.
+// It checks both channel and browserName to avoid mismatches (e.g., installing
+// chromium when the config specifies firefox).
+func resolveInstallTarget(configData []byte) browserDetection {
+	ch := extractChannel(configData)
+	if ch != "" {
+		return detectionFromChannel(ch)
+	}
+
+	bn := extractBrowserName(configData)
+	if bn == "firefox" {
+		return browserDetection{
+			browserName:   "firefox",
+			channel:       "",
+			isChromium:    false,
+			installTarget: "firefox",
+		}
+	}
+
+	return detectBrowserChannel()
+}
+
 // isBrowserInstalled checks if a browser binary is available for the given detection result.
 func isBrowserInstalled(det browserDetection) bool {
 	goos := runtime.GOOS
@@ -286,7 +309,7 @@ func isBrowserInstalled(det browserDetection) bool {
 // EnsureBrowserInstalled checks if the browser is installed and runs
 // `npx playwright install <browser>` if not. Returns an error message for
 // display purposes only; callers should not treat this as a hard error.
-func EnsureBrowserInstalled(det browserDetection) error {
+func EnsureBrowserInstalled(ctx context.Context, det browserDetection) error {
 	if isBrowserInstalled(det) {
 		slog.Debug("browser already installed", "target", det.installTarget)
 		return nil
@@ -298,7 +321,7 @@ func EnsureBrowserInstalled(det browserDetection) error {
 	}
 
 	slog.Info("installing browser via playwright", "target", det.installTarget)
-	cmd := exec.Command(npxPath, "playwright", "install", det.installTarget)
+	cmd := exec.CommandContext(ctx, npxPath, "playwright", "install", det.installTarget)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -306,4 +329,38 @@ func EnsureBrowserInstalled(det browserDetection) error {
 	}
 
 	return nil
+}
+
+// extractBrowserName extracts the browserName value from config JSON bytes.
+// Returns empty string if browserName is not set or on parse error.
+func extractBrowserName(configData []byte) string {
+	if len(configData) == 0 {
+		return ""
+	}
+
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(configData, &cfg); err != nil {
+		return ""
+	}
+
+	browserRaw, ok := cfg["browser"]
+	if !ok {
+		return ""
+	}
+
+	var browser map[string]json.RawMessage
+	if err := json.Unmarshal(browserRaw, &browser); err != nil {
+		return ""
+	}
+
+	bnRaw, ok := browser["browserName"]
+	if !ok {
+		return ""
+	}
+
+	var bn string
+	if err := json.Unmarshal(bnRaw, &bn); err != nil {
+		return ""
+	}
+	return bn
 }

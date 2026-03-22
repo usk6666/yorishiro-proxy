@@ -149,8 +149,15 @@ func applyProxySettings(browser map[string]json.RawMessage, listenAddr string, d
 	}
 
 	// Set channel based on detected browser if not already set.
-	// Firefox does not use a channel; only set for Chromium-based browsers.
-	if _, ok := launchOptions["channel"]; !ok && det.channel != "" {
+	// Firefox does not use a channel; skip injection if browserName is "firefox".
+	isFirefox := false
+	if raw, ok := browser["browserName"]; ok {
+		var bn string
+		if json.Unmarshal(raw, &bn) == nil && bn == "firefox" {
+			isFirefox = true
+		}
+	}
+	if _, ok := launchOptions["channel"]; !ok && det.channel != "" && !isFirefox {
 		launchOptions["channel"] = json.RawMessage(fmt.Sprintf("%q", det.channel))
 	}
 
