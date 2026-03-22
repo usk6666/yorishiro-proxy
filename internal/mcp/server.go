@@ -115,9 +115,12 @@ type safetyEngineSetter interface {
 
 // tlsFingerprintSetter is implemented by protocol handlers that support
 // TLS fingerprint profile configuration (HTTP/1.x and HTTP/2 handlers).
+// SetTLSTransport is required so that changing the profile also updates the
+// actual TLS transport used for upstream connections (USK-467).
 type tlsFingerprintSetter interface {
 	SetTLSFingerprint(profile string)
 	TLSFingerprint() string
+	SetTLSTransport(httputil.TLSTransport)
 }
 
 // socks5AuthSetter is implemented by a wrapper around the SOCKS5 handler
