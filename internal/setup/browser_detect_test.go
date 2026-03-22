@@ -3,6 +3,7 @@ package setup
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"runtime"
 	"testing"
@@ -598,6 +599,18 @@ func TestResolveInstallTarget(t *testing.T) {
 			wantBrowser: "firefox",
 		},
 		{
+			name:        "browserName chromium without channel",
+			configJSON:  `{"browser":{"browserName":"chromium"}}`,
+			wantInstall: "chromium",
+			wantBrowser: "chromium",
+		},
+		{
+			name:        "browserName webkit without channel",
+			configJSON:  `{"browser":{"browserName":"webkit"}}`,
+			wantInstall: "webkit",
+			wantBrowser: "webkit",
+		},
+		{
 			name:        "no channel no browserName falls back to detect",
 			configJSON:  `{"browser":{}}`,
 			wantInstall: "chromium",
@@ -631,7 +644,7 @@ func TestEnsureBrowserInstalled_WithContext(t *testing.T) {
 
 	ctx := context.Background()
 	det := browserDetection{installTarget: "firefox"}
-	if err := EnsureBrowserInstalled(ctx, det); err != nil {
+	if err := EnsureBrowserInstalled(ctx, io.Discard, det); err != nil {
 		t.Errorf("expected no error for installed browser, got: %v", err)
 	}
 }

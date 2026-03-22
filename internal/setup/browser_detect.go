@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -276,16 +277,34 @@ func resolveInstallTarget(configData []byte) browserDetection {
 		return detectionFromChannel(ch)
 	}
 
+	// Honor explicit browserName when channel is absent.
 	bn := extractBrowserName(configData)
-	if bn == "firefox" {
+	switch bn {
+	case "firefox":
 		return browserDetection{
 			browserName:   "firefox",
 			channel:       "",
 			isChromium:    false,
 			installTarget: "firefox",
 		}
+	case "chromium":
+		return browserDetection{
+			browserName:   "chromium",
+			channel:       "",
+			isChromium:    true,
+			installTarget: "chromium",
+		}
+	case "webkit":
+		return browserDetection{
+			browserName:   "webkit",
+			channel:       "",
+			isChromium:    false,
+			installTarget: "webkit",
+		}
 	}
 
+	// Fall back to auto-detection only when neither channel nor a recognized
+	// browserName is provided in the config.
 	return detectBrowserChannel()
 }
 
@@ -307,9 +326,15 @@ func isBrowserInstalled(det browserDetection) bool {
 }
 
 // EnsureBrowserInstalled checks if the browser is installed and runs
-// `npx playwright install <browser>` if not. Returns an error message for
-// display purposes only; callers should not treat this as a hard error.
-func EnsureBrowserInstalled(ctx context.Context, det browserDetection) error {
+// `npx playwright install <browser>` if not. The out writer is used for
+// subprocess output. Returns an error message for display purposes only;
+// callers should not treat this as a hard error.
+//
+// Note: isBrowserInstalled only checks well-known system paths, not Playwright's
+// internal cache (~/.cache/ms-playwright/). This means `npx playwright install`
+// may be attempted even after a previous successful install. This is acceptable
+// because the command is idempotent and completes quickly when already installed.
+func EnsureBrowserInstalled(ctx context.Context, out io.Writer, det browserDetection) error {
 	if isBrowserInstalled(det) {
 		slog.Debug("browser already installed", "target", det.installTarget)
 		return nil
@@ -322,8 +347,8 @@ func EnsureBrowserInstalled(ctx context.Context, det browserDetection) error {
 
 	slog.Info("installing browser via playwright", "target", det.installTarget)
 	cmd := exec.CommandContext(ctx, npxPath, "playwright", "install", det.installTarget)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = out
+	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("playwright install failed: %w\n  Please install the browser manually:\n  npx playwright install %s", err, det.installTarget)
 	}

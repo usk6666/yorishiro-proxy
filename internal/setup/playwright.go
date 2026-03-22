@@ -83,11 +83,18 @@ func WritePlaywrightConfig(projectDir, listenAddr string, httpsOption Playwright
 	}
 
 	// Determine if the browser is Chromium-based for --no-sandbox.
+	// Use the effective browserName from the merged config, not just the detection result,
+	// to handle cases where config explicitly sets a different browser than auto-detected.
 	isChromium := det.isChromium
 	if raw, ok := browser["browserName"]; ok {
 		var bn string
-		if json.Unmarshal(raw, &bn) == nil && bn == "firefox" {
-			isChromium = false
+		if json.Unmarshal(raw, &bn) == nil {
+			switch bn {
+			case "firefox":
+				isChromium = false
+			case "chromium":
+				isChromium = true
+			}
 		}
 	}
 

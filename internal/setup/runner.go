@@ -327,7 +327,7 @@ func (r *Runner) writePlaywrightConfigFile(ctx context.Context, projectDir strin
 		slog.Debug("failed to read config for browser install", "error", readErr)
 	} else {
 		det := resolveInstallTarget(configData)
-		if installErr := EnsureBrowserInstalled(ctx, det); installErr != nil {
+		if installErr := EnsureBrowserInstalled(ctx, r.out, det); installErr != nil {
 			r.printf("  Warning: %v\n", installErr)
 		}
 	}
