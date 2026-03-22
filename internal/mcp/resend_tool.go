@@ -879,8 +879,9 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 		return nil, nil, err
 	}
 
-	// Execute pre-send hook and expand templates in override_raw_base64.
-	kvStore, err := s.executeRawPreSendHook(ctx, &params, fl.Protocol)
+	// Execute pre-send hook. Template expansion is not applied to raw bytes
+	// (L4 operation — expanding templates would corrupt binary protocol framing).
+	kvStore, err := s.executeRawPreSendHook(ctx, &params)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -932,9 +933,12 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 	}, nil
 }
 
-// executeRawPreSendHook runs the pre-send hook for raw resend and applies
-// template expansion to override_raw_base64 for HTTP-like protocols.
-func (s *Server) executeRawPreSendHook(ctx context.Context, params *resendParams, protocol string) (map[string]string, error) {
+// executeRawPreSendHook runs the pre-send hook for raw resend.
+// Unlike the structured mode, template expansion is NOT applied to raw bytes.
+// Raw mode operates at L4 (wire bytes) and expanding templates would corrupt
+// binary protocol framing (HTTP/2, WebSocket, etc.). The KV Store is still
+// returned so it can be passed to the post-receive hook.
+func (s *Server) executeRawPreSendHook(ctx context.Context, params *resendParams) (map[string]string, error) {
 	if params.Hooks == nil || params.Hooks.PreSend == nil {
 		return nil, nil
 	}
@@ -946,11 +950,6 @@ func (s *Server) executeRawPreSendHook(ctx context.Context, params *resendParams
 		return nil, err
 	}
 
-	if len(kvStore) > 0 {
-		if err := expandRawParamsWithKVStore(params, kvStore, protocol); err != nil {
-			return nil, fmt.Errorf("template expansion: %w", err)
-		}
-	}
 	return kvStore, nil
 }
 

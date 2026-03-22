@@ -923,8 +923,7 @@ export function ResendPage() {
                     />
                     {hooks.pre_send?.macro && (
                       <p className="resend-hooks-help">
-                        Use <code>{"\u00A7key\u00A7"}</code> syntax in the raw editor to reference KV Store values set by the pre-send macro.
-                        Encoder chains are supported: <code>{"\u00A7key | url\u00A7"}</code>, <code>{"\u00A7key | base64\u00A7"}</code>.
+                        Note: In Raw mode, <code>{"\u00A7key\u00A7"}</code> template expansion is not applied to raw bytes. Use Structured mode for template-based value injection. Hooks (pre-send / post-receive) are still executed.
                       </p>
                     )}
                   </div>
