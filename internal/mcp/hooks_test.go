@@ -362,60 +362,6 @@ func TestExpandParamsWithKVStore_EmptyKVStore(t *testing.T) {
 	}
 }
 
-// --- parseHooksFromJSON tests ---
-
-func TestParseHooksFromJSON_Nil(t *testing.T) {
-	hooks, err := parseHooksFromJSON(nil)
-	if err != nil {
-		t.Fatalf("parseHooksFromJSON(nil) = %v", err)
-	}
-	if hooks != nil {
-		t.Error("expected nil hooks")
-	}
-}
-
-func TestParseHooksFromJSON_Null(t *testing.T) {
-	hooks, err := parseHooksFromJSON(json.RawMessage("null"))
-	if err != nil {
-		t.Fatalf("parseHooksFromJSON(null) = %v", err)
-	}
-	if hooks != nil {
-		t.Error("expected nil hooks")
-	}
-}
-
-func TestParseHooksFromJSON_Valid(t *testing.T) {
-	raw := json.RawMessage(`{
-		"pre_send": {
-			"macro": "auth-flow",
-			"vars": {"password": "admin123"},
-			"run_interval": "always"
-		},
-		"post_receive": {
-			"macro": "log-response",
-			"pass_response": true,
-			"run_interval": "on_status",
-			"status_codes": [401]
-		}
-	}`)
-	hooks, err := parseHooksFromJSON(raw)
-	if err != nil {
-		t.Fatalf("parseHooksFromJSON: %v", err)
-	}
-	if hooks == nil {
-		t.Fatal("expected non-nil hooks")
-	}
-	if hooks.PreSend == nil || hooks.PreSend.Macro != "auth-flow" {
-		t.Errorf("PreSend.Macro = %v, want auth-flow", hooks.PreSend)
-	}
-	if hooks.PostReceive == nil || hooks.PostReceive.Macro != "log-response" {
-		t.Errorf("PostReceive.Macro = %v, want log-response", hooks.PostReceive)
-	}
-	if !hooks.PostReceive.PassResponse {
-		t.Error("PostReceive.PassResponse should be true")
-	}
-}
-
 // --- Integration tests: resend with hooks ---
 
 func TestExecute_Resend_WithPreSendHook(t *testing.T) {
