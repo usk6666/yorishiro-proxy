@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -1162,5 +1164,409 @@ func TestExecute_ResendRaw_PatchOffsetBeyondData(t *testing.T) {
 	})
 	if !result.IsError {
 		t.Fatal("expected error for offset beyond data length")
+	}
+}
+
+// --- resend_raw hooks tests ---
+
+// setupTestSessionWithRawDialerAndMacro creates an MCP client session with
+// both rawReplayDialer (for raw resend) and replayDoer (for macro HTTP calls).
+func setupTestSessionWithRawDialerAndMacro(t *testing.T, store flow.Store, dialer rawDialer) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	s := NewServer(context.Background(), nil, store, nil)
+	s.deps.rawReplayDialer = dialer
+	s.deps.replayDoer = newPermissiveClient()
+	ct, st := gomcp.NewInMemoryTransports()
+
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{
+		Name:    "test-client",
+		Version: "v0.0.1",
+	}, nil)
+
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+func TestExecute_ResendRaw_HooksNil_BackwardCompat(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	addr, cleanup := newRawEchoServer(t)
+	defer cleanup()
+
+	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	host, port, _ := net.SplitHostPort(addr)
+	u, _ := url.Parse("http://" + host + ":" + port + "/test")
+
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+			RawBytes:  rawReq,
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	// Use standard raw dialer setup (no macro support needed).
+	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
+
+	// Explicitly pass hooks=nil to verify backward compatibility.
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":     entry.Session.ID,
+			"target_addr": addr,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out resendRawResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
+	}
+}
+
+func TestExecute_ResendRaw_InvalidHooksRejected(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	u, _ := url.Parse("http://127.0.0.1/test")
+
+	fl := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: fl.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now(), Method: "GET", URL: u,
+		Headers: map[string][]string{}, RawBytes: rawReq,
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupTestSessionWithExecuteRawDialer(t, store, &testDialer{})
+
+	// Invalid hooks: pre_send with empty macro name.
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":     fl.ID,
+			"target_addr": "127.0.0.1:9999",
+			"hooks": map[string]any{
+				"pre_send": map[string]any{
+					"macro":        "",
+					"run_interval": "always",
+				},
+			},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for invalid hooks (empty macro name)")
+	}
+
+	// Invalid hooks: pre_send with invalid run_interval.
+	result = executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":     fl.ID,
+			"target_addr": "127.0.0.1:9999",
+			"hooks": map[string]any{
+				"pre_send": map[string]any{
+					"macro":        "some-macro",
+					"run_interval": "invalid_interval",
+				},
+			},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for invalid run_interval")
+	}
+
+	// Invalid hooks: post_receive with on_status but no status_codes.
+	result = executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":     fl.ID,
+			"target_addr": "127.0.0.1:9999",
+			"hooks": map[string]any{
+				"post_receive": map[string]any{
+					"macro":        "some-macro",
+					"run_interval": "on_status",
+				},
+			},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for on_status without status_codes")
+	}
+}
+
+func TestExecute_ResendRaw_WithPreSendHook(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	addr, cleanup := newRawEchoServer(t)
+	defer cleanup()
+
+	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	host, port, _ := net.SplitHostPort(addr)
+	u, _ := url.Parse("http://" + host + ":" + port + "/test")
+
+	// Save the raw resend target flow.
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+			RawBytes:  rawReq,
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	// Create a token server for the macro step.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Token", "raw-pre-send-token")
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer tokenServer.Close()
+
+	ctx := context.Background()
+
+	// Save the macro step flow.
+	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
+	tokenSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: tokenSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
+		Headers: map[string][]string{},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Set up session with both raw dialer and macro HTTP support.
+	cs := setupTestSessionWithRawDialerAndMacro(t, store, &testDialer{})
+
+	// Define the pre-send macro.
+	defineResult := callMacro(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "raw-auth-flow",
+			"steps": []any{
+				map[string]any{
+					"id":      "get-token",
+					"flow_id": tokenSess.ID,
+					"extract": []any{
+						map[string]any{
+							"name":        "token",
+							"from":        "response",
+							"source":      "header",
+							"header_name": "X-Token",
+						},
+					},
+				},
+			},
+		},
+	})
+	if defineResult.IsError {
+		t.Fatalf("define_macro failed: %v", defineResult.Content)
+	}
+
+	// Resend raw with pre_send hook.
+	// Note: template expansion is NOT applied to raw bytes (L4 integrity).
+	// The hook executes but the KV Store is only available for post_receive.
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":     entry.Session.ID,
+			"target_addr": addr,
+			"hooks": map[string]any{
+				"pre_send": map[string]any{
+					"macro": "raw-auth-flow",
+				},
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("resend_raw with pre_send hook failed: %v", result.Content)
+	}
+
+	var out resendRawResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
+	}
+	if out.ResponseSize == 0 {
+		t.Error("expected non-zero response_size")
+	}
+}
+
+func TestExecute_ResendRaw_WithPostReceiveHook(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	addr, cleanup := newRawEchoServer(t)
+	defer cleanup()
+
+	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	host, port, _ := net.SplitHostPort(addr)
+	u, _ := url.Parse("http://" + host + ":" + port + "/test")
+
+	// Save the raw resend target flow.
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "HTTP/1.x",
+			Timestamp: time.Now(),
+			Duration:  100 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "GET",
+			URL:       u,
+			Headers:   map[string][]string{},
+			RawBytes:  rawReq,
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{},
+			Body:       []byte("ok"),
+		},
+	)
+
+	// Create a macro step server for the post_receive hook.
+	var postReceiveInvoked bool
+	macroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		postReceiveInvoked = true
+		w.WriteHeader(200)
+		w.Write([]byte("logged"))
+	}))
+	defer macroServer.Close()
+
+	ctx := context.Background()
+
+	// Save the macro step flow.
+	macroURL, _ := url.Parse(macroServer.URL + "/log")
+	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveFlow(ctx, macroSess); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	if err := store.AppendMessage(ctx, &flow.Message{
+		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
+		Headers: map[string][]string{"Content-Type": {"text/plain"}},
+		Body:    []byte("log entry"),
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	// Set up session with both raw dialer and macro HTTP support.
+	cs := setupTestSessionWithRawDialerAndMacro(t, store, &testDialer{})
+
+	// Define the post-receive macro.
+	defineResult := callMacro(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "raw-log-response",
+			"steps": []any{
+				map[string]any{
+					"id":      "log",
+					"flow_id": macroSess.ID,
+				},
+			},
+		},
+	})
+	if defineResult.IsError {
+		t.Fatalf("define_macro failed: %v", defineResult.Content)
+	}
+
+	// Resend raw with post_receive hook.
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend_raw",
+		"params": map[string]any{
+			"flow_id":     entry.Session.ID,
+			"target_addr": addr,
+			"hooks": map[string]any{
+				"post_receive": map[string]any{
+					"macro":        "raw-log-response",
+					"run_interval": "always",
+				},
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("resend_raw with post_receive hook failed: %v", result.Content)
+	}
+
+	var out resendRawResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.NewFlowID == "" {
+		t.Error("expected non-empty new_flow_id")
+	}
+
+	if !postReceiveInvoked {
+		t.Error("post_receive hook was not invoked")
 	}
 }

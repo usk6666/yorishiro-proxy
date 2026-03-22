@@ -63,6 +63,8 @@ Resend the raw bytes from a recorded flow over TCP/TLS. Useful for testing HTTP 
 - **dry_run** (boolean, optional): Preview modified raw bytes without sending.
 - **tag** (string, optional): Tag to attach to the result flow.
 
+**Note:** KV Store template expansion (`§key§`) is **not** applied to raw bytes in `resend_raw`. Raw mode operates at L4 (wire bytes), and template expansion would corrupt binary protocol framing (HTTP/2, WebSocket, etc.). Hooks (`pre_send` / `post_receive`) are still executed. Use the `resend` (Structured) action if you need template-based value injection.
+
 Returns: response_data (base64), response_size, duration_ms.
 
 ### tcp_replay

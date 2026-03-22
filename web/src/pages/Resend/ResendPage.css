@@ -386,6 +386,13 @@
   margin: 0 0 var(--space-sm) 0;
 }
 
+.resend-hooks-help {
+  font-size: var(--font-size-xs);
+  color: var(--text-tertiary);
+  margin: var(--space-sm) 0 0 0;
+  line-height: 1.5;
+}
+
 /* Resend page code styling */
 .resend-page code {
   padding: 2px var(--space-xs);
