@@ -375,9 +375,14 @@ func TestConfigure_TLSFingerprint_TransportRebuilt(t *testing.T) {
 			)
 
 			input := configureInput{TLSFingerprint: &tt.profile}
-			data, _ := json.Marshal(input)
+			data, err := json.Marshal(input)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
 			var args map[string]json.RawMessage
-			_ = json.Unmarshal(data, &args)
+			if err := json.Unmarshal(data, &args); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
 
 			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 				Name:      "configure",
