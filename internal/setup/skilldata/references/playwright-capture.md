@@ -4,9 +4,10 @@ yorishiro-proxy と playwright-cli を組み合わせて、ブラウザ操作の
 
 ## 前提条件
 
-- `yorishiro-proxy install` が実行済み (CA 証明書インストール済み、`.playwright/cli.config.json` のプロキシ設定済み)
-  - `install playwright` はブラウザを自動検出し、`channel` を環境に合わせて設定する (chromium > firefox > chrome の優先順位)
-  - コンテナ環境 (Docker/devcontainer/Codespaces) では `--no-sandbox` が自動付与される
+- `yorishiro-proxy install` が実行済み (CA 証明書インストール済み)
+- `yorishiro-proxy install playwright` が実行済み (`.playwright/cli.config.json` のプロキシ設定済み)
+  - このサブコマンドはブラウザを自動検出し、`channel` を環境に合わせて設定する (chromium > firefox > chrome の優先順位)
+  - コンテナ環境 (Docker/devcontainer/Codespaces) かつ Chromium 系ブラウザでは `--no-sandbox` が自動付与される
   - ブラウザ未検出時は `npx playwright install <browser>` で自動インストールを試みる
 - playwright-cli スキルがインストール済み
 
@@ -73,8 +74,9 @@ playwright-cli を使って対象アプリケーションの操作を行う。
 1. playwright-cli のブラウザを閉じる
 2. `.playwright/cli.config.json` を確認し、設定が正しいことを検証する:
    - `proxy.server` が `proxy_start` の `listen_addr` と一致しているか
-   - `launchOptions.channel` が環境にインストール済みのブラウザと一致しているか (`yorishiro-proxy install playwright` で自動検出・再設定可能)
-   - コンテナ環境で `launchOptions.args` に `--no-sandbox` が含まれているか (通常は自動付与される)
+   - `browser.browserName` が想定しているブラウザ (`"chromium"`, `"firefox"`, `"webkit"`) と一致しているか
+   - Chromium 系の場合のみ、`launchOptions.channel` が環境にインストール済みのブラウザと一致しているか (`yorishiro-proxy install playwright` で自動検出・再設定可能)。Firefox/WebKit では `channel` は空/未設定で問題ない
+   - コンテナ環境かつ Chromium 系の場合、`launchOptions.args` に `--no-sandbox` が含まれているか (通常は自動付与される)
 3. 設定を修正した上で、playwright-cli を再起動して Step 2 からやり直す
 
 **このステップを省略してはならない。** プロキシ未接続のまま操作を続行すると:
