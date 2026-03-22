@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -612,26 +611,4 @@ func expandParamsWithKVStore(params *resendParams, kvStore map[string]string) er
 	}
 
 	return nil
-}
-
-// parseHooksFromJSON parses hooks from a raw JSON map extracted from the params.
-// This is needed because the hooks field is part of the resendParams struct
-// and parsed from the nested JSON object in the tool input.
-func parseHooksFromJSON(raw json.RawMessage) (*hooksInput, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-
-	// Check if the raw message is a valid JSON object (not null).
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "null" || trimmed == "" {
-		return nil, nil
-	}
-
-	var hooks hooksInput
-	if err := json.Unmarshal(raw, &hooks); err != nil {
-		return nil, fmt.Errorf("parse hooks: %w", err)
-	}
-
-	return &hooks, nil
 }

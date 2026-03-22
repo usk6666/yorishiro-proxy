@@ -829,7 +829,7 @@ export function ResendPage() {
                     {hooks.pre_send?.macro && (
                       <p className="resend-hooks-help">
                         Use <code>{"\u00A7key\u00A7"}</code> syntax in URL, headers, and body fields to reference KV Store values set by the pre-send macro.
-                        Encoder chains are supported: <code>{"\u00A7key | url\u00A7"}</code>, <code>{"\u00A7key | base64\u00A7"}</code>.
+                        Encoder chains are supported: <code>{"\u00A7key | url_encode\u00A7"}</code>, <code>{"\u00A7key | base64\u00A7"}</code>.
                       </p>
                     )}
                   </div>
