@@ -308,6 +308,7 @@ func (r *Runner) resolvePlaywrightHTTPSOption() PlaywrightHTTPSOption {
 }
 
 // writePlaywrightConfigFile writes the Playwright configuration and reports the result.
+// After writing, it attempts to ensure the configured browser is installed.
 func (r *Runner) writePlaywrightConfigFile(projectDir string, httpsOption PlaywrightHTTPSOption) error {
 	backupPath, err := WritePlaywrightConfig(projectDir, r.opts.ListenAddr, httpsOption, r.now())
 	if err != nil {
@@ -318,6 +319,21 @@ func (r *Runner) writePlaywrightConfigFile(projectDir string, httpsOption Playwr
 	if backupPath != "" {
 		r.printf("  Backup: %s\n", backupPath)
 	}
+
+	// Read the written config to determine which browser to install.
+	configData, readErr := os.ReadFile(configPath)
+	if readErr == nil {
+		det := detectBrowserChannel()
+		ch := extractChannel(configData)
+		if ch != "" {
+			// Override detection with the actual channel from config.
+			det = detectionFromChannel(ch)
+		}
+		if installErr := EnsureBrowserInstalled(det); installErr != nil {
+			r.printf("  Warning: %v\n", installErr)
+		}
+	}
+
 	return nil
 }
 

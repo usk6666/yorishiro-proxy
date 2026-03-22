@@ -67,16 +67,31 @@ func WritePlaywrightConfig(projectDir, listenAddr string, httpsOption Playwright
 		return backupPath, fmt.Errorf("parse browser config: %w", err)
 	}
 
+	det := detectBrowserChannel()
+
 	// Set browserName if not already set.
 	if _, ok := browser["browserName"]; !ok {
-		browser["browserName"] = json.RawMessage(`"chromium"`)
+		browser["browserName"] = json.RawMessage(fmt.Sprintf("%q", det.browserName))
 	}
 
-	if err := applyProxySettings(browser, listenAddr); err != nil {
+	if err := applyProxySettings(browser, listenAddr, det); err != nil {
 		return backupPath, err
 	}
 
 	if err := applyHTTPSOption(browser, httpsOption); err != nil {
+		return backupPath, err
+	}
+
+	// Determine if the browser is Chromium-based for --no-sandbox.
+	isChromium := det.isChromium
+	if raw, ok := browser["browserName"]; ok {
+		var bn string
+		if json.Unmarshal(raw, &bn) == nil && bn == "firefox" {
+			isChromium = false
+		}
+	}
+
+	if err := applyNoSandbox(browser, isChromium); err != nil {
 		return backupPath, err
 	}
 
@@ -126,15 +141,17 @@ func unmarshalJSONSection(parent map[string]json.RawMessage, key string) (map[st
 }
 
 // applyProxySettings adds proxy configuration to the browser's launchOptions.
-func applyProxySettings(browser map[string]json.RawMessage, listenAddr string) error {
+// The det parameter provides auto-detected browser defaults for channel.
+func applyProxySettings(browser map[string]json.RawMessage, listenAddr string, det browserDetection) error {
 	launchOptions, err := unmarshalJSONSection(browser, "launchOptions")
 	if err != nil {
 		return fmt.Errorf("parse launchOptions: %w", err)
 	}
 
-	// Set channel if not already set (similar to browserName default).
-	if _, ok := launchOptions["channel"]; !ok {
-		launchOptions["channel"] = json.RawMessage(`"chromium"`)
+	// Set channel based on detected browser if not already set.
+	// Firefox does not use a channel; only set for Chromium-based browsers.
+	if _, ok := launchOptions["channel"]; !ok && det.channel != "" {
+		launchOptions["channel"] = json.RawMessage(fmt.Sprintf("%q", det.channel))
 	}
 
 	proxyServer := fmt.Sprintf("http://%s", listenAddr)
