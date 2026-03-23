@@ -417,3 +417,43 @@ func TestPlugin_EnableMissingName(t *testing.T) {
 		t.Error("expected error for missing name in enable")
 	}
 }
+
+func TestPlugin_EnableWithoutParams(t *testing.T) {
+	t.Parallel()
+	logger := testutil.DiscardLogger()
+	engine := plugin.NewEngine(logger)
+
+	cs := setupTestSessionWithPluginEngine(t, engine)
+
+	// Omit params entirely — should return a clear error.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "plugin",
+		Arguments: map[string]any{"action": "enable"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error when params is absent for enable")
+	}
+}
+
+func TestPlugin_DisableWithoutParams(t *testing.T) {
+	t.Parallel()
+	logger := testutil.DiscardLogger()
+	engine := plugin.NewEngine(logger)
+
+	cs := setupTestSessionWithPluginEngine(t, engine)
+
+	// Omit params entirely — should return a clear error.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "plugin",
+		Arguments: map[string]any{"action": "disable"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error when params is absent for disable")
+	}
+}

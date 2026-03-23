@@ -78,8 +78,14 @@ func (s *Server) handlePlugin(ctx context.Context, _ *gomcp.CallToolRequest, inp
 	case "reload":
 		return s.handlePluginReload(ctx, params)
 	case "enable":
+		if input.Params == nil {
+			return nil, nil, fmt.Errorf("params is required for enable action")
+		}
 		return s.handlePluginEnable(params)
 	case "disable":
+		if input.Params == nil {
+			return nil, nil, fmt.Errorf("params is required for disable action")
+		}
 		return s.handlePluginDisable(params)
 	default:
 		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availablePluginActions, ", "))
