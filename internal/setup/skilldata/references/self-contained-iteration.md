@@ -1,35 +1,35 @@
-# Self-Contained Iteration パターン
+# Self-Contained Iteration Pattern
 
-Macro の pre_send / post_receive hook を使った自己完結イテレーションパターン。
-ステートフルな API のファジングで、各イテレーションが独立して動作することを保証する。
+A self-contained iteration pattern using Macro pre_send / post_receive hooks.
+Guarantees that each iteration operates independently when fuzzing stateful APIs.
 
-## 核心原則
+## Core Principles
 
-1. **各イテレーションが「前提条件の構築 -> テスト実行 -> 後片付け」を完結させる**
-2. Fuzzer の各イテレーション間で KV Store は共有されない (設計上の制約)
-3. ただしサーバ側の状態は共有されるため、前のイテレーションの副作用を考慮する
+1. **Each iteration completes "precondition setup → test execution → teardown" independently**
+2. The KV Store is not shared between fuzzer iterations (by design)
+3. However, server-side state is shared, so account for side effects from previous iterations
 
-## なぜこのパターンが必要か
+## Why This Pattern Is Needed
 
-- DELETE は冪等でない (2 回目は 404) -- 毎回新しいリソースが必要
-- CSRF トークンはリクエストごとにリフレッシュが必要な場合がある
-- 同時セッション数制限やレート制限を回避するための logout が必要
+- Repeated DELETE requests may return 404 after the first successful deletion, so a new resource is needed each time
+- CSRF tokens may need to be refreshed per request
+- Logout may be needed to avoid concurrent session limits or rate limits
 
-## 実装手順
+## Implementation Steps
 
-### Step 1: 必要なリクエストを playwright-capture でキャプチャ
+### Step 1: Capture Required Requests with playwright-capture
 
-ブラウザで以下の操作を行い、各リクエストのフロー ID を記録する:
+Perform the following operations in the browser and record the flow ID for each request:
 
-- ログインリクエスト
-- CSRF トークン取得ページ
-- テスト対象 API (例: item 作成、item 削除)
-- ログアウトリクエスト
+- Login request
+- CSRF token retrieval page
+- Target API under test (e.g., item creation, item deletion)
+- Logout request
 
-### Step 2: pre_send Macro を定義
+### Step 2: Define the pre_send Macro
 
-pre_send macro はメインリクエスト送信前に毎回実行される。
-ログイン -> CSRF トークン取得 -> テスト用リソース作成 を行う。
+The pre_send macro runs before each main request is sent.
+It performs: login → CSRF token retrieval → test resource creation.
 
 ```json
 // macro
@@ -90,10 +90,10 @@ pre_send macro はメインリクエスト送信前に毎回実行される。
 }
 ```
 
-### Step 3: post_receive Macro を定義
+### Step 3: Define the post_receive Macro
 
-post_receive macro はメインリクエストのレスポンス受信後に毎回実行される。
-pre_send の KV Store (session_cookie 等) が自動的に引き継がれる。
+The post_receive macro runs after each main request response is received.
+The KV Store from pre_send (session_cookie, etc.) is automatically passed through.
 
 ```json
 // macro
@@ -113,7 +113,7 @@ pre_send の KV Store (session_cookie 等) が自動的に引き継がれる。
 }
 ```
 
-### Step 4: fuzz を hook 付きで実行
+### Step 4: Run fuzz with Hooks
 
 ```json
 // fuzz
@@ -151,25 +151,25 @@ pre_send の KV Store (session_cookie 等) が自動的に引き継がれる。
 }
 ```
 
-## KV Store の共有
+## KV Store Sharing
 
-1 イテレーション内での KV Store のフロー:
+KV Store flow within a single iteration:
 
 ```
-pre_send macro 実行
-  -> KV Store: {session_cookie: "abc", csrf_token: "xyz", item_id: "42"}
-    -> メインリクエスト送信 (テンプレート展開で §item_id§ 等を使用)
-      -> レスポンス受信
-        -> post_receive macro 実行 (pre_send の KV Store が自動的に渡される)
-           -> §session_cookie§ で正しいセッションを logout
+pre_send macro executes
+  → KV Store: {session_cookie: "abc", csrf_token: "xyz", item_id: "42"}
+    → Main request sent (template expansion uses §item_id§, etc.)
+      → Response received
+        → post_receive macro executes (pre_send KV Store is automatically passed)
+           → Logout using correct session via §session_cookie§
 ```
 
-**重要**: pre_send の KV Store と post_receive の vars 設定が同じキーを持つ場合、
-pre_send の KV Store 値が優先される。
+**Important**: If the pre_send KV Store and post_receive vars config share the same key,
+the pre_send KV Store value takes precedence.
 
-## resend での単発テスト
+## Single Test with resend
 
-fuzz の前に resend で単発テストして動作確認する:
+Before fuzzing, verify behavior with a single resend test:
 
 ```json
 // resend
@@ -193,21 +193,21 @@ fuzz の前に resend で単発テストして動作確認する:
 }
 ```
 
-## run_interval オプション
+## run_interval Options
 
 ### pre_send
 
-| 値 | 動作 |
-|----|------|
-| `"always"` | 毎回実行 (デフォルト) |
-| `"once"` | 最初の 1 回だけ実行 |
-| `"every_n"` | N 回に 1 回実行 (`n` パラメータ必須) |
-| `"on_error"` | 前回エラー時のみ実行 |
+| Value | Behavior |
+|-------|----------|
+| `"always"` | Run every iteration (default) |
+| `"once"` | Run only on the first iteration |
+| `"every_n"` | Run every N iterations (requires `n` parameter) |
+| `"on_error"` | Run only when the previous iteration errored |
 
 ### post_receive
 
-| 値 | 動作 |
-|----|------|
-| `"always"` | 毎回実行 (デフォルト) |
-| `"on_status"` | 特定ステータスコードのとき実行 (`status_codes` 必須) |
-| `"on_match"` | レスポンスボディが正規表現にマッチしたとき実行 (`match_pattern` 必須) |
+| Value | Behavior |
+|-------|----------|
+| `"always"` | Run every iteration (default) |
+| `"on_status"` | Run when a specific status code occurs (requires `status_codes`) |
+| `"on_match"` | Run when response body matches a regex (requires `match_pattern`) |

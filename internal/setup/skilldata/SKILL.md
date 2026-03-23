@@ -1,65 +1,65 @@
 ---
-description: "yorishiro-proxy を使った脆弱性検証ワークフロー"
+description: "Vulnerability verification workflow using yorishiro-proxy"
 user-invokable: true
 ---
 
 # /yorishiro
 
-yorishiro-proxy (MCP プロキシ) を使った脆弱性検証を支援するスキル。
-ソースコードレビューで検出された脆弱性を実環境で検証するユースケースに特化。
+A skill that supports vulnerability verification using yorishiro-proxy (MCP proxy).
+Specialized for the use case of verifying vulnerabilities detected through source code review in a live environment.
 
-## トリガー
+## Triggers
 
-以下のような指示を受けたとき、このスキルを適用する:
+Apply this skill when you receive instructions such as:
 
-- 「脆弱性を検証して」「このエンドポイントをテストして」
-- 「IDOR/SQLi/XSS/CSRF をテストして」
-- 「認可バイパスを確認して」「権限昇格を検証して」
-- 「このリクエストを改ざんして送り直して」
-- 「ファジングを実行して」
+- "Verify the vulnerability" / "Test this endpoint"
+- "Test IDOR/SQLi/XSS/CSRF"
+- "Check authorization bypass" / "Verify privilege escalation"
+- "Tamper and resend this request"
+- "Run fuzzing"
 
-## MCP ツール概要
+## MCP Tools Overview
 
-yorishiro-proxy は 11 の MCP ツールを提供する:
+yorishiro-proxy provides 11 MCP tools:
 
-| ツール | 用途 |
-|--------|------|
-| `proxy_start` | プロキシ起動・キャプチャスコープ設定。マルチリスナー・SOCKS5 対応 |
-| `proxy_stop` | プロキシ停止。名前指定で個別停止、省略で全停止 |
-| `configure` | 実行中のプロキシ設定変更 (スコープ・TLS パススルー・インターセプトルール・自動変換・upstream proxy・接続制限・SOCKS5 認証等) |
-| `query` | 統一情報検索 (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies) |
-| `resend` | リクエスト再送・リプレイ・比較 (action: resend, resend_raw, tcp_replay, compare) |
-| `manage` | フローデータ管理・CA 証明書 (action: delete_flows, export_flows, import_flows, regenerate_ca_cert) |
-| `fuzz` | ファジング (action: fuzz, fuzz_pause, fuzz_resume, fuzz_cancel) |
-| `macro` | マクロワークフロー (action: define_macro, run_macro, delete_macro) |
-| `intercept` | インターセプト操作。リクエスト/レスポンス両 phase 対応 (action: release, modify_and_forward, drop) |
-| `security` | ターゲットスコープ・レート制限・診断バジェット・SafetyFilter 制御。Policy/Agent 2 層構造 (action: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits, set_budget, get_budget, get_safety_filter) |
-| `plugin` | Starlark プラグイン管理 (action: list, reload, enable, disable) |
+| Tool | Purpose |
+|------|---------|
+| `proxy_start` | Start proxy, configure capture scope. Supports multi-listener and SOCKS5 |
+| `proxy_stop` | Stop proxy. Stop by name for individual listeners, or omit to stop all |
+| `configure` | Change running proxy settings (scope, TLS passthrough, intercept rules, auto-transform, upstream proxy, connection limits, SOCKS5 auth, etc.) |
+| `query` | Unified information retrieval (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies) |
+| `resend` | Request resend/replay/compare (action: resend, resend_raw, tcp_replay, compare) |
+| `manage` | Flow data management and CA certificate (action: delete_flows, export_flows, import_flows, regenerate_ca_cert) |
+| `fuzz` | Fuzzing (action: fuzz, fuzz_pause, fuzz_resume, fuzz_cancel) |
+| `macro` | Macro workflow (action: define_macro, run_macro, delete_macro) |
+| `intercept` | Intercept operations. Supports both request/response phases (action: release, modify_and_forward, drop) |
+| `security` | Target scope, rate limits, diagnostic budget, SafetyFilter control. Policy/Agent 2-layer structure (action: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits, set_budget, get_budget, get_safety_filter) |
+| `plugin` | Starlark plugin management (action: list, reload, enable, disable) |
 
 ### MCP Resources
 
-各ツールの詳細なヘルプとスキーマは MCP Resources として提供される。
-ツールのパラメータや使用例を確認するには、以下の URI でリソースを取得する:
+Detailed help and schemas for each tool are provided as MCP Resources.
+To check tool parameters and usage examples, retrieve the resource at the following URIs:
 
-**ヘルプ (使い方・パラメータ説明・例)**:
+**Help (usage, parameter descriptions, examples)**:
 - `yorishiro://help/proxy_start`, `yorishiro://help/proxy_stop`
 - `yorishiro://help/query`, `yorishiro://help/resend`, `yorishiro://help/manage`
 - `yorishiro://help/fuzz`, `yorishiro://help/macro`, `yorishiro://help/intercept`
 - `yorishiro://help/configure`, `yorishiro://help/security`
-- `yorishiro://help/examples` (ワークフロー別の使用例集)
+- `yorishiro://help/examples` (collection of usage examples by workflow)
 
-**スキーマ (JSON Schema)**:
+**Schemas (JSON Schema)**:
 - `yorishiro://schema/proxy_start`, `yorishiro://schema/query`
 - `yorishiro://schema/resend`, `yorishiro://schema/manage`
 - `yorishiro://schema/fuzz`, `yorishiro://schema/macro`
 - `yorishiro://schema/intercept`, `yorishiro://schema/configure`
 
-パラメータの正確な構造が不明な場合は、まずヘルプリソースを参照すること。
+If you are unsure of the exact parameter structure, always consult the help resource first.
 
-### proxy_start -- プロキシ起動
+### proxy_start -- Start Proxy
 
 ```json
-// 基本起動
+// Basic startup
 {
   "listen_addr": "127.0.0.1:8080",
   "capture_scope": {
@@ -69,7 +69,7 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
   "tls_passthrough": ["*.googleapis.com"]
 }
 
-// マルチリスナー・追加オプション付き起動
+// Multi-listener startup with additional options
 {
   "name": "socks-listener",
   "listen_addr": "127.0.0.1:1080",
@@ -81,107 +81,107 @@ yorishiro-proxy は 11 の MCP ツールを提供する:
 }
 ```
 
-#### proxy_start パラメータ
+#### proxy_start Parameters
 
-| パラメータ | 型 | 説明 |
-|-----------|------|------|
-| `name` | string | リスナー名（デフォルト: "default"）。マルチリスナー時に識別用 |
-| `listen_addr` | string | リッスンアドレス（デフォルト: "127.0.0.1:8080"） |
-| `upstream_proxy` | string | 上流プロキシ URL（http:// または socks5://[user:pass@]host:port） |
-| `capture_scope` | object | キャプチャスコープ（includes/excludes） |
-| `tls_passthrough` | string[] | TLS パススルー対象パターン |
-| `intercept_rules` | object[] | インターセプトルール（id, enabled, direction, conditions） |
-| `auto_transform` | object[] | 自動変換ルール（id, enabled, priority, direction, conditions, action） |
-| `tcp_forwards` | map | TCP ポートフォワード（port -> upstream_host:port） |
-| `protocols` | string[] | 有効プロトコル（HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, SOCKS5, TCP） |
-| `socks5_auth` | string | SOCKS5 認証方法（"none" or "password"） |
-| `socks5_username` | string | SOCKS5 ユーザー名 |
-| `socks5_password` | string | SOCKS5 パスワード |
-| `max_connections` | int | 最大同時接続数（デフォルト: 128、範囲: 1-100000） |
-| `peek_timeout_ms` | int | プロトコル検出タイムアウト（デフォルト: 30000） |
-| `request_timeout_ms` | int | HTTP リクエストヘッダ読み込みタイムアウト（デフォルト: 60000） |
-| `tls_fingerprint` | string | TLS フィンガープリントプロファイル（"chrome", "firefox", "safari", "edge", "random", "none"。デフォルト: "chrome"） |
-| `client_cert` | string | PEM クライアント証明書パス（mTLS 用、client_key と併用） |
-| `client_key` | string | PEM クライアント秘密鍵パス（mTLS 用、client_cert と併用） |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `name` | string | Listener name (default: "default"). Used for identification with multiple listeners |
+| `listen_addr` | string | Listen address (default: "127.0.0.1:8080") |
+| `upstream_proxy` | string | Upstream proxy URL (http:// or socks5://[user:pass@]host:port) |
+| `capture_scope` | object | Capture scope (includes/excludes) |
+| `tls_passthrough` | string[] | TLS passthrough target patterns |
+| `intercept_rules` | object[] | Intercept rules (id, enabled, direction, conditions) |
+| `auto_transform` | object[] | Auto-transform rules (id, enabled, priority, direction, conditions, action) |
+| `tcp_forwards` | map | TCP port forwarding (port -> upstream_host:port) |
+| `protocols` | string[] | Enabled protocols (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, SOCKS5, TCP) |
+| `socks5_auth` | string | SOCKS5 authentication method ("none" or "password") |
+| `socks5_username` | string | SOCKS5 username |
+| `socks5_password` | string | SOCKS5 password |
+| `max_connections` | int | Maximum concurrent connections (default: 128, range: 1-100000) |
+| `peek_timeout_ms` | int | Protocol detection timeout (default: 30000) |
+| `request_timeout_ms` | int | HTTP request header read timeout (default: 60000) |
+| `tls_fingerprint` | string | TLS fingerprint profile ("chrome", "firefox", "safari", "edge", "random", "none". default: "chrome") |
+| `client_cert` | string | PEM client certificate path (for mTLS, used with client_key) |
+| `client_key` | string | PEM client private key path (for mTLS, used with client_cert) |
 
-### proxy_stop -- プロキシ停止
+### proxy_stop -- Stop Proxy
 
 ```json
-// 特定リスナーを停止
+// Stop a specific listener
 {"name": "socks-listener"}
 
-// 全リスナーを停止
+// Stop all listeners
 {}
 ```
 
-### query -- 情報取得
+### query -- Retrieve Information
 
 ```json
-// フロー一覧
+// Flow list
 {"resource": "flows", "filter": {"url_pattern": "/api/"}, "limit": 50}
 
-// フロー詳細
+// Flow details
 {"resource": "flow", "id": "<flow-id>"}
 
-// 状態フィルタ（active/complete/error）
+// State filter (active/complete/error)
 {"resource": "flows", "filter": {"state": "complete", "tag": "idor-test"}}
 
-// プロトコルフィルタ
+// Protocol filter
 {"resource": "flows", "filter": {"protocol": "SOCKS5+HTTPS"}}
 
-// ブロックされたフロー
+// Blocked flows
 {"resource": "flows", "filter": {"blocked_by": "target_scope"}}
 
-// WebSocket/gRPC メッセージ（direction フィルタ）
+// WebSocket/gRPC messages (direction filter)
 {"resource": "messages", "id": "<flow-id>", "filter": {"direction": "send"}}
 
-// ファズジョブ一覧（status/tag フィルタ）
+// Fuzz job list (status/tag filter)
 {"resource": "fuzz_jobs", "filter": {"status": "running", "tag": "sqli-fuzz"}}
 
-// ファズ結果
+// Fuzz results
 {"resource": "fuzz_results", "fuzz_id": "<fuzz-id>", "sort_by": "status_code"}
 
-// ファズ結果の外れ値のみ取得
+// Fuzz results — outliers only
 {"resource": "fuzz_results", "fuzz_id": "<fuzz-id>", "filter": {"outliers_only": true}}
 
-// コネクション ID でフロー検索
+// Search flows by connection ID
 {"resource": "flows", "filter": {"conn_id": "abc-conn-123"}}
 
-// ホストでフロー検索
+// Search flows by host
 {"resource": "flows", "filter": {"host": "example.com"}}
 
-// 技術スタック検出結果
+// Technology stack detection results
 {"resource": "technologies"}
 ```
 
-#### query フィルタパラメータ
+#### query Filter Parameters
 
-| パラメータ | 対象リソース | 説明 |
-|-----------|-------------|------|
-| `protocol` | flows | プロトコル名（HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS 等） |
-| `scheme` | flows | URL スキーム / トランスポートフィルタ（"https", "http", "wss", "ws", "tcp"）。TLS フローの検索に使用 |
-| `method` | flows | HTTP メソッド |
-| `url_pattern` | flows | URL サブストリング検索 |
-| `status_code` | flows, fuzz_results | HTTP レスポンスコード |
-| `state` | flows | フロー状態（"active", "complete", "error"） |
-| `blocked_by` | flows | ブロック理由（"target_scope", "intercept_drop", "rate_limit", "safety_filter"） |
-| `conn_id` | flows | コネクション ID 完全一致。同一接続のフローを検索 |
-| `host` | flows | ホスト名フィルタ。server_addr または URL のホスト部分にマッチ |
-| `technology` | flows | 技術スタック名（大文字小文字不問のサブストリングマッチ、例: "nginx"） |
-| `tag` | fuzz_jobs | タグ完全一致 |
-| `direction` | messages | メッセージ方向（"send", "receive"） |
-| `status` | fuzz_jobs | ジョブ状態（"running", "paused", "completed", "cancelled", "error"） |
-| `body_contains` | fuzz_results | レスポンスボディサブストリング |
-| `outliers_only` | fuzz_results | 外れ値のみ返す（ステータスコード・ボディ長・タイミングの偏差で検出） |
+| Parameter | Target Resource | Description |
+|-----------|----------------|-------------|
+| `protocol` | flows | Protocol name (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, etc.) |
+| `scheme` | flows | URL scheme / transport filter ("https", "http", "wss", "ws", "tcp"). Used to search TLS flows |
+| `method` | flows | HTTP method |
+| `url_pattern` | flows | URL substring search |
+| `status_code` | flows, fuzz_results | HTTP response code |
+| `state` | flows | Flow state ("active", "complete", "error") |
+| `blocked_by` | flows | Block reason ("target_scope", "intercept_drop", "rate_limit", "safety_filter") |
+| `conn_id` | flows | Connection ID exact match. Search flows from the same connection |
+| `host` | flows | Hostname filter. Matches server_addr or host portion of URL |
+| `technology` | flows | Technology stack name (case-insensitive substring match, e.g., "nginx") |
+| `tag` | fuzz_jobs | Tag exact match |
+| `direction` | messages | Message direction ("send", "receive") |
+| `status` | fuzz_jobs | Job state ("running", "paused", "completed", "cancelled", "error") |
+| `body_contains` | fuzz_results | Response body substring |
+| `outliers_only` | fuzz_results | Return only outliers (detected by deviation in status code, body length, and timing) |
 
-fuzz_results には集約統計（`summary.statistics`: status_code_distribution, body_length, timing_ms の min/max/median/stddev）と外れ値検出（`summary.outliers`: by_status_code, by_body_length, by_timing）が含まれる。
+fuzz_results includes aggregate statistics (`summary.statistics`: status_code_distribution, body_length, timing_ms min/max/median/stddev) and outlier detection (`summary.outliers`: by_status_code, by_body_length, by_timing).
 
-フロー詳細には `protocol_summary`（プロトコル固有情報）、ストリーミング系フローには `message_preview`（最初 10 メッセージ）が含まれる。resend で生成されたフローは `variant: "modified"` となる。
+Flow details include `protocol_summary` (protocol-specific info), and streaming flows include `message_preview` (first 10 messages). Flows generated by resend have `variant: "modified"`.
 
-### resend -- リクエスト再送・比較
+### resend -- Request Resend & Compare
 
 ```json
-// HTTP リクエスト再送（ヘッダ追加・削除）
+// HTTP request resend (add/remove headers)
 {
   "action": "resend",
   "params": {
@@ -195,7 +195,7 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
   }
 }
 
-// 生リクエスト再送（HTTP パースをバイパス）
+// Raw request resend (bypass HTTP parsing)
 {
   "action": "resend_raw",
   "params": {
@@ -207,7 +207,7 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
   }
 }
 
-// TCP リプレイ（WebSocket/TCP フローのメッセージを再送）
+// TCP replay (resend messages from WebSocket/TCP flow)
 {
   "action": "tcp_replay",
   "params": {
@@ -218,7 +218,7 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
   }
 }
 
-// 2 フローの構造化比較
+// Structured comparison of 2 flows
 {
   "action": "compare",
   "params": {
@@ -228,26 +228,26 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 }
 ```
 
-#### resend 追加パラメータ
+#### resend Additional Parameters
 
-| パラメータ | アクション | 説明 |
-|-----------|-----------|------|
-| `override_method` | resend | HTTP メソッド上書き |
-| `override_url` | resend | URL 上書き |
-| `add_headers` | resend | ヘッダ追加 |
-| `remove_headers` | resend | ヘッダ削除 |
-| `override_host` | resend | ホスト上書き（host:port 形式） |
-| `follow_redirects` | resend | リダイレクト追従（デフォルト: false） |
-| `message_sequence` | resend | WebSocket メッセージシーケンス番号（WebSocket フロー必須） |
-| `timeout_ms` | resend, resend_raw, tcp_replay | タイムアウト（ミリ秒） |
-| `override_raw_base64` | resend_raw | Base64 エンコード済み生リクエストデータ |
-| `target_addr` | resend_raw, tcp_replay | ターゲットアドレス（host:port、未指定時はフローの接続先を使用） |
-| `use_tls` | resend_raw, tcp_replay | TLS 使用フラグ |
-| `patches` | resend_raw | バイトレベルパッチ |
-| `dry_run` | resend, resend_raw | 送信せず改変内容をプレビュー |
-| `tag` | resend, resend_raw, tcp_replay | 結果フローにタグを付与 |
+| Parameter | Action | Description |
+|-----------|--------|-------------|
+| `override_method` | resend | Override HTTP method |
+| `override_url` | resend | Override URL |
+| `add_headers` | resend | Add headers |
+| `remove_headers` | resend | Remove headers |
+| `override_host` | resend | Override host (host:port format) |
+| `follow_redirects` | resend | Follow redirects (default: false) |
+| `message_sequence` | resend | WebSocket message sequence number (required for WebSocket flows) |
+| `timeout_ms` | resend, resend_raw, tcp_replay | Timeout (milliseconds) |
+| `override_raw_base64` | resend_raw | Base64-encoded raw request data |
+| `target_addr` | resend_raw, tcp_replay | Target address (host:port, defaults to flow's connection target) |
+| `use_tls` | resend_raw, tcp_replay | Use TLS flag |
+| `patches` | resend_raw | Byte-level patches |
+| `dry_run` | resend, resend_raw | Preview modifications without sending |
+| `tag` | resend, resend_raw, tcp_replay | Tag applied to resulting flow |
 
-### fuzz -- ファジング
+### fuzz -- Fuzzing
 
 ```json
 {
@@ -276,29 +276,29 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 }
 ```
 
-#### fuzz 追加パラメータ
+#### fuzz Additional Parameters
 
-| パラメータ | 説明 |
-|-----------|------|
-| `rate_limit_rps` | RPS リミット（0 = 無制限） |
-| `delay_ms` | リクエスト間の固定遅延（ミリ秒） |
-| `timeout_ms` | リクエストタイムアウト（デフォルト: 30000） |
-| `max_retries` | リトライ回数 |
-| `stop_on` | 自動停止条件 |
+| Parameter | Description |
+|-----------|-------------|
+| `rate_limit_rps` | RPS limit (0 = unlimited) |
+| `delay_ms` | Fixed delay between requests (milliseconds) |
+| `timeout_ms` | Request timeout (default: 30000) |
+| `max_retries` | Retry count |
+| `stop_on` | Automatic stop conditions |
 
-#### PayloadSet の type
+#### PayloadSet types
 
-| type | フィールド | 説明 |
-|------|-----------|------|
-| `wordlist` | `values` | 文字列リスト |
-| `file` | `path` | ファイルパス（1 行 1 ペイロード） |
-| `range` | `start`, `end`, `step` | 整数範囲（step デフォルト: 1） |
-| `sequence` | `start`, `end`, `format` | フォーマット付き連番（例: "user%04d"） |
+| type | Fields | Description |
+|------|--------|-------------|
+| `wordlist` | `values` | List of strings |
+| `file` | `path` | File path (one payload per line) |
+| `range` | `start`, `end`, `step` | Integer range (step default: 1) |
+| `sequence` | `start`, `end`, `format` | Formatted sequential numbers (e.g., "user%04d") |
 
-### macro -- マクロ定義・実行
+### macro -- Macro Definition & Execution
 
 ```json
-// マクロ定義（条件付きステップ・リトライ・初期変数）
+// Macro definition (conditional steps, retry, initial variables)
 {
   "action": "define_macro",
   "params": {
@@ -343,40 +343,40 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
   }
 }
 
-// マクロ実行
+// Run macro
 {
   "action": "run_macro",
   "params": {"name": "auth-flow"}
 }
 ```
 
-#### extract ルール追加フィールド
+#### extract Rule Additional Fields
 
-| フィールド | 説明 |
-|-----------|------|
-| `json_path` | JSON パスによる値抽出（source: body_json 時） |
-| `required` | true の場合、抽出失敗でステップをエラーにする |
-| `default` | 抽出失敗時のデフォルト値 |
+| Field | Description |
+|-------|-------------|
+| `json_path` | Extract value by JSON path (when source: body_json) |
+| `required` | If true, extraction failure causes the step to error |
+| `default` | Default value when extraction fails |
 
-#### when (条件付きステップ)
+#### when (Conditional Steps)
 
-| フィールド | 説明 |
-|-----------|------|
-| `step` | 参照する先行ステップ ID |
-| `status_code` | 期待するステータスコード |
-| `status_code_range` | ステータスコード範囲（例: [200, 299]） |
-| `header_match` | ヘッダ値マッチ（map） |
-| `body_match` | ボディ正規表現マッチ |
-| `extracted_var` | 抽出変数の存在チェック |
-| `negate` | 条件を反転 |
+| Field | Description |
+|-------|-------------|
+| `step` | Referenced preceding step ID |
+| `status_code` | Expected status code |
+| `status_code_range` | Status code range (e.g., [200, 299]) |
+| `header_match` | Header value match (map) |
+| `body_match` | Body regex match |
+| `extracted_var` | Check existence of extracted variable |
+| `negate` | Invert condition |
 
-### manage -- フローデータ管理
+### manage -- Flow Data Management
 
 ```json
-// フロー削除（プロトコルフィルタ付き）
+// Delete flows (with protocol filter)
 {"action": "delete_flows", "params": {"protocol": "TCP", "older_than_days": 7, "confirm": true}}
 
-// フローエクスポート（フィルタ・ボディ制御）
+// Export flows (with filter and body control)
 {
   "action": "export_flows",
   "params": {
@@ -387,7 +387,7 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
   }
 }
 
-// フローインポート（競合時の動作指定）
+// Import flows (specify behavior on conflict)
 {
   "action": "import_flows",
   "params": {
@@ -397,19 +397,19 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 }
 ```
 
-#### manage 追加パラメータ
+#### manage Additional Parameters
 
-| パラメータ | アクション | 説明 |
-|-----------|-----------|------|
-| `protocol` | delete_flows | プロトコルフィルタ |
-| `include_bodies` | export_flows | メッセージボディを含めるか（デフォルト: true） |
-| `filter` | export_flows | エクスポートフィルタ（protocol, url_pattern, 時間範囲等） |
-| `on_conflict` | import_flows | 競合時の動作（"skip" or "replace"、デフォルト: skip） |
+| Parameter | Action | Description |
+|-----------|--------|-------------|
+| `protocol` | delete_flows | Protocol filter |
+| `include_bodies` | export_flows | Include message bodies (default: true) |
+| `filter` | export_flows | Export filter (protocol, url_pattern, time range, etc.) |
+| `on_conflict` | import_flows | Behavior on conflict ("skip" or "replace", default: skip) |
 
-### intercept -- インターセプト操作
+### intercept -- Intercept Operations
 
 ```json
-// リクエスト phase: 改変して転送
+// Request phase: modify and forward
 {
   "action": "modify_and_forward",
   "params": {
@@ -422,7 +422,7 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
   }
 }
 
-// レスポンス phase: ステータス・ヘッダ・ボディを改変
+// Response phase: modify status, headers, and body
 {
   "action": "modify_and_forward",
   "params": {
@@ -435,13 +435,13 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
   }
 }
 
-// リクエストをそのまま転送
+// Forward request as-is
 {"action": "release", "params": {"intercept_id": "<intercept-id>"}}
 
-// リクエストをドロップ
+// Drop request
 {"action": "drop", "params": {"intercept_id": "<intercept-id>"}}
 
-// raw モードで生バイトを転送
+// Forward raw bytes in raw mode
 {
   "action": "modify_and_forward",
   "params": {
@@ -452,34 +452,34 @@ fuzz_results には集約統計（`summary.statistics`: status_code_distribution
 }
 ```
 
-#### intercept パラメータ
+#### intercept Parameters
 
-| パラメータ | phase | 説明 |
-|-----------|-------|------|
-| `override_method` | request | HTTP メソッド上書き |
-| `override_url` | request | URL 上書き |
-| `override_headers` | request | リクエストヘッダ上書き |
-| `add_headers` | request | リクエストヘッダ追加 |
-| `remove_headers` | request | リクエストヘッダ削除 |
-| `override_body` | request | リクエストボディ上書き |
-| `override_status` | response | ステータスコード上書き |
-| `override_response_headers` | response | レスポンスヘッダ上書き |
-| `add_response_headers` | response | レスポンスヘッダ追加 |
-| `remove_response_headers` | response | レスポンスヘッダ削除 |
-| `override_response_body` | response | レスポンスボディ上書き |
-| `override_body` | websocket_frame | WebSocket フレームペイロード上書き |
-| `mode` | all | 転送モード（"structured" or "raw"。デフォルト: "structured"） |
-| `raw_override_base64` | all (raw mode) | Base64 エンコード済み生バイト（raw モード時の modify_and_forward 用） |
+| Parameter | Phase | Description |
+|-----------|-------|-------------|
+| `override_method` | request | Override HTTP method |
+| `override_url` | request | Override URL |
+| `override_headers` | request | Override request headers |
+| `add_headers` | request | Add request headers |
+| `remove_headers` | request | Remove request headers |
+| `override_body` | request | Override request body |
+| `override_status` | response | Override status code |
+| `override_response_headers` | response | Override response headers |
+| `add_response_headers` | response | Add response headers |
+| `remove_response_headers` | response | Remove response headers |
+| `override_response_body` | response | Override response body |
+| `override_body` | websocket_frame | Override WebSocket frame payload |
+| `mode` | all | Forwarding mode ("structured" or "raw". default: "structured") |
+| `raw_override_base64` | all (raw mode) | Base64-encoded raw bytes (for modify_and_forward in raw mode) |
 
-### security -- ターゲットスコープ制御
+### security -- Target Scope Control
 
-yorishiro-proxy のスコープ制御は 2 層構造:
+yorishiro-proxy scope control uses a 2-layer structure:
 
-- **Policy Layer**: 設定ファイルで定義される不変のスコープ。エージェントからは変更不可
-- **Agent Layer**: MCP ツールで動的に変更可能。Policy Layer の制約内でのみ有効
+- **Policy Layer**: Immutable scope defined in the config file. Cannot be changed by agents
+- **Agent Layer**: Dynamically changeable via MCP tools. Only effective within Policy Layer constraints
 
 ```json
-// ターゲットスコープ設定
+// Set target scope
 {
   "action": "set_target_scope",
   "params": {
@@ -488,7 +488,7 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   }
 }
 
-// ターゲットスコープ更新（既存に追加）
+// Update target scope (add to existing)
 {
   "action": "update_target_scope",
   "params": {
@@ -497,16 +497,16 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   }
 }
 
-// 現在のスコープ取得
+// Get current scope
 {"action": "get_target_scope"}
 
-// URL のスコープ判定テスト
+// Test scope evaluation for a URL
 {
   "action": "test_target",
   "params": {"url": "https://api.target.com/v1/users"}
 }
 
-// レート制限設定（グローバル 10 RPS、ホスト別 5 RPS）
+// Set rate limits (global 10 RPS, per-host 5 RPS)
 {
   "action": "set_rate_limits",
   "params": {
@@ -515,10 +515,10 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   }
 }
 
-// 現在のレート制限取得
+// Get current rate limits
 {"action": "get_rate_limits"}
 
-// 診断バジェット設定（最大 1000 リクエスト、30 分）
+// Set diagnostic budget (max 1000 requests, 30 minutes)
 {
   "action": "set_budget",
   "params": {
@@ -527,53 +527,53 @@ yorishiro-proxy のスコープ制御は 2 層構造:
   }
 }
 
-// 現在のバジェット・使用状況取得
+// Get current budget and usage
 {"action": "get_budget"}
 ```
 
-#### ターゲットルール パラメータ
+#### Target Rule Parameters
 
-| パラメータ | 説明 |
-|-----------|------|
-| `hostname` | ホスト名 |
-| `ports` | ポートリスト（省略時は全ポート） |
-| `schemes` | スキーム（http, https 等。省略時は全スキーム） |
-| `path_prefix` | パスプレフィックス（省略時は全パス） |
+| Parameter | Description |
+|-----------|-------------|
+| `hostname` | Hostname |
+| `ports` | Port list (all ports if omitted) |
+| `schemes` | Schemes (http, https, etc. All schemes if omitted) |
+| `path_prefix` | Path prefix (all paths if omitted) |
 
-#### レート制限パラメータ
+#### Rate Limit Parameters
 
-| パラメータ | 説明 |
-|-----------|------|
-| `max_requests_per_second` | グローバル RPS 制限（0 = 無制限） |
-| `max_requests_per_host_per_second` | ホスト別 RPS 制限（0 = 無制限） |
+| Parameter | Description |
+|-----------|-------------|
+| `max_requests_per_second` | Global RPS limit (0 = unlimited) |
+| `max_requests_per_host_per_second` | Per-host RPS limit (0 = unlimited) |
 
-#### 診断バジェットパラメータ
+#### Diagnostic Budget Parameters
 
-| パラメータ | 説明 |
-|-----------|------|
-| `max_total_requests` | セッション全体の最大リクエスト数（0 = 無制限） |
-| `max_duration` | セッション最大時間（Go duration 形式、例: "30m", "1h"。"0s" = 無制限） |
+| Parameter | Description |
+|-----------|-------------|
+| `max_total_requests` | Maximum requests for the entire session (0 = unlimited) |
+| `max_duration` | Maximum session duration (Go duration format, e.g., "30m", "1h". "0s" = unlimited) |
 
-レート制限・バジェットも Policy/Agent 2 層構造。Agent Layer は Policy Layer 以下の制限のみ設定可能。バジェット超過時はプロキシが自動停止。
+Rate limits and budget also use Policy/Agent 2-layer structure. The Agent Layer can only set limits at or below the Policy Layer. When the budget is exceeded, the proxy stops automatically.
 
-### SafetyFilter（入力フィルタ）
+### SafetyFilter (Input Filter)
 
-SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DROP TABLE、rm -rf 等）がターゲットに送信されることを防止する。AI エージェントからは変更不可で、設定ファイル (`config.json`) で定義する。
+SafetyFilter operates as a Policy Layer to prevent destructive payloads (DROP TABLE, rm -rf, etc.) from being sent to targets. It cannot be changed by AI agents and is defined in the config file (`config.json`).
 
-#### プリセット選択の指針
+#### Preset Selection Guide
 
-| プリセット | 用途 | 対象 |
-|-----------|------|------|
-| `destructive-sql` | SQL データベースを持つアプリケーション | DROP TABLE/DATABASE、TRUNCATE、無条件 DELETE/UPDATE 等 |
-| `destructive-os-command` | OS コマンドインジェクション検証時 | rm -rf、shutdown、mkfs、dd、format 等 |
+| Preset | Use Case | Targets |
+|--------|----------|---------|
+| `destructive-sql` | Applications with SQL databases | DROP TABLE/DATABASE, TRUNCATE, unconditional DELETE/UPDATE, etc. |
+| `destructive-os-command` | OS command injection verification | rm -rf, shutdown, mkfs, dd, format, etc. |
 
-- Web アプリケーション診断: 両方のプリセットを有効化推奨
-- API のみの診断: 対象に応じてプリセットを選択
-- `log_only` モードで事前テスト後、`block` モードに切り替える運用を推奨
+- Web application testing: Enable both presets (recommended)
+- API-only testing: Select preset based on target
+- Recommended workflow: Test in `log_only` mode first, then switch to `block` mode
 
-#### カスタムルール追加
+#### Adding Custom Rules
 
-プリセットに加え、アプリケーション固有のパターンをカスタムルールとして追加可能:
+In addition to presets, application-specific patterns can be added as custom rules:
 
 ```json
 {
@@ -596,21 +596,21 @@ SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DR
 }
 ```
 
-#### 現在の設定確認
+#### Checking Current Settings
 
 ```json
 // security
 {"action": "get_safety_filter"}
 ```
 
-`get_safety_filter` は読み取り専用で、現在有効なルール一覧と `immutable: true` を返す。
+`get_safety_filter` is read-only and returns the list of currently active rules and `immutable: true`.
 
-### configure -- プロキシ設定変更
+### configure -- Change Proxy Settings
 
-実行中のプロキシ設定を動的に変更する。
+Dynamically change running proxy settings.
 
 ```json
-// upstream proxy と接続制限を変更（merge モード）
+// Change upstream proxy and connection limits (merge mode)
 {
   "operation": "merge",
   "upstream_proxy": "socks5://proxy.internal:1080",
@@ -618,7 +618,7 @@ SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DR
   "peek_timeout_ms": 5000
 }
 
-// インターセプトキューの設定
+// Configure intercept queue settings
 {
   "intercept_queue": {
     "timeout_ms": 120000,
@@ -626,7 +626,7 @@ SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DR
   }
 }
 
-// SOCKS5 認証の設定
+// Configure SOCKS5 authentication
 {
   "socks5_auth": {
     "method": "password",
@@ -636,90 +636,90 @@ SafetyFilter は Policy Layer として動作し、破壊的ペイロード（DR
 }
 ```
 
-#### configure パラメータ
+#### configure Parameters
 
-| パラメータ | 説明 |
-|-----------|------|
-| `operation` | "merge"（デフォルト）または "replace" |
-| `upstream_proxy` | 上流プロキシ URL |
-| `capture_scope` | キャプチャスコープ |
-| `tls_passthrough` | TLS パススルー設定 |
-| `intercept_rules` | インターセプトルール |
-| `intercept_queue` | インターセプトキュー（timeout_ms, timeout_behavior） |
-| `auto_transform` | 自動変換ルール |
-| `socks5_auth` | SOCKS5 認証（method, username, password） |
-| `max_connections` | 最大同時接続数（1-100000） |
-| `peek_timeout_ms` | プロトコル検出タイムアウト（100-600000） |
-| `request_timeout_ms` | HTTP リクエストタイムアウト（100-600000） |
-| `tls_fingerprint` | TLS フィンガープリントプロファイル変更 |
-| `budget` | 診断バジェット（max_total_requests, max_duration） |
-| `client_cert` | mTLS クライアント証明書設定（cert_path, key_path） |
+| Parameter | Description |
+|-----------|-------------|
+| `operation` | "merge" (default) or "replace" |
+| `upstream_proxy` | Upstream proxy URL |
+| `capture_scope` | Capture scope |
+| `tls_passthrough` | TLS passthrough settings |
+| `intercept_rules` | Intercept rules |
+| `intercept_queue` | Intercept queue (timeout_ms, timeout_behavior) |
+| `auto_transform` | Auto-transform rules |
+| `socks5_auth` | SOCKS5 authentication (method, username, password) |
+| `max_connections` | Maximum concurrent connections (1-100000) |
+| `peek_timeout_ms` | Protocol detection timeout (100-600000) |
+| `request_timeout_ms` | HTTP request timeout (100-600000) |
+| `tls_fingerprint` | Change TLS fingerprint profile |
+| `budget` | Diagnostic budget (max_total_requests, max_duration) |
+| `client_cert` | mTLS client certificate settings (cert_path, key_path) |
 
-### plugin -- プラグイン管理
+### plugin -- Plugin Management
 
 ```json
-// プラグイン一覧
+// List plugins
 {"action": "list"}
 
-// 特定プラグインのリロード
+// Reload a specific plugin
 {"action": "reload", "params": {"name": "<plugin-name>"}}
 
-// 全プラグインのリロード
+// Reload all plugins
 {"action": "reload"}
 
-// プラグイン無効化
+// Disable a plugin
 {"action": "disable", "params": {"name": "<plugin-name>"}}
 
-// プラグイン有効化
+// Enable a plugin
 {"action": "enable", "params": {"name": "<plugin-name>"}}
 ```
 
-## ワークフロー選択ディシジョンツリー
+## Workflow Selection Decision Tree
 
 ```
-指示を受けた
+Received instruction
   |
-  +-- トラフィックキャプチャが必要?
+  +-- Need traffic capture?
   |     |
-  |     +-- YES --> references/playwright-capture.md を参照
-  |     +-- NO (既にフローがある) --> 次へ
+  |     +-- YES --> See references/playwright-capture.md
+  |     +-- NO (flows already exist) --> Next
   |
-  +-- テスト対象の操作はステートフル? (ログイン必要、CSRF トークン、削除系 API 等)
+  +-- Is the target operation stateful? (login required, CSRF token, DELETE API, etc.)
   |     |
-  |     +-- YES --> references/self-contained-iteration.md を参照して Macro 設計
-  |     +-- NO --> 直接 resend / fuzz で実行
+  |     +-- YES --> See references/self-contained-iteration.md for Macro design
+  |     +-- NO --> Execute directly with resend / fuzz
   |
-  +-- 攻撃ペイロードの選定が必要?
+  +-- Need to select attack payloads?
   |     |
-  |     +-- YES --> references/payload-patterns.md を参照 (必ず「安全なペイロード選定の原則」を確認)
-  |     +-- NO --> 次へ
+  |     +-- YES --> See references/payload-patterns.md (always check "Safe Payload Selection Principles")
+  |     +-- NO --> Next
   |
-  +-- 単発テスト or 網羅テスト?
+  +-- Single test or comprehensive test?
   |     |
-  |     +-- 単発確認 --> resend ツール
-  |     +-- 網羅テスト --> fuzz ツール (外れ値検出: outliers_only フィルタ)
-  |     +-- HTTP パースをバイパスしたい --> resend_raw (HTTP Request Smuggling 等)
-  |     +-- WebSocket/TCP メッセージ再送 --> tcp_replay
+  |     +-- Single verification --> resend tool
+  |     +-- Comprehensive test --> fuzz tool (outlier detection: outliers_only filter)
+  |     +-- Want to bypass HTTP parsing --> resend_raw (HTTP Request Smuggling, etc.)
+  |     +-- WebSocket/TCP message resend --> tcp_replay
   |
-  +-- レスポンスの差分分析が必要?
+  +-- Need response diff analysis?
   |     |
-  |     +-- YES --> resend compare で 2 フローを構造化比較
-  |     +-- NO --> 次へ
+  |     +-- YES --> resend compare for structured comparison of 2 flows
+  |     +-- NO --> Next
   |
-  +-- レート制限・バジェット設定が必要?
+  +-- Need rate limit / budget configuration?
   |     |
   |     +-- YES --> security set_rate_limits / set_budget
-  |     +-- NO --> 次へ
+  |     +-- NO --> Next
   |
-  +-- SafetyFilter の設定確認が必要?
+  +-- Need to check SafetyFilter settings?
   |     |
-  |     +-- YES --> security get_safety_filter で現在のルール確認
-  |     +-- NO --> 次へ
+  |     +-- YES --> security get_safety_filter to check current rules
+  |     +-- NO --> Next
   |
-  +-- プロトコル固有の操作?
+  +-- Protocol-specific operations?
         |
-        +-- SOCKS5 トラフィック監視 --> protocols に "SOCKS5" を指定して proxy_start
-        +-- TCP 生データ --> tcp_forwards で TCP フォワード設定
+        +-- SOCKS5 traffic monitoring --> proxy_start with "SOCKS5" in protocols
+        +-- Raw TCP data --> TCP port forwarding via tcp_forwards
 ```
 
-検証の全体フローは `references/verify-vulnerability.md` を参照。
+For the complete verification workflow, see `references/verify-vulnerability.md`.
