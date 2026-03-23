@@ -188,7 +188,7 @@ No data is modified whatsoever, so **this is safe to use on methods with side ef
 
 Retrieve information using UNION SELECT. Identify the number of columns and verify if information can be extracted.
 
-**Usage restriction**: Only use on GET method reference APIs. Prohibited on DELETE/UPDATE/PUT/PATCH.
+**Usage restriction**: Only use on GET/read-only endpoints; do not use on POST/PUT/PATCH/DELETE or any other state-changing operations.
 
 ### Payloads
 
