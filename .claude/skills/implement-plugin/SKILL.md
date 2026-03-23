@@ -1,54 +1,54 @@
 ---
-description: "Starlark プラグインの雛形生成・実装・テスト支援。プロトコル・フック選択からサンプルテスト実行まで"
+description: "Scaffold, implement, and test Starlark plugins. From protocol/hook selection to running sample tests"
 user-invokable: true
 ---
 
 # /implement-plugin
 
-Starlark プラグインの作成を支援するワークフロー。対話的にプロトコルとフックを選択し、動作する雛形を生成する。
+A workflow skill for creating Starlark plugins. Interactively select protocols and hooks to generate a working scaffold.
 
-## 引数
+## Arguments
 
-- `/implement-plugin` — 対話モードでプラグインを作成
-- `/implement-plugin <description>` — 説明からプラグインを自動生成（例: `/implement-plugin HTTPリクエストにX-Request-IDヘッダを付与する`）
+- `/implement-plugin` — Create a plugin in interactive mode
+- `/implement-plugin <description>` — Auto-generate a plugin from a description (e.g., `/implement-plugin Add X-Request-ID header to HTTP requests`)
 
-## 手順
+## Steps
 
-### Phase 1: 要件確認
+### Phase 1: Requirements Clarification
 
-引数に説明がない場合は、以下を対話で確認:
+If no description argument is given, interactively confirm:
 
-1. **目的**: プラグインで何をしたいか
-2. **プロトコル**: 対象プロトコル（http, https, h2, grpc, websocket, tcp, socks5）
-3. **フック**: 使用するフックポイント
-4. **アクション**: CONTINUE（修正）/ DROP（破棄）/ RESPOND（即時応答）
+1. **Purpose**: What should the plugin do?
+2. **Protocol**: Target protocol (http, https, h2, grpc, websocket, tcp, socks5)
+3. **Hook**: Hook points to use
+4. **Action**: CONTINUE (modify) / DROP (discard) / RESPOND (immediate response)
 
-引数に説明がある場合は、内容から自動判定する。
+If a description argument is given, auto-determine from its content.
 
-### Phase 2: コンテキスト収集
+### Phase 2: Context Collection
 
-以下を読んでプラグイン API を把握:
+Read the following to understand the plugin API:
 
-1. `docs/plugins.md` — プラグイン開発ガイド（フックリファレンス、データマップ、アクション）
-2. `examples/plugins/` — 既存サンプルプラグイン
-3. `internal/plugin/engine.go` — Engine API（action 定数、dispatch の仕組み）
-4. `internal/plugin/hook.go` — Hook 定数一覧
+1. `docs/plugins.md` — Plugin development guide (hook reference, data map, actions)
+2. `examples/plugins/` — Existing sample plugins
+3. `internal/plugin/engine.go` — Engine API (action constants, dispatch mechanism)
+4. `internal/plugin/hook.go` — List of hook constants
 
-### Phase 3: プラグイン生成
+### Phase 3: Plugin Generation
 
-`examples/plugins/` にプラグインファイルを作成:
+Create a plugin file in `examples/plugins/`:
 
-- ファイル名: `<snake_case_name>.star`
-- 先頭にコメントで目的・設定例を記載
-- プロトコル固有のデータマップキーを正しく使用
-- `action.CONTINUE` / `action.DROP` / `action.RESPOND` を適切に使い分け
+- Filename: `<snake_case_name>.star`
+- Include a comment at the top describing the purpose and configuration example
+- Use protocol-specific data map keys correctly
+- Use `action.CONTINUE` / `action.DROP` / `action.RESPOND` appropriately
 
-#### テンプレート構造
+#### Template Structure
 
 ```python
 # <Plugin Name>
 #
-# Purpose: <目的の説明>
+# Purpose: <description of purpose>
 #
 # Config:
 #   protocol: "<protocol>"
@@ -62,38 +62,38 @@ def <hook_name>(data):
     return {"action": action.CONTINUE}
 ```
 
-#### プロトコル別データマップ早見表
+#### Protocol Data Map Quick Reference
 
-| プロトコル | キー |
-|-----------|------|
+| Protocol | Keys |
+|----------|------|
 | http/https | protocol, method, url, headers, body, status_code, conn_info |
-| h2 | 同上（protocol="h2"） |
-| grpc | protocol, method, url, headers, body, conn_info（observe-only） |
+| h2 | Same as above (protocol="h2") |
+| grpc | protocol, method, url, headers, body, conn_info (observe-only) |
 | websocket | protocol, opcode, payload, is_text, direction, conn_info |
 | tcp | protocol, data, direction, conn_info, forward_target |
-| socks5 | protocol, target_host, target_port, target, auth_method, auth_user, client_addr（observe-only, CONTINUE のみ） |
+| socks5 | protocol, target_host, target_port, target, auth_method, auth_user, client_addr (observe-only, CONTINUE only) |
 
-#### アクション制約
+#### Action Constraints
 
-| アクション | 使用可能なフック | プロトコル制限 |
-|-----------|----------------|---------------|
-| CONTINUE | 全フック | なし |
-| DROP | on_receive_from_client | なし |
-| RESPOND | on_receive_from_client | HTTP/HTTPS/H2 のみ |
+| Action | Usable Hooks | Protocol Restrictions |
+|--------|-------------|----------------------|
+| CONTINUE | All hooks | None |
+| DROP | on_receive_from_client | None |
+| RESPOND | on_receive_from_client | HTTP/HTTPS/H2 only |
 
-### Phase 4: 動作確認
+### Phase 4: Verification
 
-1. プラグインの Starlark 構文を検証（`go.starlark.net` の構文ルールに準拠しているか目視確認）
-2. 既存テストパターンを参考に、プラグインが Engine に正しくロードできることを確認:
+1. Visually verify Starlark syntax (confirm compliance with `go.starlark.net` syntax rules)
+2. Referring to existing test patterns, verify the plugin can be correctly loaded by the Engine:
 
 ```bash
 make build
 go test -v ./internal/plugin/ -run TestLoad
 ```
 
-### Phase 5: 設定例の提示
+### Phase 5: Present Configuration Example
 
-生成したプラグインの PluginConfig を提示:
+Present the PluginConfig for the generated plugin:
 
 ```json
 {
@@ -104,7 +104,7 @@ go test -v ./internal/plugin/ -run TestLoad
 }
 ```
 
-MCP plugin ツールでの管理方法も案内:
+Also provide guidance on managing via the MCP plugin tool:
 
 ```json
 // plugin tool: list
@@ -117,13 +117,13 @@ MCP plugin ツールでの管理方法も案内:
 {"action": "disable", "params": {"name": "<name>"}}
 ```
 
-## 注意事項
+## Notes
 
-- gRPC は observe-only。DROP/RESPOND は使用不可（CONTINUE のみ）
-- SOCKS5 は observe-only。`on_socks5_connect` フックのみ、CONTINUE のみ使用可。サンプル: `examples/plugins/socks5_logger.star`
-- WebSocket のコントロールフレーム（Close, Ping, Pong）はプラグイン dispatch をスキップする
-- TCP チャンクのプラグイン修正後サイズは 1MB 以下に制限される（超過時は元データを使用）
-- ライフサイクルフック（on_connect, on_tls_handshake, on_disconnect）は 5秒タイムアウト付き
-- Starlark は Python のサブセット。`import`, `class`, ファイル I/O, ネットワークアクセスは不可
-- `print()` はプロキシのログに出力される（デバッグ用）
-- **モジュールレベル変数はロード後にフリーズされる** — リスト・dict などの可変オブジェクトをモジュールレベルに置くと、フック関数内で変更できない（ランタイムエラー）。`on_error: "skip"` 時はサイレントにスキップされるため注意。文字列・int・タプルなどの不変値のみモジュールレベルで使用すること
+- gRPC is observe-only. DROP/RESPOND cannot be used (CONTINUE only)
+- SOCKS5 is observe-only. Only the `on_socks5_connect` hook, CONTINUE only. See sample: `examples/plugins/socks5_logger.star`
+- WebSocket control frames (Close, Ping, Pong) skip plugin dispatch
+- Plugin-modified TCP chunk size is limited to 1MB (original data used if exceeded)
+- Lifecycle hooks (on_connect, on_tls_handshake, on_disconnect) have a 5-second timeout
+- Starlark is a subset of Python. `import`, `class`, file I/O, and network access are not available
+- `print()` outputs to the proxy log (for debugging)
+- **Module-level variables are frozen after loading** — Mutable objects like lists or dicts placed at module level cannot be modified inside hook functions (runtime error). With `on_error: "skip"`, this is silently skipped, so be careful. Use only immutable values (strings, ints, tuples) at module level

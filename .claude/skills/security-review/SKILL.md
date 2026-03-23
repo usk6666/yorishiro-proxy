@@ -1,50 +1,50 @@
 ---
-description: "TLS / ネットワーク / Go 固有のセキュリティレビューを実施"
+description: "Perform TLS / network / Go-specific security reviews"
 user-invokable: true
 ---
 
 # /security-review
 
-yorishiro-proxy のコードに対してセキュリティレビューを実施するスキル。
+A skill for conducting security reviews on yorishiro-proxy code.
 
-## 引数パターン
+## Argument Patterns
 
-- `/security-review` — 全体レビュー
-- `/security-review ./internal/cert/...` — 指定パッケージのみ
+- `/security-review` — Full review
+- `/security-review ./internal/cert/...` — Review specified packages only
 
-## チェックリスト
+## Checklist
 
-### TLS / 証明書
+### TLS / Certificates
 
-- [ ] CA 秘密鍵の保護（ファイルパーミッション、メモリ上の扱い）
-- [ ] 証明書の有効期限設定が適切か
-- [ ] TLS バージョン制限（TLS 1.2 以上）
-- [ ] 安全な暗号スイートのみ使用しているか
-- [ ] 証明書検証のバイパスが意図的かつ制御されているか
+- [ ] CA private key protection (file permissions, memory handling)
+- [ ] Certificate expiration settings are appropriate
+- [ ] TLS version restriction (TLS 1.2 or higher)
+- [ ] Only safe cipher suites are used
+- [ ] Certificate verification bypass is intentional and controlled
 
-### ネットワーク
+### Network
 
-- [ ] バインドアドレスのデフォルトが安全か（localhost vs 0.0.0.0）
-- [ ] コネクションのタイムアウト設定
-- [ ] リソース制限（最大コネクション数、バッファサイズ）
-- [ ] 不正なパケットに対する耐性
+- [ ] Default bind address is safe (localhost vs 0.0.0.0)
+- [ ] Connection timeout settings
+- [ ] Resource limits (max connections, buffer sizes)
+- [ ] Resilience against malformed packets
 
-### Go 固有
+### Go-Specific
 
-- [ ] race condition のリスク（`go test -race` でチェック）
-- [ ] goroutine リーク
-- [ ] `defer` の使い方が正しいか（ループ内など）
-- [ ] `unsafe` パッケージの使用有無
-- [ ] 入力のバリデーション（ヘッダインジェクション等）
+- [ ] Race condition risks (`go test -race` check)
+- [ ] Goroutine leaks
+- [ ] Correct `defer` usage (e.g., inside loops)
+- [ ] Absence of `unsafe` package usage
+- [ ] Input validation (header injection, etc.)
 
 ### MCP / API
 
-- [ ] MCP ツールの入力バリデーション
-- [ ] 認証・認可の仕組み
-- [ ] エラーメッセージに機密情報が含まれていないか
+- [ ] MCP tool input validation
+- [ ] Authentication and authorization mechanisms
+- [ ] Error messages do not contain sensitive information
 
-## 手順
+## Steps
 
-1. 対象パッケージのソースコードを読む
-2. チェックリストに沿ってレビュー
-3. 発見事項を重要度別（Critical / High / Medium / Low）に分類して報告
+1. Read the source code of the target packages
+2. Review against the checklist
+3. Report findings classified by severity (Critical / High / Medium / Low)

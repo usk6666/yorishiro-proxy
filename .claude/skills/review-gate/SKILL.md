@@ -1,120 +1,120 @@
 ---
-description: "PR のレビュー → Fix → 再レビューサイクルを管理するゲート。Code Review + Security Review を並行実行し、問題があれば自動修正"
+description: "Gate skill for managing the PR review → Fix → re-review cycle. Run Code Review + Security Review in parallel, and auto-fix if issues are found"
 user-invokable: true
 ---
 
 # /review-gate
 
-PR に対してコードレビューとセキュリティレビューを並行実行し、
-問題が見つかった場合は自動修正 → 再レビューのサイクルを最大 2 ラウンドまで実行するゲートスキル。
+A gate skill that runs code review and security review in parallel for a PR,
+and if issues are found, executes an auto-fix → re-review cycle for up to 2 rounds.
 
-## 引数パターン
+## Argument Patterns
 
-- `/review-gate <PR番号>` — 指定 PR にフルレビューサイクルを実行
-- `/review-gate <PR番号> --issue <ISSUE_ID>` — Issue ID を明示指定
-- `/review-gate` — 現在のブランチに紐づく PR にフルレビューサイクルを実行
+- `/review-gate <PR number>` — Run full review cycle on the specified PR
+- `/review-gate <PR number> --issue <ISSUE_ID>` — Explicitly specify Issue ID
+- `/review-gate` — Run full review cycle on the PR associated with the current branch
 
 ---
 
-## 手順
+## Steps
 
-### Phase 1: PR 情報の収集
+### Phase 1: Collect PR Information
 
-#### 1-1. PR の特定
+#### 1-1. Identify the PR
 
-引数が指定された場合:
-- `<PR番号>` を使用する
+If an argument is provided:
+- Use `<PR number>`
 
-引数が省略された場合:
-- `gh pr view --json number -q .number` で現在のブランチの PR 番号を取得する
+If no argument is provided:
+- Get the PR number for the current branch with `gh pr view --json number -q .number`
 
-#### 1-2. PR 情報の取得
+#### 1-2. Fetch PR Information
 
-以下を **並行で** 取得する:
+Fetch the following **in parallel**:
 
 ```bash
-gh pr view <PR番号> --json title,body,headRefName,baseRefName,number,url
-gh pr diff <PR番号> --name-only
+gh pr view <PR number> --json title,body,headRefName,baseRefName,number,url
+gh pr diff <PR number> --name-only
 ```
 
-#### 1-3. Issue 情報の取得
+#### 1-3. Fetch Issue Information
 
-`--issue` で指定された場合はそれを使用。
-未指定の場合は PR 本文から `USK-XX` 形式の Issue ID を抽出し、
-`mcp__linear-server__get_issue` で詳細を取得する。
+If `--issue` is specified, use that.
+Otherwise, extract the Issue ID in `USK-XX` format from the PR body,
+and fetch details with `mcp__linear-server__get_issue`.
 
-#### 1-4. コンテキストの構築
+#### 1-4. Build Context
 
-**プロダクトコンテキスト:**
+**Product context:**
 ```
-yorishiro-proxy は AI エージェント向けネットワークプロキシ（MCP サーバ）。
-脆弱性診断のトラフィック傍受・記録・リプレイ機能を提供する。
-アーキテクチャ: TCP リスナ → プロトコル検出 → プロトコルハンドラ → セッション記録 → MCP Tool
+yorishiro-proxy is a network proxy (MCP server) for AI agents.
+Provides traffic interception, recording, and replay capabilities for vulnerability assessment.
+Architecture: TCP Listener → Protocol Detection → Protocol Handler → Session Recording → MCP Tool
 ```
 
-**セキュリティコンテキスト:**
+**Security context:**
 ```
-yorishiro-proxy は MITM プロキシとして動作するため:
-- 攻撃者が制御するトラフィックを直接処理する
-- CA 秘密鍵を保持し、動的に証明書を発行する
-- セッション記録に認証情報が含まれる可能性がある
-- MCP 経由で AI エージェントがコマンドを実行する
+yorishiro-proxy operates as a MITM proxy, therefore:
+- It directly processes attacker-controlled traffic
+- It holds the CA private key and dynamically issues certificates
+- Session recordings may contain credentials (auth tokens, passwords)
+- AI agents execute commands via MCP
 ```
 
 ---
 
-### Phase 2: レビューの並行実行
+### Phase 2: Run Reviews in Parallel
 
-#### 2-1. エージェントテンプレートの読み込み
+#### 2-1. Load Agent Templates
 
-`.claude/agents/code-reviewer.md` と `.claude/agents/security-reviewer.md` を Read ツールで読み込み、
-各テンプレートの `## プロンプト本文` セクション内のコードブロックを抽出する。
+Read `.claude/agents/code-reviewer.md` and `.claude/agents/security-reviewer.md` with the Read tool,
+and extract the code block inside each template's `## Prompt Body` section.
 
-#### 2-2. プレースホルダー置換
+#### 2-2. Replace Placeholders
 
 **Code Review Agent:**
-- `{{PR_NUMBER}}` → PR 番号
-- `{{PR_TITLE}}` → PR タイトル
+- `{{PR_NUMBER}}` → PR number
+- `{{PR_TITLE}}` → PR title
 - `{{ISSUE_ID}}` → Issue ID
-- `{{ISSUE_DESCRIPTION}}` → Issue 説明
-- `{{PRODUCT_CONTEXT}}` → プロダクトコンテキスト
-- `{{CHANGED_FILES}}` → 変更ファイル一覧
+- `{{ISSUE_DESCRIPTION}}` → Issue description
+- `{{PRODUCT_CONTEXT}}` → Product context
+- `{{CHANGED_FILES}}` → List of changed files
 
 **Security Review Agent:**
-- `{{PR_NUMBER}}` → PR 番号
-- `{{PR_TITLE}}` → PR タイトル
+- `{{PR_NUMBER}}` → PR number
+- `{{PR_TITLE}}` → PR title
 - `{{ISSUE_ID}}` → Issue ID
-- `{{PRODUCT_CONTEXT}}` → プロダクトコンテキスト
-- `{{SECURITY_CONTEXT}}` → セキュリティコンテキスト
+- `{{PRODUCT_CONTEXT}}` → Product context
+- `{{SECURITY_CONTEXT}}` → Security context
 
-#### 2-3. 並行起動
+#### 2-3. Parallel Launch
 
-**同一メッセージ内**で 2 つの Task ツールを並行起動する:
+Launch 2 Task tools **in the same message** in parallel:
 
 ```
-Task(description="Code review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Code Review プロンプト>)
-Task(description="Security review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Security Review プロンプト>)
+Task(description="Code review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Code Review prompt>)
+Task(description="Security review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Security Review prompt>)
 ```
 
-**注意**: レビューは read-only だが、並列実行時に対象ブランチの checkout がメイン worktree の状態と競合するため `isolation: "worktree"` を使用する。
+**Note**: Reviews are read-only, but `isolation: "worktree"` is used because checking out the target branch during parallel execution conflicts with the main worktree state.
 
 ---
 
-### Phase 3: 判定集約
+### Phase 3: Aggregate Verdict
 
-#### 3-1. 結果のパース
+#### 3-1. Parse Results
 
-各エージェントの出力から `VERDICT:` 行を抽出し、判定を記録する。
+Extract `VERDICT:` lines from each agent's output and record the verdict.
 
 ```
 code_review_verdict = APPROVED | CHANGES_REQUESTED
 security_review_verdict = APPROVED | CHANGES_REQUESTED
 ```
 
-#### 3-2. 所見の有無を確認
+#### 3-2. Check for Findings
 
-各エージェントの出力から `FINDINGS:` セクションをパースし、LOW 以上の所見が存在するかを記録する。
-`FINDINGS: None` の場合は所見なし。
+Parse the `FINDINGS:` section from each agent's output and record whether LOW or higher findings exist.
+`FINDINGS: None` means no findings.
 
 ```
 code_review_has_findings = true | false
@@ -122,182 +122,182 @@ security_review_has_findings = true | false
 has_any_findings = code_review_has_findings or security_review_has_findings
 ```
 
-#### 3-3. 集約判定
+#### 3-3. Aggregate Verdict
 
-| Code Review | Security Review | 集約判定 | 次のアクション |
-|-------------|----------------|---------|-------------|
-| APPROVED (所見なし) | APPROVED (所見なし) | **APPROVED** | Phase 5 (結果報告) |
-| APPROVED (所見あり) | APPROVED (所見なし/あり) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix のみ、再レビュー不要) |
-| APPROVED (所見なし) | APPROVED (所見あり) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix のみ、再レビュー不要) |
-| APPROVED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + 再レビュー) |
-| CHANGES_REQUESTED | APPROVED | **CHANGES_REQUESTED** | Phase 4 (Fix + 再レビュー) |
-| CHANGES_REQUESTED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + 再レビュー) |
+| Code Review | Security Review | Aggregate Verdict | Next Action |
+|-------------|----------------|-------------------|-------------|
+| APPROVED (no findings) | APPROVED (no findings) | **APPROVED** | Phase 5 (Report) |
+| APPROVED (with findings) | APPROVED (no/with findings) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix only, no re-review) |
+| APPROVED (no findings) | APPROVED (with findings) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix only, no re-review) |
+| APPROVED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
+| CHANGES_REQUESTED | APPROVED | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
+| CHANGES_REQUESTED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
 
 ---
 
-### Phase 4: Fix サイクル（最大 2 ラウンド）
+### Phase 4: Fix Cycle (Max 2 Rounds)
 
-> **注意**: `APPROVED_WITH_FINDINGS` の場合は Fixer を 1 回だけ実行し、再レビューは行わない。
-> 再レビューサイクル（最大 2 ラウンド）は `CHANGES_REQUESTED` の場合のみ適用される。
+> **Note**: For `APPROVED_WITH_FINDINGS`, run Fixer once only and skip re-review.
+> The re-review cycle (max 2 rounds) applies only for `CHANGES_REQUESTED`.
 
-#### 4-1. Fixer Agent の起動
+#### 4-1. Launch Fixer Agent
 
-`.claude/agents/fixer.md` を Read ツールで読み込み、プレースホルダーを置換する:
+Read `.claude/agents/fixer.md` with the Read tool and replace placeholders:
 
-- `{{PR_NUMBER}}` → PR 番号
-- `{{BRANCH_NAME}}` → PR のヘッドブランチ名
-- `{{CODE_REVIEW_FINDINGS}}` → Code Review の所見（所見がある場合は全件渡す。所見なしの場合は "None — Code review passed."）
-- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review の所見（所見がある場合は全件渡す。所見なしの場合は "None — Security review passed."）
+- `{{PR_NUMBER}}` → PR number
+- `{{BRANCH_NAME}}` → PR head branch name
+- `{{CODE_REVIEW_FINDINGS}}` → Code Review findings (pass all findings if present; "None — Code review passed." if none)
+- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review findings (pass all findings if present; "None — Security review passed." if none)
 - `{{ORIGINAL_ISSUE_ID}}` → Issue ID
-- `{{PRODUCT_CONTEXT}}` → プロダクトコンテキスト
+- `{{PRODUCT_CONTEXT}}` → Product context
 
-Task ツールで起動:
+Launch with Task tool:
 - `subagent_type`: `"general-purpose"`
 - `isolation`: `"worktree"`
 - `description`: `"Fix review findings PR #<N> round <R>"`
-- `prompt`: 置換後のプロンプト
+- `prompt`: Replaced prompt
 
-#### 4-2. 修正結果の確認
+#### 4-2. Check Fix Results
 
-Fixer Agent の出力から各所見のステータスを抽出する:
-- `FIXED`: 修正完了
-- `PARTIALLY_FIXED`: 部分修正
-- `UNRESOLVED`: 未解決
+Extract the status of each finding from the Fixer Agent output:
+- `FIXED`: Fix complete
+- `PARTIALLY_FIXED`: Partially fixed
+- `UNRESOLVED`: Not resolved
 
-#### 4-3. 再レビュー
+#### 4-3. Re-review
 
-**CHANGES_REQUESTED だったレビューのみ** 再実行する:
+Re-run **only the reviews that were `CHANGES_REQUESTED`**:
 
-- Code Review のみ CHANGES_REQUESTED → Code Review Agent のみ再起動
-- Security Review のみ CHANGES_REQUESTED → Security Review Agent のみ再起動
-- 両方 CHANGES_REQUESTED → 両方を並行で再起動
+- Only Code Review was `CHANGES_REQUESTED` → Re-launch Code Review Agent only
+- Only Security Review was `CHANGES_REQUESTED` → Re-launch Security Review Agent only
+- Both were `CHANGES_REQUESTED` → Re-launch both in parallel
 
-#### 4-4. ラウンド管理
+#### 4-4. Round Management
 
 ```
-# APPROVED_WITH_FINDINGS の場合: Fix のみ、再レビューなし
-if 集約判定 == APPROVED_WITH_FINDINGS:
-    Fixer Agent 起動（LOW 所見を含む全所見を渡す）
-    → Phase 5（再レビューなしで完了）
+# For APPROVED_WITH_FINDINGS: Fix only, no re-review
+if aggregate_verdict == APPROVED_WITH_FINDINGS:
+    Launch Fixer Agent (pass all findings including LOW)
+    → Phase 5 (complete without re-review)
 
-# CHANGES_REQUESTED の場合: Fix + 再レビューサイクル（最大 2 ラウンド）
+# For CHANGES_REQUESTED: Fix + re-review cycle (max 2 rounds)
 current_round = 1
 
 while current_round <= 2:
-    if 集約判定 == APPROVED or 集約判定 == APPROVED_WITH_FINDINGS:
+    if aggregate_verdict == APPROVED or aggregate_verdict == APPROVED_WITH_FINDINGS:
         break  → Phase 5
 
-    Fixer Agent 起動（LOW 所見を含む全所見を渡す）
-    再レビュー実行（CHANGES_REQUESTED だった側のみ）
-    判定集約
+    Launch Fixer Agent (pass all findings including LOW)
+    Run re-review (only the side that was CHANGES_REQUESTED)
+    Aggregate verdict
 
     current_round += 1
 
-if current_round > 2 and 集約判定 == CHANGES_REQUESTED:
+if current_round > 2 and aggregate_verdict == CHANGES_REQUESTED:
     → ESCALATE
 ```
 
 ---
 
-### Phase 5: 結果報告
+### Phase 5: Report Results
 
-#### 5-1. 最終ステータス
+#### 5-1. Final Status
 
-| 結果 | 意味 |
-|-----|------|
-| **APPROVED** | 両方のレビューが通過（初回またはFix後） |
-| **ESCALATED** | 2 ラウンドの修正後もレビュー不通過。手動対応が必要 |
+| Result | Meaning |
+|--------|---------|
+| **APPROVED** | Both reviews passed (initial or after Fix) |
+| **ESCALATED** | Review not passed after 2 rounds of fixes. Manual intervention required |
 
-#### 5-2. ユーザーへの報告
+#### 5-2. Report to User
 
 ```markdown
-## Review Gate 結果: PR #<N>
+## Review Gate Results: PR #<N>
 
-**最終判定**: APPROVED / ESCALATED
+**Final Verdict**: APPROVED / ESCALATED
 **PR**: <PR URL>
-**Fix ラウンド数**: 0 / 1 / 2
+**Fix Rounds**: 0 / 1 / 2
 
-### レビュー結果
+### Review Results
 
-| レビュー | 初回 | Round 1 | Round 2 | 最終 |
-|---------|------|---------|---------|------|
+| Review | Initial | Round 1 | Round 2 | Final |
+|--------|---------|---------|---------|-------|
 | Code Review | APPROVED/CHANGES_REQUESTED | — | — | APPROVED |
 | Security Review | CHANGES_REQUESTED | APPROVED | — | APPROVED |
 
-### 所見サマリー
+### Findings Summary
 
 | ID | Severity | Category | Status |
 |----|----------|----------|--------|
 | F-1 | HIGH | Correctness | FIXED (Round 1) |
 | S-1 | MEDIUM | InputValidation | FIXED (Round 1) |
 
-### エスカレーション（ESCALATED の場合のみ）
+### Escalation (ESCALATED only)
 
-以下の所見が 2 ラウンドの修正で解決できませんでした。手動対応をお願いします:
+The following findings could not be resolved in 2 rounds of fixes. Manual intervention requested:
 
 | ID | Severity | File | Description |
 |----|----------|------|-------------|
 | ... | ... | ... | ... |
 ```
 
-#### 5-3. Linear ステータス更新（Issue ID がある場合）
+#### 5-3. Update Linear Status (if Issue ID exists)
 
-| イベント | Linear コメント |
-|---------|----------------|
-| レビュー通過 | "PR #N: Code Review APPROVED, Security Review APPROVED" |
-| Fix サイクル開始 | "PR #N: Review found issues. Fix round 1 starting." |
-| Fix 後通過 | "PR #N: All findings resolved after N fix round(s)." |
-| エスカレーション | "PR #N: ESCALATION - N unresolved findings after 2 fix rounds. Manual intervention needed." |
+| Event | Linear Comment |
+|-------|---------------|
+| Review passed | "PR #N: Code Review APPROVED, Security Review APPROVED" |
+| Fix cycle starts | "PR #N: Review found issues. Fix round 1 starting." |
+| Passes after Fix | "PR #N: All findings resolved after N fix round(s)." |
+| Escalation | "PR #N: ESCALATION - N unresolved findings after 2 fix rounds. Manual intervention needed." |
 
-`mcp__linear-server__create_comment` で Issue にコメントを投稿する。
+Post comments to Issues using `mcp__linear-server__create_comment`.
 
-### Phase 6: Worktree クリーンアップ
+### Phase 6: Worktree Cleanup
 
-レビューサイクル完了後、**自分が起動したサブエージェントの worktree のみ**を削除する。
+After the review cycle completes, delete **only the worktrees of sub-agents you launched**.
 
-**重要**: 別セッションがアクティブに使用中の worktree を破壊する事故を防ぐため、
-一括削除は行わない。
+**Important**: To prevent accidentally destroying worktrees actively in use by other sessions,
+do not bulk-delete.
 
-**手順:**
+**Steps:**
 
-1. Phase 2 〜 4 の各 Task 呼び出し結果から agent ID を記録しておく
-2. 記録した agent ID ごとに以下を実行:
+1. Record agent IDs from each Task call in Phases 2 through 4
+2. Run the following for each recorded agent ID:
 
 ```bash
 git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
 ```
 
-3. 全削除後にメタデータを清掃:
+3. Clean up metadata after all deletions:
 
 ```bash
 git worktree prune
 ```
 
-注意: `/orchestrate` 内から呼ばれた場合は Phase 3-3 で一括削除されるため重複するが、
-冪等なので問題ない。`/review-gate` 単独実行時にのみ実質的に機能する。
+Note: When called from `/orchestrate`, bulk deletion happens in Phase 3-3, so there may be duplication,
+but it is idempotent so no problem. This effectively functions only when `/review-gate` is run standalone.
 
 ---
 
-## 並行度戦略
+## Concurrency Strategy
 
-| シナリオ | 戦略 | 同時 Agent 数 |
-|---------|------|-------------|
-| 初回レビュー | Code + Security 並行 | 2 |
-| 再レビュー（一方のみ） | 単独実行 | 1 |
-| 再レビュー（両方） | Code + Security 並行 | 2 |
-| Fix | Fixer 1 agent のみ | 1 |
+| Scenario | Strategy | Concurrent Agents |
+|----------|----------|------------------|
+| Initial review | Code + Security in parallel | 2 |
+| Re-review (one side only) | Single execution | 1 |
+| Re-review (both sides) | Code + Security in parallel | 2 |
+| Fix | Fixer 1 agent only | 1 |
 
-## 最大エージェント呼び出し数（1 PR あたり最悪ケース）
+## Maximum Agent Calls Per PR (Worst Case)
 
-初回レビュー 2 + Fix 1 + 再レビュー 2 + Fix 1 + 再レビュー 2 = **8 回**
-APPROVED_WITH_FINDINGS の場合: 初回レビュー 2 + Fix 1 = **3 回**
+Initial review 2 + Fix 1 + Re-review 2 + Fix 1 + Re-review 2 = **8 calls**
+For APPROVED_WITH_FINDINGS: Initial review 2 + Fix 1 = **3 calls**
 
 ---
 
-## 注意事項
+## Notes
 
-- レビューエージェントは **read-only** — コード変更は一切行わない
-- Fixer Agent は **worktree** で動作 — PR のブランチを直接操作する
-- **LOW 以上**の所見は全て Fix 対象（NIT のみ対象外）
-- APPROVED でも LOW 所見があれば Fixer を起動する（再レビューは不要）
-- エスカレーション時は修正を試みず、ユーザーに判断を委ねる
+- Review agents are **read-only** — they make no code changes whatsoever
+- Fixer Agent operates in a **worktree** — directly modifies the PR branch
+- **LOW and above** findings are all fix targets (NIT only is excluded)
+- Even if APPROVED, launch Fixer if LOW findings exist (no re-review needed)
+- On escalation, do not attempt fixes; defer to the user's judgment

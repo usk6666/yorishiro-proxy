@@ -1,51 +1,51 @@
 ---
-description: "Linear Issue を読み込み、ブランチ作成から実装・テスト・コミット・PR 作成までを一気通貫で実行"
+description: "Load a Linear Issue and execute the full workflow from branch creation to implementation, testing, commit, and PR creation"
 user-invokable: true
 ---
 
 # /implement
 
-Linear Issue に基づいて実装から PR 作成までを行う一気通貫ワークフロー。
+An end-to-end workflow skill for implementing a Linear Issue through to PR creation.
 
-## 引数
+## Arguments
 
-- `/implement <Issue ID>` — 指定 Issue を実装する (例: `/implement USK-12`)
+- `/implement <Issue ID>` — Implement the specified Issue (e.g., `/implement USK-12`)
 
-## 手順
+## Steps
 
-1. **Issue 読み込み**: `mcp__linear-server__get_issue` で Issue の詳細を取得
-2. **Issue ステータス更新**: ステータスを "In Progress" に更新
-3. **ブランチ作成**: Issue から適切なブランチ名を生成
+1. **Load Issue**: Fetch Issue details with `mcp__linear-server__get_issue`
+2. **Update Issue status**: Update status to "In Progress"
+3. **Create branch**: Generate an appropriate branch name from the Issue
    - feat: `feat/<id>-<short-desc>`
    - fix: `fix/<id>-<short-desc>`
-   - その他: `chore/<id>-<short-desc>`
-4. **実装計画**: Issue の内容を分析し、EnterPlanMode で実装計画を立てる
-5. **実装**: 計画に基づいてコードを実装
-6. **テスト作成**: 実装に対するテストを書く
-7. **検証**:
-   - `gofmt -w .` でフォーマットを自動整形
+   - other: `chore/<id>-<short-desc>`
+4. **Implementation plan**: Analyze Issue content and create an implementation plan
+5. **Implement**: Implement code based on the plan
+6. **Write tests**: Write tests for the implementation
+7. **Verify**:
+   - Auto-format with `gofmt -w .`
    - `make lint` (gofmt check + go vet + staticcheck + ineffassign)
    - `make build`
    - `make test`
-8. **コミット**: Conventional Commits 形式でコミット
-   - コミットメッセージのフッターに `Refs: <Issue ID>` を含める
-9. **プッシュ**: `git push -u origin <branch-name>` でリモートにプッシュ
-10. **PR 作成**:
-    - `git diff main...HEAD` で差分を確認
-    - PR タイトルは Conventional Commits 形式 (例: `feat(protocol): add HTTP handler`)
-    - PR 本文は以下のテンプレートに従う
-    - `gh pr create` で PR を作成
-11. **Issue ステータス更新**: ステータスを "In Review" に更新
-12. **結果報告**: 実装サマリー + PR URL を表示
+8. **Commit**: Commit in Conventional Commits format
+   - Include `Refs: <Issue ID>` in the commit message footer
+9. **Push**: Push to remote with `git push -u origin <branch-name>`
+10. **Create PR**:
+    - Review changes with `git diff main...HEAD`
+    - PR title in Conventional Commits format (e.g., `feat(protocol): add HTTP handler`)
+    - PR body follows the template below
+    - Create PR with `gh pr create`
+11. **Update Issue status**: Update status to "In Review"
+12. **Report results**: Display implementation summary + PR URL
 
-## PR 本文テンプレート
+## PR Body Template
 
 ```markdown
 ## Summary
-- <変更の箇条書き>
+- <bulleted list of changes>
 
 ## Test plan
-- [ ] テスト項目
+- [ ] Test items
 
 Resolves <Issue ID>
 Linear: https://linear.app/usk6666/issue/<Issue ID>
@@ -53,11 +53,11 @@ Linear: https://linear.app/usk6666/issue/<Issue ID>
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
-## 注意事項
+## Notes
 
-- ビルドまたはテストが失敗した場合は修正してから再実行
-- Issue のラベルや説明から実装のスコープを判断する
-- 大きな変更の場合は計画を立ててからユーザーに確認を取る
-- ステップ 7 でビルド・テスト検証済みのため、PR 作成時に再実行しない
-- PR 作成が失敗した場合は `/pr` を手動実行するよう案内する
-- 実装完了前に「config ファイルから本機能を利用できるか」を確認する（config struct・バリデーション・init 関数の対応漏れがないか）
+- If build or tests fail, fix the issues before re-running
+- Determine implementation scope from Issue labels and description
+- For large changes, create a plan and confirm with the user before proceeding
+- Since build/test verification was done in Step 7, do not re-run when creating the PR
+- If PR creation fails, guide the user to manually run `/pr`
+- Before completing implementation, verify that the feature is accessible from the config file (no missing config struct, validation, or init function changes)
