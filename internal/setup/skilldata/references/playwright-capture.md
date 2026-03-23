@@ -41,7 +41,7 @@ Start with a scope configured to capture only the target host.
 ## Step 2: Browser Operations with playwright-cli
 
 Use playwright-cli to operate the target application.
-Proxy settings are automatically configured in `.playwright/cli.config.json` by `yorishiro-proxy install`.
+Proxy settings are automatically configured in `.playwright/cli.config.json` by `yorishiro-proxy install playwright`.
 
 **Required**: Always use `.playwright/cli.config.json` when launching playwright-cli. Do not create custom configuration files.
 
