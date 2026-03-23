@@ -83,6 +83,43 @@ func TestPlugin_List_Empty(t *testing.T) {
 	}
 }
 
+// TestPlugin_List_WithoutParams verifies that the list action succeeds when params
+// is omitted entirely (the WebUI sends { action: "list" } without a params field).
+// This tests the fix for USK-468 where Params was a non-pointer and thus required
+// by the MCP JSON Schema, causing a -32602 validation error.
+func TestPlugin_List_WithoutParams(t *testing.T) {
+	t.Parallel()
+	logger := testutil.DiscardLogger()
+	engine := plugin.NewEngine(logger)
+
+	cs := setupTestSessionWithPluginEngine(t, engine)
+
+	// Send { action: "list" } only — no "params" key at all.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "plugin",
+		Arguments: map[string]any{"action": "list"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success without params: %v", result.Content)
+	}
+
+	tc, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+
+	var out pluginListResult
+	if err := json.Unmarshal([]byte(tc.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Count != 0 {
+		t.Errorf("expected 0 plugins, got %d", out.Count)
+	}
+}
+
 func TestPlugin_List_WithPlugins(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -378,5 +415,45 @@ func TestPlugin_EnableMissingName(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Error("expected error for missing name in enable")
+	}
+}
+
+func TestPlugin_EnableWithoutParams(t *testing.T) {
+	t.Parallel()
+	logger := testutil.DiscardLogger()
+	engine := plugin.NewEngine(logger)
+
+	cs := setupTestSessionWithPluginEngine(t, engine)
+
+	// Omit params entirely — should return a clear error.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "plugin",
+		Arguments: map[string]any{"action": "enable"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error when params is absent for enable")
+	}
+}
+
+func TestPlugin_DisableWithoutParams(t *testing.T) {
+	t.Parallel()
+	logger := testutil.DiscardLogger()
+	engine := plugin.NewEngine(logger)
+
+	cs := setupTestSessionWithPluginEngine(t, engine)
+
+	// Omit params entirely — should return a clear error.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "plugin",
+		Arguments: map[string]any{"action": "disable"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error when params is absent for disable")
 	}
 }
