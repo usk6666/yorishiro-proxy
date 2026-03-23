@@ -11,7 +11,7 @@ Guarantees that each iteration operates independently when fuzzing stateful APIs
 
 ## Why This Pattern Is Needed
 
-- DELETE is not idempotent (the 2nd call returns 404) — a new resource is needed each time
+- Repeated DELETE requests may return 404 after the first successful deletion, so a new resource is needed each time
 - CSRF tokens may need to be refreshed per request
 - Logout may be needed to avoid concurrent session limits or rate limits
 
