@@ -17,7 +17,8 @@ type pluginInput struct {
 	// Available actions: list, reload, enable, disable.
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
-	Params pluginParams `json:"params"`
+	// It is optional; the list action does not require params.
+	Params *pluginParams `json:"params,omitempty"`
 }
 
 // pluginParams holds the union of all plugin action-specific parameters.
@@ -46,10 +47,16 @@ func (s *Server) registerPlugin() {
 // handlePlugin routes the plugin tool invocation to the appropriate action handler.
 func (s *Server) handlePlugin(ctx context.Context, _ *gomcp.CallToolRequest, input pluginInput) (*gomcp.CallToolResult, any, error) {
 	start := time.Now()
+
+	params := pluginParams{}
+	if input.Params != nil {
+		params = *input.Params
+	}
+
 	slog.DebugContext(ctx, "MCP tool invoked",
 		"tool", "plugin",
 		"action", input.Action,
-		"name", input.Params.Name,
+		"name", params.Name,
 	)
 	defer func() {
 		slog.DebugContext(ctx, "MCP tool completed",
@@ -69,11 +76,11 @@ func (s *Server) handlePlugin(ctx context.Context, _ *gomcp.CallToolRequest, inp
 	case "list":
 		return s.handlePluginList()
 	case "reload":
-		return s.handlePluginReload(ctx, input.Params)
+		return s.handlePluginReload(ctx, params)
 	case "enable":
-		return s.handlePluginEnable(input.Params)
+		return s.handlePluginEnable(params)
 	case "disable":
-		return s.handlePluginDisable(input.Params)
+		return s.handlePluginDisable(params)
 	default:
 		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availablePluginActions, ", "))
 	}
