@@ -1,29 +1,29 @@
 ---
-description: "Go テストを実行する"
+description: "Run Go tests"
 user-invokable: true
 ---
 
 # /test
 
-Go テストを実行するスキル。
+A skill for running Go tests.
 
-## デフォルト動作
+## Default Behavior
 
 ```bash
 make test
 ```
 
-## 引数パターン
+## Argument Patterns
 
-- `/test` — 全パッケージのテストを実行 (`make test`)
-- `/test ./internal/proxy/...` — 指定パッケージのみ実行 (`make ensure-ui && go test -race -v ./internal/proxy/...`)
-- `/test -cover` — カバレッジ付きで実行 (`make test-cover`)
-- `/test -run TestName` — 特定のテストのみ実行 (`make ensure-ui && go test -race -v -run TestName ./...`)
+- `/test` — Run tests for all packages (`make test`)
+- `/test ./internal/proxy/...` — Run specified packages only (`make ensure-ui && go test -race -v ./internal/proxy/...`)
+- `/test -cover` — Run with coverage (`make test-cover`)
+- `/test -run TestName` — Run only a specific test (`make ensure-ui && go test -race -v -run TestName ./...`)
 
-## 手順
+## Steps
 
-1. 引数を解析する
-2. `-cover` が指定された場合は `make test-cover` を実行
-3. 引数なしの場合は `make test` を実行
-4. パッケージ指定や `-run` 指定がある場合は `make ensure-ui && go test -race -v <引数>` を実行
-5. 結果を表示し、失敗がある場合は失敗箇所を強調する
+1. Parse arguments
+2. If `-cover` is specified, run `make test-cover`
+3. If no arguments, run `make test`
+4. If a package or `-run` flag is specified, run `make ensure-ui && go test -race -v <args>`
+5. Display results and highlight any failures

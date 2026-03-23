@@ -1,279 +1,279 @@
 # yorishiro-proxy
 
-AI エージェント向けネットワークプロキシツール — AI のための MITM プロキシ。
-MCP (Model Context Protocol) サーバとして動作し、脆弱性診断のためのトラフィック傍受・記録・リプレイ機能を提供する。
+A network proxy tool for AI agents — a MITM proxy for AI.
+Operates as an MCP (Model Context Protocol) server, providing traffic interception, recording, and replay capabilities for vulnerability assessment.
 
-**ステータス**: OSS (Apache License 2.0)・開発中
+**Status**: OSS (Apache License 2.0) · Under active development
 
-## アーキテクチャ
+## Architecture
 
-### 原則: L7-first, L4-capable
+### Principle: L7-first, L4-capable
 
-1. **デフォルトの操作インターフェースは構造化された L7 ビュー** — AI エージェントの Token 効率を優先し、method, URL, headers, body 等の構造化データで通信を表現する
-2. **全プロトコルで raw bytes の記録・閲覧・改変が可能であること** — 診断ツールとして、プロトコルレベルの異常検出・再現ができなければならない（SOCKS5 など純粋なトランスポート層プロトコルはトンネル先プロトコルに対して適用）
-3. **L7 パースは raw bytes の上に乗るオーバーレイであり、wire-observed な raw bytes スナップショット自体を破壊・改変してはならない** — 記録された raw bytes は常にワイヤー上の元データを反映し、改変は必ず別の派生データ（例: modified variant）として扱う
+1. **The default operation interface is a structured L7 view** — Prioritize AI agent token efficiency by representing communication as structured data: method, URL, headers, body, etc.
+2. **Raw bytes recording, viewing, and modification must be possible for all protocols** — As a diagnostic tool, protocol-level anomaly detection and reproduction must be supported (pure transport-layer protocols like SOCKS5 apply to the tunneled protocol)
+3. **L7 parsing is an overlay on top of raw bytes; the wire-observed raw bytes snapshot itself must not be destroyed or modified** — Recorded raw bytes always reflect the original wire data; modifications must always be treated as separate derived data (e.g., modified variant)
 
-### パイプライン
-
-```
-TCP リスナ (Layer 4)
-  → プロトコル検出 (peek bytes)
-    → プロトコルハンドラ (HTTP/S, HTTP/2, gRPC, WebSocket, Raw TCP)
-      → セッション記録 (L7 構造化 + L4 raw bytes)
-        → MCP Tool (傍受・リプレイ・検索)
-```
-
-### プロトコル別 L7/L4 対応状況
-
-| プロトコル | L7 構造化ビュー | L4 raw bytes | 備考 |
-|-----------|---------------|-------------|------|
-| HTTP/1.x | YES | YES (captureReader) | intercept raw forwarding は M27 |
-| HTTP/2 | YES | YES (フレーム codec) | M26 で自前フレームエンジン実装 |
-| gRPC | YES | YES (HTTP/2 経由) | |
-| WebSocket | YES | YES (フレーム単位) | |
-| Raw TCP | N/A | YES (バイトストリーム) | |
-| SOCKS5 | N/A | N/A (トランスポート層として自身は対象外) | ハンドシェイク/トンネル後に委譲されたプロトコルで raw bytes/L7 を適用 |
-
-### 設計方針
-
-- Layer 4 (TCP) でコネクションを受け取り、モジュラー化されたプロトコルハンドラにルーティング
-- 外部プロキシライブラリは使用しない — 標準ライブラリベースで自前実装
-- MCP-first: すべての操作は MCP ツールとして公開
-
-## パッケージレイアウト
+### Pipeline
 
 ```
-cmd/yorishiro-proxy/       # エントリポイント
+TCP Listener (Layer 4)
+  → Protocol Detection (peek bytes)
+    → Protocol Handler (HTTP/S, HTTP/2, gRPC, WebSocket, Raw TCP)
+      → Session Recording (L7 structured + L4 raw bytes)
+        → MCP Tool (Intercept / Replay / Search)
+```
+
+### L7/L4 Support Status by Protocol
+
+| Protocol | L7 Structured View | L4 raw bytes | Notes |
+|----------|-------------------|--------------|-------|
+| HTTP/1.x | YES | YES (captureReader) | intercept raw forwarding in M27 |
+| HTTP/2 | YES | YES (frame codec) | Custom frame engine implemented in M26 |
+| gRPC | YES | YES (via HTTP/2) | |
+| WebSocket | YES | YES (per frame) | |
+| Raw TCP | N/A | YES (byte stream) | |
+| SOCKS5 | N/A | N/A (excluded as transport layer itself) | Apply raw bytes/L7 to protocol delegated after handshake/tunnel |
+
+### Design Principles
+
+- Accept connections at Layer 4 (TCP) and route to modular protocol handlers
+- No external proxy libraries — built on standard library
+- MCP-first: all operations are exposed as MCP tools
+
+## Package Layout
+
+```
+cmd/yorishiro-proxy/       # Entry point
 internal/
-  mcp/                     # MCP サーバ・ツール定義・ハンドラ
+  mcp/                     # MCP server, tool definitions, handlers
   proxy/
-    listener.go            # TCP リスナ (Layer 4)
-    handler.go             # ProtocolHandler インターフェース
-    peekconn.go            # バッファ付き net.Conn ラッパー
+    listener.go            # TCP listener (Layer 4)
+    handler.go             # ProtocolHandler interface
+    peekconn.go            # Buffered net.Conn wrapper
   protocol/
-    detect.go              # プロトコル検出ロジック
-    http/                  # HTTP/1.x, HTTPS MITM 実装
-      handler.go           # HTTP forward proxy ハンドラ
-      connect.go           # CONNECT トンネル・HTTPS MITM
-    httputil/              # HTTP 共通ユーティリティ (TLS トランスポート, ホスト別 TLS 設定, タイミング)
-  safety/                  # SafetyFilter エンジン (Input Filter + Output Filter)
-    engine.go              # ルールコンパイル・CheckInput・FilterOutput
-    rule.go                # Rule/Target/Action 型定義・Preset 構造
-    preset.go              # Input Filter プリセット (destructive-sql, destructive-os-command)
-    preset_pii.go          # Output Filter PII プリセット (credit-card, japan-my-number, email, japan-phone)
-  plugin/                  # Starlark プラグインエンジン・レジストリ
-  flow/                    # リクエスト/レスポンス記録・フロー管理・HAR エクスポート
-  cert/                    # TLS 証明書生成・CA 管理
-    ca.go                  # ルート CA 生成・読み込み
-    issuer.go              # 動的サーバ証明書発行
-  config/                  # 設定読み込み
-  logging/                 # 構造化ロギング (log/slog)
+    detect.go              # Protocol detection logic
+    http/                  # HTTP/1.x, HTTPS MITM implementation
+      handler.go           # HTTP forward proxy handler
+      connect.go           # CONNECT tunnel, HTTPS MITM
+    httputil/              # HTTP common utilities (TLS transport, per-host TLS config, timing)
+  safety/                  # SafetyFilter engine (Input Filter + Output Filter)
+    engine.go              # Rule compilation, CheckInput, FilterOutput
+    rule.go                # Rule/Target/Action type definitions, Preset structures
+    preset.go              # Input Filter presets (destructive-sql, destructive-os-command)
+    preset_pii.go          # Output Filter PII presets (credit-card, japan-my-number, email, japan-phone)
+  plugin/                  # Starlark plugin engine and registry
+  flow/                    # Request/response recording, flow management, HAR export
+  cert/                    # TLS certificate generation, CA management
+    ca.go                  # Root CA generation and loading
+    issuer.go              # Dynamic server certificate issuance
+  config/                  # Configuration loading
+  logging/                 # Structured logging (log/slog)
 ```
 
-## ビルド・テスト
+## Build & Test
 
 ```bash
-make build          # build-ui → vet → go build（常に UI を再ビルド）
-make build-ui       # web/ の React/Vite アプリをビルドし dist/ を生成
-make ensure-ui      # dist/ が存在しない場合のみ build-ui を実行（軽量）
-make test           # ensure-ui → go test -race -v ./...（ユニットテストのみ）
-make test-e2e       # ensure-ui → go test -race -v -tags e2e ./...（e2e 含む全テスト）
-make test-cover     # ensure-ui → カバレッジレポート付きテスト
+make build          # build-ui → vet → go build (always rebuilds UI)
+make build-ui       # Build the React/Vite app in web/ and generate dist/
+make ensure-ui      # Run build-ui only if dist/ does not exist (lightweight)
+make test           # ensure-ui → go test -race -v ./... (unit tests only)
+make test-e2e       # ensure-ui → go test -race -v -tags e2e ./... (all tests including e2e)
+make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
-make fmt            # gofmt -w . で全ファイルをフォーマット
+make fmt            # Format all files with gofmt -w .
 make lint           # gofmt check + go vet + staticcheck + ineffassign
-make bench          # ensure-ui → ベンチマーク実行
-make clean          # 成果物削除
+make bench          # ensure-ui → run benchmarks
+make clean          # Delete build artifacts
 ```
 
-> **e2e テスト**: `*_integration_test.go` ファイルには `//go:build e2e` タグが付与されている。
-> `make test` ではスキップされ、`make test-e2e` で実行される。
-> 新規 integration テストを追加する際は必ずこのタグを付けること。
+> **e2e tests**: `*_integration_test.go` files have the `//go:build e2e` tag.
+> They are skipped by `make test` and run by `make test-e2e`.
+> Always include this tag when adding new integration tests.
 
-> **重要**: `go test` / `go vet` / `go build` を直接実行しないこと。
-> `internal/mcp/webui/embed.go` が `//go:embed dist/*` で Web UI を埋め込むため、
-> `dist/` が存在しないとコンパイルエラーになる。必ず `make` ターゲット経由で実行する。
+> **Important**: Do not run `go test` / `go vet` / `go build` directly.
+> `internal/mcp/webui/embed.go` embeds the Web UI with `//go:embed dist/*`,
+> so a missing `dist/` will cause a compilation error. Always run via `make` targets.
 
-### e2e テストのサブシステム検証チェックリスト
+### e2e Test Subsystem Verification Checklist
 
-新規 e2e テスト (`*_integration_test.go`) を追加する際、通信の成功だけでなく
-サブシステム連携を必ず検証すること。以下のチェックリストを満たしているか確認する。
+When adding new e2e tests (`*_integration_test.go`), verify not just communication success
+but also subsystem integration. Confirm that the following checklist is satisfied.
 
-- [ ] **通信の成功**: データが正しく透過・変換されること（リクエスト送信 → レスポンス受信 → 内容検証）
-- [ ] **フロー記録**: Store に正しいプロトコル名 (`Protocol`)、FlowType (`unary` / `bidirectional` / `stream`)、State で保存されること
-- [ ] **メッセージ内容**: リクエスト/レスポンスのヘッダー・ボディが `store.GetMessages(ctx, flowID, opts)` で正しく記録されていること
-- [ ] **状態遷移**: progressive recording が正しく動作すること（`State` が `active` → `complete` に遷移）
-- [ ] **プラグインフック発火**: 該当プロトコルのフックが呼ばれること（プラグイン対応プロトコルの場合）
-- [ ] **エラーパス**: 接続失敗、タイムアウト時にフローが `State="error"` で記録されること
-- [ ] **raw bytes 記録**: wire-observed な raw bytes (`Message.RawBytes`) が正しく記録されていること（L4-capable 原則、M26/M27 で確立）
-- [ ] **variant recording**: intercept/transform による改変時、original と modified variant が両方記録されること（M27 で導入）
-- [ ] **MCP ツール統合**: `query` ツール（`resource: "flows"` / `resource: "flow"` パラメータ指定）経由でフローが正しく取得できること
+- [ ] **Communication success**: Data is correctly transmitted/transformed (send request → receive response → validate content)
+- [ ] **Flow recording**: Saved to Store with correct protocol name (`Protocol`), FlowType (`unary` / `bidirectional` / `stream`), and State
+- [ ] **Message content**: Request/response headers and body are correctly recorded via `store.GetMessages(ctx, flowID, opts)`
+- [ ] **State transitions**: Progressive recording works correctly (`State` transitions from `active` → `complete`)
+- [ ] **Plugin hook firing**: The relevant hook is called for the protocol (for plugin-enabled protocols)
+- [ ] **Error paths**: Flow is recorded with `State="error"` on connection failure or timeout
+- [ ] **Raw bytes recording**: Wire-observed raw bytes (`Message.RawBytes`) are correctly recorded (L4-capable principle, established in M26/M27)
+- [ ] **Variant recording**: On intercept/transform modification, both original and modified variants are recorded (introduced in M27)
+- [ ] **MCP tool integration**: Flows are correctly retrievable via the `query` tool (with `resource: "flows"` / `resource: "flow"` parameters)
 
-> **適用範囲**: 全項目が全テストに必須ではない。プロトコル特性やテスト目的に応じて該当項目を検証する。
-> 例: Raw TCP は L7 構造化ビューを持たないため「メッセージ内容」のヘッダー検証は不要。
-> SOCKS5 はトランスポート層として自身のフロー記録対象外のため、トンネル先プロトコルで検証する。
+> **Applicability**: Not all items are required for every test. Verify relevant items based on protocol characteristics and test purpose.
+> Example: Raw TCP has no L7 structured view, so header validation under "message content" is not required.
+> SOCKS5 is excluded from flow recording as a transport layer; validate at the tunneled protocol instead.
 
-## コーディング規約
+## Coding Conventions
 
-- Go 標準スタイル (`gofmt` / `goimports`)
-- エラーは `fmt.Errorf("context: %w", err)` でラップ
-- `context.Context` は第一引数で伝播
-- パッケージコメントは doc.go または先頭ファイルに記載
-- テストは `_test.go` ファイル、テーブル駆動テスト推奨
-- `t.Logf` で未検証を記録するパターンは禁止。未実装機能は `t.Skip("not yet implemented: <issue-id>")` を使用すること
-- `internal/` 配下は外部公開しない
+- Go standard style (`gofmt` / `goimports`)
+- Wrap errors with `fmt.Errorf("context: %w", err)`
+- Propagate `context.Context` as the first argument
+- Package comments go in doc.go or the leading file
+- Tests in `_test.go` files; table-driven tests recommended
+- The pattern of using `t.Logf` to record unverified behavior is prohibited. Use `t.Skip("not yet implemented: <issue-id>")` for unimplemented features
+- Do not expose `internal/` packages externally
 
-### ログレベル使い分けガイドライン
+### Log Level Guidelines
 
-`log/slog` のレベル選択は以下の基準に従う。
+Level selection for `log/slog` follows these criteria:
 
-| レベル | 用途 | 例 |
-|--------|------|-----|
-| `slog.Debug` | 開発者・診断向けの詳細情報。`-log-level debug` 時のみ出力 | プロトコル検出結果、TLS SNI、ルールマッチ判定、フレーム送受信、ハンドシェイク進行 |
-| `slog.Info` | 正常動作の主要イベント。デフォルトで出力される | サーバ起動/停止、プロキシ開始/停止、設定ロード完了、プラグインロード |
-| `slog.Warn` | 異常だが処理続行可能な状態。運用者の注意を引くべき事象 | TLS 証明書検証失敗（insecure モード）、非推奨機能の使用、リトライ発生、リソース枯渇の兆候 |
-| `slog.Error` | 処理失敗。回復不能またはリクエスト単位の致命的エラー | DB 書き込み失敗、リスナ起動失敗、CA 証明書読み込み失敗 |
+| Level | Purpose | Examples |
+|-------|---------|---------|
+| `slog.Debug` | Detailed information for developers/diagnostics. Output only at `-log-level debug` | Protocol detection results, TLS SNI, rule match decisions, frame send/receive, handshake progress |
+| `slog.Info` | Major events of normal operation. Output by default | Server start/stop, proxy start/stop, config load complete, plugin load |
+| `slog.Warn` | Abnormal but recoverable state. Events that need operator attention | TLS certificate validation failure (insecure mode), deprecated feature usage, retry occurrence, signs of resource exhaustion |
+| `slog.Error` | Processing failure. Unrecoverable or request-level fatal errors | DB write failure, listener start failure, CA certificate load failure |
 
-#### 判断基準
+#### Decision Criteria
 
-- **Debug vs Info**: そのログが無くても運用者が正常動作を確認できるなら Debug。起動・停止・設定変更など「何が起きたか」を示すイベントは Info
-- **Info vs Warn**: 正常フローの一部なら Info。想定外だが処理を継続する場合は Warn。Warn は「運用者が確認すべき」レベルであり、頻発するなら Info か Debug に降格する
-- **Warn vs Error**: 処理を続行できるなら Warn。呼び出し元にエラーを返す、またはリクエストが失敗する場合は Error
+- **Debug vs Info**: If an operator can confirm normal operation without the log, use Debug. Use Info for events that show "what happened" — start, stop, config change
+- **Info vs Warn**: Use Info if it is part of the normal flow. Use Warn if unexpected but processing continues. Warn means "operator should check", and if it occurs frequently, demote to Info or Debug
+- **Warn vs Error**: Use Warn if processing can continue. Use Error if returning an error to the caller or if a request fails
 
-#### 迷いやすいケースの判断例
+#### Decision Examples for Ambiguous Cases
 
-| ケース | レベル | 理由 |
-|--------|--------|------|
-| クライアントが不正なリクエストを送信（400 系） | `Debug` | クライアント側の問題であり、プロキシの異常ではない |
-| 上流サーバが 5xx を返した | `Debug` | プロキシは正常に中継しており、上流の問題。フロー記録で追跡可能 |
-| intercept ルールにマッチしたリクエスト | `Debug` | 正常動作の詳細。診断時に有用だがデフォルトでは不要 |
-| Safety Filter がリクエストをブロック | `Info` | セキュリティイベントとして運用者に通知すべき |
-| プラグインの Starlark スクリプトが実行時エラー | `Warn` | プラグインの問題だが、プロキシ自体は動作継続可能 |
-| WebSocket 接続の正常クローズ | `Debug` | 正常動作の詳細 |
-| WebSocket 接続の異常切断 | `Warn` | 想定外だが処理続行可能 |
-| フローの DB 保存に失敗 | `Error` | データ損失が発生。回復不能 |
-| 設定ファイルが見つからずデフォルト値を使用 | `Info` | 正常フローの一部（デフォルト値で動作可能な設計） |
-| CONNECT トンネル先への接続タイムアウト | `Debug` | ネットワーク状態に依存。クライアントにはエラーレスポンスを返すが、プロキシの異常ではない |
+| Case | Level | Reason |
+|------|-------|--------|
+| Client sends invalid request (4xx) | `Debug` | Client-side issue; not a proxy anomaly |
+| Upstream server returns 5xx | `Debug` | Proxy relayed correctly; upstream issue. Traceable via flow recording |
+| Request matches intercept rule | `Debug` | Normal operation detail. Useful for diagnostics but not needed by default |
+| Safety Filter blocks a request | `Info` | Security event that should notify the operator |
+| Starlark script in plugin throws runtime error | `Warn` | Plugin issue, but the proxy itself can continue |
+| WebSocket connection closes normally | `Debug` | Normal operation detail |
+| WebSocket connection disconnects abnormally | `Warn` | Unexpected but processing can continue |
+| Flow DB save fails | `Error` | Data loss occurred. Unrecoverable |
+| Config file not found; using default values | `Info` | Part of normal flow (designed to work with default values) |
+| Connection timeout to CONNECT tunnel target | `Debug` | Network-dependent. Returns error response to client, but not a proxy anomaly |
 
-## 依存ライセンスポリシー
+## Dependency License Policy
 
-### 許可
+### Allowed
 
 MIT, BSD (2-clause, 3-clause), Apache-2.0, ISC, MPL-2.0
 
-### 禁止
+### Prohibited
 
-GPL 系全般 (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
+All GPL variants (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 
-### 承認済み依存
+### Approved Dependencies
 
-- `github.com/modelcontextprotocol/go-sdk` — MCP 公式 Go SDK
-- `modernc.org/sqlite` — Pure Go SQLite ドライバ (BSD-3-Clause)
-- `github.com/google/uuid` — UUID 生成 (Apache-2.0)
-- `golang.org/x/sync` — singleflight 等の並行制御 (BSD-3-Clause)
-- `go.starlark.net` — Starlark スクリプトエンジン (BSD-3-Clause)
+- `github.com/modelcontextprotocol/go-sdk` — Official MCP Go SDK
+- `modernc.org/sqlite` — Pure Go SQLite driver (BSD-3-Clause)
+- `github.com/google/uuid` — UUID generation (Apache-2.0)
+- `golang.org/x/sync` — Concurrency control utilities such as singleflight (BSD-3-Clause)
+- `go.starlark.net` — Starlark script engine (BSD-3-Clause)
 
-新しい外部依存を追加する場合は `/license-check` スキルでライセンスを確認すること。
+When adding new external dependencies, verify the license with the `/license-check` skill.
 
-## 開発ワークフロー
+## Development Workflow
 
-1. `/project status` — マイルストーン進捗を確認し、次に取り組む対象を決定
-2. `/project plan <milestone>` — ロードマップから Linear Issue を作成・整備
-3. `/orchestrate` — マイルストーン単位で複数 Issue をサブエージェントに並行実装
-4. `/implement <Issue ID>` — 単一 Issue の実装・テスト・コミット・PR 作成
-5. `/review-gate` — PR に対して Code Review + Security Review を並行実行。問題があれば自動修正→再レビュー（最大 2 ラウンド）
-6. `/project sync` — 実装完了後、ロードマップ文書を更新
+1. `/project status` — Check milestone progress and decide what to work on next
+2. `/project plan <milestone>` — Create and organize Linear Issues from the roadmap
+3. `/orchestrate` — Delegate multiple Issues to sub-agents for parallel implementation per milestone
+4. `/implement <Issue ID>` — Implement, test, commit, and create PR for a single Issue
+5. `/review-gate` — Run Code Review + Security Review in parallel for a PR. If issues found, auto-fix → re-review (up to 2 rounds)
+6. `/project sync` — Update roadmap documents after implementation is complete
 
-> **注意**: `/implement` は単一セッションでの単独実行を前提とする。複数 Issue を並行実装する場合は `/orchestrate` を使用すること。
+> **Note**: `/implement` assumes single-session, solo execution. Use `/orchestrate` for parallel implementation of multiple Issues.
 
-### 新機能マイルストーンの config 対応チェックリスト
+### Config Checklist for New Feature Milestones
 
-`/project plan` で新機能マイルストーンの Issue を分割する際、以下を必須確認項目とする。
-config 対応が暗黙の前提として漏れることを防ぐ。
+When splitting Issues for a new feature milestone with `/project plan`, treat the following as mandatory checks.
+This prevents config support from being omitted as an implicit assumption.
 
-- [ ] `internal/config/` の config struct にフィールド追加が必要か
-- [ ] config バリデーション (`Validate()`) の追加・更新が必要か
-- [ ] init 系関数 (`cmd/yorishiro-proxy/main.go`) の変更が必要か
-- [ ] config → runtime パスの結合テストが必要か
-- [ ] 上記のいずれかに該当する場合、config 対応の Issue を明示的に起票する
+- [ ] Does the config struct in `internal/config/` need a new field?
+- [ ] Does config validation (`Validate()`) need to be added or updated?
+- [ ] Does an init function (`cmd/yorishiro-proxy/main.go`) need to change?
+- [ ] Is a config → runtime path integration test needed?
+- [ ] If any of the above apply, explicitly create a config support Issue
 
-### 新プロトコル追加時の e2e テストチェックリスト
+### e2e Test Checklist for New Protocol Addition
 
-`/project plan` で新プロトコル対応の Issue を分割する際、以下を必須確認項目とする。
-e2e テストの観点漏れを防ぐ。個々のテスト項目の検証内容は「e2e テストのサブシステム検証チェックリスト」を参照。
+When splitting Issues for a new protocol with `/project plan`, treat the following as mandatory checks.
+This prevents gaps in e2e test coverage. Refer to the "e2e Test Subsystem Verification Checklist" for individual test verification details.
 
-- [ ] プロキシ経由の通信成功 e2e テスト (`internal/proxy/*_integration_test.go`)
-- [ ] フロー記録の完全性検証（プロトコル名、FlowType、State 遷移、メッセージ数）
-- [ ] raw bytes 記録の完全性検証（フレーム境界、バイナリデータの round-trip）— L4-capable 原則
-- [ ] variant recording テスト（intercept 改変時の original/modified 保存）
-- [ ] progressive recording テスト（streaming プロトコルの中間状態検証）
-- [ ] プラグインフック発火の検証（該当フックが存在する場合）
-- [ ] Safety Filter / Output Filter の適用検証
-- [ ] エラーパス（接続失敗、タイムアウト、不正データ）の e2e テスト
-- [ ] 派生プロトコル（例: HTTP/2 → gRPC）がある場合、派生パスの独立テスト
-- [ ] MCP ツール統合テスト（query ツール経由でフロー詳細が正しく返ること）
-- [ ] WebUI 表示テスト（新プロトコル用コンポーネントの null guard 含む）
-- [ ] 上記のいずれかに該当する場合、テスト Issue を明示的に起票する
+- [ ] e2e test for successful proxy communication (`internal/proxy/*_integration_test.go`)
+- [ ] Flow recording completeness verification (protocol name, FlowType, State transitions, message count)
+- [ ] Raw bytes recording completeness verification (frame boundaries, binary data round-trip) — L4-capable principle
+- [ ] Variant recording test (original/modified save on intercept modification)
+- [ ] Progressive recording test (intermediate state verification for streaming protocols)
+- [ ] Plugin hook firing verification (if relevant hooks exist for the protocol)
+- [ ] Safety Filter / Output Filter application verification
+- [ ] Error path e2e tests (connection failure, timeout, malformed data)
+- [ ] Independent tests for derived protocols (e.g., HTTP/2 → gRPC) if they exist
+- [ ] MCP tool integration tests (flow details returned correctly via query tool)
+- [ ] WebUI display tests (including null guards for new protocol components)
+- [ ] If any of the above apply, explicitly create a test Issue
 
-> **サブシステム検証チェックリストとの関係**: 本チェックリストは新プロトコル追加の Issue 分割時に使う計画レベルのリスト。
-> サブシステム検証チェックリストは個々の e2e テストファイルを書く際の実装レベルのリスト。両方を参照すること。
+> **Relationship to Subsystem Verification Checklist**: This checklist is a planning-level list for splitting Issues when adding new protocols.
+> The Subsystem Verification Checklist is an implementation-level list for writing individual e2e test files. Refer to both.
 
-## エージェント隔離戦略 (Worktree)
+## Agent Isolation Strategy (Worktree)
 
-サブエージェントによる並行作業での git 競合を防ぐため、以下のルールを適用する。
+To prevent git conflicts during parallel work by sub-agents, apply the following rules.
 
-### 原則
+### Principles
 
-- **メイン worktree（リポジトリのクローン元）は main ブランチに固定し、直接の作業を禁止する** — ブランチ切り替えやコミットは全て worktree 内で行う。main ブランチは branch protection により直接 push できない
-- **全てのサブエージェントは `isolation: "worktree"` で起動する** — 並列実行時にメイン worktree の HEAD を checkout すると、他のエージェントが読み取るコードの状態と競合するため、読み取り専用のレビューエージェントも worktree で隔離する
+- **Lock the main worktree (the repository clone origin) to the main branch and prohibit direct work** — All branch switching and commits happen inside worktrees. The main branch cannot be pushed to directly due to branch protection
+- **All sub-agents are launched with `isolation: "worktree"`** — During parallel execution, checking out the main worktree's HEAD conflicts with the code state read by other agents, so even read-only review agents are isolated in worktrees
 
-### Task ツールでの分類
+### Classification in Task Tool
 
-| エージェント種別 | 操作 | isolation |
-|---------------|------|-----------|
-| implementer | コード実装・コミット・プッシュ | `"worktree"` |
-| fixer | レビュー所見の修正・コミット・プッシュ | `"worktree"` |
-| code-reviewer | 対象ブランチの checkout・差分の読み取り・レビュー投稿 | `"worktree"` |
-| security-reviewer | 対象ブランチの checkout・差分の読み取り・レビュー投稿 | `"worktree"` |
+| Agent Type | Operation | isolation |
+|-----------|-----------|-----------|
+| implementer | Code implementation, commit, push | `"worktree"` |
+| fixer | Fix review findings, commit, push | `"worktree"` |
+| code-reviewer | Checkout target branch, read diff, post review | `"worktree"` |
+| security-reviewer | Checkout target branch, read diff, post review | `"worktree"` |
 
-### 新規エージェント追加時
+### When Adding New Agents
 
-1. 全てのサブエージェントは原則 `isolation: "worktree"` を使用する
-2. 起動元のスキル（`.claude/skills/*/SKILL.md`）に isolation 設定を明記
+1. All sub-agents must use `isolation: "worktree"` by default
+2. Document the isolation setting in the calling skill (`.claude/skills/*/SKILL.md`)
 
-### Worktree クリーンアップ
+### Worktree Cleanup
 
-Claude Code の Task ツールは worktree に変更がある場合、完了後も自動削除しない。
-**呼び出し元スキルがクリーンアップの責務を持つ。**
+The Claude Code Task tool does not auto-delete worktrees when they have changes after completion.
+**The calling skill is responsible for cleanup.**
 
-#### クリーンアップのタイミング
+#### Cleanup Timing
 
-| スキル | クリーンアップタイミング |
-|--------|------------------------|
-| `/orchestrate` | Phase 3-3（全バッチ・レビュー完了後）|
-| `/review-gate` | Phase 6（レビューサイクル完了後）|
-| `/code-review` | Step 7（結果報告後）|
+| Skill | Cleanup Timing |
+|-------|---------------|
+| `/orchestrate` | Phase 3-3 (after all batches and reviews complete) |
+| `/review-gate` | Phase 6 (after review cycle completes) |
+| `/code-review` | Step 7 (after reporting results) |
 
-各スキルは自分が起動したサブエージェントの agent ID を追跡し、**その worktree のみ**を削除する。
-別セッションのアクティブな worktree を破壊しないため、一括削除は行わない。
+Each skill tracks the agent IDs of the sub-agents it launched and deletes **only those worktrees**.
+Do not bulk-delete to avoid destroying active worktrees of other sessions.
 
 ```bash
 git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
 git worktree prune
 ```
 
-stale な worktree が蓄積した場合は `git worktree list` で確認し、個別に `git worktree remove` すること。
+If stale worktrees accumulate, check with `git worktree list` and remove individually with `git worktree remove`.
 
-## ブランチ戦略
+## Branch Strategy
 
-- `main` — 常にビルド・テスト通過状態を維持
-- 機能ブランチ: `feat/<issue-id>-<short-desc>` (例: `feat/USK-12-http-handler`)
-- バグ修正: `fix/<issue-id>-<short-desc>`
-- PR はすべて CI 通過後にマージ
+- `main` — Always maintains a passing build and test state
+- Feature branches: `feat/<issue-id>-<short-desc>` (e.g., `feat/USK-12-http-handler`)
+- Bug fixes: `fix/<issue-id>-<short-desc>`
+- All PRs require CI to pass before merge
 
-## コミット規約
+## Commit Conventions
 
-Conventional Commits 形式:
+Conventional Commits format:
 
 ```
 <type>(<scope>): <description>
@@ -287,5 +287,5 @@ type: `feat`, `fix`, `refactor`, `test`, `docs`, `ci`, `chore`
 
 ## Linear
 
-- チーム: Usk6666
-- プロジェクト: yorishiro-proxy
+- Team: Usk6666
+- Project: yorishiro-proxy
