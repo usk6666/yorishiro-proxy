@@ -1,19 +1,19 @@
-# Playwright-CLI 連携キャプチャ手順
+# Playwright-CLI Integration Capture Procedure
 
-yorishiro-proxy と playwright-cli を組み合わせて、ブラウザ操作のトラフィックをキャプチャする。
+Combine yorishiro-proxy with playwright-cli to capture traffic from browser operations.
 
-## 前提条件
+## Prerequisites
 
-- `yorishiro-proxy install` が実行済み (CA 証明書インストール済み)
-- `yorishiro-proxy install playwright` が実行済み (`.playwright/cli.config.json` のプロキシ設定済み)
-  - このサブコマンドはブラウザを自動検出し、`channel` を環境に合わせて設定する (chromium > firefox > chrome の優先順位)
-  - コンテナ環境 (Docker/devcontainer/Codespaces) かつ Chromium 系ブラウザでは `--no-sandbox` が自動付与される
-  - ブラウザ未検出時は `npx playwright install <browser>` で自動インストールを試みる
-- playwright-cli スキルがインストール済み
+- `yorishiro-proxy install` has been run (CA certificate installed)
+- `yorishiro-proxy install playwright` has been run (proxy settings configured in `.playwright/cli.config.json`)
+  - This subcommand auto-detects the browser and configures `channel` to match the environment (priority: chromium > firefox > chrome)
+  - In container environments (Docker/devcontainer/Codespaces) with Chromium-based browsers, `--no-sandbox` is automatically added
+  - If no browser is detected, automatically attempts installation via `npx playwright install <browser>`
+- playwright-cli skill is installed
 
-## Step 1: プロキシ起動
+## Step 1: Start the Proxy
 
-対象ホストのみキャプチャするスコープを設定して起動する。
+Start with a scope configured to capture only the target host.
 
 ```json
 // proxy_start
@@ -32,65 +32,65 @@ yorishiro-proxy と playwright-cli を組み合わせて、ブラウザ操作の
 }
 ```
 
-**スコープ設計のポイント:**
-- `includes` で対象ホストのみに限定する (ノイズ削減)
-- `excludes` で静的アセット、ヘルスチェック等を除外する
-- `tls_passthrough` で証明書ピンニングされたサービスを除外する
-- Cloudflare 等の WAF で bot 検知される場合は `tls_fingerprint` を設定する（デフォルト: "chrome"）
+**Scope design tips:**
+- Use `includes` to limit to the target host only (reduces noise)
+- Use `excludes` to filter out static assets, health checks, etc.
+- Use `tls_passthrough` to exclude services with certificate pinning
+- If bot detection triggers on Cloudflare or similar WAFs, configure `tls_fingerprint` (default: "chrome")
 
-## Step 2: playwright-cli でブラウザ操作
+## Step 2: Browser Operations with playwright-cli
 
-playwright-cli を使って対象アプリケーションの操作を行う。
-プロキシ設定は `yorishiro-proxy install` で `.playwright/cli.config.json` に自動設定済み。
+Use playwright-cli to operate the target application.
+Proxy settings are automatically configured in `.playwright/cli.config.json` by `yorishiro-proxy install`.
 
-**必須**: playwright-cli 起動時は必ず `.playwright/cli.config.json` を使用すること。独自の設定ファイルを作成してはならない。
+**Required**: Always use `.playwright/cli.config.json` when launching playwright-cli. Do not create custom configuration files.
 
-操作例:
-1. ログインページにアクセスしてログイン
-2. テスト対象の機能を操作 (CRUD 操作、設定変更等)
-3. ログアウト
+Example operations:
+1. Navigate to the login page and log in
+2. Operate the feature under test (CRUD operations, settings changes, etc.)
+3. Log out
 
-**重要**: 後で Macro のステップとして参照するため、各操作を意識的に分けて行う。
+**Important**: Since you will reference each operation as a Macro step later, perform each action deliberately and separately.
 
-最初のページアクセスが完了したら、**必ず次の Step 2.5 でプロキシ接続を確認する**。
+Once the first page access is complete, **you must verify the proxy connection in Step 2.5 before continuing**.
 
-## Step 2.5: プロキシ接続確認 (必須)
+## Step 2.5: Verify Proxy Connection (Required)
 
-最初のページアクセス後、トラフィックがプロキシ経由で記録されているか確認する。
+After the first page access, verify that traffic is being recorded via the proxy.
 
 ```json
 // query
 {"resource": "flows", "limit": 5}
 ```
 
-### フローが 1 件以上ある場合
+### If 1 or More Flows Exist
 
-プロキシ接続は正常。Step 3 に進む。
+Proxy connection is working. Proceed to Step 3.
 
-### フローが 0 件の場合
+### If 0 Flows Exist
 
-ブラウザがプロキシを経由していない。以下の手順で修正する:
+The browser is not routing through the proxy. Fix using the following steps:
 
-1. playwright-cli のブラウザを閉じる
-2. `.playwright/cli.config.json` を確認し、設定が正しいことを検証する:
-   - `proxy.server` が `proxy_start` の `listen_addr` と一致しているか
-   - `browser.browserName` が想定しているブラウザ (`"chromium"`, `"firefox"`, `"webkit"`) と一致しているか
-   - Chromium 系の場合のみ、`launchOptions.channel` が環境にインストール済みのブラウザと一致しているか (`yorishiro-proxy install playwright` で自動検出・再設定可能)。Firefox/WebKit では `channel` は空/未設定で問題ない
-   - コンテナ環境かつ Chromium 系の場合、`launchOptions.args` に `--no-sandbox` が含まれているか (通常は自動付与される)
-3. 設定を修正した上で、playwright-cli を再起動して Step 2 からやり直す
+1. Close the playwright-cli browser
+2. Check `.playwright/cli.config.json` and verify the settings are correct:
+   - Does `proxy.server` match the `listen_addr` from `proxy_start`?
+   - Does `browser.browserName` match the expected browser (`"chromium"`, `"firefox"`, `"webkit"`)?
+   - For Chromium-based browsers only, does `launchOptions.channel` match a browser installed in the environment (`yorishiro-proxy install playwright` can auto-detect and reconfigure this)? For Firefox/WebKit, `channel` should be empty/unset.
+   - In container environments with Chromium-based browsers, does `launchOptions.args` include `--no-sandbox`? (usually added automatically)
+3. After fixing the settings, restart playwright-cli and redo from Step 2
 
-**このステップを省略してはならない。** プロキシ未接続のまま操作を続行すると:
-- 全操作をやり直す必要がある (フローが記録されていないため)
-- `capture_scope` や `security` のターゲットスコープ制御が機能しない
+**Do not skip this step.** If you continue without a proxy connection:
+- All operations must be redone (flows were not recorded)
+- `capture_scope` and `security` target scope controls will not function
 
-## Step 3: キャプチャされたフロー確認
+## Step 3: Review Captured Flows
 
 ```json
 // query
 {"resource": "flows", "limit": 50}
 ```
 
-特定の URL パターンでフィルタする:
+Filter by a specific URL pattern:
 
 ```json
 // query
@@ -101,39 +101,39 @@ playwright-cli を使って対象アプリケーションの操作を行う。
 }
 ```
 
-## Step 4: フロー詳細の確認
+## Step 4: Review Flow Details
 
-各フローの詳細を確認し、Macro で使うフロー ID を特定する。
+Check the details of each flow to identify the flow IDs to use in Macros.
 
 ```json
 // query
 {"resource": "flow", "id": "<flow-id>"}
 ```
 
-レスポンスから以下を確認する:
-- リクエスト/レスポンスのヘッダとボディ
-- CSRF トークンの位置 (ヘッダ or ボディ)
-- セッションクッキーの名前
-- レスポンスの JSON 構造 (抽出ルール設計のため)
+From the response, verify:
+- Request/response headers and body
+- Location of CSRF token (header or body)
+- Session cookie name
+- JSON structure of the response (for designing extraction rules)
 
-## Step 5: フロー ID のマッピング
+## Step 5: Map Flow IDs
 
-キャプチャしたフローを用途別に整理する:
+Organize the captured flows by purpose:
 
 ```
-login-flow:          <flow-id-1>  -- ログインリクエスト
-csrf-page-flow:      <flow-id-2>  -- CSRF トークン取得ページ
-target-api-flow:     <flow-id-3>  -- テスト対象 API
-create-item-flow:    <flow-id-4>  -- テスト用リソース作成
-delete-item-flow:    <flow-id-5>  -- テスト用リソース削除
-logout-flow:         <flow-id-6>  -- ログアウト
+login-flow:          <flow-id-1>  -- Login request
+csrf-page-flow:      <flow-id-2>  -- CSRF token retrieval page
+target-api-flow:     <flow-id-3>  -- Target API under test
+create-item-flow:    <flow-id-4>  -- Test resource creation
+delete-item-flow:    <flow-id-5>  -- Test resource deletion
+logout-flow:         <flow-id-6>  -- Logout
 ```
 
-これらのフロー ID を Macro 定義 (`define_macro`) の各ステップで `flow_id` として参照する。
+Reference these flow IDs as `flow_id` in each step of the Macro definition (`define_macro`).
 
-## 実行中のスコープ変更
+## Changing Scope During Testing
 
-テスト中にスコープを変更する必要がある場合は `configure` を使う:
+If you need to change scope during testing, use `configure`:
 
 ```json
 // configure
@@ -146,6 +146,6 @@ logout-flow:         <flow-id-6>  -- ログアウト
 
 ## Tips
 
-- キャプチャ中に不要なフローが増えたら、スコープを絞る
-- フロー一覧が多い場合は `filter` と `limit` を活用する
-- WebSocket フローは `protocol` フィルタで確認: `{"filter": {"protocol": "WebSocket"}}`
+- If unwanted flows accumulate during capture, narrow the scope
+- Use `filter` and `limit` when the flow list gets large
+- Check WebSocket flows using the `protocol` filter: `{"filter": {"protocol": "WebSocket"}}`
