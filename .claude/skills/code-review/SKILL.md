@@ -1,101 +1,100 @@
 ---
-description: "PR のコード品質をレビューする。Go 慣習、アーキテクチャ準拠、テスト品質を検査"
+description: "Review code quality of a PR. Inspect Go conventions, architecture compliance, and test quality"
 user-invokable: true
 ---
 
 # /code-review
 
-Pull Request に対してコード品質レビューを実施するスキル。
+A skill for conducting code quality reviews on Pull Requests.
 
-## 引数パターン
+## Argument Patterns
 
-- `/code-review <PR番号>` — 指定 PR をレビュー
-- `/code-review` — 現在のブランチに紐づく PR をレビュー
+- `/code-review <PR number>` — Review the specified PR
+- `/code-review` — Review the PR associated with the current branch
 
 ---
 
-## 手順
+## Steps
 
-### Step 1: PR の特定
+### Step 1: Identify the PR
 
-引数が指定された場合:
-- `<PR番号>` を使用する
+If an argument is provided:
+- Use `<PR number>`
 
-引数が省略された場合:
-- `gh pr view --json number -q .number` で現在のブランチの PR 番号を取得する
-- PR が存在しない場合はエラーメッセージを表示して終了する
+If no argument is provided:
+- Get the PR number for the current branch with `gh pr view --json number -q .number`
+- If no PR exists, display an error message and exit
 
-### Step 2: PR 情報の取得
+### Step 2: Fetch PR Information
 
-以下を **並行で** 取得する:
+Fetch the following **in parallel**:
 
 ```bash
-gh pr view <PR番号> --json title,body,headRefName,baseRefName,number,url
-gh pr diff <PR番号> --name-only
+gh pr view <PR number> --json title,body,headRefName,baseRefName,number,url
+gh pr diff <PR number> --name-only
 ```
 
-- PR タイトル、ブランチ名、PR URL を記録
-- 変更ファイル一覧を取得
+- Record the PR title, branch name, and PR URL
+- Get the list of changed files
 
-### Step 3: Issue 情報の取得（任意）
+### Step 3: Fetch Issue Information (optional)
 
-PR の本文から Linear Issue ID（`USK-XX` 形式）を抽出する。
-見つかった場合は `mcp__linear-server__get_issue` で Issue 説明を取得する。
-見つからない場合は Issue 関連のプレースホルダーを空にして続行する。
+Extract a Linear Issue ID (`USK-XX` format) from the PR body.
+If found, fetch the Issue description with `mcp__linear-server__get_issue`.
+If not found, leave the Issue-related placeholders empty and continue.
 
-### Step 4: プロダクトコンテキストの構築
+### Step 4: Build Product Context
 
 ```
-yorishiro-proxy は AI エージェント向けネットワークプロキシ（MCP サーバ）。
-脆弱性診断のトラフィック傍受・記録・リプレイ機能を提供する。
-アーキテクチャ: TCP リスナ → プロトコル検出 → プロトコルハンドラ → セッション記録 → MCP Tool
+yorishiro-proxy is a network proxy (MCP server) for AI agents.
+Provides traffic interception, recording, and replay capabilities for vulnerability assessment.
+Architecture: TCP Listener → Protocol Detection → Protocol Handler → Session Recording → MCP Tool
 ```
 
-### Step 5: Code Review Agent の起動
+### Step 5: Launch Code Review Agent
 
-`.claude/agents/code-reviewer.md` を Read ツールで読み込み、
-`## プロンプト本文` セクション内のコードブロックを抽出する。
+Read `.claude/agents/code-reviewer.md` with the Read tool and extract the code block inside the `## Prompt Body` section.
 
-プレースホルダーを置換:
-- `{{PR_NUMBER}}` → PR 番号
-- `{{PR_TITLE}}` → PR タイトル
-- `{{ISSUE_ID}}` → Issue ID（または "N/A"）
-- `{{ISSUE_DESCRIPTION}}` → Issue 説明（または "N/A"）
-- `{{PRODUCT_CONTEXT}}` → Step 4 で構築したコンテキスト
-- `{{CHANGED_FILES}}` → 変更ファイル一覧
+Replace placeholders:
+- `{{PR_NUMBER}}` → PR number
+- `{{PR_TITLE}}` → PR title
+- `{{ISSUE_ID}}` → Issue ID (or "N/A")
+- `{{ISSUE_DESCRIPTION}}` → Issue description (or "N/A")
+- `{{PRODUCT_CONTEXT}}` → Context built in Step 4
+- `{{CHANGED_FILES}}` → List of changed files
 
-Task ツールで起動:
+Launch with Task tool:
 - `subagent_type`: `"general-purpose"`
 - `isolation`: `"worktree"`
 - `description`: `"Code review PR #<N>"`
-- `prompt`: 置換後のプロンプト
+- `prompt`: Replaced prompt
 
-### Step 6: 結果の報告
+### Step 6: Report Results
 
-サブエージェントの結果を解析し、ユーザーに以下の形式で報告する:
+Parse the sub-agent results and report to the user in the following format:
 
 ```markdown
-## Code Review 結果: PR #<N>
+## Code Review Results: PR #<N>
 
-**判定**: APPROVED / CHANGES_REQUESTED
+**Verdict**: APPROVED / CHANGES_REQUESTED
 **PR**: <PR URL>
 
-### 所見サマリー
+### Findings Summary
 
 | ID | Severity | File | Category | Description |
 |----|----------|------|----------|-------------|
 | F-1 | HIGH | ... | ... | ... |
 
-### 統計
+### Stats
 
 - CRITICAL: X, HIGH: X, MEDIUM: X, LOW: X, NIT: X
 ```
 
-### Step 7: Worktree クリーンアップ
+### Step 7: Worktree Cleanup
 
-結果報告後、**Step 5 で起動したサブエージェントの worktree のみ**を削除する。
+After reporting results, delete **only the worktree of the sub-agent launched in Step 5**.
 
-Task ツールの戻り値に含まれる agent ID を使い、以下を実行:
+Use the agent ID from the Task tool return value and run:
 
 ```bash
 git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true

@@ -1,32 +1,32 @@
 ---
-description: "全依存のライセンスを確認し、禁止ライセンスを検出"
+description: "Check licenses of all dependencies and detect prohibited licenses"
 user-invokable: true
 ---
 
 # /license-check
 
-プロジェクトの全依存ライブラリのライセンスを確認するスキル。
+A skill for checking the licenses of all project dependency libraries.
 
-## ライセンスポリシー
+## License Policy
 
-### 許可
+### Allowed
 
 MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, MPL-2.0
 
-### 禁止
+### Prohibited
 
-GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0 およびその他 GPL 系
+GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0 and other GPL variants
 
-## 手順
+## Steps
 
-1. `go list -m -json all` で全依存を列挙
-2. 各依存のリポジトリ/パッケージの LICENSE ファイルを確認
-3. ライセンスをポリシーと照合
-4. 結果をテーブル形式で表示:
-   - 依存名 | バージョン | ライセンス | ステータス (OK / PROHIBITED / UNKNOWN)
-5. 禁止ライセンスまたは不明なライセンスがある場合は警告を出す
+1. List all dependencies with `go list -m -json all`
+2. Check the LICENSE file of each dependency's repository/package
+3. Compare licenses against the policy
+4. Display results in a table:
+   - Dependency | Version | License | Status (OK / PROHIBITED / UNKNOWN)
+5. Warn if any prohibited or unknown licenses are found
 
-## 注意事項
+## Notes
 
-- UNKNOWN の場合は手動確認を推奨する旨を報告
-- 推移的依存（indirect）も対象に含める
+- For UNKNOWN licenses, recommend manual verification
+- Include transitive dependencies (indirect) in the scope

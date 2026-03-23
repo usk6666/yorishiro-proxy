@@ -1,181 +1,181 @@
 ---
-description: "プロジェクトの進捗把握・Issue 整備・ロードマップ同期を行う開発計画ツール"
+description: "Development planning tool for tracking project progress, organizing Issues, and syncing the roadmap"
 user-invokable: true
 ---
 
 # /project
 
-開発フローの「計画→実装→追跡」サイクルにおいて、orchestrate (実装) の前後を担うスキル。
-マイルストーン進捗の把握、ロードマップからの Issue 作成、実装後のドキュメント同期を提供する。
+A skill that handles the planning and tracking sides of the "plan → implement → track" development cycle.
+Provides milestone progress overview, Issue creation from the roadmap, and post-implementation document sync.
 
-## 固定パラメータ
+## Fixed Parameters
 
-- **チーム**: Usk6666
-- **プロジェクト**: yorishiro-proxy
-- **ロードマップ doc ID**: d413edd7-d296-433a-ab94-11d4dd57d883
+- **Team**: Usk6666
+- **Project**: yorishiro-proxy
+- **Roadmap doc ID**: d413edd7-d296-433a-ab94-11d4dd57d883
 
-## サブコマンド
+## Subcommands
 
-- `/project status` — マイルストーン進捗の全体俯瞰
-- `/project plan <milestone>` — ロードマップ → Linear Issue のギャップ分析・Issue 作成
-- `/project sync` — 実装完了後のロードマップ文書更新
+- `/project status` — Overview of milestone progress
+- `/project plan <milestone>` — Gap analysis between roadmap and Linear Issues, with Issue creation
+- `/project sync` — Update roadmap documents after implementation is complete
 
 ---
 
 ## `/project status`
 
-マイルストーン進捗を確認し、次に取り組む対象を決定するための入口。
+The entry point for checking milestone progress and deciding what to work on next.
 
-### 手順
+### Steps
 
-1. `mcp__linear-server__list_milestones(project=yorishiro-proxy)` で全マイルストーンの進捗を取得
-2. 以下を **並行で** 取得:
+1. Fetch all milestone progress with `mcp__linear-server__list_milestones(project=yorishiro-proxy)`
+2. Fetch the following **in parallel**:
    - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=started)`
    - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=backlog)`
    - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=unstarted)`
-3. Issue を `projectMilestone` フィールドでグループ化
-4. 以下を報告:
+3. Group Issues by `projectMilestone` field
+4. Report the following:
 
-### 出力形式
+### Output Format
 
 ```markdown
-## プロジェクト進捗
+## Project Progress
 
-### マイルストーン進捗
-| Milestone | Progress | 残り Issue | ステータス |
-|-----------|----------|-----------|----------|
-| M1: Foundation | 100% | — | 完了 |
+### Milestone Progress
+| Milestone | Progress | Remaining Issues | Status |
+|-----------|----------|-----------------|--------|
+| M1: Foundation | 100% | — | Complete |
 | M2: MCP Interface v2 | 79% | 3 issues | ← ACTIVE |
-| M3: Active Testing | 0% | N issues | 未着手 |
-| M4: Multi-Protocol | 0% | N issues | 未着手 |
-| M5: Production Ready | 0% | N issues | 未着手 |
+| M3: Active Testing | 0% | N issues | Not started |
+| M4: Multi-Protocol | 0% | N issues | Not started |
+| M5: Production Ready | 0% | N issues | Not started |
 
-### アクティブ: M2 — MCP Interface v2
-| ID | タイトル | ステータス | 優先度 |
-|----|---------|----------|--------|
+### Active: M2 — MCP Interface v2
+| ID | Title | Status | Priority |
+|----|-------|--------|----------|
 | USK-79 | ... | Backlog | High |
 | USK-80 | ... | Todo | Normal |
 | ...
 
-### ブロッカー
-- M3 は M2 の完了に依存 (現在 79%)
+### Blockers
+- M3 depends on M2 completion (currently 79%)
 
-### 推奨アクション
-- `/orchestrate milestone M2` で残り 3 Issue を実装
-- または `/project plan M3` で M3 の Issue を事前整備
+### Recommended Actions
+- `/orchestrate milestone M2` to implement remaining 3 Issues
+- Or `/project plan M3` to prepare M3 Issues in advance
 ```
 
 ---
 
 ## `/project plan <milestone>`
 
-orchestrate の前提条件を整える最も重要なサブコマンド。
-ロードマップ (あるべき姿) と Linear (実際の Issue) のギャップを埋める。
+The most important subcommand for setting up prerequisites for orchestrate.
+Closes the gap between the roadmap (desired state) and Linear (actual Issues).
 
-### 手順
+### Steps
 
-1. `mcp__linear-server__get_document(id=d413edd7-d296-433a-ab94-11d4dd57d883)` でロードマップ文書を取得
-2. 対象マイルストーンセクションの Issue テーブルを解析
-   - Issue ID、タイトル、説明、優先度、依存関係を抽出
-3. `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy)` で当該マイルストーンの既存 Issue を取得
-   - `milestone` パラメータでフィルタリングできない場合は全件取得後にフィルタ
-4. ギャップ分析:
-   - **ロードマップにあるが Linear にない** → Issue 作成を提案
-   - **Linear にあるがマイルストーン未割当** → 割り当て修正を提案
-   - **説明が不十分な Issue** → 説明の充実を提案
-5. 分析結果をユーザーに提示し、承認を得る
-6. 承認後、`create_issue` / `update_issue` を実行
-7. 作成した Issue 間の依存関係 (`blockedBy`/`blocks`) も設定
+1. Fetch roadmap document with `mcp__linear-server__get_document(id=d413edd7-d296-433a-ab94-11d4dd57d883)`
+2. Parse the Issue table in the target milestone section
+   - Extract Issue ID, title, description, priority, and dependencies
+3. Fetch existing Issues for that milestone with `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy)`
+   - Filter by milestone (fetch all then filter if milestone parameter filtering is unavailable)
+4. Gap analysis:
+   - **In roadmap but not in Linear** → Propose Issue creation
+   - **In Linear but milestone unassigned** → Propose assignment fix
+   - **Issues with insufficient description** → Propose description improvement
+5. Present analysis results to user and get approval
+6. After approval, execute `create_issue` / `update_issue`
+7. Also set dependency relationships (`blockedBy`/`blocks`) between created Issues
 
-### 出力形式
+### Output Format
 
 ```markdown
-## <Milestone名> — Issue Plan
+## <Milestone Name> — Issue Plan
 
-### 作成予定
-| # | タイトル | 優先度 | 根拠 |
-|---|---------|--------|------|
-| 1 | Intercept rule engine | High | ロードマップ M3 セクション |
-| 2 | Intruder engine | High | ロードマップ M3 セクション |
+### To Create
+| # | Title | Priority | Basis |
+|---|-------|----------|-------|
+| 1 | Intercept rule engine | High | Roadmap M3 section |
+| 2 | Intruder engine | High | Roadmap M3 section |
 | ...
 
-### 既存 (変更なし)
-| ID | タイトル | マイルストーン | ステータス |
-|----|---------|-------------|----------|
+### Existing (No changes)
+| ID | Title | Milestone | Status |
+|----|-------|-----------|--------|
 | USK-64 | Auto-transform rules | M3 | Backlog |
 
-### 修正提案
-| ID | 変更内容 |
-|----|---------|
-| USK-XX | マイルストーン未割当 → M3 に割り当て |
-| USK-YY | 説明を充実 (ロードマップの仕様を反映) |
+### Proposed Modifications
+| ID | Change |
+|----|--------|
+| USK-XX | Milestone unassigned → assign to M3 |
+| USK-YY | Improve description (reflect roadmap spec) |
 
-### 依存関係
+### Dependencies
 | Issue | blockedBy |
 |-------|-----------|
 | #2 Intruder engine | #1 Intercept rule engine |
 
-N 件の Issue を作成し、M 件を更新しますか?
+Create N Issues and update M? Proceed?
 ```
 
-### config 対応チェック
+### Config Checklist
 
-Issue 分割の最終段階で、以下を確認する（CLAUDE.md「新機能マイルストーンの config 対応チェックリスト」参照）:
+At the final stage of Issue splitting, confirm the following (see "Config Checklist for New Feature Milestones" in CLAUDE.md):
 
-- 新機能が config struct へのフィールド追加を必要とする場合、config 対応の Issue を明示的に含める
-- config バリデーション・init 関数の変更が必要な場合も同様
-- config → runtime パスの結合テスト Issue を含める
+- If a new feature requires adding a field to the config struct, explicitly include a config support Issue
+- Same applies if config validation or init function changes are needed
+- Include a config → runtime path integration test Issue if needed
 
-### 注意事項
+### Notes
 
-- Issue 作成前に必ずユーザーの承認を得ること
-- ロードマップに記載のない Issue は作成しない
-- 既存 Issue の説明を上書きする場合は差分を明示すること
-- 依存関係は Issue の内容から推論し、blockedBy/blocks を設定する
+- Always get user approval before creating Issues
+- Do not create Issues not in the roadmap
+- When overwriting an existing Issue's description, show the diff explicitly
+- Infer dependency relationships from Issue content and set blockedBy/blocks
 
 ---
 
 ## `/project sync`
 
-実装完了後、ロードマップ文書を実態に合わせて更新する。
+Update roadmap documents to match the actual state after implementation is complete.
 
-### 手順
+### Steps
 
-1. `mcp__linear-server__get_document(id=d413edd7-d296-433a-ab94-11d4dd57d883)` でロードマップ文書を取得
-2. `mcp__linear-server__list_milestones(project=yorishiro-proxy)` で最新の進捗を取得
-3. 以下を **並行で** 取得:
+1. Fetch roadmap document with `mcp__linear-server__get_document(id=d413edd7-d296-433a-ab94-11d4dd57d883)`
+2. Fetch latest progress with `mcp__linear-server__list_milestones(project=yorishiro-proxy)`
+3. Fetch the following **in parallel**:
    - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=completed)`
    - `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=started)`
-4. ロードマップの各マイルストーンセクションを更新:
-   - Issue テーブルのステータスマーカーを更新 (✅ 完了, 🔄 進行中, ⏳ 未着手)
-   - マイルストーン進捗サマリーを更新
-   - 完了日がある場合は記載
-5. 変更差分をユーザーに表示し、承認を得る
-6. 承認後 `mcp__linear-server__update_document` で反映
+4. Update each milestone section in the roadmap:
+   - Update status markers in Issue tables (✅ Complete, 🔄 In Progress, ⏳ Not Started)
+   - Update milestone progress summary
+   - Record completion date if available
+5. Show the diff to the user and get approval
+6. After approval, apply with `mcp__linear-server__update_document`
 
-### 出力形式
+### Output Format
 
 ```markdown
-## ロードマップ同期
+## Roadmap Sync
 
-### 変更内容
-- M2: Progress 79% → 100% (完了)
+### Changes
+- M2: Progress 79% → 100% (Complete)
 - USK-75: ⏳ → ✅
 - USK-78: ⏳ → ✅
 - USK-79: ⏳ → ✅
 
-### 更新後のマイルストーンサマリー
-| Milestone | Progress | ステータス |
-|-----------|----------|----------|
-| M1: Foundation | 100% | 完了 |
-| M2: MCP Interface v2 | 100% | 完了 |
-| M3: Active Testing | 0% | 次のターゲット |
+### Updated Milestone Summary
+| Milestone | Progress | Status |
+|-----------|----------|--------|
+| M1: Foundation | 100% | Complete |
+| M2: MCP Interface v2 | 100% | Complete |
+| M3: Active Testing | 0% | Next target |
 
-ロードマップを更新しますか?
+Update roadmap? Proceed?
 ```
 
-### 注意事項
+### Notes
 
-- sync は completed Issue を取得するが、これは文書更新の目的のみ
-- ドキュメント更新前に必ずユーザーの承認を得ること
-- ロードマップの構造（マイルストーンの順序・説明）は変更しない — ステータスのみ更新
+- sync fetches completed Issues, but only for the purpose of document updates
+- Always get user approval before updating the document
+- Do not change the roadmap structure (milestone order, descriptions) — only update statuses

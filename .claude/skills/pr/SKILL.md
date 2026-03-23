@@ -1,35 +1,35 @@
 ---
-description: "PR を作成する。ビルド・テスト通過を確認してから gh pr create を実行"
+description: "Create a PR. Verify build and test pass, then run gh pr create"
 user-invokable: true
 ---
 
 # /pr
 
-Pull Request を作成するスキル。
+A skill for creating Pull Requests.
 
-## 手順
+## Steps
 
-1. **ビルド検証**: `make build` を実行し、エラーがないことを確認
-2. **テスト実行**: `make test` を実行し、全テストがパスすることを確認
-3. **差分確認**: `git diff main...HEAD` で変更内容を確認
-4. **PR タイトル生成**: Conventional Commits 形式 (`feat(scope): description`) でタイトルを作成
-5. **PR 本文生成**: 変更の要約、テスト計画を含む本文を生成
-6. **PR 作成**: `gh pr create --title "<title>" --body "<body>"` を実行
-7. **結果表示**: PR の URL を表示
+1. **Build verification**: Run `make build` and confirm no errors
+2. **Run tests**: Run `make test` and confirm all tests pass
+3. **Review diff**: Check changes with `git diff main...HEAD`
+4. **Generate PR title**: Create a title in Conventional Commits format (`feat(scope): description`)
+5. **Generate PR body**: Generate body including a summary of changes and test plan
+6. **Create PR**: Run `gh pr create --title "<title>" --body "<body>"`
+7. **Display result**: Show the PR URL
 
-## PR 本文テンプレート
+## PR Body Template
 
 ```markdown
 ## Summary
-- <変更の箇条書き>
+- <bulleted list of changes>
 
 ## Test plan
-- [ ] テスト項目
+- [ ] Test items
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
-## 注意事項
+## Notes
 
-- ビルドまたはテストが失敗した場合、PR は作成せず問題を報告する
-- base ブランチはデフォルトで `main`
+- If build or tests fail, do not create the PR and report the problem instead
+- Default base branch is `main`

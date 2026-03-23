@@ -1,28 +1,28 @@
 ---
-description: "Go プロジェクトをビルドする"
+description: "Build the Go project"
 user-invokable: true
 ---
 
 # /build
 
-Go プロジェクトをビルドするスキル。
+A skill for building the Go project.
 
-## デフォルト動作
+## Default Behavior
 
 ```bash
 make build
 ```
 
-これは内部的に `go vet ./...` → `go build -o bin/yorishiro-proxy ./cmd/yorishiro-proxy` を実行する。
+This internally runs `go vet ./...` → `go build -o bin/yorishiro-proxy ./cmd/yorishiro-proxy`.
 
-## 引数パターン
+## Argument Patterns
 
-- `/build` — `make build` を実行
-- `/build clean` — `make clean && make build` を実行
+- `/build` — Run `make build`
+- `/build clean` — Run `make clean && make build`
 
-## 手順
+## Steps
 
-1. 引数を解析する
-2. `clean` が指定された場合は `make clean` を先に実行
-3. `make build` を実行
-4. 成功の場合はバイナリパスを表示、失敗の場合はエラーを報告
+1. Parse arguments
+2. If `clean` is specified, run `make clean` first
+3. Run `make build`
+4. On success, display the binary path; on failure, report the error

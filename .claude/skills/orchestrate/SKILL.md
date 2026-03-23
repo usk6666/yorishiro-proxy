@@ -1,288 +1,287 @@
 ---
-description: "Linear Issue を並行実装するオーケストレーター。マイルストーンと依存関係を分析し、最適な順序・並行度でサブエージェントに実装を委任"
+description: "Orchestrator for parallel Linear Issue implementation. Analyze milestones and dependencies, then delegate implementation to sub-agents in optimal order and concurrency"
 user-invokable: true
 ---
 
 # /orchestrate
 
-マイルストーンを理解し、依存関係を分析した上で、複数の Linear Issue をサブエージェントに実装させるオーケストレーションスキル。
+An orchestration skill that understands milestones, analyzes dependencies, and delegates implementation of multiple Linear Issues to sub-agents.
 
-## 引数
+## Arguments
 
-- `/orchestrate` — アクティブマイルストーンを分析し、次に実装すべき Issue を提案
-- `/orchestrate <Issue ID> [Issue ID...]` — 指定 Issue を依存関係を考慮して実装
-- `/orchestrate milestone <name>` — 指定マイルストーンの Issue を依存順に実装
-- `/orchestrate status` — 全マイルストーンの進捗 + 実行中サブエージェント状況
+- `/orchestrate` — Analyze active milestones and suggest the next Issues to implement
+- `/orchestrate <Issue ID> [Issue ID...]` — Implement specified Issues considering dependencies
+- `/orchestrate milestone <name>` — Implement Issues in the specified milestone in dependency order
+- `/orchestrate status` — Show all milestone progress + running sub-agent status
 
 ---
 
-## 手順
+## Steps
 
-### Phase 0: プロダクト理解 — マイルストーンと現状の把握
+### Phase 0: Product Understanding — Milestone and Current State Overview
 
-**すべての実行で最初に行うこと。** オーケストレーターはまず自分がプロダクトオーナーの視点を持つ。
+**Do this first on every run.** The orchestrator first adopts the product owner's perspective.
 
-#### 0-1. マイルストーン状況の把握
+#### 0-1. Understand Milestone Status
 
 ```
 mcp__linear-server__list_milestones(project=yorishiro-proxy)
 ```
 
-全マイルストーンの名前・説明・`progress` を一括取得する。
-progress フィールドでプロジェクト全体の進行を即座に把握:
+Fetch the name, description, and `progress` of all milestones at once.
+Immediately understand overall project progress from the progress field:
 
-- `progress == 100` → 完了
-- `0 < progress < 100` → アクティブ (実装中)
-- `progress == 0` → 未着手
+- `progress == 100` → Complete
+- `0 < progress < 100` → Active (in progress)
+- `progress == 0` → Not started
 
-#### 0-2. ロードマップの読み込み
+#### 0-2. Load the Roadmap
 
-`mcp__linear-server__get_document` (id=d413edd7-d296-433a-ab94-11d4dd57d883) でロードマップ文書を取得する。
+Fetch the roadmap document with `mcp__linear-server__get_document` (id=d413edd7-d296-433a-ab94-11d4dd57d883).
 
-ロードマップから以下を抽出・理解する:
+Extract and understand the following from the roadmap:
 
-- **プロダクトのゴール**: 何を作っているのか、誰のためのツールか
-- **マイルストーン構造**: 各マイルストーンのゴールと提供価値
-- **マイルストーン間の依存**: どのマイルストーンがどのマイルストーンに依存するか
-- **マイルストーン内の Issue 順序**: 各マイルストーン内の Issue の自然な実装順
-- **技術的決定**: ストレージ選定、プロトコル戦略など既に決まっている設計判断
+- **Product goal**: What is being built and for whom
+- **Milestone structure**: The goal and delivered value of each milestone
+- **Inter-milestone dependencies**: Which milestone depends on which
+- **Issue ordering within milestones**: Natural implementation order of Issues within each milestone
+- **Technical decisions**: Design decisions already made (storage choice, protocol strategy, etc.)
 
-#### 0-3. 未完了 Issue のみ取得
+#### 0-3. Fetch Only Incomplete Issues
 
-以下を **並行で** 取得する:
+Fetch the following **in parallel**:
 
 - `mcp__linear-server__list_issues` (team=Usk6666, project=yorishiro-proxy, state=started)
 - `mcp__linear-server__list_issues` (team=Usk6666, project=yorishiro-proxy, state=backlog)
 - `mcp__linear-server__list_issues` (team=Usk6666, project=yorishiro-proxy, state=unstarted)
 
-取得した Issue を `projectMilestone` フィールドでグループ化する。
-**completed は取得しない。** マイルストーンの progress + ロードマップの Issue テーブルで完了状況を把握する。
+Group the fetched Issues by `projectMilestone` field.
+**Do not fetch completed Issues.** Use milestone progress + roadmap Issue table to track completion status.
 
-依存コンテキスト構築で特定の完了済み Issue が必要な場合のみ `get_issue(id)` で個別取得する。
+Only fetch specific completed Issues individually with `get_issue(id)` when needed for building dependency context.
 
-#### 0-4. コードベースの現状確認
+#### 0-4. Check Current Codebase State
 
-プロジェクトルートで以下を確認し、実装済みの機能を把握する:
+Confirm the following at the project root to understand what has been implemented:
 
-- `ls internal/` でパッケージ構造を確認
-- 主要ファイルの存在確認（スタブ vs 実装済み）
-- `make test` の現在のパス状況（必要な場合）
+- Check package structure with `ls internal/`
+- Confirm existence of key files (stub vs. implemented)
+- Current `make test` pass status (if needed)
 
-#### 0-5. 現状サマリーの生成
+#### 0-5. Generate Current State Summary
 
-マイルストーンベースの簡潔なサマリーをユーザーに提示する:
+Present a concise milestone-based summary to the user:
 
 ```markdown
-## プロジェクト現状分析
+## Project State Analysis
 
-### マイルストーン進捗
-| Milestone | Progress | 残り |
-|-----------|----------|------|
+### Milestone Progress
+| Milestone | Progress | Remaining |
+|-----------|----------|-----------|
 | M1: Foundation | 100% | — |
 | M2: MCP Interface v2 | 79% | 3 issues |  ← ACTIVE
 | M3: Active Testing | 0% | N issues |
 | M4: Multi-Protocol | 0% | N issues |
 | M5: Production Ready | 0% | N issues |
 
-### アクティブ: M2 — MCP Interface v2
-| ID | タイトル | ステータス | 優先度 |
-|----|---------|----------|--------|
+### Active: M2 — MCP Interface v2
+| ID | Title | Status | Priority |
+|----|-------|--------|----------|
 | USK-79 | ... | Backlog | High |
 | ...
 ```
 
 ---
 
-### Phase 1: 依存関係の分析と実行計画
+### Phase 1: Dependency Analysis and Execution Plan
 
-#### 1-1. Issue 間の依存グラフ構築
+#### 1-1. Build Dependency Graph Between Issues
 
-マイルストーン構造と Issue 説明から、以下の依存関係を分析する:
+Analyze the following dependencies from milestone structure and Issue descriptions:
 
-**マイルストーン間依存** (ロードマップに基づく動的解析):
-- ロードマップ文書のマイルストーンセクションに記載された依存情報を読み取る
-- マイルストーンの progress で依存充足を判定 (`progress == 100` → 充足)
-- 前提マイルストーンが未完了の場合、そのマイルストーンの Issue には着手しない
+**Inter-milestone dependencies** (dynamic analysis based on roadmap):
+- Read dependency information from the milestone sections of the roadmap document
+- Determine dependency satisfaction from milestone progress (`progress == 100` → satisfied)
+- Do not start Issues in a milestone whose prerequisite milestone is not complete
 
-**マイルストーン内依存** (Issue の内容から推論):
-各 Issue の説明を `mcp__linear-server__get_issue` で取得し、以下の観点で依存を判定する:
+**Intra-milestone dependencies** (inferred from Issue content):
+Fetch each Issue's description with `mcp__linear-server__get_issue` and determine dependencies from these perspectives:
 
-1. **データ依存**: Issue A が作る型・インターフェースを Issue B が使う
-2. **機能依存**: Issue A の機能が動いていないと Issue B がテストできない
-3. **統合依存**: Issue A と B の成果物を結合する Issue C がある
+1. **Data dependency**: Issue A creates types/interfaces that Issue B uses
+2. **Functional dependency**: Issue A's functionality must work before Issue B can be tested
+3. **Integration dependency**: There is an Issue C that combines the outputs of Issues A and B
 
-Linear の `blockedBy` / `blocks` フィールドも参照するが、設定されていない場合は
-ロードマップの Issue 順序と Issue 内容から依存関係を推論する。
+Also refer to Linear's `blockedBy` / `blocks` fields, but if not set,
+infer dependency relationships from the roadmap's Issue ordering and Issue content.
 
-#### 1-2. 並行実行可能グループの特定
+#### 1-2. Identify Parallel Execution Groups
 
-依存グラフから、同時に実行できる Issue のグループ (並行実行バッチ) を導出する。
+Derive groups of Issues (parallel execution batches) that can be run simultaneously from the dependency graph.
 
-**並行実行の条件:**
-- 相互に依存関係がない
-- 異なるパッケージ/ファイルを主に変更する（衝突リスクが低い）
-- 同一マイルストーン内または依存が満たされたマイルストーンの Issue
+**Conditions for parallel execution:**
+- No mutual dependencies
+- Primarily modify different packages/files (low conflict risk)
+- Issues from the same milestone or from milestones whose dependencies are satisfied
 
-#### 1-3. 実行計画の提示
+#### 1-3. Present Execution Plan
 
-ユーザーに以下の形式で計画を提示し、承認を得る:
+Present the plan to the user in the following format and get approval:
 
 ```markdown
-## 実行計画
+## Execution Plan
 
-### 対象マイルストーン: M2 — MCP Interface v2
+### Target Milestone: M2 — MCP Interface v2
 
-### Batch 1 (並行実行)
-| Issue | タイトル | ブランチ | 理由 |
-|-------|---------|---------|------|
-| USK-XX | ... | feat/USK-XX-xxx | 依存なし |
-| USK-YY | ... | feat/USK-YY-yyy | 依存なし |
+### Batch 1 (Parallel Execution)
+| Issue | Title | Branch | Reason |
+|-------|-------|--------|--------|
+| USK-XX | ... | feat/USK-XX-xxx | No dependencies |
+| USK-YY | ... | feat/USK-YY-yyy | No dependencies |
 
-### Batch 2 (Batch 1 完了後、並行実行)
-| Issue | タイトル | ブランチ | 依存 |
-|-------|---------|---------|------|
+### Batch 2 (After Batch 1, Parallel Execution)
+| Issue | Title | Branch | Dependencies |
+|-------|-------|--------|-------------|
 | USK-AA | ... | feat/USK-AA-aaa | USK-XX |
 
-### 並行度: 最大 2 (Batch 1) → 直列 (Batch 2)
-### 推定 PR 数: 3
+### Concurrency: Max 2 (Batch 1) → Sequential (Batch 2)
+### Estimated PRs: 3
 ```
 
 ---
 
-### Phase 2: サブエージェントの起動と管理
+### Phase 2: Sub-Agent Launch and Management
 
-#### 2-1. バッチ単位の実行
+#### 2-1. Per-Batch Execution
 
-計画に基づき、バッチごとにサブエージェントを起動する。
-**バッチ内の Issue は並行で起動し、バッチ間は直列で実行する。**
+Based on the plan, launch sub-agents per batch.
+**Launch Issues within a batch in parallel; execute between batches sequentially.**
 
-各 Issue に対する Task ツールの設定:
+Task tool settings for each Issue:
 
 - `subagent_type`: `"general-purpose"`
-- `isolation`: `"worktree"` — 各サブエージェントが独立した git worktree で作業
-- `description`: Issue ID を含む短い説明 (例: `"Implement USK-30"`)
-- `prompt`: `.claude/agents/implementer.md` のプロンプトテンプレートを読み込み、
-  プレースホルダーを実際の値に置換して渡す
+- `isolation`: `"worktree"` — Each sub-agent works in an independent git worktree
+- `description`: Short description including the Issue ID (e.g., `"Implement USK-30"`)
+- `prompt`: Read the `.claude/agents/implementer.md` prompt template, replace placeholders with actual values, and pass it
 
-**プレースホルダー一覧:**
-- `{{ISSUE_ID}}` → Issue ID (例: `USK-30`)
-- `{{ISSUE_TITLE}}` → Issue タイトル
-- `{{ISSUE_DESCRIPTION}}` → Issue 説明 (Markdown)
-- `{{ISSUE_LABELS}}` → ラベル名のカンマ区切り
-- `{{BRANCH_NAME}}` → ブランチ名 (例: `feat/USK-30-http-handler`)
+**Placeholder list:**
+- `{{ISSUE_ID}}` → Issue ID (e.g., `USK-30`)
+- `{{ISSUE_TITLE}}` → Issue title
+- `{{ISSUE_DESCRIPTION}}` → Issue description (Markdown)
+- `{{ISSUE_LABELS}}` → Comma-separated label names
+- `{{BRANCH_NAME}}` → Branch name (e.g., `feat/USK-30-http-handler`)
 - `{{BRANCH_TYPE}}` → `feat` / `fix` / `chore`
-- `{{PRODUCT_CONTEXT}}` → Phase 0 で構築したプロダクトコンテキスト (後述)
-- `{{DEPENDENCY_CONTEXT}}` → この Issue の依存コンテキスト (後述)
+- `{{PRODUCT_CONTEXT}}` → Product context built in Phase 0 (described below)
+- `{{DEPENDENCY_CONTEXT}}` → Dependency context for this Issue (described below)
 
-**`{{PRODUCT_CONTEXT}}` の構築:**
+**Building `{{PRODUCT_CONTEXT}}`:**
 
-Phase 0 で得た情報から、サブエージェントが「自分の Issue がプロダクト全体のどこに位置するか」を
-理解できるサマリーを構築する。以下を含める:
-
-```
-yorishiro-proxy は AI エージェント向けネットワークプロキシ（MCP サーバ）。
-脆弱性診断のトラフィック傍受・記録・リプレイ機能を提供する。
-
-アーキテクチャ: TCP リスナ → プロトコル検出 → プロトコルハンドラ → セッション記録 → MCP Tool
-ストレージ: SQLite (modernc.org/sqlite, WAL モード)
-
-現在のマイルストーン: <Milestone名>
-目標: <milestone description>
-進捗: <progress>%
-この Issue は <Milestone名> の一部で、<Issue の位置づけの説明>。
-
-関連する設計判断:
-- <この Issue に関係する技術的決定事項>
-```
-
-**`{{DEPENDENCY_CONTEXT}}` の構築:**
-
-この Issue が依存する完了済み Issue の成果物を具体的に記述する。
-サブエージェントが「何が既にあるか」を把握し、正しく連携できるようにする。
-
-依存がない場合:
-```
-この Issue には先行する依存がない。基盤となる型定義やインターフェースは
-既にスキャフォールディングで定義済み。CLAUDE.md のパッケージレイアウトを参照。
-```
-
-依存がある場合:
-```
-この Issue は以下の完了済み Issue の成果物に依存する:
-
-### USK-XX: <タイトル>
-- パッケージ: internal/proxy/
-- 提供する型: `PeekConn` (net.Conn ラッパー、Peek メソッド付き)
-- 使用方法: Listener.handleConn で PeekConn を生成し、Detector に渡す
-- 主要ファイル: internal/proxy/peek_conn.go
-
-### USK-YY: <タイトル>
-- パッケージ: internal/session/
-- 提供するインターフェース: `Store` (Save, Get, List, Delete メソッド)
-- 使用方法: HTTP handler のコンストラクタに Store を注入する
-- 主要ファイル: internal/session/store.go, internal/session/sqlite_store.go
-```
-
-依存コンテキストの情報は、完了済み Issue の PR や実際のコードベースから取得する。
-具体的な型名・メソッドシグネチャ・ファイルパスを含めることで、
-サブエージェントが正確に既存コードと連携できるようにする。
-
-**ブランチ名の決定ルール:**
-- Issue のラベルまたはタイトルに "bug" / "fix" が含まれる → `fix/`
-- それ以外 → `feat/`
-- ブランチ名: `<type>/<issue-id>-<short-desc>` (Issue タイトルから kebab-case、最大 40 文字)
-
-**プロンプト構築手順:**
-1. `.claude/agents/implementer.md` を Read ツールで読み込む
-2. `## プロンプト本文` セクション内のコードブロックを抽出する
-3. プレースホルダーを実際の値に置換する
-4. 置換後の文字列を Task ツールの `prompt` パラメータに渡す
-
-#### 2-2. バッチ完了の待機と次バッチの起動
-
-バッチ内の全サブエージェントが完了したら:
-
-1. **結果を検証**: 各サブエージェントの成否を確認
-2. **成功した PR をマージ判断**: 次のバッチが依存する PR がある場合、
-   ユーザーに「この PR をマージしてから次のバッチに進みますか?」と確認する
-3. **main を更新**: マージされた場合、次バッチのサブエージェントは最新の main から作業する
-4. **失敗の対処**: 失敗した Issue が後続バッチのブロッカーかどうかを判定
-   - ブロッカーの場合: 修正を試みるか、後続バッチからブロックされた Issue を除外
-   - 非ブロッカーの場合: 後続バッチを続行し、失敗した Issue は後で対処
-5. **次バッチを起動**: 上記が完了したら次のバッチに進む
-
-#### 2-3. 並行起動例
+From the information gathered in Phase 0, build a summary that helps sub-agents understand
+where their Issue fits in the overall product. Include the following:
 
 ```
-# Batch 1: 並行で起動
-同一メッセージ内で複数の Task ツールを呼び出す:
-Task(description="Implement USK-XX", subagent_type="general-purpose", isolation="worktree", prompt=<プロンプト>)
-Task(description="Implement USK-YY", subagent_type="general-purpose", isolation="worktree", prompt=<プロンプト>)
+yorishiro-proxy is a network proxy (MCP server) for AI agents.
+Provides traffic interception, recording, and replay capabilities for vulnerability assessment.
 
-# Batch 1 完了を待つ → 結果検証 → PR マージ判断
+Architecture: TCP Listener → Protocol Detection → Protocol Handler → Session Recording → MCP Tool
+Storage: SQLite (modernc.org/sqlite, WAL mode)
 
-# Batch 2: 並行で起動
-Task(description="Implement USK-AA", subagent_type="general-purpose", isolation="worktree", prompt=<プロンプト>)
-Task(description="Implement USK-BB", subagent_type="general-purpose", isolation="worktree", prompt=<プロンプト>)
+Current milestone: <Milestone name>
+Goal: <milestone description>
+Progress: <progress>%
+This Issue is part of <Milestone name>, and <description of Issue's position>.
+
+Relevant design decisions:
+- <Technical decisions related to this Issue>
+```
+
+**Building `{{DEPENDENCY_CONTEXT}}`:**
+
+Concretely describe the outputs of completed Issues that this Issue depends on.
+Helps sub-agents understand "what already exists" so they can integrate correctly.
+
+If there are no dependencies:
+```
+This Issue has no preceding dependencies. Foundational type definitions and interfaces are
+already defined in the scaffolding. See the package layout in CLAUDE.md.
+```
+
+If there are dependencies:
+```
+This Issue depends on the outputs of the following completed Issues:
+
+### USK-XX: <title>
+- Package: internal/proxy/
+- Provided type: `PeekConn` (net.Conn wrapper with Peek method)
+- Usage: Create PeekConn in Listener.handleConn and pass to Detector
+- Key files: internal/proxy/peek_conn.go
+
+### USK-YY: <title>
+- Package: internal/session/
+- Provided interface: `Store` (Save, Get, List, Delete methods)
+- Usage: Inject Store into HTTP handler constructor
+- Key files: internal/session/store.go, internal/session/sqlite_store.go
+```
+
+Gather dependency context information from the PRs and actual codebase of completed Issues.
+Including specific type names, method signatures, and file paths lets sub-agents
+integrate accurately with existing code.
+
+**Branch name determination rules:**
+- Issue labels or title contains "bug" / "fix" → `fix/`
+- Otherwise → `feat/`
+- Branch name: `<type>/<issue-id>-<short-desc>` (kebab-case from Issue title, max 40 chars)
+
+**Prompt construction steps:**
+1. Read `.claude/agents/implementer.md` with the Read tool
+2. Extract the code block inside the `## Prompt Body` section
+3. Replace placeholders with actual values
+4. Pass the replaced string as the `prompt` parameter to the Task tool
+
+#### 2-2. Wait for Batch Completion and Launch Next Batch
+
+When all sub-agents in a batch have completed:
+
+1. **Validate results**: Confirm success/failure of each sub-agent
+2. **Merge decision for successful PRs**: If the next batch depends on a PR,
+   ask the user "Would you like to merge this PR before proceeding to the next batch?"
+3. **Update main**: If merged, the next batch's sub-agents work from the latest main
+4. **Handle failures**: Determine whether a failed Issue blocks subsequent batches
+   - If a blocker: Try to fix it, or exclude the blocked Issue from subsequent batches
+   - If not a blocker: Continue with subsequent batches and address the failed Issue later
+5. **Launch next batch**: Proceed to the next batch once the above is complete
+
+#### 2-3. Parallel Launch Example
+
+```
+# Batch 1: Launch in parallel
+Call multiple Task tools in the same message:
+Task(description="Implement USK-XX", subagent_type="general-purpose", isolation="worktree", prompt=<prompt>)
+Task(description="Implement USK-YY", subagent_type="general-purpose", isolation="worktree", prompt=<prompt>)
+
+# Wait for Batch 1 to complete → validate results → PR merge decision
+
+# Batch 2: Launch in parallel
+Task(description="Implement USK-AA", subagent_type="general-purpose", isolation="worktree", prompt=<prompt>)
+Task(description="Implement USK-BB", subagent_type="general-purpose", isolation="worktree", prompt=<prompt>)
 ```
 
 ---
 
-### Phase 2.5: レビューゲート
+### Phase 2.5: Review Gate
 
-バッチ内で成功した PR に対してレビューゲートをバックグラウンドで実行する。
-レビューゲート全体を PR 単位でバックグラウンド Agent として起動し、オーケストレーターはブロックされない。
+Run review gates in the background for PRs that succeeded in the batch.
+Launch the entire review gate as a background Agent per PR so the orchestrator is not blocked.
 
-#### 2.5-1. レビュー対象の特定
+#### 2.5-1. Identify Review Targets
 
-バッチ内で PR が作成された Issue を対象とする。失敗した Issue（PR なし）はスキップ。
+Target Issues where a PR was created in the batch. Skip failed Issues (no PR).
 
-#### 2.5-2. バックグラウンドでのレビューゲート起動
+#### 2.5-2. Launch Background Review Gate
 
-各 PR に対して、レビュー→Fix→再レビューの一連のサイクルを **1 つのバックグラウンド Agent** に委任する。
-オーケストレーターは結果を待たずに次のバッチの準備（マージ判断等）に進める。
+Delegate the entire review → Fix → re-review cycle for each PR to **one background Agent**.
+The orchestrator can proceed to the next batch preparation (merge decisions, etc.) without waiting for results.
 
-各 PR ごとに以下の Agent を `run_in_background: true` で起動する:
+Launch the following Agent for each PR with `run_in_background: true`:
 
 ```
 Agent(
@@ -290,75 +289,75 @@ Agent(
   subagent_type="general-purpose",
   isolation="worktree",
   run_in_background=true,
-  prompt=<レビューゲートプロンプト>
+  prompt=<review gate prompt>
 )
 ```
 
-**レビューゲートプロンプトの内容:**
+**Review Gate Prompt Content:**
 
-Agent に渡すプロンプトには以下を含める:
-- PR 番号、ブランチ名、Issue ID
-- プロダクトコンテキスト、セキュリティコンテキスト
-- Code Review と Security Review のエージェントテンプレート（`.claude/agents/code-reviewer.md`, `.claude/agents/security-reviewer.md`）の内容
-- Fixer エージェントテンプレート（`.claude/agents/fixer.md`）の内容
-- 以下のレビューゲートフロー全体の手順
+The prompt passed to the Agent should include:
+- PR number, branch name, Issue ID
+- Product context, security context
+- Content of Code Review and Security Review agent templates (`.claude/agents/code-reviewer.md`, `.claude/agents/security-reviewer.md`)
+- Fixer agent template (`.claude/agents/fixer.md`) content
+- The following complete review gate flow steps
 
-**レビューゲート Agent が実行するフロー:**
+**Flow executed by the Review Gate Agent:**
 
-**Step A: 初回レビュー（並行）**
+**Step A: Initial Review (Parallel)**
 
-同一メッセージ内で 2 つの Task ツールを並行起動:
-
-```
-Agent(description="Code review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Code Review プロンプト>)
-Agent(description="Security review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Security Review プロンプト>)
-```
-
-プレースホルダー構築:
-- `{{PRODUCT_CONTEXT}}` → プロダクトコンテキスト
-- `{{SECURITY_CONTEXT}}` → yorishiro-proxy の脅威モデル（MITM プロキシ、CA 鍵保持、MCP 経由コマンド）
-- `{{ISSUE_ID}}`, `{{ISSUE_DESCRIPTION}}` → Issue 情報
-- `{{PR_NUMBER}}`, `{{PR_TITLE}}`, `{{CHANGED_FILES}}` → PR 情報
-
-**Step B: 判定集約**
-
-各エージェントの出力から `VERDICT:` と `FINDINGS:` を抽出:
-- 両方 `APPROVED` かつ所見なし → この PR のレビュー完了
-- 両方 `APPROVED` だが LOW 以上の所見あり → Step C-1 (Fix のみ、再レビュー不要)
-- いずれか `CHANGES_REQUESTED` → Step C-2 (Fix + 再レビュー)
-
-**Step C-1: Fix のみ（APPROVED_WITH_FINDINGS）**
-
-APPROVED だが LOW 以上の所見がある場合、Fixer を 1 回だけ起動して修正する。再レビューは不要。
+Launch 2 Task tools in parallel in the same message:
 
 ```
-Agent(description="Fix LOW findings PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Fixer プロンプト>)
+Agent(description="Code review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Code Review prompt>)
+Agent(description="Security review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Security Review prompt>)
 ```
 
-- `{{CODE_REVIEW_FINDINGS}}` → Code Review の所見（所見がある場合は全件。なければ "None"）
-- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review の所見（所見がある場合は全件。なければ "None"）
-- `{{BRANCH_NAME}}` → PR のヘッドブランチ名
+Placeholder construction:
+- `{{PRODUCT_CONTEXT}}` → Product context
+- `{{SECURITY_CONTEXT}}` → yorishiro-proxy threat model (MITM proxy, CA key holding, MCP commands)
+- `{{ISSUE_ID}}`, `{{ISSUE_DESCRIPTION}}` → Issue information
+- `{{PR_NUMBER}}`, `{{PR_TITLE}}`, `{{CHANGED_FILES}}` → PR information
 
-Fix 完了後、レビューゲート完了。
+**Step B: Aggregate Verdict**
 
-**Step C-2: Fix サイクル（最大 2 ラウンド、CHANGES_REQUESTED）**
+Extract `VERDICT:` and `FINDINGS:` from each agent's output:
+- Both `APPROVED` with no findings → Review complete for this PR
+- Both `APPROVED` but LOW or higher findings → Step C-1 (Fix only, no re-review)
+- Either `CHANGES_REQUESTED` → Step C-2 (Fix + re-review)
 
-`.claude/agents/fixer.md` のテンプレートでプレースホルダーを置換して起動:
+**Step C-1: Fix Only (APPROVED_WITH_FINDINGS)**
+
+If APPROVED but LOW or higher findings exist, launch Fixer once and skip re-review.
 
 ```
-Agent(description="Fix review findings PR #<N> round <R>", subagent_type="general-purpose", isolation="worktree", prompt=<Fixer プロンプト>)
+Agent(description="Fix LOW findings PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Fixer prompt>)
 ```
 
-- `{{CODE_REVIEW_FINDINGS}}` → Code Review の所見（所見がある場合は LOW 含め全件。なければ "None"）
-- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review の所見（所見がある場合は LOW 含め全件。なければ "None"）
-- `{{BRANCH_NAME}}` → PR のヘッドブランチ名
+- `{{CODE_REVIEW_FINDINGS}}` → Code Review findings (all findings if present, "None" if not)
+- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review findings (all findings if present, "None" if not)
+- `{{BRANCH_NAME}}` → PR head branch name
 
-Fix 後、`CHANGES_REQUESTED` だったレビューのみ再実行。
-2 ラウンドで解決しない場合は `ESCALATED` として報告する。
+Review gate complete after Fix.
 
-**Step D: 結果報告**
+**Step C-2: Fix Cycle (Max 2 Rounds, CHANGES_REQUESTED)**
 
-レビューゲート Agent は最終結果を以下の形式で返す:
+Launch with Fixer Agent template from `.claude/agents/fixer.md` with replaced placeholders:
+
+```
+Agent(description="Fix review findings PR #<N> round <R>", subagent_type="general-purpose", isolation="worktree", prompt=<Fixer prompt>)
+```
+
+- `{{CODE_REVIEW_FINDINGS}}` → Code Review findings (all findings including LOW if present, "None" if not)
+- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review findings (all findings including LOW if present, "None" if not)
+- `{{BRANCH_NAME}}` → PR head branch name
+
+After Fix, re-run only the reviews that were `CHANGES_REQUESTED`.
+If not resolved after 2 rounds, report as `ESCALATED`.
+
+**Step D: Report Results**
+
+The Review Gate Agent returns the final result in the following format:
 
 ```
 REVIEW_GATE_RESULT:
@@ -369,28 +368,28 @@ REVIEW_GATE_RESULT:
   fix_rounds: 0 | 1 | 2
   low_fix_only: true | false
   unresolved_findings: [...]
-  agent_ids: [<起動した全サブエージェントの agent ID>]
+  agent_ids: [<all sub-agent IDs launched>]
 ```
 
-#### 2.5-3. レビュー結果の収集
+#### 2.5-3. Collect Review Results
 
-バックグラウンド Agent が完了通知を返したら、結果をパースして記録する。
-マージ判断が必要な場合（次バッチが依存する場合）は、該当 PR のレビュー完了を待つ。
+When a background Agent sends a completion notification, parse and record the results.
+If a merge decision is needed (the next batch depends on it), wait for that PR's review to complete.
 
-#### 2.5-4. 並行度戦略
+#### 2.5-4. Concurrency Strategy
 
-| シナリオ | 戦略 | 同時 Agent 数 |
-|---------|------|-------------|
-| バッチ内 N 個の PR | 全 PR のレビューゲートを同時にバックグラウンド起動 | N |
-| 各レビューゲート内 | Code + Security 並行 | 2 |
-| Fix 中 | Fixer 1 agent のみ（レビューゲート Agent 内で排他） | 1 |
+| Scenario | Strategy | Concurrent Agents |
+|----------|----------|------------------|
+| N PRs in a batch | Launch review gates for all PRs as background simultaneously | N |
+| Inside each review gate | Code + Security in parallel | 2 |
+| During Fix | Fixer 1 agent only (exclusive within review gate Agent) | 1 |
 
-#### 2.5-5. レビュー結果の記録
+#### 2.5-5. Recording Review Results
 
-各 PR のレビュー結果を以下の形式で記録し、Phase 3 で集約する:
+Record each PR's review result in the following format for aggregation in Phase 3:
 
 ```
-pr_review_results[PR番号] = {
+pr_review_results[PR number] = {
   code_review: APPROVED | CHANGES_REQUESTED,
   security_review: APPROVED | CHANGES_REQUESTED,
   final_verdict: APPROVED | ESCALATED,
@@ -400,149 +399,149 @@ pr_review_results[PR番号] = {
 }
 ```
 
-#### 2.5-6. Linear ステータス連携
+#### 2.5-6. Linear Status Integration
 
-| イベント | Linear コメント |
-|---------|----------------|
-| レビュー開始 | "PR #N created. Automated review starting." |
-| レビュー通過 | "PR #N: Code Review APPROVED, Security Review APPROVED" |
-| LOW Fix 実行 | "PR #N: APPROVED with LOW findings. Applying fixes." |
-| Fix サイクル開始 | "PR #N: Review found issues. Fix round N starting." |
-| Fix 後通過 | "PR #N: All findings resolved after N fix round(s)." |
-| エスカレーション | "PR #N: ESCALATION - N unresolved findings after 2 fix rounds." |
+| Event | Linear Comment |
+|-------|---------------|
+| Review starts | "PR #N created. Automated review starting." |
+| Review passes | "PR #N: Code Review APPROVED, Security Review APPROVED" |
+| LOW Fix applied | "PR #N: APPROVED with LOW findings. Applying fixes." |
+| Fix cycle starts | "PR #N: Review found issues. Fix round N starting." |
+| Passes after Fix | "PR #N: All findings resolved after N fix round(s)." |
+| Escalation | "PR #N: ESCALATION - N unresolved findings after 2 fix rounds." |
 
-`mcp__linear-server__create_comment` で Issue にコメントを投稿する。
-Linear コメントはレビューゲート Agent 内で投稿する。
+Post comments to Issues using `mcp__linear-server__create_comment`.
+Linear comments are posted inside the review gate Agent.
 
-#### 2.5-7. エスカレーション時の対処
+#### 2.5-7. Handling Escalations
 
-エスカレーションされた PR がある場合:
-- バッチの他の PR の処理は続行する
-- ユーザーに未解決所見の詳細を報告し、手動対応を依頼する
-- 後続バッチの実行はユーザーの判断に委ねる（ブロッカーかどうかによる）
+If there are escalated PRs:
+- Continue processing other PRs in the batch
+- Report unresolved finding details to the user and request manual intervention
+- Leave subsequent batch execution to the user's judgment (depending on whether it is a blocker)
 
 ---
 
-### Phase 3: 結果の集約と報告
+### Phase 3: Aggregate and Report Results
 
-#### 3-1. 全体サマリー
+#### 3-1. Overall Summary
 
-全バッチ完了後、結果をマイルストーンベースで集約:
+After all batches complete, aggregate results by milestone:
 
 ```markdown
-## 実装結果サマリー
+## Implementation Results Summary
 
-### マイルストーン: M2 — MCP Interface v2
+### Milestone: M2 — MCP Interface v2
 
 #### Batch 1
-| Issue | タイトル | ステータス | PR | テスト | Code Review | Security Review | Fix Rounds |
-|-------|---------|----------|-----|-------|-------------|----------------|------------|
-| USK-XX | ... | ✅ 成功 | #4 | 8 passed | ✅ APPROVED | ✅ APPROVED | 0 |
-| USK-YY | ... | ✅ 成功 | #5 | 12 passed | ✅ APPROVED | ⚠️ Fix→✅ | 1 |
+| Issue | Title | Status | PR | Tests | Code Review | Security Review | Fix Rounds |
+|-------|-------|--------|----|-------|-------------|----------------|------------|
+| USK-XX | ... | Success | #4 | 8 passed | APPROVED | APPROVED | 0 |
+| USK-YY | ... | Success | #5 | 12 passed | APPROVED | Fix→APPROVED | 1 |
 
 #### Batch 2
-| Issue | タイトル | ステータス | PR | テスト | Code Review | Security Review | Fix Rounds |
-|-------|---------|----------|-----|-------|-------------|----------------|------------|
-| USK-AA | ... | ✅ 成功 | #6 | 5 passed | ✅ APPROVED | ✅ APPROVED | 0 |
-| USK-BB | ... | ❌ 失敗 | — | 2 failed | — | — | — |
+| Issue | Title | Status | PR | Tests | Code Review | Security Review | Fix Rounds |
+|-------|-------|--------|----|-------|-------------|----------------|------------|
+| USK-AA | ... | Success | #6 | 5 passed | APPROVED | APPROVED | 0 |
+| USK-BB | ... | Failed | — | 2 failed | — | — | — |
 
-### 失敗した Issue
-- **USK-BB**: ... — テスト失敗
-  - ワークツリー: `/path/to/worktree` (手動確認可能)
-  - 推奨: エラーログを確認し、手動修正または再実行
+### Failed Issues
+- **USK-BB**: ... — Test failure
+  - Worktree: `/path/to/worktree` (can be checked manually)
+  - Recommended: Check error logs, manually fix, or re-run
 
-### エスカレーションされた Issue（レビュー未通過）
-- **USK-ZZ**: ... — Security Review で N 件の未解決所見
-  - 推奨: 手動レビューと修正
+### Escalated Issues (Review not passed)
+- **USK-ZZ**: ... — N unresolved findings in Security Review
+  - Recommended: Manual review and fix
 
-### マイルストーン完了状況
-このバッチの実行により M2 が 100% に到達しました。
-次のマイルストーン: M3 (Active Testing)
-`/orchestrate milestone M3` で次に進めます。
+### Milestone Completion Status
+This batch run has brought M2 to 100%.
+Next milestone: M3 (Active Testing)
+Continue with `/orchestrate milestone M3`.
 ```
 
-マイルストーンが完了していない場合は残りの Issue を報告し、次のアクションを提案する。
+If the milestone is not complete, report remaining Issues and suggest next actions.
 
-#### 3-2. Issue ステータス更新
+#### 3-2. Issue Status Updates
 
-- 実装成功 + レビュー通過: ステータスを "In Review" に更新
-- 実装成功 + レビューエスカレーション: "In Review" に更新し、未解決所見をコメントに記録
-- 実装失敗: "In Progress" のまま維持し、`mcp__linear-server__create_comment` でエラー詳細を記録
+- Implementation success + review passed: Update status to "In Review"
+- Implementation success + review escalated: Update to "In Review" and record unresolved findings in comments
+- Implementation failed: Keep "In Progress" and record error details with `mcp__linear-server__create_comment`
 
-#### 3-3. Worktree クリーンアップ
+#### 3-3. Worktree Cleanup
 
-Claude Code の Task ツールは worktree に変更がある場合、完了後も自動削除しない。
-オーケストレーター（呼び出し元）が明示的に削除する。
+The Claude Code Task tool does not auto-delete worktrees when they have changes after completion.
+The orchestrator (caller) explicitly deletes them.
 
-**重要**: 別セッションがアクティブに使用中の worktree を破壊する事故を防ぐため、
-**自分が起動したサブエージェントの worktree のみ**をターゲット削除する。
+**Important**: To prevent accidentally destroying worktrees actively in use by other sessions,
+do not bulk-delete. **Only target the worktrees of sub-agents you launched.**
 
-**手順:**
+**Steps:**
 
-1. Phase 2 の各 Task 呼び出し結果から agent ID を記録する
-   （Task ツールの戻り値に含まれる `agentId` フィールド）
-2. Phase 2.5 のレビューゲート Agent の agent ID に加え、
-   レビューゲート Agent の出力に含まれる `agent_ids` リスト（内部で起動したサブエージェントの ID）も収集する
-3. 全バッチ・レビューサイクル完了後、記録した全 agent ID ごとに以下を実行:
+1. Record agent IDs from each Task call result in Phase 2
+   (the `agentId` field in the Task tool return value)
+2. In addition to the Phase 2.5 review gate Agent's agent ID,
+   also collect the `agent_ids` list in the review gate Agent's output (IDs of sub-agents it launched internally)
+3. After all batches and review cycles complete, run the following for each recorded agent ID:
 
 ```bash
 git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
 ```
 
-3. 全削除後にメタデータを清掃:
+3. Clean up metadata after all deletions:
 
 ```bash
 git worktree prune
 ```
 
-- 成功・失敗を問わず自分が起動した全 worktree を削除する（変更は remote に push 済み）
-- 失敗した Issue のデバッグ情報は Linear コメントと `git checkout <branch-name>` で参照可能
-- `git worktree remove` はディレクトリのみ削除し、ブランチ・コミットは保持される
+- Delete all worktrees you launched regardless of success/failure (changes are pushed to remote)
+- Debug information for failed Issues is accessible via Linear comments and `git checkout <branch-name>`
+- `git worktree remove` only deletes the directory; branches and commits are preserved
 
-#### 3-4. 次ステップ提案
+#### 3-4. Suggest Next Steps
 
-次に実行可能なマイルストーン/Batch を提案する。
-
----
-
-## 依存分析のガイドライン
-
-### マイルストーン間依存 (ロードマップに基づく動的解析)
-
-ロードマップ文書のマイルストーンセクションに記載された依存情報を読み取り、
-マイルストーンの progress で依存充足を判定する。
-
-- `progress == 100` → 依存充足。後続マイルストーンの Issue に着手可能
-- `0 < progress < 100` → 一部充足。残り Issue の内容次第では後続に着手できる場合もある
-- `progress == 0` → 未充足。前提マイルストーンが先
-
-### マイルストーン内の依存推論ルール
-
-1. **インフラ/ユーティリティ系 Issue は先**: バッファリーダー、ストレージ層など基盤は最初
-2. **ハンドラ/ビジネスロジックは中盤**: 基盤の上に構築するロジック
-3. **統合/結合 Issue は後半**: 複数コンポーネントを繋ぐ Issue は依存先が揃ってから
-4. **E2E テスト/統合テストは最後**: 全コンポーネントが揃ってから
-5. **MCP ツール定義は対応する内部実装の後**: 内部 API が固まってからツールを公開
-
-### 並行実行の判定基準
-
-**並行実行可能:**
-- 異なるパッケージを主に変更する (例: `internal/proxy/` と `internal/session/`)
-- 共通のインターフェースを実装するが、相互に呼び出さない
-- テストが互いの実装に依存しない
-
-**直列実行が必要:**
-- Issue B が Issue A の生成する型やインターフェースを import する
-- Issue B のテストが Issue A の実装を前提とする
-- Issue B が Issue A で変更されるファイルの同じ箇所を変更する
+Suggest the next executable milestone/batch.
 
 ---
 
-## 注意事項
+## Dependency Analysis Guidelines
 
-- 最大同時実行数: 3 Issue まで（リソース制約のため）
-- ロードマップは最新版を毎回読み込む（キャッシュしない）
-- マイルストーンをまたいだ実装は原則行わない（前のマイルストーンの PR がマージされてから次に進む）
-- 各サブエージェントは完全に独立して動作する — 相互参照はしない
-- Linear Issue のステータス更新はオーケストレーター側の責務（サブエージェントは行わない）
-- 依存分析の結果に確信が持てない場合は、ユーザーに確認を取る
+### Inter-Milestone Dependencies (Dynamic analysis based on roadmap)
+
+Read the dependency information from the milestone sections of the roadmap document
+and determine dependency satisfaction from milestone progress.
+
+- `progress == 100` → Dependency satisfied. Can proceed to subsequent milestone Issues
+- `0 < progress < 100` → Partially satisfied. May be able to proceed depending on remaining Issue content
+- `progress == 0` → Not satisfied. Prerequisite milestone goes first
+
+### Intra-Milestone Dependency Inference Rules
+
+1. **Infrastructure/utility Issues go first**: Foundational items like buffered readers and storage layers
+2. **Handlers/business logic in the middle**: Logic built on top of the foundation
+3. **Integration/combining Issues later**: Issues that connect multiple components go after dependencies are ready
+4. **E2E tests/integration tests last**: After all components are in place
+5. **MCP tool definitions after corresponding internal implementations**: Expose tools after the internal API is finalized
+
+### Criteria for Parallel Execution
+
+**Can run in parallel:**
+- Primarily modify different packages (e.g., `internal/proxy/` and `internal/session/`)
+- Implement a common interface but do not call each other
+- Tests do not depend on each other's implementations
+
+**Must run sequentially:**
+- Issue B imports types or interfaces generated by Issue A
+- Issue B's tests assume Issue A's implementation
+- Issue B modifies the same part of a file changed by Issue A
+
+---
+
+## Notes
+
+- Maximum concurrent executions: up to 3 Issues (due to resource constraints)
+- Always load the latest roadmap (do not cache)
+- Do not implement across milestones as a general rule (proceed to the next after the previous milestone's PRs are merged)
+- Each sub-agent operates completely independently — no cross-references
+- Linear Issue status updates are the orchestrator's responsibility (sub-agents do not do this)
+- If you are not confident in the dependency analysis result, confirm with the user
