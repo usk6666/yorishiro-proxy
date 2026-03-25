@@ -295,11 +295,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
 
-	if cfg.MCPHTTPAddr != "" {
-		logger.Info("starting MCP server", "http_mcp", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
-	} else {
-		logger.Info("starting MCP server", "stdio_mcp", stdioMCP)
-	}
+	logger.Info("starting MCP server", "http_mcp_addr", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
 
 	return startServers(ctx, cfg, mcpServer, proto.webUIToken, openBrowser, stdioMCP, logger)
 }
