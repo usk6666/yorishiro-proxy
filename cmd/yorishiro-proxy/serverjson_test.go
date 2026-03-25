@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -239,32 +240,19 @@ func TestReadServerJSONSlice_NotExist(t *testing.T) {
 	}
 }
 
-func TestReadServerJSON_NotExist(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "nonexistent.json")
-
-	got, err := readServerJSON(path)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	if got != nil {
-		t.Errorf("expected nil for non-existent file, got: %+v", got)
-	}
-}
-
-func TestReadServerJSON_CorruptFile(t *testing.T) {
+func TestReadServerJSONSlice_CorruptFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "corrupt.json")
 	if err := os.WriteFile(path, []byte("not valid json"), 0600); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
-	got, err := readServerJSON(path)
+	entries, err := readServerJSONSlice(path)
 	if err != nil {
 		t.Fatalf("expected no error for corrupt file (treat as stale), got: %v", err)
 	}
-	if got != nil {
-		t.Errorf("expected nil for corrupt file, got: %+v", got)
+	if len(entries) != 0 {
+		t.Errorf("expected empty slice for corrupt file, got: %+v", entries)
 	}
 }
 
@@ -295,14 +283,19 @@ func TestIsProcessAlive_InvalidPID(t *testing.T) {
 }
 
 func TestIsProcessAlive_DeadPID(t *testing.T) {
-	// PID 1 on Linux is init/systemd and is always alive.
-	// We need a PID that is definitely not alive.
-	// Use a very large PID that is unlikely to exist.
-	// Note: this is inherently racy but acceptable for a unit test.
-	// Using 2^22 - 1 which is the max PID on Linux but unlikely to be running.
-	const largePID = 4194303
-	// We simply check this doesn't panic; liveness is environment-dependent.
-	_ = isProcessAlive(largePID)
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start subprocess: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait subprocess: %v", err)
+	}
+	// Process has exited; PID should not be alive.
+	// Note: PID reuse is possible but extremely unlikely in a test.
+	if isProcessAlive(pid) {
+		t.Errorf("isProcessAlive(%d) = true after process exited, want false", pid)
+	}
 }
 
 func TestServerJSONPath(t *testing.T) {

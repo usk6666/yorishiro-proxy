@@ -91,11 +91,7 @@ func writeServerJSON(data *ServerJSON) error {
 	b = append(b, '\n')
 
 	// Atomic write via temp file + rename.
-	tmpFile, err := os.OpenFile(
-		filepath.Join(dir, ".server.json.tmp"),
-		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
-		0600,
-	)
+	tmpFile, err := os.CreateTemp(dir, ".server.json.tmp.*")
 	if err != nil {
 		return fmt.Errorf("create temp file for server.json: %w", err)
 	}
@@ -150,11 +146,7 @@ func removeServerJSON() {
 	b = append(b, '\n')
 
 	dir := filepath.Dir(path)
-	tmpFile, err := os.OpenFile(
-		filepath.Join(dir, ".server.json.tmp"),
-		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
-		0600,
-	)
+	tmpFile, err := os.CreateTemp(dir, ".server.json.tmp.*")
 	if err != nil {
 		return
 	}
@@ -187,20 +179,6 @@ func readServerJSONSlice(path string) ([]ServerJSON, error) {
 		return []ServerJSON{}, nil
 	}
 	return entries, nil
-}
-
-// readServerJSON reads and parses server.json from the given path.
-// Returns (nil, nil) if the file does not exist or is corrupt.
-// Deprecated: use readServerJSONSlice for the multi-instance array format.
-func readServerJSON(path string) (*ServerJSON, error) {
-	entries, err := readServerJSONSlice(path)
-	if err != nil {
-		return nil, err
-	}
-	if len(entries) == 0 {
-		return nil, nil
-	}
-	return &entries[0], nil
 }
 
 // isProcessAlive returns true if a process with the given PID exists and is running.

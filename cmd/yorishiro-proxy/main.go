@@ -281,16 +281,16 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		return err
 	}
 
+	// Apply transport flags before building options so MCPHTTPAddr is correct.
+	if noHTTPMCP {
+		cfg.MCPHTTPAddr = ""
+	}
+
 	opts, err := buildMCPOptions(cfg, proxyCfg, store, issuer, passthrough, scope,
 		interceptEngine, interceptQueue, pipeline, proto, targetScope, rateLimiter,
 		safetyEngine, targetScopePolicySource, logger)
 	if err != nil {
 		return err
-	}
-
-	// Apply transport flags: -no-http-mcp disables HTTP MCP.
-	if noHTTPMCP {
-		cfg.MCPHTTPAddr = ""
 	}
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
@@ -877,7 +877,8 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 				// Optionally open the browser.
 				if openBrowserFlag {
 					if err := openBrowser(webURL); err != nil {
-						logger.Warn("failed to open browser", "url", webURL, "error", err)
+						logger.Warn("failed to open browser", "url", baseURL, "error", err)
+						logger.Debug("failed to open browser (full url)", "url", webURL, "error", err)
 					}
 				}
 			}
