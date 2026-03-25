@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,14 +29,15 @@ func TestWriteServerJSON_WritesFile(t *testing.T) {
 		t.Fatalf("writeServerJSON: %v", err)
 	}
 
-	// Verify the file exists and can be read back.
-	got, err := readServerJSON(path)
+	// Verify the file exists and can be read back as an array.
+	entries, err := readServerJSONSlice(path)
 	if err != nil {
-		t.Fatalf("readServerJSON: %v", err)
+		t.Fatalf("readServerJSONSlice: %v", err)
 	}
-	if got == nil {
-		t.Fatal("expected non-nil result")
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
+	got := entries[0]
 	if got.Addr != data.Addr {
 		t.Errorf("Addr = %q, want %q", got.Addr, data.Addr)
 	}
@@ -53,6 +55,187 @@ func TestWriteServerJSON_WritesFile(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0600 {
 		t.Errorf("file permissions = %o, want 0600", perm)
+	}
+}
+
+// TestWriteServerJSON_MultiInstance verifies that writing a second entry appends
+// to the array rather than overwriting it. Stale entries (dead PIDs) are filtered out.
+func TestWriteServerJSON_MultiInstance(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.json")
+
+	orig := serverJSONPathFunc
+	serverJSONPathFunc = func() (string, error) { return path, nil }
+	t.Cleanup(func() { serverJSONPathFunc = orig })
+
+	// Write a first (live) entry using the current PID so it is not treated as stale.
+	first := &ServerJSON{
+		Addr:      "127.0.0.1:11111",
+		Token:     "token1",
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	if err := writeServerJSON(first); err != nil {
+		t.Fatalf("writeServerJSON first: %v", err)
+	}
+
+	// Manually insert a second pre-existing live entry directly into the file
+	// so we can test that both are kept. We write PID = os.Getpid() for both
+	// to guarantee liveness, then write a fresh third entry.
+	second := ServerJSON{
+		Addr:      "127.0.0.1:22222",
+		Token:     "token2",
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	b, _ := json.MarshalIndent([]ServerJSON{*first, second}, "", "  ")
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatalf("setup second entry: %v", err)
+	}
+
+	// Now write a third entry — it should append to the two live entries.
+	third := &ServerJSON{
+		Addr:      "127.0.0.1:33333",
+		Token:     "token3",
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	if err := writeServerJSON(third); err != nil {
+		t.Fatalf("writeServerJSON third: %v", err)
+	}
+
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		t.Fatalf("readServerJSONSlice: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d: %+v", len(entries), entries)
+	}
+}
+
+// TestWriteServerJSON_StaleEntriesFiltered verifies that dead PIDs are removed
+// when a new entry is written.
+func TestWriteServerJSON_StaleEntriesFiltered(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.json")
+
+	orig := serverJSONPathFunc
+	serverJSONPathFunc = func() (string, error) { return path, nil }
+	t.Cleanup(func() { serverJSONPathFunc = orig })
+
+	// Seed the file with a stale entry (PID 0 is always dead).
+	stale := ServerJSON{
+		Addr:      "127.0.0.1:99999",
+		Token:     "stale",
+		PID:       0,
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	b, _ := json.MarshalIndent([]ServerJSON{stale}, "", "  ")
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatalf("setup stale entry: %v", err)
+	}
+
+	fresh := &ServerJSON{
+		Addr:      "127.0.0.1:12345",
+		Token:     "fresh",
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	if err := writeServerJSON(fresh); err != nil {
+		t.Fatalf("writeServerJSON: %v", err)
+	}
+
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		t.Fatalf("readServerJSONSlice: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry after stale filter, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Token != "fresh" {
+		t.Errorf("expected fresh entry, got: %+v", entries[0])
+	}
+}
+
+// TestRemoveServerJSON_OwnPIDOnly verifies that removeServerJSON removes only
+// the entry matching the current PID and leaves other entries intact.
+func TestRemoveServerJSON_OwnPIDOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.json")
+
+	orig := serverJSONPathFunc
+	serverJSONPathFunc = func() (string, error) { return path, nil }
+	t.Cleanup(func() { serverJSONPathFunc = orig })
+
+	other := ServerJSON{
+		Addr:      "127.0.0.1:55555",
+		Token:     "other",
+		PID:       os.Getpid() + 1000, // different PID (not our own)
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	own := ServerJSON{
+		Addr:      "127.0.0.1:66666",
+		Token:     "own",
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	b, _ := json.MarshalIndent([]ServerJSON{other, own}, "", "  ")
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	removeServerJSON()
+
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		t.Fatalf("readServerJSONSlice after remove: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 remaining entry, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].PID != other.PID {
+		t.Errorf("expected other entry to remain, got PID %d", entries[0].PID)
+	}
+}
+
+// TestRemoveServerJSON_DeletesFileWhenEmpty verifies that server.json is deleted
+// when removing the last (own) entry.
+func TestRemoveServerJSON_DeletesFileWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.json")
+
+	orig := serverJSONPathFunc
+	serverJSONPathFunc = func() (string, error) { return path, nil }
+	t.Cleanup(func() { serverJSONPathFunc = orig })
+
+	own := ServerJSON{
+		Addr:      "127.0.0.1:77777",
+		Token:     "own",
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	b, _ := json.MarshalIndent([]ServerJSON{own}, "", "  ")
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	removeServerJSON()
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected server.json to be deleted, but it still exists (err=%v)", err)
+	}
+}
+
+func TestReadServerJSONSlice_NotExist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonexistent.json")
+
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected empty slice for non-existent file, got: %+v", entries)
 	}
 }
 

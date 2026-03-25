@@ -853,38 +853,43 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 	// Start HTTP MCP transport (default; disabled by -no-http-mcp).
 	if cfg.MCPHTTPAddr != "" {
 		capturedToken := webUIToken
-		onListening := func(addr string) {
-			// Log the WebUI URL with the actual (resolved) address.
-			// Log only the base URL at Info to avoid emitting the credential in default logs.
-			// The full URL (with token) is logged at Debug for diagnostics.
-			baseURL := fmt.Sprintf("http://%s/", addr)
-			webURL := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
-			logger.Info("WebUI available", "url", baseURL)
-			logger.Debug("WebUI available (with token)", "url", webURL)
+		g.Go(func() error {
+			wrote := false
+			onListening := func(addr string) {
+				// Log the WebUI URL with the actual (resolved) address.
+				// Log only the base URL at Info to avoid emitting the credential in default logs.
+				// The full URL (with token) is logged at Debug for diagnostics.
+				baseURL := fmt.Sprintf("http://%s/", addr)
+				webURL := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
+				logger.Info("WebUI available", "url", baseURL)
+				logger.Debug("WebUI available (with token)", "url", webURL)
 
-			// Write server.json for the CLI client to discover this server.
-			sj := &ServerJSON{
-				Addr:      addr,
-				Token:     capturedToken,
-				PID:       os.Getpid(),
-				StartedAt: timeNow(),
-			}
-			if err := writeServerJSON(sj); err != nil {
-				logger.Warn("failed to write server.json", "error", err)
-			} else {
-				logger.Info("server.json written", "path", mustServerJSONPath())
-			}
+				// Write server.json for the CLI client to discover this server.
+				sj := &ServerJSON{
+					Addr:      addr,
+					Token:     capturedToken,
+					PID:       os.Getpid(),
+					StartedAt: timeNow(),
+				}
+				if err := writeServerJSON(sj); err != nil {
+					logger.Error("failed to write server.json", "error", err)
+				} else {
+					wrote = true
+					logger.Info("server.json written", "path", mustServerJSONPath())
+				}
 
-			// Optionally open the browser.
-			if openBrowserFlag {
-				if err := openBrowser(webURL); err != nil {
-					logger.Warn("failed to open browser", "url", webURL, "error", err)
+				// Optionally open the browser.
+				if openBrowserFlag {
+					if err := openBrowser(webURL); err != nil {
+						logger.Warn("failed to open browser", "url", webURL, "error", err)
+					}
 				}
 			}
-		}
-
-		g.Go(func() error {
-			defer removeServerJSON()
+			defer func() {
+				if wrote {
+					removeServerJSON()
+				}
+			}()
 			if err := mcpServer.RunHTTP(gctx, cfg.MCPHTTPAddr, onListening); err != nil {
 				if gctx.Err() != nil {
 					logger.Info("MCP HTTP server stopped")

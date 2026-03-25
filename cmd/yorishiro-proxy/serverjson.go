@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,10 +44,16 @@ func serverJSONPath() (string, error) {
 	return serverJSONPathFunc()
 }
 
-// writeServerJSON atomically writes server.json to the default path.
-// It first checks for an existing server.json; if a live process owns it,
-// it returns an error. Otherwise it overwrites the file.
-// The caller is responsible for removing the file when the server exits
+// writeServerJSON writes server.json to the default path using an array format
+// that supports multiple concurrent instances.
+//
+// The write sequence is:
+//  1. Read existing server.json (treat missing file as empty slice)
+//  2. Remove stale entries (entries whose PID is not alive)
+//  3. Append own entry
+//  4. Write back via temp file + rename (atomic)
+//
+// The caller is responsible for removing the entry when the server exits
 // (see removeServerJSON).
 func writeServerJSON(data *ServerJSON) error {
 	path, err := serverJSONPath()
@@ -60,61 +67,146 @@ func writeServerJSON(data *ServerJSON) error {
 		return fmt.Errorf("create directory %s: %w", dir, err)
 	}
 
-	// Check for an existing server.json with a live process.
-	// Note: there is a TOCTOU window between the liveness check and the write.
-	// This is acceptable for a single-user CLI tool on localhost: the race window
-	// is extremely narrow and the worst outcome is overwriting a valid file, which
-	// is caught by the PID check on the next startup.
-	if existing, err := readServerJSON(path); err == nil && existing != nil {
-		if isProcessAlive(existing.PID) {
-			return fmt.Errorf("another instance is already running (PID: %d)", existing.PID)
-		}
-		// Stale file — safe to overwrite.
+	// Read existing entries; treat missing file as empty slice.
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		return err
 	}
 
-	b, err := json.MarshalIndent(data, "", "  ")
+	// Filter out stale entries (dead PIDs).
+	live := entries[:0]
+	for _, e := range entries {
+		if isProcessAlive(e.PID) {
+			live = append(live, e)
+		}
+	}
+
+	// Append own entry.
+	live = append(live, *data)
+
+	b, err := json.MarshalIndent(live, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal server.json: %w", err)
 	}
 	b = append(b, '\n')
 
-	if err := os.WriteFile(path, b, 0600); err != nil {
-		return fmt.Errorf("write server.json: %w", err)
+	// Atomic write via temp file + rename.
+	tmpFile, err := os.OpenFile(
+		filepath.Join(dir, ".server.json.tmp"),
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		0600,
+	)
+	if err != nil {
+		return fmt.Errorf("create temp file for server.json: %w", err)
+	}
+	tmpName := tmpFile.Name()
+	if _, err := tmpFile.Write(b); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write temp server.json: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close temp server.json: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("rename server.json: %w", err)
 	}
 	return nil
 }
 
-// removeServerJSON deletes server.json. It is a best-effort operation:
-// errors are ignored because the process is exiting.
+// removeServerJSON removes only the entry for the current process from server.json.
+// If no entries remain after removal, the file is deleted.
+// It is a best-effort operation: errors are ignored because the process is exiting.
 func removeServerJSON() {
 	path, err := serverJSONPath()
 	if err != nil {
 		return
 	}
-	_ = os.Remove(path)
+
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		return
+	}
+
+	pid := os.Getpid()
+	remaining := entries[:0]
+	for _, e := range entries {
+		if e.PID != pid {
+			remaining = append(remaining, e)
+		}
+	}
+
+	if len(remaining) == 0 {
+		_ = os.Remove(path)
+		return
+	}
+
+	b, err := json.MarshalIndent(remaining, "", "  ")
+	if err != nil {
+		return
+	}
+	b = append(b, '\n')
+
+	dir := filepath.Dir(path)
+	tmpFile, err := os.OpenFile(
+		filepath.Join(dir, ".server.json.tmp"),
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		0600,
+	)
+	if err != nil {
+		return
+	}
+	tmpName := tmpFile.Name()
+	if _, err := tmpFile.Write(b); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return
+	}
+	_ = os.Rename(tmpName, path)
 }
 
-// readServerJSON reads and parses server.json from the given path.
-// Returns (nil, nil) if the file does not exist.
-func readServerJSON(path string) (*ServerJSON, error) {
+// readServerJSONSlice reads and parses server.json from the given path as an array.
+// Returns an empty slice if the file does not exist or is corrupt.
+func readServerJSONSlice(path string) ([]ServerJSON, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return []ServerJSON{}, nil
 		}
 		return nil, fmt.Errorf("read server.json: %w", err)
 	}
-	var s ServerJSON
-	if err := json.Unmarshal(data, &s); err != nil {
-		// Corrupt file — treat as stale.
+	var entries []ServerJSON
+	if err := json.Unmarshal(data, &entries); err != nil {
+		// Corrupt file — treat as empty.
+		return []ServerJSON{}, nil
+	}
+	return entries, nil
+}
+
+// readServerJSON reads and parses server.json from the given path.
+// Returns (nil, nil) if the file does not exist or is corrupt.
+// Deprecated: use readServerJSONSlice for the multi-instance array format.
+func readServerJSON(path string) (*ServerJSON, error) {
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
 		return nil, nil
 	}
-	return &s, nil
+	return &entries[0], nil
 }
 
 // isProcessAlive returns true if a process with the given PID exists and is running.
 // On Unix, os.FindProcess always succeeds; we use kill(pid, 0) via Signal(0) to
-// check liveness.
+// check liveness. EPERM means the process exists but we lack signal permission —
+// it is treated as alive.
 func isProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -124,5 +216,6 @@ func isProcessAlive(pid int) bool {
 		return false
 	}
 	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	// EPERM means the process exists but we don't have permission to signal it.
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
