@@ -158,8 +158,19 @@ func TestBuildMCPEntry(t *testing.T) {
 		t.Fatal("expected non-empty Args")
 	}
 
-	// Check that -log-file is in args and points to user-scoped path.
+	// First arg must be "server" subcommand.
+	if entry.Args[0] != "server" {
+		t.Errorf("Args[0] = %q, want \"server\"", entry.Args[0])
+	}
+
 	argsStr := joinArgs(entry.Args)
+
+	// Must include -stdio-mcp for MCP client compatibility.
+	if !containsStr(argsStr, "-stdio-mcp") {
+		t.Error("expected -stdio-mcp in args")
+	}
+
+	// Check that -log-file is in args and points to user-scoped path.
 	if !containsStr(argsStr, "-log-file") {
 		t.Error("expected -log-file in args")
 	}
