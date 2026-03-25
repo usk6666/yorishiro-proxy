@@ -152,11 +152,6 @@ type Config struct {
 	// CLI flag: -ui-dir, env: YP_UI_DIR.
 	UIDir string `json:"-"`
 
-	// NoOpenBrowser disables automatic browser opening when -mcp-http-addr is set.
-	// When true, the WebUI URL is only logged to stderr without opening a browser.
-	// CLI flag: -no-open-browser, env: YP_NO_OPEN_BROWSER.
-	NoOpenBrowser bool `json:"-"`
-
 	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
 	// This can be set via CLI flag (-safety-filter) or environment variable
 	// (YP_SAFETY_FILTER_ENABLED). When explicitly set, it overrides the config

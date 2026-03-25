@@ -393,6 +393,9 @@ func TestM3ComponentInitialization(t *testing.T) {
 func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) (*string, *string) {
 	var configFile string
 	var targetPolicyFile string
+	var openBrowser bool
+	var stdioMCP bool
+	var noHTTPMCP bool
 	fs.StringVar(&configFile, "config", "", "")
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "")
 	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "")
@@ -402,11 +405,13 @@ func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) (*string, *string) 
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "")
-	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "")
+	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", "127.0.0.1:0", "")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "")
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "")
 	fs.StringVar(&targetPolicyFile, "target-policy-file", "", "")
-	fs.BoolVar(&cfg.NoOpenBrowser, "no-open-browser", cfg.NoOpenBrowser, "")
+	fs.BoolVar(&openBrowser, "open-browser", false, "")
+	fs.BoolVar(&stdioMCP, "stdio-mcp", false, "")
+	fs.BoolVar(&noHTTPMCP, "no-http-mcp", false, "")
 	return &configFile, &targetPolicyFile
 }
 
@@ -554,9 +559,7 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 		{"ca-ephemeral TRUE", "YP_CA_EPHEMERAL", "TRUE", "CAEphemeral", true},
 		{"ca-ephemeral false", "YP_CA_EPHEMERAL", "false", "CAEphemeral", false},
 		{"insecure invalid", "YP_INSECURE", "invalid", "InsecureSkipVerify", false},
-		{"no-open-browser true", "YP_NO_OPEN_BROWSER", "true", "NoOpenBrowser", true},
-		{"no-open-browser false", "YP_NO_OPEN_BROWSER", "false", "NoOpenBrowser", false},
-		{"no-open-browser 1", "YP_NO_OPEN_BROWSER", "1", "NoOpenBrowser", true},
+		{"ca-ephemeral 0", "YP_CA_EPHEMERAL", "0", "CAEphemeral", false},
 	}
 
 	for _, tt := range tests {
@@ -691,8 +694,6 @@ func getBoolConfigField(cfg *config.Config, field string) bool {
 		return cfg.InsecureSkipVerify
 	case "CAEphemeral":
 		return cfg.CAEphemeral
-	case "NoOpenBrowser":
-		return cfg.NoOpenBrowser
 	default:
 		return false
 	}
@@ -891,7 +892,69 @@ func TestConvertTargetRules_FieldMapping(t *testing.T) {
 	}
 }
 
-func TestNoOpenBrowserFlag(t *testing.T) {
+func TestOpenBrowserFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagArgs []string
+		envVars  map[string]string
+		want     bool
+	}{
+		{
+			name: "default is false (browser not opened)",
+			want: false,
+		},
+		{
+			name:     "flag sets true",
+			flagArgs: []string{"-open-browser"},
+			want:     true,
+		},
+		{
+			name:    "env var sets true",
+			envVars: map[string]string{"YP_OPEN_BROWSER": "true"},
+			want:    true,
+		},
+		{
+			name:    "env var sets 1",
+			envVars: map[string]string{"YP_OPEN_BROWSER": "1"},
+			want:    true,
+		},
+		{
+			name:    "env var sets false",
+			envVars: map[string]string{"YP_OPEN_BROWSER": "false"},
+			want:    false,
+		},
+		{
+			name:     "flag overrides env var false",
+			flagArgs: []string{"-open-browser"},
+			envVars:  map[string]string{"YP_OPEN_BROWSER": "false"},
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			var openBrowser bool
+			fs.BoolVar(&openBrowser, "open-browser", false, "")
+
+			if err := fs.Parse(tt.flagArgs); err != nil {
+				t.Fatalf("flag.Parse: %v", err)
+			}
+
+			applyEnvFallback(fs)
+
+			if openBrowser != tt.want {
+				t.Errorf("open-browser = %v, want %v", openBrowser, tt.want)
+			}
+		})
+	}
+}
+
+func TestStdioMCPFlag(t *testing.T) {
 	tests := []struct {
 		name     string
 		flagArgs []string
@@ -904,29 +967,18 @@ func TestNoOpenBrowserFlag(t *testing.T) {
 		},
 		{
 			name:     "flag sets true",
-			flagArgs: []string{"-no-open-browser"},
+			flagArgs: []string{"-stdio-mcp"},
 			want:     true,
 		},
 		{
 			name:    "env var sets true",
-			envVars: map[string]string{"YP_NO_OPEN_BROWSER": "true"},
-			want:    true,
-		},
-		{
-			name:    "env var sets 1",
-			envVars: map[string]string{"YP_NO_OPEN_BROWSER": "1"},
+			envVars: map[string]string{"YP_STDIO_MCP": "true"},
 			want:    true,
 		},
 		{
 			name:    "env var sets false",
-			envVars: map[string]string{"YP_NO_OPEN_BROWSER": "false"},
+			envVars: map[string]string{"YP_STDIO_MCP": "false"},
 			want:    false,
-		},
-		{
-			name:     "flag overrides env var",
-			flagArgs: []string{"-no-open-browser"},
-			envVars:  map[string]string{"YP_NO_OPEN_BROWSER": "false"},
-			want:     true,
 		},
 	}
 
@@ -937,8 +989,8 @@ func TestNoOpenBrowserFlag(t *testing.T) {
 			}
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
-			cfg := config.Default()
-			registerTestFlags(fs, cfg)
+			var stdioMCP bool
+			fs.BoolVar(&stdioMCP, "stdio-mcp", false, "")
 
 			if err := fs.Parse(tt.flagArgs); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
@@ -946,8 +998,59 @@ func TestNoOpenBrowserFlag(t *testing.T) {
 
 			applyEnvFallback(fs)
 
-			if cfg.NoOpenBrowser != tt.want {
-				t.Errorf("NoOpenBrowser = %v, want %v", cfg.NoOpenBrowser, tt.want)
+			if stdioMCP != tt.want {
+				t.Errorf("stdio-mcp = %v, want %v", stdioMCP, tt.want)
+			}
+		})
+	}
+}
+
+func TestNoHTTPMCPFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagArgs []string
+		envVars  map[string]string
+		want     bool
+	}{
+		{
+			name: "default is false (HTTP MCP enabled)",
+			want: false,
+		},
+		{
+			name:     "flag sets true",
+			flagArgs: []string{"-no-http-mcp"},
+			want:     true,
+		},
+		{
+			name:    "env var sets true",
+			envVars: map[string]string{"YP_NO_HTTP_MCP": "true"},
+			want:    true,
+		},
+		{
+			name:    "env var sets false",
+			envVars: map[string]string{"YP_NO_HTTP_MCP": "false"},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			var noHTTPMCP bool
+			fs.BoolVar(&noHTTPMCP, "no-http-mcp", false, "")
+
+			if err := fs.Parse(tt.flagArgs); err != nil {
+				t.Fatalf("flag.Parse: %v", err)
+			}
+
+			applyEnvFallback(fs)
+
+			if noHTTPMCP != tt.want {
+				t.Errorf("no-http-mcp = %v, want %v", noHTTPMCP, tt.want)
 			}
 		})
 	}

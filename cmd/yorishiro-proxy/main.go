@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
@@ -64,15 +65,19 @@ var envVarMap = map[string]string{
 	"mcp-http-token":     "YP_MCP_HTTP_TOKEN",
 	"ui-dir":             "YP_UI_DIR",
 	"target-policy-file": "YP_TARGET_POLICY_FILE",
-	"no-open-browser":    "YP_NO_OPEN_BROWSER",
+	"open-browser":       "YP_OPEN_BROWSER",
 	"tls-fingerprint":    "YP_TLS_FINGERPRINT",
 	"safety-filter":      "YP_SAFETY_FILTER_ENABLED",
+	"stdio-mcp":          "YP_STDIO_MCP",
+	"no-http-mcp":        "YP_NO_HTTP_MCP",
 }
 
 func run(ctx context.Context) error {
 	// Check for subcommands before parsing flags.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "server":
+			return runWithFlags(ctx, flag.CommandLine, os.Args[2:])
 		case "install":
 			return runInstall(ctx, os.Args[2:])
 		case "upgrade":
@@ -82,6 +87,7 @@ func run(ctx context.Context) error {
 			return nil
 		}
 	}
+	// No subcommand: backward-compatible, behave like "server".
 	return runWithFlags(ctx, flag.CommandLine, os.Args[1:])
 }
 
@@ -116,10 +122,28 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn, error (env: YP_LOG_LEVEL)")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: text, json (env: YP_LOG_FORMAT)")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "log output file, default stderr (env: YP_LOG_FILE)")
-	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: YP_MCP_HTTP_ADDR)")
+	// HTTP MCP transport: defaults to 127.0.0.1:0 (OS-assigned port).
+	// Use -mcp-http-addr to specify an explicit address.
+	// Use -no-http-mcp to disable HTTP MCP entirely.
+	defaultMCPHTTPAddr := "127.0.0.1:0"
+	if cfg.MCPHTTPAddr != "" {
+		defaultMCPHTTPAddr = cfg.MCPHTTPAddr
+	}
+	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", defaultMCPHTTPAddr, "Streamable HTTP MCP listen address; use 0 for OS-assigned port (env: YP_MCP_HTTP_ADDR)")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: YP_MCP_HTTP_TOKEN)")
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
-	fs.BoolVar(&cfg.NoOpenBrowser, "no-open-browser", cfg.NoOpenBrowser, "disable auto-opening WebUI in browser (env: YP_NO_OPEN_BROWSER)")
+
+	// -open-browser enables auto-opening the WebUI; default is disabled.
+	var openBrowser bool
+	fs.BoolVar(&openBrowser, "open-browser", false, "open WebUI in browser when HTTP MCP starts (env: YP_OPEN_BROWSER)")
+
+	// -stdio-mcp enables stdio MCP transport (opt-in).
+	var stdioMCP bool
+	fs.BoolVar(&stdioMCP, "stdio-mcp", false, "start stdio MCP transport in addition to HTTP MCP (env: YP_STDIO_MCP)")
+
+	// -no-http-mcp disables HTTP MCP transport (opt-out).
+	var noHTTPMCP bool
+	fs.BoolVar(&noHTTPMCP, "no-http-mcp", false, "disable HTTP MCP transport (env: YP_NO_HTTP_MCP)")
 
 	// SafetyFilter enable/disable override. When set via flag or env var,
 	// it overrides the config file's safety_filter.enabled value.
@@ -128,31 +152,32 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy %s\n\n", buildVersion())
-		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n")
-		fmt.Fprintf(fs.Output(), "       yorishiro-proxy install [target] [flags]\n")
-		fmt.Fprintf(fs.Output(), "       yorishiro-proxy upgrade [--check]\n\n")
+		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [subcommand] [flags]\n\n")
 		fmt.Fprintf(fs.Output(), "yorishiro-proxy is an AI agent network proxy (MCP server).\n")
-		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
+		fmt.Fprintf(fs.Output(), "By default it starts an HTTP MCP server on a random loopback port\n")
+		fmt.Fprintf(fs.Output(), "and writes the address and token to ~/.yorishiro-proxy/server.json.\n\n")
 		fmt.Fprintf(fs.Output(), "Subcommands:\n")
+		fmt.Fprintf(fs.Output(), "  server   Start the proxy server (default when no subcommand given)\n")
 		fmt.Fprintf(fs.Output(), "  install  Install and configure components (MCP, CA, Skills, Playwright)\n")
-		fmt.Fprintf(fs.Output(), "  upgrade  Check for and install updates from GitHub Releases\n\n")
-		fmt.Fprintf(fs.Output(), "Flags:\n")
+		fmt.Fprintf(fs.Output(), "  upgrade  Check for and install updates from GitHub Releases\n")
+		fmt.Fprintf(fs.Output(), "  version  Print version information\n\n")
+		fmt.Fprintf(fs.Output(), "Server flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
 		fmt.Fprintf(fs.Output(), "  All flags accept a YP_ prefixed environment variable as fallback.\n")
 		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > config file > default value.\n")
 		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> YP_LOG_LEVEL).\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy                                  # MCP stdio mode (default)\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy server                           # HTTP MCP on random port (default)\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy server -stdio-mcp                # HTTP MCP + stdio MCP\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy server -no-http-mcp -stdio-mcp   # stdio MCP only\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy server -mcp-http-addr 127.0.0.1:3000  # fixed port\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy server -open-browser             # open WebUI on start\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install                          # install all components\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install mcp                      # register MCP config only\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install ca --trust               # generate CA + register in OS\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install skills                   # install skills only\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -db pentest-2026                 # project DB: ~/.yorishiro-proxy/pentest-2026.db\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -db /data/project.db             # absolute path: used as-is\n")
 		fmt.Fprintf(fs.Output(), "  YP_DB=client-audit yorishiro-proxy               # project name via env var\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -config proxy.json               # load proxy config from file\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
 		fmt.Fprintf(fs.Output(), "  YP_INSECURE=true yorishiro-proxy                  # skip TLS verification\n")
 	}
 	if err := fs.Parse(args); err != nil {
@@ -256,6 +281,11 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		return err
 	}
 
+	// Apply transport flags before building options so MCPHTTPAddr is correct.
+	if noHTTPMCP {
+		cfg.MCPHTTPAddr = ""
+	}
+
 	opts, err := buildMCPOptions(cfg, proxyCfg, store, issuer, passthrough, scope,
 		interceptEngine, interceptQueue, pipeline, proto, targetScope, rateLimiter,
 		safetyEngine, targetScopePolicySource, logger)
@@ -264,9 +294,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
-	logger.Info("starting MCP server on stdio")
 
-	return startServers(ctx, cfg, mcpServer, proto.webUIToken, logger)
+	logger.Info("starting MCP server", "http_mcp_addr", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
+
+	return startServers(ctx, cfg, mcpServer, proto.webUIToken, openBrowser, stdioMCP, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -777,6 +808,8 @@ func buildMCPOptions(
 	}
 
 	// Set up Bearer token authentication middleware for HTTP transport.
+	// This is always configured when HTTP MCP is enabled (MCPHTTPAddr != "").
+	// The WebUI URL is logged from startServers once the actual port is known.
 	if cfg.MCPHTTPAddr != "" {
 		token, err := resolveHTTPToken(cfg.MCPHTTPToken, logger)
 		if err != nil {
@@ -786,44 +819,74 @@ func buildMCPOptions(
 		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
 			return mcp.BearerAuthMiddleware(next, token)
 		}))
-		logger.Info("WebUI available",
-			"url", fmt.Sprintf("http://%s/?token=%s", cfg.MCPHTTPAddr, url.QueryEscape(token)))
 	}
 
 	return opts, nil
 }
 
-// startServers launches the MCP stdio and optional HTTP servers using an errgroup.
-func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server, webUIToken string, logger *slog.Logger) error {
+// startServers launches the MCP HTTP and optional stdio servers using an errgroup.
+// When cfg.MCPHTTPAddr is non-empty, the HTTP MCP server is started (default).
+// When stdioMCP is true, the stdio MCP transport is also started.
+// server.json is written once the HTTP server starts listening and removed on exit.
+func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server, webUIToken string, openBrowserFlag bool, stdioMCP bool, logger *slog.Logger) error {
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Always start stdio transport (single flow via Server.Run).
-	g.Go(func() error {
-		transport := &gomcp.StdioTransport{}
-		if err := mcpServer.Run(gctx, transport); err != nil {
-			if gctx.Err() != nil {
-				logger.Info("MCP stdio server stopped")
-				return nil
+	// Optionally start stdio MCP transport (opt-in via -stdio-mcp).
+	if stdioMCP {
+		g.Go(func() error {
+			transport := &gomcp.StdioTransport{}
+			if err := mcpServer.Run(gctx, transport); err != nil {
+				if gctx.Err() != nil {
+					logger.Info("MCP stdio server stopped")
+					return nil
+				}
+				return fmt.Errorf("MCP stdio server: %w", err)
 			}
-			return fmt.Errorf("MCP stdio server: %w", err)
-		}
-		return nil
-	})
+			return nil
+		})
+	}
 
-	// Optionally start Streamable HTTP transport (multi-flow via Server.Connect).
+	// Start HTTP MCP transport (default; disabled by -no-http-mcp).
 	if cfg.MCPHTTPAddr != "" {
-		var onListening func(addr string)
-		if !cfg.NoOpenBrowser {
-			capturedToken := webUIToken
-			onListening = func(addr string) {
-				u := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
-				if err := openBrowser(u); err != nil {
-					logger.Warn("failed to open browser", "url", u, "error", err)
+		capturedToken := webUIToken
+		g.Go(func() error {
+			wrote := false
+			onListening := func(addr string) {
+				// Log the WebUI URL with the actual (resolved) address.
+				// Log only the base URL at Info to avoid emitting the credential in default logs.
+				// The full URL (with token) is logged at Debug for diagnostics.
+				baseURL := fmt.Sprintf("http://%s/", addr)
+				webURL := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
+				logger.Info("WebUI available", "url", baseURL)
+				logger.Debug("WebUI available (with token)", "url", webURL)
+
+				// Write server.json for the CLI client to discover this server.
+				sj := &ServerJSON{
+					Addr:      addr,
+					Token:     capturedToken,
+					PID:       os.Getpid(),
+					StartedAt: timeNow(),
+				}
+				if err := writeServerJSON(sj); err != nil {
+					logger.Error("failed to write server.json", "error", err)
+				} else {
+					wrote = true
+					logger.Info("server.json written", "path", mustServerJSONPath())
+				}
+
+				// Optionally open the browser.
+				if openBrowserFlag {
+					if err := openBrowser(webURL); err != nil {
+						logger.Warn("failed to open browser", "url", baseURL, "error", err)
+						logger.Debug("failed to open browser (full url)", "url", webURL, "error", err)
+					}
 				}
 			}
-		}
-
-		g.Go(func() error {
+			defer func() {
+				if wrote {
+					removeServerJSON()
+				}
+			}()
 			if err := mcpServer.RunHTTP(gctx, cfg.MCPHTTPAddr, onListening); err != nil {
 				if gctx.Err() != nil {
 					logger.Info("MCP HTTP server stopped")
@@ -835,7 +898,26 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 		})
 	}
 
+	// If neither transport is enabled, return an error.
+	if !stdioMCP && cfg.MCPHTTPAddr == "" {
+		return fmt.Errorf("no MCP transport enabled: use -stdio-mcp or remove -no-http-mcp")
+	}
+
 	return g.Wait()
+}
+
+// timeNow returns the current UTC time. It is a variable to allow test overrides.
+var timeNow = func() time.Time {
+	return time.Now().UTC()
+}
+
+// mustServerJSONPath returns the server.json path, falling back to a placeholder on error.
+func mustServerJSONPath() string {
+	p, err := serverJSONPath()
+	if err != nil {
+		return "~/.yorishiro-proxy/server.json"
+	}
+	return p
 }
 
 // initSafetyFilter creates a SafetyFilter engine from config file settings and
@@ -995,10 +1077,11 @@ func resolveHTTPToken(token string, logger *slog.Logger) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Log the auto-generated token to stderr so the operator can use it.
-	// This is the only time the token value appears in logs.
-	logger.Info("generated MCP HTTP Bearer token (use this to authenticate)",
-		"token", generated)
+	// Log the auto-generated token at Info (summary) and Debug (full value).
+	// The token appears at Debug level only to avoid forwarding the credential
+	// to centralized log aggregation systems.
+	logger.Info("generated MCP HTTP Bearer token (check server.json or use -mcp-http-token to set explicitly)")
+	logger.Debug("generated MCP HTTP Bearer token", "token", generated)
 	return generated, nil
 }
 
