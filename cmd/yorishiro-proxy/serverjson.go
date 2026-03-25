@@ -25,13 +25,22 @@ type ServerJSON struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
-// serverJSONPath returns the default path for server.json: ~/.yorishiro-proxy/server.json.
-func serverJSONPath() (string, error) {
+// serverJSONPathFunc returns the path for server.json.
+// It is a variable to allow test overrides (similar to timeNow).
+var serverJSONPathFunc = defaultServerJSONPath
+
+// defaultServerJSONPath returns the default path for server.json: ~/.yorishiro-proxy/server.json.
+func defaultServerJSONPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 	return filepath.Join(home, ".yorishiro-proxy", "server.json"), nil
+}
+
+// serverJSONPath returns the path for server.json, delegating to serverJSONPathFunc.
+func serverJSONPath() (string, error) {
+	return serverJSONPathFunc()
 }
 
 // writeServerJSON atomically writes server.json to the default path.
@@ -52,6 +61,10 @@ func writeServerJSON(data *ServerJSON) error {
 	}
 
 	// Check for an existing server.json with a live process.
+	// Note: there is a TOCTOU window between the liveness check and the write.
+	// This is acceptable for a single-user CLI tool on localhost: the race window
+	// is extremely narrow and the worst outcome is overwriting a valid file, which
+	// is caught by the PID check on the next startup.
 	if existing, err := readServerJSON(path); err == nil && existing != nil {
 		if isProcessAlive(existing.PID) {
 			return fmt.Errorf("another instance is already running (PID: %d)", existing.PID)

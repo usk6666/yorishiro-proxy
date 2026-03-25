@@ -152,12 +152,6 @@ type Config struct {
 	// CLI flag: -ui-dir, env: YP_UI_DIR.
 	UIDir string `json:"-"`
 
-	// OpenBrowser enables automatic browser opening when the HTTP MCP server starts.
-	// When true, the WebUI URL is opened in the default browser.
-	// Default is false (browser is not opened automatically).
-	// CLI flag: -open-browser, env: YP_OPEN_BROWSER.
-	OpenBrowser bool `json:"-"`
-
 	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
 	// This can be set via CLI flag (-safety-filter) or environment variable
 	// (YP_SAFETY_FILTER_ENABLED). When explicitly set, it overrides the config

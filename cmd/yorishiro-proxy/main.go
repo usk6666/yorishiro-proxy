@@ -158,7 +158,6 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "and writes the address and token to ~/.yorishiro-proxy/server.json.\n\n")
 		fmt.Fprintf(fs.Output(), "Subcommands:\n")
 		fmt.Fprintf(fs.Output(), "  server   Start the proxy server (default when no subcommand given)\n")
-		fmt.Fprintf(fs.Output(), "  client   Connect to a running server via HTTP MCP (M31)\n")
 		fmt.Fprintf(fs.Output(), "  install  Install and configure components (MCP, CA, Skills, Playwright)\n")
 		fmt.Fprintf(fs.Output(), "  upgrade  Check for and install updates from GitHub Releases\n")
 		fmt.Fprintf(fs.Output(), "  version  Print version information\n\n")
@@ -856,8 +855,12 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 		capturedToken := webUIToken
 		onListening := func(addr string) {
 			// Log the WebUI URL with the actual (resolved) address.
+			// Log only the base URL at Info to avoid emitting the credential in default logs.
+			// The full URL (with token) is logged at Debug for diagnostics.
+			baseURL := fmt.Sprintf("http://%s/", addr)
 			webURL := fmt.Sprintf("http://%s/?token=%s", addr, url.QueryEscape(capturedToken))
-			logger.Info("WebUI available", "url", webURL)
+			logger.Info("WebUI available", "url", baseURL)
+			logger.Debug("WebUI available (with token)", "url", webURL)
 
 			// Write server.json for the CLI client to discover this server.
 			sj := &ServerJSON{
@@ -1072,10 +1075,11 @@ func resolveHTTPToken(token string, logger *slog.Logger) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Log the auto-generated token to stderr so the operator can use it.
-	// This is the only time the token value appears in logs.
-	logger.Info("generated MCP HTTP Bearer token (use this to authenticate)",
-		"token", generated)
+	// Log the auto-generated token at Info (summary) and Debug (full value).
+	// The token appears at Debug level only to avoid forwarding the credential
+	// to centralized log aggregation systems.
+	logger.Info("generated MCP HTTP Bearer token (check server.json or use -mcp-http-token to set explicitly)")
+	logger.Debug("generated MCP HTTP Bearer token", "token", generated)
 	return generated, nil
 }
 

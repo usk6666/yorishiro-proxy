@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,7 +9,13 @@ import (
 
 func TestWriteServerJSON_WritesFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "server.json")
+	path := filepath.Join(dir, "subdir", "server.json")
+
+	// Override the path resolution to use a temp path.
+	// This tests writeServerJSON directly including MkdirAll, permissions, and stale-process detection.
+	orig := serverJSONPathFunc
+	serverJSONPathFunc = func() (string, error) { return path, nil }
+	t.Cleanup(func() { serverJSONPathFunc = orig })
 
 	data := &ServerJSON{
 		Addr:      "127.0.0.1:12345",
@@ -19,16 +24,11 @@ func TestWriteServerJSON_WritesFile(t *testing.T) {
 		StartedAt: time.Now().UTC().Truncate(time.Second),
 	}
 
-	// Override the path resolution by writing directly via writeServerJSONTo.
-	b, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	b = append(b, '\n')
-	if err := os.WriteFile(path, b, 0600); err != nil {
-		t.Fatalf("write: %v", err)
+	if err := writeServerJSON(data); err != nil {
+		t.Fatalf("writeServerJSON: %v", err)
 	}
 
+	// Verify the file exists and can be read back.
 	got, err := readServerJSON(path)
 	if err != nil {
 		t.Fatalf("readServerJSON: %v", err)
@@ -44,6 +44,15 @@ func TestWriteServerJSON_WritesFile(t *testing.T) {
 	}
 	if got.PID != data.PID {
 		t.Errorf("PID = %d, want %d", got.PID, data.PID)
+	}
+
+	// Verify file permissions are 0600.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("file permissions = %o, want 0600", perm)
 	}
 }
 
