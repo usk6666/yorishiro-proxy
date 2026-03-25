@@ -52,6 +52,16 @@ func TestParseToolArgs_KeyValue(t *testing.T) {
 			want: map[string]any{},
 		},
 		{
+			name: "bare dash skipped",
+			args: []string{"-"},
+			want: map[string]any{},
+		},
+		{
+			name: "bare double-dash skipped",
+			args: []string{"--"},
+			want: map[string]any{},
+		},
+		{
 			name: "value with equals sign",
 			args: []string{"url=http://example.com?a=1"},
 			want: map[string]any{"url": "http://example.com?a=1"},
@@ -192,6 +202,47 @@ func TestResolveClientConn_StaleServerJSON_NoLiveEntry(t *testing.T) {
 	}
 }
 
+func TestResolveClientConn_ExplicitAddrNoMatchingEntry_TokenEmpty(t *testing.T) {
+	// server.json has a live entry for a different addr.
+	withTempServerJSON(t, []ServerJSON{
+		{Addr: "127.0.0.1:9999", Token: "other-token", PID: os.Getpid(), StartedAt: time.Now()},
+	})
+	t.Setenv("YP_CLIENT_ADDR", "")
+	t.Setenv("YP_CLIENT_TOKEN", "")
+
+	// addr explicitly set to a different address — token from the mismatched entry must NOT be used.
+	addr, token, err := resolveClientConn("127.0.0.1:8080", "")
+	if err != nil {
+		t.Fatalf("resolveClientConn: %v", err)
+	}
+	if addr != "127.0.0.1:8080" {
+		t.Errorf("addr = %q, want 127.0.0.1:8080", addr)
+	}
+	if token != "" {
+		t.Errorf("token = %q, want empty (should not take token from a different entry)", token)
+	}
+}
+
+func TestResolveClientConn_ExplicitAddrMatchingEntry_TokenTaken(t *testing.T) {
+	// server.json has a live entry that matches the explicit addr.
+	withTempServerJSON(t, []ServerJSON{
+		{Addr: "127.0.0.1:8080", Token: "correct-token", PID: os.Getpid(), StartedAt: time.Now()},
+	})
+	t.Setenv("YP_CLIENT_ADDR", "")
+	t.Setenv("YP_CLIENT_TOKEN", "")
+
+	addr, token, err := resolveClientConn("127.0.0.1:8080", "")
+	if err != nil {
+		t.Fatalf("resolveClientConn: %v", err)
+	}
+	if addr != "127.0.0.1:8080" {
+		t.Errorf("addr = %q, want 127.0.0.1:8080", addr)
+	}
+	if token != "correct-token" {
+		t.Errorf("token = %q, want correct-token", token)
+	}
+}
+
 // --- runListServers tests ---
 
 func TestRunListServers_JSONOutput(t *testing.T) {
@@ -281,6 +332,21 @@ func TestRunListServers_EmptyJSON(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("expected empty array, got %d entries", len(entries))
+	}
+}
+
+func TestRunListServers_UnknownFormat_Error(t *testing.T) {
+	withTempServerJSON(t, []ServerJSON{
+		{Addr: "127.0.0.1:8080", Token: "tok1", PID: os.Getpid(), StartedAt: time.Now()},
+	})
+
+	var buf bytes.Buffer
+	err := runListServers(&buf, []string{"--format", "jsno"})
+	if err == nil {
+		t.Fatal("expected error for unknown format, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported format") {
+		t.Errorf("error %q should mention 'unsupported format'", err.Error())
 	}
 }
 
@@ -412,6 +478,26 @@ func TestRunClientTool_ConnectError(t *testing.T) {
 	err := runClientTool(context.Background(), "query", []string{"-server-addr=127.0.0.1:1", "resource=flows"})
 	if err == nil {
 		t.Error("expected error when connecting to non-existent server, got nil")
+	}
+}
+
+func TestRunClientTool_SpaceSeparatedServerAddr_Error(t *testing.T) {
+	// Verify that space-separated -server-addr 127.0.0.1:1 is parsed (connection fails, not a parse error).
+	t.Setenv("YP_CLIENT_ADDR", "")
+	t.Setenv("YP_CLIENT_TOKEN", "")
+
+	dir := t.TempDir()
+	orig := serverJSONPathFunc
+	serverJSONPathFunc = func() (string, error) { return filepath.Join(dir, "server.json"), nil }
+	t.Cleanup(func() { serverJSONPathFunc = orig })
+
+	err := runClientTool(context.Background(), "query", []string{"-server-addr", "127.0.0.1:1", "resource=flows"})
+	// Should fail with a connection error, not a flag parse error.
+	if err == nil {
+		t.Error("expected error when connecting to non-existent server, got nil")
+	}
+	if strings.Contains(err.Error(), "flag needs an argument") {
+		t.Errorf("space-separated flag was not parsed correctly: %v", err)
 	}
 }
 

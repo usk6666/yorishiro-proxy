@@ -160,6 +160,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "and writes the address and token to ~/.yorishiro-proxy/server.json.\n\n")
 		fmt.Fprintf(fs.Output(), "Subcommands:\n")
 		fmt.Fprintf(fs.Output(), "  server   Start the proxy server (default when no subcommand given)\n")
+		fmt.Fprintf(fs.Output(), "  client   Call MCP tools via CLI\n")
 		fmt.Fprintf(fs.Output(), "  install  Install and configure components (MCP, CA, Skills, Playwright)\n")
 		fmt.Fprintf(fs.Output(), "  upgrade  Check for and install updates from GitHub Releases\n")
 		fmt.Fprintf(fs.Output(), "  version  Print version information\n\n")

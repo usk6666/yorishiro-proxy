@@ -305,10 +305,12 @@ func runListServers(w io.Writer, args []string) error {
 	}
 
 	switch format {
+	case "json":
+		return printListServersJSON(w, result)
 	case "table":
 		return printListServersTable(w, result)
 	default:
-		return printListServersJSON(w, result)
+		return fmt.Errorf("unsupported format %q: must be \"json\" or \"table\"", format)
 	}
 }
 
@@ -354,28 +356,7 @@ func resolveClientConn(flagAddr, flagToken string) (addr, token string, err erro
 
 	// If either is still missing, try server.json.
 	if addr == "" || token == "" {
-		path, pathErr := serverJSONPath()
-		if pathErr == nil {
-			entries, readErr := readServerJSONSlice(path)
-			if readErr == nil {
-				// Use the first live entry.
-				for _, e := range entries {
-					if isProcessAlive(e.PID) {
-						if addr == "" {
-							addr = e.Addr
-						}
-						if token == "" {
-							token = e.Token
-						}
-						break
-					}
-				}
-				// Warn if any matching PID is dead (stale entry exists).
-				if addr == "" && len(entries) > 0 {
-					fmt.Fprintf(os.Stderr, "warning: server.json contains stale entries (dead PIDs); no live server found\n")
-				}
-			}
-		}
+		addr, token = fillFromServerJSON(addr, token)
 	}
 
 	if addr == "" {
@@ -383,6 +364,44 @@ func resolveClientConn(flagAddr, flagToken string) (addr, token string, err erro
 	}
 
 	return addr, token, nil
+}
+
+// fillFromServerJSON fills missing addr/token from a live server.json entry.
+// When addr is already known, only tokens from entries with a matching Addr are accepted.
+func fillFromServerJSON(addr, token string) (string, string) {
+	path, pathErr := serverJSONPath()
+	if pathErr != nil {
+		return addr, token
+	}
+	entries, readErr := readServerJSONSlice(path)
+	if readErr != nil {
+		return addr, token
+	}
+	for _, e := range entries {
+		if !isProcessAlive(e.PID) {
+			continue
+		}
+		if addr != "" && token == "" {
+			// addr is already known: only accept token from a matching entry.
+			if e.Addr == addr {
+				token = e.Token
+			}
+			continue
+		}
+		// addr not yet known: use first live entry.
+		if addr == "" {
+			addr = e.Addr
+		}
+		if token == "" {
+			token = e.Token
+		}
+		break
+	}
+	// Warn if no live entry could supply an addr.
+	if addr == "" && len(entries) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: server.json contains stale entries (dead PIDs); no live server found\n")
+	}
+	return addr, token
 }
 
 // bearerRoundTripper is an http.RoundTripper that adds a Bearer token to every request.
@@ -414,6 +433,11 @@ func parseToolArgs(args []string) map[string]any {
 			stripped = stripped[1:]
 		}
 
+		// Skip bare "-" or "--" args that strip to empty string.
+		if stripped == "" {
+			continue
+		}
+
 		idx := strings.IndexByte(stripped, '=')
 		if idx < 0 {
 			// Bare flag: treat as boolean true.
@@ -441,11 +465,12 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 	// Separate connection flags from tool parameters.
 	var connFlagArgs []string
 	var toolParamArgs []string
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		stripped := a
 		if strings.HasPrefix(stripped, "--") {
 			stripped = stripped[2:]
-		} else if strings.HasPrefix(stripped, "-") && !strings.HasPrefix(stripped, "--") {
+		} else if strings.HasPrefix(stripped, "-") {
 			stripped = stripped[1:]
 		} else {
 			toolParamArgs = append(toolParamArgs, a)
@@ -459,6 +484,11 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 		switch name {
 		case "server-addr", "token":
 			connFlagArgs = append(connFlagArgs, a)
+			// If no '=' in the flag (space-separated value), grab the next arg as value.
+			if !strings.Contains(stripped, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				connFlagArgs = append(connFlagArgs, args[i])
+			}
 		default:
 			toolParamArgs = append(toolParamArgs, a)
 		}
