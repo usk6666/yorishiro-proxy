@@ -78,6 +78,8 @@ func run(ctx context.Context) error {
 		switch os.Args[1] {
 		case "server":
 			return runWithFlags(ctx, flag.CommandLine, os.Args[2:])
+		case "client":
+			return runClient(ctx, os.Args[2:])
 		case "install":
 			return runInstall(ctx, os.Args[2:])
 		case "upgrade":
