@@ -200,18 +200,8 @@ func TestRunListServers_JSONOutput(t *testing.T) {
 		{Addr: "127.0.0.1:8081", Token: "tok2", PID: 0, StartedAt: time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)},
 	})
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := runListServers([]string{})
-
-	w.Close()
-	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-
+	err := runListServers(&buf, []string{})
 	if err != nil {
 		t.Fatalf("runListServers: %v", err)
 	}
@@ -248,17 +238,8 @@ func TestRunListServers_TableOutput(t *testing.T) {
 		{Addr: "127.0.0.1:8080", Token: "tok1", PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
 	})
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := runListServers([]string{"--format", "table"})
-
-	w.Close()
-	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-
+	err := runListServers(&buf, []string{"--format", "table"})
 	if err != nil {
 		t.Fatalf("runListServers table: %v", err)
 	}
@@ -288,17 +269,8 @@ func TestRunListServers_EmptyJSON(t *testing.T) {
 	}
 	t.Cleanup(func() { serverJSONPathFunc = orig })
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := runListServers([]string{})
-
-	w.Close()
-	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-
+	err := runListServers(&buf, []string{})
 	if err != nil {
 		t.Fatalf("runListServers empty: %v", err)
 	}
@@ -370,16 +342,21 @@ func TestBearerRoundTripper_EmptyTokenNoHeader(t *testing.T) {
 func TestPrintToolHelp_KnownTool(t *testing.T) {
 	for _, name := range clientToolList {
 		t.Run(name, func(t *testing.T) {
-			err := printToolHelp(name)
+			var buf bytes.Buffer
+			err := printToolHelp(&buf, name)
 			if err != nil {
 				t.Errorf("printToolHelp(%q) error = %v", name, err)
+			}
+			if buf.Len() == 0 {
+				t.Errorf("printToolHelp(%q) produced no output", name)
 			}
 		})
 	}
 }
 
 func TestPrintToolHelp_UnknownTool(t *testing.T) {
-	err := printToolHelp("nonexistent_tool_xyz")
+	var buf bytes.Buffer
+	err := printToolHelp(&buf, "nonexistent_tool_xyz")
 	if err == nil {
 		t.Error("expected error for unknown tool, got nil")
 	}

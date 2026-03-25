@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -200,7 +202,7 @@ func runClient(ctx context.Context, args []string) error {
 
 	// Handle list-servers subcommand (reads server.json, no MCP connection needed).
 	if first == "list-servers" {
-		return runListServers(args[1:])
+		return runListServers(os.Stdout, args[1:])
 	}
 
 	// Everything else is a tool invocation: <tool> [key=value ...] [flags]
@@ -210,7 +212,7 @@ func runClient(ctx context.Context, args []string) error {
 	// Handle <tool> --help / -help / -h (no server connection needed).
 	for _, a := range toolArgs {
 		if a == "--help" || a == "-help" || a == "-h" {
-			return printToolHelp(toolName)
+			return printToolHelp(os.Stdout, toolName)
 		}
 	}
 
@@ -218,7 +220,7 @@ func runClient(ctx context.Context, args []string) error {
 }
 
 // printClientUsage prints the usage message for the client subcommand.
-func printClientUsage(w *os.File) {
+func printClientUsage(w io.Writer) {
 	fmt.Fprintf(w, "Usage: yorishiro-proxy client <command> [parameters]\n\n")
 	fmt.Fprintf(w, "A CLI client for the yorishiro-proxy MCP server.\n")
 	fmt.Fprintf(w, "Connects to the running proxy via the Streamable HTTP MCP endpoint.\n\n")
@@ -237,19 +239,20 @@ func printClientUsage(w *os.File) {
 	fmt.Fprintf(w, "                            (env: YP_CLIENT_ADDR, default: auto-detect from server.json)\n")
 	fmt.Fprintf(w, "  --token <token>           Bearer token for authentication\n")
 	fmt.Fprintf(w, "                            (env: YP_CLIENT_TOKEN, default: auto-detect from server.json)\n")
-	fmt.Fprintf(w, "  --format table|json       Output format (default: json)\n\n")
+	fmt.Fprintf(w, "                            WARNING: --token exposes the token in process listings (ps aux).\n")
+	fmt.Fprintf(w, "                            Prefer YP_CLIENT_TOKEN env var in sensitive environments.\n\n")
 	fmt.Fprintf(w, "Tool parameters are passed as key=value pairs:\n")
 	fmt.Fprintf(w, "  yorishiro-proxy client query resource=flows limit=10\n\n")
 	fmt.Fprintf(w, "Run 'yorishiro-proxy client <tool> --help' for tool-specific parameters.\n")
 }
 
 // printToolHelp prints the hardcoded help for a specific tool.
-func printToolHelp(toolName string) error {
+func printToolHelp(w io.Writer, toolName string) error {
 	help, ok := clientToolHelp[toolName]
 	if !ok {
 		return fmt.Errorf("unknown tool %q: run 'yorishiro-proxy client --help' to see available tools", toolName)
 	}
-	fmt.Fprintln(os.Stdout, help)
+	fmt.Fprintln(w, help)
 	return nil
 }
 
@@ -262,7 +265,7 @@ type listServersEntry struct {
 }
 
 // runListServers handles the "client list-servers" subcommand.
-func runListServers(args []string) error {
+func runListServers(w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("list-servers", flag.ContinueOnError)
 	var format string
 	fs.StringVar(&format, "format", "json", "output format: json or table")
@@ -303,25 +306,25 @@ func runListServers(args []string) error {
 
 	switch format {
 	case "table":
-		return printListServersTable(result)
+		return printListServersTable(w, result)
 	default:
-		return printListServersJSON(result)
+		return printListServersJSON(w, result)
 	}
 }
 
 // printListServersJSON outputs the server list as JSON.
-func printListServersJSON(entries []listServersEntry) error {
+func printListServersJSON(w io.Writer, entries []listServersEntry) error {
 	b, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal output: %w", err)
 	}
-	fmt.Println(string(b))
+	fmt.Fprintln(w, string(b))
 	return nil
 }
 
 // printListServersTable outputs the server list as a human-readable table.
-func printListServersTable(entries []listServersEntry) error {
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+func printListServersTable(w io.Writer, entries []listServersEntry) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ADDR\tPID\tSTARTED\tSTATUS")
 	for _, e := range entries {
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
@@ -430,10 +433,9 @@ func parseToolArgs(args []string) map[string]any {
 func runClientTool(ctx context.Context, toolName string, args []string) error {
 	// Parse connection flags from args. Flags may appear anywhere in args.
 	fs := flag.NewFlagSet("client-tool", flag.ContinueOnError)
-	var flagAddr, flagToken, flagFormat string
+	var flagAddr, flagToken string
 	fs.StringVar(&flagAddr, "server-addr", "", "server address (host:port)")
-	fs.StringVar(&flagToken, "token", "", "Bearer token")
-	fs.StringVar(&flagFormat, "format", "json", "output format: json or table")
+	fs.StringVar(&flagToken, "token", "", "bearer token (prefer YP_CLIENT_TOKEN env var to avoid token appearing in process list)")
 	fs.Usage = func() {} // suppress default usage on error
 
 	// Separate connection flags from tool parameters.
@@ -455,7 +457,7 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 			name = name[:idx]
 		}
 		switch name {
-		case "server-addr", "token", "format":
+		case "server-addr", "token":
 			connFlagArgs = append(connFlagArgs, a)
 		default:
 			toolParamArgs = append(toolParamArgs, a)
@@ -471,14 +473,20 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 		return err
 	}
 
+	// Validate addr format before URL construction (S-3/F-5).
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return fmt.Errorf("invalid server address %q: %w", addr, err)
+	}
+
 	// Parse tool parameters from remaining args.
 	params := parseToolArgs(toolParamArgs)
 
 	// Build MCP endpoint URL.
 	endpoint := "http://" + addr + "/mcp"
 
-	// Build HTTP client with Bearer auth transport.
+	// Build HTTP client with Bearer auth transport and timeout (S-1).
 	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
 		Transport: &bearerRoundTripper{
 			token: token,
 			base:  http.DefaultTransport,
@@ -496,14 +504,19 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 		HTTPClient: httpClient,
 	}
 
-	session, err := client.Connect(ctx, transport, nil)
+	// Derive a context with a 60-second deadline for MCP operations (S-1/S-4).
+	mcpCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	session, err := client.Connect(mcpCtx, transport, nil)
 	if err != nil {
-		return fmt.Errorf("connect to MCP server at %s: %w\n\nhint: start the server with 'yorishiro-proxy server'", addr, err)
+		fmt.Fprintf(os.Stderr, "hint: run 'yorishiro-proxy server' to start the server\n")
+		return fmt.Errorf("connect to MCP server at %s: %w", addr, err)
 	}
 	defer session.Close()
 
 	// Call the tool.
-	result, err := session.CallTool(ctx, &gomcp.CallToolParams{
+	result, err := session.CallTool(mcpCtx, &gomcp.CallToolParams{
 		Name:      toolName,
 		Arguments: params,
 	})
