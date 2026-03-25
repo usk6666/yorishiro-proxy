@@ -67,9 +67,9 @@ func defaultLogFilePath() string {
 }
 
 // BuildMCPEntry creates a yorishiro-proxy MCP server entry for the given binary path.
-// The entry uses the "server" subcommand with "-stdio-mcp" to start the proxy in
-// stdio MCP mode, which is the expected mode when launched by MCP clients such as
-// Claude Code.
+// The entry uses the "server" subcommand with "-stdio-mcp" to enable stdio MCP
+// in addition to the default HTTP MCP transport. This is the expected configuration
+// when launched by MCP clients such as Claude Code.
 func BuildMCPEntry(binaryPath string) mcpServerEntry {
 	args := []string{
 		"server",
