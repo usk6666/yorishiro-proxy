@@ -230,7 +230,12 @@ func (h *Handler) configureTLSDialer() {
 	if h.Transport == nil || h.tlsTransport == nil {
 		return
 	}
-	transport := h.tlsTransport
+	// Restrict ALPN to HTTP/1.1 only. Go's http.Transport cannot handle
+	// HTTP/2 frames when DialTLSContext is set (it disables automatic HTTP/2
+	// upgrade). If the upstream negotiates h2 via ALPN, the transport
+	// receives HTTP/2 binary frames but parses them as HTTP/1.x text,
+	// causing "malformed HTTP response" errors and 502 Bad Gateway.
+	transport := httputil.HTTP1OnlyTransport(h.tlsTransport)
 	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {

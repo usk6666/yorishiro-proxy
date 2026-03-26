@@ -152,6 +152,14 @@ type UTLSTransport struct {
 	// Note: uTLS supports client certificates and InsecureSkipVerify but custom
 	// RootCAs are applied through the utls.Config (which supports them).
 	HostTLS *HostTLSRegistry
+
+	// NextProtos overrides the ALPN protocols offered during the TLS handshake.
+	// When non-nil, the browser profile's default ALPN extension is replaced
+	// with the specified protocols after BuildHandshakeState. This allows
+	// restricting ALPN (e.g., to ["http/1.1"] only) while preserving the
+	// rest of the browser fingerprint.
+	// When nil, the browser profile's default ALPN is used.
+	NextProtos []string
 }
 
 // TLSConnect establishes a TLS connection using uTLS with the configured
@@ -184,6 +192,23 @@ func (t *UTLSTransport) TLSConnect(ctx context.Context, conn net.Conn, serverNam
 	slog.Debug("upstream TLS handshake starting", "server", serverName, "transport", "utls",
 		"profile", profile.String(), "insecure_skip_verify", tlsConfig.InsecureSkipVerify)
 	utlsConn := utls.UClient(conn, tlsConfig, *helloID)
+
+	// Override ALPN if NextProtos is set. This must happen after the UClient
+	// builds its handshake state (from the browser profile) but before the
+	// actual TLS handshake. BuildHandshakeState populates Extensions from
+	// the profile; we then find and replace the ALPNExtension.
+	if len(t.NextProtos) > 0 {
+		if err := utlsConn.BuildHandshakeState(); err != nil {
+			return nil, "", fmt.Errorf("uTLS build handshake state for %s: %w", serverName, err)
+		}
+		for _, ext := range utlsConn.Extensions {
+			if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
+				alpnExt.AlpnProtocols = t.NextProtos
+				break
+			}
+		}
+	}
+
 	if err := utlsConn.HandshakeContext(ctx); err != nil {
 		return nil, "", fmt.Errorf("uTLS handshake with %s (profile=%s): %w", serverName, profile, err)
 	}
@@ -324,5 +349,30 @@ func WrapTLSConn(conn net.Conn) net.Conn {
 		}
 	default:
 		return conn
+	}
+}
+
+// HTTP1OnlyTransport wraps a TLSTransport and restricts ALPN to HTTP/1.1 only.
+// This is needed when the resulting connection will be used by Go's
+// http.Transport, which cannot handle HTTP/2 frames when DialTLSContext is set
+// (even with ForceAttemptHTTP2, non-*tls.Conn connections are not upgraded).
+//
+// For StandardTransport, a copy with NextProtos=["http/1.1"] is created.
+// For UTLSTransport, a copy with NextProtos=["http/1.1"] is created, which
+// modifies the browser profile's ALPN extension while preserving the rest of
+// the fingerprint.
+// For unknown types, the inner transport is used as-is (best effort).
+func HTTP1OnlyTransport(inner TLSTransport) TLSTransport {
+	switch t := inner.(type) {
+	case *StandardTransport:
+		clone := *t
+		clone.NextProtos = []string{"http/1.1"}
+		return &clone
+	case *UTLSTransport:
+		clone := *t
+		clone.NextProtos = []string{"http/1.1"}
+		return &clone
+	default:
+		return inner
 	}
 }
