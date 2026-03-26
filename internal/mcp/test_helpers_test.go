@@ -186,6 +186,17 @@ func (d *testDialer) DialContext(ctx context.Context, network, address string) (
 	return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, address)
 }
 
+// extractTextContent returns the text from the first TextContent in a CallToolResult.
+func extractTextContent(result *gomcp.CallToolResult) string {
+	if len(result.Content) == 0 {
+		return ""
+	}
+	if tc, ok := result.Content[0].(*gomcp.TextContent); ok {
+		return tc.Text
+	}
+	return ""
+}
+
 // newRawEchoServer creates a TCP server that reads HTTP-like data and echoes back a simple response.
 func newRawEchoServer(t *testing.T) (string, func()) {
 	t.Helper()

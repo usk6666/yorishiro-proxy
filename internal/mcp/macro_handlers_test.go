@@ -1356,14 +1356,3 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 		t.Errorf("new flows = %d, want >= 2 (hook macro + resend)", newCount)
 	}
 }
-
-// extractTextContent returns the text from the first TextContent in a CallToolResult.
-func extractTextContent(result *gomcp.CallToolResult) string {
-	if len(result.Content) == 0 {
-		return ""
-	}
-	if tc, ok := result.Content[0].(*gomcp.TextContent); ok {
-		return tc.Text
-	}
-	return ""
-}
