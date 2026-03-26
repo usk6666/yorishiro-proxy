@@ -445,7 +445,7 @@ func splitClientToolArgs(args []string) (connFlagArgs, toolParamArgs []string) {
 		case "server-addr", "token", "format":
 			connFlagArgs = append(connFlagArgs, a)
 			// If no '=' in the flag (space-separated value), grab the next arg as value.
-			if !strings.Contains(stripped, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if !strings.Contains(stripped, "=") && i+1 < len(args) {
 				i++
 				connFlagArgs = append(connFlagArgs, args[i])
 			}

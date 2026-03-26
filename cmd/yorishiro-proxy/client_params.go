@@ -247,7 +247,18 @@ func coerceValue(key, value string, schema *toolSchema) any {
 		return value
 	}
 	switch typ {
-	case "number", "integer":
+	case "integer":
+		i, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			// Try float and truncate to int64.
+			f, ferr := strconv.ParseFloat(value, 64)
+			if ferr != nil {
+				return value
+			}
+			return int64(f)
+		}
+		return i
+	case "number":
 		return coerceNumeric(value)
 	case "boolean":
 		return coerceBoolean(value)
@@ -282,8 +293,10 @@ func coerceBoolean(value string) any {
 
 // parseArrayValue splits a comma-separated value into a string slice.
 // Single-quoted segments preserve commas within them.
+// A doubled single quote (”) inside a quoted segment is an escaped literal single quote.
 // e.g. "a,b,c" → ["a","b","c"]
 // e.g. "'a,b','c,d'" → ["a,b","c,d"]
+// e.g. "'it”s'" → ["it's"]
 func parseArrayValue(value string) []string {
 	if value == "" {
 		return []string{}
@@ -299,7 +312,13 @@ func parseArrayValue(value string) []string {
 		case ch == '\'' && !inQuote:
 			inQuote = true
 		case ch == '\'' && inQuote:
-			inQuote = false
+			// Check for doubled single quote ('') — escaped literal quote.
+			if i+1 < len(value) && value[i+1] == '\'' {
+				current.WriteByte('\'')
+				i++ // skip the second quote
+			} else {
+				inQuote = false
+			}
 		case ch == ',' && !inQuote:
 			result = append(result, current.String())
 			current.Reset()

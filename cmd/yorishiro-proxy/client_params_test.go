@@ -49,6 +49,16 @@ func TestParseArrayValue_SimpleCSV(t *testing.T) {
 			input: "a,,b",
 			want:  []string{"a", "", "b"},
 		},
+		{
+			name:  "escaped single quote inside quoted segment",
+			input: "'it''s'",
+			want:  []string{"it's"},
+		},
+		{
+			name:  "escaped single quote with comma",
+			input: "'it''s','ok'",
+			want:  []string{"it's", "ok"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -192,7 +202,7 @@ func TestCoerceValue_IntegerType(t *testing.T) {
 		{"10", int64(10)},
 		{"0", int64(0)},
 		{"-5", int64(-5)},
-		{"3.14", float64(3.14)},
+		{"3.14", int64(3)},
 		{"abc", "abc"},
 	}
 	for _, tt := range tests {
