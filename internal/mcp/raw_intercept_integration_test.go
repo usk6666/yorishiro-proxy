@@ -1260,14 +1260,3 @@ func startRawCaptureServer(t *testing.T, capturedCh chan<- []byte) string {
 
 	return ln.Addr().String()
 }
-
-// extractTextContent extracts the text from the first TextContent in a CallToolResult.
-func extractTextContent(result *gomcp.CallToolResult) string {
-	if len(result.Content) == 0 {
-		return ""
-	}
-	if tc, ok := result.Content[0].(*gomcp.TextContent); ok {
-		return tc.Text
-	}
-	return ""
-}
