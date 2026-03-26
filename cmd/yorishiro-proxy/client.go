@@ -241,7 +241,7 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintf(w, "                            (env: YP_CLIENT_TOKEN, default: auto-detect from server.json)\n")
 	fmt.Fprintf(w, "                            WARNING: --token exposes the token in process listings (ps aux).\n")
 	fmt.Fprintf(w, "                            Prefer YP_CLIENT_TOKEN env var in sensitive environments.\n")
-	fmt.Fprintf(w, "  --format json|table       Output format (env: YP_CLIENT_FORMAT, default: json or raw when piped)\n")
+	fmt.Fprintf(w, "  --format json|table|raw   Output format (env: YP_CLIENT_FORMAT, default: json or raw when piped)\n")
 	fmt.Fprintf(w, "  --raw                     Compact JSON output without indentation (for pipes/scripts)\n")
 	fmt.Fprintf(w, "  -q, --quiet               Suppress output on success (for scripting)\n\n")
 	fmt.Fprintf(w, "Tool parameters are passed as key=value pairs:\n")
@@ -466,7 +466,7 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 	var flagRaw bool
 	fs.StringVar(&flagAddr, "server-addr", "", "server address (host:port)")
 	fs.StringVar(&flagToken, "token", "", "bearer token (prefer YP_CLIENT_TOKEN env var to avoid token appearing in process list)")
-	fs.StringVar(&flagFormat, "format", "", "output format: json or table (env: YP_CLIENT_FORMAT)")
+	fs.StringVar(&flagFormat, "format", "", "output format: json, table, or raw (env: YP_CLIENT_FORMAT)")
 	fs.BoolVar(&flagQuiet, "quiet", false, "suppress output on success")
 	fs.BoolVar(&flagQuiet, "q", false, "suppress output on success")
 	fs.BoolVar(&flagRaw, "raw", false, "raw JSON output without indentation")

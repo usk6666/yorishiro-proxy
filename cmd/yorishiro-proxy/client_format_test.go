@@ -392,6 +392,18 @@ func TestStrVal(t *testing.T) {
 	}
 }
 
+func TestPrintToolResult_UnknownFormat_ReturnsError(t *testing.T) {
+	result := makeTextResult(`{"key":"value"}`, false)
+	var buf bytes.Buffer
+	err := printToolResult(&buf, "query", result, "jsno", false, false)
+	if err == nil {
+		t.Fatal("expected error for unknown format, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported format") {
+		t.Errorf("error message should mention 'unsupported format', got: %v", err)
+	}
+}
+
 // --- printResultJSON / printResultRaw direct tests ---
 
 func TestPrintResultJSON_Indented(t *testing.T) {

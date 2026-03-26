@@ -25,13 +25,17 @@ func defaultIsTTY(f *os.File) bool {
 	if err != nil {
 		return false
 	}
-	// os.ModeCharDevice is set for TTY file descriptors on Unix.
-	return fi.Mode()&os.ModeCharDevice != 0
+	mode := fi.Mode()
+	// A real terminal (PTY) has ModeCharDevice set but NOT ModeDevice.
+	// Devices like /dev/null have both ModeCharDevice and ModeDevice set,
+	// so checking that ModeDevice is absent avoids false positives.
+	return (mode&os.ModeCharDevice) != 0 && (mode&os.ModeDevice) == 0
 }
 
 // resolveFormat determines the effective output format.
 // Priority: explicit --format flag > YP_CLIENT_FORMAT env var > TTY detection.
-// When stdout is not a TTY (piped), falls back to raw JSON regardless of env var.
+// When neither the flag nor the env var is set, TTY detection is used as the
+// final fallback: "json" when stdout is a TTY, "raw" when it is not (pipe-friendly).
 func resolveFormat(flagFormat string) string {
 	if flagFormat != "" {
 		return flagFormat
@@ -73,13 +77,14 @@ func printToolResult(w io.Writer, toolName string, result *gomcp.CallToolResult,
 	}
 
 	switch format {
+	case "json":
+		return printResultJSON(w, result)
 	case "table":
 		return printResultTable(w, toolName, result)
 	case "raw":
 		return printResultRaw(w, result)
 	default:
-		// "json" and anything else defaults to indented JSON.
-		return printResultJSON(w, result)
+		return fmt.Errorf("unsupported format %q: must be json, table, or raw", format)
 	}
 }
 
@@ -126,7 +131,7 @@ func printResultTable(w io.Writer, toolName string, result *gomcp.CallToolResult
 	// Parse the JSON text block to determine what to render.
 	var data any
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
-		fmt.Fprintf(errWriter, "warning: could not parse tool response as JSON; falling back to compact output\n")
+		fmt.Fprintf(errWriter, "warning: could not parse tool response as JSON; printing raw text output\n")
 		fmt.Fprintln(w, text)
 		return nil
 	}
