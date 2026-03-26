@@ -423,58 +423,8 @@ func (t *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return t.base.RoundTrip(req)
 }
 
-// parseToolArgs parses key=value or --key=value pairs from args into a map.
-// Both "key=value" and "--key=value" formats are supported.
-func parseToolArgs(args []string) map[string]any {
-	result := make(map[string]any)
-	for _, arg := range args {
-		// Strip leading "--" or "-" if present.
-		stripped := arg
-		if strings.HasPrefix(stripped, "--") {
-			stripped = stripped[2:]
-		} else if strings.HasPrefix(stripped, "-") {
-			stripped = stripped[1:]
-		}
-
-		// Skip bare "-" or "--" args that strip to empty string.
-		if stripped == "" {
-			continue
-		}
-
-		idx := strings.IndexByte(stripped, '=')
-		if idx < 0 {
-			// Bare flag: treat as boolean true.
-			result[stripped] = true
-			continue
-		}
-		key := stripped[:idx]
-		value := stripped[idx+1:]
-		if key != "" {
-			result[key] = value
-		}
-	}
-	return result
-}
-
-// runClientTool connects to the MCP server and calls the given tool.
-func runClientTool(ctx context.Context, toolName string, args []string) error {
-	// Parse connection flags from args. Flags may appear anywhere in args.
-	fs := flag.NewFlagSet("client-tool", flag.ContinueOnError)
-	var flagAddr, flagToken string
-	var flagFormat string
-	var flagQuiet bool
-	var flagRaw bool
-	fs.StringVar(&flagAddr, "server-addr", "", "server address (host:port)")
-	fs.StringVar(&flagToken, "token", "", "bearer token (prefer YP_CLIENT_TOKEN env var to avoid token appearing in process list)")
-	fs.StringVar(&flagFormat, "format", "", "output format: json, table, or raw (env: YP_CLIENT_FORMAT)")
-	fs.BoolVar(&flagQuiet, "quiet", false, "suppress output on success")
-	fs.BoolVar(&flagQuiet, "q", false, "suppress output on success")
-	fs.BoolVar(&flagRaw, "raw", false, "raw JSON output without indentation")
-	fs.Usage = func() {} // suppress default usage on error
-
-	// Separate connection flags from tool parameters.
-	var connFlagArgs []string
-	var toolParamArgs []string
+// splitClientToolArgs partitions args into connection flags (--server-addr, --token, --format, etc.) and tool parameter args.
+func splitClientToolArgs(args []string) (connFlagArgs, toolParamArgs []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		stripped := a
@@ -495,7 +445,7 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 		case "server-addr", "token", "format":
 			connFlagArgs = append(connFlagArgs, a)
 			// If no '=' in the flag (space-separated value), grab the next arg as value.
-			if !strings.Contains(stripped, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if !strings.Contains(stripped, "=") && i+1 < len(args) {
 				i++
 				connFlagArgs = append(connFlagArgs, args[i])
 			}
@@ -505,6 +455,27 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 			toolParamArgs = append(toolParamArgs, a)
 		}
 	}
+	return connFlagArgs, toolParamArgs
+}
+
+// runClientTool connects to the MCP server and calls the given tool.
+func runClientTool(ctx context.Context, toolName string, args []string) error {
+	// Parse connection flags from args. Flags may appear anywhere in args.
+	fs := flag.NewFlagSet("client-tool", flag.ContinueOnError)
+	var flagAddr, flagToken string
+	var flagFormat string
+	var flagQuiet bool
+	var flagRaw bool
+	fs.StringVar(&flagAddr, "server-addr", "", "server address (host:port)")
+	fs.StringVar(&flagToken, "token", "", "bearer token (prefer YP_CLIENT_TOKEN env var to avoid token appearing in process list)")
+	fs.StringVar(&flagFormat, "format", "", "output format: json, table, or raw (env: YP_CLIENT_FORMAT)")
+	fs.BoolVar(&flagQuiet, "quiet", false, "suppress output on success")
+	fs.BoolVar(&flagQuiet, "q", false, "suppress output on success")
+	fs.BoolVar(&flagRaw, "raw", false, "raw JSON output without indentation")
+	fs.Usage = func() {} // suppress default usage on error
+
+	// Separate connection flags from tool parameters.
+	connFlagArgs, toolParamArgs := splitClientToolArgs(args)
 
 	if err := fs.Parse(connFlagArgs); err != nil {
 		return err
@@ -519,9 +490,6 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		return fmt.Errorf("invalid server address %q: %w", addr, err)
 	}
-
-	// Parse tool parameters from remaining args.
-	params := parseToolArgs(toolParamArgs)
 
 	// Build MCP endpoint URL.
 	endpoint := "http://" + addr + "/mcp"
@@ -557,6 +525,15 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 	}
 	defer session.Close()
 
+	// Fetch tool schema for type inference and validation.
+	schema := fetchToolSchema(mcpCtx, session, toolName)
+
+	// Build tool parameters with type inference and positional arg support.
+	params, err := buildToolParams(toolName, toolParamArgs, schema, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("invalid parameters: %w", err)
+	}
+
 	// Call the tool.
 	result, err := session.CallTool(mcpCtx, &gomcp.CallToolParams{
 		Name:      toolName,
@@ -569,4 +546,19 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 	// Resolve effective format and output the result.
 	format := resolveFormat(flagFormat)
 	return printToolResult(os.Stdout, toolName, result, format, flagQuiet, flagRaw)
+}
+
+// fetchToolSchema calls tools/list on the session and returns the parsed schema for toolName.
+// Returns nil if the list call fails or the tool is not found.
+func fetchToolSchema(ctx context.Context, session *gomcp.ClientSession, toolName string) *toolSchema {
+	toolsResult, err := session.ListTools(ctx, nil)
+	if err != nil || toolsResult == nil {
+		return nil
+	}
+	for _, t := range toolsResult.Tools {
+		if t.Name == toolName {
+			return parseToolSchema(t.InputSchema)
+		}
+	}
+	return nil
 }
