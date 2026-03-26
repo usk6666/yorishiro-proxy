@@ -44,6 +44,11 @@ TCP Listener (Layer 4)
 
 ```
 cmd/yorishiro-proxy/       # Entry point
+  main.go                  # CLI root: server/client/version/install/upgrade subcommands
+  client.go                # CLI client subcommand (MCP client via Streamable HTTP)
+  client_params.go         # Flag → JSON parameter conversion engine
+  client_format.go         # Result formatting (JSON / table output)
+  serverjson.go            # server.json multi-instance entry management (used for client auto-discovery)
 internal/
   mcp/                     # MCP server, tool definitions, handlers
   proxy/
