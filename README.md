@@ -178,6 +178,96 @@ Priority: CLI flag > environment variable > config file > default value.
 
 The `-db` flag accepts an absolute path, a relative path with extension, or a plain project name. A project name (e.g., `my-project`) resolves to `~/.yorishiro-proxy/my-project.db`, making it easy to maintain separate databases per engagement.
 
+## CLI Client
+
+yorishiro-proxy includes a built-in CLI client that connects to a running server via the Streamable HTTP MCP endpoint. This provides a lightweight interface for scripting, automation, and ad-hoc pentest workflows without requiring a full MCP client integration.
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `server` | Start the proxy server (default when no subcommand given) |
+| `client` | Call MCP tools via CLI |
+| `install` | Install and configure components (MCP, CA, Skills, Playwright) |
+| `upgrade` | Check for and install updates from GitHub Releases |
+| `version` | Print version information |
+
+### Server
+
+Start the proxy server. The server writes its address and authentication token to `~/.yorishiro-proxy/server.json` for automatic discovery by the CLI client.
+
+```bash
+# Start with default settings (random loopback port)
+yorishiro-proxy server
+
+# Start on a fixed port
+yorishiro-proxy server -mcp-http-addr 127.0.0.1:3000
+
+# Start with browser auto-open
+yorishiro-proxy server -open-browser
+```
+
+### Client
+
+The `client` subcommand calls MCP tools on a running server. Parameters are passed as `key=value` pairs.
+
+```bash
+# Query proxy status
+yorishiro-proxy client query resource=status
+
+# Start a proxy listener
+yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
+
+# List recorded flows
+yorishiro-proxy client query resource=flows limit=10
+
+# Get a specific flow detail
+yorishiro-proxy client query resource=flow flow_id=<id>
+
+# Replay a request with modifications
+yorishiro-proxy client resend action=resend flow_id=<id>
+
+# Configure upstream proxy
+yorishiro-proxy client configure upstream_proxy=http://proxy:8888
+
+# Stop all proxy listeners
+yorishiro-proxy client proxy_stop
+```
+
+**Connection flags:**
+
+| Flag | Env Variable | Default | Description |
+|------|-------------|---------|-------------|
+| `-server-addr` | `YP_CLIENT_ADDR` | auto-detect from `server.json` | Server address (host:port) |
+| `--token` | `YP_CLIENT_TOKEN` | auto-detect from `server.json` | Bearer token for authentication |
+| `--format` | `YP_CLIENT_FORMAT` | `json` (TTY) / `raw` (pipe) | Output format: json, table, raw |
+| `--raw` | -- | `false` | Compact JSON output without indentation |
+| `-q`, `--quiet` | -- | `false` | Suppress output on success |
+
+Connection priority: CLI flag > environment variable > `server.json` auto-detection.
+
+**Output format:** JSON is the default for interactive use (agent-friendly). When stdout is piped, the format automatically switches to `raw` (compact JSON) for easy integration with `jq` and other tools. Use `--format table` for human-readable output.
+
+### Agent Integration
+
+For AI agent workflows, configure the server as an MCP server and use the CLI client for ad-hoc operations:
+
+```bash
+# Terminal 1: Start the server
+yorishiro-proxy server
+
+# Terminal 2: Use CLI client for quick operations
+yorishiro-proxy client query resource=status
+yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
+yorishiro-proxy client query resource=flows | jq '.[] | .url'
+```
+
+The CLI client is designed for temporary-use pentest scenarios where an AI agent needs to quickly invoke proxy tools without maintaining a persistent MCP session. For full agent integration, configure yorishiro-proxy as an MCP server in your agent's MCP configuration (see [Quick Start](#quick-start)).
+
+### Migration Note
+
+> **`-no-open-browser` to `-open-browser`:** The default behavior has changed. The browser no longer opens automatically on server start. Use `-open-browser` to opt in to automatic browser opening. The old `-no-open-browser` flag has been removed.
+
 ## Architecture
 
 ```
