@@ -685,8 +685,8 @@ func TestTCPForward_Auto_DetectsHTTP1AndH2C(t *testing.T) {
 		protocolSet[f.Protocol] = true
 	}
 
-	if !protocolSet["HTTP/2 (h2c)"] {
-		t.Error("expected HTTP/2 (h2c) flow from h2c request")
+	if !protocolSet["HTTP/2"] {
+		t.Error("expected HTTP/2 flow from h2c request")
 	}
 	if !protocolSet["HTTP/1.x"] {
 		t.Error("expected HTTP/1.x flow from HTTP/1.1 request")
