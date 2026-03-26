@@ -240,7 +240,10 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintf(w, "  --token <token>           Bearer token for authentication\n")
 	fmt.Fprintf(w, "                            (env: YP_CLIENT_TOKEN, default: auto-detect from server.json)\n")
 	fmt.Fprintf(w, "                            WARNING: --token exposes the token in process listings (ps aux).\n")
-	fmt.Fprintf(w, "                            Prefer YP_CLIENT_TOKEN env var in sensitive environments.\n\n")
+	fmt.Fprintf(w, "                            Prefer YP_CLIENT_TOKEN env var in sensitive environments.\n")
+	fmt.Fprintf(w, "  --format json|table|raw   Output format (env: YP_CLIENT_FORMAT, default: json or raw when piped)\n")
+	fmt.Fprintf(w, "  --raw                     Compact JSON output without indentation (for pipes/scripts)\n")
+	fmt.Fprintf(w, "  -q, --quiet               Suppress output on success (for scripting)\n\n")
 	fmt.Fprintf(w, "Tool parameters are passed as key=value pairs:\n")
 	fmt.Fprintf(w, "  yorishiro-proxy client query resource=flows limit=10\n\n")
 	fmt.Fprintf(w, "Run 'yorishiro-proxy client <tool> --help' for tool-specific parameters.\n")
@@ -458,8 +461,15 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 	// Parse connection flags from args. Flags may appear anywhere in args.
 	fs := flag.NewFlagSet("client-tool", flag.ContinueOnError)
 	var flagAddr, flagToken string
+	var flagFormat string
+	var flagQuiet bool
+	var flagRaw bool
 	fs.StringVar(&flagAddr, "server-addr", "", "server address (host:port)")
 	fs.StringVar(&flagToken, "token", "", "bearer token (prefer YP_CLIENT_TOKEN env var to avoid token appearing in process list)")
+	fs.StringVar(&flagFormat, "format", "", "output format: json, table, or raw (env: YP_CLIENT_FORMAT)")
+	fs.BoolVar(&flagQuiet, "quiet", false, "suppress output on success")
+	fs.BoolVar(&flagQuiet, "q", false, "suppress output on success")
+	fs.BoolVar(&flagRaw, "raw", false, "raw JSON output without indentation")
 	fs.Usage = func() {} // suppress default usage on error
 
 	// Separate connection flags from tool parameters.
@@ -482,13 +492,15 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 			name = name[:idx]
 		}
 		switch name {
-		case "server-addr", "token":
+		case "server-addr", "token", "format":
 			connFlagArgs = append(connFlagArgs, a)
 			// If no '=' in the flag (space-separated value), grab the next arg as value.
 			if !strings.Contains(stripped, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++
 				connFlagArgs = append(connFlagArgs, args[i])
 			}
+		case "quiet", "q", "raw":
+			connFlagArgs = append(connFlagArgs, a)
 		default:
 			toolParamArgs = append(toolParamArgs, a)
 		}
@@ -554,11 +566,7 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 		return fmt.Errorf("call tool %q: %w", toolName, err)
 	}
 
-	// Output result as JSON.
-	b, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal result: %w", err)
-	}
-	fmt.Println(string(b))
-	return nil
+	// Resolve effective format and output the result.
+	format := resolveFormat(flagFormat)
+	return printToolResult(os.Stdout, toolName, result, format, flagQuiet, flagRaw)
 }
