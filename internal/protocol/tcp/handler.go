@@ -205,7 +205,7 @@ func (h *Handler) resolveTarget(ctx context.Context, conn net.Conn, logger *slog
 
 // recordFlowError updates a flow to error state. Errors are logged but not propagated.
 func (h *Handler) recordFlowError(ctx context.Context, flowID string, start time.Time, logger *slog.Logger) {
-	if h.store == nil {
+	if h.store == nil || flowID == "" {
 		return
 	}
 	duration := time.Since(start)
