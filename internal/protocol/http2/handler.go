@@ -97,8 +97,15 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 
 	if t == nil {
 		h.Transport.DialTLSContext = nil
+		h.Transport.ForceAttemptHTTP2 = false
 		return
 	}
+	// Restrict ALPN to HTTP/1.1 only. Go's http.Transport cannot handle
+	// HTTP/2 frames when DialTLSContext is set (it disables automatic HTTP/2
+	// upgrade). If the upstream negotiates h2 via ALPN, the transport
+	// receives HTTP/2 binary frames but parses them as HTTP/1.x text,
+	// causing "malformed HTTP response" errors and 502 Bad Gateway.
+	h1Transport := httputil.HTTP1OnlyTransport(t)
 	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		rawConn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
 		if err != nil {
@@ -111,7 +118,7 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 			return nil, fmt.Errorf("parse upstream address %s: %w", addr, err)
 		}
 
-		tlsConn, negotiatedProto, err := t.TLSConnect(ctx, rawConn, host)
+		tlsConn, negotiatedProto, err := h1Transport.TLSConnect(ctx, rawConn, host)
 		if err != nil {
 			rawConn.Close()
 			return nil, fmt.Errorf("TLS connect to %s: %w", addr, err)
@@ -123,7 +130,9 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 			"negotiated_protocol", negotiatedProto,
 		)
 
-		return tlsConn, nil
+		// Wrap the connection so http.Transport can detect TLS and
+		// populate resp.TLS via ConnectionState() tls.ConnectionState.
+		return httputil.WrapTLSConn(tlsConn), nil
 	}
 }
 
@@ -853,6 +862,12 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 	if len(trailerKeys) > 0 {
 		sc.w.Header().Set("Trailer", strings.Join(trailerKeys, ", "))
 	}
+
+	// Remove HTTP/1.1 hop-by-hop headers from the upstream response before
+	// writing to the HTTP/2 client. These headers are invalid in HTTP/2
+	// (RFC 9113 §8.2.2) and cause PROTOCOL_ERROR when the upstream is
+	// HTTP/1.1 (e.g., when DialTLSContext restricts ALPN to http/1.1).
+	removeHTTP2HopByHop(resp.Header)
 
 	for key, vals := range resp.Header {
 		for _, val := range vals {

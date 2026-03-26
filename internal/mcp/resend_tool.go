@@ -814,8 +814,12 @@ func (s *Server) resendHTTPClient(params resendParams) httpDoer {
 		},
 	}
 	// Use uTLS transport for HTTPS connections if configured.
+	// Restrict ALPN to HTTP/1.1 only because Go's http.Transport cannot handle
+	// HTTP/2 binary frames when DialTLSContext is set (automatic HTTP/2 upgrade
+	// is disabled). Without this, ALPN may negotiate h2 with the upstream
+	// causing "malformed HTTP response" errors.
 	if s.deps.tlsTransport != nil {
-		tlsT := s.deps.tlsTransport
+		tlsT := httputil.HTTP1OnlyTransport(s.deps.tlsTransport)
 		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if params.OverrideHost != "" {
 				addr = params.OverrideHost
