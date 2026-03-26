@@ -304,11 +304,77 @@ func TestBuildToolParams_DotNotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildToolParams: %v", err)
 	}
-	if params["filter.method"] != "POST" {
-		t.Errorf("filter.method = %v, want 'POST'", params["filter.method"])
+	// Dot-notation must produce nested map, not flat key.
+	filterVal, ok := params["filter"]
+	if !ok {
+		t.Fatalf("expected params[\"filter\"] to exist, got %v", params)
 	}
-	if params["filter.url_pattern"] != "/api" {
-		t.Errorf("filter.url_pattern = %v, want '/api'", params["filter.url_pattern"])
+	filter, ok := filterVal.(map[string]any)
+	if !ok {
+		t.Fatalf("params[\"filter\"] = %T, want map[string]any", filterVal)
+	}
+	if filter["method"] != "POST" {
+		t.Errorf("filter[\"method\"] = %v, want 'POST'", filter["method"])
+	}
+	if filter["url_pattern"] != "/api" {
+		t.Errorf("filter[\"url_pattern\"] = %v, want '/api'", filter["url_pattern"])
+	}
+	// Flat keys must not exist.
+	if _, found := params["filter.method"]; found {
+		t.Error("flat key 'filter.method' should not exist in params")
+	}
+	if _, found := params["filter.url_pattern"]; found {
+		t.Error("flat key 'filter.url_pattern' should not exist in params")
+	}
+}
+
+func TestBuildToolParams_DotNotation_MergesSameParent(t *testing.T) {
+	// Multiple dot-notation flags with same parent key must be merged into a single nested map.
+	params, err := buildToolParams("query", []string{"--filter.method=POST", "--filter.status=200", "--filter.url_pattern=/api"}, nil, nil)
+	if err != nil {
+		t.Fatalf("buildToolParams: %v", err)
+	}
+	filter, ok := params["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("params[\"filter\"] = %T, want map[string]any", params["filter"])
+	}
+	if filter["method"] != "POST" {
+		t.Errorf("filter[\"method\"] = %v, want 'POST'", filter["method"])
+	}
+	if filter["status"] != "200" {
+		t.Errorf("filter[\"status\"] = %v, want '200'", filter["status"])
+	}
+	if filter["url_pattern"] != "/api" {
+		t.Errorf("filter[\"url_pattern\"] = %v, want '/api'", filter["url_pattern"])
+	}
+}
+
+func TestBuildToolParams_DotNotation_MixedWithPositionalAndFlat(t *testing.T) {
+	// Positional + flat + dot-notation all together.
+	schema := &toolSchema{
+		properties: map[string]string{
+			"resource": "string",
+			"limit":    "integer",
+		},
+		required: map[string]bool{},
+		enums:    map[string][]string{},
+	}
+	params, err := buildToolParams("query", []string{"flows", "--limit=5", "--filter.method=GET"}, schema, nil)
+	if err != nil {
+		t.Fatalf("buildToolParams: %v", err)
+	}
+	if params["resource"] != "flows" {
+		t.Errorf("resource = %v, want 'flows'", params["resource"])
+	}
+	if params["limit"] != int64(5) {
+		t.Errorf("limit = %v, want int64(5)", params["limit"])
+	}
+	filter, ok := params["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("params[\"filter\"] = %T, want map[string]any", params["filter"])
+	}
+	if filter["method"] != "GET" {
+		t.Errorf("filter[\"method\"] = %v, want 'GET'", filter["method"])
 	}
 }
 

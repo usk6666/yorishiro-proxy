@@ -423,39 +423,6 @@ func (t *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return t.base.RoundTrip(req)
 }
 
-// parseToolArgs parses key=value or --key=value pairs from args into a map.
-// Both "key=value" and "--key=value" formats are supported.
-func parseToolArgs(args []string) map[string]any {
-	result := make(map[string]any)
-	for _, arg := range args {
-		// Strip leading "--" or "-" if present.
-		stripped := arg
-		if strings.HasPrefix(stripped, "--") {
-			stripped = stripped[2:]
-		} else if strings.HasPrefix(stripped, "-") {
-			stripped = stripped[1:]
-		}
-
-		// Skip bare "-" or "--" args that strip to empty string.
-		if stripped == "" {
-			continue
-		}
-
-		idx := strings.IndexByte(stripped, '=')
-		if idx < 0 {
-			// Bare flag: treat as boolean true.
-			result[stripped] = true
-			continue
-		}
-		key := stripped[:idx]
-		value := stripped[idx+1:]
-		if key != "" {
-			result[key] = value
-		}
-	}
-	return result
-}
-
 // splitClientToolArgs partitions args into connection flags (--server-addr, --token, --format, etc.) and tool parameter args.
 func splitClientToolArgs(args []string) (connFlagArgs, toolParamArgs []string) {
 	for i := 0; i < len(args); i++ {

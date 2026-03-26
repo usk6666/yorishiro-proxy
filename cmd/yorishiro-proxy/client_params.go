@@ -145,7 +145,7 @@ func buildToolParams(toolName string, args []string, schema *toolSchema, stderr 
 		default:
 			key := stripped[:idx]
 			if key != "" {
-				result[key] = coerceValue(key, stripped[idx+1:], schema)
+				applyKeyValue(result, key, stripped[idx+1:], schema)
 			}
 		}
 	}
@@ -179,13 +179,42 @@ func applyPositionalArg(result map[string]any, posMapping []string, posIndex int
 	return posIndex
 }
 
+// applyKeyValue sets a key-value pair in the result map.
+// If key contains a "." (dot-notation), it expands into a nested map.
+// For example, "filter.method" with value "POST" produces result["filter"] = {"method": "POST"}.
+// If result["filter"] already exists as map[string]any, the child key is merged into it.
+// Type coercion uses the schema's parent key properties if no direct match for the dot-notation key.
+func applyKeyValue(result map[string]any, key, value string, schema *toolSchema) {
+	dotIdx := strings.IndexByte(key, '.')
+	if dotIdx < 0 {
+		result[key] = coerceValue(key, value, schema)
+		return
+	}
+	parent := key[:dotIdx]
+	child := key[dotIdx+1:]
+	nested, ok := result[parent].(map[string]any)
+	if !ok {
+		nested = make(map[string]any)
+	}
+	// Attempt type coercion using the child key directly; if not in schema, treat as string.
+	nested[child] = coerceValue(child, value, schema)
+	result[parent] = nested
+}
+
 // validateToolParams warns on unknown parameters and errors on missing required ones.
+// For nested map values (produced by dot-notation expansion), the parent key is validated
+// as an "object" type and child keys are not individually checked against the schema.
 func validateToolParams(result map[string]any, schema *toolSchema, stderr io.Writer) error {
 	if schema == nil {
 		return nil
 	}
-	for key := range result {
+	for key, val := range result {
 		if _, known := schema.properties[key]; !known {
+			// If the value is a nested map, it was produced by dot-notation expansion (e.g. filter.method=POST).
+			// Accept it as a potential "object" parameter without warning.
+			if _, isNested := val.(map[string]any); isNested {
+				continue
+			}
 			fmt.Fprintf(stderr, "warning: unknown parameter %q (not in tool schema)\n", key)
 		}
 	}
