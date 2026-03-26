@@ -92,34 +92,15 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 
-	// Resolve the forwarding target from the local port.
-	localAddr := conn.LocalAddr().String()
-	_, port, err := net.SplitHostPort(localAddr)
+	target, err := h.resolveTarget(ctx, conn, logger)
 	if err != nil {
-		logger.Error("failed to parse local address", "addr", localAddr, "error", err)
-		return fmt.Errorf("parse local address %s: %w", localAddr, err)
+		return err
+	}
+	if target == "" {
+		return nil // no forward configured; logged by resolveTarget
 	}
 
-	h.mu.Lock()
-	fc, ok := h.forwards[port]
-	h.mu.Unlock()
-	if !ok || fc == nil {
-		logger.Warn("no TCP forward configured for port, closing connection", "port", port)
-		return nil
-	}
-	target := fc.Target
-
-	// Dial upstream.
-	upstream, err := net.DialTimeout("tcp", target, 30*time.Second)
-	if err != nil {
-		logger.Error("TCP upstream dial failed", "target", target, "error", err)
-		return fmt.Errorf("dial upstream %s: %w", target, err)
-	}
-	defer upstream.Close()
-
-	logger.Info("TCP relay established", "target", target)
-
-	// Create flow record.
+	// Create flow record before dialing so that connection failures are recorded.
 	start := time.Now()
 	fl := &flow.Flow{
 		ConnID:    connID,
@@ -137,9 +118,20 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	if h.store != nil {
 		if err := h.store.SaveFlow(ctx, fl); err != nil {
 			logger.Error("TCP flow save failed", "error", err)
-			// Continue relaying even if recording fails.
+			// Continue even if recording fails.
 		}
 	}
+
+	// Dial upstream.
+	upstream, err := net.DialTimeout("tcp", target, 30*time.Second)
+	if err != nil {
+		logger.Error("TCP upstream dial failed", "target", target, "error", err)
+		h.recordFlowError(ctx, fl.ID, start, logger)
+		return fmt.Errorf("dial upstream %s: %w", target, err)
+	}
+	defer upstream.Close()
+
+	logger.Info("TCP relay established", "target", target)
 
 	// Build plugin ConnInfo from the flow's ConnectionInfo.
 	var pluginConnInfo *plugin.ConnInfo
@@ -182,4 +174,45 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		return ctx.Err()
 	}
 	return relayErr
+}
+
+// resolveTarget determines the upstream forwarding target for a connection.
+// Priority: port-based forward mapping > context-injected forward target.
+// Returns empty string (and logs a warning) when no target is configured.
+func (h *Handler) resolveTarget(ctx context.Context, conn net.Conn, logger *slog.Logger) (string, error) {
+	localAddr := conn.LocalAddr().String()
+	_, port, err := net.SplitHostPort(localAddr)
+	if err != nil {
+		logger.Error("failed to parse local address", "addr", localAddr, "error", err)
+		return "", fmt.Errorf("parse local address %s: %w", localAddr, err)
+	}
+
+	h.mu.Lock()
+	fc, ok := h.forwards[port]
+	h.mu.Unlock()
+	if ok && fc != nil {
+		return fc.Target, nil
+	}
+
+	// TCPForwardListener injects the target via context.
+	if ctxTarget, ctxOk := proxy.ForwardTargetFromContext(ctx); ctxOk {
+		return ctxTarget, nil
+	}
+
+	logger.Warn("no TCP forward configured for port, closing connection", "port", port)
+	return "", nil
+}
+
+// recordFlowError updates a flow to error state. Errors are logged but not propagated.
+func (h *Handler) recordFlowError(ctx context.Context, flowID string, start time.Time, logger *slog.Logger) {
+	if h.store == nil {
+		return
+	}
+	duration := time.Since(start)
+	if err := h.store.UpdateFlow(ctx, flowID, flow.FlowUpdate{
+		State:    "error",
+		Duration: duration,
+	}); err != nil {
+		logger.Error("TCP flow update failed", "error", err)
+	}
 }
