@@ -239,10 +239,10 @@ yorishiro-proxy client proxy_stop
 | Flag | Env Variable | Default | Description |
 |------|-------------|---------|-------------|
 | `-server-addr` | `YP_CLIENT_ADDR` | auto-detect from `server.json` | Server address (host:port) |
-| `--token` | `YP_CLIENT_TOKEN` | auto-detect from `server.json` | Bearer token for authentication |
-| `--format` | `YP_CLIENT_FORMAT` | `json` (TTY) / `raw` (pipe) | Output format: json, table, raw |
-| `--raw` | -- | `false` | Compact JSON output without indentation |
-| `-q`, `--quiet` | -- | `false` | Suppress output on success |
+| `-token` | `YP_CLIENT_TOKEN` | auto-detect from `server.json` | Bearer token for authentication |
+| `-format` | `YP_CLIENT_FORMAT` | `json` (TTY) / `raw` (pipe) | Output format: json, table, raw |
+| `-raw` | -- | `false` | Compact JSON output without indentation |
+| `-q`, `-quiet` | -- | `false` | Suppress output on success |
 
 Connection priority: CLI flag > environment variable > `server.json` auto-detection.
 
@@ -259,7 +259,7 @@ yorishiro-proxy server
 # Terminal 2: Use CLI client for quick operations
 yorishiro-proxy client query resource=status
 yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
-yorishiro-proxy client query resource=flows | jq '.[] | .url'
+yorishiro-proxy client query resource=flows -format raw | jq '.[].url'
 ```
 
 The CLI client is designed for temporary-use pentest scenarios where an AI agent needs to quickly invoke proxy tools without maintaining a persistent MCP session. For full agent integration, configure yorishiro-proxy as an MCP server in your agent's MCP configuration (see [Quick Start](#quick-start)).

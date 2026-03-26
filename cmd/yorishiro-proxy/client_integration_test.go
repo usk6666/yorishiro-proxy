@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -72,22 +71,26 @@ func setupClientTestEnv(t *testing.T) *clientTestEnv {
 	}
 	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		cancel()
-		t.Fatalf("listen for free port: %v", err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
-
+	// Use :0 and the onListening callback to avoid port race conditions.
+	// RunHTTP binds the listener internally, so there is no window where
+	// another process could steal the port.
+	addrCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- mcpServer.RunHTTP(ctx, addr)
+		errCh <- mcpServer.RunHTTP(ctx, "127.0.0.1:0", func(addr string) {
+			addrCh <- addr
+		})
 	}()
 
-	if err := waitForTCP(t, addr, 3*time.Second); err != nil {
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case err := <-errCh:
 		cancel()
-		t.Fatalf("server did not start: %v", err)
+		t.Fatalf("server failed to start: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("server did not start within 5s")
 	}
 
 	env := &clientTestEnv{
@@ -106,21 +109,6 @@ func setupClientTestEnv(t *testing.T) *clientTestEnv {
 		}
 	})
 	return env
-}
-
-// waitForTCP polls a TCP address until it accepts a connection or times out.
-func waitForTCP(t *testing.T, addr string, timeout time.Duration) error {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return fmt.Errorf("server at %s not reachable within %v", addr, timeout)
 }
 
 // setupTempServerJSON creates a temp server.json with the given entries and
@@ -645,4 +633,3 @@ func extractTextFromResult(t *testing.T, result *gomcp.CallToolResult) string {
 	}
 	return ""
 }
-
