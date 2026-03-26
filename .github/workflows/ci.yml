@@ -73,3 +73,6 @@ jobs:
 
       - name: Test
         run: go test -race -v -timeout 4m ./...
+
+      - name: Test (e2e)
+        run: go test -race -v -tags e2e -timeout 6m ./...
