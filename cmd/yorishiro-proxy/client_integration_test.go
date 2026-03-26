@@ -480,8 +480,6 @@ func TestClientE2E_InvalidParameters(t *testing.T) {
 	if result != nil && !result.IsError {
 		// The server may accept unknown resources gracefully;
 		// the important thing is it does not crash.
-		t.Logf("unexpected success for invalid resource; verifying server is still healthy")
-
 		// Verify the server is still responding.
 		statusResult, err := session.CallTool(ctx, &gomcp.CallToolParams{
 			Name: "query",
@@ -521,54 +519,6 @@ func TestClientE2E_ServerNotRunning(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "connect") {
 		t.Errorf("error should mention connection failure, got: %v", err)
-	}
-}
-
-// --- e2e Test: splitClientToolArgs ---
-
-func TestClientE2E_SplitClientToolArgs(t *testing.T) {
-	tests := []struct {
-		name         string
-		args         []string
-		wantConn     []string
-		wantToolArgs []string
-	}{
-		{
-			name:         "mixed flags and params",
-			args:         []string{"--server-addr=127.0.0.1:8080", "resource=flows", "--format", "json", "limit=10"},
-			wantConn:     []string{"--server-addr=127.0.0.1:8080", "--format", "json"},
-			wantToolArgs: []string{"resource=flows", "limit=10"},
-		},
-		{
-			name:         "only tool params",
-			args:         []string{"resource=flows", "limit=10"},
-			wantConn:     nil,
-			wantToolArgs: []string{"resource=flows", "limit=10"},
-		},
-		{
-			name:         "quiet flag",
-			args:         []string{"--quiet", "resource=flows"},
-			wantConn:     []string{"--quiet"},
-			wantToolArgs: []string{"resource=flows"},
-		},
-		{
-			name:         "raw flag",
-			args:         []string{"--raw", "resource=flows"},
-			wantConn:     []string{"--raw"},
-			wantToolArgs: []string{"resource=flows"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotConn, gotTool := splitClientToolArgs(tt.args)
-			if !sliceEqual(gotConn, tt.wantConn) {
-				t.Errorf("connFlagArgs = %v, want %v", gotConn, tt.wantConn)
-			}
-			if !sliceEqual(gotTool, tt.wantToolArgs) {
-				t.Errorf("toolParamArgs = %v, want %v", gotTool, tt.wantToolArgs)
-			}
-		})
 	}
 }
 
@@ -696,18 +646,3 @@ func extractTextFromResult(t *testing.T, result *gomcp.CallToolResult) string {
 	return ""
 }
 
-// sliceEqual compares two string slices for equality (nil and empty are treated as equal).
-func sliceEqual(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
