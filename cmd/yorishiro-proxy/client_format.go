@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"text/tabwriter"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,6 +14,10 @@ import (
 // isTTYFunc is the function used to detect whether an *os.File is a TTY.
 // Replaceable in tests.
 var isTTYFunc = defaultIsTTY
+
+// errWriter is the writer used for warning messages (e.g., JSON parse failures).
+// Replaceable in tests to capture stderr output.
+var errWriter io.Writer = os.Stderr
 
 // defaultIsTTY returns true when f is connected to an interactive terminal.
 func defaultIsTTY(f *os.File) bool {
@@ -121,7 +126,7 @@ func printResultTable(w io.Writer, toolName string, result *gomcp.CallToolResult
 	// Parse the JSON text block to determine what to render.
 	var data any
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not parse tool response as JSON; falling back to compact output\n")
+		fmt.Fprintf(errWriter, "warning: could not parse tool response as JSON; falling back to compact output\n")
 		fmt.Fprintln(w, text)
 		return nil
 	}
@@ -274,8 +279,15 @@ func printKeyValueTable(w io.Writer, data any) error {
 		return nil
 	}
 
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	for k, v := range m {
+	for _, k := range keys {
+		v := m[k]
 		// Render nested objects as compact JSON.
 		var valStr string
 		switch vv := v.(type) {

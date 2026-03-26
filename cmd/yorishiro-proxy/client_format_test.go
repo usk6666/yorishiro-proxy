@@ -451,3 +451,96 @@ func TestPrintFlowsTable_NonMapItem(t *testing.T) {
 		t.Errorf("should render valid item: %q", out)
 	}
 }
+
+// --- writeHTTPPart with nested map values ---
+
+func TestWriteHTTPPart_NestedMapValues(t *testing.T) {
+	flow := map[string]any{
+		"request": map[string]any{
+			"headers": map[string]any{
+				"content-type": "application/json",
+				"x-custom":     map[string]any{"nested": "value"},
+			},
+			"body": map[string]any{"key": "val"},
+		},
+	}
+
+	var buf bytes.Buffer
+	tw := &buf
+	_ = tw
+
+	// Use tabwriter via printFlowDetailTable to exercise writeHTTPPart fully.
+	// Add required "id" and "protocol" keys so the flow detail path is taken.
+	flow["id"] = "nest-test"
+	flow["protocol"] = "http"
+
+	b, _ := json.Marshal(flow)
+	result := makeTextResult(string(b), false)
+
+	var out bytes.Buffer
+	err := printToolResult(&out, "query", result, "table", false, false)
+	if err != nil {
+		t.Fatalf("writeHTTPPart nested: %v", err)
+	}
+
+	outStr := out.String()
+	// Top-level fields should appear.
+	if !strings.Contains(outStr, "nest-test") {
+		t.Errorf("output missing flow id 'nest-test':\n%s", outStr)
+	}
+	// Request headers section should appear.
+	if !strings.Contains(outStr, "request headers") {
+		t.Errorf("output missing 'request headers' section:\n%s", outStr)
+	}
+	// Nested map value should be rendered as compact JSON.
+	if !strings.Contains(outStr, "nested") {
+		t.Errorf("output missing nested map value:\n%s", outStr)
+	}
+	// Request body (nested map) should appear.
+	if !strings.Contains(outStr, "request body") {
+		t.Errorf("output missing 'request body':\n%s", outStr)
+	}
+}
+
+// --- resolveFormat with YP_CLIENT_FORMAT set and non-TTY stdout ---
+
+func TestResolveFormat_EnvVar_NonTTY_ReturnsEnvValue(t *testing.T) {
+	t.Setenv("YP_CLIENT_FORMAT", "table")
+	orig := isTTYFunc
+	// Simulate non-TTY stdout.
+	isTTYFunc = func(*os.File) bool { return false }
+	t.Cleanup(func() { isTTYFunc = orig })
+
+	got := resolveFormat("")
+	// When YP_CLIENT_FORMAT is set it takes priority over TTY detection.
+	if got != "table" {
+		t.Errorf("resolveFormat with YP_CLIENT_FORMAT=table and non-TTY = %q, want \"table\"", got)
+	}
+}
+
+// --- printResultTable stderr warning is captured via errWriter ---
+
+func TestPrintResultTable_InvalidJSON_WritesWarningToErrWriter(t *testing.T) {
+	result := makeTextResult("not valid json {{", false)
+
+	var mainBuf, warnBuf bytes.Buffer
+
+	// Inject custom errWriter to capture the warning.
+	origErrWriter := errWriter
+	errWriter = &warnBuf
+	t.Cleanup(func() { errWriter = origErrWriter })
+
+	err := printToolResult(&mainBuf, "query", result, "table", false, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Main output should contain the original text.
+	if !strings.Contains(mainBuf.String(), "not valid json") {
+		t.Errorf("main output missing original text: %q", mainBuf.String())
+	}
+	// Warning should have been written to errWriter.
+	if !strings.Contains(warnBuf.String(), "warning") {
+		t.Errorf("errWriter should contain warning message, got: %q", warnBuf.String())
+	}
+}
