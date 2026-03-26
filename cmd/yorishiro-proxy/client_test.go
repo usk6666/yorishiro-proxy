@@ -442,3 +442,67 @@ func TestRunClientTool_NoAddress_Error(t *testing.T) {
 		t.Errorf("error %q should mention 'no server address'", err.Error())
 	}
 }
+
+// --- splitClientToolArgs tests ---
+
+func TestSplitClientToolArgs(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantConn     []string
+		wantToolArgs []string
+	}{
+		{
+			name:         "mixed flags and params",
+			args:         []string{"--server-addr=127.0.0.1:8080", "resource=flows", "--format", "json", "limit=10"},
+			wantConn:     []string{"--server-addr=127.0.0.1:8080", "--format", "json"},
+			wantToolArgs: []string{"resource=flows", "limit=10"},
+		},
+		{
+			name:         "only tool params",
+			args:         []string{"resource=flows", "limit=10"},
+			wantConn:     nil,
+			wantToolArgs: []string{"resource=flows", "limit=10"},
+		},
+		{
+			name:         "quiet flag",
+			args:         []string{"--quiet", "resource=flows"},
+			wantConn:     []string{"--quiet"},
+			wantToolArgs: []string{"resource=flows"},
+		},
+		{
+			name:         "raw flag",
+			args:         []string{"--raw", "resource=flows"},
+			wantConn:     []string{"--raw"},
+			wantToolArgs: []string{"resource=flows"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotConn, gotTool := splitClientToolArgs(tt.args)
+			if !sliceEqual(gotConn, tt.wantConn) {
+				t.Errorf("connFlagArgs = %v, want %v", gotConn, tt.wantConn)
+			}
+			if !sliceEqual(gotTool, tt.wantToolArgs) {
+				t.Errorf("toolParamArgs = %v, want %v", gotTool, tt.wantToolArgs)
+			}
+		})
+	}
+}
+
+// sliceEqual compares two string slices for equality (nil and empty are treated as equal).
+func sliceEqual(a, b []string) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
