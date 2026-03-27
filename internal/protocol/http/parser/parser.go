@@ -209,22 +209,24 @@ func readLine(r *bufio.Reader, cw *captureWriter, maxLen int) (string, error) {
 	var line []byte
 	for {
 		segment, err := r.ReadSlice('\n')
-		cw.write(segment)
+
+		// Check maxLen BEFORE appending to prevent large allocations.
+		if len(line)+len(segment) > maxLen {
+			remaining := maxLen - len(line)
+			if remaining > 0 {
+				cw.write(segment[:remaining])
+			}
+			return "", fmt.Errorf("line exceeds maximum length %d", maxLen)
+		}
 
 		line = append(line, segment...)
+		cw.write(segment)
+
 		if err == nil {
-			// Found \n — also enforce maxLen for single-read success
-			// (bufio buffer may be larger than maxLen).
-			if len(line) > maxLen {
-				return "", fmt.Errorf("line exceeds maximum length %d", maxLen)
-			}
 			break
 		}
 		if err == bufio.ErrBufferFull {
 			// Line is longer than bufio buffer; keep reading.
-			if len(line) > maxLen {
-				return "", fmt.Errorf("line exceeds maximum length %d", maxLen)
-			}
 			continue
 		}
 		// I/O error or EOF.
@@ -303,6 +305,14 @@ func parseHeaders(r *bufio.Reader, cw *captureWriter) (RawHeaders, []Anomaly, er
 			anomalies = append(anomalies, Anomaly{
 				Type:   AnomalyHeaderInjection,
 				Detail: fmt.Sprintf("whitespace before colon in header name: %q", name),
+			})
+		}
+
+		// Check for embedded CR in header name or value (bare \r not part of line terminator).
+		if strings.ContainsRune(name, '\r') || strings.ContainsRune(value, '\r') {
+			anomalies = append(anomalies, Anomaly{
+				Type:   AnomalyHeaderInjection,
+				Detail: fmt.Sprintf("embedded CR in header: %q", name),
 			})
 		}
 
@@ -415,9 +425,9 @@ func shouldClose(headers RawHeaders, proto string) bool {
 }
 
 // resolveRequestBody creates an appropriate body reader for a request.
-// The body is NOT decoded — chunked encoding is streamed as-is.
+// The body is NOT decoded — chunked encoding is buffered as-is.
 func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Reader {
-	// chunked Transfer-Encoding: stream the raw chunked body as-is (no dechunking).
+	// chunked Transfer-Encoding: buffer the raw chunked body as-is (no dechunking).
 	// HTTP/1.0 does not use chunked TE.
 	// Check ALL TE header values to avoid smuggling via multiple TE headers.
 	if proto != "HTTP/1.0" {
@@ -444,14 +454,14 @@ func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Re
 }
 
 // resolveResponseBody creates an appropriate body reader for a response.
-// The body is NOT decoded — chunked encoding is streamed as-is.
+// The body is NOT decoded — chunked encoding is buffered as-is.
 func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, statusCode int) io.Reader {
 	// 1xx, 204, 304 responses have no body.
 	if (statusCode >= 100 && statusCode < 200) || statusCode == 204 || statusCode == 304 {
 		return io.LimitReader(r, 0)
 	}
 
-	// chunked Transfer-Encoding: stream as-is.
+	// chunked Transfer-Encoding: buffer as-is.
 	// Check ALL TE header values to avoid smuggling via multiple TE headers.
 	if proto != "HTTP/1.0" {
 		for _, te := range headers.Values("Transfer-Encoding") {

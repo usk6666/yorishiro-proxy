@@ -498,7 +498,7 @@ func TestParseRequest_ChunkedBody_TrailerSizeLimit(t *testing.T) {
 	b.WriteString("0\r\n")      // terminal chunk
 	// Write trailer lines until exceeding maxChunkedBodySize.
 	trailerLine := "X-Pad: " + strings.Repeat("B", 1000) + "\r\n"
-	for b.Len() < maxRawCaptureSize+1000 {
+	for b.Len() < maxChunkedBodySize+1000 {
 		b.WriteString(trailerLine)
 	}
 	b.WriteString("\r\n")
@@ -883,5 +883,58 @@ func TestParseRequest_OrphanObsFold(t *testing.T) {
 	}
 	if !hasObsFold {
 		t.Error("expected ObsFold anomaly for orphan continuation line")
+	}
+}
+
+// --- CP-14: readLine pre-append maxLen check ---
+
+func TestReadLine_MaxLenPreAppendCheck(t *testing.T) {
+	// Verify that readLine rejects overlong lines without allocating the full
+	// oversized buffer. We test via ParseRequest since readLine is unexported.
+	// Build a request line that exceeds maxRequestLineSize.
+	oversized := "GET /" + strings.Repeat("X", maxRequestLineSize+100) + " HTTP/1.1\r\nHost: x\r\n\r\n"
+	// Use a small bufio buffer so ReadSlice hits ErrBufferFull and loops.
+	r := bufio.NewReaderSize(strings.NewReader(oversized), 256)
+	_, err := ParseRequest(r)
+	if err == nil {
+		t.Error("expected error for request line exceeding maxRequestLineSize with small bufio buffer")
+	}
+}
+
+// --- CP-15: embedded CR in header name/value ---
+
+func TestParseRequest_EmbeddedCR_InHeaderValue(t *testing.T) {
+	// Embed a bare \r in the header value (not as part of \r\n terminator).
+	raw := "GET / HTTP/1.1\r\nX-Test: val\rue\r\nHost: x\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	hasInjection := false
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyHeaderInjection && strings.Contains(a.Detail, "embedded CR") {
+			hasInjection = true
+		}
+	}
+	if !hasInjection {
+		t.Error("expected HeaderInjection anomaly for embedded CR in header value")
+	}
+}
+
+func TestParseRequest_EmbeddedCR_InHeaderName(t *testing.T) {
+	// Embed a bare \r in the header name.
+	raw := "GET / HTTP/1.1\r\nX-Te\rst: value\r\nHost: x\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	hasInjection := false
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyHeaderInjection && strings.Contains(a.Detail, "embedded CR") {
+			hasInjection = true
+		}
+	}
+	if !hasInjection {
+		t.Error("expected HeaderInjection anomaly for embedded CR in header name")
 	}
 }

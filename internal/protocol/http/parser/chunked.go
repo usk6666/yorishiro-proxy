@@ -57,9 +57,23 @@ func (cr *rawChunkedReader) Read(p []byte) (int, error) {
 func (cr *rawChunkedReader) readAll() {
 	for {
 		// Read chunk size line (e.g., "1a\r\n" or "0\r\n").
-		sizeLine, err := cr.r.ReadSlice('\n')
-		cr.buf.Write(sizeLine)
-		if err != nil {
+		// Loop to handle bufio.ErrBufferFull when the line exceeds the bufio buffer.
+		var sizeLine []byte
+		for {
+			fragment, err := cr.r.ReadSlice('\n')
+			sizeLine = append(sizeLine, fragment...)
+			cr.buf.Write(fragment)
+			if err == nil {
+				break
+			}
+			if err == bufio.ErrBufferFull {
+				if len(sizeLine) > maxChunkedBodySize {
+					cr.err = fmt.Errorf("chunk size line exceeds maximum length")
+					return
+				}
+				continue
+			}
+			// Any other error is fatal.
 			cr.err = err
 			return
 		}
@@ -118,16 +132,27 @@ func (cr *rawChunkedReader) readAll() {
 // readTrailers reads trailer headers (or just the terminating CRLF).
 func (cr *rawChunkedReader) readTrailers() {
 	for {
-		line, err := cr.r.ReadSlice('\n')
-		if cr.buf.Len()+len(line) > maxChunkedBodySize {
-			cr.err = fmt.Errorf("chunked body exceeds maximum size %d", maxChunkedBodySize)
-			return
-		}
-		cr.buf.Write(line)
-		if err != nil {
+		// Loop to handle bufio.ErrBufferFull for long trailer lines.
+		var line []byte
+		for {
+			fragment, err := cr.r.ReadSlice('\n')
+			line = append(line, fragment...)
+			if cr.buf.Len()+len(line) > maxChunkedBodySize {
+				cr.err = fmt.Errorf("chunked body exceeds maximum size %d", maxChunkedBodySize)
+				return
+			}
+			if err == nil {
+				break
+			}
+			if err == bufio.ErrBufferFull {
+				continue
+			}
+			// Any other error: write what we have and return.
+			cr.buf.Write(line)
 			cr.err = err
 			return
 		}
+		cr.buf.Write(line)
 		// Blank line ends the trailers.
 		trimmed := bytes.TrimRight(line, "\r\n")
 		if len(trimmed) == 0 {
