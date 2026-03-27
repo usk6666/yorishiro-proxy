@@ -13,6 +13,13 @@ import (
 var positionalArgMapping = map[string][]string{
 	"query":       {"resource", "id"},
 	"execute":     {"action"},
+	"intercept":   {"action"},
+	"resend":      {"action"},
+	"manage":      {"action"},
+	"security":    {"action"},
+	"macro":       {"action"},
+	"fuzz":        {"action"},
+	"plugin":      {"action"},
 	"proxy_start": {},
 	"proxy_stop":  {},
 	"configure":   {},
