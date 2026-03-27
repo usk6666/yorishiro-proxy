@@ -61,16 +61,17 @@ func (cr *rawChunkedReader) readAll() {
 		var sizeLine []byte
 		for {
 			fragment, err := cr.r.ReadSlice('\n')
+			// Check size BEFORE appending/writing to prevent large allocations.
+			if len(sizeLine)+len(fragment) > maxChunkedBodySize || cr.buf.Len()+len(fragment) > maxChunkedBodySize {
+				cr.err = fmt.Errorf("chunk size line exceeds maximum length")
+				return
+			}
 			sizeLine = append(sizeLine, fragment...)
 			cr.buf.Write(fragment)
 			if err == nil {
 				break
 			}
 			if err == bufio.ErrBufferFull {
-				if len(sizeLine) > maxChunkedBodySize {
-					cr.err = fmt.Errorf("chunk size line exceeds maximum length")
-					return
-				}
 				continue
 			}
 			// Any other error is fatal.
@@ -116,7 +117,9 @@ func (cr *rawChunkedReader) readAll() {
 		}
 
 		// Enforce memory limit on total buffered body.
-		if int64(cr.buf.Len())+size > int64(maxChunkedBodySize) {
+		// Account for the trailing CRLF that copyN reads after chunk data.
+		const chunkCRLFOverhead = int64(2)
+		if int64(cr.buf.Len())+size+chunkCRLFOverhead > int64(maxChunkedBodySize) {
 			cr.err = fmt.Errorf("chunked body exceeds maximum size %d", maxChunkedBodySize)
 			return
 		}

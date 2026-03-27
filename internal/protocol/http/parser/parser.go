@@ -237,10 +237,18 @@ func readLine(r *bufio.Reader, cw *captureWriter, maxLen int) (string, error) {
 		return "", err
 	}
 
-	// Trim CRLF or LF.
-	s := string(line)
-	s = strings.TrimRight(s, "\r\n")
-	return s, nil
+	// Strip exactly one trailing CRLF or LF terminator, preserving any other
+	// trailing CR/LF characters so that embedded CR anomaly detection works.
+	if n := len(line); n > 0 {
+		if line[n-1] == '\n' {
+			n--
+			if n > 0 && line[n-1] == '\r' {
+				n--
+			}
+		}
+		line = line[:n]
+	}
+	return string(line), nil
 }
 
 // parseHeaders parses HTTP headers until the blank line terminator.
@@ -375,18 +383,7 @@ func detectSmugglingAnomalies(headers RawHeaders, anomalies *[]Anomaly) {
 	}
 
 	// Check for TE obfuscation using raw (pre-OWS-trim) values.
-	for _, hdr := range headers {
-		if !strings.EqualFold(hdr.Name, "transfer-encoding") {
-			continue
-		}
-		if hdr.RawValue != "" {
-			// RawValue is set only when OWS was trimmed, indicating whitespace padding.
-			*anomalies = append(*anomalies, Anomaly{
-				Type:   AnomalyAmbiguousTE,
-				Detail: fmt.Sprintf("Transfer-Encoding value has surrounding whitespace: %q", hdr.RawValue),
-			})
-		}
-	}
+	detectTEObfuscation(headers, anomalies)
 
 	// Multiple Transfer-Encoding headers.
 	if len(teValues) > 1 {
@@ -394,6 +391,28 @@ func detectSmugglingAnomalies(headers RawHeaders, anomalies *[]Anomaly) {
 			Type:   AnomalyAmbiguousTE,
 			Detail: fmt.Sprintf("multiple Transfer-Encoding headers: %v", teValues),
 		})
+	}
+}
+
+// detectTEObfuscation checks Transfer-Encoding headers for suspicious whitespace.
+// Only flags trailing OWS after the value or tab characters — the standard single
+// leading space after the colon (normal OWS) is NOT flagged.
+func detectTEObfuscation(headers RawHeaders, anomalies *[]Anomaly) {
+	for _, hdr := range headers {
+		if !strings.EqualFold(hdr.Name, "transfer-encoding") {
+			continue
+		}
+		if hdr.RawValue == "" {
+			continue
+		}
+		raw := hdr.RawValue
+		trimmedRight := strings.TrimRight(raw, " \t")
+		if len(trimmedRight) != len(raw) || strings.ContainsRune(raw, '\t') {
+			*anomalies = append(*anomalies, Anomaly{
+				Type:   AnomalyAmbiguousTE,
+				Detail: fmt.Sprintf("Transfer-Encoding value has suspicious whitespace: %q", raw),
+			})
+		}
 	}
 }
 

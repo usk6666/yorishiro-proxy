@@ -938,3 +938,97 @@ func TestParseRequest_EmbeddedCR_InHeaderName(t *testing.T) {
 		t.Error("expected HeaderInjection anomaly for embedded CR in header name")
 	}
 }
+
+// --- CP-22: readLine preserves embedded CR (strips exactly one CRLF/LF terminator) ---
+
+func TestParseRequest_ReadLine_PreservesEmbeddedCR(t *testing.T) {
+	// Header value ending with "value\r" — the \r is embedded, not part of the
+	// \r\n terminator. readLine must preserve it so that embedded-CR detection
+	// sees it.
+	raw := "GET / HTTP/1.1\r\nX-Test: value\r\r\nHost: x\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	hasInjection := false
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyHeaderInjection && strings.Contains(a.Detail, "embedded CR") {
+			hasInjection = true
+		}
+	}
+	if !hasInjection {
+		t.Error("expected HeaderInjection anomaly for embedded CR (value\\r\\r\\n), readLine must not strip it")
+	}
+}
+
+func TestParseRequest_ReadLine_MultipleTrailingCR(t *testing.T) {
+	// Header value with multiple trailing \r before \n:
+	// "X-Test: abc\r\r\r\n" — should preserve the two embedded \r characters.
+	raw := "GET / HTTP/1.1\r\nX-Test: abc\r\r\r\nHost: x\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	hasInjection := false
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyHeaderInjection && strings.Contains(a.Detail, "embedded CR") {
+			hasInjection = true
+		}
+	}
+	if !hasInjection {
+		t.Error("expected HeaderInjection anomaly for multiple embedded CRs")
+	}
+}
+
+// --- CP-23: AmbiguousTE only for truly suspicious whitespace ---
+
+func TestParseRequest_AmbiguousTE_StandardOWS_NoFalsePositive(t *testing.T) {
+	// Standard single space after colon: "Transfer-Encoding: chunked"
+	// This should NOT trigger AmbiguousTE.
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyAmbiguousTE {
+			t.Errorf("standard TE header should NOT trigger AmbiguousTE, got: %s", a.Detail)
+		}
+	}
+}
+
+func TestParseRequest_AmbiguousTE_TrailingWhitespace(t *testing.T) {
+	// Trailing space after value: "Transfer-Encoding: chunked  "
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked  \r\n\r\n0\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	hasAmbiguous := false
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyAmbiguousTE {
+			hasAmbiguous = true
+		}
+	}
+	if !hasAmbiguous {
+		t.Error("expected AmbiguousTE anomaly for trailing whitespace in TE value")
+	}
+}
+
+func TestParseRequest_AmbiguousTE_TabInValue(t *testing.T) {
+	// Tab character in TE value: "Transfer-Encoding:\tchunked"
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding:\tchunked\r\n\r\n0\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	hasAmbiguous := false
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyAmbiguousTE {
+			hasAmbiguous = true
+		}
+	}
+	if !hasAmbiguous {
+		t.Error("expected AmbiguousTE anomaly for tab character in TE value")
+	}
+}
