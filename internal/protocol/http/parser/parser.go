@@ -296,12 +296,18 @@ func parseHeaders(r *bufio.Reader, cw *captureWriter) (RawHeaders, []Anomaly, er
 			})
 		}
 
+		// Preserve raw value before OWS trimming for anomaly detection.
+		rawValue := value
 		// Trim optional leading whitespace from value (OWS per RFC 7230).
 		value = strings.TrimLeft(value, " \t")
 		// Trim trailing OWS.
 		value = strings.TrimRight(value, " \t")
 
-		headers = append(headers, RawHeader{Name: name, Value: value})
+		hdr := RawHeader{Name: name, Value: value}
+		if rawValue != value {
+			hdr.RawValue = rawValue
+		}
+		headers = append(headers, hdr)
 	}
 
 	return headers, anomalies, nil
@@ -346,11 +352,18 @@ func detectSmugglingAnomalies(headers RawHeaders, anomalies *[]Anomaly) {
 				Detail: fmt.Sprintf("non-standard Transfer-Encoding value: %q", te),
 			})
 		}
-		// Check for obfuscation (trailing whitespace, unusual case).
-		if te != strings.TrimSpace(te) {
+	}
+
+	// Check for TE obfuscation using raw (pre-OWS-trim) values.
+	for _, hdr := range headers {
+		if strings.ToLower(hdr.Name) != "transfer-encoding" {
+			continue
+		}
+		if hdr.RawValue != "" {
+			// RawValue is set only when OWS was trimmed, indicating whitespace padding.
 			*anomalies = append(*anomalies, Anomaly{
 				Type:   AnomalyAmbiguousTE,
-				Detail: fmt.Sprintf("Transfer-Encoding value has surrounding whitespace: %q", te),
+				Detail: fmt.Sprintf("Transfer-Encoding value has surrounding whitespace: %q", hdr.RawValue),
 			})
 		}
 	}

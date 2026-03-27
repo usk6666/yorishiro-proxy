@@ -3,8 +3,13 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 )
+
+// maxChunkedBodySize limits the total raw chunked body to prevent OOM.
+// Set equal to maxRawCaptureSize for consistency.
+const maxChunkedBodySize = maxRawCaptureSize
 
 // rawChunkedReader streams a chunked Transfer-Encoding body WITHOUT decoding.
 // It reads the entire chunked body (all chunks including size lines, chunk data,
@@ -13,6 +18,8 @@ import (
 // The reader terminates after reading the "0\r\n" terminal chunk and its
 // trailing headers + CRLF. Any trailers present after the terminal chunk
 // are included in the output.
+//
+// The total buffered size is capped at maxChunkedBodySize to prevent OOM.
 type rawChunkedReader struct {
 	r    *bufio.Reader
 	done bool
@@ -63,14 +70,20 @@ func (cr *rawChunkedReader) readAll() {
 		}
 		sizeStr = trimHexString(sizeStr)
 
+		// Empty chunk-size line is a protocol violation.
+		if sizeStr == "" {
+			cr.err = io.ErrUnexpectedEOF
+			return
+		}
+
 		// Terminal chunk: "0\r\n"
-		if sizeStr == "0" || sizeStr == "" {
+		if sizeStr == "0" {
 			// Read trailers until blank line.
 			cr.readTrailers()
 			return
 		}
 
-		// Parse hex size.
+		// Parse hex size with overflow protection.
 		var size int64
 		for _, c := range sizeStr {
 			d := hexVal(c)
@@ -79,7 +92,18 @@ func (cr *rawChunkedReader) readAll() {
 				cr.err = io.ErrUnexpectedEOF
 				return
 			}
+			// Guard against int64 overflow.
+			if size > (1<<63-1)/16 {
+				cr.err = fmt.Errorf("chunk size overflow")
+				return
+			}
 			size = size*16 + int64(d)
+		}
+
+		// Enforce memory limit on total buffered body.
+		if int64(cr.buf.Len())+size > int64(maxChunkedBodySize) {
+			cr.err = fmt.Errorf("chunked body exceeds maximum size %d", maxChunkedBodySize)
+			return
 		}
 
 		// Read chunk data + trailing CRLF.
@@ -132,5 +156,5 @@ func hexVal(c rune) int64 {
 
 // trimHexString trims leading/trailing whitespace from a hex size string.
 func trimHexString(s string) string {
-	return bytes.NewBuffer(bytes.TrimSpace([]byte(s))).String()
+	return string(bytes.TrimSpace([]byte(s)))
 }

@@ -11,8 +11,6 @@ type AnomalyType string
 const (
 	// AnomalyCLTE indicates both Content-Length and Transfer-Encoding are present.
 	AnomalyCLTE AnomalyType = "CLTE"
-	// AnomalyTECL is an alias for CLTE detected in TE-first order.
-	AnomalyTECL AnomalyType = "TECL"
 	// AnomalyDuplicateCL indicates multiple Content-Length headers with different values.
 	AnomalyDuplicateCL AnomalyType = "DuplicateCL"
 	// AnomalyInvalidTE indicates a non-standard Transfer-Encoding value.
@@ -33,8 +31,9 @@ type Anomaly struct {
 
 // RawHeader represents a single HTTP header with original case preserved.
 type RawHeader struct {
-	Name  string // original case preserved
-	Value string
+	Name     string // original case preserved
+	Value    string // OWS-trimmed value
+	RawValue string // value before OWS trimming (empty if same as Value)
 }
 
 // RawHeaders is an ordered list of HTTP headers preserving wire order and case.
