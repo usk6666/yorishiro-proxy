@@ -11,9 +11,10 @@ import (
 // Set equal to maxRawCaptureSize for consistency.
 const maxChunkedBodySize = maxRawCaptureSize
 
-// rawChunkedReader streams a chunked Transfer-Encoding body WITHOUT decoding.
-// It reads the entire chunked body (all chunks including size lines, chunk data,
-// trailers, and the final CRLF) and returns the raw bytes as-is.
+// rawChunkedReader buffers a chunked Transfer-Encoding body WITHOUT decoding.
+// On the first Read call, it reads and buffers the entire chunked body
+// (all chunks including size lines, chunk data, trailers, and the final CRLF)
+// up to maxChunkedBodySize. Subsequent Read calls serve data from the buffer.
 //
 // The reader terminates after reading the "0\r\n" terminal chunk and its
 // trailing headers + CRLF. Any trailers present after the terminal chunk
@@ -118,6 +119,10 @@ func (cr *rawChunkedReader) readAll() {
 func (cr *rawChunkedReader) readTrailers() {
 	for {
 		line, err := cr.r.ReadSlice('\n')
+		if cr.buf.Len()+len(line) > maxChunkedBodySize {
+			cr.err = fmt.Errorf("chunked body exceeds maximum size %d", maxChunkedBodySize)
+			return
+		}
 		cr.buf.Write(line)
 		if err != nil {
 			cr.err = err

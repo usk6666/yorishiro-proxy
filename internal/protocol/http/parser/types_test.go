@@ -93,6 +93,17 @@ func TestRawHeaders_Set(t *testing.T) {
 		}
 	})
 
+	t.Run("clears RawValue on overwrite", func(t *testing.T) {
+		h := RawHeaders{{Name: "Content-Type", Value: "text/html", RawValue: " text/html "}}
+		h.Set("content-type", "application/json")
+		if h[0].Value != "application/json" {
+			t.Errorf("Set() did not update value: got %q", h[0].Value)
+		}
+		if h[0].RawValue != "" {
+			t.Errorf("Set() did not clear RawValue: got %q", h[0].RawValue)
+		}
+	})
+
 	t.Run("append new", func(t *testing.T) {
 		h := RawHeaders{{Name: "Content-Type", Value: "text/html"}}
 		h.Set("X-Custom", "value")
@@ -128,6 +139,61 @@ func TestRawHeaders_Del(t *testing.T) {
 			t.Errorf("Del() changed len for missing header: %d", len(h))
 		}
 	})
+}
+
+func TestHasConnectionToken(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers RawHeaders
+		token   string
+		want    bool
+	}{
+		{
+			name:    "exact close",
+			headers: RawHeaders{{Name: "Connection", Value: "close"}},
+			token:   "close",
+			want:    true,
+		},
+		{
+			name:    "disclose should not match close",
+			headers: RawHeaders{{Name: "Connection", Value: "disclose"}},
+			token:   "close",
+			want:    false,
+		},
+		{
+			name:    "comma-separated tokens",
+			headers: RawHeaders{{Name: "Connection", Value: "keep-alive, close"}},
+			token:   "close",
+			want:    true,
+		},
+		{
+			name:    "multiple Connection headers",
+			headers: RawHeaders{{Name: "Connection", Value: "keep-alive"}, {Name: "Connection", Value: "close"}},
+			token:   "close",
+			want:    true,
+		},
+		{
+			name:    "case insensitive",
+			headers: RawHeaders{{Name: "connection", Value: "Close"}},
+			token:   "close",
+			want:    true,
+		},
+		{
+			name:    "no match",
+			headers: RawHeaders{{Name: "Connection", Value: "keep-alive"}},
+			token:   "close",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasConnectionToken(tt.headers, tt.token)
+			if got != tt.want {
+				t.Errorf("hasConnectionToken() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRawHeaders_Clone(t *testing.T) {

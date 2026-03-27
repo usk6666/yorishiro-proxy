@@ -5,6 +5,19 @@ import (
 	"strings"
 )
 
+// hasConnectionToken reports whether any Connection header value contains the
+// given token as an exact, case-insensitive, comma-separated token.
+func hasConnectionToken(headers RawHeaders, want string) bool {
+	for _, val := range headers.Values("Connection") {
+		for _, token := range strings.Split(val, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // AnomalyType classifies the kind of HTTP anomaly detected during parsing.
 type AnomalyType string
 
@@ -44,9 +57,8 @@ type RawHeaders []RawHeader
 // Get returns the value of the first header matching name (case-insensitive).
 // Returns empty string if not found.
 func (h RawHeaders) Get(name string) string {
-	lower := strings.ToLower(name)
 	for _, hdr := range h {
-		if strings.ToLower(hdr.Name) == lower {
+		if strings.EqualFold(hdr.Name, name) {
 			return hdr.Value
 		}
 	}
@@ -55,10 +67,9 @@ func (h RawHeaders) Get(name string) string {
 
 // Values returns all values for headers matching name (case-insensitive).
 func (h RawHeaders) Values(name string) []string {
-	lower := strings.ToLower(name)
 	var vals []string
 	for _, hdr := range h {
-		if strings.ToLower(hdr.Name) == lower {
+		if strings.EqualFold(hdr.Name, name) {
 			vals = append(vals, hdr.Value)
 		}
 	}
@@ -68,10 +79,10 @@ func (h RawHeaders) Values(name string) []string {
 // Set sets the first header matching name to value, or appends if not found.
 // Matching is case-insensitive but the original or provided name case is preserved.
 func (h *RawHeaders) Set(name, value string) {
-	lower := strings.ToLower(name)
 	for i, hdr := range *h {
-		if strings.ToLower(hdr.Name) == lower {
+		if strings.EqualFold(hdr.Name, name) {
 			(*h)[i].Value = value
+			(*h)[i].RawValue = ""
 			return
 		}
 	}
@@ -80,10 +91,9 @@ func (h *RawHeaders) Set(name, value string) {
 
 // Del removes all headers matching name (case-insensitive).
 func (h *RawHeaders) Del(name string) {
-	lower := strings.ToLower(name)
 	n := 0
 	for _, hdr := range *h {
-		if strings.ToLower(hdr.Name) != lower {
+		if !strings.EqualFold(hdr.Name, name) {
 			(*h)[n] = hdr
 			n++
 		}

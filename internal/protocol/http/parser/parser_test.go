@@ -488,6 +488,31 @@ func TestParseRequest_ChunkedBody_WithTrailers(t *testing.T) {
 	}
 }
 
+// --- CP-10: readTrailers size limit ---
+
+func TestParseRequest_ChunkedBody_TrailerSizeLimit(t *testing.T) {
+	// Build a chunked body with a tiny chunk but oversized trailers.
+	var b strings.Builder
+	b.WriteString("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+	b.WriteString("1\r\nA\r\n") // 1-byte chunk
+	b.WriteString("0\r\n")      // terminal chunk
+	// Write trailer lines until exceeding maxChunkedBodySize.
+	trailerLine := "X-Pad: " + strings.Repeat("B", 1000) + "\r\n"
+	for b.Len() < maxRawCaptureSize+1000 {
+		b.WriteString(trailerLine)
+	}
+	b.WriteString("\r\n")
+
+	req, err := ParseRequest(newReader(b.String()))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	_, err = io.ReadAll(req.Body)
+	if err == nil {
+		t.Error("expected error for oversized trailers exceeding maxChunkedBodySize")
+	}
+}
+
 // --- Response chunked ---
 
 func TestParseResponse_ChunkedBody(t *testing.T) {
@@ -758,6 +783,90 @@ func TestResolveResponseBody_InvalidChunkedTE(t *testing.T) {
 }
 
 // --- CP-4: orphan obs-fold line records anomaly ---
+
+// --- CP-6/CP-7: Multiple TE headers — all values checked ---
+
+func TestResolveRequestBody_MultipleTE_ChunkedInSecondHeader(t *testing.T) {
+	// First TE header is "identity", second is "chunked".
+	// Both should be checked; chunked mode should activate.
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	want := "5\r\nhello\r\n0\r\n\r\n"
+	if string(body) != want {
+		t.Errorf("body = %q, want %q (chunked mode should activate from second TE header)", string(body), want)
+	}
+}
+
+func TestResolveResponseBody_MultipleTE_ChunkedInSecondHeader(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\n\r\n"
+	resp, err := ParseResponse(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseResponse() error: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	want := "4\r\ntest\r\n0\r\n\r\n"
+	if string(body) != want {
+		t.Errorf("body = %q, want %q (chunked mode should activate from second TE header)", string(body), want)
+	}
+}
+
+// --- CP-8: exact token matching for Connection header ---
+
+func TestShouldClose_ExactTokenMatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		wantClose bool
+	}{
+		{
+			name:      "disclose should not match close",
+			raw:       "GET / HTTP/1.1\r\nConnection: disclose\r\n\r\n",
+			wantClose: false,
+		},
+		{
+			name:      "close token in comma list",
+			raw:       "GET / HTTP/1.1\r\nConnection: keep-alive, close\r\n\r\n",
+			wantClose: true,
+		},
+		{
+			name:      "multiple Connection headers",
+			raw:       "GET / HTTP/1.1\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n",
+			wantClose: true,
+		},
+		{
+			name:      "case insensitive Close",
+			raw:       "GET / HTTP/1.1\r\nConnection: Close\r\n\r\n",
+			wantClose: true,
+		},
+		{
+			name:      "HTTP/1.0 keep-alive in comma list",
+			raw:       "GET / HTTP/1.0\r\nConnection: upgrade, keep-alive\r\n\r\n",
+			wantClose: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := ParseRequest(newReader(tt.raw))
+			if err != nil {
+				t.Fatalf("ParseRequest() error: %v", err)
+			}
+			if req.Close != tt.wantClose {
+				t.Errorf("Close = %v, want %v", req.Close, tt.wantClose)
+			}
+		})
+	}
+}
 
 func TestParseRequest_OrphanObsFold(t *testing.T) {
 	// Continuation line at the very start of headers (no preceding header).

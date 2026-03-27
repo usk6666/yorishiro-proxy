@@ -366,7 +366,7 @@ func detectSmugglingAnomalies(headers RawHeaders, anomalies *[]Anomaly) {
 
 	// Check for TE obfuscation using raw (pre-OWS-trim) values.
 	for _, hdr := range headers {
-		if strings.ToLower(hdr.Name) != "transfer-encoding" {
+		if !strings.EqualFold(hdr.Name, "transfer-encoding") {
 			continue
 		}
 		if hdr.RawValue != "" {
@@ -401,15 +401,13 @@ func hasChunkedTE(te string) bool {
 
 // shouldClose determines if the connection should be closed after this message.
 func shouldClose(headers RawHeaders, proto string) bool {
-	conn := strings.ToLower(headers.Get("Connection"))
-
-	if strings.Contains(conn, "close") {
+	if hasConnectionToken(headers, "close") {
 		return true
 	}
 
 	// HTTP/1.0 defaults to close unless Connection: keep-alive.
 	if proto == "HTTP/1.0" {
-		return !strings.Contains(conn, "keep-alive")
+		return !hasConnectionToken(headers, "keep-alive")
 	}
 
 	// HTTP/1.1 defaults to keep-alive.
@@ -421,8 +419,13 @@ func shouldClose(headers RawHeaders, proto string) bool {
 func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Reader {
 	// chunked Transfer-Encoding: stream the raw chunked body as-is (no dechunking).
 	// HTTP/1.0 does not use chunked TE.
-	if hasChunkedTE(headers.Get("Transfer-Encoding")) && proto != "HTTP/1.0" {
-		return newRawChunkedReader(r)
+	// Check ALL TE header values to avoid smuggling via multiple TE headers.
+	if proto != "HTTP/1.0" {
+		for _, te := range headers.Values("Transfer-Encoding") {
+			if hasChunkedTE(te) {
+				return newRawChunkedReader(r)
+			}
+		}
 	}
 
 	// Content-Length present: read exactly that many bytes.
@@ -449,8 +452,13 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 	}
 
 	// chunked Transfer-Encoding: stream as-is.
-	if hasChunkedTE(headers.Get("Transfer-Encoding")) && proto != "HTTP/1.0" {
-		return newRawChunkedReader(r)
+	// Check ALL TE header values to avoid smuggling via multiple TE headers.
+	if proto != "HTTP/1.0" {
+		for _, te := range headers.Values("Transfer-Encoding") {
+			if hasChunkedTE(te) {
+				return newRawChunkedReader(r)
+			}
+		}
 	}
 
 	// Content-Length.
