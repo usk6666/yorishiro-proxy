@@ -64,43 +64,39 @@ make build    # outputs bin/yorishiro-proxy
 
 ### 2. Configure MCP
 
-Add to your MCP client configuration (e.g., `.mcp.json` for Claude Code):
+The easiest way to set up MCP integration is with the `install` subcommand:
 
-```json
-{
-  "mcpServers": {
-    "yorishiro-proxy": {
-      "command": "/path/to/bin/yorishiro-proxy",
-      "args": []
-    }
-  }
-}
+```bash
+# Configure MCP for the current project (writes .mcp.json)
+yorishiro-proxy install mcp
+
+# Or configure at the user level (~/.claude/settings.json)
+yorishiro-proxy install mcp --user-scope
 ```
 
-The proxy starts as an MCP server on stdin/stdout. The CA certificate is automatically generated on first run and persisted to `~/.yorishiro-proxy/ca/`.
+This generates the correct `.mcp.json` entry with stdio MCP transport enabled and log output redirected to a file -- the recommended configuration for MCP clients like Claude Code.
 
-To also enable the Web UI:
+The CA certificate is automatically generated on first run and persisted to `~/.yorishiro-proxy/ca/`.
 
-```json
-{
-  "mcpServers": {
-    "yorishiro-proxy": {
-      "command": "/path/to/bin/yorishiro-proxy",
-      "args": ["-mcp-http-addr", "127.0.0.1:3000"]
-    }
-  }
-}
+### 3. Start the Server Standalone
+
+You can also start the server directly. By default, it launches an HTTP MCP server on a random loopback port and writes the connection info to `~/.yorishiro-proxy/server.json`:
+
+```bash
+# Start with default settings
+yorishiro-proxy server
+
+# Start on a fixed port with browser auto-open
+yorishiro-proxy server -mcp-http-addr 127.0.0.1:3000 -open-browser
 ```
 
-On startup, the log (stderr or the file specified by `-log-file`) prints the access URL including an authentication token:
+On startup, the log prints the Web UI URL with an authentication token:
 
 ```
 WebUI available url=http://127.0.0.1:3000/?token=<random-token>
 ```
 
-Open this URL in your browser. The token is auto-generated each launch; use `-mcp-http-token` to set a fixed value.
-
-### 3. First Capture
+### 4. First Capture
 
 Once the MCP server is running, the AI agent can start capturing traffic:
 
@@ -132,7 +128,7 @@ All proxy operations are exposed through eleven MCP tools:
 
 ## Web UI
 
-When Streamable HTTP mode is enabled (`-mcp-http-addr`), the embedded Web UI is served at the same address.
+The embedded Web UI is served on the HTTP MCP address (enabled by default).
 
 | Page | Description |
 |------|-------------|
@@ -158,115 +154,27 @@ The Web UI communicates with the backend via Streamable HTTP MCP -- the same pro
 | WebSocket | HTTP Upgrade | Message-level recording with per-message display |
 | Raw TCP | Fallback | Captures any unrecognized protocol, with TCP forwarding mappings |
 
-## CLI Flags
+## CLI
 
-| Flag | Env Variable | Default | Description |
-|------|-------------|---------|-------------|
-| `-db` | `YP_DB` | `~/.yorishiro-proxy/yorishiro.db` | SQLite database path or project name |
-| `-ca-cert` / `-ca-key` | `YP_CA_CERT` / `YP_CA_KEY` | -- | CA certificate and private key paths |
-| `-ca-ephemeral` | `YP_CA_EPHEMERAL` | `false` | Use ephemeral in-memory CA |
-| `-insecure` | `YP_INSECURE` | `false` | Skip upstream TLS verification |
-| `-tls-fingerprint <profile>` | `YP_TLS_FINGERPRINT` | `chrome` | TLS fingerprint profile: chrome, firefox, safari, edge, random, none |
-| `-config` | `YP_CONFIG` | -- | JSON config file path for proxy defaults |
-| `-log-level` | `YP_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
-| `-log-format` | `YP_LOG_FORMAT` | `text` | Log format: text, json |
-| `-log-file` | `YP_LOG_FILE` | stderr | Log output file |
-| `-mcp-http-addr` | `YP_MCP_HTTP_ADDR` | -- | Streamable HTTP listen address (also serves the Web UI) |
-| `-mcp-http-token` | `YP_MCP_HTTP_TOKEN` | auto-generated | HTTP Bearer auth token |
-
-Priority: CLI flag > environment variable > config file > default value.
-
-The `-db` flag accepts an absolute path, a relative path with extension, or a plain project name. A project name (e.g., `my-project`) resolves to `~/.yorishiro-proxy/my-project.db`, making it easy to maintain separate databases per engagement.
-
-## CLI Client
-
-yorishiro-proxy includes a built-in CLI client that connects to a running server via the Streamable HTTP MCP endpoint. This provides a lightweight interface for scripting, automation, and ad-hoc pentest workflows without requiring a full MCP client integration.
-
-### Subcommands
+yorishiro-proxy provides the following subcommands:
 
 | Subcommand | Description |
 |------------|-------------|
 | `server` | Start the proxy server (default when no subcommand given) |
-| `client` | Call MCP tools via CLI |
+| `client` | Call MCP tools on a running server via CLI |
 | `install` | Install and configure components (MCP, CA, Skills, Playwright) |
 | `upgrade` | Check for and install updates from GitHub Releases |
 | `version` | Print version information |
 
-### Server
-
-Start the proxy server. The server writes its address and authentication token to `~/.yorishiro-proxy/server.json` for automatic discovery by the CLI client.
+The `client` subcommand connects to a running server and calls MCP tools with `key=value` parameters, providing a lightweight interface for scripting and ad-hoc pentest workflows:
 
 ```bash
-# Start with default settings (random loopback port)
-yorishiro-proxy server
-
-# Start on a fixed port
-yorishiro-proxy server -mcp-http-addr 127.0.0.1:3000
-
-# Start with browser auto-open
-yorishiro-proxy server -open-browser
-```
-
-### Client
-
-The `client` subcommand calls MCP tools on a running server. Parameters are passed as `key=value` pairs.
-
-```bash
-# Query proxy status
 yorishiro-proxy client query resource=status
-
-# Start a proxy listener
 yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
-
-# List recorded flows
 yorishiro-proxy client query resource=flows limit=10
-
-# Get a specific flow detail
-yorishiro-proxy client query resource=flow flow_id=<id>
-
-# Replay a request with modifications
-yorishiro-proxy client resend action=resend flow_id=<id>
-
-# Configure upstream proxy
-yorishiro-proxy client configure upstream_proxy=http://proxy:8888
-
-# Stop all proxy listeners
-yorishiro-proxy client proxy_stop
 ```
 
-**Connection flags:**
-
-| Flag | Env Variable | Default | Description |
-|------|-------------|---------|-------------|
-| `-server-addr` | `YP_CLIENT_ADDR` | auto-detect from `server.json` | Server address (host:port) |
-| `-token` | `YP_CLIENT_TOKEN` | auto-detect from `server.json` | Bearer token for authentication |
-| `-format` | `YP_CLIENT_FORMAT` | `json` (TTY) / `raw` (pipe) | Output format: json, table, raw |
-| `-raw` | -- | `false` | Compact JSON output without indentation |
-| `-q`, `-quiet` | -- | `false` | Suppress output on success |
-
-Connection priority: CLI flag > environment variable > `server.json` auto-detection.
-
-**Output format:** JSON is the default for interactive use (agent-friendly). When stdout is piped, the format automatically switches to `raw` (compact JSON) for easy integration with `jq` and other tools. Use `--format table` for human-readable output.
-
-### Agent Integration
-
-For AI agent workflows, configure the server as an MCP server and use the CLI client for ad-hoc operations:
-
-```bash
-# Terminal 1: Start the server
-yorishiro-proxy server
-
-# Terminal 2: Use CLI client for quick operations
-yorishiro-proxy client query resource=status
-yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
-yorishiro-proxy client query resource=flows -format raw | jq '.[].url'
-```
-
-The CLI client is designed for temporary-use pentest scenarios where an AI agent needs to quickly invoke proxy tools without maintaining a persistent MCP session. For full agent integration, configure yorishiro-proxy as an MCP server in your agent's MCP configuration (see [Quick Start](#quick-start)).
-
-### Migration Note
-
-> **`-no-open-browser` to `-open-browser`:** The default behavior has changed. The browser no longer opens automatically on server start. Use `-open-browser` to opt in to automatic browser opening. The old `-no-open-browser` flag has been removed.
+For the full list of server flags, client options, and environment variables, run `yorishiro-proxy server -help` or `yorishiro-proxy client -help`, or see the [documentation](https://usk6666.github.io/yorishiro-proxy-docs/).
 
 ## Architecture
 
