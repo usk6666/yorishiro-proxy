@@ -1126,3 +1126,41 @@ func TestParseRequest_InvalidTE_CommaSeparatedList(t *testing.T) {
 		})
 	}
 }
+
+// --- CP-26: embedded CR in chunk-size line is not silently stripped ---
+
+func TestParseRequest_ChunkedBody_EmbeddedCR(t *testing.T) {
+	// A malformed chunk-size line "0\r\r\n" has an embedded CR before the terminator.
+	// The parser must NOT normalize it to "0" — the embedded CR makes it invalid.
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	_, err = io.ReadAll(req.Body)
+	if err == nil {
+		t.Error("expected error for chunk-size line with embedded CR")
+	}
+}
+
+// --- CP-27: invalid hex digit returns descriptive error ---
+
+func TestParseRequest_ChunkedBody_InvalidHex(t *testing.T) {
+	// Chunk size "XZ" contains invalid hex digits.
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nXZ\r\nhello\r\n0\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	_, err = io.ReadAll(req.Body)
+	if err == nil {
+		t.Fatal("expected error for invalid hex in chunk size")
+	}
+	if err == io.ErrUnexpectedEOF {
+		t.Errorf("error should not be io.ErrUnexpectedEOF, got: %v", err)
+	}
+	want := `invalid chunk size: "XZ"`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}

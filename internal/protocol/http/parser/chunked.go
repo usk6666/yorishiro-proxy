@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // maxChunkedBodySize limits the total raw chunked body to prevent OOM.
@@ -79,10 +80,13 @@ func (cr *rawChunkedReader) readAll() {
 			return
 		}
 
+		// Strip exactly one line terminator (CRLF or LF) from the size line.
+		lineNoEOL := stripLineTerminator(sizeLine)
+
 		// Parse the chunk size (hex before any chunk-ext).
-		sizeStr := string(bytes.TrimRight(sizeLine, "\r\n"))
-		if idx := bytes.IndexByte(sizeLine, ';'); idx >= 0 {
-			sizeStr = string(sizeLine[:idx])
+		sizeStr := string(lineNoEOL)
+		if idx := bytes.IndexByte(lineNoEOL, ';'); idx >= 0 {
+			sizeStr = string(lineNoEOL[:idx])
 		}
 		sizeStr = trimHexString(sizeStr)
 
@@ -104,8 +108,8 @@ func (cr *rawChunkedReader) readAll() {
 		for _, c := range sizeStr {
 			d := hexVal(c)
 			if d < 0 {
-				// Invalid hex — stop reading.
-				cr.err = io.ErrUnexpectedEOF
+				// Invalid hex digit in chunk size.
+				cr.err = fmt.Errorf("invalid chunk size: %q", sizeStr)
 				return
 			}
 			// Guard against int64 overflow.
@@ -189,7 +193,24 @@ func hexVal(c rune) int64 {
 	}
 }
 
-// trimHexString trims leading/trailing whitespace from a hex size string.
+// stripLineTerminator removes exactly one trailing CRLF or LF from b.
+func stripLineTerminator(b []byte) []byte {
+	end := len(b)
+	if end > 0 && b[end-1] == '\n' {
+		end--
+		if end > 0 && b[end-1] == '\r' {
+			end--
+		}
+	}
+	return b[:end]
+}
+
+// trimHexString trims leading/trailing spaces and tabs (HTTP OWS) from a hex
+// size string. It intentionally does NOT trim control characters such as CR,
+// so that embedded CRs in malformed chunk-size lines are preserved and
+// detected as invalid hex digits downstream.
 func trimHexString(s string) string {
-	return string(bytes.TrimSpace([]byte(s)))
+	return strings.TrimFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t'
+	})
 }
