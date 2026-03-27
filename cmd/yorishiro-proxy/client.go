@@ -22,36 +22,54 @@ var clientToolHelp = map[string]string{
 	"query": `query: Unified information query tool.
 
 Parameters (key=value):
-  resource=flows          List recorded flows
-  resource=flow           Get a single flow detail (requires flow_id=<id>)
-  resource=messages       Get messages for a flow (requires flow_id=<id>)
-  resource=status         Get proxy status
-  resource=config         Get current configuration
-  resource=ca_cert        Get CA certificate
-  resource=intercept_queue  Get intercept queue
-  resource=macros         List macro definitions
-  resource=fuzz_results   Get fuzz results
-  resource=technologies   Get technology stack detections
-  flow_id=<id>            Flow ID (required for flow/messages resources)
-  limit=<n>               Maximum number of results (default: 50)
+  resource=<resource>     Resource to query (required)
+    flows                 List recorded flows
+    flow                  Get a single flow detail (requires id=<id>)
+    messages              Get messages for a flow (requires id=<id>)
+    status                Get proxy status
+    config                Get current configuration
+    ca_cert               Get CA certificate
+    intercept_queue       Get intercept queue
+    macros                List macro definitions
+    macro                 Get a single macro (requires id=<name>)
+    fuzz_jobs             List fuzz jobs
+    fuzz_results          Get fuzz results (requires fuzz_id=<id>)
+    technologies          Get technology stack detections
+  id=<id>                 Flow ID or macro name (required for flow/messages/macro)
+  fuzz_id=<id>            Fuzz job ID (required for fuzz_results)
+  limit=<n>               Maximum number of results (default: 50, max: 1000)
   offset=<n>              Pagination offset
-  protocol=<proto>        Filter by protocol (http, https, h2, grpc, ws, tcp)
+  sort_by=<field>         Sort field (timestamp, duration_ms, etc.)
+
+Filter options (dot-notation):
+  filter.protocol=<proto>   Protocol filter (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)
+  filter.host=<host>        Host filter
+  filter.method=<method>    HTTP method filter (GET, POST, etc.)
+  filter.url_pattern=<pat>  URL substring search
+  filter.status_code=<n>    HTTP status code filter
+  filter.state=<state>      State filter (active, complete, error)
+  filter.direction=<dir>    Message direction (send, receive) — for messages resource
 
 Examples:
   yorishiro-proxy client query resource=flows limit=10
-  yorishiro-proxy client query resource=flow flow_id=abc123
+  yorishiro-proxy client query resource=flow id=abc123
+  yorishiro-proxy client query resource=flows filter.protocol=HTTPS filter.method=POST
   yorishiro-proxy client query resource=status`,
 
 	"proxy_start": `proxy_start: Start a proxy listener.
 
 Parameters (key=value):
   name=<name>             Listener name (default: "default")
-  addr=<host:port>        Listen address (default: 127.0.0.1:8080)
-  protocol=<proto>        Protocol hint (http, socks5, tcp)
+  listen_addr=<host:port> Listen address (default: 127.0.0.1:8080)
+  upstream_proxy=<url>    Upstream proxy URL
+  tls_fingerprint=<prof>  TLS fingerprint profile (chrome, firefox, safari, edge, random, none)
+  max_connections=<n>     Max concurrent connections (default: 128)
+  peek_timeout_ms=<n>     Protocol detection timeout in ms (default: 30000)
+  request_timeout_ms=<n>  HTTP request timeout in ms (default: 60000)
 
 Examples:
-  yorishiro-proxy client proxy_start addr=127.0.0.1:8080
-  yorishiro-proxy client proxy_start name=secondary addr=127.0.0.1:8081`,
+  yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
+  yorishiro-proxy client proxy_start name=secondary listen_addr=127.0.0.1:9090`,
 
 	"proxy_stop": `proxy_stop: Stop proxy listener(s).
 
@@ -65,92 +83,171 @@ Examples:
 	"configure": `configure: Configure runtime proxy settings.
 
 Parameters (key=value):
-  operation=merge|replace   Operation mode (default: merge)
-  upstream_proxy=<url>      Upstream proxy URL
-  passthrough=<hosts>       Comma-separated TLS passthrough hosts
-  tls_fingerprint=<profile> TLS fingerprint profile
+  operation=merge|replace       Operation mode (default: merge)
+  upstream_proxy=<url>          Upstream proxy URL (empty string to disable)
+  tls_fingerprint=<profile>     TLS fingerprint profile (chrome, firefox, safari, edge, random, none)
+  max_connections=<n>           Max concurrent connections
+  peek_timeout_ms=<n>           Protocol detection timeout in ms
+  request_timeout_ms=<n>        HTTP request timeout in ms
+
+TLS passthrough (dot-notation):
+  tls_passthrough.add=<hosts>       (merge) Comma-separated patterns to add
+  tls_passthrough.remove=<hosts>    (merge) Comma-separated patterns to remove
+  tls_passthrough.patterns=<hosts>  (replace) Full comma-separated pattern list
 
 Examples:
   yorishiro-proxy client configure upstream_proxy=http://proxy:8888
-  yorishiro-proxy client configure passthrough=example.com,*.internal`,
+  yorishiro-proxy client configure tls_passthrough.add=example.com,*.internal
+  yorishiro-proxy client configure tls_fingerprint=chrome`,
 
 	"intercept": `intercept: Act on intercepted requests in the intercept queue.
 
 Parameters (key=value):
-  id=<id>                 Intercept item ID (required)
-  action=forward|drop|modify  Action to take (required)
-  body=<body>             Modified body (for action=modify)
+  action=<action>                   Action to take (required)
+    release                         Forward the request/response unmodified
+    modify_and_forward              Modify and forward
+    drop                            Drop the request/response
+  params.intercept_id=<id>          Intercept item ID (required)
+  params.override_method=<method>   HTTP method override (request phase)
+  params.override_url=<url>         URL override (request phase)
+  params.override_body=<body>       Body override (request phase)
+  params.override_status=<code>     Status code override (response phase)
+  params.override_response_body=<b> Response body override (response phase)
+  params.mode=structured|raw        Forwarding mode (default: structured)
 
 Examples:
-  yorishiro-proxy client intercept id=abc123 action=forward
-  yorishiro-proxy client intercept id=abc123 action=drop`,
+  yorishiro-proxy client intercept action=release params.intercept_id=abc123
+  yorishiro-proxy client intercept action=drop params.intercept_id=abc123
+  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 params.override_body='{"new":"data"}'`,
 
 	"resend": `resend: Resend and replay recorded proxy requests.
 
 Parameters (key=value):
-  action=resend|compare   Action to perform (required)
-  flow_id=<id>            Flow ID to resend (required for resend)
-  flow_id_a=<id>          First flow ID (required for compare)
-  flow_id_b=<id>          Second flow ID (required for compare)
+  action=<action>                   Action to perform (required)
+    resend                          Resend an HTTP request
+    resend_raw                      Resend raw bytes
+    tcp_replay                      Replay TCP connection
+    compare                         Compare two flows
+  params.flow_id=<id>               Flow ID (required for resend/resend_raw/tcp_replay)
+  params.override_method=<method>   HTTP method override
+  params.override_url=<url>         URL override
+  params.override_body=<body>       Body override (text)
+  params.override_host=<host:port>  Connection target override
+  params.follow_redirects=true      Follow HTTP redirects (default: false)
+  params.timeout_ms=<n>             Request timeout in ms (default: 30000)
+  params.dry_run=true               Preview without sending
+  params.tag=<tag>                  Tag for result flow
+  params.flow_id_a=<id>             First flow ID (for compare)
+  params.flow_id_b=<id>             Second flow ID (for compare)
 
 Examples:
-  yorishiro-proxy client resend action=resend flow_id=abc123
-  yorishiro-proxy client resend action=compare flow_id_a=abc flow_id_b=def`,
+  yorishiro-proxy client resend action=resend params.flow_id=abc123
+  yorishiro-proxy client resend action=resend params.flow_id=abc123 params.override_method=POST
+  yorishiro-proxy client resend action=compare params.flow_id_a=abc params.flow_id_b=def`,
 
 	"manage": `manage: Manage flow data and CA certificates.
 
 Parameters (key=value):
-  action=delete_flows|export_har|get_ca_cert  Action to perform (required)
-  flow_ids=<id1,id2>      Flow IDs for delete/export (comma-separated)
-  format=har              Export format
+  action=<action>                   Action to perform (required)
+    delete_flows                    Delete flow(s)
+    export_flows                    Export flows
+    import_flows                    Import flows
+    regenerate_ca_cert              Regenerate CA certificate
+  params.flow_id=<id>               Flow ID for single-flow deletion
+  params.older_than_days=<n>        Delete flows older than N days
+  params.protocol=<proto>           Protocol filter for delete_flows
+  params.confirm=true               Confirm bulk deletion (required for bulk ops)
+  params.format=jsonl|har           Export format (default: jsonl)
+  params.output_path=<path>         File path for export output
+  params.input_path=<path>          File path for import input
+  params.on_conflict=skip|replace   Import conflict policy (default: skip)
 
 Examples:
-  yorishiro-proxy client manage action=delete_flows flow_ids=abc123,def456
-  yorishiro-proxy client manage action=export_har flow_ids=abc123
-  yorishiro-proxy client manage action=get_ca_cert`,
+  yorishiro-proxy client manage action=delete_flows params.flow_id=abc123
+  yorishiro-proxy client manage action=delete_flows params.older_than_days=7 params.confirm=true
+  yorishiro-proxy client manage action=export_flows params.format=har params.output_path=export.har
+  yorishiro-proxy client manage action=regenerate_ca_cert`,
 
 	"security": `security: Configure runtime security settings.
 
 Parameters (key=value):
-  action=configure        Action to perform
-  rate_limit=<n>          Request rate limit per second
-  budget=<n>              Security diagnostic budget
+  action=<action>                          Action to perform (required)
+    set_target_scope                       Replace all target scope rules
+    update_target_scope                    Merge delta into target scope
+    get_target_scope                       Get current target scope
+    test_target                            Dry-run URL check against scope
+    set_rate_limits                        Set rate limits
+    get_rate_limits                        Get current rate limits
+    set_budget                             Set session budget
+    get_budget                             Get current budget
+    get_safety_filter                      Get safety filter status
+  params.url=<url>                         URL to test (for test_target)
+  params.max_requests_per_second=<n>       Global rate limit (for set_rate_limits)
+  params.max_requests_per_host_per_second=<n>  Per-host rate limit
+  params.max_total_requests=<n>            Max total requests (for set_budget)
+  params.max_duration=<dur>                Max duration e.g. 30m (for set_budget)
 
 Examples:
-  yorishiro-proxy client security action=configure rate_limit=100`,
+  yorishiro-proxy client security action=get_target_scope
+  yorishiro-proxy client security action=test_target params.url=https://example.com
+  yorishiro-proxy client security action=set_rate_limits params.max_requests_per_second=100`,
 
 	"macro": `macro: Define and execute macro workflows.
 
 Parameters (key=value):
-  action=define|execute|list|delete  Action to perform (required)
-  name=<name>             Macro name
-  script=<starlark>       Starlark script (for define)
+  action=<action>                   Action to perform (required)
+    define_macro                    Define a new macro
+    run_macro                       Execute a macro
+    delete_macro                    Delete a macro
+  params.name=<name>                Macro name (required for all actions)
+  params.description=<desc>         Macro description (for define_macro)
+  params.macro_timeout_ms=<n>       Overall macro timeout in ms (default: 300000)
+
+Note: define_macro requires complex 'steps' array — use JSON input or MCP client for full definitions.
+      Use 'query resource=macros' to list macros, 'query resource=macro id=<name>' to inspect.
 
 Examples:
-  yorishiro-proxy client macro action=list
-  yorishiro-proxy client macro action=execute name=my_macro`,
+  yorishiro-proxy client macro action=run_macro params.name=my_macro
+  yorishiro-proxy client macro action=delete_macro params.name=my_macro`,
 
 	"fuzz": `fuzz: Execute fuzz testing campaigns.
 
 Parameters (key=value):
-  action=start|stop|status|results  Action to perform (required)
-  flow_id=<id>            Flow ID to fuzz (required for start)
-  campaign_id=<id>        Campaign ID (required for stop/status/results)
+  action=<action>                   Action to perform (required)
+    fuzz                            Start a fuzz job
+    fuzz_pause                      Pause a running fuzz job
+    fuzz_resume                     Resume a paused fuzz job
+    fuzz_cancel                     Cancel a fuzz job
+  params.flow_id=<id>               Template flow ID (required for fuzz)
+  params.fuzz_id=<id>               Fuzz job ID (required for pause/resume/cancel)
+  params.concurrency=<n>            Concurrent workers (default: 1, max: 100)
+  params.rate_limit_rps=<n>         Requests per second limit (0=unlimited)
+  params.delay_ms=<n>               Delay between requests in ms
+  params.timeout_ms=<n>             Request timeout in ms (default: 30000)
+  params.tag=<tag>                  Tag for the fuzz job
+
+Note: fuzz action requires 'positions' and 'payload_sets' — use JSON input or MCP client for full definitions.
+      Use 'query resource=fuzz_jobs' to list jobs, 'query resource=fuzz_results fuzz_id=<id>' for results.
 
 Examples:
-  yorishiro-proxy client fuzz action=start flow_id=abc123
-  yorishiro-proxy client fuzz action=results campaign_id=xyz789`,
+  yorishiro-proxy client fuzz action=fuzz_pause params.fuzz_id=xyz789
+  yorishiro-proxy client fuzz action=fuzz_cancel params.fuzz_id=xyz789`,
 
 	"plugin": `plugin: Manage Starlark plugins.
 
 Parameters (key=value):
-  action=load|unload|list|reload  Action to perform (required)
-  name=<name>             Plugin name
-  path=<path>             Plugin file path (for load)
+  action=<action>                   Action to perform (required)
+    list                            List all registered plugins
+    reload                          Reload a plugin (or all if name omitted)
+    enable                          Enable a disabled plugin
+    disable                         Disable a plugin
+  params.name=<name>                Plugin name (required for enable/disable, optional for reload)
 
 Examples:
   yorishiro-proxy client plugin action=list
-  yorishiro-proxy client plugin action=load name=myplugin path=/path/to/plugin.star`,
+  yorishiro-proxy client plugin action=reload params.name=myplugin
+  yorishiro-proxy client plugin action=enable params.name=myplugin
+  yorishiro-proxy client plugin action=disable params.name=myplugin`,
 }
 
 // clientToolList is the ordered list of available MCP tools for help display.
