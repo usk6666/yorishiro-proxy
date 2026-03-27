@@ -90,11 +90,13 @@ yorishiro-proxy server
 yorishiro-proxy server -mcp-http-addr 127.0.0.1:3000 -open-browser
 ```
 
-起動時にログに認証トークン付きの Web UI URL が出力されます:
+起動時にログに Web UI の URL が出力されます:
 
 ```
-WebUI available url=http://127.0.0.1:3000/?token=<random-token>
+WebUI available url=http://127.0.0.1:3000/
 ```
+
+認証トークンは `~/.yorishiro-proxy/server.json` に書き込まれ、デバッグログレベル（`-log-level debug`）では URL に含まれた形でも出力されます。
 
 ### 4. 最初のキャプチャ
 
