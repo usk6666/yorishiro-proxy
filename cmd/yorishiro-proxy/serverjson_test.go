@@ -199,9 +199,9 @@ func TestRemoveServerJSON_OwnPIDOnly(t *testing.T) {
 	}
 }
 
-// TestRemoveServerJSON_DeletesFileWhenEmpty verifies that server.json is deleted
-// when removing the last (own) entry.
-func TestRemoveServerJSON_DeletesFileWhenEmpty(t *testing.T) {
+// TestRemoveServerJSON_KeepsFileWithEmptyArrayWhenEmpty verifies that server.json
+// is kept with an empty JSON array when removing the last (own) entry.
+func TestRemoveServerJSON_KeepsFileWithEmptyArrayWhenEmpty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
 
@@ -222,8 +222,27 @@ func TestRemoveServerJSON_DeletesFileWhenEmpty(t *testing.T) {
 
 	removeServerJSON()
 
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("expected server.json to be deleted, but it still exists (err=%v)", err)
+	// File should still exist.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected server.json to exist, got: %v", err)
+	}
+
+	// Content should be an empty JSON array.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read server.json: %v", err)
+	}
+	if string(data) != "[]\n" {
+		t.Errorf("expected empty array content %q, got %q", "[]\n", string(data))
+	}
+
+	// readServerJSONSlice should return an empty slice.
+	entries, err := readServerJSONSlice(path)
+	if err != nil {
+		t.Fatalf("readServerJSONSlice: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d: %+v", len(entries), entries)
 	}
 }
 
