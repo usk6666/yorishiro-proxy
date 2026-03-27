@@ -113,7 +113,7 @@ func writeServerJSON(data *ServerJSON) error {
 }
 
 // removeServerJSON removes only the entry for the current process from server.json.
-// If no entries remain after removal, the file is deleted.
+// If no entries remain after removal, the file is kept with an empty JSON array.
 // It is a best-effort operation: errors are ignored because the process is exiting.
 func removeServerJSON() {
 	path, err := serverJSONPath()
@@ -134,17 +134,17 @@ func removeServerJSON() {
 		}
 	}
 
+	var b []byte
 	if len(remaining) == 0 {
-		_ = os.Remove(path)
-		return
+		b = []byte("[]\n")
+	} else {
+		var err error
+		b, err = json.MarshalIndent(remaining, "", "  ")
+		if err != nil {
+			return
+		}
+		b = append(b, '\n')
 	}
-
-	b, err := json.MarshalIndent(remaining, "", "  ")
-	if err != nil {
-		return
-	}
-	b = append(b, '\n')
-
 	dir := filepath.Dir(path)
 	tmpFile, err := os.CreateTemp(dir, ".server.json.tmp.*")
 	if err != nil {
