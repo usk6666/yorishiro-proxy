@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"net/http"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // filterOutputBody applies the SafetyFilter output masking to the given body data.
@@ -27,13 +29,13 @@ func (s *Server) filterOutputHeaders(headers http.Header) http.Header {
 	if s.deps.safetyEngine == nil {
 		return headers
 	}
-	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(headers)
+	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(httputil.HTTPHeaderToRawHeaders(headers))
 	if len(matches) > 0 {
 		slog.Debug("SafetyFilter output masking applied to headers",
 			"matches", len(matches),
 		)
 	}
-	return filtered
+	return httputil.RawHeadersToHTTPHeader(filtered)
 }
 
 // filterOutputMessages applies SafetyFilter output masking to query message entries.

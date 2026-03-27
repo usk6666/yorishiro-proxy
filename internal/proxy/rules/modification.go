@@ -6,10 +6,11 @@ package rules
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // maxRegexPatternLen is the maximum allowed length (in bytes) for regex
@@ -182,7 +183,7 @@ func compileConditionPatterns(cond Conditions, cr *compiledRule) error {
 			if err != nil {
 				return err
 			}
-			cr.headerMatchRes[http.CanonicalHeaderKey(name)] = re
+			cr.headerMatchRes[strings.ToLower(name)] = re
 		}
 	}
 
@@ -251,7 +252,7 @@ func validateAction(a Action) error {
 
 // matchesRequest evaluates whether the compiled rule matches the given
 // HTTP method, URL, and headers.
-func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.Header) bool {
+func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers parser.RawHeaders) bool {
 	// Check URL pattern against the full URL (scheme + host + path + query).
 	if cr.urlPatternRe != nil {
 		fullURL := ""
@@ -295,7 +296,7 @@ func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.H
 
 // matchesResponse evaluates whether the compiled rule matches the given
 // response status code and headers.
-func (cr *compiledRule) matchesResponse(statusCode int, headers http.Header) bool {
+func (cr *compiledRule) matchesResponse(statusCode int, headers parser.RawHeaders) bool {
 	// For response matching, url_pattern and methods are not applicable.
 	// Only header_match applies.
 	if len(cr.headerMatchRes) > 0 {

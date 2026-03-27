@@ -6,10 +6,11 @@ package intercept
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // Direction specifies whether a rule applies to requests, responses, or both.
@@ -179,7 +180,7 @@ func compileRule(r Rule) (*compiledRule, error) {
 				}
 			}
 			// Store with canonical header name for consistent lookup.
-			cr.headerMatchRes[http.CanonicalHeaderKey(name)] = re
+			cr.headerMatchRes[strings.ToLower(name)] = re
 		}
 	}
 
@@ -189,7 +190,7 @@ func compileRule(r Rule) (*compiledRule, error) {
 // matchesRequest evaluates whether the compiled rule matches the given
 // HTTP method, URL, and headers. Only applicable conditions are checked;
 // empty conditions match everything.
-func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.Header) bool {
+func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers parser.RawHeaders) bool {
 	if !cr.matchesHost(u, headers) {
 		return false
 	}
@@ -207,7 +208,7 @@ func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers http.H
 
 // matchesHost checks whether the request host matches the compiled host pattern.
 // For HTTPS MITM (CONNECT tunnel), u.Host may be empty; falls back to the Host header.
-func (cr *compiledRule) matchesHost(u *url.URL, headers http.Header) bool {
+func (cr *compiledRule) matchesHost(u *url.URL, headers parser.RawHeaders) bool {
 	if cr.hostPatternRe == nil {
 		return true
 	}
@@ -247,7 +248,7 @@ func (cr *compiledRule) matchesMethod(method string) bool {
 }
 
 // matchesHeaders checks whether the request headers match all compiled header patterns.
-func (cr *compiledRule) matchesHeaders(headers http.Header) bool {
+func (cr *compiledRule) matchesHeaders(headers parser.RawHeaders) bool {
 	if len(cr.headerMatchRes) == 0 {
 		return true
 	}
@@ -266,7 +267,7 @@ func (cr *compiledRule) matchesHeaders(headers http.Header) bool {
 // matchesResponse evaluates whether the compiled rule matches the given
 // response status code and headers. Host pattern, path pattern, and method
 // conditions are not applicable to responses and are ignored.
-func (cr *compiledRule) matchesResponse(statusCode int, headers http.Header) bool {
+func (cr *compiledRule) matchesResponse(statusCode int, headers parser.RawHeaders) bool {
 	// For response matching, host_pattern, path_pattern, and methods are not applicable.
 	// Only header_match applies.
 	if len(cr.headerMatchRes) > 0 {

@@ -2,9 +2,9 @@ package httputil
 
 import (
 	"encoding/json"
-	gohttp "net/http"
 
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // MergeTechnologyTags runs the fingerprint detector (if non-nil) on the
@@ -12,7 +12,7 @@ import (
 // base tags map. The result is stored as a JSON array under the key
 // "technologies". If the detector is nil or detects nothing, the original
 // tags are returned unchanged.
-func MergeTechnologyTags(baseTags map[string]string, det *fingerprint.Detector, headers gohttp.Header, body []byte) map[string]string {
+func MergeTechnologyTags(baseTags map[string]string, det *fingerprint.Detector, headers parser.RawHeaders, body []byte) map[string]string {
 	if det == nil {
 		return baseTags
 	}

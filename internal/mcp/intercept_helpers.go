@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
@@ -137,7 +138,7 @@ func (s *Server) checkInterceptSafety(params interceptParams) error {
 			headers.Add(k, v)
 		}
 	}
-	if v := s.deps.safetyEngine.CheckInput(body, params.OverrideURL, headers); v != nil {
+	if v := s.deps.safetyEngine.CheckInput(body, params.OverrideURL, httputil.HTTPHeaderToRawHeaders(headers)); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil

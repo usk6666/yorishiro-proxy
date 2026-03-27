@@ -3,10 +3,11 @@ package rules
 import (
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"sort"
 	"sync"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // Pipeline manages auto-transform rules and applies them to HTTP requests
@@ -154,7 +155,7 @@ func (p *Pipeline) Clear() {
 // TransformRequest applies all matching enabled request rules to the given
 // request headers and body, returning the potentially modified headers and body.
 // Rules are applied in priority order (lower priority values first).
-func (p *Pipeline) TransformRequest(method string, u *url.URL, headers http.Header, body []byte) (http.Header, []byte) {
+func (p *Pipeline) TransformRequest(method string, u *url.URL, headers parser.RawHeaders, body []byte) (parser.RawHeaders, []byte) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -183,7 +184,7 @@ func (p *Pipeline) TransformRequest(method string, u *url.URL, headers http.Head
 // TransformResponse applies all matching enabled response rules to the given
 // response headers and body, returning the potentially modified headers and body.
 // Rules are applied in priority order (lower priority values first).
-func (p *Pipeline) TransformResponse(statusCode int, headers http.Header, body []byte) (http.Header, []byte) {
+func (p *Pipeline) TransformResponse(statusCode int, headers parser.RawHeaders, body []byte) (parser.RawHeaders, []byte) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -210,10 +211,10 @@ func (p *Pipeline) TransformResponse(statusCode int, headers http.Header, body [
 }
 
 // applyAction applies a single rule's action to the headers and body.
-func applyAction(cr *compiledRule, headers http.Header, body []byte) (http.Header, []byte) {
+func applyAction(cr *compiledRule, headers parser.RawHeaders, body []byte) (parser.RawHeaders, []byte) {
 	switch cr.rule.Action.Type {
 	case ActionAddHeader:
-		headers.Add(cr.rule.Action.Header, cr.rule.Action.Value)
+		headers = append(headers, parser.RawHeader{Name: cr.rule.Action.Header, Value: cr.rule.Action.Value})
 	case ActionSetHeader:
 		headers.Set(cr.rule.Action.Header, cr.rule.Action.Value)
 	case ActionRemoveHeader:

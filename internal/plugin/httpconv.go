@@ -5,6 +5,8 @@ import (
 	gohttp "net/http"
 	"net/url"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // HTTPRequestToMap converts an HTTP request and its associated metadata into
@@ -24,7 +26,7 @@ func HTTPRequestToMap(req *gohttp.Request, body []byte, connInfo *ConnInfo, prot
 	if req == nil {
 		return map[string]any{}
 	}
-	headers := headersToMap(req.Header)
+	headers := headersToMap(goHeaderToRaw(req.Header))
 	// Ensure Host header is present (Go strips it from Header and stores in req.Host).
 	if req.Host != "" {
 		headers["Host"] = []any{req.Host}
@@ -81,8 +83,8 @@ func HTTPResponseToMap(resp *gohttp.Response, body []byte, req *gohttp.Request, 
 
 	m := map[string]any{
 		"status_code": resp.StatusCode,
-		"headers":     headersToMap(resp.Header),
-		"trailers":    headersToMap(resp.Trailer),
+		"headers":     headersToMap(goHeaderToRaw(resp.Header)),
+		"trailers":    headersToMap(goHeaderToRaw(resp.Trailer)),
 		"body":        body,
 		"protocol":    protocol,
 	}
@@ -190,7 +192,7 @@ func applyRequestHeaders(req *gohttp.Request, data map[string]any) {
 	if v, ok := data["headers"]; ok {
 		newHeaders := mapToHeaders(v)
 		if newHeaders != nil {
-			req.Header = newHeaders
+			req.Header = rawToGoHeader(newHeaders)
 		}
 	}
 }
@@ -234,14 +236,14 @@ func ApplyHTTPResponseChanges(resp *gohttp.Response, data map[string]any) (*goht
 	if v, ok := data["headers"]; ok {
 		newHeaders := mapToHeaders(v)
 		if newHeaders != nil {
-			resp.Header = newHeaders
+			resp.Header = rawToGoHeader(newHeaders)
 		}
 	}
 
 	if v, ok := data["trailers"]; ok {
 		newTrailers := mapToHeaders(v)
 		if newTrailers != nil {
-			resp.Trailer = newTrailers
+			resp.Trailer = rawToGoHeader(newTrailers)
 		}
 	}
 
@@ -257,46 +259,52 @@ func ApplyHTTPResponseChanges(resp *gohttp.Response, data map[string]any) (*goht
 	return resp, body, nil
 }
 
-// headersToMap converts net/http.Header to a map[string]any where each value
+// headersToMap converts parser.RawHeaders to a map[string]any where each value
 // is a []any of strings. This format is compatible with Starlark dict conversion.
-func headersToMap(h gohttp.Header) map[string]any {
+func headersToMap(h parser.RawHeaders) map[string]any {
 	if h == nil {
 		return map[string]any{}
 	}
-	m := make(map[string]any, len(h))
-	for k, vals := range h {
-		list := make([]any, len(vals))
-		for i, v := range vals {
-			list[i] = v
+	// Group by header name preserving first-seen casing.
+	ordered := make([]string, 0, len(h))
+	groups := make(map[string][]any, len(h))
+	for _, hdr := range h {
+		key := hdr.Name
+		if _, exists := groups[key]; !exists {
+			ordered = append(ordered, key)
 		}
-		m[k] = list
+		groups[key] = append(groups[key], hdr.Value)
+	}
+	m := make(map[string]any, len(ordered))
+	for _, key := range ordered {
+		m[key] = groups[key]
 	}
 	return m
 }
 
-// mapToHeaders converts a map (from Starlark) back to net/http.Header.
+// mapToHeaders converts a map (from Starlark) back to parser.RawHeaders.
 // Supports map[string]any with []any string values or []string values.
-func mapToHeaders(v any) gohttp.Header {
+func mapToHeaders(v any) parser.RawHeaders {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return nil
 	}
-	h := make(gohttp.Header, len(m))
+	var h parser.RawHeaders
 	for k, val := range m {
 		safeKey := sanitizeHeaderToken(k)
 		switch vals := val.(type) {
 		case []any:
 			for _, item := range vals {
 				if s, ok := item.(string); ok {
-					h.Add(safeKey, sanitizeHeaderToken(s))
+					h = append(h, parser.RawHeader{Name: safeKey, Value: sanitizeHeaderToken(s)})
 				}
 			}
 		case []string:
 			for _, s := range vals {
-				h.Add(safeKey, sanitizeHeaderToken(s))
+				h = append(h, parser.RawHeader{Name: safeKey, Value: sanitizeHeaderToken(s)})
 			}
 		case string:
-			h.Set(safeKey, sanitizeHeaderToken(vals))
+			h = append(h, parser.RawHeader{Name: safeKey, Value: sanitizeHeaderToken(vals)})
 		}
 	}
 	return h
@@ -304,7 +312,7 @@ func mapToHeaders(v any) gohttp.Header {
 
 // BuildRespondResponse constructs an HTTP response map from a RESPOND action's
 // ResponseData. Returns status code, headers map, and body bytes.
-func BuildRespondResponse(responseData map[string]any) (statusCode int, headers gohttp.Header, body []byte) {
+func BuildRespondResponse(responseData map[string]any) (statusCode int, headers parser.RawHeaders, body []byte) {
 	statusCode = gohttp.StatusOK // default
 
 	if v, ok := responseData["status_code"]; ok {
@@ -318,7 +326,6 @@ func BuildRespondResponse(responseData map[string]any) (statusCode int, headers 
 		}
 	}
 
-	headers = make(gohttp.Header)
 	if v, ok := responseData["headers"]; ok {
 		if h := mapToHeaders(v); h != nil {
 			headers = h
@@ -356,4 +363,32 @@ func validStatusCode(code, fallback int) int {
 		return code
 	}
 	return fallback
+}
+
+// goHeaderToRaw converts net/http.Header to parser.RawHeaders.
+// This is a temporary bridge until the handler pipeline is fully migrated.
+func goHeaderToRaw(h gohttp.Header) parser.RawHeaders {
+	if h == nil {
+		return nil
+	}
+	var rh parser.RawHeaders
+	for name, vals := range h {
+		for _, v := range vals {
+			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+		}
+	}
+	return rh
+}
+
+// rawToGoHeader converts parser.RawHeaders back to net/http.Header.
+// This is a temporary bridge until the handler pipeline is fully migrated.
+func rawToGoHeader(rh parser.RawHeaders) gohttp.Header {
+	if rh == nil {
+		return nil
+	}
+	h := make(gohttp.Header, len(rh))
+	for _, hdr := range rh {
+		h.Add(hdr.Name, hdr.Value)
+	}
+	return h
 }

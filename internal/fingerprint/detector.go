@@ -1,8 +1,9 @@
 package fingerprint
 
 import (
-	"net/http"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // Detector performs technology stack detection on HTTP responses.
@@ -26,7 +27,7 @@ const maxFingerprintBodySize = 64 * 1024 // 64KB
 // technologies. The body parameter should contain the response body content
 // (or a prefix thereof — full body is not required).
 // Both headers and body may be nil/empty.
-func (d *Detector) Analyze(headers http.Header, body []byte) *Result {
+func (d *Detector) Analyze(headers parser.RawHeaders, body []byte) *Result {
 	seen := make(map[string]Detection) // key = "name|category" for dedup
 	// Truncate body for pattern matching to avoid CPU spikes on large bodies.
 	// Technology signatures typically appear early in the response.
@@ -131,7 +132,7 @@ func versionFromMatch(m []string) string {
 }
 
 // extractCookieNames parses Set-Cookie headers and returns cookie names.
-func extractCookieNames(headers http.Header) []string {
+func extractCookieNames(headers parser.RawHeaders) []string {
 	values := headers.Values("Set-Cookie")
 	if len(values) == 0 {
 		return nil

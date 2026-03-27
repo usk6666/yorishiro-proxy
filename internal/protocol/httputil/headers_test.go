@@ -5,6 +5,7 @@ import (
 	gohttp "net/http"
 	"testing"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
@@ -81,12 +82,13 @@ func TestValidateCRLFHeaders(t *testing.T) {
 }
 
 func TestApplyHeaderModifications(t *testing.T) {
-	h := gohttp.Header{}
-	h.Set("X-Existing", "old")
-	h.Set("X-Remove", "gone")
+	h := parser.RawHeaders{
+		{Name: "X-Existing", Value: "old"},
+		{Name: "X-Remove", Value: "gone"},
+	}
 
 	ApplyHeaderModifications(
-		h,
+		&h,
 		map[string]string{"X-Existing": "new"},
 		map[string]string{"X-Add": "added"},
 		[]string{"X-Remove"},

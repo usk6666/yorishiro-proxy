@@ -12,6 +12,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // fuzzInput is the typed input for the fuzz tool.
@@ -169,7 +170,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 	if s.deps.safetyEngine != nil {
 		se := s.deps.safetyEngine
 		cfg.SafetyInputChecker = func(body []byte, rawURL string, headers http.Header) error {
-			if v := se.CheckInput(body, rawURL, headers); v != nil {
+			if v := se.CheckInput(body, rawURL, httputil.HTTPHeaderToRawHeaders(headers)); v != nil {
 				return fmt.Errorf("%s", safetyViolationError(v))
 			}
 			return nil
@@ -259,7 +260,7 @@ func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Message) error {
 	if msg.Headers != nil {
 		headers = http.Header(msg.Headers)
 	}
-	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
+	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, httputil.HTTPHeaderToRawHeaders(headers)); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil

@@ -276,8 +276,9 @@ func TestBuildRespondResponse_Defaults(t *testing.T) {
 	if statusCode != 200 {
 		t.Errorf("default statusCode = %d, want 200", statusCode)
 	}
-	if headers == nil {
-		t.Error("headers should not be nil")
+	// When no headers are provided in responseData, RawHeaders is nil.
+	if headers != nil {
+		t.Errorf("headers should be nil when not provided, got %v", headers)
 	}
 	if body != nil {
 		t.Errorf("body should be nil, got %v", body)
@@ -291,11 +292,11 @@ func TestHeadersToMap_RoundTrip(t *testing.T) {
 		"Accept":        {"text/html", "application/json"},
 	}
 
-	m := headersToMap(original)
+	m := headersToMap(goHeaderToRaw(original))
 	restored := mapToHeaders(m)
 
 	for key, wantVals := range original {
-		gotVals := restored[key]
+		gotVals := restored.Values(key)
 		if len(gotVals) != len(wantVals) {
 			t.Errorf("header %q: got %d values, want %d", key, len(gotVals), len(wantVals))
 			continue

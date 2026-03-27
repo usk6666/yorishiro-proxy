@@ -1,8 +1,9 @@
 package fingerprint
 
 import (
-	"net/http"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 func TestNewDetector(t *testing.T) {
@@ -18,11 +19,11 @@ func TestNewDetector(t *testing.T) {
 func TestAnalyze_EmptyInputs(t *testing.T) {
 	tests := []struct {
 		name    string
-		headers http.Header
+		headers parser.RawHeaders
 		body    []byte
 	}{
 		{"nil inputs", nil, nil},
-		{"empty inputs", http.Header{}, []byte{}},
+		{"empty inputs", parser.RawHeaders{}, []byte{}},
 	}
 
 	d := NewDetector()
@@ -59,7 +60,7 @@ func TestAnalyze_WebServers(t *testing.T) {
 	d := NewDetector()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := http.Header{}
+			h := parser.RawHeaders{}
 			h.Set("Server", tt.server)
 			result := d.Analyze(h, nil)
 			if !result.Has(tt.wantName) {
@@ -98,7 +99,7 @@ func TestAnalyze_XPoweredBy(t *testing.T) {
 	d := NewDetector()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := http.Header{}
+			h := parser.RawHeaders{}
 			h.Set("X-Powered-By", tt.value)
 			result := d.Analyze(h, nil)
 			if !result.Has(tt.wantName) {
@@ -133,8 +134,9 @@ func TestAnalyze_CookieDetection(t *testing.T) {
 	d := NewDetector()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := http.Header{}
-			h.Add("Set-Cookie", tt.cookie)
+			h := parser.RawHeaders{
+				{Name: "Set-Cookie", Value: tt.cookie},
+			}
 			result := d.Analyze(h, nil)
 			if !result.Has(tt.wantName) {
 				t.Errorf("expected detection of %q from cookie %q, got: %v",
@@ -186,7 +188,7 @@ func TestAnalyze_CDN_WAF(t *testing.T) {
 	d := NewDetector()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := http.Header{}
+			h := parser.RawHeaders{}
 			for k, v := range tt.headers {
 				h.Set(k, v)
 			}
@@ -272,7 +274,7 @@ func TestAnalyze_BodyPatterns(t *testing.T) {
 	d := NewDetector()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := d.Analyze(http.Header{}, []byte(tt.body))
+			result := d.Analyze(parser.RawHeaders{}, []byte(tt.body))
 			found := false
 			for _, det := range result.Detections {
 				if det.Name == tt.wantName && det.Category == tt.wantCat {
@@ -289,10 +291,11 @@ func TestAnalyze_BodyPatterns(t *testing.T) {
 
 func TestAnalyze_MultipleDetections(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
-	h.Set("Server", "nginx/1.25.3")
-	h.Set("X-Powered-By", "PHP/8.2.3")
-	h.Add("Set-Cookie", "PHPSESSID=abc123; Path=/")
+	h := parser.RawHeaders{
+		{Name: "Server", Value: "nginx/1.25.3"},
+		{Name: "X-Powered-By", Value: "PHP/8.2.3"},
+		{Name: "Set-Cookie", Value: "PHPSESSID=abc123; Path=/"},
+	}
 	body := []byte(`<link href="/wp-content/themes/style.css">`)
 
 	result := d.Analyze(h, body)
@@ -308,9 +311,10 @@ func TestAnalyze_MultipleDetections(t *testing.T) {
 
 func TestAnalyze_Deduplication(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
-	h.Set("X-Powered-By", "PHP/8.2.3")
-	h.Add("Set-Cookie", "PHPSESSID=abc123; Path=/")
+	h := parser.RawHeaders{
+		{Name: "X-Powered-By", Value: "PHP/8.2.3"},
+		{Name: "Set-Cookie", Value: "PHPSESSID=abc123; Path=/"},
+	}
 
 	result := d.Analyze(h, nil)
 
@@ -335,7 +339,7 @@ func TestAnalyze_Deduplication(t *testing.T) {
 
 func TestAnalyze_ASPNETHeaders(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
+	h := parser.RawHeaders{}
 	h.Set("X-AspNet-Version", "4.0.30319")
 	h.Set("X-AspNetMvc-Version", "5.2.7")
 
@@ -370,7 +374,7 @@ func TestAnalyze_LanguageServers(t *testing.T) {
 	d := NewDetector()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := http.Header{}
+			h := parser.RawHeaders{}
 			h.Set("Server", tt.server)
 			result := d.Analyze(h, nil)
 			if !result.Has(tt.wantName) {
@@ -383,7 +387,7 @@ func TestAnalyze_LanguageServers(t *testing.T) {
 
 func TestAnalyze_DrupalGenerator(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
+	h := parser.RawHeaders{}
 	h.Set("X-Generator", "Drupal 10")
 
 	result := d.Analyze(h, nil)
@@ -401,7 +405,7 @@ func TestAnalyze_DrupalGenerator(t *testing.T) {
 
 func TestAnalyze_JoomlaHeader(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
+	h := parser.RawHeaders{}
 	h.Set("X-Content-Encoded-By", "Joomla! 4.3")
 
 	result := d.Analyze(h, nil)
@@ -412,7 +416,7 @@ func TestAnalyze_JoomlaHeader(t *testing.T) {
 
 func TestAnalyze_NoFalsePositives(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
+	h := parser.RawHeaders{}
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Content-Length", "1234")
 	body := []byte(`<html><body><h1>Hello World</h1></body></html>`)
@@ -425,7 +429,7 @@ func TestAnalyze_NoFalsePositives(t *testing.T) {
 
 func TestAnalyze_CaseInsensitive(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
+	h := parser.RawHeaders{}
 	h.Set("Server", "NGINX/1.20.0")
 
 	result := d.Analyze(h, nil)
@@ -436,7 +440,7 @@ func TestAnalyze_CaseInsensitive(t *testing.T) {
 
 func TestAnalyze_RubyPassenger(t *testing.T) {
 	d := NewDetector()
-	h := http.Header{}
+	h := parser.RawHeaders{}
 	h.Set("X-Powered-By", "Phusion Passenger 6.0.18")
 
 	result := d.Analyze(h, nil)
@@ -494,7 +498,7 @@ func TestAnalyze_jQueryVersionExtraction(t *testing.T) {
 	d := NewDetector()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := d.Analyze(http.Header{}, []byte(tt.body))
+			result := d.Analyze(parser.RawHeaders{}, []byte(tt.body))
 			if !result.Has("jQuery") {
 				t.Fatalf("expected jQuery detection, got: %v", result.Names())
 			}
