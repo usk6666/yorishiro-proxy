@@ -1032,3 +1032,97 @@ func TestParseRequest_AmbiguousTE_TabInValue(t *testing.T) {
 		t.Error("expected AmbiguousTE anomaly for tab character in TE value")
 	}
 }
+
+// --- CP-24: readTrailers pre-append size check ---
+
+func TestParseRequest_ChunkedBody_TrailerFragmentPreAppendCheck(t *testing.T) {
+	// Verify that readTrailers enforces the size limit BEFORE appending the
+	// fragment to the line slice. We construct a chunked body with a small
+	// chunk followed by trailers that push past maxChunkedBodySize.
+	var b strings.Builder
+	b.WriteString("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+	b.WriteString("1\r\nA\r\n") // 1-byte chunk
+	b.WriteString("0\r\n")      // terminal chunk
+	// Single very long trailer line to test the pre-append guard.
+	b.WriteString("X-Huge: " + strings.Repeat("Z", maxChunkedBodySize) + "\r\n")
+	b.WriteString("\r\n")
+
+	req, err := ParseRequest(newReader(b.String()))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	_, err = io.ReadAll(req.Body)
+	if err == nil {
+		t.Error("expected error for oversized trailer fragment exceeding maxChunkedBodySize")
+	}
+}
+
+// --- CP-25: comma-separated TE token validation ---
+
+func TestParseRequest_InvalidTE_CommaSeparatedList(t *testing.T) {
+	tests := []struct {
+		name        string
+		te          string
+		wantInvalid bool
+	}{
+		{
+			name:        "gzip,chunked is valid",
+			te:          "gzip, chunked",
+			wantInvalid: false,
+		},
+		{
+			name:        "compress,chunked is valid",
+			te:          "compress, chunked",
+			wantInvalid: false,
+		},
+		{
+			name:        "deflate,chunked is valid",
+			te:          "deflate, chunked",
+			wantInvalid: false,
+		},
+		{
+			name:        "identity is valid",
+			te:          "identity",
+			wantInvalid: false,
+		},
+		{
+			name:        "chunked alone is valid",
+			te:          "chunked",
+			wantInvalid: false,
+		},
+		{
+			name:        "xchunked is invalid",
+			te:          "xchunked",
+			wantInvalid: true,
+		},
+		{
+			name:        "gzip,bogus,chunked has invalid token",
+			te:          "gzip, bogus, chunked",
+			wantInvalid: true,
+		},
+		{
+			name:        "cow is invalid",
+			te:          "cow",
+			wantInvalid: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: " + tt.te + "\r\n\r\n"
+			req, err := ParseRequest(newReader(raw))
+			if err != nil {
+				t.Fatalf("ParseRequest() error: %v", err)
+			}
+			hasInvalid := false
+			for _, a := range req.Anomalies {
+				if a.Type == AnomalyInvalidTE {
+					hasInvalid = true
+				}
+			}
+			if hasInvalid != tt.wantInvalid {
+				t.Errorf("InvalidTE anomaly = %v, want %v (TE: %q)", hasInvalid, tt.wantInvalid, tt.te)
+			}
+		})
+	}
+}

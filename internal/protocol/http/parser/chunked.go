@@ -139,11 +139,13 @@ func (cr *rawChunkedReader) readTrailers() {
 		var line []byte
 		for {
 			fragment, err := cr.r.ReadSlice('\n')
-			line = append(line, fragment...)
-			if cr.buf.Len()+len(line) > maxChunkedBodySize {
+			// Enforce size limit before growing the line slice to prevent
+			// large allocations from a single oversized ReadSlice fragment.
+			if cr.buf.Len()+len(line)+len(fragment) > maxChunkedBodySize {
 				cr.err = fmt.Errorf("chunked body exceeds maximum size %d", maxChunkedBodySize)
 				return
 			}
+			line = append(line, fragment...)
 			if err == nil {
 				break
 			}

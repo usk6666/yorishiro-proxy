@@ -371,14 +371,20 @@ func detectSmugglingAnomalies(headers RawHeaders, anomalies *[]Anomaly) {
 		}
 	}
 
-	// Check Transfer-Encoding values.
+	// Check Transfer-Encoding values — validate each token in comma-separated
+	// lists per RFC 7230. Standard tokens: chunked, compress, deflate, gzip, identity.
 	for _, te := range teValues {
-		normalized := strings.ToLower(strings.TrimSpace(te))
-		if normalized != "chunked" && normalized != "identity" && normalized != "" {
-			*anomalies = append(*anomalies, Anomaly{
-				Type:   AnomalyInvalidTE,
-				Detail: fmt.Sprintf("non-standard Transfer-Encoding value: %q", te),
-			})
+		for _, rawToken := range strings.Split(te, ",") {
+			token := strings.ToLower(strings.TrimSpace(rawToken))
+			if token == "" {
+				continue
+			}
+			if token != "chunked" && token != "identity" && token != "gzip" && token != "compress" && token != "deflate" {
+				*anomalies = append(*anomalies, Anomaly{
+					Type:   AnomalyInvalidTE,
+					Detail: fmt.Sprintf("non-standard Transfer-Encoding token %q in header value %q", token, te),
+				})
+			}
 		}
 	}
 
