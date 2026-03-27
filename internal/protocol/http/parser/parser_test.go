@@ -681,3 +681,98 @@ func TestParseRequest_RawBytesTruncation(t *testing.T) {
 		t.Errorf("RawBytes len = %d, should not exceed %d", len(req.RawBytes), maxRawCaptureSize)
 	}
 }
+
+// --- CP-1: readLine maxLen enforcement regardless of bufio buffer size ---
+
+func TestReadLine_MaxLenEnforcedWithLargeBuffer(t *testing.T) {
+	// Create a line longer than maxRequestLineSize but shorter than the bufio
+	// buffer, so ReadSlice succeeds in one call (err==nil).
+	oversized := "GET /" + strings.Repeat("A", maxRequestLineSize) + " HTTP/1.1\r\nHost: x\r\n\r\n"
+	// Use a bufio.Reader with buffer larger than the line.
+	r := bufio.NewReaderSize(strings.NewReader(oversized), maxRequestLineSize+4096)
+	_, err := ParseRequest(r)
+	if err == nil {
+		t.Error("expected error for request line exceeding maxRequestLineSize")
+	}
+}
+
+// --- CP-2/CP-3: exact token match for chunked Transfer-Encoding ---
+
+func TestHasChunkedTE(t *testing.T) {
+	tests := []struct {
+		te   string
+		want bool
+	}{
+		{"chunked", true},
+		{"Chunked", true},
+		{" chunked ", true},
+		{"gzip, chunked", true},
+		{"chunked, gzip", true},
+		{"xchunked", false},
+		{"chunkedX", false},
+		{"xchunkedx", false},
+		{"", false},
+		{"identity", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.te, func(t *testing.T) {
+			got := hasChunkedTE(tt.te)
+			if got != tt.want {
+				t.Errorf("hasChunkedTE(%q) = %v, want %v", tt.te, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveRequestBody_InvalidChunkedTE(t *testing.T) {
+	// "xchunked" should NOT be treated as chunked TE.
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: xchunked\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if len(body) != 0 {
+		t.Errorf("xchunked TE should not activate chunked reader, got %d bytes", len(body))
+	}
+}
+
+func TestResolveResponseBody_InvalidChunkedTE(t *testing.T) {
+	// "chunkedX" should NOT be treated as chunked TE.
+	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunkedX\r\nConnection: close\r\n\r\nsome body"
+	resp, err := ParseResponse(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseResponse() error: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	// With Connection: close and no valid chunked TE, body reads until EOF.
+	if string(body) != "some body" {
+		t.Errorf("body = %q, want %q", string(body), "some body")
+	}
+}
+
+// --- CP-4: orphan obs-fold line records anomaly ---
+
+func TestParseRequest_OrphanObsFold(t *testing.T) {
+	// Continuation line at the very start of headers (no preceding header).
+	raw := "GET / HTTP/1.1\r\n \torphan-continuation\r\nHost: x\r\n\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	hasObsFold := false
+	for _, a := range req.Anomalies {
+		if a.Type == AnomalyObsFold {
+			hasObsFold = true
+		}
+	}
+	if !hasObsFold {
+		t.Error("expected ObsFold anomaly for orphan continuation line")
+	}
+}

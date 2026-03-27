@@ -213,7 +213,11 @@ func readLine(r *bufio.Reader, cw *captureWriter, maxLen int) (string, error) {
 
 		line = append(line, segment...)
 		if err == nil {
-			// Found \n.
+			// Found \n — also enforce maxLen for single-read success
+			// (bufio buffer may be larger than maxLen).
+			if len(line) > maxLen {
+				return "", fmt.Errorf("line exceeds maximum length %d", maxLen)
+			}
 			break
 		}
 		if err == bufio.ErrBufferFull {
@@ -272,6 +276,12 @@ func parseHeaders(r *bufio.Reader, cw *captureWriter) (RawHeaders, []Anomaly, er
 				anomalies = append(anomalies, Anomaly{
 					Type:   AnomalyObsFold,
 					Detail: "obsolete line folding detected in header",
+				})
+			} else {
+				// Orphan continuation line with no preceding header.
+				anomalies = append(anomalies, Anomaly{
+					Type:   AnomalyObsFold,
+					Detail: "obsolete line folding with no preceding header",
 				})
 			}
 			continue
@@ -377,6 +387,18 @@ func detectSmugglingAnomalies(headers RawHeaders, anomalies *[]Anomaly) {
 	}
 }
 
+// hasChunkedTE reports whether the Transfer-Encoding header value contains
+// an exact "chunked" token. It splits by comma, trims whitespace, and performs
+// case-insensitive comparison to avoid matching invalid values like "xchunked".
+func hasChunkedTE(te string) bool {
+	for _, token := range strings.Split(te, ",") {
+		if strings.EqualFold(strings.TrimSpace(token), "chunked") {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldClose determines if the connection should be closed after this message.
 func shouldClose(headers RawHeaders, proto string) bool {
 	conn := strings.ToLower(headers.Get("Connection"))
@@ -397,11 +419,9 @@ func shouldClose(headers RawHeaders, proto string) bool {
 // resolveRequestBody creates an appropriate body reader for a request.
 // The body is NOT decoded — chunked encoding is streamed as-is.
 func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Reader {
-	te := strings.ToLower(strings.TrimSpace(headers.Get("Transfer-Encoding")))
-
 	// chunked Transfer-Encoding: stream the raw chunked body as-is (no dechunking).
 	// HTTP/1.0 does not use chunked TE.
-	if strings.Contains(te, "chunked") && proto != "HTTP/1.0" {
+	if hasChunkedTE(headers.Get("Transfer-Encoding")) && proto != "HTTP/1.0" {
 		return newRawChunkedReader(r)
 	}
 
@@ -428,10 +448,8 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 		return io.LimitReader(r, 0)
 	}
 
-	te := strings.ToLower(strings.TrimSpace(headers.Get("Transfer-Encoding")))
-
 	// chunked Transfer-Encoding: stream as-is.
-	if strings.Contains(te, "chunked") && proto != "HTTP/1.0" {
+	if hasChunkedTE(headers.Get("Transfer-Encoding")) && proto != "HTTP/1.0" {
 		return newRawChunkedReader(r)
 	}
 

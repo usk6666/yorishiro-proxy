@@ -15,7 +15,9 @@ const (
 	AnomalyDuplicateCL AnomalyType = "DuplicateCL"
 	// AnomalyInvalidTE indicates a non-standard Transfer-Encoding value.
 	AnomalyInvalidTE AnomalyType = "InvalidTE"
-	// AnomalyHeaderInjection indicates a suspected header injection via CR/LF in a value.
+	// AnomalyHeaderInjection indicates suspected HTTP header injection or malformed
+	// header syntax (for example, embedded CR/LF characters or illegal whitespace
+	// around the header name/colon).
 	AnomalyHeaderInjection AnomalyType = "HeaderInjection"
 	// AnomalyAmbiguousTE indicates obfuscated Transfer-Encoding (e.g., trailing whitespace).
 	AnomalyAmbiguousTE AnomalyType = "AmbiguousTE"
