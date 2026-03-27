@@ -90,11 +90,13 @@ yorishiro-proxy server
 yorishiro-proxy server -mcp-http-addr 127.0.0.1:3000 -open-browser
 ```
 
-On startup, the log prints the Web UI URL with an authentication token:
+On startup, the log prints the Web UI URL:
 
 ```
-WebUI available url=http://127.0.0.1:3000/?token=<random-token>
+WebUI available url=http://127.0.0.1:3000/
 ```
+
+The authentication token is written to `~/.yorishiro-proxy/server.json` and included in the URL at debug log level (`-log-level debug`).
 
 ### 4. First Capture
 
