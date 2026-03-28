@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -424,14 +423,14 @@ func TestConnPool_Close_NoOp(t *testing.T) {
 }
 
 func TestConnPool_Get_ConnectionLeak(t *testing.T) {
-	var mu sync.Mutex
-	var accepted []net.Conn
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
 
+	const numConns = 5
+	acceptedCh := make(chan net.Conn, numConns)
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
@@ -440,16 +439,13 @@ func TestConnPool_Get_ConnectionLeak(t *testing.T) {
 			if err != nil {
 				return
 			}
-			mu.Lock()
-			accepted = append(accepted, conn)
-			mu.Unlock()
+			acceptedCh <- conn
 		}
 	}()
 
 	pool := &ConnPool{DialTimeout: 2 * time.Second}
 	ctx := context.Background()
 
-	const numConns = 5
 	for i := 0; i < numConns; i++ {
 		result, err := pool.Get(ctx, ln.Addr().String(), false, "")
 		if err != nil {
@@ -458,16 +454,27 @@ func TestConnPool_Get_ConnectionLeak(t *testing.T) {
 		result.Conn.Close()
 	}
 
+	// Wait for all connections to be accepted before closing the listener.
+	// net.Dial completes at the kernel level (SYN-ACK) before Accept returns,
+	// so we must explicitly wait for all Accept calls to finish.
+	var acceptedConns []net.Conn
+	for i := 0; i < numConns; i++ {
+		select {
+		case c := <-acceptedCh:
+			acceptedConns = append(acceptedConns, c)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for accept %d/%d", i+1, numConns)
+		}
+	}
+
 	// Close the listener so the accept goroutine exits, then wait.
 	ln.Close()
 	<-acceptDone
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(accepted) != numConns {
-		t.Errorf("accepted %d connections, want %d", len(accepted), numConns)
+	if len(acceptedConns) != numConns {
+		t.Errorf("accepted %d connections, want %d", len(acceptedConns), numConns)
 	}
-	for _, c := range accepted {
+	for _, c := range acceptedConns {
 		c.Close()
 	}
 }
