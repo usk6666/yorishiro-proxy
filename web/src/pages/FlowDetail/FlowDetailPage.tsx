@@ -488,14 +488,33 @@ export function FlowDetailPage() {
           )}
         </div>
 
-        {/* Tags */}
-        {flowData.tags && Object.keys(flowData.tags).length > 0 && (
+        {/* Anomalies */}
+        {flowData.anomalies && flowData.anomalies.length > 0 && (
+          <div className="sd-anomalies">
+            <span className="sd-anomalies-label">Anomalies</span>
+            <div className="sd-anomalies-list">
+              {flowData.anomalies.map((anomaly, idx) => (
+                <div key={`${anomaly.type}-${idx}`} className="sd-anomaly-item">
+                  <Badge variant="danger">{anomaly.type}</Badge>
+                  {anomaly.detail && (
+                    <span className="sd-anomaly-detail">{anomaly.detail}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Tags (excluding smuggling:* which are shown as anomalies above) */}
+        {flowData.tags && Object.keys(flowData.tags).filter(k => !k.startsWith("smuggling:")).length > 0 && (
           <div className="sd-tags">
-            {Object.entries(flowData.tags).map(([key, value]) => (
-              <Badge key={key} variant="info">
-                {key}: {value}
-              </Badge>
-            ))}
+            {Object.entries(flowData.tags)
+              .filter(([key]) => !key.startsWith("smuggling:"))
+              .map(([key, value]) => (
+                <Badge key={key} variant="info">
+                  {key}: {value}
+                </Badge>
+              ))}
           </div>
         )}
 

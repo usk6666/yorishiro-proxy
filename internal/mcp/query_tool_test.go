@@ -2235,3 +2235,239 @@ func TestQuery_Sessions_FilterByConnIDAndHost(t *testing.T) {
 		t.Errorf("id = %q, want flow-c1", out.Flows[0].ID)
 	}
 }
+
+// --- Test: extractAnomalies ---
+
+func TestExtractAnomalies_NilTags(t *testing.T) {
+	t.Parallel()
+	result := extractAnomalies(nil)
+	if result != nil {
+		t.Errorf("expected nil for nil tags, got %v", result)
+	}
+}
+
+func TestExtractAnomalies_EmptyTags(t *testing.T) {
+	t.Parallel()
+	result := extractAnomalies(map[string]string{})
+	if result != nil {
+		t.Errorf("expected nil for empty tags, got %v", result)
+	}
+}
+
+func TestExtractAnomalies_NoSmugglingTags(t *testing.T) {
+	t.Parallel()
+	result := extractAnomalies(map[string]string{"error": "timeout"})
+	if result != nil {
+		t.Errorf("expected nil for non-smuggling tags, got %v", result)
+	}
+}
+
+func TestExtractAnomalies_SingleAnomaly(t *testing.T) {
+	t.Parallel()
+	tags := map[string]string{
+		"smuggling:cl_te_conflict": "true",
+		"smuggling:warnings":       "CL/TE conflict detected",
+	}
+	result := extractAnomalies(tags)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 anomaly, got %d", len(result))
+	}
+	if result[0].Type != "CLTE" {
+		t.Errorf("type = %q, want CLTE", result[0].Type)
+	}
+	if result[0].Detail != "CL/TE conflict detected" {
+		t.Errorf("detail = %q, want warning text", result[0].Detail)
+	}
+}
+
+func TestExtractAnomalies_MultipleAnomalies(t *testing.T) {
+	t.Parallel()
+	tags := map[string]string{
+		"smuggling:cl_te_conflict":   "true",
+		"smuggling:header_injection": "true",
+		"smuggling:warnings":         "multiple issues",
+	}
+	result := extractAnomalies(tags)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 anomalies, got %d", len(result))
+	}
+	// Sorted alphabetically by type.
+	if result[0].Type != "CLTE" {
+		t.Errorf("result[0].Type = %q, want CLTE", result[0].Type)
+	}
+	if result[1].Type != "HeaderInjection" {
+		t.Errorf("result[1].Type = %q, want HeaderInjection", result[1].Type)
+	}
+}
+
+func TestExtractAnomalies_AllTypes(t *testing.T) {
+	t.Parallel()
+	tags := map[string]string{
+		"smuggling:cl_te_conflict":   "true",
+		"smuggling:duplicate_cl":     "true",
+		"smuggling:ambiguous_te":     "true",
+		"smuggling:invalid_te":       "true",
+		"smuggling:header_injection": "true",
+		"smuggling:obs_fold":         "true",
+	}
+	result := extractAnomalies(tags)
+	if len(result) != 6 {
+		t.Fatalf("expected 6 anomalies, got %d", len(result))
+	}
+}
+
+// --- Test: anomalies in flow detail response ---
+
+func TestQuery_FlowDetail_Anomalies(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a flow with smuggling tags.
+	fl := &flow.Flow{
+		ID:        "flow-anomaly-1",
+		ConnID:    "conn-anomaly",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+		Tags: map[string]string{
+			"smuggling:cl_te_conflict": "true",
+			"smuggling:warnings":       "CL and TE both present",
+		},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	parsedURL, _ := url.Parse("http://example.com/test")
+	sendMsg := &flow.Message{
+		FlowID:    "flow-anomaly-1",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	recvMsg := &flow.Message{
+		FlowID:     "flow-anomaly-1",
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"text/plain"}},
+	}
+	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	// Test flow detail.
+	result := callQuery(t, cs, queryInput{Resource: "flow", ID: "flow-anomaly-1"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var detail queryFlowResult
+	unmarshalQueryResult(t, result, &detail)
+
+	// Verify anomalies are present.
+	if len(detail.Anomalies) != 1 {
+		t.Fatalf("expected 1 anomaly, got %d", len(detail.Anomalies))
+	}
+	if detail.Anomalies[0].Type != "CLTE" {
+		t.Errorf("anomaly type = %q, want CLTE", detail.Anomalies[0].Type)
+	}
+	if detail.Anomalies[0].Detail != "CL and TE both present" {
+		t.Errorf("anomaly detail = %q, want warning text", detail.Anomalies[0].Detail)
+	}
+
+	// Verify tags are still present for backward compatibility.
+	if detail.Tags["smuggling:cl_te_conflict"] != "true" {
+		t.Error("expected smuggling:cl_te_conflict tag to be preserved")
+	}
+}
+
+func TestQuery_FlowsList_Anomalies(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a flow with smuggling tags.
+	fl := &flow.Flow{
+		ID:        "flow-anomaly-list",
+		ConnID:    "conn-anomaly-list",
+		Protocol:  "HTTP/1.x",
+		FlowType:  "unary",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
+		Tags: map[string]string{
+			"smuggling:duplicate_cl": "true",
+			"smuggling:invalid_te":   "true",
+			"smuggling:warnings":     "multiple anomalies",
+		},
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	parsedURL, _ := url.Parse("http://example.com/list")
+	sendMsg := &flow.Message{
+		FlowID:    "flow-anomaly-list",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "POST",
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+	}
+	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var out queryFlowsResult
+	unmarshalQueryResult(t, result, &out)
+
+	if len(out.Flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(out.Flows))
+	}
+	if len(out.Flows[0].Anomalies) != 2 {
+		t.Fatalf("expected 2 anomalies, got %d", len(out.Flows[0].Anomalies))
+	}
+	// Sorted alphabetically: DuplicateCL, InvalidTE
+	if out.Flows[0].Anomalies[0].Type != "DuplicateCL" {
+		t.Errorf("anomaly[0].Type = %q, want DuplicateCL", out.Flows[0].Anomalies[0].Type)
+	}
+	if out.Flows[0].Anomalies[1].Type != "InvalidTE" {
+		t.Errorf("anomaly[1].Type = %q, want InvalidTE", out.Flows[0].Anomalies[1].Type)
+	}
+}
+
+func TestQuery_FlowDetail_NoAnomalies(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	seedSession(t, store, "flow-no-anomaly", "HTTP/1.x", "GET", "http://example.com/ok", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "flow", ID: "flow-no-anomaly"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var detail queryFlowResult
+	unmarshalQueryResult(t, result, &detail)
+
+	if detail.Anomalies != nil {
+		t.Errorf("expected nil anomalies for normal flow, got %v", detail.Anomalies)
+	}
+}
