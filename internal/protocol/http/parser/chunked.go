@@ -210,6 +210,11 @@ func (dr *dechunkedReader) nextChunk() error {
 	return nil
 }
 
+// maxChunkSizeLineLen is the hard cap on chunk-size line length.
+// A chunk-size line contains hex digits plus an optional extension; 4 KiB is
+// far more than any legitimate implementation would send.
+const maxChunkSizeLineLen = 4096
+
 // readChunkSizeLine reads a chunk-size line, handling bufio.ErrBufferFull
 // for very long lines, and returns the trimmed hex size string.
 func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
@@ -218,9 +223,15 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 		return "", lineErr
 	}
 	for lineErr == bufio.ErrBufferFull {
+		if len(line) > maxChunkSizeLineLen {
+			return "", fmt.Errorf("chunk-size line exceeds maximum length %d", maxChunkSizeLineLen)
+		}
 		var extra []byte
 		extra, lineErr = dr.r.ReadSlice('\n')
 		line = append(line, extra...)
+	}
+	if len(line) > maxChunkSizeLineLen {
+		return "", fmt.Errorf("chunk-size line exceeds maximum length %d", maxChunkSizeLineLen)
 	}
 
 	lineNoEOL := stripLineTerminator(line)
@@ -237,9 +248,12 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 }
 
 // consumeTrailers reads and discards trailer lines until a blank line.
+// Total trailer bytes are capped at maxHeaderSize to prevent unbounded allocation.
 func (dr *dechunkedReader) consumeTrailers() {
+	var totalSize int
 	for {
 		trailer, tErr := dr.r.ReadSlice('\n')
+		totalSize += len(trailer)
 		if tErr != nil && tErr != bufio.ErrBufferFull {
 			break
 		}
@@ -247,6 +261,15 @@ func (dr *dechunkedReader) consumeTrailers() {
 			var extra []byte
 			extra, tErr = dr.r.ReadSlice('\n')
 			trailer = append(trailer, extra...)
+			totalSize += len(extra)
+			if totalSize > maxHeaderSize {
+				dr.err = fmt.Errorf("chunked trailers exceed maximum size %d", maxHeaderSize)
+				return
+			}
+		}
+		if totalSize > maxHeaderSize {
+			dr.err = fmt.Errorf("chunked trailers exceed maximum size %d", maxHeaderSize)
+			return
 		}
 		trimmed := bytes.TrimRight(trailer, "\r\n")
 		if len(trimmed) == 0 {

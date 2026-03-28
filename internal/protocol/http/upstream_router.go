@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
@@ -86,28 +87,31 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 // connClosingReader wraps an io.Reader and closes the connection when Read
 // returns any error (including io.EOF) or when Close is called. This ensures
 // the upstream connection stays open while the response body is being read.
+// Close is guarded by sync.Once to prevent races between concurrent Read and
+// Close calls.
 type connClosingReader struct {
 	io.Reader
-	conn   net.Conn
-	closed bool
+	conn      net.Conn
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (r *connClosingReader) Read(p []byte) (int, error) {
 	n, err := r.Reader.Read(p)
-	if err != nil && !r.closed {
-		r.closed = true
-		r.conn.Close()
+	if err != nil {
+		r.closeOnce.Do(func() {
+			r.closeErr = r.conn.Close()
+		})
 	}
 	return n, err
 }
 
 // Close implements io.Closer to allow explicit cleanup.
 func (r *connClosingReader) Close() error {
-	if !r.closed {
-		r.closed = true
-		return r.conn.Close()
-	}
-	return nil
+	r.closeOnce.Do(func() {
+		r.closeErr = r.conn.Close()
+	})
+	return r.closeErr
 }
 
 // roundTripH2 performs an HTTP/2 round trip using a pre-established h2

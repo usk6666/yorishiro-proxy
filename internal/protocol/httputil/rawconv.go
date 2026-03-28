@@ -94,7 +94,7 @@ func RawResponseToHTTP(resp *parser.RawResponse, bodyBytes []byte) *gohttp.Respo
 	if len(bodyBytes) > 0 {
 		body = io.NopCloser(bytes.NewReader(bodyBytes))
 	} else {
-		body = io.NopCloser(bytes.NewReader(nil))
+		body = gohttp.NoBody
 	}
 
 	httpResp := &gohttp.Response{
@@ -130,10 +130,18 @@ func HTTPResponseToRaw(resp *gohttp.Response, bodyBytes []byte) *parser.RawRespo
 		return nil
 	}
 
+	// Preserve the original status string from resp.Status (e.g. "200 OK")
+	// which may include a custom reason phrase. Only fall back to StatusText
+	// when resp.Status is empty.
+	status := resp.Status
+	if status == "" {
+		status = fmt.Sprintf("%d %s", resp.StatusCode, gohttp.StatusText(resp.StatusCode))
+	}
+
 	raw := &parser.RawResponse{
 		Proto:      resp.Proto,
 		StatusCode: resp.StatusCode,
-		Status:     fmt.Sprintf("%d %s", resp.StatusCode, gohttp.StatusText(resp.StatusCode)),
+		Status:     status,
 		Headers:    HTTPHeaderToRawHeaders(resp.Header),
 		Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
 	}
@@ -188,6 +196,16 @@ func HTTPRequestToRaw(goReq *gohttp.Request, bodyBytes []byte) *parser.RawReques
 	if goReq.URL.Scheme != "" && goReq.URL.Host != "" {
 		reqURI = goReq.URL.String()
 	}
+	// Sync Content-Length and Transfer-Encoding headers with the actual body
+	// bytes. After plugin/intercept modification the original headers may be
+	// inconsistent (e.g. stale Content-Length or TE:chunked still present).
+	headers.Del("Transfer-Encoding")
+	if len(bodyBytes) > 0 {
+		headers.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+	} else {
+		headers.Del("Content-Length")
+	}
+
 	return &parser.RawRequest{
 		Method:     goReq.Method,
 		RequestURI: reqURI,
