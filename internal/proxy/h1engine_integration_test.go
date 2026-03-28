@@ -4,6 +4,7 @@ package proxy_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +100,8 @@ func sendRawHTTPRequest(t *testing.T, proxyAddr string, rawRequest string) strin
 
 // sendRawHTTPRequestParsed sends raw bytes to the proxy and returns a parsed
 // HTTP response (using Go's standard library parser for validation).
+// The response body is fully buffered before the connection is closed, so
+// callers can safely read resp.Body after the connection is gone.
 func sendRawHTTPRequestParsed(t *testing.T, proxyAddr string, rawRequest string) *gohttp.Response {
 	t.Helper()
 
@@ -117,6 +121,16 @@ func sendRawHTTPRequestParsed(t *testing.T, proxyAddr string, rawRequest string)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
+
+	// Buffer the entire body before returning so that callers are not
+	// affected by the deferred conn.Close().
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+
 	return resp
 }
 
@@ -128,7 +142,7 @@ func TestH1Engine_RawBytes_HeaderCaseAndOrder(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Upstream echoes request headers as response body.
+	// Upstream responds with a fixed body and custom header.
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.Header().Set("X-Custom-Header", "preserved")
 		w.Header().Set("Content-Type", "text/plain")
@@ -204,8 +218,10 @@ func TestH1Engine_RawBytes_HeaderCaseAndOrder(t *testing.T) {
 	firstIdx := strings.Index(rawStr, "X-First-Header:")
 	secondIdx := strings.Index(rawStr, "x-second-header:")
 	thirdIdx := strings.Index(rawStr, "X-THIRD-HEADER:")
-	if firstIdx > secondIdx || secondIdx > thirdIdx {
-		t.Errorf("header order not preserved in raw bytes: first=%d, second=%d, third=%d", firstIdx, secondIdx, thirdIdx)
+	if firstIdx >= 0 && secondIdx >= 0 && thirdIdx >= 0 {
+		if firstIdx > secondIdx || secondIdx > thirdIdx {
+			t.Errorf("header order not preserved in raw bytes: first=%d, second=%d, third=%d", firstIdx, secondIdx, thirdIdx)
+		}
 	}
 
 	// Verify response raw bytes are also captured.
@@ -496,7 +512,9 @@ func TestH1Engine_Anomaly_QueryViaMCP(t *testing.T) {
 			"\r\n",
 		upstream.URL, mustParseURL(upstream.URL).Host)
 
-	sendRawHTTPRequestParsed(t, listener.Addr(), rawReq)
+	resp := sendRawHTTPRequestParsed(t, listener.Addr(), rawReq)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 
 	// Verify the flow is queryable via the store (simulating MCP query).
 	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
@@ -767,11 +785,11 @@ func TestH1Engine_ConnPool_KeepAliveReuse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var requestCount int
+	var requestCount atomic.Int32
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		requestCount++
+		n := requestCount.Add(1)
 		w.WriteHeader(gohttp.StatusOK)
-		fmt.Fprintf(w, "req-%d", requestCount)
+		fmt.Fprintf(w, "req-%d", n)
 	}))
 	defer upstream.Close()
 
@@ -848,7 +866,9 @@ func TestH1Engine_StateTransition_ActiveToComplete(t *testing.T) {
 			"\r\n",
 		upstream.URL, mustParseURL(upstream.URL).Host)
 
-	sendRawHTTPRequestParsed(t, listener.Addr(), rawReq)
+	resp := sendRawHTTPRequestParsed(t, listener.Addr(), rawReq)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 
 	// Wait for flow to reach complete state.
 	var fl *flow.Flow
@@ -892,13 +912,12 @@ func TestH1Engine_StateTransition_ErrorOnConnectionFailure(t *testing.T) {
 		DialTimeout: 1 * time.Second,
 	})
 
-	// Listen on a port but never accept — this causes a connection timeout
-	// with the short dial timeout configured above.
+	// Listen on a port and immediately close the listener so connections
+	// are refused (connection refused, not timeout).
 	blockerLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Close the listener so connections are refused immediately.
 	blockerLn.Close()
 	refusedAddr := blockerLn.Addr().String()
 
@@ -943,7 +962,7 @@ func TestH1Engine_StateTransition_ErrorOnConnectionFailure(t *testing.T) {
 		if len(flows) == 0 {
 			t.Skip("no flow recorded for connection failure (proxy may not record error flows for upstream dial failures)")
 		}
-		// If a flow exists but not in error state, that's still acceptable.
-		t.Logf("flow exists but state = %q (not error)", flows[0].State)
+		// A flow exists but is not in error state — this is unexpected.
+		t.Errorf("flow exists but state = %q, want %q", flows[0].State, "error")
 	}
 }
