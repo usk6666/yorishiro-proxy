@@ -68,9 +68,6 @@ func ApplyRequestModifications(req *gohttp.Request, action intercept.InterceptAc
 	rh := HTTPHeaderToRawHeaders(req.Header)
 	ApplyHeaderModifications(&rh, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
 	req.Header = RawHeadersToHTTPHeader(rh)
-	if req.Header == nil {
-		req.Header = make(gohttp.Header)
-	}
 
 	if action.OverrideBody != nil {
 		bodyBytes := []byte(*action.OverrideBody)
@@ -100,9 +97,6 @@ func ApplyResponseModifications(resp *gohttp.Response, action intercept.Intercep
 	respRH := HTTPHeaderToRawHeaders(resp.Header)
 	ApplyHeaderModifications(&respRH, action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders)
 	resp.Header = RawHeadersToHTTPHeader(respRH)
-	if resp.Header == nil {
-		resp.Header = make(gohttp.Header)
-	}
 
 	if action.OverrideResponseBody != nil {
 		body = []byte(*action.OverrideResponseBody)

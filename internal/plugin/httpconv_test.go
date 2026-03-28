@@ -4,6 +4,8 @@ import (
 	"bytes"
 	gohttp "net/http"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 func TestHTTPRequestToMap(t *testing.T) {
@@ -292,7 +294,7 @@ func TestHeadersToMap_RoundTrip(t *testing.T) {
 		"Accept":        {"text/html", "application/json"},
 	}
 
-	m := headersToMap(goHeaderToRaw(original))
+	m := headersToMap(httputil.HTTPHeaderToRawHeaders(original))
 	restored := mapToHeaders(m)
 
 	for key, wantVals := range original {

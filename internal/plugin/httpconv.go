@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // HTTPRequestToMap converts an HTTP request and its associated metadata into
@@ -26,7 +27,7 @@ func HTTPRequestToMap(req *gohttp.Request, body []byte, connInfo *ConnInfo, prot
 	if req == nil {
 		return map[string]any{}
 	}
-	headers := headersToMap(goHeaderToRaw(req.Header))
+	headers := headersToMap(httputil.HTTPHeaderToRawHeaders(req.Header))
 	// Ensure Host header is present (Go strips it from Header and stores in req.Host).
 	if req.Host != "" {
 		headers["Host"] = []any{req.Host}
@@ -83,8 +84,8 @@ func HTTPResponseToMap(resp *gohttp.Response, body []byte, req *gohttp.Request, 
 
 	m := map[string]any{
 		"status_code": resp.StatusCode,
-		"headers":     headersToMap(goHeaderToRaw(resp.Header)),
-		"trailers":    headersToMap(goHeaderToRaw(resp.Trailer)),
+		"headers":     headersToMap(httputil.HTTPHeaderToRawHeaders(resp.Header)),
+		"trailers":    headersToMap(httputil.HTTPHeaderToRawHeaders(resp.Trailer)),
 		"body":        body,
 		"protocol":    protocol,
 	}
@@ -192,7 +193,7 @@ func applyRequestHeaders(req *gohttp.Request, data map[string]any) {
 	if v, ok := data["headers"]; ok {
 		newHeaders := mapToHeaders(v)
 		if newHeaders != nil {
-			req.Header = rawToGoHeader(newHeaders)
+			req.Header = httputil.RawHeadersToHTTPHeader(newHeaders)
 		}
 	}
 }
@@ -236,14 +237,14 @@ func ApplyHTTPResponseChanges(resp *gohttp.Response, data map[string]any) (*goht
 	if v, ok := data["headers"]; ok {
 		newHeaders := mapToHeaders(v)
 		if newHeaders != nil {
-			resp.Header = rawToGoHeader(newHeaders)
+			resp.Header = httputil.RawHeadersToHTTPHeader(newHeaders)
 		}
 	}
 
 	if v, ok := data["trailers"]; ok {
 		newTrailers := mapToHeaders(v)
 		if newTrailers != nil {
-			resp.Trailer = rawToGoHeader(newTrailers)
+			resp.Trailer = httputil.RawHeadersToHTTPHeader(newTrailers)
 		}
 	}
 
@@ -363,32 +364,4 @@ func validStatusCode(code, fallback int) int {
 		return code
 	}
 	return fallback
-}
-
-// goHeaderToRaw converts net/http.Header to parser.RawHeaders.
-// This is a temporary bridge until the handler pipeline is fully migrated.
-func goHeaderToRaw(h gohttp.Header) parser.RawHeaders {
-	if h == nil {
-		return nil
-	}
-	var rh parser.RawHeaders
-	for name, vals := range h {
-		for _, v := range vals {
-			rh = append(rh, parser.RawHeader{Name: name, Value: v})
-		}
-	}
-	return rh
-}
-
-// rawToGoHeader converts parser.RawHeaders back to net/http.Header.
-// This is a temporary bridge until the handler pipeline is fully migrated.
-func rawToGoHeader(rh parser.RawHeaders) gohttp.Header {
-	if rh == nil {
-		return nil
-	}
-	h := make(gohttp.Header, len(rh))
-	for _, hdr := range rh {
-		h.Add(hdr.Name, hdr.Value)
-	}
-	return h
 }
