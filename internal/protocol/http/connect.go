@@ -238,7 +238,7 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 		return h.handleRawForward(ctx, conn, req, reqURL, iResult, sp, &snap, start, logger)
 	}
 
-	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+	bodyResult.recordBody = h.applyTransform(req, reqURL, bodyResult.recordBody)
 	sp.req = req
 	sp.reqBody = bodyResult.recordBody
 
@@ -577,7 +577,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		return h.handleRawForward(ctx, conn, req, reqURL, iResult, sp, &snap, start, logger)
 	}
 
-	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+	bodyResult.recordBody = h.applyTransform(req, reqURL, bodyResult.recordBody)
 	sp.reqBody = bodyResult.recordBody
 
 	// Plugin hook: on_before_send_to_server.

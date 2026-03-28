@@ -95,13 +95,15 @@ func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *parser
 }
 
 // applyTransform applies auto-transform rules to the request before forwarding
-// upstream. It modifies request headers and body in place.
-func (h *Handler) applyTransform(req *parser.RawRequest, recordReqBody []byte) []byte {
+// upstream. It modifies request headers and body in place. The caller must pass
+// the fully normalized reqURL (including scheme and host) so that URL-based
+// transform rules can match correctly even for origin-form RequestURIs.
+func (h *Handler) applyTransform(req *parser.RawRequest, reqURL *url.URL, recordReqBody []byte) []byte {
 	if h.transformPipeline == nil {
 		return recordReqBody
 	}
 	rh := req.Headers
-	rh, recordReqBody = h.transformPipeline.TransformRequest(req.Method, parseRawRequestURI(req), rh, recordReqBody)
+	rh, recordReqBody = h.transformPipeline.TransformRequest(req.Method, reqURL, rh, recordReqBody)
 	req.Headers = rh
 	req.Body = bytes.NewReader(recordReqBody)
 	return recordReqBody

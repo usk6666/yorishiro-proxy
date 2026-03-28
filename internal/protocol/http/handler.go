@@ -435,7 +435,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 		return h.handleRawForward(ctx, conn, req, reqURL, iResult, sp, &snap, start, logger)
 	}
 
-	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
+	bodyResult.recordBody = h.applyTransform(req, reqURL, bodyResult.recordBody)
 
 	// Plugin hook: on_before_send_to_server.
 	req, bodyResult.recordBody = h.dispatchOnBeforeSendToServer(ctx, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
@@ -567,6 +567,7 @@ func readAndCaptureBody(req *parser.RawRequest, logger *slog.Logger) requestBody
 	// removed by hop-by-hop header stripping. The body is already decoded
 	// by the parser's dechunkedReader.
 	if parser.IsChunked(req.Headers) && len(fullBody) > 0 {
+		req.Headers.Del("Content-Length")
 		req.Headers.Set("Content-Length", fmt.Sprintf("%d", len(fullBody)))
 	}
 
@@ -643,20 +644,15 @@ func (h *Handler) forwardUpstream(ctx context.Context, conn net.Conn, req *parse
 }
 
 // cloneRequestForUpstream creates a copy of the request suitable for upstream
-// forwarding. For HTTPS (useTLS=true), the RequestURI is set to the
-// origin-form (path+query). For HTTP, it preserves the absolute-form.
+// forwarding. The RequestURI is always normalized to origin-form (path+query)
+// because upstream connections use CONNECT tunneling for both HTTP and HTTPS.
 func cloneRequestForUpstream(req *parser.RawRequest, reqURL *url.URL, useTLS bool) *parser.RawRequest {
 	out := &parser.RawRequest{
 		Method:     req.Method,
-		RequestURI: req.RequestURI,
+		RequestURI: reqURL.RequestURI(),
 		Proto:      req.Proto,
 		Headers:    req.Headers.Clone(),
 		Body:       req.Body,
-	}
-
-	if useTLS {
-		// HTTPS: use origin-form URI (relative).
-		out.RequestURI = reqURL.RequestURI()
 	}
 
 	return out

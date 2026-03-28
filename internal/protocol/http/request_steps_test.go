@@ -244,7 +244,8 @@ func TestApplyTransform_NilPipeline(t *testing.T) {
 	}
 	originalBody := []byte("original body")
 
-	result := handler.applyTransform(req, originalBody)
+	reqURL, _ := url.Parse("http://example.com")
+	result := handler.applyTransform(req, reqURL, originalBody)
 	if !bytes.Equal(result, originalBody) {
 		t.Errorf("applyTransform with nil pipeline changed body: got %q, want %q", result, originalBody)
 	}
