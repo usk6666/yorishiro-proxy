@@ -99,7 +99,7 @@ func (p *ConnPool) Close() {
 // upstream proxy.
 func (p *ConnPool) dialTCP(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
 	if p.UpstreamProxy != nil {
-		slog.Debug("connpool dialing via upstream proxy", "addr", addr, "proxy", p.UpstreamProxy.String())
+		slog.Debug("connpool dialing via upstream proxy", "addr", addr, "proxy", proxy.RedactProxyURL(p.UpstreamProxy.String()))
 		return proxy.DialViaUpstreamProxy(ctx, p.UpstreamProxy, addr, timeout)
 	}
 
@@ -114,5 +114,8 @@ func (p *ConnPool) effectiveTLSTransport() httputil.TLSTransport {
 	if p.TLSTransport != nil {
 		return p.TLSTransport
 	}
-	return &httputil.StandardTransport{InsecureSkipVerify: true}
+	return &httputil.StandardTransport{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"http/1.1"},
+	}
 }

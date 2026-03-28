@@ -14,6 +14,10 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
+// defaultRoundTripTimeout is the fallback deadline for RoundTripOnConn when
+// the caller's context has no deadline, to prevent indefinite blocking.
+const defaultRoundTripTimeout = 30 * time.Second
+
 // H1Transport sends HTTP/1.x requests over raw connections and reads
 // responses using the custom parser, bypassing net/http entirely.
 // It supports both structured mode (serializing from RawRequest) and raw
@@ -45,10 +49,15 @@ type RoundTripResult struct {
 func (t *H1Transport) RoundTripOnConn(ctx context.Context, conn net.Conn, req *parser.RawRequest) (*RoundTripResult, error) {
 	timing := &httputil.RoundTripTiming{}
 
-	// Apply context deadline to the connection.
+	// Apply context deadline to the connection. If the context has no deadline,
+	// use a default timeout to prevent indefinite blocking.
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {
 			return nil, fmt.Errorf("h1transport set deadline: %w", err)
+		}
+	} else {
+		if err := conn.SetDeadline(time.Now().Add(defaultRoundTripTimeout)); err != nil {
+			return nil, fmt.Errorf("h1transport set default deadline: %w", err)
 		}
 	}
 
@@ -116,11 +125,13 @@ func serializeRequest(req *parser.RawRequest) []byte {
 	// Headers in wire order.
 	for _, h := range req.Headers {
 		buf.WriteString(h.Name)
-		buf.WriteString(": ")
-		// Use RawValue if available to preserve original whitespace.
 		if h.RawValue != "" {
+			// RawValue includes the original whitespace after the colon,
+			// so we write only ":" to preserve exact wire bytes.
+			buf.WriteByte(':')
 			buf.WriteString(h.RawValue)
 		} else {
+			buf.WriteString(": ")
 			buf.WriteString(h.Value)
 		}
 		buf.WriteString("\r\n")
@@ -151,19 +162,30 @@ func writeRequest(conn net.Conn, header []byte, body io.Reader) error {
 //
 // HTTP/1.1 default: keep-alive (unless "Connection: close")
 // HTTP/1.0 default: close (unless "Connection: keep-alive")
+//
+// When both "close" and "keep-alive" tokens are present (e.g.,
+// "Connection: keep-alive, close"), "close" takes precedence.
 func isKeepAlive(resp *parser.RawResponse) bool {
-	// Check for explicit Connection header tokens.
+	// Scan all Connection header tokens, giving "close" precedence.
+	var sawClose, sawKeepAlive bool
 	connValues := resp.Headers.Values("Connection")
 	for _, val := range connValues {
 		for _, token := range strings.Split(val, ",") {
 			token = strings.TrimSpace(token)
 			if strings.EqualFold(token, "close") {
-				return false
+				sawClose = true
 			}
 			if strings.EqualFold(token, "keep-alive") {
-				return true
+				sawKeepAlive = true
 			}
 		}
+	}
+
+	if sawClose {
+		return false
+	}
+	if sawKeepAlive {
+		return true
 	}
 
 	// Default based on protocol version.

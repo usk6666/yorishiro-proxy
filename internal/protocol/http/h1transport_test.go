@@ -77,7 +77,7 @@ func TestSerializeRequest_RawValue(t *testing.T) {
 	}
 
 	got := string(serializeRequest(req))
-	if !strings.Contains(got, "Host:   example.com  \r\n") {
+	if !strings.Contains(got, "Host:  example.com  \r\n") {
 		t.Errorf("serializeRequest should use RawValue when set, got:\n%q", got)
 	}
 }
@@ -170,13 +170,14 @@ func TestH1Transport_RoundTripOnConn_RawMode(t *testing.T) {
 	rawRequest := []byte("GET /smuggle HTTP/1.1\r\nHost: evil.com\r\n\r\n")
 	responseData := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
 
-	var receivedBytes []byte
+	receivedCh := make(chan []byte, 1)
 	go func() {
 		defer server.Close()
 		buf := make([]byte, 4096)
 		n, _ := server.Read(buf)
-		receivedBytes = make([]byte, n)
-		copy(receivedBytes, buf[:n])
+		captured := make([]byte, n)
+		copy(captured, buf[:n])
+		receivedCh <- captured
 		server.Write([]byte(responseData))
 	}()
 
@@ -199,6 +200,9 @@ func TestH1Transport_RoundTripOnConn_RawMode(t *testing.T) {
 	if result.Response.StatusCode != 200 {
 		t.Errorf("StatusCode = %d, want 200", result.Response.StatusCode)
 	}
+
+	// Wait for the server goroutine to send captured bytes before asserting.
+	receivedBytes := <-receivedCh
 
 	// Verify that the raw bytes were sent verbatim.
 	if !bytes.Equal(receivedBytes, rawRequest) {
@@ -416,6 +420,16 @@ func TestIsKeepAlive(t *testing.T) {
 				},
 			},
 			want: true,
+		},
+		{
+			name: "HTTP/1.1 Connection keep-alive and close gives close precedence",
+			resp: &parser.RawResponse{
+				Proto: "HTTP/1.1",
+				Headers: parser.RawHeaders{
+					{Name: "Connection", Value: "keep-alive, close"},
+				},
+			},
+			want: false,
 		},
 	}
 
