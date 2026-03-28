@@ -151,13 +151,14 @@ func (t *Transport) RoundTripOnConn(ctx context.Context, conn net.Conn, headers 
 	logger := t.logger()
 
 	tc := newTransportConn(conn, logger)
+	defer tc.close()
+
 	if err := tc.handshake(ctx); err != nil {
 		return nil, fmt.Errorf("h2 handshake: %w", err)
 	}
 
 	result, err := tc.roundTripRaw(ctx, headers, body)
 	if err != nil {
-		tc.close()
 		return nil, fmt.Errorf("h2 round trip on conn: %w", err)
 	}
 	return result, nil

@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	gohttp "net/http"
+	"net/url"
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
@@ -48,13 +50,13 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 	if err != nil {
 		return nil, fmt.Errorf("upstream router dial %s: %w", addr, err)
 	}
+	defer cr.Conn.Close()
 
 	switch cr.ALPN {
 	case "h2":
 		slog.Debug("upstream router: routing to h2 transport", "addr", addr, "alpn", cr.ALPN)
 		result, h2Err := r.roundTripH2(ctx, cr.Conn, req, addr, hostname)
 		if h2Err != nil {
-			cr.Conn.Close()
 			return nil, fmt.Errorf("upstream router h2 round trip: %w", h2Err)
 		}
 		result.ConnectDuration = cr.ConnectDuration
@@ -63,7 +65,6 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 		slog.Debug("upstream router: routing to h1 transport", "addr", addr, "alpn", cr.ALPN)
 		result, h1Err := r.H1.RoundTripOnConn(ctx, cr.Conn, req)
 		if h1Err != nil {
-			cr.Conn.Close()
 			return nil, fmt.Errorf("upstream router h1 round trip: %w", h1Err)
 		}
 		result.ConnectDuration = cr.ConnectDuration
@@ -79,7 +80,11 @@ func (r *UpstreamRouter) roundTripH2(ctx context.Context, conn net.Conn, req *pa
 	// Use the h2Transport to perform the round trip on the pre-established
 	// connection. RoundTripOnConn handles the HTTP/2 handshake, header
 	// encoding, data frame transmission, and response parsing.
-	h2Result, err := r.H2.RoundTripOnConn(ctx, conn, buildH2Headers(req, hostname), req.Body)
+	h2Headers, err := buildH2Headers(req, hostname)
+	if err != nil {
+		return nil, err
+	}
+	h2Result, err := r.H2.RoundTripOnConn(ctx, conn, h2Headers, req.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -99,9 +104,20 @@ func (r *UpstreamRouter) roundTripH2(ctx context.Context, conn net.Conn, req *pa
 // constructing the required pseudo-headers (:method, :scheme, :authority, :path)
 // from the request fields and mapping regular headers with case preserved as
 // lowercase (HTTP/2 requirement per RFC 9113 Section 8.2).
-func buildH2Headers(req *parser.RawRequest, hostname string) []hpack.HeaderField {
-	// Determine path from RequestURI.
+//
+// Returns an error if :authority would be empty (both Host header and hostname
+// are missing).
+func buildH2Headers(req *parser.RawRequest, hostname string) ([]hpack.HeaderField, error) {
+	// Determine path from RequestURI. For forward-proxy requests the
+	// request-target may be absolute-form (e.g. "http://example.com/path").
+	// HTTP/2 :path must be origin-form (path+query only).
 	path := req.RequestURI
+	if path == "" {
+		path = "/"
+	} else if u, err := url.Parse(path); err == nil && u.Host != "" {
+		// Absolute-form: extract origin-form (path + query).
+		path = u.RequestURI()
+	}
 	if path == "" {
 		path = "/"
 	}
@@ -111,6 +127,9 @@ func buildH2Headers(req *parser.RawRequest, hostname string) []hpack.HeaderField
 	if authority == "" {
 		authority = hostname
 	}
+	if authority == "" {
+		return nil, fmt.Errorf("cannot build h2 headers: empty :authority (no Host header and no hostname)")
+	}
 
 	headers := []hpack.HeaderField{
 		{Name: ":method", Value: req.Method},
@@ -118,6 +137,9 @@ func buildH2Headers(req *parser.RawRequest, hostname string) []hpack.HeaderField
 		{Name: ":authority", Value: authority},
 		{Name: ":path", Value: path},
 	}
+
+	// Build the set of Connection-nominated headers to skip (CP-5).
+	connNominated := parseConnNominatedHeaders(req.Headers)
 
 	// Add regular headers, lowercased per HTTP/2 spec.
 	for _, h := range req.Headers {
@@ -133,10 +155,33 @@ func buildH2Headers(req *parser.RawRequest, hostname string) []hpack.HeaderField
 			}
 			continue
 		}
+		// Skip headers nominated by the Connection header.
+		if connNominated[lower] {
+			continue
+		}
 		headers = append(headers, hpack.HeaderField{Name: lower, Value: h.Value})
 	}
 
-	return headers
+	return headers, nil
+}
+
+// parseConnNominatedHeaders extracts the set of header names nominated by the
+// Connection header (RFC 9110 Section 7.6.1). These headers must not be
+// forwarded in HTTP/2.
+func parseConnNominatedHeaders(headers parser.RawHeaders) map[string]bool {
+	nominated := make(map[string]bool)
+	for _, h := range headers {
+		if !strings.EqualFold(h.Name, "Connection") {
+			continue
+		}
+		for _, token := range strings.Split(h.Value, ",") {
+			token = strings.TrimSpace(token)
+			if token != "" {
+				nominated[strings.ToLower(token)] = true
+			}
+		}
+	}
+	return nominated
 }
 
 // isH2HopByHopHeader reports whether the header is an HTTP/1 hop-by-hop header
@@ -155,7 +200,7 @@ func h2ResultToRawResponse(h2r *http2.RoundTripResult) *parser.RawResponse {
 	resp := &parser.RawResponse{
 		Proto:      "HTTP/2.0",
 		StatusCode: h2r.StatusCode,
-		Status:     fmt.Sprintf("%d", h2r.StatusCode),
+		Status:     fmt.Sprintf("%d %s", h2r.StatusCode, gohttp.StatusText(h2r.StatusCode)),
 		Headers:    make(parser.RawHeaders, 0, len(h2r.Headers)),
 		Body:       io.NopCloser(h2r.Body),
 	}

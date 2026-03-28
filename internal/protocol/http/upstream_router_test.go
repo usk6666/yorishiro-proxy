@@ -197,7 +197,10 @@ func TestBuildH2Headers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildH2Headers(tt.req, tt.hostname)
+			got, err := buildH2Headers(tt.req, tt.hostname)
+			if err != nil {
+				t.Fatalf("buildH2Headers() unexpected error: %v", err)
+			}
 			if len(got) != len(tt.want) {
 				t.Fatalf("buildH2Headers() returned %d headers, want %d\ngot:  %v\nwant: %v", len(got), len(tt.want), got, tt.want)
 			}
@@ -210,6 +213,109 @@ func TestBuildH2Headers(t *testing.T) {
 	}
 }
 
+func TestBuildH2Headers_EmptyAuthority(t *testing.T) {
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "/",
+		Headers:    parser.RawHeaders{},
+	}
+	_, err := buildH2Headers(req, "")
+	if err == nil {
+		t.Fatal("buildH2Headers() expected error for empty authority, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty :authority") {
+		t.Errorf("error message = %q, want it to mention 'empty :authority'", err.Error())
+	}
+}
+
+func TestBuildH2Headers_AbsoluteFormURI(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestURI string
+		wantPath   string
+	}{
+		{
+			name:       "absolute-form URL",
+			requestURI: "http://example.com/path?q=1",
+			wantPath:   "/path?q=1",
+		},
+		{
+			name:       "absolute-form URL without query",
+			requestURI: "https://example.com/foo/bar",
+			wantPath:   "/foo/bar",
+		},
+		{
+			name:       "origin-form passes through",
+			requestURI: "/already/origin?x=1",
+			wantPath:   "/already/origin?x=1",
+		},
+		{
+			name:       "absolute-form with root path",
+			requestURI: "http://example.com",
+			wantPath:   "/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &parser.RawRequest{
+				Method:     "GET",
+				RequestURI: tt.requestURI,
+				Headers: parser.RawHeaders{
+					{Name: "Host", Value: "example.com"},
+				},
+			}
+			got, err := buildH2Headers(req, "example.com")
+			if err != nil {
+				t.Fatalf("buildH2Headers() unexpected error: %v", err)
+			}
+			// Find :path pseudo-header.
+			var pathValue string
+			for _, hf := range got {
+				if hf.Name == ":path" {
+					pathValue = hf.Value
+					break
+				}
+			}
+			if pathValue != tt.wantPath {
+				t.Errorf(":path = %q, want %q", pathValue, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestBuildH2Headers_ConnectionNominatedHeaders(t *testing.T) {
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "/",
+		Headers: parser.RawHeaders{
+			{Name: "Host", Value: "example.com"},
+			{Name: "Connection", Value: "X-Custom-Hop, keep-alive"},
+			{Name: "X-Custom-Hop", Value: "should-be-dropped"},
+			{Name: "X-Regular", Value: "should-be-kept"},
+		},
+	}
+	got, err := buildH2Headers(req, "example.com")
+	if err != nil {
+		t.Fatalf("buildH2Headers() unexpected error: %v", err)
+	}
+	for _, hf := range got {
+		if hf.Name == "x-custom-hop" {
+			t.Error("Connection-nominated header x-custom-hop should have been dropped")
+		}
+	}
+	found := false
+	for _, hf := range got {
+		if hf.Name == "x-regular" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("regular header x-regular should have been preserved")
+	}
+}
+
 func TestH2ResultToRawResponse(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -217,6 +323,7 @@ func TestH2ResultToRawResponse(t *testing.T) {
 		headers        []hpack.HeaderField
 		bodyData       string
 		wantStatusCode int
+		wantStatus     string
 		wantProto      string
 		wantHeaders    int // expected number of non-pseudo headers
 	}{
@@ -230,6 +337,7 @@ func TestH2ResultToRawResponse(t *testing.T) {
 			},
 			bodyData:       `{"ok":true}`,
 			wantStatusCode: 200,
+			wantStatus:     "200 OK",
 			wantProto:      "HTTP/2.0",
 			wantHeaders:    2,
 		},
@@ -243,8 +351,21 @@ func TestH2ResultToRawResponse(t *testing.T) {
 			},
 			bodyData:       "not found",
 			wantStatusCode: 404,
+			wantStatus:     "404 Not Found",
 			wantProto:      "HTTP/2.0",
 			wantHeaders:    1,
+		},
+		{
+			name:       "500 includes reason phrase",
+			statusCode: 500,
+			headers: []hpack.HeaderField{
+				{Name: ":status", Value: "500"},
+			},
+			bodyData:       "",
+			wantStatusCode: 500,
+			wantStatus:     "500 Internal Server Error",
+			wantProto:      "HTTP/2.0",
+			wantHeaders:    0,
 		},
 	}
 
@@ -258,6 +379,9 @@ func TestH2ResultToRawResponse(t *testing.T) {
 			resp := h2ResultToRawResponse(h2r)
 			if resp.StatusCode != tt.wantStatusCode {
 				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, tt.wantStatusCode)
+			}
+			if resp.Status != tt.wantStatus {
+				t.Errorf("Status = %q, want %q", resp.Status, tt.wantStatus)
 			}
 			if resp.Proto != tt.wantProto {
 				t.Errorf("Proto = %q, want %q", resp.Proto, tt.wantProto)
