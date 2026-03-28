@@ -257,7 +257,7 @@ func TestMatchesRequest_HostPattern(t *testing.T) {
 				headers = http.Header{"Host": {"httpbin.org"}}
 			}
 
-			got := cr.matchesRequest("GET", u, headers)
+			got := cr.matchesRequest("GET", u, h2r(headers))
 			if got != tt.want {
 				t.Errorf("matchesRequest() = %v, want %v", got, tt.want)
 			}
@@ -283,7 +283,7 @@ func TestMatchesRequest_HostPattern_HostHeaderFallback(t *testing.T) {
 	u := &url.URL{Path: "/api/test"}
 	headers := http.Header{"Host": {"target.com:443"}}
 
-	got := cr.matchesRequest("GET", u, headers)
+	got := cr.matchesRequest("GET", u, h2r(headers))
 	if !got {
 		t.Error("matchesRequest() should match Host header fallback with port stripped")
 	}
@@ -449,7 +449,7 @@ func TestMatchesRequest_HeaderMatch(t *testing.T) {
 				t.Fatalf("compileRule() error = %v", err)
 			}
 
-			got := cr.matchesRequest("GET", nil, tt.headers)
+			got := cr.matchesRequest("GET", nil, h2r(tt.headers))
 			if got != tt.want {
 				t.Errorf("matchesRequest() = %v, want %v", got, tt.want)
 			}
@@ -527,7 +527,7 @@ func TestMatchesRequest_CombinedConditions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u := &url.URL{Host: tt.host, Path: tt.path}
-			got := cr.matchesRequest(tt.method, u, tt.headers)
+			got := cr.matchesRequest(tt.method, u, h2r(tt.headers))
 			if got != tt.want {
 				t.Errorf("matchesRequest() = %v, want %v", got, tt.want)
 			}
@@ -568,7 +568,7 @@ func TestMatchesResponse_HeaderMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := cr.matchesResponse(200, tt.headers)
+			got := cr.matchesResponse(200, h2r(tt.headers))
 			if got != tt.want {
 				t.Errorf("matchesResponse() = %v, want %v", got, tt.want)
 			}
@@ -587,7 +587,7 @@ func TestMatchesResponse_NoConditions(t *testing.T) {
 		t.Fatalf("compileRule() error = %v", err)
 	}
 
-	got := cr.matchesResponse(404, http.Header{"Content-Type": {"text/html"}})
+	got := cr.matchesResponse(404, h2r(http.Header{"Content-Type": {"text/html"}}))
 	if !got {
 		t.Error("matchesResponse() with no conditions should match all responses")
 	}

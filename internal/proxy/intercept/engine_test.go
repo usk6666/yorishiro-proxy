@@ -327,7 +327,7 @@ func TestEngine_MatchesRequest_ORLogic(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u := &url.URL{Path: tt.path}
-			got := e.MatchesRequest(tt.method, u, tt.headers)
+			got := e.MatchesRequest(tt.method, u, h2r(tt.headers))
 			if got != tt.want {
 				t.Errorf("MatchesRequest() = %v, want %v", got, tt.want)
 			}
@@ -367,7 +367,7 @@ func TestEngine_MatchesRequest_DirectionFilter(t *testing.T) {
 
 	u := &url.URL{Path: "/api"}
 	headers := http.Header{"Content-Type": {"text/html"}}
-	if e.MatchesRequest("GET", u, headers) {
+	if e.MatchesRequest("GET", u, h2r(headers)) {
 		t.Error("response-only rule should not match requests")
 	}
 }
@@ -421,7 +421,7 @@ func TestEngine_MatchesResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := e.MatchesResponse(200, tt.headers)
+			got := e.MatchesResponse(200, h2r(tt.headers))
 			if got != tt.want {
 				t.Errorf("MatchesResponse() = %v, want %v", got, tt.want)
 			}
@@ -438,7 +438,7 @@ func TestEngine_MatchesResponse_RequestOnlySkipped(t *testing.T) {
 		Direction: DirectionRequest,
 	})
 
-	if e.MatchesResponse(200, http.Header{}) {
+	if e.MatchesResponse(200, h2r(http.Header{})) {
 		t.Error("request-only rule should not match responses")
 	}
 }
@@ -482,7 +482,7 @@ func TestEngine_MatchResponseRules(t *testing.T) {
 	})
 
 	headers := http.Header{"Content-Type": {"text/html"}}
-	matched := e.MatchResponseRules(200, headers)
+	matched := e.MatchResponseRules(200, h2r(headers))
 
 	if len(matched) != 2 {
 		t.Fatalf("MatchResponseRules() len = %d, want 2", len(matched))
@@ -735,7 +735,7 @@ func TestEngine_MatchesWebSocketFrame_HTTPRuleIndependence(t *testing.T) {
 	})
 
 	testURL := &url.URL{Path: "/api/test"}
-	matched := e.MatchRequestRules("GET", testURL, http.Header{})
+	matched := e.MatchRequestRules("GET", testURL, h2r(http.Header{}))
 	for _, id := range matched {
 		if id == "ws-catch-all" {
 			t.Error("WebSocket rule should not match HTTP request via MatchRequestRules")

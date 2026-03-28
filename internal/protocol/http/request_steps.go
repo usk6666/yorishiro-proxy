@@ -180,7 +180,9 @@ func (h *Handler) applyTransform(req *gohttp.Request, recordReqBody []byte) []by
 	if h.transformPipeline == nil {
 		return recordReqBody
 	}
-	req.Header, recordReqBody = h.transformPipeline.TransformRequest(req.Method, req.URL, req.Header, recordReqBody)
+	rh := httpHeaderToRawHeaders(req.Header)
+	rh, recordReqBody = h.transformPipeline.TransformRequest(req.Method, req.URL, rh, recordReqBody)
+	req.Header = rawHeadersToHTTPHeader(rh)
 	req.Body = io.NopCloser(bytes.NewReader(recordReqBody))
 	req.ContentLength = int64(len(recordReqBody))
 	return recordReqBody
@@ -217,7 +219,9 @@ func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) [
 	}
 
 	if h.transformPipeline != nil {
-		resp.Header, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, fullBody)
+		respRH := httpHeaderToRawHeaders(resp.Header)
+		respRH, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, respRH, fullBody)
+		resp.Header = rawHeadersToHTTPHeader(respRH)
 	}
 
 	return fullBody
@@ -241,7 +245,7 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, httpHeaderToRawHeaders(resp.Header))
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -253,7 +257,7 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 		"matched_rules", matchedRules)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, req.URL, resp.StatusCode, resp.Header, body, matchedRules,
+		req.Method, req.URL, resp.StatusCode, httpHeaderToRawHeaders(resp.Header), body, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 

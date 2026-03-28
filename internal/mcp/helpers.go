@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -294,7 +295,7 @@ func (s *Server) checkSafetyInput(body []byte, rawURL string, headers http.Heade
 	if s.deps.safetyEngine == nil {
 		return nil
 	}
-	return s.deps.safetyEngine.CheckInput(body, rawURL, headers)
+	return s.deps.safetyEngine.CheckInput(body, rawURL, httputil.HTTPHeaderToRawHeaders(headers))
 }
 
 // safetyViolationError returns a generic error message for MCP clients when a safety

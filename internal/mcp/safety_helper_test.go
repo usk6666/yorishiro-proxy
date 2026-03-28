@@ -12,6 +12,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -364,10 +365,10 @@ func TestOutputFilter_InterceptQueue_MasksBody(t *testing.T) {
 	queue.Enqueue(
 		"POST",
 		u,
-		http.Header{
+		httputil.HTTPHeaderToRawHeaders(http.Header{
 			"Content-Type": {"application/json"},
 			"X-Api-Key":    {"sk-interceptedkey12345"},
-		},
+		}),
 		[]byte(`{"contact":"intercepted@email.com"}`),
 		[]string{"rule-1"},
 	)
@@ -466,10 +467,10 @@ func TestOutputFilter_InterceptRelease_MasksBody(t *testing.T) {
 	id, actionCh := queue.Enqueue(
 		"POST",
 		u,
-		http.Header{
+		httputil.HTTPHeaderToRawHeaders(http.Header{
 			"Content-Type": {"application/json"},
 			"X-Api-Key":    {"sk-interceptedkey12345"},
-		},
+		}),
 		[]byte(`{"contact":"intercepted@email.com"}`),
 		[]string{"rule-1"},
 	)
@@ -539,10 +540,10 @@ func TestOutputFilter_InterceptDrop_MasksBody(t *testing.T) {
 		"GET",
 		nil,
 		200,
-		http.Header{
+		httputil.HTTPHeaderToRawHeaders(http.Header{
 			"Content-Type": {"application/json"},
 			"X-Token":      {"sk-responseapikey12345"},
-		},
+		}),
 		[]byte(`{"email":"victim@secret.com","data":"ok"}`),
 		[]string{"rule-pii"},
 	)
@@ -609,10 +610,10 @@ func TestOutputFilter_InterceptModifyAndForward_MasksBody(t *testing.T) {
 	id, actionCh := queue.Enqueue(
 		"POST",
 		u,
-		http.Header{
+		httputil.HTTPHeaderToRawHeaders(http.Header{
 			"Content-Type":  {"application/json"},
 			"Authorization": {"Bearer sk-secretapikey123456"},
-		},
+		}),
 		[]byte(`{"user":"agent@internal.com"}`),
 		[]string{"rule-auth"},
 	)

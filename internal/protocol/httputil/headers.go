@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
@@ -34,16 +35,17 @@ func ValidateCRLFHeaders(override, add map[string]string, remove []string) error
 }
 
 // ApplyHeaderModifications applies remove, override (set), and add operations
-// to the given http.Header in that order.
-func ApplyHeaderModifications(h gohttp.Header, override, add map[string]string, remove []string) {
+// to the given RawHeaders in that order.
+func ApplyHeaderModifications(h *parser.RawHeaders, override, add map[string]string, remove []string) {
 	for _, key := range remove {
 		h.Del(key)
 	}
 	for key, val := range override {
+		h.Del(key)
 		h.Set(key, val)
 	}
 	for key, val := range add {
-		h.Add(key, val)
+		*h = append(*h, parser.RawHeader{Name: key, Value: val})
 	}
 }
 
@@ -63,7 +65,9 @@ func ApplyRequestModifications(req *gohttp.Request, action intercept.InterceptAc
 		return req, err
 	}
 
-	ApplyHeaderModifications(req.Header, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
+	rh := HTTPHeaderToRawHeaders(req.Header)
+	ApplyHeaderModifications(&rh, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
+	req.Header = RawHeadersToHTTPHeader(rh)
 
 	if action.OverrideBody != nil {
 		bodyBytes := []byte(*action.OverrideBody)
@@ -90,7 +94,9 @@ func ApplyResponseModifications(resp *gohttp.Response, action intercept.Intercep
 		return resp, body, fmt.Errorf("response %w", err)
 	}
 
-	ApplyHeaderModifications(resp.Header, action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders)
+	respRH := HTTPHeaderToRawHeaders(resp.Header)
+	ApplyHeaderModifications(&respRH, action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders)
+	resp.Header = RawHeadersToHTTPHeader(respRH)
 
 	if action.OverrideResponseBody != nil {
 		body = []byte(*action.OverrideResponseBody)

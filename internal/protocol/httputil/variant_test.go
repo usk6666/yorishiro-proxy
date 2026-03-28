@@ -9,7 +9,13 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
+
+// h2r is a test helper that converts gohttp.Header to parser.RawHeaders.
+func h2r(h gohttp.Header) parser.RawHeaders {
+	return HTTPHeaderToRawHeaders(h)
+}
 
 // mockWriter is a minimal VariantRecordWriter for testing.
 type mockWriter struct {
@@ -55,7 +61,7 @@ func TestRecordReceiveVariant_NoModification(t *testing.T) {
 		Header:     gohttp.Header{"Content-Type": {"text/plain"}},
 	}
 	body := []byte("hello")
-	snap := SnapshotResponse(200, resp.Header, body)
+	snap := SnapshotResponse(200, h2r(resp.Header), body)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
 		FlowID:       "f1",
@@ -117,7 +123,7 @@ func TestRecordReceiveVariant_StatusModified(t *testing.T) {
 	w := &mockWriter{}
 	headers := gohttp.Header{"Content-Type": {"text/plain"}}
 	body := []byte("body")
-	snap := SnapshotResponse(200, headers, body)
+	snap := SnapshotResponse(200, h2r(headers), body)
 
 	resp := &gohttp.Response{
 		StatusCode: 403,
@@ -174,7 +180,7 @@ func TestRecordReceiveVariant_BodyModified(t *testing.T) {
 	origBody := []byte(`{"v":"original"}`)
 	modBody := []byte(`{"v":"modified"}`)
 
-	snap := SnapshotResponse(200, headers, origBody)
+	snap := SnapshotResponse(200, h2r(headers), origBody)
 
 	resp := &gohttp.Response{
 		StatusCode: 200,
@@ -209,7 +215,7 @@ func TestRecordReceiveVariant_RawResponseOnOriginalOnly(t *testing.T) {
 	modBody := []byte("modified")
 	rawResp := []byte("HTTP/1.1 200 OK\r\n\r\noriginal")
 
-	snap := SnapshotResponse(200, headers, origBody)
+	snap := SnapshotResponse(200, h2r(headers), origBody)
 
 	resp := &gohttp.Response{
 		StatusCode: 200,
@@ -292,20 +298,20 @@ func TestRecordReceiveVariant_AppendError(t *testing.T) {
 func TestResponseModified_Cases(t *testing.T) {
 	headers := gohttp.Header{"Content-Type": {"text/plain"}}
 	body := []byte("hello")
-	snap := SnapshotResponse(200, headers, body)
+	snap := SnapshotResponse(200, h2r(headers), body)
 
 	tests := []struct {
 		name       string
 		statusCode int
-		headers    gohttp.Header
+		headers    parser.RawHeaders
 		body       []byte
 		want       bool
 	}{
-		{"no change", 200, headers, body, false},
-		{"status changed", 404, headers, body, true},
-		{"body changed", 200, headers, []byte("world"), true},
-		{"header added", 200, gohttp.Header{"Content-Type": {"text/plain"}, "X-New": {"v"}}, body, true},
-		{"header removed", 200, gohttp.Header{}, body, true},
+		{"no change", 200, h2r(headers), body, false},
+		{"status changed", 404, h2r(headers), body, true},
+		{"body changed", 200, h2r(headers), []byte("world"), true},
+		{"header added", 200, h2r(gohttp.Header{"Content-Type": {"text/plain"}, "X-New": {"v"}}), body, true},
+		{"header removed", 200, h2r(gohttp.Header{}), body, true},
 	}
 
 	for _, tt := range tests {
@@ -322,7 +328,7 @@ func TestSnapshotResponse_DeepCopy(t *testing.T) {
 	headers := gohttp.Header{"Content-Type": {"application/json"}}
 	body := []byte(`{"key":"value"}`)
 
-	snap := SnapshotResponse(200, headers, body)
+	snap := SnapshotResponse(200, h2r(headers), body)
 
 	// Mutate originals.
 	headers.Set("Content-Type", "text/plain")
@@ -352,16 +358,16 @@ func TestSnapshotResponse_NilInputs(t *testing.T) {
 func TestHeadersModified_Cases(t *testing.T) {
 	tests := []struct {
 		name string
-		a, b gohttp.Header
+		a, b parser.RawHeaders
 		want bool
 	}{
-		{"identical", gohttp.Header{"K": {"v"}}, gohttp.Header{"K": {"v"}}, false},
+		{"identical", h2r(gohttp.Header{"K": {"v"}}), h2r(gohttp.Header{"K": {"v"}}), false},
 		{"both nil", nil, nil, false},
-		{"both empty", gohttp.Header{}, gohttp.Header{}, false},
-		{"a extra key", gohttp.Header{"K": {"v"}, "E": {"v"}}, gohttp.Header{"K": {"v"}}, true},
-		{"b extra key", gohttp.Header{"K": {"v"}}, gohttp.Header{"K": {"v"}, "E": {"v"}}, true},
-		{"different value", gohttp.Header{"K": {"old"}}, gohttp.Header{"K": {"new"}}, true},
-		{"different count", gohttp.Header{"K": {"a", "b"}}, gohttp.Header{"K": {"a"}}, true},
+		{"both empty", parser.RawHeaders{}, parser.RawHeaders{}, false},
+		{"a extra key", parser.RawHeaders{{Name: "K", Value: "v"}, {Name: "E", Value: "v"}}, parser.RawHeaders{{Name: "K", Value: "v"}}, true},
+		{"b extra key", parser.RawHeaders{{Name: "K", Value: "v"}}, parser.RawHeaders{{Name: "K", Value: "v"}, {Name: "E", Value: "v"}}, true},
+		{"different value", parser.RawHeaders{{Name: "K", Value: "old"}}, parser.RawHeaders{{Name: "K", Value: "new"}}, true},
+		{"different count", parser.RawHeaders{{Name: "K", Value: "a"}, {Name: "K", Value: "b"}}, parser.RawHeaders{{Name: "K", Value: "a"}}, true},
 	}
 
 	for _, tt := range tests {

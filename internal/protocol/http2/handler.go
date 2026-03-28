@@ -735,7 +735,9 @@ func (h *Handler) applyRequestTransform(sc *streamContext, outReq *gohttp.Reques
 		return
 	}
 	// Use sc.srp.reqBody as input (reflects intercept overrides).
-	outReq.Header, sc.reqBody = h.transformPipeline.TransformRequest(outReq.Method, outReq.URL, outReq.Header, sc.srp.reqBody)
+	rh := httpHeaderToRawHeaders(outReq.Header)
+	rh, sc.reqBody = h.transformPipeline.TransformRequest(outReq.Method, outReq.URL, rh, sc.srp.reqBody)
+	outReq.Header = rawHeadersToHTTPHeader(rh)
 	outReq.Body = io.NopCloser(bytes.NewReader(sc.reqBody))
 	outReq.ContentLength = int64(len(sc.reqBody))
 	sc.srp.reqBody = sc.reqBody
@@ -751,7 +753,8 @@ func (h *Handler) applyResponseTransform(resp *gohttp.Response, body []byte) (go
 	if h.transformPipeline == nil {
 		return resp.Header, body
 	}
-	return h.transformPipeline.TransformResponse(resp.StatusCode, resp.Header, body)
+	rh, newBody := h.transformPipeline.TransformResponse(resp.StatusCode, httpHeaderToRawHeaders(resp.Header), body)
+	return rawHeadersToHTTPHeader(rh), newBody
 }
 
 // runServerPluginHook dispatches the on_before_send_to_server hook.
@@ -1038,7 +1041,7 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, httpHeaderToRawHeaders(req.Header))
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -1050,7 +1053,7 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 		opts = append(opts, intercept.EnqueueOpts{RawBytes: joined})
 	}
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules, opts...)
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, httpHeaderToRawHeaders(req.Header), body, matchedRules, opts...)
 	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
 
 	timeout := h.InterceptQueue.Timeout()
@@ -1095,7 +1098,7 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, httpHeaderToRawHeaders(resp.Header))
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -1107,7 +1110,7 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 		"matched_rules", matchedRules)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, req.URL, resp.StatusCode, resp.Header, body, matchedRules,
+		req.Method, req.URL, resp.StatusCode, httpHeaderToRawHeaders(resp.Header), body, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 

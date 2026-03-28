@@ -14,7 +14,7 @@ func TestQueue_EnqueueResponse(t *testing.T) {
 	body := []byte("<html>hello</html>")
 	matchedRules := []string{"rule-resp-1"}
 
-	id, actionCh := q.EnqueueResponse("GET", reqURL, 200, headers, body, matchedRules)
+	id, actionCh := q.EnqueueResponse("GET", reqURL, 200, h2r(headers), body, matchedRules)
 
 	if id == "" {
 		t.Fatal("EnqueueResponse returned empty ID")
@@ -60,7 +60,7 @@ func TestQueue_EnqueueResponse_DeepCopies(t *testing.T) {
 	body := []byte("original")
 	rules := []string{"rule-1"}
 
-	id, _ := q.EnqueueResponse("GET", reqURL, 200, headers, body, rules)
+	id, _ := q.EnqueueResponse("GET", reqURL, 200, h2r(headers), body, rules)
 
 	// Modify originals after enqueue.
 	headers.Set("X-Test", "modified")

@@ -531,7 +531,7 @@ func (h *Handler) applySSEEventIntercept(ctx context.Context, event *SSEEvent, f
 		matchHeaders.Set("X-SSE-Retry", event.Retry)
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(200, matchHeaders)
+	matchedRules := h.InterceptEngine.MatchResponseRules(200, httpHeaderToRawHeaders(matchHeaders))
 	if len(matchedRules) == 0 {
 		return event, false
 	}
@@ -547,7 +547,7 @@ func (h *Handler) applySSEEventIntercept(ctx context.Context, event *SSEEvent, f
 	filteredBody := h.filterSSEEventBodyForIntercept(eventBody, logger)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		sseCtx.req.Method, sseCtx.req.URL, 200, matchHeaders, filteredBody, matchedRules,
+		sseCtx.req.Method, sseCtx.req.URL, 200, httpHeaderToRawHeaders(matchHeaders), filteredBody, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 
@@ -782,7 +782,7 @@ func (h *Handler) applySSEIntercept(ctx context.Context, conn net.Conn, req *goh
 		return false
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Header)
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, httpHeaderToRawHeaders(resp.Header))
 	if len(matchedRules) == 0 {
 		return false
 	}
@@ -795,7 +795,7 @@ func (h *Handler) applySSEIntercept(ctx context.Context, conn net.Conn, req *goh
 
 	// Enqueue with nil body since SSE body is a stream.
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, req.URL, resp.StatusCode, resp.Header, nil, matchedRules,
+		req.Method, req.URL, resp.StatusCode, httpHeaderToRawHeaders(resp.Header), nil, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 

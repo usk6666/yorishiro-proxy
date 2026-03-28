@@ -10,6 +10,8 @@ import (
 	gohttp "net/http"
 	"strconv"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // DecompressBody decompresses an HTTP response body based on the Content-Encoding
@@ -55,6 +57,19 @@ func RecordingHeaders(original gohttp.Header, decompressed bool, bodyLen int) go
 	headers := original.Clone()
 	if decompressed {
 		headers.Del("Content-Encoding")
+		headers.Set("Content-Length", strconv.Itoa(bodyLen))
+	}
+	return headers
+}
+
+// RecordingHeadersRaw returns a copy of the RawHeaders suitable for flow
+// recording. When the body has been decompressed, Content-Encoding is removed
+// and Content-Length is updated to reflect the decoded body size.
+func RecordingHeadersRaw(original parser.RawHeaders, decompressed bool, bodyLen int) parser.RawHeaders {
+	headers := original.Clone()
+	if decompressed {
+		headers.Del("Content-Encoding")
+		headers.Del("Content-Length")
 		headers.Set("Content-Length", strconv.Itoa(bodyLen))
 	}
 	return headers

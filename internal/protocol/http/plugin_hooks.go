@@ -45,7 +45,7 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn
 
 	case plugin.ActionRespond:
 		statusCode, headers, respBody := plugin.BuildRespondResponse(result.ResponseData)
-		if err := writePluginResponse(conn, statusCode, headers, respBody); err != nil {
+		if err := writePluginResponse(conn, statusCode, rawHeadersToHTTPHeader(headers), respBody); err != nil {
 			logger.Warn("plugin respond write failed", "error", err)
 		}
 		logger.Info("plugin responded to request", "hook", "on_receive_from_client",

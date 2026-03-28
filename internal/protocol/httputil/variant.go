@@ -4,10 +4,12 @@ import (
 	"context"
 	"log/slog"
 	gohttp "net/http"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // VariantRecordWriter is the subset of flow.FlowWriter needed by variant
@@ -24,7 +26,7 @@ type VariantRecordWriter interface {
 // separate receive message.
 type ResponseSnapshot struct {
 	StatusCode int
-	Headers    gohttp.Header
+	Headers    parser.RawHeaders
 	Body       []byte
 }
 
@@ -88,7 +90,7 @@ func RecordReceiveVariant(
 	logger *slog.Logger,
 ) {
 	modified := snap != nil && ResponseModified(
-		*snap, p.Resp.StatusCode, p.Resp.Header, p.RespBody,
+		*snap, p.Resp.StatusCode, HTTPHeaderToRawHeaders(p.Resp.Header), p.RespBody,
 	)
 
 	if !modified {
@@ -152,7 +154,7 @@ func recordOriginalReceive(
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
 		StatusCode:    snap.StatusCode,
-		Headers:       RecordingHeaders(snap.Headers, decompressed, len(body)),
+		Headers:       RawHeadersToHTTPHeader(RecordingHeadersRaw(snap.Headers, decompressed, len(body))),
 		Body:          body,
 		RawBytes:      p.RawResponse,
 		BodyTruncated: truncated,
@@ -245,7 +247,7 @@ func decompressAndTruncate(body []byte, contentEncoding string, logger *slog.Log
 
 // ResponseModified reports whether the response status code, headers, or body
 // have been changed relative to the snapshot.
-func ResponseModified(snap ResponseSnapshot, currentStatusCode int, currentHeaders gohttp.Header, currentBody []byte) bool {
+func ResponseModified(snap ResponseSnapshot, currentStatusCode int, currentHeaders parser.RawHeaders, currentBody []byte) bool {
 	if snap.StatusCode != currentStatusCode {
 		return true
 	}
@@ -260,20 +262,24 @@ func ResponseModified(snap ResponseSnapshot, currentStatusCode int, currentHeade
 	return HeadersModified(snap.Headers, currentHeaders)
 }
 
-// HeadersModified reports whether two header maps differ.
-func HeadersModified(a, b gohttp.Header) bool {
+// HeadersModified reports whether two header sets differ in content.
+// The comparison is order-insensitive: only the set of (lowercased name, value)
+// pairs matters, not their position. This avoids false positives when headers
+// originate from net/http.Header map iteration (non-deterministic order).
+func HeadersModified(a, b parser.RawHeaders) bool {
 	if len(a) != len(b) {
 		return true
 	}
-	for key, aVals := range a {
-		bVals, ok := b[key]
-		if !ok || len(aVals) != len(bVals) {
+	freq := make(map[string]int, len(a))
+	for _, h := range a {
+		key := strings.ToLower(h.Name) + "\x00" + h.Value
+		freq[key]++
+	}
+	for _, h := range b {
+		key := strings.ToLower(h.Name) + "\x00" + h.Value
+		freq[key]--
+		if freq[key] < 0 {
 			return true
-		}
-		for i := range aVals {
-			if aVals[i] != bVals[i] {
-				return true
-			}
 		}
 	}
 	return false
@@ -312,7 +318,7 @@ func mergeMetadata(base, override map[string]string) map[string]string {
 
 // SnapshotResponse creates a deep copy of the response status code, headers,
 // and body for later comparison.
-func SnapshotResponse(statusCode int, headers gohttp.Header, body []byte) ResponseSnapshot {
+func SnapshotResponse(statusCode int, headers parser.RawHeaders, body []byte) ResponseSnapshot {
 	snap := ResponseSnapshot{StatusCode: statusCode}
 	if headers != nil {
 		snap.Headers = headers.Clone()

@@ -1,8 +1,9 @@
 package safety
 
 import (
-	"net/http"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 func TestNewEngine_EmptyConfig(t *testing.T) {
@@ -254,7 +255,7 @@ func TestCheckInput_HeaderMatch(t *testing.T) {
 		},
 	})
 
-	h := http.Header{}
+	var h parser.RawHeaders
 	h.Set("X-Custom", "this is evil")
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
@@ -272,7 +273,7 @@ func TestCheckInput_HeadersMatch(t *testing.T) {
 		},
 	})
 
-	h := http.Header{}
+	var h parser.RawHeaders
 	h.Set("X-Secret", "token123")
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
@@ -413,7 +414,7 @@ func TestFilterOutputHeaders_Mask(t *testing.T) {
 		},
 	})
 
-	h := http.Header{}
+	var h parser.RawHeaders
 	h.Set("Authorization", "Bearer abc123")
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
@@ -437,7 +438,7 @@ func TestFilterOutputHeaders_NoModifyOriginal(t *testing.T) {
 		},
 	})
 
-	h := http.Header{}
+	var h parser.RawHeaders
 	h.Set("X-Data", "secret")
 	_, _ = e.FilterOutputHeaders(h)
 	// Original should be unchanged.
@@ -544,7 +545,7 @@ func TestCheckInput_HeaderColonTarget_SpecificHeader(t *testing.T) {
 	})
 
 	// Should match when the specific header contains the pattern.
-	h := http.Header{}
+	var h parser.RawHeaders
 	h.Set("Location", "http://evil.com")
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
@@ -555,7 +556,7 @@ func TestCheckInput_HeaderColonTarget_SpecificHeader(t *testing.T) {
 	}
 
 	// Should NOT match when a different header contains the pattern.
-	h2 := http.Header{}
+	var h2 parser.RawHeaders
 	h2.Set("X-Other", "evil-value")
 	v2 := e.CheckInput(nil, "", h2)
 	if v2 != nil {
@@ -576,9 +577,10 @@ func TestFilterOutputHeaders_SpecificHeader(t *testing.T) {
 		},
 	})
 
-	h := http.Header{}
-	h.Set("Location", "http://evil.com")
-	h.Set("X-Other", "also evil")
+	h := parser.RawHeaders{
+		{Name: "Location", Value: "http://evil.com"},
+		{Name: "X-Other", Value: "also evil"},
+	}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(matches))
@@ -891,7 +893,7 @@ func TestFilterOutputHeaders_ValidatorAccepts(t *testing.T) {
 		return match[0] == '1'
 	}
 
-	h := http.Header{}
+	var h parser.RawHeaders
 	h.Set("X-Data", "id=1234 code=5678")
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
@@ -926,7 +928,7 @@ func TestFilterOutputHeaders_ValidatorRejectsAll(t *testing.T) {
 		return false
 	}
 
-	h := http.Header{}
+	var h parser.RawHeaders
 	h.Set("X-Val", "abc 123")
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 0 {
@@ -957,9 +959,10 @@ func TestFilterOutputHeaders_ValidatorSpecificHeader(t *testing.T) {
 		return len(match) > 6 && match[6] == '1'
 	}
 
-	h := http.Header{}
-	h.Set("X-Token", "secret1 secret2")
-	h.Set("X-Other", "secret1")
+	h := parser.RawHeaders{
+		{Name: "X-Token", Value: "secret1 secret2"},
+		{Name: "X-Other", Value: "secret1"},
+	}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(matches))

@@ -353,14 +353,14 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 	if snap != nil {
 		s := httputil.ResponseSnapshot{
 			StatusCode: snap.statusCode,
-			Headers:    snap.headers,
+			Headers:    httpHeaderToRawHeaders(snap.headers),
 			Body:       snap.body,
 		}
 		sharedSnap = &s
 	}
 
 	tags := proxy.MergeSOCKS5Tags(ctx, nil)
-	tags = httputil.MergeTechnologyTags(tags, h.detector, p.resp.Header, p.respBody)
+	tags = httputil.MergeTechnologyTags(tags, h.detector, httpHeaderToRawHeaders(p.resp.Header), p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,

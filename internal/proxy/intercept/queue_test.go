@@ -31,7 +31,7 @@ func TestQueue_EnqueueAndGet(t *testing.T) {
 	body := []byte(`{"key":"value"}`)
 	matchedRules := []string{"rule-1", "rule-2"}
 
-	id, actionCh := q.Enqueue("POST", u, headers, body, matchedRules)
+	id, actionCh := q.Enqueue("POST", u, h2r(headers), body, matchedRules)
 
 	if id == "" {
 		t.Fatal("Enqueue returned empty ID")
@@ -74,7 +74,7 @@ func TestQueue_EnqueueDeepCopies(t *testing.T) {
 	body := []byte("original")
 	rules := []string{"rule-1"}
 
-	id, _ := q.Enqueue("GET", u, headers, body, rules)
+	id, _ := q.Enqueue("GET", u, h2r(headers), body, rules)
 
 	// Modify originals after enqueue.
 	headers.Set("X-Test", "modified")
@@ -121,8 +121,9 @@ func TestQueue_EnqueueNilValues(t *testing.T) {
 	if item.URL != nil {
 		t.Errorf("expected nil URL, got %v", item.URL)
 	}
-	if item.Headers == nil {
-		t.Error("expected non-nil empty headers")
+	// When nil headers are passed, Clone returns nil.
+	if item.Headers != nil {
+		t.Errorf("expected nil headers, got %v", item.Headers)
 	}
 	if item.Body != nil {
 		t.Errorf("expected nil body, got %v", item.Body)

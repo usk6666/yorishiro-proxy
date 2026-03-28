@@ -46,10 +46,8 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.Resp
 
 	case plugin.ActionRespond:
 		statusCode, headers, respBody := plugin.BuildRespondResponse(result.ResponseData)
-		for key, vals := range headers {
-			for _, val := range vals {
-				w.Header().Add(key, val)
-			}
+		for _, hdr := range headers {
+			w.Header().Add(hdr.Name, hdr.Value)
 		}
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
 		w.WriteHeader(statusCode)

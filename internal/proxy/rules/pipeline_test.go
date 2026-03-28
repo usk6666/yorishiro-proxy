@@ -291,13 +291,13 @@ func TestPipeline_TransformRequest_AddHeader(t *testing.T) {
 	u, _ := url.Parse("http://api.target.com/test")
 	headers := http.Header{"Content-Type": {"application/json"}}
 
-	headers, _ = p.TransformRequest("GET", u, headers, nil)
+	rHeaders, _ := p.TransformRequest("GET", u, h2r(headers), nil)
 
-	if got := headers.Get("Authorization"); got != "Bearer test-token" {
+	if got := rHeaders.Get("Authorization"); got != "Bearer test-token" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer test-token")
 	}
 	// Original header should still be present.
-	if got := headers.Get("Content-Type"); got != "application/json" {
+	if got := rHeaders.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q, want %q", got, "application/json")
 	}
 }
@@ -323,9 +323,9 @@ func TestPipeline_TransformRequest_SetHeader(t *testing.T) {
 		"Content-Type":  {"application/json"},
 	}
 
-	headers, _ = p.TransformRequest("GET", u, headers, nil)
+	rHeaders, _ := p.TransformRequest("GET", u, h2r(headers), nil)
 
-	if got := headers.Get("Authorization"); got != "Bearer new-token" {
+	if got := rHeaders.Get("Authorization"); got != "Bearer new-token" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer new-token")
 	}
 }
@@ -350,12 +350,12 @@ func TestPipeline_TransformRequest_RemoveHeader(t *testing.T) {
 		"Content-Type": {"text/html"},
 	}
 
-	headers, _ = p.TransformRequest("GET", u, headers, nil)
+	rHeaders, _ := p.TransformRequest("GET", u, h2r(headers), nil)
 
-	if got := headers.Get("X-Unwanted"); got != "" {
+	if got := rHeaders.Get("X-Unwanted"); got != "" {
 		t.Errorf("X-Unwanted should be removed, got %q", got)
 	}
-	if got := headers.Get("Content-Type"); got != "text/html" {
+	if got := rHeaders.Get("Content-Type"); got != "text/html" {
 		t.Errorf("Content-Type = %q, want %q", got, "text/html")
 	}
 }
@@ -379,7 +379,7 @@ func TestPipeline_TransformRequest_ReplaceBody(t *testing.T) {
 	headers := http.Header{}
 	body := []byte(`{"server": "production-host", "port": 443}`)
 
-	_, newBody := p.TransformRequest("POST", u, headers, body)
+	_, newBody := p.TransformRequest("POST", u, h2r(headers), body)
 
 	expected := `{"server": "staging-host", "port": 443}`
 	if string(newBody) != expected {
@@ -406,7 +406,7 @@ func TestPipeline_TransformRequest_ReplaceBodyRegex(t *testing.T) {
 	headers := http.Header{}
 	body := []byte(`{"api_version": "v1.5", "name": "test"}`)
 
-	_, newBody := p.TransformRequest("POST", u, headers, body)
+	_, newBody := p.TransformRequest("POST", u, h2r(headers), body)
 
 	expected := `{"api_version": "v2.0", "name": "test"}`
 	if string(newBody) != expected {
@@ -432,9 +432,9 @@ func TestPipeline_TransformRequest_DisabledRuleSkipped(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 	headers := http.Header{}
 
-	headers, _ = p.TransformRequest("GET", u, headers, nil)
+	rHeaders, _ := p.TransformRequest("GET", u, h2r(headers), nil)
 
-	if got := headers.Get("X-Should-Not-Exist"); got != "" {
+	if got := rHeaders.Get("X-Should-Not-Exist"); got != "" {
 		t.Errorf("disabled rule should not add header, got %q", got)
 	}
 }
@@ -458,9 +458,9 @@ func TestPipeline_TransformRequest_DirectionFilter(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 	headers := http.Header{}
 
-	headers, _ = p.TransformRequest("GET", u, headers, nil)
+	rHeaders, _ := p.TransformRequest("GET", u, h2r(headers), nil)
 
-	if got := headers.Get("X-Response-Only"); got != "" {
+	if got := rHeaders.Get("X-Response-Only"); got != "" {
 		t.Errorf("response-only rule should not apply to requests, got %q", got)
 	}
 }
@@ -483,9 +483,9 @@ func TestPipeline_TransformRequest_BothDirection(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 	headers := http.Header{}
 
-	headers, _ = p.TransformRequest("GET", u, headers, nil)
+	rHeaders, _ := p.TransformRequest("GET", u, h2r(headers), nil)
 
-	if got := headers.Get("X-Proxy"); got != "yorishiro" {
+	if got := rHeaders.Get("X-Proxy"); got != "yorishiro" {
 		t.Errorf("both-direction rule should apply to requests, got %q", got)
 	}
 }
@@ -510,17 +510,15 @@ func TestPipeline_TransformRequest_ConditionFilter(t *testing.T) {
 
 	// Matching request.
 	u1, _ := url.Parse("http://example.com/api/test")
-	h1 := http.Header{}
-	h1, _ = p.TransformRequest("GET", u1, h1, nil)
-	if got := h1.Get("X-API"); got != "true" {
+	rh1, _ := p.TransformRequest("GET", u1, h2r(http.Header{}), nil)
+	if got := rh1.Get("X-API"); got != "true" {
 		t.Errorf("matching request: X-API = %q, want %q", got, "true")
 	}
 
 	// Non-matching request.
 	u2, _ := url.Parse("http://example.com/public/test")
-	h2 := http.Header{}
-	h2, _ = p.TransformRequest("GET", u2, h2, nil)
-	if got := h2.Get("X-API"); got != "" {
+	rh2, _ := p.TransformRequest("GET", u2, h2r(http.Header{}), nil)
+	if got := rh2.Get("X-API"); got != "" {
 		t.Errorf("non-matching request: X-API should be empty, got %q", got)
 	}
 }
@@ -545,10 +543,10 @@ func TestPipeline_TransformRequest_PriorityOrder(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 	headers := http.Header{}
 
-	headers, _ = p.TransformRequest("GET", u, headers, nil)
+	rHeaders, _ := p.TransformRequest("GET", u, h2r(headers), nil)
 
 	// Last writer wins for SetHeader, so "third" (highest priority value, applied last).
-	if got := headers.Get("X-Test"); got != "third" {
+	if got := rHeaders.Get("X-Test"); got != "third" {
 		t.Errorf("X-Test = %q, want %q (last applied wins for SetHeader)", got, "third")
 	}
 }
@@ -564,7 +562,7 @@ func TestPipeline_TransformRequest_EmptyBody(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 	headers := http.Header{}
 
-	_, body := p.TransformRequest("GET", u, headers, nil)
+	_, body := p.TransformRequest("GET", u, h2r(headers), nil)
 
 	if body != nil {
 		t.Errorf("body should remain nil for empty body, got %v", body)
@@ -590,12 +588,12 @@ func TestPipeline_TransformResponse_RemoveHeader(t *testing.T) {
 		"Content-Type":            {"text/html"},
 	}
 
-	headers, _ = p.TransformResponse(200, headers, nil)
+	rHeaders, _ := p.TransformResponse(200, h2r(headers), nil)
 
-	if got := headers.Get("Content-Security-Policy"); got != "" {
+	if got := rHeaders.Get("Content-Security-Policy"); got != "" {
 		t.Errorf("CSP header should be removed, got %q", got)
 	}
-	if got := headers.Get("Content-Type"); got != "text/html" {
+	if got := rHeaders.Get("Content-Type"); got != "text/html" {
 		t.Errorf("Content-Type = %q, want %q", got, "text/html")
 	}
 }
@@ -618,7 +616,7 @@ func TestPipeline_TransformResponse_ReplaceBody(t *testing.T) {
 	headers := http.Header{"Content-Type": {"text/html"}}
 	body := []byte(`<script src="https://cdn.example.com/app.js"></script>`)
 
-	_, newBody := p.TransformResponse(200, headers, body)
+	_, newBody := p.TransformResponse(200, h2r(headers), body)
 
 	expected := `<script src="https://local.proxy/app.js"></script>`
 	if string(newBody) != expected {
@@ -636,9 +634,9 @@ func TestPipeline_TransformResponse_DirectionFilter(t *testing.T) {
 	})
 
 	headers := http.Header{}
-	headers, _ = p.TransformResponse(200, headers, nil)
+	rHeaders, _ := p.TransformResponse(200, h2r(headers), nil)
 
-	if got := headers.Get("X-Request-Only"); got != "" {
+	if got := rHeaders.Get("X-Request-Only"); got != "" {
 		t.Errorf("request-only rule should not apply to responses, got %q", got)
 	}
 }
@@ -652,9 +650,9 @@ func TestPipeline_TransformResponse_BothDirection(t *testing.T) {
 	})
 
 	headers := http.Header{}
-	headers, _ = p.TransformResponse(200, headers, nil)
+	rHeaders, _ := p.TransformResponse(200, h2r(headers), nil)
 
-	if got := headers.Get("X-Proxy"); got != "yorishiro" {
+	if got := rHeaders.Get("X-Proxy"); got != "yorishiro" {
 		t.Errorf("both-direction rule should apply to responses, got %q", got)
 	}
 }
@@ -687,12 +685,12 @@ func TestPipeline_TransformRequest_MultipleRules(t *testing.T) {
 	}
 	body := []byte(`{"host": "prod.example.com"}`)
 
-	headers, newBody := p.TransformRequest("POST", u, headers, body)
+	rHeaders, newBody := p.TransformRequest("POST", u, h2r(headers), body)
 
-	if got := headers.Get("Cookie"); got != "" {
+	if got := rHeaders.Get("Cookie"); got != "" {
 		t.Errorf("Cookie should be removed, got %q", got)
 	}
-	if got := headers.Get("Authorization"); got != "Bearer token" {
+	if got := rHeaders.Get("Authorization"); got != "Bearer token" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer token")
 	}
 	expected := `{"host": "staging.example.com"}`
@@ -721,8 +719,7 @@ func TestPipeline_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			h := http.Header{}
-			p.TransformRequest("GET", u, h, nil)
+			p.TransformRequest("GET", u, h2r(http.Header{}), nil)
 		}()
 	}
 
@@ -731,8 +728,7 @@ func TestPipeline_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			h := http.Header{}
-			p.TransformResponse(200, h, nil)
+			p.TransformResponse(200, h2r(http.Header{}), nil)
 		}()
 	}
 
@@ -759,7 +755,7 @@ func TestPipeline_TransformRequest_NoRules(t *testing.T) {
 	headers := http.Header{"X-Original": {"value"}}
 	body := []byte("original body")
 
-	newHeaders, newBody := p.TransformRequest("GET", u, headers, body)
+	newHeaders, newBody := p.TransformRequest("GET", u, h2r(headers), body)
 
 	if got := newHeaders.Get("X-Original"); got != "value" {
 		t.Errorf("X-Original = %q, want %q", got, "value")
@@ -775,7 +771,7 @@ func TestPipeline_TransformResponse_NoRules(t *testing.T) {
 	headers := http.Header{"X-Original": {"value"}}
 	body := []byte("original body")
 
-	newHeaders, newBody := p.TransformResponse(200, headers, body)
+	newHeaders, newBody := p.TransformResponse(200, h2r(headers), body)
 
 	if got := newHeaders.Get("X-Original"); got != "value" {
 		t.Errorf("X-Original = %q, want %q", got, "value")

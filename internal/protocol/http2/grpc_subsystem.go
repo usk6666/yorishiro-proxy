@@ -64,7 +64,7 @@ func applyGRPCSafetyFilter(engine *safety.Engine, jsonBody string, rawURL string
 	if engine == nil {
 		return nil
 	}
-	return engine.CheckInput([]byte(jsonBody), rawURL, headers)
+	return engine.CheckInput([]byte(jsonBody), rawURL, httpHeaderToRawHeaders(headers))
 }
 
 // applyGRPCOutputFilter applies the output filter to a decoded gRPC JSON body.
@@ -208,7 +208,7 @@ func applyGRPCAutoTransform(pipeline *rules.Pipeline, sc *streamContext, jsonBod
 	if pipeline == nil || pipeline.Len() == 0 {
 		return jsonBody, false
 	}
-	_, body := pipeline.TransformRequest(sc.req.Method, sc.reqURL, sc.req.Header, []byte(jsonBody))
+	_, body := pipeline.TransformRequest(sc.req.Method, sc.reqURL, httpHeaderToRawHeaders(sc.req.Header), []byte(jsonBody))
 	newJSON := string(body)
 	return newJSON, newJSON != jsonBody
 }
@@ -219,7 +219,7 @@ func applyGRPCAutoTransformResponse(pipeline *rules.Pipeline, statusCode int, he
 	if pipeline == nil || pipeline.Len() == 0 {
 		return jsonBody, false
 	}
-	_, body := pipeline.TransformResponse(statusCode, headers, []byte(jsonBody))
+	_, body := pipeline.TransformResponse(statusCode, httpHeaderToRawHeaders(headers), []byte(jsonBody))
 	newJSON := string(body)
 	return newJSON, newJSON != jsonBody
 }
