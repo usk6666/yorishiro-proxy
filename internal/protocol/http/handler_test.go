@@ -696,46 +696,40 @@ func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
 	}
 }
 
-func TestSetConnPool(t *testing.T) {
-	store := &mockStore{}
-	handler := NewHandler(store, nil, testutil.DiscardLogger())
-
-	// Initially nil.
-	if handler.ConnPool() != nil {
-		t.Error("ConnPool() should be nil initially")
-	}
-
-	// Set a ConnPool and verify.
-	pool := &ConnPool{DialTimeout: 15 * time.Second}
-	handler.SetConnPool(pool)
-
-	got := handler.ConnPool()
-	if got == nil {
-		t.Fatal("ConnPool() is nil after SetConnPool")
-	}
-	if got.DialTimeout != 15*time.Second {
-		t.Errorf("ConnPool().DialTimeout = %v, want %v", got.DialTimeout, 15*time.Second)
-	}
-}
-
 func TestHandler_SetConnPool_Accessor(t *testing.T) {
-	// Verify that SetConnPool stores and ConnPool retrieves the same pointer.
-	h := NewHandler(nil, nil, nil)
-
-	pool := &ConnPool{
-		DialTimeout: 10 * time.Second,
+	tests := []struct {
+		name string
+		pool *ConnPool
+	}{
+		{"nil pool", nil},
+		{"non-nil pool", &ConnPool{DialTimeout: 15 * time.Second}},
 	}
 
-	h.SetConnPool(pool)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHandler(nil, nil, nil)
 
-	got := h.ConnPool()
-	if got != pool {
-		t.Errorf("ConnPool() returned different pointer: got %p, want %p", got, pool)
-	}
+			// Initially nil.
+			if h.ConnPool() != nil {
+				t.Error("ConnPool() should be nil initially")
+			}
 
-	// Verify nil round-trip.
-	h.SetConnPool(nil)
-	if h.ConnPool() != nil {
-		t.Error("ConnPool() should return nil after SetConnPool(nil)")
+			h.SetConnPool(tt.pool)
+
+			got := h.ConnPool()
+			if got != tt.pool {
+				t.Errorf("ConnPool() = %p, want %p", got, tt.pool)
+			}
+
+			if tt.pool != nil && got.DialTimeout != tt.pool.DialTimeout {
+				t.Errorf("ConnPool().DialTimeout = %v, want %v", got.DialTimeout, tt.pool.DialTimeout)
+			}
+
+			// Verify nil round-trip.
+			h.SetConnPool(nil)
+			if h.ConnPool() != nil {
+				t.Error("ConnPool() should return nil after SetConnPool(nil)")
+			}
+		})
 	}
 }
