@@ -179,7 +179,7 @@ func compileRule(r Rule) (*compiledRule, error) {
 					return nil, err
 				}
 			}
-			// Store with canonical header name for consistent lookup.
+			// Store with lowercased header name for case-insensitive lookup.
 			cr.headerMatchRes[strings.ToLower(name)] = re
 		}
 	}

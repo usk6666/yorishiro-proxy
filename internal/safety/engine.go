@@ -338,21 +338,23 @@ func matchNamedHeaderValues(re *regexp.Regexp, headers parser.RawHeaders, name s
 
 // matchAllHeaders concatenates all headers in sorted key order and checks the
 // pattern. Sorting ensures deterministic matching order for testability.
+// Header values are grouped by name in a single pass to avoid repeated
+// linear scans via Values().
 func matchAllHeaders(re *regexp.Regexp, headers parser.RawHeaders) (bool, string) {
-	// Collect unique header names for deterministic sort order.
-	nameSet := make(map[string]bool, len(headers))
+	// Group values by header name in a single pass.
+	grouped := make(map[string][]string, len(headers))
 	for _, h := range headers {
-		nameSet[h.Name] = true
+		grouped[h.Name] = append(grouped[h.Name], h.Value)
 	}
-	keys := make([]string, 0, len(nameSet))
-	for name := range nameSet {
+	keys := make([]string, 0, len(grouped))
+	for name := range grouped {
 		keys = append(keys, name)
 	}
 	sort.Strings(keys)
 
 	var sb strings.Builder
 	for _, name := range keys {
-		for _, v := range headers.Values(name) {
+		for _, v := range grouped[name] {
 			sb.WriteString(name)
 			sb.WriteString(": ")
 			sb.WriteString(v)

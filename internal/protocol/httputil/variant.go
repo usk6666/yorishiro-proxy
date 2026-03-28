@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	gohttp "net/http"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -261,13 +262,23 @@ func ResponseModified(snap ResponseSnapshot, currentStatusCode int, currentHeade
 	return HeadersModified(snap.Headers, currentHeaders)
 }
 
-// HeadersModified reports whether two header maps differ.
+// HeadersModified reports whether two header sets differ in content.
+// The comparison is order-insensitive: only the set of (lowercased name, value)
+// pairs matters, not their position. This avoids false positives when headers
+// originate from net/http.Header map iteration (non-deterministic order).
 func HeadersModified(a, b parser.RawHeaders) bool {
 	if len(a) != len(b) {
 		return true
 	}
-	for i := range a {
-		if a[i].Name != b[i].Name || a[i].Value != b[i].Value {
+	freq := make(map[string]int, len(a))
+	for _, h := range a {
+		key := strings.ToLower(h.Name) + "\x00" + h.Value
+		freq[key]++
+	}
+	for _, h := range b {
+		key := strings.ToLower(h.Name) + "\x00" + h.Value
+		freq[key]--
+		if freq[key] < 0 {
 			return true
 		}
 	}
