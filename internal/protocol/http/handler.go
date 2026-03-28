@@ -426,7 +426,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
 
 	sendStart := time.Now()
-	fwd, err := h.forwardUpstream(ctx, conn, req, reqURL, false, logger)
+	fwd, err := h.forwardUpstream(ctx, conn, req, reqURL, reqURL.Scheme == "https", logger)
 	if err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
 		return err

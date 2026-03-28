@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	interceptPkg "github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -84,8 +85,14 @@ func TestInsecureSkipVerify_HTTPForwardToSelfSignedServer(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
-	// Enable InsecureSkipVerify so the handler can connect to the self-signed upstream.
-	handler.SetInsecureSkipVerify(true)
+	// Wire a ConnPool with InsecureSkipVerify TLS transport so the handler
+	// can connect to the self-signed upstream via UpstreamRouter.
+	handler.SetConnPool(&ConnPool{
+		TLSTransport: &httputil.StandardTransport{
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"http/1.1"},
+		},
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -189,7 +196,15 @@ func TestWithoutInsecureSkipVerify_SelfSignedServerFails(t *testing.T) {
 
 	store := &mockStore{}
 	handler := NewHandler(store, nil, testutil.DiscardLogger())
-	// Do NOT set InsecureSkipVerify — default transport should reject self-signed cert.
+	// Explicitly wire a ConnPool with InsecureSkipVerify=false so the proxy
+	// rejects the self-signed certificate (the default effectiveTLSTransport
+	// uses InsecureSkipVerify=true for MITM proxy use).
+	handler.SetConnPool(&ConnPool{
+		TLSTransport: &httputil.StandardTransport{
+			InsecureSkipVerify: false,
+			NextProtos:         []string{"http/1.1"},
+		},
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -603,19 +618,34 @@ func TestSetTLSTransport_NilByDefault(t *testing.T) {
 	}
 }
 
-func TestSetTLSTransport_ConfiguresDialTLSContext(t *testing.T) {
+func TestSetTLSTransport_ConfiguresConnPool(t *testing.T) {
 	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
 
 	mock := &mockTLSTransport{}
 	handler.SetTLSTransport(mock)
 
-	if handler.Transport.DialTLSContext == nil {
-		t.Fatal("DialTLSContext should be set after SetTLSTransport")
+	// After SetTLSTransport, the handler's tlsTransport should be set.
+	if handler.TLSTransport() != mock {
+		t.Fatal("TLSTransport() should return the configured transport")
 	}
 
-	// TLSClientConfig should be nil since DialTLSContext handles TLS.
-	if handler.Transport.TLSClientConfig != nil {
-		t.Error("TLSClientConfig should be nil when DialTLSContext is set")
+	// effectiveTLSTransport should return the configured transport.
+	effective := handler.effectiveTLSTransport()
+	if effective != mock {
+		t.Error("effectiveTLSTransport() should return the configured transport, not a fallback")
+	}
+
+	// effectiveUpstreamRouter should build a router with a ConnPool using
+	// the configured TLS transport.
+	router := handler.effectiveUpstreamRouter()
+	if router == nil {
+		t.Fatal("effectiveUpstreamRouter() should not return nil")
+	}
+	if router.Pool == nil {
+		t.Fatal("router.Pool should not be nil")
+	}
+	if router.Pool.TLSTransport != mock {
+		t.Error("router.Pool.TLSTransport should be the configured TLS transport")
 	}
 }
 
@@ -653,16 +683,17 @@ func TestEffectiveTLSTransport_FallbackInheritsInsecure(t *testing.T) {
 func TestSetTLSTransport_NilDoesNotPanic(t *testing.T) {
 	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
 
-	// Setting nil should not panic and should not configure DialTLSContext.
+	// Setting nil should not panic and should leave TLSTransport nil.
 	handler.SetTLSTransport(nil)
 
-	if handler.Transport.DialTLSContext != nil {
-		t.Error("DialTLSContext should remain nil when TLSTransport is nil")
+	if handler.TLSTransport() != nil {
+		t.Error("TLSTransport() should remain nil when SetTLSTransport(nil) is called")
 	}
 }
 
 func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
-	// Test that the handler can forward HTTPS requests through the TLS transport.
+	// Test that the handler can forward HTTPS requests through the TLS transport
+	// via UpstreamRouter/ConnPool.
 	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		w.Header().Set("X-UTLS-Test", "passed")
 		w.WriteHeader(gohttp.StatusOK)
@@ -672,18 +703,35 @@ func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
 
 	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
 
-	// Use the test server's TLS config to connect, since it's self-signed.
-	handler.Transport = upstream.Client().Transport.(*gohttp.Transport)
+	// Wire a ConnPool with InsecureSkipVerify to handle the self-signed cert.
+	handler.SetConnPool(&ConnPool{
+		TLSTransport: &httputil.StandardTransport{
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"http/1.1"},
+		},
+	})
 
-	// Build an HTTP proxy request to the upstream HTTPS server.
-	req, _ := gohttp.NewRequest("GET", upstream.URL+"/test", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// Forward through the handler's transport (which uses test server certs).
-	outReq := req.WithContext(context.Background())
-	outReq.RequestURI = ""
-	resp, _, _, err := roundTripWithTrace(handler.Transport, outReq)
+	proxyAddr, proxyCancel := startTestProxy(t, ctx, handler)
+	defer proxyCancel()
+
+	// Connect to the proxy and send a request targeting the HTTPS upstream.
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
 	if err != nil {
-		t.Fatalf("roundTrip failed: %v", err)
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	httpReq := fmt.Sprintf("GET %s/test HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+		upstream.URL, upstream.Listener.Addr().String())
+	conn.Write([]byte(httpReq))
+
+	reader := bufio.NewReader(conn)
+	resp, err := gohttp.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -693,6 +741,9 @@ func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "utls-ok" {
 		t.Errorf("body = %q, want %q", string(body), "utls-ok")
+	}
+	if resp.Header.Get("X-UTLS-Test") != "passed" {
+		t.Errorf("X-UTLS-Test = %q, want %q", resp.Header.Get("X-UTLS-Test"), "passed")
 	}
 }
 
