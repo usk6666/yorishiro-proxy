@@ -313,7 +313,7 @@ func (e *Engine) executeFuzzCase(
 		if data.URL != nil {
 			rawURL = data.URL.String()
 		}
-		if err := safetyInputChecker(data.Body, rawURL, httputil.HTTPHeaderToRawHeaders(data.Headers)); err != nil {
+		if err := safetyInputChecker(data.Body, rawURL, httputil.HTTPHeaderToRawHeaders(http.Header(data.Headers))); err != nil {
 			result.Error = fmt.Sprintf("safety filter: %s", err.Error())
 			return result
 		}

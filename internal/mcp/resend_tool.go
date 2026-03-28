@@ -318,6 +318,13 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 		return nil, nil, nil, fmt.Errorf("flow_id is required for resend action")
 	}
 
+	// Reject follow_redirects: the UpstreamRouter does not support redirect
+	// following (the old net/http.Client path was removed). Fail explicitly
+	// rather than silently ignoring the parameter.
+	if params.FollowRedirects != nil && *params.FollowRedirects {
+		return nil, nil, nil, fmt.Errorf("follow_redirects is not supported: the resend transport does not implement redirect following")
+	}
+
 	if err := validateHooks(params.Hooks); err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid hooks: %w", err)
 	}
@@ -502,11 +509,14 @@ func buildDryRunResult(method string, targetURL *url.URL, headers parser.RawHead
 }
 
 // rawHeadersToMultiMap converts parser.RawHeaders to map[string][]string
-// for JSON serialization in result types.
+// for JSON serialization in result types. Header names are canonicalized
+// using http.CanonicalHeaderKey so that HTTP/2 lowercase names (e.g. "content-type")
+// are normalized to the canonical form expected by consumers (e.g. "Content-Type").
 func rawHeadersToMultiMap(headers parser.RawHeaders) map[string][]string {
 	result := make(map[string][]string)
 	for _, h := range headers {
-		result[h.Name] = append(result[h.Name], h.Value)
+		key := http.CanonicalHeaderKey(h.Name)
+		result[key] = append(result[key], h.Value)
 	}
 	return result
 }
@@ -533,19 +543,29 @@ func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params
 		return nil, nil, fmt.Errorf("resend request: %w", err)
 	}
 
+	resp := rtResult.Response
+	if resp == nil {
+		return nil, nil, fmt.Errorf("resend request: upstream returned nil response")
+	}
+
+	// Defer body close to prevent connection leak if ReadAll fails.
+	// The UpstreamRouter wraps the body with connClosingReader that closes the
+	// underlying connection when the body is closed or fully read.
+	if resp.Body != nil {
+		if closer, ok := resp.Body.(io.Closer); ok {
+			defer closer.Close()
+		}
+	}
+
 	var respBody []byte
-	if rtResult.Response != nil && rtResult.Response.Body != nil {
-		respBody, err = io.ReadAll(io.LimitReader(rtResult.Response.Body, config.MaxReplayResponseSize))
+	if resp.Body != nil {
+		respBody, err = io.ReadAll(io.LimitReader(resp.Body, config.MaxReplayResponseSize))
 		if err != nil {
 			return nil, nil, fmt.Errorf("read resend response body: %w", err)
-		}
-		if closer, ok := rtResult.Response.Body.(io.Closer); ok {
-			closer.Close()
 		}
 	}
 	duration := time.Since(start)
 
-	resp := rtResult.Response
 	if err := s.recordResendFlowRaw(ctx, prep, params, rawReq, resp, respBody, start, duration); err != nil {
 		return nil, nil, err
 	}
@@ -579,8 +599,8 @@ func (s *Server) buildRawRequest(prep *resendPrepared) *parser.RawRequest {
 		body = bytes.NewReader(prep.body)
 	}
 
-	// Build the request URI. For absolute-form URLs (forward-proxy style),
-	// use the full URL string. For origin-form, use path+query.
+	// Build the request URI in origin-form (path+query). url.URL.RequestURI()
+	// returns the path?query portion, which is origin-form per RFC 7230 Section 5.3.1.
 	requestURI := prep.url.RequestURI()
 
 	headers := prep.headers.Clone()
@@ -840,13 +860,21 @@ type resendRouter interface {
 // resendUpstreamRouter returns the upstream router for the resend tool.
 // If a test-injected replayRouter is set, it is returned; otherwise a new
 // UpstreamRouter is constructed using the configured TLS transport.
+//
+// A new ConnPool is created per call intentionally — resend is a low-frequency
+// diagnostic operation and connection reuse across resends is not needed (YAGNI).
+// AllowH2 is false because the resend router only has an H1 transport;
+// if the upstream negotiated h2, UpstreamRouter.roundTripH2 would dereference
+// a nil H2 transport and panic. The proxy handler pipeline uses a separate
+// UpstreamRouter with H2 properly initialized.
 func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 	if s.deps.replayRouter != nil {
 		return s.deps.replayRouter
 	}
 	pool := &protohttp.ConnPool{
 		TLSTransport: s.deps.tlsTransport,
-		AllowH2:      true,
+		// AllowH2 is intentionally false: the resend router does not have an
+		// H2 transport, so h2 ALPN negotiation must be prevented.
 	}
 	return &protohttp.UpstreamRouter{
 		H1:   &protohttp.H1Transport{},

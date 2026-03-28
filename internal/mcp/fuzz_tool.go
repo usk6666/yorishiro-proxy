@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	gohttp "net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -256,7 +257,7 @@ func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Message) error {
 	if msg.URL != nil {
 		rawURL = msg.URL.String()
 	}
-	headers := httputil.HTTPHeaderToRawHeaders(msg.Headers)
+	headers := httputil.HTTPHeaderToRawHeaders(gohttp.Header(msg.Headers))
 	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}

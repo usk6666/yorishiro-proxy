@@ -22,8 +22,8 @@ func TestResendUpstreamRouter_DefaultRouter(t *testing.T) {
 	if ur.Pool == nil {
 		t.Error("Pool must not be nil")
 	}
-	if !ur.Pool.AllowH2 {
-		t.Error("Pool.AllowH2 must be true to support HTTP/2 via ALPN routing")
+	if ur.Pool.AllowH2 {
+		t.Error("Pool.AllowH2 must be false: resend router has no H2 transport, h2 ALPN would cause a nil dereference panic")
 	}
 }
 
