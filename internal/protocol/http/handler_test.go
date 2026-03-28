@@ -718,38 +718,24 @@ func TestSetConnPool(t *testing.T) {
 	}
 }
 
-func TestConnPool_ConfigWiring(t *testing.T) {
-	// Simulate the config -> ConnPool wiring that happens in main.go.
-	tests := []struct {
-		name            string
-		dialTimeout     time.Duration
-		wantDialTimeout time.Duration
-	}{
-		{
-			name:            "custom dial timeout",
-			dialTimeout:     10 * time.Second,
-			wantDialTimeout: 10 * time.Second,
-		},
-		{
-			name:            "default dial timeout (30s)",
-			dialTimeout:     30 * time.Second,
-			wantDialTimeout: 30 * time.Second,
-		},
-		{
-			name:            "zero uses ConnPool internal default",
-			dialTimeout:     0,
-			wantDialTimeout: 0,
-		},
+func TestHandler_SetConnPool_Accessor(t *testing.T) {
+	// Verify that SetConnPool stores and ConnPool retrieves the same pointer.
+	h := NewHandler(nil, nil, nil)
+
+	pool := &ConnPool{
+		DialTimeout: 10 * time.Second,
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pool := &ConnPool{
-				DialTimeout: tt.dialTimeout,
-			}
-			if pool.DialTimeout != tt.wantDialTimeout {
-				t.Errorf("ConnPool.DialTimeout = %v, want %v", pool.DialTimeout, tt.wantDialTimeout)
-			}
-		})
+	h.SetConnPool(pool)
+
+	got := h.ConnPool()
+	if got != pool {
+		t.Errorf("ConnPool() returned different pointer: got %p, want %p", got, pool)
+	}
+
+	// Verify nil round-trip.
+	h.SetConnPool(nil)
+	if h.ConnPool() != nil {
+		t.Error("ConnPool() should return nil after SetConnPool(nil)")
 	}
 }
