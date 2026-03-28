@@ -4,26 +4,22 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // dispatchOnReceiveFromClient dispatches the on_receive_from_client hook.
-// It may return ActionDrop (close connection) or ActionRespond (send custom response).
-// Returns the (possibly modified) request, body, and a boolean indicating the
-// request was terminated (caller should return early).
-// The txCtx is a mutable dict shared across all hooks within the same transaction.
-func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
+func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn, req *parser.RawRequest, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*parser.RawRequest, []byte, bool) {
 	if h.pluginEngine == nil {
 		return req, body, false
 	}
 
-	data := plugin.HTTPRequestToMap(req, body, connInfo, "HTTP/1.x")
+	goReq := httputil.RawRequestToHTTP(req, body)
+	data := plugin.HTTPRequestToMap(goReq, body, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromClient, data)
@@ -38,33 +34,33 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn
 
 	switch result.Action {
 	case plugin.ActionDrop:
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		writeHTTPError(conn, statusBadGateway, logger)
 		logger.Info("plugin dropped request", "hook", "on_receive_from_client",
-			"method", req.Method, "url", req.URL.String())
+			"method", req.Method, "url", req.RequestURI)
 		return req, body, true
 
 	case plugin.ActionRespond:
 		statusCode, headers, respBody := plugin.BuildRespondResponse(result.ResponseData)
-		if err := writePluginResponse(conn, statusCode, rawHeadersToHTTPHeader(headers), respBody); err != nil {
+		if err := writePluginResponseRaw(conn, statusCode, headers, respBody); err != nil {
 			logger.Warn("plugin respond write failed", "error", err)
 		}
 		logger.Info("plugin responded to request", "hook", "on_receive_from_client",
-			"method", req.Method, "url", req.URL.String(), "status", statusCode)
+			"method", req.Method, "url", req.RequestURI, "status", statusCode)
 		return req, body, true
 
 	case plugin.ActionContinue:
 		if result.Data != nil {
-			var applyErr error
-			req, body, applyErr = plugin.ApplyHTTPRequestChanges(req, result.Data)
+			goReq, newBody, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
 			if applyErr != nil {
 				logger.Warn("plugin on_receive_from_client apply changes failed", "error", applyErr)
 				return req, body, false
 			}
-			// Update request body if changed by plugin.
-			if body != nil {
-				req.Body = io.NopCloser(bytes.NewReader(body))
-				req.ContentLength = int64(len(body))
+			// Preserve the original body when the plugin did not modify it.
+			if newBody != nil {
+				body = newBody
 			}
+			// Convert back to RawRequest.
+			req = httputil.HTTPRequestToRaw(goReq, body)
 		}
 	}
 
@@ -72,14 +68,13 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn
 }
 
 // dispatchOnBeforeSendToServer dispatches the on_before_send_to_server hook.
-// Returns the (possibly modified) request and body.
-// The txCtx is a mutable dict shared across all hooks within the same transaction.
-func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Request, []byte) {
+func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *parser.RawRequest, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*parser.RawRequest, []byte) {
 	if h.pluginEngine == nil {
 		return req, body
 	}
 
-	data := plugin.HTTPRequestToMap(req, body, connInfo, "HTTP/1.x")
+	goReq := httputil.RawRequestToHTTP(req, body)
+	data := plugin.HTTPRequestToMap(goReq, body, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToServer, data)
@@ -92,29 +87,29 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *gohttp.
 		return req, body
 	}
 
-	var applyErr error
-	req, body, applyErr = plugin.ApplyHTTPRequestChanges(req, result.Data)
+	goReq, newBody, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_server apply changes failed", "error", applyErr)
 		return req, body
 	}
-	if body != nil {
-		req.Body = io.NopCloser(bytes.NewReader(body))
-		req.ContentLength = int64(len(body))
+	// Preserve the original body when the plugin did not modify it.
+	if newBody != nil {
+		body = newBody
 	}
+	req = httputil.HTTPRequestToRaw(goReq, body)
 
 	return req, body
 }
 
 // dispatchOnReceiveFromServer dispatches the on_receive_from_server hook.
-// Returns the (possibly modified) response and body.
-// The txCtx is a mutable dict shared across all hooks within the same transaction.
-func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.Response, body []byte, req *gohttp.Request, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Response, []byte) {
+func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *parser.RawResponse, body []byte, req *parser.RawRequest, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*parser.RawResponse, []byte) {
 	if h.pluginEngine == nil {
 		return resp, body
 	}
 
-	data := plugin.HTTPResponseToMap(resp, body, req, connInfo, "HTTP/1.x")
+	goReq := httputil.RawRequestToHTTP(req, nil)
+	goResp := httputil.RawResponseToHTTP(resp, body)
+	data := plugin.HTTPResponseToMap(goResp, body, goReq, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromServer, data)
@@ -127,27 +122,28 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 		return resp, body
 	}
 
-	var applyErr error
-	resp, body, applyErr = plugin.ApplyHTTPResponseChanges(resp, result.Data)
+	goResp, newBody, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_receive_from_server apply changes failed", "error", applyErr)
 	}
-	if body != nil {
-		resp.ContentLength = int64(len(body))
+	// Preserve the original body when the plugin did not modify it.
+	if newBody != nil {
+		body = newBody
 	}
+	resp = httputil.HTTPResponseToRaw(goResp, body)
 
 	return resp, body
 }
 
 // dispatchOnBeforeSendToClient dispatches the on_before_send_to_client hook.
-// Returns the (possibly modified) response and body.
-// The txCtx is a mutable dict shared across all hooks within the same transaction.
-func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp.Response, body []byte, req *gohttp.Request, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*gohttp.Response, []byte) {
+func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *parser.RawResponse, body []byte, req *parser.RawRequest, connInfo *plugin.ConnInfo, txCtx map[string]any, logger *slog.Logger) (*parser.RawResponse, []byte) {
 	if h.pluginEngine == nil {
 		return resp, body
 	}
 
-	data := plugin.HTTPResponseToMap(resp, body, req, connInfo, "HTTP/1.x")
+	goReq := httputil.RawRequestToHTTP(req, nil)
+	goResp := httputil.RawResponseToHTTP(resp, body)
+	data := plugin.HTTPResponseToMap(goResp, body, goReq, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToClient, data)
@@ -160,32 +156,30 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 		return resp, body
 	}
 
-	var applyErr error
-	resp, body, applyErr = plugin.ApplyHTTPResponseChanges(resp, result.Data)
+	goResp, newBody, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_client apply changes failed", "error", applyErr)
 	}
-	if body != nil {
-		resp.ContentLength = int64(len(body))
+	// Preserve the original body when the plugin did not modify it.
+	if newBody != nil {
+		body = newBody
 	}
+	resp = httputil.HTTPResponseToRaw(goResp, body)
 
 	return resp, body
 }
 
-// writePluginResponse writes a custom HTTP response generated by a plugin's
-// RESPOND action to the client connection.
-func writePluginResponse(conn net.Conn, statusCode int, headers gohttp.Header, body []byte) error {
-	resp := &gohttp.Response{
+// writePluginResponseRaw writes a custom HTTP response generated by a plugin's
+// RESPOND action using RawHeaders (without importing net/http).
+func writePluginResponseRaw(conn net.Conn, statusCode int, headers parser.RawHeaders, body []byte) error {
+	resp := &parser.RawResponse{
+		Proto:      "HTTP/1.1",
 		StatusCode: statusCode,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     headers,
+		Status:     formatStatus(statusCode),
+		Headers:    headers,
+		Body:       bytes.NewReader(body),
 	}
-	if resp.Header == nil {
-		resp.Header = make(gohttp.Header)
-	}
-	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	resp.Header.Set("Connection", "close")
-
-	return writeResponse(conn, resp, body)
+	resp.Headers.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	resp.Headers.Set("Connection", "close")
+	return writeRawResponse(conn, resp, body)
 }

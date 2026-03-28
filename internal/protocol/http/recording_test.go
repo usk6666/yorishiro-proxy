@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -20,7 +21,8 @@ func TestRecordHTTPSession_Basic(t *testing.T) {
 	start := time.Now()
 	duration := 50 * time.Millisecond
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq)
 
 	resp := &gohttp.Response{
 		StatusCode: 200,
@@ -82,7 +84,8 @@ func TestRecordHTTPSession_NilStore(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	req := goRequestToRaw(goReq)
 	resp := &gohttp.Response{
 		StatusCode: 200,
 		ProtoMajor: 1,
@@ -108,7 +111,8 @@ func TestRecordHTTPSession_WithReqURL(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
+	goReq, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
+	req := goRequestToRaw(goReq)
 
 	// Provide an explicit reqURL to override the one from req.
 	reqURL := &url.URL{
@@ -153,7 +157,8 @@ func TestRecordHTTPSession_Tags(t *testing.T) {
 
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
-	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	req := goRequestToRaw(goReq)
 	resp := &gohttp.Response{
 		StatusCode: 200,
 		ProtoMajor: 1,
@@ -190,7 +195,8 @@ func TestRecordHTTPSession_TLSConnInfo(t *testing.T) {
 
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
-	req, _ := gohttp.NewRequest("GET", "https://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "https://example.com", nil)
+	req := goRequestToRaw(goReq)
 	resp := &gohttp.Response{
 		StatusCode: 200,
 		ProtoMajor: 1,
@@ -259,9 +265,17 @@ func TestRequestHeaders_InjectsHost(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
-			req.Host = tt.host
-			req.Header.Set("X-Custom", "value")
+			req := &parser.RawRequest{
+				Method:     "GET",
+				RequestURI: "http://example.com/path",
+				Proto:      "HTTP/1.1",
+				Headers: parser.RawHeaders{
+					{Name: "X-Custom", Value: "value"},
+				},
+			}
+			if tt.host != "" {
+				req.Headers.Set("Host", tt.host)
+			}
 
 			headers := requestHeaders(req)
 
@@ -271,7 +285,7 @@ func TestRequestHeaders_InjectsHost(t *testing.T) {
 			}
 
 			if tt.wantHost == "" {
-				if _, ok := headers["Host"]; ok {
+				if headers.Get("Host") != "" {
 					t.Errorf("Host header should not be present for empty host")
 				}
 			} else {
@@ -280,10 +294,7 @@ func TestRequestHeaders_InjectsHost(t *testing.T) {
 				}
 			}
 
-			// Verify it does not mutate the original req.Header.
-			if _, ok := req.Header["Host"]; ok {
-				t.Error("requestHeaders should not mutate req.Header")
-			}
+			// requestHeaders now returns req.Headers directly (no mutation concern).
 		})
 	}
 }
@@ -295,10 +306,10 @@ func TestRecordHTTPSession_HostHeader(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
-	// Go's net/http sets Host on req.Host, not in req.Header.
-	// Verify that the recording includes it.
-	req.Host = "example.com"
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq)
+	// Ensure Host header is set on the RawRequest.
+	req.Headers.Set("Host", "example.com")
 
 	resp := &gohttp.Response{
 		StatusCode: 200,

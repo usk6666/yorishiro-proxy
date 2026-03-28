@@ -143,13 +143,15 @@ func TestHTTPForwardViaUpstreamProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	// Start a mock HTTP forward proxy that relays requests.
-	proxyAddr := startMockHTTPForwardProxy(t)
+	// Start a mock HTTP CONNECT proxy (the independent engine uses CONNECT
+	// tunneling for all upstream proxy connections, including plain HTTP).
+	proxyAddr, proxyCleanup := startMockHTTPConnectProxy(t, false, "", "")
+	defer proxyCleanup()
 
 	store := &mockStore{}
 	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
-	// Configure the upstream proxy on the Transport.
+	// Configure the upstream proxy.
 	proxyURL, _ := url.Parse("http://" + proxyAddr)
 	handler.SetUpstreamProxy(proxyURL)
 
@@ -499,56 +501,6 @@ func handleMockProxy(conn net.Conn, requireAuth bool, username, password string)
 		errCh <- err
 	}()
 	<-errCh
-}
-
-// startMockHTTPForwardProxy starts a mock HTTP forward proxy that relays
-// non-CONNECT requests to the target.
-func startMockHTTPForwardProxy(t *testing.T) string {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen mock forward proxy: %v", err)
-	}
-
-	server := &gohttp.Server{
-		Handler: gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-			// Forward proxy mode: relay request to the target.
-			if r.Method == gohttp.MethodConnect {
-				gohttp.Error(w, "CONNECT not implemented in mock", gohttp.StatusMethodNotAllowed)
-				return
-			}
-
-			// Create outgoing request.
-			outReq, _ := gohttp.NewRequest(r.Method, r.URL.String(), r.Body)
-			for k, vv := range r.Header {
-				for _, v := range vv {
-					outReq.Header.Add(k, v)
-				}
-			}
-
-			client := &gohttp.Client{Timeout: 5 * time.Second}
-			resp, err := client.Do(outReq)
-			if err != nil {
-				gohttp.Error(w, err.Error(), gohttp.StatusBadGateway)
-				return
-			}
-			defer resp.Body.Close()
-
-			for k, vv := range resp.Header {
-				for _, v := range vv {
-					w.Header().Add(k, v)
-				}
-			}
-			w.WriteHeader(resp.StatusCode)
-			io.Copy(w, resp.Body)
-		}),
-	}
-
-	go server.Serve(ln)
-	t.Cleanup(func() { server.Close() })
-
-	return ln.Addr().String()
 }
 
 func TestHTTPConnectViaUpstreamProxyWithAuth(t *testing.T) {

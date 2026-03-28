@@ -19,6 +19,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -239,16 +240,15 @@ func startTestProxy(t *testing.T, ctx context.Context, handler *Handler) (string
 			}
 			go func() {
 				defer conn.Close()
-				capture := &captureReader{r: conn}
-				reader := bufio.NewReader(capture)
-				req, err := gohttp.ReadRequest(reader)
+				reader := bufio.NewReader(conn)
+				rawReq, err := parser.ParseRequest(reader)
 				if err != nil {
 					return
 				}
-				if req.Method == gohttp.MethodConnect {
-					handler.handleCONNECT(proxyCtx, conn, req)
+				if rawReq.Method == gohttp.MethodConnect {
+					handler.handleCONNECT(proxyCtx, conn, rawReq)
 				} else {
-					handler.handleRequest(proxyCtx, conn, req, &smugglingFlags{}, capture, 0, reader)
+					handler.handleRequest(proxyCtx, conn, rawReq)
 				}
 			}()
 		}
@@ -1251,89 +1251,22 @@ func TestTLSVersionName(t *testing.T) {
 	}
 }
 
-func TestCaptureReader_BasicCapture(t *testing.T) {
-	data := []byte("Hello, World!")
-	cr := &captureReader{r: strings.NewReader(string(data))}
+// captureReader tests removed — captureReader was replaced by parser.ParseRequest
+// which captures raw bytes internally (USK-494).
 
-	buf := make([]byte, 5)
-	n, err := cr.Read(buf)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("Read returned %d bytes, want 5", n)
-	}
-	if string(buf[:n]) != "Hello" {
-		t.Errorf("Read returned %q, want Hello", string(buf[:n]))
-	}
-
-	// Read the rest.
-	buf2 := make([]byte, 20)
-	n2, _ := cr.Read(buf2)
-
-	captured := cr.Bytes()
-	if string(captured) != string(data[:n+n2]) {
-		t.Errorf("Captured = %q, want %q", captured, data[:n+n2])
-	}
-}
-
-func TestCaptureReader_Reset(t *testing.T) {
-	cr := &captureReader{r: strings.NewReader("test data")}
-
-	buf := make([]byte, 4)
-	cr.Read(buf)
-
-	if cr.buf.Len() == 0 {
-		t.Error("expected non-empty buffer before reset")
-	}
-
-	cr.Reset()
-	if cr.buf.Len() != 0 {
-		t.Errorf("buffer after reset has %d bytes, want 0", cr.buf.Len())
-	}
-	if cr.Bytes() != nil {
-		t.Errorf("Bytes() after reset = %v, want nil", cr.Bytes())
-	}
-}
-
-func TestCaptureReader_MaxCaptureSize(t *testing.T) {
-	// Create data larger than maxRawCaptureSize.
-	bigData := make([]byte, maxRawCaptureSize+1024)
-	for i := range bigData {
-		bigData[i] = 'A'
-	}
-	cr := &captureReader{r: strings.NewReader(string(bigData))}
-
-	// Read all data.
-	buf := make([]byte, len(bigData))
-	total := 0
-	for {
-		n, err := cr.Read(buf[total:])
-		total += n
-		if err != nil {
-			break
-		}
-	}
-
-	captured := cr.Bytes()
-	if len(captured) > maxRawCaptureSize {
-		t.Errorf("captured %d bytes, want <= %d", len(captured), maxRawCaptureSize)
-	}
-}
-
-func TestSerializeRawResponse(t *testing.T) {
-	resp := &gohttp.Response{
-		ProtoMajor: 1,
-		ProtoMinor: 1,
+func TestSerializeRawResponseBytes(t *testing.T) {
+	resp := &parser.RawResponse{
+		Proto:      "HTTP/1.1",
 		StatusCode: 200,
-		Header: gohttp.Header{
-			"Content-Type": {"text/plain"},
-			"X-Custom":     {"value"},
+		Status:     "200 OK",
+		Headers: parser.RawHeaders{
+			{Name: "Content-Type", Value: "text/plain"},
+			{Name: "X-Custom", Value: "value"},
 		},
 	}
 	body := []byte("Hello")
 
-	raw := serializeRawResponse(resp, body)
+	raw := serializeRawResponseBytes(resp, body)
 	rawStr := string(raw)
 
 	if !strings.HasPrefix(rawStr, "HTTP/1.1 200 OK\r\n") {
@@ -1344,10 +1277,10 @@ func TestSerializeRawResponse(t *testing.T) {
 	}
 }
 
-func TestSerializeRawResponse_NilResponse(t *testing.T) {
-	raw := serializeRawResponse(nil, nil)
+func TestSerializeRawResponseBytes_NilResponse(t *testing.T) {
+	raw := serializeRawResponseBytes(nil, nil)
 	if raw != nil {
-		t.Errorf("serializeRawResponse(nil) = %v, want nil", raw)
+		t.Errorf("serializeRawResponseBytes(nil) = %v, want nil", raw)
 	}
 }
 

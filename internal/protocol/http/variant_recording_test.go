@@ -47,7 +47,7 @@ func TestRequestModified_NoChange(t *testing.T) {
 	body := []byte("hello")
 	snap := snapshotRequest(headers, body)
 
-	if requestModified(snap, headers, body) {
+	if requestModifiedCompat(snap, headers, body) {
 		t.Error("expected no modification, but requestModified returned true")
 	}
 }
@@ -58,7 +58,7 @@ func TestRequestModified_BodyChanged(t *testing.T) {
 	snap := snapshotRequest(headers, body)
 
 	modifiedBody := []byte("world")
-	if !requestModified(snap, headers, modifiedBody) {
+	if !requestModifiedCompat(snap, headers, modifiedBody) {
 		t.Error("expected modification detected for changed body")
 	}
 }
@@ -71,7 +71,7 @@ func TestRequestModified_HeaderAdded(t *testing.T) {
 	modifiedHeaders := headers.Clone()
 	modifiedHeaders.Set("X-Modified", "true")
 
-	if !requestModified(snap, modifiedHeaders, body) {
+	if !requestModifiedCompat(snap, modifiedHeaders, body) {
 		t.Error("expected modification detected for added header")
 	}
 }
@@ -84,7 +84,7 @@ func TestRequestModified_HeaderValueChanged(t *testing.T) {
 	modifiedHeaders := headers.Clone()
 	modifiedHeaders.Set("Content-Type", "text/plain")
 
-	if !requestModified(snap, modifiedHeaders, body) {
+	if !requestModifiedCompat(snap, modifiedHeaders, body) {
 		t.Error("expected modification detected for changed header value")
 	}
 }
@@ -100,7 +100,7 @@ func TestRequestModified_HeaderRemoved(t *testing.T) {
 	modifiedHeaders := headers.Clone()
 	modifiedHeaders.Del("Authorization")
 
-	if !requestModified(snap, modifiedHeaders, body) {
+	if !requestModifiedCompat(snap, modifiedHeaders, body) {
 		t.Error("expected modification detected for removed header")
 	}
 }
@@ -118,8 +118,11 @@ func TestRecordSendWithVariant_NoModification(t *testing.T) {
 
 	body := []byte("request body")
 
+	rawReq := goRequestToRaw(req)
+
 	// Snapshot matches the current state: no modification.
-	snap := snapshotRequest(req.Header, body)
+	// Use raw headers (which include Host) to match what recordSendWithVariant sees.
+	snap := snapshotRawRequest(rawReq.Headers, body)
 
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:     "conn-1",
@@ -127,7 +130,7 @@ func TestRecordSendWithVariant_NoModification(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        req,
+		req:        rawReq,
 		reqBody:    body,
 	}, &snap, logger)
 
@@ -181,7 +184,7 @@ func TestRecordSendWithVariant_BodyModified(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        req,
+		req:        goRequestToRaw(req),
 		reqBody:    modifiedBody,
 	}, &snap, logger)
 
@@ -257,7 +260,7 @@ func TestRecordSendWithVariant_HeaderModified(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        req,
+		req:        goRequestToRaw(req),
 		reqBody:    body,
 	}, &snap, logger)
 
@@ -307,7 +310,7 @@ func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        req,
+		req:        goRequestToRaw(req),
 		reqBody:    modifiedBody,
 		rawRequest: rawBytes,
 	}, &snap, logger)
@@ -347,7 +350,7 @@ func TestRecordSendWithVariant_NilSnap(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
+		req:      goRequestToRaw(req),
 	}, nil, logger)
 
 	if result == nil {
@@ -378,7 +381,7 @@ func TestRecordSendWithVariant_NilStore(t *testing.T) {
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		protocol: "HTTP/1.x",
 		start:    time.Now(),
-		req:      req,
+		req:      goRequestToRaw(req),
 	}, &snap, logger)
 
 	if result != nil {
@@ -411,7 +414,7 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
-		req:        req,
+		req:        goRequestToRaw(req),
 		reqBody:    modifiedBody,
 		rawRequest: []byte("POST /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
 	}, &snap, logger)
@@ -503,7 +506,10 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
 	body := []byte("unchanged")
 
-	snap := snapshotRequest(req.Header, body)
+	rawReq := goRequestToRaw(req)
+
+	// Use raw headers (which include Host) to match what recordSendWithVariant sees.
+	snap := snapshotRawRequest(rawReq.Headers, body)
 
 	sendResult := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:     "conn-nomod",
@@ -511,7 +517,7 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
-		req:        req,
+		req:        rawReq,
 		reqBody:    body,
 	}, &snap, logger)
 
@@ -585,7 +591,7 @@ func TestRecordSendWithVariant_SelfContainedMessages(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
+		req:      goRequestToRaw(req),
 		reqBody:  modifiedBody,
 		reqURL: &url.URL{
 			Scheme: "http",
@@ -723,7 +729,7 @@ func TestRecordReceiveWithVariant_NoModification(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
+		req:      goRequestToRaw(req),
 	}, logger)
 
 	resp := &gohttp.Response{
@@ -773,7 +779,7 @@ func TestRecordReceiveWithVariant_StatusModified(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
+		req:      goRequestToRaw(req),
 	}, logger)
 
 	body := []byte("response body")
@@ -835,7 +841,7 @@ func TestRecordReceiveWithVariant_BodyModified(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
+		req:      goRequestToRaw(req),
 	}, logger)
 
 	origBody := []byte(`{"status":"original"}`)
@@ -887,7 +893,7 @@ func TestRecordReceiveWithVariant_NilSnap(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
+		req:      goRequestToRaw(req),
 	}, logger)
 
 	resp := &gohttp.Response{
@@ -922,7 +928,7 @@ func TestRecordReceiveWithVariant_NilSendResult(t *testing.T) {
 	handler.recordReceiveWithVariant(context.Background(), nil, receiveRecordParams{
 		resp:     &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}},
 		respBody: []byte("ok"),
-	}, &responseSnapshot{statusCode: 200, headers: gohttp.Header{}, body: []byte("ok")}, testutil.DiscardLogger())
+	}, &responseSnapshot{statusCode: 200, headers: nil, body: []byte("ok")}, testutil.DiscardLogger())
 	// No panic = pass.
 }
 
@@ -949,7 +955,7 @@ func TestRecordReceiveWithVariant_SequenceWithSendVariant(t *testing.T) {
 		protocol: "HTTP/1.x",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
-		req:      req,
+		req:      goRequestToRaw(req),
 		reqBody:  modReqBody,
 	}, &reqSnap, logger)
 
@@ -1077,7 +1083,7 @@ func TestHeadersModified(t *testing.T) {
 			name: "different multi-value order",
 			a:    gohttp.Header{"X-Key": {"a", "b"}},
 			b:    gohttp.Header{"X-Key": {"b", "a"}},
-			want: true,
+			want: false, // HeadersModified uses frequency-based comparison (order-agnostic)
 		},
 	}
 

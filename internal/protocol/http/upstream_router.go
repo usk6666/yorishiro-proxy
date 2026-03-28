@@ -6,9 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
@@ -50,10 +50,10 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 	if err != nil {
 		return nil, fmt.Errorf("upstream router dial %s: %w", addr, err)
 	}
-	defer cr.Conn.Close()
 
 	switch cr.ALPN {
 	case "h2":
+		defer cr.Conn.Close()
 		slog.Debug("upstream router: routing to h2 transport", "addr", addr, "alpn", cr.ALPN)
 		result, h2Err := r.roundTripH2(ctx, cr.Conn, req, addr, hostname)
 		if h2Err != nil {
@@ -65,11 +65,53 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 		slog.Debug("upstream router: routing to h1 transport", "addr", addr, "alpn", cr.ALPN)
 		result, h1Err := r.H1.RoundTripOnConn(ctx, cr.Conn, req)
 		if h1Err != nil {
+			cr.Conn.Close()
 			return nil, fmt.Errorf("upstream router h1 round trip: %w", h1Err)
 		}
 		result.ConnectDuration = cr.ConnectDuration
+		// Wrap the response body so the connection is closed after the body
+		// is fully consumed. This avoids buffering the entire response body
+		// in memory and prevents premature connection closure.
+		if result.Response != nil && result.Response.Body != nil {
+			result.Response.Body = &connClosingReader{
+				Reader: result.Response.Body,
+				conn:   cr.Conn,
+			}
+		} else {
+			cr.Conn.Close()
+		}
 		return result, nil
 	}
+}
+
+// connClosingReader wraps an io.Reader and closes the connection when Read
+// returns any error (including io.EOF) or when Close is called. This ensures
+// the upstream connection stays open while the response body is being read.
+// Close is guarded by sync.Once to prevent races between concurrent Read and
+// Close calls.
+type connClosingReader struct {
+	io.Reader
+	conn      net.Conn
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (r *connClosingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil {
+		r.closeOnce.Do(func() {
+			r.closeErr = r.conn.Close()
+		})
+	}
+	return n, err
+}
+
+// Close implements io.Closer to allow explicit cleanup.
+func (r *connClosingReader) Close() error {
+	r.closeOnce.Do(func() {
+		r.closeErr = r.conn.Close()
+	})
+	return r.closeErr
 }
 
 // roundTripH2 performs an HTTP/2 round trip using a pre-established h2
@@ -223,7 +265,7 @@ func h2ResultToRawResponse(h2r *http2.RoundTripResult) *parser.RawResponse {
 // For unknown codes where http.StatusText returns empty, it omits the
 // reason phrase to avoid a trailing space (e.g. "599" instead of "599 ").
 func formatStatus(code int) string {
-	reason := gohttp.StatusText(code)
+	reason := statusText(code)
 	if reason == "" {
 		return fmt.Sprintf("%d", code)
 	}
