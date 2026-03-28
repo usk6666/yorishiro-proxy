@@ -388,6 +388,10 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 		return nil
 	}
 
+	// Re-derive reqURL after plugin hook — the plugin may have modified
+	// the request URI (CP-7).
+	reqURL = parseRequestURL(ctx, req, "http")
+
 	// Build send record params for progressive recording.
 	sp := sendRecordParams{
 		connID:       connID,
@@ -415,6 +419,16 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	}
 	req = iResult.Req
 	bodyResult.recordBody = iResult.RecordBody
+
+	// Re-derive reqURL after intercept — the intercept action may have
+	// overridden the URL (CP-8). Use the explicitly returned ModURL when
+	// available; otherwise re-parse from the (potentially modified) request.
+	if iResult.ModURL != nil {
+		reqURL = iResult.ModURL
+	} else {
+		reqURL = parseRequestURL(ctx, req, "http")
+	}
+	sp.reqURL = reqURL
 
 	// Raw mode: bypass UpstreamRouter and forward raw bytes directly.
 	if iResult.IsRaw {
@@ -659,6 +673,12 @@ func (h *Handler) readResponseBody(resp *parser.RawResponse, logger *slog.Logger
 	fullBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
 	if err != nil {
 		logger.Warn("failed to read response body", "error", err)
+	}
+	// Close the body to release the underlying connection. When the body
+	// is truncated by LimitReader, the reader may not have reached EOF,
+	// so explicit Close is required to avoid connection leaks (CP-9).
+	if closer, ok := resp.Body.(io.Closer); ok {
+		closer.Close()
 	}
 
 	if h.transformPipeline != nil {

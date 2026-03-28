@@ -26,6 +26,9 @@ type interceptResult struct {
 	IsRaw            bool
 	RawBytes         []byte
 	OriginalRawBytes []byte
+	// ModURL is the modified URL after intercept URL override processing.
+	// Non-nil only when the intercept action overrides the URL.
+	ModURL *url.URL
 }
 
 // applyIntercept checks intercept rules and applies any modifications.
@@ -71,6 +74,8 @@ func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *parser
 		}
 		req = modReq
 		recordReqBody = modBody
+		result := interceptResult{Req: req, RecordBody: recordReqBody, ModURL: modURL}
+		return result
 	case intercept.ActionRelease:
 		// Raw mode release: forward original raw bytes as-is.
 		if action.IsRawMode() {

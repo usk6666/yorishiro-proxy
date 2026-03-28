@@ -45,6 +45,8 @@ func RawRequestToHTTP(req *parser.RawRequest, bodyBytes []byte) *gohttp.Request 
 	var body io.ReadCloser
 	if len(bodyBytes) > 0 {
 		body = io.NopCloser(bytes.NewReader(bodyBytes))
+	} else {
+		body = gohttp.NoBody
 	}
 
 	httpReq := &gohttp.Request{

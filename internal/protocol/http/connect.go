@@ -226,13 +226,20 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	req = iResult.Req
 	bodyResult.recordBody = iResult.RecordBody
 
+	// Re-derive reqURL after intercept URL override (CP-7/CP-8).
+	if iResult.ModURL != nil {
+		reqURL = iResult.ModURL
+	} else {
+		reqURL = parseRequestURL(ctx, req, "http")
+	}
+	sp.reqURL = reqURL
+
 	if iResult.IsRaw {
 		return h.handleRawForward(ctx, conn, req, reqURL, iResult, sp, &snap, start, logger)
 	}
 
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
 	sp.req = req
-	sp.reqURL = reqURL
 	sp.reqBody = bodyResult.recordBody
 
 	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
@@ -557,6 +564,14 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	}
 	req = iResult.Req
 	bodyResult.recordBody = iResult.RecordBody
+
+	// Re-derive reqURL after intercept URL override (CP-7/CP-8).
+	if iResult.ModURL != nil {
+		reqURL = iResult.ModURL
+	} else {
+		reqURL = parseRequestURL(ctx, req, "https")
+	}
+	sp.reqURL = reqURL
 
 	if iResult.IsRaw {
 		return h.handleRawForward(ctx, conn, req, reqURL, iResult, sp, &snap, start, logger)
