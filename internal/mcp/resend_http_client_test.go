@@ -1,39 +1,44 @@
 package mcp
 
 import (
-	"net/http"
+	"context"
 	"testing"
+
+	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
-func TestResendHTTPClient_ForceAttemptHTTP2(t *testing.T) {
+func TestResendUpstreamRouter_DefaultRouter(t *testing.T) {
 	s := &Server{deps: &deps{}}
 
-	doer := s.resendHTTPClient(resendParams{})
-	client, ok := doer.(*http.Client)
+	router := s.resendUpstreamRouter(resendParams{})
+	ur, ok := router.(*protohttp.UpstreamRouter)
 	if !ok {
-		t.Fatalf("expected *http.Client, got %T", doer)
+		t.Fatalf("expected *protohttp.UpstreamRouter, got %T", router)
 	}
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	if ur.H1 == nil {
+		t.Error("H1 transport must not be nil")
 	}
-	if !transport.ForceAttemptHTTP2 {
-		t.Error("ForceAttemptHTTP2 must be true to support HTTP/2 over TLS resend")
+	if ur.Pool == nil {
+		t.Error("Pool must not be nil")
+	}
+	if !ur.Pool.AllowH2 {
+		t.Error("Pool.AllowH2 must be true to support HTTP/2 via ALPN routing")
 	}
 }
 
-func TestResendHTTPClient_ReplayDoerOverride(t *testing.T) {
-	mock := &mockHTTPDoer{}
-	s := &Server{deps: &deps{replayDoer: mock}}
+func TestResendUpstreamRouter_ReplayRouterOverride(t *testing.T) {
+	mock := &mockResendRouter{}
+	s := &Server{deps: &deps{replayRouter: mock}}
 
-	doer := s.resendHTTPClient(resendParams{})
-	if doer != mock {
-		t.Error("expected replayDoer to be returned when set")
+	router := s.resendUpstreamRouter(resendParams{})
+	if router != mock {
+		t.Error("expected replayRouter to be returned when set")
 	}
 }
 
-type mockHTTPDoer struct{}
+type mockResendRouter struct{}
 
-func (m *mockHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+func (m *mockResendRouter) RoundTrip(_ context.Context, _ *parser.RawRequest, _ string, _ bool, _ string) (*protohttp.RoundTripResult, error) {
 	return nil, nil
 }

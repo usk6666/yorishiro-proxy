@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // maxConcurrency is the upper bound on concurrent workers per fuzz job.
@@ -64,7 +64,7 @@ type RunConfig struct {
 	// an error but the fuzz job continues.
 	// When nil, no safety input check is performed.
 	// Not serialized to JSON (set at runtime only).
-	SafetyInputChecker func(body []byte, rawURL string, headers http.Header) error `json:"-"`
+	SafetyInputChecker func(body []byte, rawURL string, headers parser.RawHeaders) error `json:"-"`
 }
 
 // Validate checks that a RunConfig is well-formed.

@@ -503,14 +503,7 @@ func performUpgradeHandshake(conn net.Conn, upgradeMsg *flow.Message, targetAddr
 
 	// Apply header overrides using buildResendHeaders (same as HTTP resend).
 	// This handles override_headers, add_headers, and remove_headers consistently.
-	headers := buildResendHeaders(upgradeMsg.Headers, params)
-	// Use direct map assignment instead of Header.Add so that empty-slice
-	// sentinels from buildResendHeaders (remove_headers) are preserved.
-	// This suppresses Go net/http auto-added headers like User-Agent,
-	// matching the behavior of applyHeaders in HTTP resend.
-	for k, vs := range headers {
-		httpReq.Header[k] = vs
-	}
+	applyResendHeadersToGoHTTP(httpReq.Header, upgradeMsg.Headers, params)
 
 	// Determine if the user explicitly overrode the Host header.
 	hostExplicitlyOverridden := hasHostOverride(params)
@@ -884,4 +877,23 @@ func copyMetadataMap(src map[string]string) map[string]string {
 		dst[k] = v
 	}
 	return dst
+}
+
+// applyResendHeadersToGoHTTP applies buildResendHeaders output to a gohttp.Header.
+// It converts parser.RawHeaders to gohttp.Header and sets empty slices for removed
+// headers to suppress Go's net/http auto-added defaults (e.g., User-Agent).
+func applyResendHeadersToGoHTTP(dst gohttp.Header, originalHeaders map[string][]string, params resendParams) {
+	rawHeaders := buildResendHeaders(originalHeaders, params)
+	for _, h := range rawHeaders {
+		dst.Add(h.Name, h.Value)
+	}
+	// For removed headers, set empty slices to suppress Go's net/http auto-added
+	// defaults. buildResendHeaders omits removed headers from the result, so we
+	// need to explicitly set them on the gohttp.Header.
+	for _, key := range params.RemoveHeaders {
+		canonical := gohttp.CanonicalHeaderKey(key)
+		if _, exists := dst[canonical]; !exists {
+			dst[canonical] = []string{}
+		}
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
@@ -36,6 +37,21 @@ func (s *Server) filterOutputHeaders(headers http.Header) http.Header {
 		)
 	}
 	return httputil.RawHeadersToHTTPHeader(filtered)
+}
+
+// filterOutputRawHeaders applies the SafetyFilter output masking to parser.RawHeaders.
+// If no safety engine is configured, it returns the headers unchanged.
+func (s *Server) filterOutputRawHeaders(headers parser.RawHeaders) parser.RawHeaders {
+	if s.deps.safetyEngine == nil {
+		return headers
+	}
+	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(headers)
+	if len(matches) > 0 {
+		slog.Debug("SafetyFilter output masking applied to headers",
+			"matches", len(matches),
+		)
+	}
+	return filtered
 }
 
 // filterOutputMessages applies SafetyFilter output masking to query message entries.

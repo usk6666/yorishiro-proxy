@@ -42,6 +42,7 @@ type deps struct {
 	fuzzStore             flow.FuzzStore
 	dbPath                string
 	replayDoer            httpDoer
+	replayRouter          resendRouter
 	rawReplayDialer       rawDialer
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
