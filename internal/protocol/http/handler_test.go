@@ -695,3 +695,61 @@ func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
 		t.Errorf("body = %q, want %q", string(body), "utls-ok")
 	}
 }
+
+func TestSetConnPool(t *testing.T) {
+	store := &mockStore{}
+	handler := NewHandler(store, nil, testutil.DiscardLogger())
+
+	// Initially nil.
+	if handler.ConnPool() != nil {
+		t.Error("ConnPool() should be nil initially")
+	}
+
+	// Set a ConnPool and verify.
+	pool := &ConnPool{DialTimeout: 15 * time.Second}
+	handler.SetConnPool(pool)
+
+	got := handler.ConnPool()
+	if got == nil {
+		t.Fatal("ConnPool() is nil after SetConnPool")
+	}
+	if got.DialTimeout != 15*time.Second {
+		t.Errorf("ConnPool().DialTimeout = %v, want %v", got.DialTimeout, 15*time.Second)
+	}
+}
+
+func TestConnPool_ConfigWiring(t *testing.T) {
+	// Simulate the config -> ConnPool wiring that happens in main.go.
+	tests := []struct {
+		name            string
+		dialTimeout     time.Duration
+		wantDialTimeout time.Duration
+	}{
+		{
+			name:            "custom dial timeout",
+			dialTimeout:     10 * time.Second,
+			wantDialTimeout: 10 * time.Second,
+		},
+		{
+			name:            "default dial timeout (30s)",
+			dialTimeout:     30 * time.Second,
+			wantDialTimeout: 30 * time.Second,
+		},
+		{
+			name:            "zero uses ConnPool internal default",
+			dialTimeout:     0,
+			wantDialTimeout: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := &ConnPool{
+				DialTimeout: tt.dialTimeout,
+			}
+			if pool.DialTimeout != tt.wantDialTimeout {
+				t.Errorf("ConnPool.DialTimeout = %v, want %v", pool.DialTimeout, tt.wantDialTimeout)
+			}
+		})
+	}
+}

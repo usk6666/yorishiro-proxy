@@ -509,6 +509,13 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	}
 	tlsTransport := initTLSTransport(cfg, hostTLSRegistry, httpHandler, logger)
 
+	// Build ConnPool for HTTP/1.x independent engine upstream connections.
+	connPool := &protohttp.ConnPool{
+		TLSTransport: tlsTransport,
+		DialTimeout:  cfg.DialTimeout,
+	}
+	httpHandler.SetConnPool(connPool)
+
 	// Configure technology stack fingerprint detector for response analysis.
 	fpDetector := fingerprint.NewDetector()
 	httpHandler.SetDetector(fpDetector)
