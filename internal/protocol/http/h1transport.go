@@ -63,17 +63,21 @@ func (t *H1Transport) RoundTripOnConn(ctx context.Context, conn net.Conn, req *p
 
 	// Choose between raw mode and structured mode.
 	var payload []byte
+	var body io.Reader
 	if len(req.RawBytes) > 0 {
-		// Raw mode: send the captured bytes verbatim (body must be appended by caller
-		// if needed, but typically RawBytes represents the header section only).
+		// Raw mode: send the captured bytes verbatim. Body is set to nil
+		// because RawBytes already contains the complete wire data; passing
+		// req.Body would append extra bytes and break verbatim semantics.
 		payload = req.RawBytes
 	} else {
 		// Structured mode: serialize the request preserving header order.
+		// Body is written separately to allow streaming.
 		payload = serializeRequest(req)
+		body = req.Body
 	}
 
 	// Write payload + body to connection.
-	if err := writeRequest(conn, payload, req.Body); err != nil {
+	if err := writeRequest(conn, payload, body); err != nil {
 		return nil, fmt.Errorf("h1transport write: %w", err)
 	}
 	timing.SetWroteRequest(time.Now())
@@ -146,7 +150,7 @@ func serializeRequest(req *parser.RawRequest) []byte {
 // writeRequest writes the serialized header payload and then streams the body
 // (if any) to the connection.
 func writeRequest(conn net.Conn, header []byte, body io.Reader) error {
-	if _, err := conn.Write(header); err != nil {
+	if _, err := io.Copy(conn, bytes.NewReader(header)); err != nil {
 		return err
 	}
 	if body != nil {

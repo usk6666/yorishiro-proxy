@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -305,6 +306,7 @@ func TestConnPool_Close_NoOp(t *testing.T) {
 }
 
 func TestConnPool_Get_ConnectionLeak(t *testing.T) {
+	var mu sync.Mutex
 	var accepted []net.Conn
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -320,7 +322,9 @@ func TestConnPool_Get_ConnectionLeak(t *testing.T) {
 			if err != nil {
 				return
 			}
+			mu.Lock()
 			accepted = append(accepted, conn)
+			mu.Unlock()
 		}
 	}()
 
@@ -340,6 +344,8 @@ func TestConnPool_Get_ConnectionLeak(t *testing.T) {
 	ln.Close()
 	<-acceptDone
 
+	mu.Lock()
+	defer mu.Unlock()
 	if len(accepted) != numConns {
 		t.Errorf("accepted %d connections, want %d", len(accepted), numConns)
 	}
