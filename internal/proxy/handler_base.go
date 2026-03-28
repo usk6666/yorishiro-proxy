@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -117,7 +118,7 @@ func (b *HandlerBase) CheckSafetyFilter(body []byte, rawURL string, headers goht
 	if b.SafetyEngine == nil {
 		return nil
 	}
-	return b.SafetyEngine.CheckInput(body, rawURL, headers)
+	return b.SafetyEngine.CheckInput(body, rawURL, httputil.HTTPHeaderToRawHeaders(headers))
 }
 
 // SafetyFilterAction looks up the action for the matched safety rule.
@@ -216,7 +217,7 @@ func (b *HandlerBase) ApplyOutputFilter(body []byte, headers gohttp.Header, logg
 	}
 
 	bodyResult := b.SafetyEngine.FilterOutput(body)
-	maskedHeaders, headerMatches := b.SafetyEngine.FilterOutputHeaders(headers)
+	maskedHeaders, headerMatches := b.SafetyEngine.FilterOutputHeaders(httputil.HTTPHeaderToRawHeaders(headers))
 
 	// Log matches for observability.
 	for _, m := range bodyResult.Matches {
@@ -228,7 +229,7 @@ func (b *HandlerBase) ApplyOutputFilter(body []byte, headers gohttp.Header, logg
 			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
 	}
 
-	return bodyResult.Data, maskedHeaders
+	return bodyResult.Data, httputil.RawHeadersToHTTPHeader(maskedHeaders)
 }
 
 // ApplyOutputFilterHeaders applies the safety engine's output filter to HTTP
@@ -240,12 +241,12 @@ func (b *HandlerBase) ApplyOutputFilterHeaders(headers gohttp.Header, logger *sl
 		return headers
 	}
 
-	masked, matches := b.SafetyEngine.FilterOutputHeaders(headers)
+	masked, matches := b.SafetyEngine.FilterOutputHeaders(httputil.HTTPHeaderToRawHeaders(headers))
 	for _, m := range matches {
 		logger.Info("output filter matched trailer",
 			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
 	}
-	return masked
+	return httputil.RawHeadersToHTTPHeader(masked)
 }
 
 // ConnLogger returns the connection-scoped logger from context,

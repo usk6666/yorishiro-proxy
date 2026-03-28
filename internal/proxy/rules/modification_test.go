@@ -389,7 +389,7 @@ func TestCompiledRule_MatchesRequest(t *testing.T) {
 				u, _ = url.Parse(tt.url)
 			}
 
-			got := cr.matchesRequest(tt.method, u, tt.headers)
+			got := cr.matchesRequest(tt.method, u, h2r(tt.headers))
 			if got != tt.want {
 				t.Errorf("matchesRequest() = %v, want %v", got, tt.want)
 			}
@@ -456,7 +456,7 @@ func TestCompiledRule_MatchesResponse(t *testing.T) {
 				t.Fatalf("compileRule: %v", err)
 			}
 
-			got := cr.matchesResponse(tt.statusCode, tt.headers)
+			got := cr.matchesResponse(tt.statusCode, h2r(tt.headers))
 			if got != tt.want {
 				t.Errorf("matchesResponse() = %v, want %v", got, tt.want)
 			}

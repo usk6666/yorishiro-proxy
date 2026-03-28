@@ -677,7 +677,7 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, req.Header)
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, httpHeaderToRawHeaders(req.Header))
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -689,7 +689,7 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *goht
 		opts = append(opts, intercept.EnqueueOpts{RawBytes: rawBytes})
 	}
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, req.Header, body, matchedRules, opts...)
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, httpHeaderToRawHeaders(req.Header), body, matchedRules, opts...)
 	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
 
 	timeout := h.InterceptQueue.Timeout()

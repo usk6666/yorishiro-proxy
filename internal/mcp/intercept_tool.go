@@ -8,6 +8,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
@@ -196,7 +197,7 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 			result.URL = item.URL.String()
 		}
 		// Apply output filter to headers.
-		filteredHeaders := s.filterOutputHeaders(item.Headers)
+		filteredHeaders := s.filterOutputHeaders(httputil.RawHeadersToHTTPHeader(item.Headers))
 		headers := make(map[string][]string)
 		for k, vs := range filteredHeaders {
 			headers[k] = vs
