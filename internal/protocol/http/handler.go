@@ -114,6 +114,7 @@ type Handler struct {
 	pluginEngine      *plugin.Engine
 	tlsTransport      httputil.TLSTransport
 	detector          *fingerprint.Detector
+	connPool          *ConnPool
 }
 
 // NewHandler creates a new HTTP handler with flow recording.
@@ -209,6 +210,18 @@ func (h *Handler) SetDetector(d *fingerprint.Detector) {
 // Detector returns the handler's current fingerprint detector, or nil.
 func (h *Handler) Detector() *fingerprint.Detector {
 	return h.detector
+}
+
+// SetConnPool sets the connection pool used for upstream HTTP/1.x connections.
+// When set, the ConnPool is used by the independent HTTP/1.x engine to dial
+// upstream servers.
+func (h *Handler) SetConnPool(pool *ConnPool) {
+	h.connPool = pool
+}
+
+// ConnPool returns the handler's current connection pool, or nil.
+func (h *Handler) ConnPool() *ConnPool {
+	return h.connPool
 }
 
 // effectiveTLSTransport returns the configured TLS transport, falling back to

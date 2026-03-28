@@ -87,6 +87,11 @@ func TestValidate_InvalidFields(t *testing.T) {
 			modify: func(c *Config) { c.CleanupInterval = -time.Minute },
 			errSub: "cleanup_interval must be >= 0",
 		},
+		{
+			name:   "dial_timeout negative",
+			modify: func(c *Config) { c.DialTimeout = -time.Second },
+			errSub: "dial_timeout must be >= 0",
+		},
 	}
 
 	for _, tt := range tests {
@@ -194,6 +199,14 @@ func TestValidate_ValidFields(t *testing.T) {
 			name:   "minimal valid non-default timeouts",
 			modify: func(c *Config) { c.PeekTimeout = time.Nanosecond; c.RequestTimeout = time.Nanosecond },
 		},
+		{
+			name:   "dial_timeout zero (uses ConnPool default)",
+			modify: func(c *Config) { c.DialTimeout = 0 },
+		},
+		{
+			name:   "dial_timeout positive",
+			modify: func(c *Config) { c.DialTimeout = 10 * time.Second },
+		},
 	}
 
 	for _, tt := range tests {
@@ -238,6 +251,7 @@ func TestDefault_FieldsHaveSensibleDefaults(t *testing.T) {
 		{"RetentionMaxFlows", cfg.RetentionMaxFlows, true},
 		{"RetentionMaxAge", cfg.RetentionMaxAge, true},
 		{"CleanupInterval", cfg.CleanupInterval, false},
+		{"DialTimeout", cfg.DialTimeout, false},
 		{"MCPHTTPAddr", cfg.MCPHTTPAddr, true},
 		{"MCPHTTPToken", cfg.MCPHTTPToken, true},
 		{"TLSFingerprint", cfg.TLSFingerprint, true},

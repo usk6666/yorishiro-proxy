@@ -695,3 +695,41 @@ func TestSetTLSTransport_UpstreamHTTPS(t *testing.T) {
 		t.Errorf("body = %q, want %q", string(body), "utls-ok")
 	}
 }
+
+func TestHandler_SetConnPool_Accessor(t *testing.T) {
+	tests := []struct {
+		name string
+		pool *ConnPool
+	}{
+		{"nil pool", nil},
+		{"non-nil pool", &ConnPool{DialTimeout: 15 * time.Second}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHandler(nil, nil, nil)
+
+			// Initially nil.
+			if h.ConnPool() != nil {
+				t.Error("ConnPool() should be nil initially")
+			}
+
+			h.SetConnPool(tt.pool)
+
+			got := h.ConnPool()
+			if got != tt.pool {
+				t.Errorf("ConnPool() = %p, want %p", got, tt.pool)
+			}
+
+			if tt.pool != nil && got.DialTimeout != tt.pool.DialTimeout {
+				t.Errorf("ConnPool().DialTimeout = %v, want %v", got.DialTimeout, tt.pool.DialTimeout)
+			}
+
+			// Verify nil round-trip.
+			h.SetConnPool(nil)
+			if h.ConnPool() != nil {
+				t.Error("ConnPool() should return nil after SetConnPool(nil)")
+			}
+		})
+	}
+}

@@ -30,6 +30,9 @@ func (c *Config) Validate() error {
 	if c.PeekTimeout <= 0 {
 		return fmt.Errorf("peek_timeout must be > 0, got %s", c.PeekTimeout)
 	}
+	if c.DialTimeout < 0 {
+		return fmt.Errorf("dial_timeout must be >= 0, got %s", c.DialTimeout)
+	}
 	if c.LogLevel != "" && !validLogLevels[strings.ToLower(c.LogLevel)] {
 		return fmt.Errorf("invalid log level: %q (must be debug, info, warn, or error)", c.LogLevel)
 	}
@@ -90,6 +93,11 @@ type Config struct {
 
 	// RequestTimeout is the timeout for reading HTTP request headers.
 	RequestTimeout time.Duration `json:"request_timeout"`
+
+	// DialTimeout is the timeout for establishing upstream TCP connections
+	// (including any upstream proxy CONNECT handshake). Used by ConnPool
+	// in the HTTP/1.x independent engine. Defaults to 30s.
+	DialTimeout time.Duration `json:"dial_timeout"`
 
 	// MaxConnections is the maximum number of concurrent proxy connections.
 	MaxConnections int `json:"max_connections"`
@@ -170,6 +178,7 @@ func Default() *Config {
 		LogFormat:       "text",
 		PeekTimeout:     30 * time.Second,
 		RequestTimeout:  60 * time.Second,
+		DialTimeout:     30 * time.Second,
 		MaxConnections:  128,
 		CleanupInterval: time.Hour,
 	}

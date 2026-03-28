@@ -509,6 +509,20 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	}
 	tlsTransport := initTLSTransport(cfg, hostTLSRegistry, httpHandler, logger)
 
+	// Build ConnPool for HTTP/1.x independent engine upstream connections.
+	// NOTE: ConnPool is pre-wired here but not yet consumed in the forwarding path.
+	// It will be used when USK-494 (Handler Rewrite) replaces the HTTP/1.x
+	// forwarding path with the independent engine.
+	// NOTE: UpstreamProxy is not set here because it is configured dynamically
+	// via the MCP proxy_start tool (SetUpstreamProxy). When USK-494 activates
+	// the ConnPool in the forwarding path, SetUpstreamProxy must also sync
+	// ConnPool.UpstreamProxy so upstream proxy chaining works correctly.
+	connPool := &protohttp.ConnPool{
+		TLSTransport: tlsTransport,
+		DialTimeout:  cfg.DialTimeout,
+	}
+	httpHandler.SetConnPool(connPool)
+
 	// Configure technology stack fingerprint detector for response analysis.
 	fpDetector := fingerprint.NewDetector()
 	httpHandler.SetDetector(fpDetector)
