@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
 	"net/url"
 	"strings"
 
@@ -223,7 +222,7 @@ func h2ResultToRawResponse(h2r *http2.RoundTripResult) *parser.RawResponse {
 // For unknown codes where http.StatusText returns empty, it omits the
 // reason phrase to avoid a trailing space (e.g. "599" instead of "599 ").
 func formatStatus(code int) string {
-	reason := gohttp.StatusText(code)
+	reason := statusText(code)
 	if reason == "" {
 		return fmt.Sprintf("%d", code)
 	}

@@ -43,6 +43,12 @@ type HandlerBase struct {
 	tlsFingerprintProfile string
 }
 
+// NewDefaultTransport creates a new default *gohttp.Transport for HandlerBase.
+// This is a convenience function so that callers do not need to import net/http.
+func NewDefaultTransport() *gohttp.Transport {
+	return &gohttp.Transport{}
+}
+
 // SetTransport replaces the handler's HTTP transport. This is primarily
 // useful for testing, where the upstream server uses a self-signed certificate.
 func (b *HandlerBase) SetTransport(t *gohttp.Transport) {

@@ -9,19 +9,18 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
-	"net/http/httptrace"
 	"net/url"
 	"sync/atomic"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -31,44 +30,6 @@ import (
 const maxRawCaptureSize = 2 << 20 // 2MB
 
 const defaultRequestTimeout = 60 * time.Second
-
-// captureReader wraps an io.Reader and records all bytes read into a buffer.
-// It is used to capture raw HTTP request/response bytes as they flow through
-// the reader, preserving the exact wire format for smuggling analysis and replay.
-type captureReader struct {
-	r   io.Reader
-	buf bytes.Buffer
-}
-
-// Read implements io.Reader, recording bytes into the capture buffer.
-func (cr *captureReader) Read(p []byte) (int, error) {
-	n, err := cr.r.Read(p)
-	if n > 0 && cr.buf.Len() < maxRawCaptureSize {
-		// Limit capture to maxRawCaptureSize to prevent OOM.
-		remaining := maxRawCaptureSize - cr.buf.Len()
-		if n <= remaining {
-			cr.buf.Write(p[:n])
-		} else {
-			cr.buf.Write(p[:remaining])
-		}
-	}
-	return n, err
-}
-
-// Bytes returns a copy of the captured bytes.
-func (cr *captureReader) Bytes() []byte {
-	if cr.buf.Len() == 0 {
-		return nil
-	}
-	out := make([]byte, cr.buf.Len())
-	copy(out, cr.buf.Bytes())
-	return out
-}
-
-// Reset clears the capture buffer for reuse.
-func (cr *captureReader) Reset() {
-	cr.buf.Reset()
-}
 
 // httpMethods contains the common HTTP method prefixes used for protocol detection.
 var httpMethods = [][]byte{
@@ -115,6 +76,7 @@ type Handler struct {
 	tlsTransport      httputil.TLSTransport
 	detector          *fingerprint.Detector
 	connPool          *ConnPool
+	upstreamRouter    *UpstreamRouter
 }
 
 // NewHandler creates a new HTTP handler with flow recording.
@@ -124,7 +86,7 @@ func NewHandler(store flow.FlowWriter, issuer *cert.Issuer, logger *slog.Logger)
 	return &Handler{
 		HandlerBase: proxy.HandlerBase{
 			Store:     store,
-			Transport: &gohttp.Transport{},
+			Transport: proxy.NewDefaultTransport(),
 			Logger:    logger,
 		},
 		issuer: issuer,
@@ -192,7 +154,6 @@ func (h *Handler) PluginEngine() *plugin.Engine {
 // crypto/tls, enabling uTLS fingerprint spoofing.
 func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 	h.tlsTransport = t
-	h.configureTLSDialer()
 }
 
 // TLSTransport returns the handler's current TLS transport, or nil.
@@ -224,57 +185,44 @@ func (h *Handler) ConnPool() *ConnPool {
 	return h.connPool
 }
 
+// SetUpstreamRouter sets the upstream router used for request forwarding.
+// When set, requests are forwarded via the UpstreamRouter which handles
+// ALPN-based routing to H1/H2 transports.
+func (h *Handler) SetUpstreamRouter(r *UpstreamRouter) {
+	h.upstreamRouter = r
+}
+
+// UpstreamRouter returns the handler's current upstream router, or nil.
+func (h *Handler) GetUpstreamRouter() *UpstreamRouter {
+	return h.upstreamRouter
+}
+
 // effectiveTLSTransport returns the configured TLS transport, falling back to
-// a StandardTransport with InsecureSkipVerify matching the handler's transport
-// configuration.
+// a StandardTransport with InsecureSkipVerify.
 func (h *Handler) effectiveTLSTransport() httputil.TLSTransport {
 	if h.tlsTransport != nil {
 		return h.tlsTransport
 	}
-	insecure := h.Transport != nil && h.Transport.TLSClientConfig != nil &&
-		h.Transport.TLSClientConfig.InsecureSkipVerify
-	return &httputil.StandardTransport{InsecureSkipVerify: insecure}
+	return &httputil.StandardTransport{InsecureSkipVerify: true}
 }
 
-// configureTLSDialer installs a DialTLSContext function on the handler's
-// http.Transport so that outgoing HTTPS requests use the configured
-// TLSTransport (e.g. uTLS) instead of Go's default TLS stack.
-func (h *Handler) configureTLSDialer() {
-	if h.Transport == nil || h.tlsTransport == nil {
-		return
+// effectiveUpstreamRouter returns the configured UpstreamRouter or builds one
+// from the ConnPool and TLS transport.
+func (h *Handler) effectiveUpstreamRouter() *UpstreamRouter {
+	if h.upstreamRouter != nil {
+		return h.upstreamRouter
 	}
-	// Restrict ALPN to HTTP/1.1 only for the legacy gohttp.Transport path.
-	// Go's http.Transport cannot handle HTTP/2 frames when DialTLSContext is
-	// set (it disables automatic HTTP/2 upgrade). If the upstream negotiates
-	// h2 via ALPN, the transport receives HTTP/2 binary frames but parses them
-	// as HTTP/1.x text, causing "malformed HTTP response" errors and 502 Bad
-	// Gateway.
-	//
-	// The new UpstreamRouter-based path does not need this restriction because
-	// it routes h2 connections to the HTTP/2 frame engine. This restriction
-	// applies only to the legacy gohttp.Transport fallback.
-	transport := httputil.RestrictALPNToH1(h.tlsTransport)
-	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(addr)
-		if err != nil {
-			host = addr
+	pool := h.connPool
+	if pool == nil {
+		pool = &ConnPool{
+			TLSTransport:  h.effectiveTLSTransport(),
+			UpstreamProxy: h.GetUpstreamProxy(),
 		}
-		dialer := &net.Dialer{Timeout: 30 * time.Second}
-		rawConn, err := dialer.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		tlsConn, _, err := transport.TLSConnect(ctx, rawConn, host)
-		if err != nil {
-			rawConn.Close()
-			return nil, err
-		}
-		// Wrap the connection so http.Transport can detect TLS and
-		// populate resp.TLS via ConnectionState() tls.ConnectionState.
-		return httputil.WrapTLSConn(tlsConn), nil
 	}
-	// Disable the default TLS config since DialTLSContext handles TLS.
-	h.Transport.TLSClientConfig = nil
+	return &UpstreamRouter{
+		H1:   &H1Transport{},
+		Pool: pool,
+	}
 }
 
 // Issuer returns the handler's TLS certificate issuer, or nil if not configured.
@@ -324,16 +272,9 @@ func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 
 // Handle processes HTTP connections in a loop (keep-alive support).
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
-	capture := &captureReader{r: conn}
-	reader := bufio.NewReader(capture)
+	reader := bufio.NewReader(conn)
 
 	// Watch for context cancellation and interrupt blocking reads.
-	// When the proxy is shutting down, ReadRequest may be blocked waiting
-	// for the next request on a keep-alive connection. Setting an immediate
-	// read deadline causes it to return with a timeout error.
-	//
-	// Use a child context so the goroutine is reclaimed when the connection
-	// handler returns, not only when the parent context is cancelled.
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 	go func() {
@@ -353,42 +294,29 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 			conn.SetReadDeadline(time.Now().Add(timeout))
 		}
 
-		// Mark the capture position before reading the request.
-		// After ReadRequest + body read, everything between this mark
-		// and the current position (minus remaining buffer) is the raw request.
-		captureStart := capture.buf.Len()
-
-		// Check for HTTP request smuggling patterns in raw headers before
-		// ReadRequest normalizes them. This is important because Go's
-		// ReadRequest strips Content-Length when Transfer-Encoding is
-		// present, making post-parse detection impossible.
-		smuggling := checkRequestSmuggling(reader, h.Logger)
-
-		req, err := gohttp.ReadRequest(reader)
+		req, err := parser.ParseRequest(reader)
 		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
-			// If the context was cancelled, return the context error
-			// instead of the read deadline error.
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return fmt.Errorf("read request: %w", err)
 		}
 
-		// Log any detected smuggling patterns.
-		logSmugglingWarnings(h.Logger, smuggling, req)
+		// Log any detected anomalies (replaces smuggling detection).
+		logAnomalyWarnings(h.Logger, req.Anomalies, req.Method, req.RequestURI)
 
 		// Reset deadline after successful read.
 		conn.SetReadDeadline(time.Time{})
 
 		// CONNECT method starts HTTPS MITM tunnel.
-		if req.Method == gohttp.MethodConnect {
+		if req.Method == "CONNECT" {
 			return h.handleCONNECT(ctx, conn, req)
 		}
 
-		if err := h.handleRequest(ctx, conn, req, smuggling, capture, captureStart, reader); err != nil {
+		if err := h.handleRequest(ctx, conn, req); err != nil {
 			return err
 		}
 
@@ -398,67 +326,56 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	}
 }
 
-func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, smuggling *smugglingFlags, capture *captureReader, captureStart int, reader *bufio.Reader) error {
+func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.RawRequest) error {
 	start := time.Now()
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
-	normalizeRequestURL(ctx, req)
+
+	// Parse and normalize request URL.
+	reqURL := parseRequestURL(ctx, req, "http")
 
 	// Target scope enforcement (before WebSocket — S-1: CWE-863).
-	if blocked, reason := h.checkTargetScope(req.URL); blocked {
-		h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
-		h.recordBlockedSession(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "target_scope", nil, logger)
+	if blocked, reason := h.checkTargetScope(reqURL); blocked {
+		h.writeBlockedResponse(conn, reqURL.Hostname(), reason, logger)
+		h.recordBlockedSession(ctx, req, reqURL, nil, nil, false, req.Anomalies, start, connID, clientAddr, "target_scope", nil, logger)
 		return nil
 	}
 
 	// Rate limit enforcement (after target scope, before WebSocket).
-	if denial := h.checkRateLimit(req.URL.Hostname()); denial != nil {
+	if denial := h.checkRateLimit(reqURL.Hostname()); denial != nil {
 		h.writeRateLimitResponse(conn, logger)
-		h.recordBlockedSessionWithTags(ctx, req, nil, nil, false, smuggling, start, connID, clientAddr, "rate_limit", nil, denial.Tags(), logger)
+		h.recordBlockedSessionWithTags(ctx, req, reqURL, nil, nil, false, req.Anomalies, start, connID, clientAddr, "rate_limit", nil, denial.Tags(), logger)
 		return nil
 	}
-	// NOTE (S-LOW-1): WebSocket upgrade requests bypass the safety filter
-	// intentionally. WS upgrade requests do not carry a meaningful body,
-	// so input filtering would not add value. The safety filter runs on
-	// the body-bearing code path below instead.
-	if isWebSocketUpgrade(req) {
-		return h.handleWebSocket(ctx, conn, req)
+
+	// WebSocket upgrade: check using raw headers.
+	if isWebSocketUpgradeRaw(req.Headers) {
+		return h.handleWebSocket(ctx, conn, req, reqURL)
 	}
 
-	bodyResult := readAndCaptureRequestBody(req, logger)
-	rawRequest := extractRawRequest(capture, captureStart, reader)
+	bodyResult := readAndCaptureBody(req, logger)
 
-	// Safety filter enforcement (after target scope + rate limit, before plugin hooks).
-	// NOTE (L-1): The safety filter is intentionally placed after the rate limiter
-	// rather than before it. The filter requires the request body, which is read
-	// above by readAndCaptureRequestBody. Moving it before the rate limiter would
-	// require reading the body earlier, which would allow a rate-limited client
-	// to force body reads on every request, increasing resource consumption.
-	if violation := h.CheckSafetyFilter(bodyResult.recordBody, req.URL.String(), req.Header); violation != nil {
+	// Safety filter enforcement.
+	safetyHeaders := httputil.RawHeadersToHTTPHeader(req.Headers)
+	if violation := h.CheckSafetyFilter(bodyResult.recordBody, reqURL.String(), safetyHeaders); violation != nil {
 		if h.SafetyFilterAction(violation) == safety.ActionBlock {
 			h.writeSafetyFilterResponse(conn, violation, logger)
-			h.recordBlockedSession(ctx, req, bodyResult.recordBody, rawRequest, bodyResult.truncated, smuggling, start, connID, clientAddr, "safety_filter", violation, logger)
+			h.recordBlockedSession(ctx, req, reqURL, bodyResult.recordBody, req.RawBytes, bodyResult.truncated, req.Anomalies, start, connID, clientAddr, "safety_filter", violation, logger)
 			return nil
 		}
-		// log_only: log the violation but continue processing.
 		logger.Warn("safety filter violation (log_only)",
 			"rule_id", violation.RuleID, "rule_name", violation.RuleName,
 			"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
 	}
 
-	removeHopByHopHeaders(req.Header)
+	removeHopByHopHeadersRaw(&req.Headers)
 
 	// Build plugin ConnInfo for hook data.
 	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
-
-	// Create transaction context shared across all plugin hooks for this
-	// request-response pair. Plugins can store and retrieve values via
-	// data["ctx"] to pass data between hooks.
 	txCtx := plugin.NewTxCtx()
 
-	// Plugin hook: on_receive_from_client — after TargetScope, before Intercept.
-	// Supports DROP (close connection) and RESPOND (custom response) actions.
+	// Plugin hook: on_receive_from_client.
 	var pluginDropped bool
 	req, bodyResult.recordBody, pluginDropped = h.dispatchOnReceiveFromClient(ctx, conn, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
 	if pluginDropped {
@@ -472,20 +389,19 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		protocol:     socks5Protocol(ctx, "HTTP/1.x"),
 		scheme:       "http",
 		start:        start,
-		tags:         mergeSOCKS5Tags(ctx, smugglingTags(smuggling)),
+		tags:         mergeSOCKS5Tags(ctx, anomalyTags(req.Anomalies)),
 		connInfo:     &flow.ConnectionInfo{ClientAddr: clientAddr},
 		req:          req,
+		reqURL:       reqURL,
 		reqBody:      bodyResult.recordBody,
-		rawRequest:   rawRequest,
+		rawRequest:   req.RawBytes,
 		reqTruncated: bodyResult.truncated,
 	}
 
 	// Snapshot headers/body before intercept/transform for variant recording.
-	// If intercept or transform modifies the request, both the original and
-	// modified versions are recorded as separate send messages.
-	snap := snapshotRequest(req.Header, bodyResult.recordBody)
+	snap := snapshotRawRequest(req.Headers, bodyResult.recordBody)
 
-	iResult := h.applyIntercept(ctx, conn, req, bodyResult.recordBody, rawRequest, logger)
+	iResult := h.applyIntercept(ctx, conn, req, reqURL, bodyResult.recordBody, req.RawBytes, logger)
 	if iResult.Dropped {
 		sp.reqBody = iResult.RecordBody
 		h.recordInterceptDrop(ctx, sp, logger)
@@ -494,98 +410,78 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 	req = iResult.Req
 	bodyResult.recordBody = iResult.RecordBody
 
-	// Raw mode: bypass net/http.Transport and forward raw bytes directly.
+	// Raw mode: bypass UpstreamRouter and forward raw bytes directly.
 	if iResult.IsRaw {
-		return h.handleRawForward(ctx, conn, req, iResult, sp, &snap, start, logger)
+		return h.handleRawForward(ctx, conn, req, reqURL, iResult, sp, &snap, start, logger)
 	}
 
 	bodyResult.recordBody = h.applyTransform(req, bodyResult.recordBody)
 
-	// Plugin hook: on_before_send_to_server — after Transform, before Recording.
+	// Plugin hook: on_before_send_to_server.
 	req, bodyResult.recordBody = h.dispatchOnBeforeSendToServer(ctx, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
 
 	sp.reqBody = bodyResult.recordBody
 
-	// Progressive recording: record send (session + request) before forwarding.
-	// Uses variant-aware recording to capture both original and modified
-	// versions when intercept/transform changed the request.
+	// Progressive recording: record send before forwarding.
 	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
 
 	sendStart := time.Now()
-	fwd, err := h.forwardUpstream(ctx, conn, req, logger)
+	fwd, err := h.forwardUpstream(ctx, conn, req, reqURL, false, logger)
 	if err != nil {
-		// Upstream failed — record session as error. Send is already recorded.
 		h.recordSendError(ctx, sendResult, start, err, logger)
 		return err
 	}
-	defer fwd.resp.Body.Close()
 
-	// SSE detection: if the response is text/event-stream, switch to
-	// streaming mode. SSE responses are long-lived streams that would
-	// block forever in readResponseBody's io.ReadAll. SSE streams use
-	// per-event processing: output filter is applied per event, intercept
-	// is applied at header level. Full-body buffering and auto-transform
-	// rules are skipped.
-	// The send phase is already recorded via sendResult above; pass it
-	// directly to avoid duplicate flow recording.
-	if isSSEResponse(fwd.resp) {
+	// SSE detection.
+	if isSSEResponseRaw(fwd.resp) {
 		sendResult.tags = addSSETags(sendResult.tags)
 		hookCtx := &sseHookContext{connInfo: pluginConnInfo, txCtx: txCtx}
-		return h.handleSSEStream(ctx, conn, req, fwd, start, sendResult, hookCtx, logger)
+		return h.handleSSEStream(ctx, conn, req, reqURL, fwd, start, sendResult, hookCtx, logger)
 	}
 
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
 	receiveEnd := time.Now()
 
-	// Plugin hook: on_receive_from_server — after response received, before Transform.
+	// Plugin hook: on_receive_from_server.
 	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	// Snapshot response before intercept for variant recording.
-	// If intercept modifies the response, both the original and modified
-	// versions are recorded as separate receive messages.
-	respSnap := snapshotResponse(fwd.resp.StatusCode, fwd.resp.Header, fullRespBody)
+	respSnap := snapshotRawResponse(fwd.resp.StatusCode, fwd.resp.Headers, fullRespBody)
 
-	// Response intercept: check if the response matches any intercept rules
-	// and allow the AI agent to modify or drop it before sending to the client.
+	// Response intercept.
 	var respDropped bool
-	fwd.resp, fullRespBody, respDropped = h.applyInterceptResponse(ctx, conn, req, fwd.resp, fullRespBody, logger)
+	fwd.resp, fullRespBody, respDropped = h.applyInterceptResponse(ctx, conn, req, reqURL, fwd.resp, fullRespBody, logger)
 	if respDropped {
 		return nil
 	}
 
-	// Plugin hook: on_before_send_to_client — after intercept, before Recording/write.
+	// Plugin hook: on_before_send_to_client.
 	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
-	// Serialize raw response for recording. This is done after plugin/intercept
-	// so that any modifications are reflected in the recorded bytes.
-	// The raw response captures the unmasked data for Flow Store.
-	rawResponse := serializeRawResponse(fwd.resp, fullRespBody)
-	// Save unmasked body for recording before output filter masks it.
-	// Deep copy to guard against future FilterOutput implementations that
-	// may modify the underlying array in place (S-2).
+	// Serialize raw response for recording.
+	rawResponse := serializeRawResponseBytes(fwd.resp, fullRespBody)
 	rawRespBody := make([]byte, len(fullRespBody))
 	copy(rawRespBody, fullRespBody)
 
-	// Output filter: mask sensitive data in response body and headers before
-	// sending to client. Raw (unmasked) data is preserved in Flow Store via
-	// rawResponse/rawRespBody above.
-	fullRespBody, fwd.resp.Header = h.ApplyOutputFilter(fullRespBody, fwd.resp.Header, logger)
+	// Output filter: mask sensitive data.
+	goHeaders := httputil.RawHeadersToHTTPHeader(fwd.resp.Headers)
+	fullRespBody, goHeaders = h.ApplyOutputFilter(fullRespBody, goHeaders, logger)
+	fwd.resp.Headers = httputil.HTTPHeaderToRawHeaders(goHeaders)
 
-	if err := writeResponseToClient(conn, fwd.resp, fullRespBody); err != nil {
-		return err
+	if err := writeRawResponse(conn, fwd.resp, fullRespBody); err != nil {
+		return fmt.Errorf("write response: %w", err)
 	}
 
-	// Progressive recording: record receive (response + session completion).
-	// Uses variant-aware recording to capture both original and modified
-	// versions when intercept changed the response.
-	// NOTE: respBody uses rawRespBody (unmasked) so Flow Store has raw data.
+	// Progressive recording: record receive.
 	duration := time.Since(start)
 	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
+
+	goResp := httputil.RawResponseToHTTP(fwd.resp, rawRespBody)
 	h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:       start,
 		duration:    duration,
 		serverAddr:  fwd.serverAddr,
-		resp:        fwd.resp,
+		resp:        goResp,
 		rawResponse: rawResponse,
 		respBody:    rawRespBody,
 		sendMs:      sendMs,
@@ -593,33 +489,62 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *gohttp.
 		receiveMs:   receiveMs,
 	}, &respSnap, logger)
 
-	logHTTPRequest(logger, req, fwd.resp.StatusCode, duration)
+	logHTTPRequest(logger, req.Method, reqURL.String(), fwd.resp.StatusCode, duration)
 	return nil
 }
 
-// serializeRawResponse reconstructs raw HTTP response bytes from the parsed response
-// and body. This preserves the status line, headers, and body in wire format.
-func serializeRawResponse(resp *gohttp.Response, body []byte) []byte {
-	if resp == nil {
-		return nil
+// parseRequestURL constructs a full URL from the raw request, normalizing
+// it for forward proxy use. When a forwarding target is present in the
+// context, it overrides the Host.
+func parseRequestURL(ctx context.Context, req *parser.RawRequest, defaultScheme string) *url.URL {
+	u, err := url.ParseRequestURI(req.RequestURI)
+	if err != nil {
+		u = &url.URL{Path: req.RequestURI}
 	}
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "HTTP/%d.%d %d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, gohttp.StatusText(resp.StatusCode))
-	for key, vals := range resp.Header {
-		for _, val := range vals {
-			fmt.Fprintf(&buf, "%s: %s\r\n", key, val)
-		}
+
+	host := req.Headers.Get("Host")
+	if u.Host == "" {
+		u.Host = host
 	}
-	buf.WriteString("\r\n")
-	if len(body) > 0 {
-		remaining := maxRawCaptureSize - buf.Len()
-		if len(body) <= remaining {
-			buf.Write(body)
-		} else if remaining > 0 {
-			buf.Write(body[:remaining])
-		}
+	if u.Scheme == "" {
+		u.Scheme = defaultScheme
 	}
-	return buf.Bytes()
+
+	// TCP forwarding: override the host with the actual upstream target.
+	if target, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		u.Host = target
+	}
+
+	return u
+}
+
+// requestBodyResult holds the result of reading and capturing a request body.
+type requestBodyResult struct {
+	recordBody []byte
+	truncated  bool
+}
+
+// readAndCaptureBody reads the full request body and returns it for recording
+// (truncated to MaxBodySize if necessary). After this call the request's Body
+// reader is replaced with a re-readable copy.
+func readAndCaptureBody(req *parser.RawRequest, logger *slog.Logger) requestBodyResult {
+	if req.Body == nil {
+		return requestBodyResult{}
+	}
+
+	fullBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		logger.Warn("failed to read request body", "error", err)
+	}
+	req.Body = bytes.NewReader(fullBody)
+
+	recordBody := fullBody
+	var truncated bool
+	if len(fullBody) > int(config.MaxBodySize) {
+		recordBody = fullBody[:int(config.MaxBodySize)]
+		truncated = true
+	}
+	return requestBodyResult{recordBody: recordBody, truncated: truncated}
 }
 
 // shouldCapture checks the capture scope to determine whether a request
@@ -628,124 +553,102 @@ func (h *Handler) shouldCapture(method string, u *url.URL) bool {
 	return h.ShouldCapture(method, u)
 }
 
-func removeHopByHopHeaders(header gohttp.Header) {
-	for _, h := range hopByHopHeaders {
-		header.Del(h)
+func removeHopByHopHeadersRaw(headers *parser.RawHeaders) {
+	for _, name := range hopByHopHeaders {
+		headers.Del(name)
 	}
 }
 
-// roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
-// capture the remote address of the TCP connection used for the request
-// and per-phase timing data (send, wait, receive).
-func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*gohttp.Response, string, *httputil.RoundTripTiming, error) {
-	var serverAddr string
-	timing := &httputil.RoundTripTiming{}
-	trace := &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			if info.Conn != nil {
-				serverAddr = info.Conn.RemoteAddr().String()
-			}
-		},
-		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			timing.SetWroteRequest(time.Now())
-		},
-		GotFirstResponseByte: func() {
-			timing.SetGotFirstByte(time.Now())
-		},
-	}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	resp, err := transport.RoundTrip(req)
-	return resp, serverAddr, timing, err
+// forwardResult holds the result of forwarding a request upstream.
+type forwardResult struct {
+	resp       *parser.RawResponse
+	serverAddr string
+	timing     *httputil.RoundTripTiming
 }
 
-func writeResponse(conn net.Conn, resp *gohttp.Response, body []byte) error {
-	w := bufio.NewWriter(conn)
-	if _, err := fmt.Fprintf(w, "HTTP/%d.%d %d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, gohttp.StatusText(resp.StatusCode)); err != nil {
-		return err
+// forwardUpstream sends the request to the upstream server via the
+// UpstreamRouter and returns the response. On failure, it writes a
+// 502 Bad Gateway to the client connection.
+func (h *Handler) forwardUpstream(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, useTLS bool, logger *slog.Logger) (*forwardResult, error) {
+	router := h.effectiveUpstreamRouter()
+
+	// Determine upstream address and hostname.
+	host := reqURL.Host
+	if host == "" {
+		host = req.Headers.Get("Host")
 	}
-	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	resp.Header.Del("Transfer-Encoding")
-	for key, vals := range resp.Header {
-		for _, val := range vals {
-			if _, err := fmt.Fprintf(w, "%s: %s\r\n", key, val); err != nil {
-				return err
-			}
+	addr := host
+	hostname := host
+
+	// Add default port if not specified.
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		if useTLS {
+			addr = addr + ":443"
+		} else {
+			addr = addr + ":80"
 		}
+	} else {
+		hostname, _, _ = net.SplitHostPort(addr)
 	}
-	if _, err := fmt.Fprintf(w, "\r\n"); err != nil {
-		return err
+
+	// Build the request for upstream. Use relative URI for HTTPS, absolute for HTTP.
+	outReq := cloneRequestForUpstream(req, reqURL, useTLS)
+
+	result, err := router.RoundTrip(ctx, outReq, addr, useTLS, hostname)
+	if err != nil {
+		logger.Error("upstream request failed", "method", req.Method, "url", reqURL.String(), "error", err)
+		writeHTTPError(conn, statusBadGateway, logger)
+		return nil, fmt.Errorf("upstream request: %w", err)
 	}
-	if _, err := w.Write(body); err != nil {
-		return err
-	}
-	return w.Flush()
+
+	return &forwardResult{
+		resp:       result.Response,
+		serverAddr: result.ServerAddr,
+		timing:     result.Timing,
+	}, nil
 }
 
-// interceptRequest checks if the request matches any intercept rules and,
-// if so, enqueues it for AI agent review. It blocks until the agent responds
-// or the timeout expires. Returns the action and true if intercepted, or a
-// zero-value action and false if not intercepted.
-//
-// The rawBytes parameter is the captured raw request bytes from captureReader.
-// When non-nil, they are atomically attached to the queued item via
-// EnqueueOpts so that the AI agent can view/edit the raw bytes and select
-// raw forwarding mode.
-func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *gohttp.Request, body []byte, rawBytes []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
-	if h.InterceptEngine == nil || h.InterceptQueue == nil {
-		return intercept.InterceptAction{}, false
+// cloneRequestForUpstream creates a copy of the request suitable for upstream
+// forwarding. For HTTPS (useTLS=true), the RequestURI is set to the
+// origin-form (path+query). For HTTP, it preserves the absolute-form.
+func cloneRequestForUpstream(req *parser.RawRequest, reqURL *url.URL, useTLS bool) *parser.RawRequest {
+	out := &parser.RawRequest{
+		Method:     req.Method,
+		RequestURI: req.RequestURI,
+		Proto:      req.Proto,
+		Headers:    req.Headers.Clone(),
+		Body:       req.Body,
 	}
 
-	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, httpHeaderToRawHeaders(req.Header))
-	if len(matchedRules) == 0 {
-		return intercept.InterceptAction{}, false
+	if useTLS {
+		// HTTPS: use origin-form URI (relative).
+		out.RequestURI = reqURL.RequestURI()
 	}
 
-	logger.Info("request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
-
-	var opts []intercept.EnqueueOpts
-	if len(rawBytes) > 0 {
-		opts = append(opts, intercept.EnqueueOpts{RawBytes: rawBytes})
-	}
-
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, httpHeaderToRawHeaders(req.Header), body, matchedRules, opts...)
-	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
-
-	timeout := h.InterceptQueue.Timeout()
-	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
-	defer timeoutCancel()
-
-	select {
-	case action := <-actionCh:
-		return action, true
-	case <-timeoutCtx.Done():
-		// Timeout or context cancellation.
-		behavior := h.InterceptQueue.TimeoutBehaviorValue()
-		if ctx.Err() != nil {
-			// Proxy shutting down — drop.
-			logger.Info("intercepted request cancelled (proxy shutdown)", "id", id)
-			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
-		}
-		logger.Info("intercepted request timed out", "id", id, "behavior", string(behavior))
-		switch behavior {
-		case intercept.TimeoutAutoDrop:
-			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
-		default:
-			// auto_release or unrecognized → release.
-			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
-		}
-	}
+	return out
 }
 
-// applyInterceptModifications applies the modifications from a modify_and_forward
-// action to the HTTP request. It delegates to the shared httputil package for
-// CRLF validation, URL scheme enforcement, and header/body modifications.
-func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
-	return httputil.ApplyRequestModifications(req, action)
+// readResponseBody reads the full response body (up to MaxBodySize) and applies
+// response transforms if configured.
+func (h *Handler) readResponseBody(resp *parser.RawResponse, logger *slog.Logger) []byte {
+	if resp.Body == nil {
+		return nil
+	}
+	fullBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
+	if err != nil {
+		logger.Warn("failed to read response body", "error", err)
+	}
+
+	if h.transformPipeline != nil {
+		rh := resp.Headers
+		rh, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, rh, fullBody)
+		resp.Headers = rh
+	}
+
+	return fullBody
 }
 
 // checkTargetScope checks if the request URL is allowed by the target scope.
-// Returns (true, reason) if the target is blocked, (false, "") if allowed.
-// If no target scope is configured or it has no rules, the target is always allowed.
 func (h *Handler) checkTargetScope(u *url.URL) (blocked bool, reason string) {
 	if h.TargetScope == nil || !h.TargetScope.HasRules() {
 		return false, ""
@@ -758,13 +661,10 @@ func (h *Handler) checkTargetScope(u *url.URL) (blocked bool, reason string) {
 }
 
 // checkTargetScopeHost checks if a hostname:port is allowed by the target scope.
-// This is used for CONNECT requests where only host and port are available.
-// Returns (true, reason) if the target is blocked, (false, "") if allowed.
 func (h *Handler) checkTargetScopeHost(hostname string, port int) (blocked bool, reason string) {
 	if h.TargetScope == nil || !h.TargetScope.HasRules() {
 		return false, ""
 	}
-	// CONNECT targets don't have scheme or path information.
 	allowed, reason := h.TargetScope.CheckTarget("", hostname, port, "")
 	if !allowed {
 		return true, reason
@@ -773,7 +673,6 @@ func (h *Handler) checkTargetScopeHost(hostname string, port int) (blocked bool,
 }
 
 // checkRateLimit checks whether the request is rate limited.
-// Returns nil if the request is allowed, or a *proxy.RateLimitDenial if blocked.
 func (h *Handler) checkRateLimit(hostname string) *proxy.RateLimitDenial {
 	if h.RateLimiter == nil || !h.RateLimiter.HasLimits() {
 		return nil
@@ -781,8 +680,7 @@ func (h *Handler) checkRateLimit(hostname string) *proxy.RateLimitDenial {
 	return h.RateLimiter.Check(hostname)
 }
 
-// writeRateLimitResponse writes a 429 Too Many Requests response with
-// the standard rate limit headers.
+// writeRateLimitResponse writes a 429 Too Many Requests response.
 func (h *Handler) writeRateLimitResponse(conn net.Conn, logger *slog.Logger) {
 	body := `{"error":"rate limit exceeded","blocked_by":"rate_limit"}`
 	resp := fmt.Sprintf("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nX-Blocked-By: yorishiro-proxy\r\nX-Block-Reason: rate_limit\r\nRetry-After: 1\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
@@ -807,8 +705,7 @@ func (h *Handler) writeSafetyFilterResponse(conn net.Conn, violation *safety.Inp
 		"target", violation.Target.String(), "matched_on", proxy.TruncateForLog(violation.MatchedOn, 256))
 }
 
-// writeBlockedResponse writes a 403 Forbidden response with a JSON body
-// indicating that the target was blocked by the target scope.
+// writeBlockedResponse writes a 403 Forbidden response.
 func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, logger *slog.Logger) {
 	body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`, target, reason)
 	resp := fmt.Sprintf("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
@@ -819,25 +716,27 @@ func (h *Handler) writeBlockedResponse(conn net.Conn, target, reason string, log
 	logger.Info("request blocked by target scope", "target", target, "reason", reason)
 }
 
-// recordBlockedSession records a blocked request as a flow with the given blockedBy reason.
-// If violation is non-nil and blockedBy is "safety_filter", safety rule tags are added.
-func (h *Handler) recordBlockedSession(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
-	h.recordBlockedSessionWithTags(ctx, req, reqBody, rawRequest, reqTruncated, smuggling, start, connID, clientAddr, blockedBy, violation, nil, logger)
+// logHTTPRequest logs the completed HTTP request with method, URL, status, and duration.
+func logHTTPRequest(logger *slog.Logger, method, urlStr string, statusCode int, duration time.Duration) {
+	logger.Info("http request", "method", method, "url", urlStr, "status", statusCode, "duration_ms", duration.Milliseconds())
 }
 
-// recordBlockedSessionWithTags records a blocked request as a flow with the given blockedBy reason.
-// If violation is non-nil and blockedBy is "safety_filter", safety rule tags are added.
-// extraTags are merged into the flow tags (e.g., rate limit detail tags).
-func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *gohttp.Request, reqBody, rawRequest []byte, reqTruncated bool, smuggling *smugglingFlags, start time.Time, connID, clientAddr, blockedBy string, violation *safety.InputViolation, extraTags map[string]string, logger *slog.Logger) {
+// recordBlockedSession records a blocked request as a flow.
+func (h *Handler) recordBlockedSession(ctx context.Context, req *parser.RawRequest, reqURL *url.URL, reqBody, rawRequest []byte, reqTruncated bool, anomalies []parser.Anomaly, start time.Time, connID, clientAddr, blockedBy string, violation *safety.InputViolation, logger *slog.Logger) {
+	h.recordBlockedSessionWithTags(ctx, req, reqURL, reqBody, rawRequest, reqTruncated, anomalies, start, connID, clientAddr, blockedBy, violation, nil, logger)
+}
+
+// recordBlockedSessionWithTags records a blocked request as a flow with extra tags.
+func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *parser.RawRequest, reqURL *url.URL, reqBody, rawRequest []byte, reqTruncated bool, anomalies []parser.Anomaly, start time.Time, connID, clientAddr, blockedBy string, violation *safety.InputViolation, extraTags map[string]string, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
-	if !h.shouldCapture(req.Method, req.URL) {
+	if !h.shouldCapture(req.Method, reqURL) {
 		return
 	}
 
 	duration := time.Since(start)
-	tags := smugglingTags(smuggling)
+	tags := anomalyTags(anomalies)
 	if violation != nil {
 		if tags == nil {
 			tags = make(map[string]string)
@@ -861,12 +760,10 @@ func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *gohttp.
 		Duration:  duration,
 		Tags:      tags,
 		BlockedBy: blockedBy,
-		ConnInfo: &flow.ConnectionInfo{
-			ClientAddr: clientAddr,
-		},
+		ConnInfo:  &flow.ConnectionInfo{ClientAddr: clientAddr},
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
-		logger.Error("blocked flow save failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		logger.Error("blocked flow save failed", "method", req.Method, "url", reqURL.String(), "error", err)
 		return
 	}
 	sendMsg := &flow.Message{
@@ -875,8 +772,8 @@ func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *gohttp.
 		Direction:     "send",
 		Timestamp:     start,
 		Method:        req.Method,
-		URL:           req.URL,
-		Headers:       req.Header,
+		URL:           reqURL,
+		Headers:       httputil.RawHeadersToHTTPHeader(req.Headers),
 		Body:          reqBody,
 		RawBytes:      rawRequest,
 		BodyTruncated: reqTruncated,
@@ -884,4 +781,15 @@ func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *gohttp.
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("blocked send message save failed", "error", err)
 	}
+}
+
+// socks5Protocol returns the protocol string with a "SOCKS5+" prefix if the
+// request arrived through a SOCKS5 tunnel.
+func socks5Protocol(ctx context.Context, base string) string {
+	return proxy.SOCKS5Protocol(ctx, base)
+}
+
+// mergeSOCKS5Tags adds SOCKS5 metadata tags to the given tags map.
+func mergeSOCKS5Tags(ctx context.Context, tags map[string]string) map[string]string {
+	return proxy.MergeSOCKS5Tags(ctx, tags)
 }

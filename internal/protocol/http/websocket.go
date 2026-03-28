@@ -7,88 +7,48 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
-// isWebSocketUpgrade checks if the HTTP request is a WebSocket upgrade request.
-// It must be called before hop-by-hop headers are removed.
-func isWebSocketUpgrade(req *gohttp.Request) bool {
-	// RFC 6455 Section 4.1: The request must contain:
-	// - Connection: Upgrade
-	// - Upgrade: websocket (case-insensitive)
-	connection := req.Header.Get("Connection")
-	upgrade := req.Header.Get("Upgrade")
-
-	return headerContains(connection, "upgrade") &&
-		strings.EqualFold(strings.TrimSpace(upgrade), "websocket")
-}
-
-// headerContains checks if a comma-separated header value contains the given
-// token (case-insensitive).
-func headerContains(headerValue, token string) bool {
-	for _, v := range strings.Split(headerValue, ",") {
-		if strings.EqualFold(strings.TrimSpace(v), token) {
-			return true
-		}
-	}
-	return false
-}
-
-// wsErrorRecordParams holds the parameters needed to record a WebSocket
-// upgrade failure as an error flow.
+// wsErrorRecordParams holds parameters for recording WebSocket upgrade failures.
 type wsErrorRecordParams struct {
 	connID     string
 	clientAddr string
 	scheme     string
 	start      time.Time
 	connInfo   *flow.ConnectionInfo
-	req        *gohttp.Request
+	req        *parser.RawRequest
+	reqURL     *url.URL
 }
 
 // handleWebSocket processes a WebSocket upgrade request in HTTP forward proxy mode.
-// It dials the upstream server, forwards the upgrade request, validates the 101
-// response, sends it back to the client, then delegates to the ws.Handler for
-// bidirectional frame relay.
-//
-// Error paths (dial failure, write failure, response read failure) record a
-// Session(State="error") with the upgrade request so that failed WebSocket
-// attempts are visible in session history.
-func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohttp.Request) error {
+func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL) error {
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 	start := time.Now()
 
-	// Ensure absolute URL for forward proxy.
-	if req.URL.Host == "" {
-		req.URL.Host = req.Host
-	}
-	if req.URL.Scheme == "" {
-		req.URL.Scheme = "http"
-	}
-
 	// TCP forwarding: override the host with the actual upstream target.
 	if target, ok := proxy.ForwardTargetFromContext(ctx); ok {
-		req.URL.Host = target
-		req.Host = target
+		reqURL.Host = target
+		req.Headers.Set("Host", target)
 	}
 
-	// Determine upstream address.
-	host := req.URL.Host
+	host := reqURL.Host
 	if !strings.Contains(host, ":") {
 		host = host + ":80"
 	}
 
-	logger.Info("websocket upgrade detected", "url", req.URL.String(), "host", host)
+	logger.Info("websocket upgrade detected", "url", reqURL.String(), "host", host)
 
-	// Build error recording params for use if any error path is reached.
 	ep := wsErrorRecordParams{
 		connID:     connID,
 		clientAddr: clientAddr,
@@ -96,13 +56,13 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: clientAddr},
 		req:        req,
+		reqURL:     reqURL,
 	}
 
-	// Dial the upstream server, optionally via upstream proxy.
 	upstreamConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
 		logger.Error("websocket upstream dial failed", "host", host, "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		writeHTTPError(conn, statusBadGateway, logger)
 		h.recordWebSocketError(ctx, ep, fmt.Errorf("dial websocket upstream %s: %w", host, err), logger)
 		return fmt.Errorf("dial websocket upstream %s: %w", host, err)
 	}
@@ -110,37 +70,35 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 
 	serverAddr := upstreamConn.RemoteAddr().String()
 
-	// Forward the original upgrade request to the upstream server.
-	if err := req.Write(upstreamConn); err != nil {
+	// Write the upgrade request to upstream using the serialized form.
+	payload := serializeRequest(req)
+	if err := writeRequest(upstreamConn, payload, req.Body); err != nil {
 		logger.Error("websocket upstream write failed", "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		writeHTTPError(conn, statusBadGateway, logger)
 		h.recordWebSocketError(ctx, ep, fmt.Errorf("write websocket upgrade request: %w", err), logger)
 		return fmt.Errorf("write websocket upgrade request: %w", err)
 	}
 
 	// Read the upstream's response.
 	upstreamReader := bufio.NewReader(upstreamConn)
-	resp, err := gohttp.ReadResponse(upstreamReader, req)
+	resp, err := parser.ParseResponse(upstreamReader)
 	if err != nil {
 		logger.Error("websocket upstream response read failed", "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		writeHTTPError(conn, statusBadGateway, logger)
 		h.recordWebSocketError(ctx, ep, fmt.Errorf("read websocket upgrade response: %w", err), logger)
 		return fmt.Errorf("read websocket upgrade response: %w", err)
 	}
 
 	// Validate 101 Switching Protocols response.
-	if resp.StatusCode != gohttp.StatusSwitchingProtocols {
-		defer resp.Body.Close()
+	if resp.StatusCode != statusSwitchingProtocols {
 		logger.Warn("websocket upgrade rejected by upstream", "status", resp.StatusCode)
-		// Forward the non-101 response to the client.
-		if writeErr := resp.Write(conn); writeErr != nil {
-			logger.Debug("failed to forward rejection response", "error", writeErr)
-		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		writeRawResponse(conn, resp, body)
 		return nil
 	}
 
 	// Forward the 101 response to the client.
-	if err := resp.Write(conn); err != nil {
+	if err := writeSSERawResponseHeaders(conn, resp); err != nil {
 		return fmt.Errorf("write websocket 101 response to client: %w", err)
 	}
 
@@ -150,46 +108,36 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *gohtt
 	}
 
 	// Delegate to the WebSocket handler for frame relay.
-	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
+	goReq := httputil.RawRequestToHTTP(req, nil)
+	goResp := httputil.RawResponseToHTTP(resp, nil)
 	wsHandler := h.newWSHandler(logger)
-	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, req, resp, connID, clientAddr, connInfo)
+	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, goReq, goResp, connID, clientAddr, connInfo)
 }
 
 // handleWebSocketTLS processes a WebSocket upgrade request in HTTPS MITM mode (WSS).
-// It dials the upstream server over TLS, forwards the upgrade request, validates
-// the 101 response, sends it back to the client, then delegates to the ws.Handler
-// for bidirectional frame relay.
-//
-// Error paths (dial failure, TLS handshake failure, write failure, response read
-// failure) record a Session(State="error") with the upgrade request so that
-// failed WSS attempts are visible in session history.
-func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connectHost string, req *gohttp.Request, tlsMeta tlsMetadata) error {
+func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connectHost string, req *parser.RawRequest, reqURL *url.URL, tlsMeta tlsMetadata) error {
 	logger := h.connLogger(ctx)
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 	start := time.Now()
 
-	// Reconstruct the full URL.
-	// TCP forwarding: override the host with the actual upstream target.
 	effectiveHost := proxy.ResolveUpstreamTarget(ctx, connectHost)
-	if req.URL.Host == "" {
-		req.URL.Host = effectiveHost
+	if reqURL.Host == "" {
+		reqURL.Host = effectiveHost
 	}
 	if _, ok := proxy.ForwardTargetFromContext(ctx); ok {
-		req.URL.Host = effectiveHost
-		req.Host = effectiveHost
+		reqURL.Host = effectiveHost
+		req.Headers.Set("Host", effectiveHost)
 	}
-	req.URL.Scheme = "wss"
+	reqURL.Scheme = "wss"
 
-	// Determine upstream address.
 	host := effectiveHost
 	if !strings.Contains(host, ":") {
 		host = host + ":443"
 	}
 
-	logger.Info("wss websocket upgrade detected", "url", req.URL.String(), "host", host)
+	logger.Info("wss websocket upgrade detected", "url", reqURL.String(), "host", host)
 
-	// Build error recording params for use if any error path is reached.
 	ep := wsErrorRecordParams{
 		connID:     connID,
 		clientAddr: clientAddr,
@@ -201,18 +149,16 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 			TLSCipher:  tlsMeta.CipherSuite,
 			TLSALPN:    tlsMeta.ALPN,
 		},
-		req: req,
+		req:    req,
+		reqURL: reqURL,
 	}
 
-	// Dial the upstream server, optionally via upstream proxy.
 	rawConn, err := h.dialUpstream(ctx, host, 30*time.Second)
 	if err != nil {
 		return h.wssUpstreamError(ctx, conn, ep, logger, host, fmt.Errorf("dial wss upstream %s: %w", host, err))
 	}
 	defer rawConn.Close()
 
-	// Perform TLS handshake with the upstream server using a transport that
-	// offers only HTTP/1.1 via ALPN (WebSocket requires HTTP/1.1 Upgrade).
 	hostname, _, splitErr := net.SplitHostPort(host)
 	if splitErr != nil {
 		hostname = host
@@ -224,8 +170,6 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	}
 	defer upstreamTLS.Close()
 
-	// Safety net: if the server negotiated HTTP/2 despite our preference for
-	// HTTP/1.1, WebSocket upgrade cannot proceed (RFC 8441 not yet supported).
 	if negotiatedProto == "h2" {
 		return h.wssUpstreamError(ctx, conn, ep, logger, host,
 			fmt.Errorf("wss upstream %s negotiated HTTP/2 via ALPN; WebSocket requires HTTP/1.1 (RFC 8441 not supported)", host))
@@ -233,39 +177,34 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 
 	serverAddr := rawConn.RemoteAddr().String()
 
-	// Extract the upstream server's TLS certificate subject if available.
 	var tlsCertSubject string
 	if tc, ok := httputil.TLSConnectionState(upstreamTLS); ok && len(tc.PeerCertificates) > 0 {
 		tlsCertSubject = tc.PeerCertificates[0].Subject.String()
 	}
+	_ = tlsCertSubject // stored in connInfo
 
-	// Forward the upgrade request to the upstream TLS connection.
-	// Use the original request URI (relative form for HTTPS).
-	outReq := req.Clone(ctx)
-	outReq.RequestURI = req.URL.RequestURI()
-	if err := outReq.Write(upstreamTLS); err != nil {
+	// Write the upgrade request using origin-form URI.
+	outReq := cloneRequestForUpstream(req, reqURL, true)
+	payload := serializeRequest(outReq)
+	if err := writeRequest(upstreamTLS, payload, outReq.Body); err != nil {
 		return h.wssUpstreamError(ctx, conn, ep, logger, host, fmt.Errorf("write wss upgrade request: %w", err))
 	}
 
-	// Read the upstream's response.
 	upstreamReader := bufio.NewReader(upstreamTLS)
-	resp, err := gohttp.ReadResponse(upstreamReader, req)
+	resp, err := parser.ParseResponse(upstreamReader)
 	if err != nil {
 		return h.wssUpstreamError(ctx, conn, ep, logger, host, fmt.Errorf("read wss upgrade response: %w", err))
 	}
 
-	// Validate 101 Switching Protocols response.
-	if resp.StatusCode != gohttp.StatusSwitchingProtocols {
+	if resp.StatusCode != statusSwitchingProtocols {
 		logger.Warn("wss websocket upgrade rejected by upstream", "status", resp.StatusCode)
-		// Read and forward the response body (limited to 1MB to prevent OOM from malicious upstream).
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		resp.Body.Close()
-		writeResponse(conn, resp, body)
+		writeRawResponse(conn, resp, body)
 		return nil
 	}
 
 	// Forward the 101 response to the client.
-	if err := resp.Write(conn); err != nil {
+	if err := writeSSERawResponseHeaders(conn, resp); err != nil {
 		return fmt.Errorf("write wss 101 response to client: %w", err)
 	}
 
@@ -278,14 +217,12 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 		TLSServerCertSubject: tlsCertSubject,
 	}
 
-	// Delegate to the WebSocket handler for frame relay.
-	// Pass upstreamReader to preserve any bytes buffered during HTTP response parsing.
+	goReq := httputil.RawRequestToHTTP(req, nil)
+	goResp := httputil.RawResponseToHTTP(resp, nil)
 	wsHandler := h.newWSHandler(logger)
-	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
+	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, goReq, goResp, connID, clientAddr, connInfo)
 }
 
-// newWSHandler creates a ws.Handler configured with the handler's safety engine,
-// intercept engine, and intercept queue.
 func (h *Handler) newWSHandler(logger *slog.Logger) *ws.Handler {
 	wsHandler := ws.NewHandler(h.Store, logger)
 	if h.SafetyEngine != nil {
@@ -300,57 +237,34 @@ func (h *Handler) newWSHandler(logger *slog.Logger) *ws.Handler {
 	return wsHandler
 }
 
-// wssUpstreamError is a helper that handles common WSS upstream error paths:
-// it logs the error, sends 502 to the client, records the error flow, and
-// returns the formatted error. This reduces cyclomatic complexity in
-// handleWebSocketTLS.
 func (h *Handler) wssUpstreamError(ctx context.Context, conn net.Conn, ep wsErrorRecordParams, logger *slog.Logger, host string, wrapErr error) error {
-	logger.Error("wss upstream error", slog.String("host", host), "error", wrapErr)
-	httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+	logger.Error("wss upstream error", "host", host, "error", wrapErr)
+	writeHTTPError(conn, statusBadGateway, logger)
 	h.recordWebSocketError(ctx, ep, wrapErr, logger)
 	return wrapErr
 }
 
-// wsHTTP1Transport returns a TLS transport configured to offer only HTTP/1.1
-// via ALPN. WebSocket requires HTTP/1.1 Upgrade semantics, so offering h2
-// would cause failures when the upstream server selects HTTP/2.
-//
-// For StandardTransport, a copy with NextProtos set to ["http/1.1"] is returned.
-// For other transport types (e.g. UTLSTransport), the original transport is
-// returned as-is — the h2 ALPN check after TLSConnect acts as a safety net.
+// wsHTTP1Transport returns a TLS transport configured for HTTP/1.1 only.
 func (h *Handler) wsHTTP1Transport() httputil.TLSTransport {
 	t := h.effectiveTLSTransport()
 	if st, ok := t.(*httputil.StandardTransport); ok {
-		cp := *st // shallow copy — picks up all current and future fields
+		cp := *st
 		cp.NextProtos = []string{"http/1.1"}
 		return &cp
 	}
 	return t
 }
 
-// recordWebSocketError records a WebSocket upgrade failure as an error flow.
-// It creates a Session(State="error") with the upgrade request as the send
-// message (no receive message). The error is stored in the flow tags.
-//
-// This is called from handleWebSocket and handleWebSocketTLS error paths where
-// the WebSocket upgrade could not complete (dial failure, TLS handshake failure,
-// upstream write/read failure).
-//
-// If the store is nil or capture scope filtering excludes the request,
-// this is a no-op.
 func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParams, upstreamErr error, logger *slog.Logger) {
 	if h.Store == nil {
 		return
 	}
-
-	if !h.shouldCapture(p.req.Method, p.req.URL) {
+	if !h.shouldCapture(p.req.Method, p.reqURL) {
 		return
 	}
 
 	duration := time.Since(p.start)
-	tags := map[string]string{
-		"error": upstreamErr.Error(),
-	}
+	tags := map[string]string{"error": upstreamErr.Error()}
 
 	fl := &flow.Flow{
 		ConnID:    p.connID,
@@ -365,7 +279,7 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("websocket error flow save failed",
-			"method", p.req.Method, "url", p.req.URL.String(), "error", err)
+			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
 		return
 	}
 
@@ -375,8 +289,8 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 		Direction: "send",
 		Timestamp: p.start,
 		Method:    p.req.Method,
-		URL:       p.req.URL,
-		Headers:   p.req.Header,
+		URL:       p.reqURL,
+		Headers:   httputil.RawHeadersToHTTPHeader(p.req.Headers),
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("websocket error send message save failed", "error", err)

@@ -3,25 +3,19 @@ package http
 import (
 	"context"
 	"log/slog"
-	gohttp "net/http"
 	"net/url"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
-// requestHeaders returns a clone of the request headers with the Host header
-// explicitly set from req.Host. Go's net/http strips the Host header from
-// Request.Header and stores it in Request.Host, so we must re-inject it for
-// accurate flow recording.
-func requestHeaders(req *gohttp.Request) gohttp.Header {
-	headers := req.Header.Clone()
-	if req.Host != "" {
-		headers["Host"] = []string{req.Host}
-	}
-	return headers
+// requestHeaders returns RawHeaders with the Host header explicitly set.
+// This ensures accurate flow recording since the parser preserves Host in
+// the RawHeaders directly (unlike Go's net/http which strips it).
+func requestHeaders(req *parser.RawRequest) parser.RawHeaders {
+	return req.Headers
 }
 
 // sendRecordParams holds the parameters needed to record the send phase
@@ -35,7 +29,7 @@ type sendRecordParams struct {
 	tags       map[string]string
 	connInfo   *flow.ConnectionInfo
 
-	req          *gohttp.Request
+	req          *parser.RawRequest
 	reqURL       *url.URL
 	reqBody      []byte
 	rawRequest   []byte
@@ -46,7 +40,6 @@ type sendRecordParams struct {
 	// happen at the raw bytes level, not the parsed HTTP level.
 	rawVariant bool
 	// originalRawBytes holds the original raw bytes before raw mode modification.
-	// Used only when rawVariant is true to record the original variant's RawBytes.
 	originalRawBytes []byte
 }
 
@@ -54,22 +47,12 @@ type sendRecordParams struct {
 // subsequent recordReceive or recordSendError calls can reference it.
 type sendRecordResult struct {
 	flowID string
-	// tags holds the original session tags set during recordSend, so that
-	// recordSendError can merge error tags with them instead of replacing.
-	tags map[string]string
+	tags   map[string]string
 	// recvSequence is the sequence number to use for the receive message.
-	// Defaults to 1 (send=0, receive=1). When variant recording produces
-	// two send messages (original=0, modified=1), this is set to 2.
 	recvSequence int
 }
 
-// recordSend records the send phase of a session: creates the flow with
-// State="active" and appends the send (request) message. This is called after
-// intercept/transform processing but before upstream forwarding, so even if the
-// upstream fails, the request is already recorded.
-//
-// Returns a sendRecordResult containing the flow ID for follow-up calls,
-// or nil if recording was skipped (nil store, capture scope miss, etc.).
+// recordSend records the send phase of a session.
 func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *slog.Logger) *sendRecordResult {
 	if h.Store == nil {
 		return nil
@@ -77,7 +60,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 
 	reqURL := p.reqURL
 	if reqURL == nil {
-		reqURL = p.req.URL
+		reqURL = parseRawRequestURI(p.req)
 	}
 
 	if !h.shouldCapture(p.req.Method, reqURL) {
@@ -106,7 +89,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
 		Body:          p.reqBody,
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
@@ -118,18 +101,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 	return &sendRecordResult{flowID: fl.ID, tags: p.tags, recvSequence: 1}
 }
 
-// recordSendWithVariant records the send phase with variant support. If the
-// request was modified by intercept or transform (detected by comparing
-// snap against the current request), it records two send messages:
-//   - Sequence 0: original (variant="original") with the snapshot's headers/body
-//   - Sequence 1: modified (variant="modified") with the current headers/body
-//
-// If no modification occurred (snap is nil or headers/body unchanged), this
-// behaves identically to recordSend (single send at sequence 0, no variant
-// metadata).
-//
-// The returned sendRecordResult.recvSequence is set accordingly: 2 when
-// variant recording produced two messages, 1 otherwise.
+// recordSendWithVariant records the send phase with variant support.
 func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams, snap *requestSnapshot, logger *slog.Logger) *sendRecordResult {
 	if h.Store == nil {
 		return nil
@@ -137,7 +109,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 
 	reqURL := p.reqURL
 	if reqURL == nil {
-		reqURL = p.req.URL
+		reqURL = parseRawRequestURI(p.req)
 	}
 
 	if !h.shouldCapture(p.req.Method, reqURL) {
@@ -145,7 +117,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	}
 
 	// Detect whether modification occurred.
-	modified := p.rawVariant || (snap != nil && requestModified(*snap, p.req.Header, p.reqBody))
+	modified := p.rawVariant || (snap != nil && requestModified(*snap, p.req.Headers, p.reqBody))
 
 	fl := &flow.Flow{
 		ConnID:    p.connID,
@@ -163,11 +135,8 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	}
 
 	if modified {
-		// Inject Host into the snapshot headers (the snapshot was taken from
-		// req.Header which does not contain Host per Go's net/http design).
-		// Defensive nil guard: if snap is nil (rawVariant with no snapshot),
-		// fall back to current request headers/body.
-		var origHeaders gohttp.Header
+		// Determine original headers/body from snapshot or current request.
+		var origHeaders parser.RawHeaders
 		var origBody []byte
 		if snap != nil {
 			origHeaders = snap.headers.Clone()
@@ -176,18 +145,13 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			origHeaders = requestHeaders(p.req)
 			origBody = p.reqBody
 		}
-		if p.req.Host != "" {
-			origHeaders["Host"] = []string{p.req.Host}
-		}
 
 		// Determine RawBytes for original and modified messages.
-		// For raw variant (raw mode intercept), the original raw bytes are stored
-		// separately since p.rawRequest already holds the modified raw bytes.
 		origRawBytes := p.rawRequest
 		var modRawBytes []byte
 		if p.rawVariant {
 			origRawBytes = p.originalRawBytes
-			modRawBytes = p.rawRequest // modified raw bytes that were actually sent
+			modRawBytes = p.rawRequest
 		}
 
 		// Record the original (unmodified) request as sequence 0.
@@ -198,7 +162,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Timestamp:     p.start,
 			Method:        p.req.Method,
 			URL:           reqURL,
-			Headers:       origHeaders,
+			Headers:       httputil.RawHeadersToHTTPHeader(origHeaders),
 			Body:          origBody,
 			RawBytes:      origRawBytes,
 			BodyTruncated: p.reqTruncated,
@@ -216,7 +180,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Timestamp:     p.start,
 			Method:        p.req.Method,
 			URL:           reqURL,
-			Headers:       requestHeaders(p.req),
+			Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
 			Body:          p.reqBody,
 			RawBytes:      modRawBytes,
 			BodyTruncated: p.reqTruncated,
@@ -237,7 +201,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
 		Body:          p.reqBody,
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
@@ -249,46 +213,31 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	return &sendRecordResult{flowID: fl.ID, tags: p.tags, recvSequence: 1}
 }
 
-// receiveRecordParams holds the parameters needed to record the receive phase
-// (response message + session completion) of an HTTP/HTTPS flow.
+// receiveRecordParams holds the parameters needed to record the receive phase.
+// NOTE: resp still uses *httputil.GoHTTPResponse because the shared
+// httputil.RecordReceiveVariant function expects it.
 type receiveRecordParams struct {
 	start      time.Time
 	duration   time.Duration
 	serverAddr string
 
-	// tlsServerCertSubject is the subject DN of the upstream server's TLS
-	// certificate. Only set for HTTPS connections.
 	tlsServerCertSubject string
 
-	resp        *gohttp.Response
+	resp        *httputil.GoHTTPResponse
 	rawResponse []byte
 	respBody    []byte
 
-	// sendMs is the time in milliseconds to send the request upstream.
-	sendMs *int64
-	// waitMs is the server processing time in milliseconds (TTFB).
-	waitMs *int64
-	// receiveMs is the time in milliseconds to receive the response.
+	sendMs    *int64
+	waitMs    *int64
 	receiveMs *int64
 }
 
-// recordReceive records the receive phase of a session: appends the receive
-// (response) message and updates the flow to State="complete". This is called
-// after the response has been written to the client.
-//
-// If sendResult is nil (recording was skipped in recordSend), this is a no-op.
+// recordReceive records the receive phase of a session.
 func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResult, p receiveRecordParams, logger *slog.Logger) {
 	h.recordReceiveWithVariant(ctx, sendResult, p, nil, logger)
 }
 
-// recordReceiveWithVariant records the receive phase with variant support. If
-// the response was modified by intercept (detected by comparing snap against
-// the current response), it records two receive messages:
-//   - Sequence N:   original (variant="original") with the snapshot's status/headers/body
-//   - Sequence N+1: modified (variant="modified") with the current status/headers/body
-//
-// If no modification occurred (snap is nil or status/headers/body unchanged),
-// this behaves identically to recordReceive (single receive, no variant metadata).
+// recordReceiveWithVariant records the receive phase with variant support.
 func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *sendRecordResult, p receiveRecordParams, snap *responseSnapshot, logger *slog.Logger) {
 	if sendResult == nil || h.Store == nil {
 		return
@@ -302,14 +251,14 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 	if snap != nil {
 		s := httputil.ResponseSnapshot{
 			StatusCode: snap.statusCode,
-			Headers:    httpHeaderToRawHeaders(snap.headers),
+			Headers:    snap.headers,
 			Body:       snap.body,
 		}
 		sharedSnap = &s
 	}
 
-	// Merge existing tags (from send phase) with fingerprint detection results.
-	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, httpHeaderToRawHeaders(p.resp.Header), p.respBody)
+	// Merge existing tags with fingerprint detection results.
+	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, httputil.HTTPHeaderToRawHeaders(p.resp.Header), p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
@@ -329,18 +278,12 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 }
 
 // recordSendError updates a flow to State="error" after an upstream failure.
-// The send message is already recorded by recordSend; this only updates the
-// flow metadata.
-//
-// If sendResult is nil (recording was skipped in recordSend), this is a no-op.
 func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordResult, start time.Time, upstreamErr error, logger *slog.Logger) {
 	if sendResult == nil || h.Store == nil {
 		return
 	}
 
 	duration := time.Since(start)
-	// Merge the error tag with any existing tags (e.g., smuggling detection)
-	// from the send phase to avoid silently discarding them.
 	tags := make(map[string]string)
 	for k, v := range sendResult.tags {
 		tags[k] = v
@@ -356,9 +299,7 @@ func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordRes
 	}
 }
 
-// recordInterceptDrop records a flow where the request was dropped by an
-// intercept rule. The session is recorded as State="complete" with
-// BlockedBy="intercept_drop" and only a send message (no receive).
+// recordInterceptDrop records a flow where the request was dropped by intercept.
 func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, logger *slog.Logger) {
 	if h.Store == nil {
 		return
@@ -366,7 +307,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 
 	reqURL := p.reqURL
 	if reqURL == nil {
-		reqURL = p.req.URL
+		reqURL = parseRawRequestURI(p.req)
 	}
 
 	if !h.shouldCapture(p.req.Method, reqURL) {
@@ -398,7 +339,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
 		Body:          p.reqBody,
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
@@ -408,14 +349,10 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	}
 }
 
-// sessionRecordParams holds all the parameters needed to record an HTTP/HTTPS
-// session and its request/response messages to the flow store.
+// sessionRecordParams holds all parameters for recording an HTTP/HTTPS session.
 //
-// Deprecated: This type is retained for backward compatibility with existing
-// tests. New code should use the progressive recording functions (recordSend +
-// recordReceive) directly.
+// Deprecated: Retained for backward compatibility with existing tests.
 type sessionRecordParams struct {
-	// Session-level fields
 	connID     string
 	clientAddr string
 	serverAddr string
@@ -426,25 +363,20 @@ type sessionRecordParams struct {
 	tags       map[string]string
 	connInfo   *flow.ConnectionInfo
 
-	// Request fields
-	req          *gohttp.Request
+	req          *parser.RawRequest
 	reqURL       *url.URL
 	reqBody      []byte
 	rawRequest   []byte
 	reqTruncated bool
 
-	// Response fields
-	resp        *gohttp.Response
+	resp        *httputil.GoHTTPResponse
 	rawResponse []byte
 	respBody    []byte
 }
 
-// recordHTTPSession records a complete HTTP/HTTPS session (request + response)
-// to the flow store in a single call. It delegates to the progressive
-// recording functions (recordSend + recordReceive) internally.
+// recordHTTPSession records a complete HTTP/HTTPS session.
 //
-// Deprecated: This method is retained for backward compatibility with existing
-// tests. Production code uses the progressive recording pattern directly.
+// Deprecated: Retained for backward compatibility with existing tests.
 func (h *Handler) recordHTTPSession(ctx context.Context, p sessionRecordParams, logger *slog.Logger) {
 	sp := sendRecordParams{
 		connID:       p.connID,
@@ -478,17 +410,4 @@ func (h *Handler) recordHTTPSession(ctx context.Context, p sessionRecordParams, 
 			respBody:             p.respBody,
 		}, logger)
 	}
-}
-
-// socks5Protocol returns the protocol string with a "SOCKS5+" prefix if the
-// request arrived through a SOCKS5 tunnel (detected via context metadata).
-// Delegates to proxy.SOCKS5Protocol.
-func socks5Protocol(ctx context.Context, base string) string {
-	return proxy.SOCKS5Protocol(ctx, base)
-}
-
-// mergeSOCKS5Tags adds SOCKS5 metadata tags to the given tags map if the
-// request arrived through a SOCKS5 tunnel. Delegates to proxy.MergeSOCKS5Tags.
-func mergeSOCKS5Tags(ctx context.Context, tags map[string]string) map[string]string {
-	return proxy.MergeSOCKS5Tags(ctx, tags)
 }

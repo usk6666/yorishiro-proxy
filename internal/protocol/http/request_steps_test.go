@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -235,7 +236,12 @@ func TestExtractRawRequest_WithOffset(t *testing.T) {
 
 func TestApplyTransform_NilPipeline(t *testing.T) {
 	handler := NewHandler(&mockStore{}, nil, testutil.DiscardLogger())
-	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "http://example.com",
+		Proto:      "HTTP/1.1",
+		Headers:    parser.RawHeaders{{Name: "Host", Value: "example.com"}},
+	}
 	originalBody := []byte("original body")
 
 	result := handler.applyTransform(req, originalBody)
@@ -247,8 +253,7 @@ func TestApplyTransform_NilPipeline(t *testing.T) {
 func TestLogHTTPRequest(t *testing.T) {
 	// This is a smoke test to ensure logHTTPRequest doesn't panic.
 	logger := testutil.DiscardLogger()
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	logHTTPRequest(logger, req, 200, 42)
+	logHTTPRequest(logger, "GET", "http://example.com/test", 200, 42*time.Millisecond)
 }
 
 func TestApplyIntercept_ModifyAndForward_OverrideURLBlockedByTargetScope(t *testing.T) {
@@ -305,13 +310,14 @@ func TestApplyIntercept_ModifyAndForward_OverrideURLBlockedByTargetScope(t *test
 	// Run applyIntercept in a goroutine since interceptRequest blocks
 	// waiting for a response from the queue.
 	type result struct {
-		req     *gohttp.Request
+		req     *parser.RawRequest
 		body    []byte
 		dropped bool
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, nil, logger)
+		rawReq := goRequestToRaw(req)
+		ir := handler.applyIntercept(ctx, serverConn, rawReq, req.URL, recordBody, nil, logger)
 		resultCh <- result{ir.Req, ir.RecordBody, ir.Dropped}
 	}()
 
@@ -385,7 +391,9 @@ func TestApplyIntercept_ModifyAndForward_OverrideURLAllowedByTargetScope(t *test
 	queue := intercept.NewQueue()
 	handler.InterceptQueue = queue
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReqMF, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReqMF)
+	reqURL := goReqMF.URL
 	recordBody := []byte("test body")
 
 	clientConn, serverConn := net.Pipe()
@@ -395,13 +403,13 @@ func TestApplyIntercept_ModifyAndForward_OverrideURLAllowedByTargetScope(t *test
 	ctx := context.Background()
 
 	type result struct {
-		req     *gohttp.Request
+		req     *parser.RawRequest
 		body    []byte
 		dropped bool
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, nil, logger)
+		ir := handler.applyIntercept(ctx, serverConn, req, reqURL, recordBody, nil, logger)
 		resultCh <- result{ir.Req, ir.RecordBody, ir.Dropped}
 	}()
 
@@ -433,11 +441,12 @@ func TestApplyIntercept_ModifyAndForward_OverrideURLAllowedByTargetScope(t *test
 	if res.dropped {
 		t.Fatal("expected request NOT to be dropped for override_url to allowed host")
 	}
-	if res.req.URL.Host != "allowed.com" {
-		t.Errorf("URL host = %q, want %q", res.req.URL.Host, "allowed.com")
+	resURL := parseRawRequestURI(res.req)
+	if resURL.Host != "allowed.com" {
+		t.Errorf("URL host = %q, want %q", resURL.Host, "allowed.com")
 	}
-	if res.req.URL.Path != "/new-path" {
-		t.Errorf("URL path = %q, want %q", res.req.URL.Path, "/new-path")
+	if resURL.Path != "/new-path" {
+		t.Errorf("URL path = %q, want %q", resURL.Path, "/new-path")
 	}
 }
 
@@ -467,7 +476,9 @@ func TestApplyIntercept_ModifyAndForward_NoOverrideURL_SkipsRecheck(t *testing.T
 	queue := intercept.NewQueue()
 	handler.InterceptQueue = queue
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReqDP, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReqDP)
+	reqURL := goReqDP.URL
 	recordBody := []byte("test body")
 
 	clientConn, serverConn := net.Pipe()
@@ -477,13 +488,13 @@ func TestApplyIntercept_ModifyAndForward_NoOverrideURL_SkipsRecheck(t *testing.T
 	ctx := context.Background()
 
 	type result struct {
-		req     *gohttp.Request
+		req     *parser.RawRequest
 		body    []byte
 		dropped bool
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, nil, logger)
+		ir := handler.applyIntercept(ctx, serverConn, req, reqURL, recordBody, nil, logger)
 		resultCh <- result{ir.Req, ir.RecordBody, ir.Dropped}
 	}()
 
@@ -514,7 +525,8 @@ func TestApplyIntercept_ModifyAndForward_NoOverrideURL_SkipsRecheck(t *testing.T
 	if res.dropped {
 		t.Fatal("expected request NOT to be dropped for modify_and_forward without URL override")
 	}
-	if res.req.URL.Host != "example.com" {
-		t.Errorf("URL host = %q, want %q", res.req.URL.Host, "example.com")
+	resURL := parseRawRequestURI(res.req)
+	if resURL.Host != "example.com" {
+		t.Errorf("URL host = %q, want %q", resURL.Host, "example.com")
 	}
 }

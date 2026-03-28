@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -24,7 +25,12 @@ func TestRecordSend_Basic(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	start := time.Now()
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	rawReq := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "http://example.com/path",
+		Proto:      "HTTP/1.1",
+		Headers:    parser.RawHeaders{{Name: "Host", Value: "example.com"}},
+	}
 
 	result := handler.recordSend(ctx, sendRecordParams{
 		connID:     "conn-1",
@@ -32,7 +38,7 @@ func TestRecordSend_Basic(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        req,
+		req:        rawReq,
 		reqBody:    []byte("request body"),
 	}, logger)
 
@@ -86,7 +92,8 @@ func TestRecordSend_NilStore(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	req := goRequestToRaw(goReq)
 
 	result := handler.recordSend(ctx, sendRecordParams{
 		protocol: "HTTP/1.x",
@@ -106,7 +113,8 @@ func TestRecordSend_WithReqURL(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
+	goReq, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
+	req := goRequestToRaw(goReq)
 	reqURL := &url.URL{
 		Scheme:   "https",
 		Host:     "example.com",
@@ -146,7 +154,8 @@ func TestRecordReceive_Basic(t *testing.T) {
 	start := time.Now()
 
 	// First record send.
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq)
 	sendResult := handler.recordSend(ctx, sendRecordParams{
 		connID:   "conn-1",
 		protocol: "HTTP/1.x",
@@ -238,7 +247,8 @@ func TestRecordReceive_NilResponse(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	req := goRequestToRaw(goReq)
 	sendResult := handler.recordSend(ctx, sendRecordParams{
 		protocol: "HTTP/1.x",
 		start:    time.Now(),
@@ -276,7 +286,8 @@ func TestRecordSendError_Basic(t *testing.T) {
 	start := time.Now()
 
 	// First record send.
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq)
 	sendResult := handler.recordSend(ctx, sendRecordParams{
 		connID:   "conn-1",
 		protocol: "HTTP/1.x",
@@ -347,7 +358,8 @@ func TestRecordInterceptDrop_Basic(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	start := time.Now()
 
-	req, _ := gohttp.NewRequest("POST", "http://example.com/api", nil)
+	goReq, _ := gohttp.NewRequest("POST", "http://example.com/api", nil)
+	req := goRequestToRaw(goReq)
 
 	handler.recordInterceptDrop(ctx, sendRecordParams{
 		connID:     "conn-1",
@@ -396,7 +408,8 @@ func TestRecordInterceptDrop_NilStore(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	req := goRequestToRaw(goReq)
 
 	// Should not panic.
 	handler.recordInterceptDrop(ctx, sendRecordParams{
@@ -414,7 +427,8 @@ func TestRecordInterceptDrop_HTTPS(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	start := time.Now()
 
-	req, _ := gohttp.NewRequest("GET", "https://example.com/path", nil)
+	goReq, _ := gohttp.NewRequest("GET", "https://example.com/path", nil)
+	req := goRequestToRaw(goReq)
 	reqURL := &url.URL{
 		Scheme: "https",
 		Host:   "example.com",
@@ -460,8 +474,9 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	start := time.Now()
 
-	req, _ := gohttp.NewRequest("POST", "http://example.com/api", nil)
-	req.Header.Set("Content-Type", "application/json")
+	goReq, _ := gohttp.NewRequest("POST", "http://example.com/api", nil)
+	req := goRequestToRaw(goReq)
+	req.Headers.Set("Content-Type", "application/json")
 
 	// Phase 1: Record send.
 	sendResult := handler.recordSend(ctx, sendRecordParams{
@@ -561,7 +576,8 @@ func TestProgressiveRecording_ErrorLifecycle(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	start := time.Now()
 
-	req, _ := gohttp.NewRequest("GET", "http://unreachable.example.com/test", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://unreachable.example.com/test", nil)
+	req := goRequestToRaw(goReq)
 
 	// Phase 1: Record send.
 	sendResult := handler.recordSend(ctx, sendRecordParams{
@@ -614,7 +630,8 @@ func TestProgressiveRecording_Tags(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
+	req := goRequestToRaw(goReq)
 	tags := map[string]string{"smuggling:cl_te_conflict": "true"}
 
 	sendResult := handler.recordSend(ctx, sendRecordParams{
@@ -646,7 +663,8 @@ func TestProgressiveRecording_TLSConnInfo(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	req, _ := gohttp.NewRequest("GET", "https://example.com", nil)
+	goReq, _ := gohttp.NewRequest("GET", "https://example.com", nil)
+	req := goRequestToRaw(goReq)
 
 	sendResult := handler.recordSend(ctx, sendRecordParams{
 		protocol: "HTTPS",

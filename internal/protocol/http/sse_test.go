@@ -34,7 +34,7 @@ func TestApplySSEIntercept_NoEngine(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	dropped := h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 	if dropped {
 		t.Error("applySSEIntercept should return false when no intercept engine is set")
 	}
@@ -64,7 +64,7 @@ func TestApplySSEIntercept_NoMatchingRules(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	dropped := h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 	if dropped {
 		t.Error("applySSEIntercept should return false when no rules match")
 	}
@@ -117,7 +117,7 @@ func TestApplySSEIntercept_Drop(t *testing.T) {
 		}
 	}()
 
-	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	dropped := h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 	if !dropped {
 		t.Error("applySSEIntercept should return true when DROP action is received")
 	}
@@ -176,7 +176,7 @@ func TestApplySSEIntercept_Release(t *testing.T) {
 		}
 	}()
 
-	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	dropped := h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 	if dropped {
 		t.Error("applySSEIntercept should return false when RELEASE action is received")
 	}
@@ -235,7 +235,7 @@ func TestApplySSEIntercept_ModifyAndForward_TreatedAsRelease(t *testing.T) {
 		}
 	}()
 
-	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	dropped := h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 	if dropped {
 		t.Error("applySSEIntercept should return false for ModifyAndForward (treated as release)")
 	}
@@ -278,7 +278,7 @@ func TestApplySSEIntercept_Timeout_AutoRelease(t *testing.T) {
 	defer server.Close()
 
 	// Don't resolve — let it timeout with auto_release.
-	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	dropped := h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 	if dropped {
 		t.Error("applySSEIntercept should return false on timeout with auto_release")
 	}
@@ -314,7 +314,7 @@ func TestApplySSEIntercept_Timeout_AutoDrop(t *testing.T) {
 	go io.Copy(io.Discard, client)
 
 	// Don't resolve — let it timeout with auto_drop.
-	dropped := h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	dropped := h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 	if !dropped {
 		t.Error("applySSEIntercept should return true on timeout with auto_drop")
 	}
@@ -362,7 +362,7 @@ func TestApplySSEIntercept_EnqueuesWithNilBody(t *testing.T) {
 		}
 	}()
 
-	h.applySSEIntercept(context.Background(), server, req, resp, testutil.DiscardLogger())
+	h.applySSEIntercept(context.Background(), server, goRequestToRaw(req), req.URL, goResponseToRaw(resp, nil), testutil.DiscardLogger())
 
 	// Verify the enqueued item had nil body (SSE streams cannot buffer the body).
 	select {
@@ -394,7 +394,7 @@ func TestSSEHookContext_NilAllowed(t *testing.T) {
 	}
 
 	fwd := &forwardResult{
-		resp:       resp,
+		resp:       goResponseToRaw(resp, nil),
 		serverAddr: "127.0.0.1:8080",
 	}
 
@@ -403,11 +403,11 @@ func TestSSEHookContext_NilAllowed(t *testing.T) {
 		recvSequence: 1,
 	}
 
-	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
+	goReqSSE := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- h.handleSSEStream(context.Background(), server, req, fwd, time.Now(), sendResult, nil, testutil.DiscardLogger())
+		errCh <- h.handleSSEStream(context.Background(), server, goRequestToRaw(goReqSSE), goReqSSE.URL, fwd, time.Now(), sendResult, nil, testutil.DiscardLogger())
 		server.Close()
 	}()
 
@@ -685,7 +685,7 @@ func TestRecordSSEReceive(t *testing.T) {
 	}
 
 	fwd := &forwardResult{
-		resp:       resp,
+		resp:       goResponseToRaw(resp, nil),
 		serverAddr: "127.0.0.1:8080",
 	}
 
@@ -750,7 +750,7 @@ func TestRecordSSEReceive_NilSendResult(t *testing.T) {
 	h.Store = store
 
 	resp := &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}}
-	fwd := &forwardResult{resp: resp}
+	fwd := &forwardResult{resp: goResponseToRaw(resp, nil)}
 
 	// Should be a no-op when sendResult is nil.
 	h.recordSSEReceive(context.Background(), nil, fwd, time.Now(), "", testutil.DiscardLogger())
@@ -779,7 +779,7 @@ func TestRecordSSEReceive_TLSCertSubject(t *testing.T) {
 	}
 
 	fwd := &forwardResult{
-		resp:       resp,
+		resp:       goResponseToRaw(resp, nil),
 		serverAddr: "example.com:443",
 	}
 
@@ -927,7 +927,7 @@ func TestCompleteSSEFlow(t *testing.T) {
 
 	resp := &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}}
 	fwd := &forwardResult{
-		resp:       resp,
+		resp:       goResponseToRaw(resp, nil),
 		serverAddr: "example.com:443",
 	}
 
@@ -975,7 +975,7 @@ func TestCompleteSSEFlow_NoEvents(t *testing.T) {
 	}
 
 	resp := &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}}
-	fwd := &forwardResult{resp: resp}
+	fwd := &forwardResult{resp: goResponseToRaw(resp, nil)}
 
 	var eventSeq atomic.Int64
 	eventSeq.Store(2) // Only the headers message, no events
@@ -1515,7 +1515,7 @@ func TestApplySSEEventIntercept_NoMatchingRules(t *testing.T) {
 
 	event := &SSEEvent{Data: "hello", RawBytes: []byte("data: hello\n\n")}
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	got, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
 	if dropped {
@@ -1543,7 +1543,7 @@ func TestApplySSEEventIntercept_Drop(t *testing.T) {
 
 	event := &SSEEvent{Data: "drop me", RawBytes: []byte("data: drop me\n\n")}
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	// Resolve with DROP action in a goroutine.
 	go func() {
@@ -1580,7 +1580,7 @@ func TestApplySSEEventIntercept_Release(t *testing.T) {
 
 	event := &SSEEvent{Data: "keep me", RawBytes: []byte("data: keep me\n\n")}
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	go func() {
 		for i := 0; i < 50; i++ {
@@ -1624,7 +1624,7 @@ func TestApplySSEEventIntercept_ModifyAndForward(t *testing.T) {
 		RawBytes:  []byte("event: original-type\nid: 1\ndata: original data\n\n"),
 	}
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	newBody := "modified data"
 	go func() {
@@ -1676,7 +1676,7 @@ func TestApplySSEEventIntercept_Timeout_AutoRelease(t *testing.T) {
 
 	event := &SSEEvent{Data: "timeout me", RawBytes: []byte("data: timeout me\n\n")}
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	// Don't resolve — let it timeout with auto_release.
 	_, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
@@ -1703,7 +1703,7 @@ func TestApplySSEEventIntercept_Timeout_AutoDrop(t *testing.T) {
 
 	event := &SSEEvent{Data: "timeout drop", RawBytes: []byte("data: timeout drop\n\n")}
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	// Don't resolve — let it timeout with auto_drop.
 	_, dropped := h.applySSEEventIntercept(context.Background(), event, "flow-1", sseCtx, testutil.DiscardLogger())
@@ -1741,7 +1741,7 @@ func TestApplySSEEventIntercept_OutputFilterAppliedToEnqueuedBody(t *testing.T) 
 
 	event := &SSEEvent{Data: "token SECRET-123", RawBytes: []byte("data: token SECRET-123\n\n")}
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	// Capture the enqueued item's body.
 	bodyCh := make(chan []byte, 1)
@@ -2161,7 +2161,7 @@ func TestStreamSSEEvents_WithIntercept_Drop(t *testing.T) {
 	seq.Store(2)
 
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	// Drop the second event, release the first and third.
 	var eventNum atomic.Int32
@@ -2239,7 +2239,7 @@ func TestStreamSSEEvents_WithIntercept_ModifyAndForward(t *testing.T) {
 	seq.Store(2)
 
 	req := &gohttp.Request{Method: "GET", URL: &url.URL{Path: "/events"}}
-	sseCtx := &sseStreamContext{req: req}
+	sseCtx := &sseStreamContext{req: goRequestToRaw(req), reqURL: req.URL}
 
 	newBody := "modified"
 	go func() {
