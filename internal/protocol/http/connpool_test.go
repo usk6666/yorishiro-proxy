@@ -392,6 +392,58 @@ func TestConnPool_Get_UpstreamProxy(t *testing.T) {
 	defer result.Conn.Close()
 }
 
+func TestConnPool_Get_TLS_AllowH2(t *testing.T) {
+	mockTLS := &connpoolMockTLSTransport{
+		alpn: "h2",
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	pool := &ConnPool{
+		TLSTransport: mockTLS,
+		DialTimeout:  5 * time.Second,
+		AllowH2:      true,
+	}
+
+	ctx := context.Background()
+	result, err := pool.Get(ctx, ln.Addr().String(), true, "example.com")
+	if err != nil {
+		t.Fatalf("Get() with AllowH2=true error = %v", err)
+	}
+	defer result.Conn.Close()
+
+	if result.ALPN != "h2" {
+		t.Errorf("ALPN = %q, want %q", result.ALPN, "h2")
+	}
+}
+
+func TestConnPool_effectiveTLSTransport_AllowH2(t *testing.T) {
+	pool := &ConnPool{AllowH2: true}
+	transport := pool.effectiveTLSTransport()
+	st, ok := transport.(*httputil.StandardTransport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *httputil.StandardTransport", transport)
+	}
+	// When AllowH2 is true, the default transport should offer both h2 and http/1.1.
+	if len(st.NextProtos) != 2 || st.NextProtos[0] != "h2" || st.NextProtos[1] != "http/1.1" {
+		t.Errorf("NextProtos = %v, want [h2 http/1.1]", st.NextProtos)
+	}
+}
+
 func TestConnPool_effectiveTLSTransport_Default(t *testing.T) {
 	pool := &ConnPool{}
 	transport := pool.effectiveTLSTransport()

@@ -35,6 +35,11 @@ type RoundTripResult struct {
 	// Timing contains per-phase timing measurements.
 	Timing *httputil.RoundTripTiming
 
+	// ConnectDuration is the wall-clock time spent establishing the upstream
+	// connection (TCP dial + TLS handshake). Set by UpstreamRouter after
+	// ConnPool.Get returns.
+	ConnectDuration time.Duration
+
 	// KeepAlive indicates whether the connection can be reused according to
 	// the response's Connection header and HTTP version.
 	KeepAlive bool

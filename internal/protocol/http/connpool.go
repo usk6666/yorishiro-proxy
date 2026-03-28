@@ -27,6 +27,12 @@ type ConnPool struct {
 	// DialTimeout is the timeout for the TCP dial (and upstream proxy CONNECT
 	// handshake, if applicable). Defaults to defaultDialTimeout if zero.
 	DialTimeout time.Duration
+
+	// AllowH2 permits HTTP/2 ALPN negotiation results. When false (default),
+	// Get() rejects connections that negotiate "h2" ALPN. When true, "h2" is
+	// accepted and the caller (typically UpstreamRouter) is responsible for
+	// routing the connection to an appropriate HTTP/2 transport.
+	AllowH2 bool
 }
 
 // defaultDialTimeout is the fallback dial timeout when ConnPool.DialTimeout is zero.
@@ -93,8 +99,9 @@ func (p *ConnPool) Get(ctx context.Context, addr string, useTLS bool, hostname s
 		return nil, fmt.Errorf("connpool TLS connect %s: %w", addr, tlsErr)
 	}
 
-	// Reject HTTP/2 ALPN — this transport is for HTTP/1.x only.
-	if alpn == "h2" {
+	// Reject HTTP/2 ALPN when AllowH2 is not set — the caller only has an
+	// HTTP/1.x transport and cannot handle HTTP/2 frames.
+	if alpn == "h2" && !p.AllowH2 {
 		tlsConn.Close()
 		return nil, fmt.Errorf("connpool TLS connect %s: negotiated h2 ALPN, but HTTP/1.x transport requires http/1.1 or no ALPN", addr)
 	}
@@ -132,8 +139,12 @@ func (p *ConnPool) effectiveTLSTransport() httputil.TLSTransport {
 	if p.TLSTransport != nil {
 		return p.TLSTransport
 	}
+	protos := []string{"http/1.1"}
+	if p.AllowH2 {
+		protos = []string{"h2", "http/1.1"}
+	}
 	return &httputil.StandardTransport{
 		InsecureSkipVerify: true,
-		NextProtos:         []string{"http/1.1"},
+		NextProtos:         protos,
 	}
 }
