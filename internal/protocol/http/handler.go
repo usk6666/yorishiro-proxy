@@ -533,6 +533,7 @@ func parseRequestURL(ctx context.Context, req *parser.RawRequest, defaultScheme 
 	// TCP forwarding: override the host with the actual upstream target.
 	if target, ok := proxy.ForwardTargetFromContext(ctx); ok {
 		u.Host = target
+		req.Headers.Set("Host", target)
 	}
 
 	return u

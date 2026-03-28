@@ -49,6 +49,11 @@ func RawRequestToHTTP(req *parser.RawRequest, bodyBytes []byte) *gohttp.Request 
 		body = gohttp.NoBody
 	}
 
+	// Fall back to URL host when the Host header is absent (absolute-form URI).
+	if host == "" {
+		host = u.Host
+	}
+
 	httpReq := &gohttp.Request{
 		Method:        req.Method,
 		URL:           u,

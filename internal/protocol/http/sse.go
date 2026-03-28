@@ -61,7 +61,7 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *parse
 		fwd.resp, _ = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, nil, req, hookCtx.connInfo, hookCtx.txCtx, logger)
 	}
 
-	if err := writeSSERawResponseHeaders(conn, fwd.resp); err != nil {
+	if err := writeRawResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
 		return fmt.Errorf("write SSE response headers: %w", err)
 	}
@@ -101,7 +101,7 @@ func (h *Handler) handleSSEStreamTLS(ctx context.Context, conn net.Conn, req *pa
 		return nil
 	}
 
-	if err := writeSSERawResponseHeaders(conn, fwd.resp); err != nil {
+	if err := writeRawResponseHeaders(conn, fwd.resp); err != nil {
 		h.recordSendError(ctx, sendResult, start, err, logger)
 		return fmt.Errorf("write SSE response headers: %w", err)
 	}

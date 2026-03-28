@@ -98,7 +98,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *parse
 	}
 
 	// Forward the 101 response to the client.
-	if err := writeSSERawResponseHeaders(conn, resp); err != nil {
+	if err := writeRawResponseHeaders(conn, resp); err != nil {
 		return fmt.Errorf("write websocket 101 response to client: %w", err)
 	}
 
@@ -204,7 +204,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	}
 
 	// Forward the 101 response to the client.
-	if err := writeSSERawResponseHeaders(conn, resp); err != nil {
+	if err := writeRawResponseHeaders(conn, resp); err != nil {
 		return fmt.Errorf("write wss 101 response to client: %w", err)
 	}
 

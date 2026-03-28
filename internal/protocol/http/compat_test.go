@@ -159,7 +159,7 @@ func writeSSEResponseHeaders(conn interface{}, resp *gohttp.Response) error {
 		return fmt.Errorf("writeSSEResponseHeaders: conn is not net.Conn")
 	}
 	rawResp := httputil.HTTPResponseToRaw(resp, nil)
-	return writeSSERawResponseHeaders(netConn, rawResp)
+	return writeRawResponseHeaders(netConn, rawResp)
 }
 
 // sseEventToHTTPResponse is a test compatibility shim.

@@ -95,10 +95,11 @@ func writeResponseHeaders(w *bufio.Writer, headers parser.RawHeaders, bodyLen in
 	return nil
 }
 
-// writeSSERawResponseHeaders writes the HTTP response status line and headers
-// to the client connection without buffering the body. This allows the client
-// to begin processing SSE events as they arrive.
-func writeSSERawResponseHeaders(conn net.Conn, resp *parser.RawResponse) error {
+// writeRawResponseHeaders writes the HTTP response status line and headers
+// to the client connection without buffering the body. This is used for
+// streaming protocols (SSE, WebSocket upgrade) where the body is forwarded
+// separately.
+func writeRawResponseHeaders(conn net.Conn, resp *parser.RawResponse) error {
 	w := bufio.NewWriter(conn)
 
 	if _, err := fmt.Fprintf(w, "%s\r\n", buildStatusLine(resp)); err != nil {

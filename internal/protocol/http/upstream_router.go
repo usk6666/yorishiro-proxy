@@ -83,9 +83,9 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 	}
 }
 
-// connClosingReader wraps an io.Reader and closes the connection when the
-// reader returns io.EOF or when Close is called. This ensures the upstream
-// connection stays open while the response body is being read.
+// connClosingReader wraps an io.Reader and closes the connection when Read
+// returns any error (including io.EOF) or when Close is called. This ensures
+// the upstream connection stays open while the response body is being read.
 type connClosingReader struct {
 	io.Reader
 	conn   net.Conn
