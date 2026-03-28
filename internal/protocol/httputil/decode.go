@@ -69,6 +69,7 @@ func RecordingHeadersRaw(original parser.RawHeaders, decompressed bool, bodyLen 
 	headers := original.Clone()
 	if decompressed {
 		headers.Del("Content-Encoding")
+		headers.Del("Content-Length")
 		headers.Set("Content-Length", strconv.Itoa(bodyLen))
 	}
 	return headers

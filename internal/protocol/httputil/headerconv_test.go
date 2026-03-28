@@ -61,8 +61,11 @@ func TestHTTPHeaderToRawHeaders_CasingPreserved(t *testing.T) {
 
 func TestRawHeadersToHTTPHeader_NilInput(t *testing.T) {
 	got := RawHeadersToHTTPHeader(nil)
-	if got != nil {
-		t.Fatalf("expected nil, got %v", got)
+	if got == nil {
+		t.Fatal("expected non-nil empty header map for nil RawHeaders, got nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(got))
 	}
 }
 

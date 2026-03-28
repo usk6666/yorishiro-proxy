@@ -29,7 +29,7 @@ func HTTPHeaderToRawHeaders(h gohttp.Header) parser.RawHeaders {
 // from the handler pipeline entirely.
 func RawHeadersToHTTPHeader(rh parser.RawHeaders) gohttp.Header {
 	if rh == nil {
-		return nil
+		return make(gohttp.Header)
 	}
 	h := make(gohttp.Header, len(rh))
 	for _, hdr := range rh {

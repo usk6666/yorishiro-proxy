@@ -41,6 +41,7 @@ func ApplyHeaderModifications(h *parser.RawHeaders, override, add map[string]str
 		h.Del(key)
 	}
 	for key, val := range override {
+		h.Del(key)
 		h.Set(key, val)
 	}
 	for key, val := range add {

@@ -216,6 +216,7 @@ func applyAction(cr *compiledRule, headers parser.RawHeaders, body []byte) (pars
 	case ActionAddHeader:
 		headers = append(headers, parser.RawHeader{Name: cr.rule.Action.Header, Value: cr.rule.Action.Value})
 	case ActionSetHeader:
+		headers.Del(cr.rule.Action.Header)
 		headers.Set(cr.rule.Action.Header, cr.rule.Action.Value)
 	case ActionRemoveHeader:
 		headers.Del(cr.rule.Action.Header)
