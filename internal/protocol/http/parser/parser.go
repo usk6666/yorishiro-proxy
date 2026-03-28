@@ -450,15 +450,17 @@ func shouldClose(headers RawHeaders, proto string) bool {
 }
 
 // resolveRequestBody creates an appropriate body reader for a request.
-// The body is NOT decoded — chunked encoding is buffered as-is.
+// Chunked encoding is decoded (chunk markers stripped) so the caller receives
+// plain body data ready for forwarding. Raw bytes for recording are captured
+// separately via the captureWriter in ParseRequest.
 func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Reader {
-	// chunked Transfer-Encoding: buffer the raw chunked body as-is (no dechunking).
+	// chunked Transfer-Encoding: decode the chunked body to plain data.
 	// HTTP/1.0 does not use chunked TE.
 	// Check ALL TE header values to avoid smuggling via multiple TE headers.
 	if proto != "HTTP/1.0" {
 		for _, te := range headers.Values("Transfer-Encoding") {
 			if hasChunkedTE(te) {
-				return newRawChunkedReader(r)
+				return newDechunkedReader(r)
 			}
 		}
 	}
@@ -479,19 +481,20 @@ func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Re
 }
 
 // resolveResponseBody creates an appropriate body reader for a response.
-// The body is NOT decoded — chunked encoding is buffered as-is.
+// Chunked encoding is decoded (chunk markers stripped) so the caller receives
+// plain body data ready for forwarding.
 func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, statusCode int) io.Reader {
 	// 1xx, 204, 304 responses have no body.
 	if (statusCode >= 100 && statusCode < 200) || statusCode == 204 || statusCode == 304 {
 		return io.LimitReader(r, 0)
 	}
 
-	// chunked Transfer-Encoding: buffer as-is.
+	// chunked Transfer-Encoding: decode to plain data.
 	// Check ALL TE header values to avoid smuggling via multiple TE headers.
 	if proto != "HTTP/1.0" {
 		for _, te := range headers.Values("Transfer-Encoding") {
 			if hasChunkedTE(te) {
-				return newRawChunkedReader(r)
+				return newDechunkedReader(r)
 			}
 		}
 	}

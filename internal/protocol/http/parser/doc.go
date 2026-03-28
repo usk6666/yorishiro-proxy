@@ -5,8 +5,8 @@
 // the standard library:
 //
 //   - Headers preserve original case and order ([]RawHeader instead of map)
-//   - Chunked Transfer-Encoding is NOT decoded — the raw chunked body bytes are
-//     preserved and buffered internally (up to maxChunkedBodySize) rather than streamed incrementally
+//   - Chunked Transfer-Encoding is decoded — the chunk markers are stripped and
+//     the plain body data is returned via the Body io.Reader
 //   - Content-Encoding (gzip, etc.) is NOT decompressed
 //   - Invalid requests are NOT rejected — they are parsed and anomalies reported
 //   - Raw bytes are captured simultaneously during parsing

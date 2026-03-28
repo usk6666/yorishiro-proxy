@@ -37,7 +37,9 @@ func TestApplyIntercept_RawModeRelease(t *testing.T) {
 	queue := intercept.NewQueue()
 	handler.InterceptQueue = queue
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq)
+	reqURL := goReq.URL
 	recordBody := []byte("test body")
 	rawRequest := []byte("GET /path HTTP/1.1\r\nHost: example.com\r\n\r\ntest body")
 
@@ -54,7 +56,7 @@ func TestApplyIntercept_RawModeRelease(t *testing.T) {
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, rawRequest, logger)
+		ir := handler.applyIntercept(ctx, serverConn, req, reqURL, recordBody, rawRequest, logger)
 		resultCh <- result{ir.IsRaw, ir.RawBytes, ir.Dropped}
 	}()
 
@@ -121,7 +123,9 @@ func TestApplyIntercept_RawModeModifyAndForward(t *testing.T) {
 	queue := intercept.NewQueue()
 	handler.InterceptQueue = queue
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq)
+	reqURL := goReq.URL
 	recordBody := []byte("test body")
 	rawRequest := []byte("GET /path HTTP/1.1\r\nHost: example.com\r\n\r\ntest body")
 	modifiedRaw := []byte("GET /evil HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n0\r\n\r\n")
@@ -140,7 +144,7 @@ func TestApplyIntercept_RawModeModifyAndForward(t *testing.T) {
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, rawRequest, logger)
+		ir := handler.applyIntercept(ctx, serverConn, req, reqURL, recordBody, rawRequest, logger)
 		resultCh <- result{ir.IsRaw, ir.RawBytes, ir.OriginalRawBytes, ir.Dropped}
 	}()
 
@@ -202,7 +206,9 @@ func TestApplyIntercept_StructuredModeDefault(t *testing.T) {
 	queue := intercept.NewQueue()
 	handler.InterceptQueue = queue
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq)
+	reqURL := goReq.URL
 	recordBody := []byte("test body")
 	rawRequest := []byte("GET /path HTTP/1.1\r\nHost: example.com\r\n\r\ntest body")
 
@@ -218,7 +224,7 @@ func TestApplyIntercept_StructuredModeDefault(t *testing.T) {
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, rawRequest, logger)
+		ir := handler.applyIntercept(ctx, serverConn, req, reqURL, recordBody, rawRequest, logger)
 		resultCh <- result{ir.IsRaw, ir.Dropped}
 	}()
 
@@ -273,7 +279,9 @@ func TestApplyIntercept_RawModeRelease_NilRawBytes(t *testing.T) {
 	queue := intercept.NewQueue()
 	handler.InterceptQueue = queue
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq2, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq2)
+	reqURL := goReq2.URL
 	recordBody := []byte("test body")
 
 	clientConn, serverConn := net.Pipe()
@@ -289,7 +297,7 @@ func TestApplyIntercept_RawModeRelease_NilRawBytes(t *testing.T) {
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		ir := handler.applyIntercept(ctx, serverConn, req, recordBody, nil, logger)
+		ir := handler.applyIntercept(ctx, serverConn, req, reqURL, recordBody, nil, logger)
 		resultCh <- result{ir.IsRaw, ir.RawBytes, ir.Dropped}
 	}()
 
@@ -345,7 +353,9 @@ func TestInterceptRequest_AttachesRawBytes(t *testing.T) {
 	queue := intercept.NewQueue()
 	handler.InterceptQueue = queue
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	goReq3, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
+	req := goRequestToRaw(goReq3)
+	reqURL := goReq3.URL
 	body := []byte("test body")
 	rawBytes := []byte("GET /path HTTP/1.1\r\nHost: example.com\r\n\r\ntest body")
 
@@ -357,7 +367,7 @@ func TestInterceptRequest_AttachesRawBytes(t *testing.T) {
 
 	// Run interceptRequest in a goroutine.
 	go func() {
-		handler.interceptRequest(ctx, serverConn, req, body, rawBytes, logger)
+		handler.interceptRequest(ctx, serverConn, req, reqURL, body, rawBytes, logger)
 	}()
 
 	var interceptedID string
@@ -403,10 +413,12 @@ func TestRawForwardUpstream_Integration(t *testing.T) {
 	rawReq := fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
 		strings.TrimPrefix(upstream.URL, "http://"))
 
-	req, _ := gohttp.NewRequest("GET", upstream.URL+"/", nil)
+	goReqFwd, _ := gohttp.NewRequest("GET", upstream.URL+"/", nil)
+	req := goRequestToRaw(goReqFwd)
+	reqURL := goReqFwd.URL
 	ctx := context.Background()
 
-	result, err := handler.forwardRawUpstream(ctx, req, []byte(rawReq), testutil.DiscardLogger())
+	result, err := handler.forwardRawUpstream(ctx, req, reqURL, []byte(rawReq), testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("forwardRawUpstream: %v", err)
 	}
@@ -453,10 +465,12 @@ func TestRawForwardUpstream_SmugglingPattern(t *testing.T) {
 	rawReq := fmt.Sprintf("POST / HTTP/1.1\r\nHost: %s\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
 		strings.TrimPrefix(upstream.URL, "http://"))
 
-	req, _ := gohttp.NewRequest("POST", upstream.URL+"/", nil)
+	goReqSmug, _ := gohttp.NewRequest("POST", upstream.URL+"/", nil)
+	req := goRequestToRaw(goReqSmug)
+	reqURL := goReqSmug.URL
 	ctx := context.Background()
 
-	result, err := handler.forwardRawUpstream(ctx, req, []byte(rawReq), testutil.DiscardLogger())
+	result, err := handler.forwardRawUpstream(ctx, req, reqURL, []byte(rawReq), testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("forwardRawUpstream: %v", err)
 	}
@@ -525,8 +539,10 @@ func TestHandleRawForward_EndToEnd(t *testing.T) {
 	}()
 
 	// Build the request object.
-	reqURL := upstream.URL + "/"
-	req, _ := gohttp.NewRequest("GET", reqURL, nil)
+	rawReqURL := upstream.URL + "/"
+	goReqHRF, _ := gohttp.NewRequest("GET", rawReqURL, nil)
+	req := goRequestToRaw(goReqHRF)
+	reqURL := goReqHRF.URL
 
 	sp := sendRecordParams{
 		connID:     "test-conn",
@@ -537,7 +553,7 @@ func TestHandleRawForward_EndToEnd(t *testing.T) {
 		reqBody:    nil,
 		rawRequest: []byte(rawRequest),
 	}
-	snap := snapshotRequest(req.Header, nil)
+	snap := snapshotRawRequest(req.Headers, nil)
 
 	iResult := interceptResult{
 		IsRaw:    true,
@@ -548,7 +564,7 @@ func TestHandleRawForward_EndToEnd(t *testing.T) {
 	// Run handleRawForward.
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- handler.handleRawForward(ctx, serverConn, req, iResult, sp, &snap, time.Now(), testutil.DiscardLogger())
+		errCh <- handler.handleRawForward(ctx, serverConn, req, reqURL, iResult, sp, &snap, time.Now(), testutil.DiscardLogger())
 	}()
 
 	// Read the response on the client side.
@@ -640,7 +656,9 @@ func TestRawForward_VariantRecording(t *testing.T) {
 	originalRaw := fmt.Sprintf("GET /original HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", upstreamHost)
 	modifiedRaw := fmt.Sprintf("GET /modified HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", upstreamHost)
 
-	req, _ := gohttp.NewRequest("GET", upstream.URL+"/original", nil)
+	goReqVar, _ := gohttp.NewRequest("GET", upstream.URL+"/original", nil)
+	req := goRequestToRaw(goReqVar)
+	reqURL := goReqVar.URL
 
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
@@ -657,7 +675,7 @@ func TestRawForward_VariantRecording(t *testing.T) {
 		reqBody:    nil,
 		rawRequest: []byte(originalRaw),
 	}
-	snap := snapshotRequest(req.Header, nil)
+	snap := snapshotRawRequest(req.Headers, nil)
 
 	iResult := interceptResult{
 		IsRaw:            true,
@@ -672,7 +690,7 @@ func TestRawForward_VariantRecording(t *testing.T) {
 		io.ReadAll(clientConn)
 	}()
 
-	err := handler.handleRawForward(ctx, serverConn, req, iResult, sp, &snap, time.Now(), testutil.DiscardLogger())
+	err := handler.handleRawForward(ctx, serverConn, req, reqURL, iResult, sp, &snap, time.Now(), testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("handleRawForward: %v", err)
 	}

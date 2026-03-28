@@ -8,6 +8,7 @@ import (
 	gohttp "net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
@@ -41,6 +42,25 @@ type HandlerBase struct {
 	// Protected by tlsFingerprintMu for concurrent access.
 	tlsFingerprintMu      sync.RWMutex
 	tlsFingerprintProfile string
+}
+
+// NewDefaultTransport creates a new default *gohttp.Transport for HandlerBase
+// by cloning http.DefaultTransport. This inherits proxy-from-environment,
+// default timeouts, and keep-alive settings from the standard library.
+func NewDefaultTransport() *gohttp.Transport {
+	if dt, ok := gohttp.DefaultTransport.(*gohttp.Transport); ok {
+		return dt.Clone()
+	}
+	// Fallback: DefaultTransport is unexpectedly not *http.Transport.
+	// Create a Transport with sensible defaults matching the standard library.
+	return &gohttp.Transport{
+		Proxy:                 gohttp.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
 
 // SetTransport replaces the handler's HTTP transport. This is primarily

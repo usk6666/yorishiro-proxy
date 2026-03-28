@@ -8,125 +8,46 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
+	"net/url"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
-// normalizeRequestURL ensures the request URL has an absolute form suitable for
-// forward proxy use. This sets the Host and Scheme if they are missing.
-// When a forwarding target is present in the context, it overrides the Host
-// so that the request is sent to the correct upstream server rather than
-// the localhost address that the client connected to.
-func normalizeRequestURL(ctx context.Context, req *gohttp.Request) {
-	if req.URL.Host == "" {
-		req.URL.Host = req.Host
-	}
-	if req.URL.Scheme == "" {
-		req.URL.Scheme = "http"
-	}
-	// TCP forwarding: override the host with the actual upstream target.
-	if target, ok := proxy.ForwardTargetFromContext(ctx); ok {
-		req.URL.Host = target
-		req.Host = target
-	}
-}
-
-// requestBodyResult holds the result of reading and capturing a request body.
-type requestBodyResult struct {
-	recordBody []byte
-	truncated  bool
-}
-
-// readAndCaptureRequestBody reads the full request body, replaces req.Body with
-// a re-readable copy, and returns the body bytes for flow recording (truncated
-// to MaxBodySize if necessary).
-func readAndCaptureRequestBody(req *gohttp.Request, logger *slog.Logger) requestBodyResult {
-	if req.Body == nil {
-		return requestBodyResult{}
-	}
-
-	fullBody, err := io.ReadAll(req.Body)
-	if err != nil {
-		logger.Warn("failed to read request body", "error", err)
-	}
-	req.Body.Close()
-	req.Body = io.NopCloser(bytes.NewReader(fullBody))
-
-	recordBody := fullBody
-	var truncated bool
-	if len(fullBody) > int(config.MaxBodySize) {
-		recordBody = fullBody[:int(config.MaxBodySize)]
-		truncated = true
-	}
-	return requestBodyResult{recordBody: recordBody, truncated: truncated}
-}
-
-// extractRawRequest extracts the raw request bytes from the capture buffer.
-// The raw bytes span from captureStart to the current capture position, minus
-// any bytes buffered by the bufio.Reader (which belong to the next request).
-func extractRawRequest(capture *captureReader, captureStart int, reader *bufio.Reader) []byte {
-	if capture == nil {
-		return nil
-	}
-	captureEnd := capture.buf.Len()
-	buffered := reader.Buffered()
-	rawEnd := captureEnd - buffered
-	if rawEnd > captureStart && captureStart < capture.buf.Len() {
-		raw := make([]byte, rawEnd-captureStart)
-		copy(raw, capture.buf.Bytes()[captureStart:rawEnd])
-		return raw
-	}
-	return nil
-}
-
 // interceptResult holds the outcome of applyIntercept. When raw mode is
-// selected (IsRaw == true), the caller must bypass net/http.Transport and
+// selected (IsRaw == true), the caller must bypass UpstreamRouter and
 // write RawBytes directly to the upstream connection.
 type interceptResult struct {
-	// Req is the (possibly modified) request.
-	Req *gohttp.Request
-	// RecordBody is the body bytes for flow recording.
-	RecordBody []byte
-	// Dropped is true when the request was dropped (caller should return early).
-	Dropped bool
-	// IsRaw is true when the intercept action selected raw forwarding mode.
-	// The caller must use RawBytes for upstream forwarding instead of
-	// net/http.Transport.
-	IsRaw bool
-	// RawBytes holds the raw bytes to send upstream in raw mode.
-	// For release+raw, this is the original captured raw bytes.
-	// For modify_and_forward+raw, this is the RawOverride from the action.
-	RawBytes []byte
-	// OriginalRawBytes holds the original (pre-modification) raw bytes
-	// for variant recording. Only set when IsRaw && action is modify_and_forward.
+	Req              *parser.RawRequest
+	RecordBody       []byte
+	Dropped          bool
+	IsRaw            bool
+	RawBytes         []byte
 	OriginalRawBytes []byte
+	// ModURL is the modified URL after intercept URL override processing.
+	// Non-nil only when the intercept action overrides the URL.
+	ModURL *url.URL
 }
 
-// applyIntercept checks intercept rules and applies any modifications. It returns
-// an interceptResult describing the outcome. When result.IsRaw is true, the
-// caller must forward result.RawBytes directly to the upstream connection,
-// bypassing net/http.Transport.
-func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *gohttp.Request, recordReqBody []byte, rawRequest []byte, logger *slog.Logger) interceptResult {
-	action, intercepted := h.interceptRequest(ctx, conn, req, recordReqBody, rawRequest, logger)
+// applyIntercept checks intercept rules and applies any modifications.
+func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, recordReqBody []byte, rawRequest []byte, logger *slog.Logger) interceptResult {
+	action, intercepted := h.interceptRequest(ctx, conn, req, reqURL, recordReqBody, rawRequest, logger)
 	if !intercepted {
 		return interceptResult{Req: req, RecordBody: recordReqBody}
 	}
 
 	switch action.Type {
 	case intercept.ActionDrop:
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		logger.Info("intercepted request dropped", "method", req.Method, "url", req.URL.String())
+		writeHTTPError(conn, statusBadGateway, logger)
+		logger.Info("intercepted request dropped", "method", req.Method, "url", reqURL.String())
 		return interceptResult{Req: req, RecordBody: recordReqBody, Dropped: true}
 	case intercept.ActionModifyAndForward:
 		// Raw mode: bypass L7 modifications and forward raw bytes directly.
 		if action.IsRawMode() {
 			logger.Info("intercept raw mode modify_and_forward",
-				"method", req.Method, "url", req.URL.String(),
+				"method", req.Method, "url", reqURL.String(),
 				"raw_override_size", len(action.RawOverride))
 			return interceptResult{
 				Req:              req,
@@ -136,30 +57,30 @@ func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *gohttp
 				OriginalRawBytes: rawRequest,
 			}
 		}
-		var modErr error
-		req, modErr = applyInterceptModifications(req, action, recordReqBody)
+		modReq, modBody, modURL, modErr := httputil.ApplyRequestModificationsRaw(req, recordReqBody, action)
 		if modErr != nil {
 			logger.Error("intercept modification failed", "error", modErr)
-			httputil.WriteHTTPError(conn, gohttp.StatusBadRequest, logger)
+			writeHTTPError(conn, statusBadRequest, logger)
 			return interceptResult{Req: req, RecordBody: recordReqBody, Dropped: true}
 		}
 		// Re-check target scope after URL override to prevent SSRF (CWE-918, S-1).
-		if action.OverrideURL != "" {
-			if blocked, reason := h.checkTargetScope(req.URL); blocked {
-				h.writeBlockedResponse(conn, req.URL.Hostname(), reason, logger)
+		if action.OverrideURL != "" && modURL != nil {
+			if blocked, reason := h.checkTargetScope(modURL); blocked {
+				h.writeBlockedResponse(conn, modURL.Hostname(), reason, logger)
 				logger.Warn("intercept override_url blocked by target scope",
-					"url", req.URL.String(), "reason", reason)
+					"url", modURL.String(), "reason", reason)
 				return interceptResult{Req: req, RecordBody: recordReqBody, Dropped: true}
 			}
 		}
-		if action.OverrideBody != nil {
-			recordReqBody = []byte(*action.OverrideBody)
-		}
+		req = modReq
+		recordReqBody = modBody
+		result := interceptResult{Req: req, RecordBody: recordReqBody, ModURL: modURL}
+		return result
 	case intercept.ActionRelease:
 		// Raw mode release: forward original raw bytes as-is.
 		if action.IsRawMode() {
 			logger.Info("intercept raw mode release",
-				"method", req.Method, "url", req.URL.String(),
+				"method", req.Method, "url", reqURL.String(),
 				"raw_bytes_size", len(rawRequest))
 			return interceptResult{
 				Req:        req,
@@ -168,96 +89,98 @@ func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *gohttp
 				RawBytes:   rawRequest,
 			}
 		}
-		// Structured release: continue with the original request.
 	}
 
 	return interceptResult{Req: req, RecordBody: recordReqBody}
 }
 
 // applyTransform applies auto-transform rules to the request before forwarding
-// upstream. It modifies request headers and body in place.
-func (h *Handler) applyTransform(req *gohttp.Request, recordReqBody []byte) []byte {
+// upstream. It modifies request headers and body in place. The caller must pass
+// the fully normalized reqURL (including scheme and host) so that URL-based
+// transform rules can match correctly even for origin-form RequestURIs.
+func (h *Handler) applyTransform(req *parser.RawRequest, reqURL *url.URL, recordReqBody []byte) []byte {
 	if h.transformPipeline == nil {
 		return recordReqBody
 	}
-	rh := httpHeaderToRawHeaders(req.Header)
-	rh, recordReqBody = h.transformPipeline.TransformRequest(req.Method, req.URL, rh, recordReqBody)
-	req.Header = rawHeadersToHTTPHeader(rh)
-	req.Body = io.NopCloser(bytes.NewReader(recordReqBody))
-	req.ContentLength = int64(len(recordReqBody))
+	rh := req.Headers
+	rh, recordReqBody = h.transformPipeline.TransformRequest(req.Method, reqURL, rh, recordReqBody)
+	req.Headers = rh
+	req.Body = bytes.NewReader(recordReqBody)
 	return recordReqBody
 }
 
-// forwardResult holds the result of forwarding a request upstream.
-type forwardResult struct {
-	resp       *gohttp.Response
-	serverAddr string
-	timing     *httputil.RoundTripTiming
-}
-
-// forwardUpstream sends the request to the upstream server and returns the
-// response. On failure, it writes a 502 Bad Gateway to the client connection.
-func (h *Handler) forwardUpstream(ctx context.Context, conn net.Conn, req *gohttp.Request, logger *slog.Logger) (*forwardResult, error) {
-	outReq := req.WithContext(ctx)
-	outReq.RequestURI = ""
-
-	resp, serverAddr, timing, err := roundTripWithTrace(h.Transport, outReq)
+// parseRawRequestURI parses the request URI from a RawRequest into a *url.URL.
+func parseRawRequestURI(req *parser.RawRequest) *url.URL {
+	u, err := url.ParseRequestURI(req.RequestURI)
 	if err != nil {
-		logger.Error("upstream request failed", "method", req.Method, "url", req.URL.String(), "error", err)
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
-		return nil, fmt.Errorf("upstream request: %w", err)
+		return &url.URL{Path: req.RequestURI}
 	}
-	return &forwardResult{resp: resp, serverAddr: serverAddr, timing: timing}, nil
+	return u
 }
 
-// readResponseBody reads the full response body (up to MaxBodySize) and applies
-// response transforms if configured.
-func (h *Handler) readResponseBody(resp *gohttp.Response, logger *slog.Logger) []byte {
-	fullBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
-	if err != nil {
-		logger.Warn("failed to read response body", "error", err)
-	}
-
-	if h.transformPipeline != nil {
-		respRH := httpHeaderToRawHeaders(resp.Header)
-		respRH, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, respRH, fullBody)
-		resp.Header = rawHeadersToHTTPHeader(respRH)
-	}
-
-	return fullBody
-}
-
-// writeResponseToClient writes the HTTP response with body back to the client
-// connection.
-func writeResponseToClient(conn net.Conn, resp *gohttp.Response, body []byte) error {
-	if err := writeResponse(conn, resp, body); err != nil {
-		return fmt.Errorf("write response: %w", err)
-	}
-	return nil
-}
-
-// interceptResponse checks if the response matches any intercept rules and,
-// if so, enqueues it for AI agent review. It blocks until the agent responds
-// or the timeout expires. Returns the action and true if intercepted, or a
-// zero-value action and false if not intercepted.
-func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+// interceptRequest checks if the request matches any intercept rules.
+func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, body []byte, rawBytes []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, httpHeaderToRawHeaders(resp.Header))
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, reqURL, req.Headers)
+	if len(matchedRules) == 0 {
+		return intercept.InterceptAction{}, false
+	}
+
+	logger.Info("request intercepted", "method", req.Method, "url", reqURL.String(), "matched_rules", matchedRules)
+
+	var opts []intercept.EnqueueOpts
+	if len(rawBytes) > 0 {
+		opts = append(opts, intercept.EnqueueOpts{RawBytes: rawBytes})
+	}
+
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, reqURL, req.Headers, body, matchedRules, opts...)
+	defer h.InterceptQueue.Remove(id)
+
+	timeout := h.InterceptQueue.Timeout()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	select {
+	case action := <-actionCh:
+		return action, true
+	case <-timeoutCtx.Done():
+		behavior := h.InterceptQueue.TimeoutBehaviorValue()
+		if ctx.Err() != nil {
+			logger.Info("intercepted request cancelled (proxy shutdown)", "id", id)
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		}
+		logger.Info("intercepted request timed out", "id", id, "behavior", string(behavior))
+		switch behavior {
+		case intercept.TimeoutAutoDrop:
+			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
+		default:
+			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
+		}
+	}
+}
+
+// interceptResponse checks if the response matches any intercept rules.
+func (h *Handler) interceptResponse(ctx context.Context, req *parser.RawRequest, reqURL *url.URL, resp *parser.RawResponse, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+	if h.InterceptEngine == nil || h.InterceptQueue == nil {
+		return intercept.InterceptAction{}, false
+	}
+
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Headers)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
 
 	logger.Info("response intercepted",
 		"method", req.Method,
-		"url", req.URL.String(),
+		"url", reqURL.String(),
 		"status", resp.StatusCode,
 		"matched_rules", matchedRules)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, req.URL, resp.StatusCode, httpHeaderToRawHeaders(resp.Header), body, matchedRules,
+		req.Method, reqURL, resp.StatusCode, resp.Headers, body, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 
@@ -284,30 +207,27 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 	}
 }
 
-// applyInterceptResponse checks response intercept rules and applies any modifications.
-// It returns the (possibly modified) response, updated body, and a boolean indicating
-// whether the response was dropped (caller should return early with an error response).
-func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (*gohttp.Response, []byte, bool) {
-	action, intercepted := h.interceptResponse(ctx, req, resp, body, logger)
+// applyInterceptResponse checks response intercept rules and applies modifications.
+func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, resp *parser.RawResponse, body []byte, logger *slog.Logger) (*parser.RawResponse, []byte, bool) {
+	action, intercepted := h.interceptResponse(ctx, req, reqURL, resp, body, logger)
 	if !intercepted {
 		return resp, body, false
 	}
 
 	switch action.Type {
 	case intercept.ActionDrop:
-		httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+		writeHTTPError(conn, statusBadGateway, logger)
 		logger.Info("intercepted response dropped",
-			"method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
+			"method", req.Method, "url", reqURL.String(), "status", resp.StatusCode)
 		return resp, body, true
 	case intercept.ActionModifyAndForward:
-		var modErr error
-		resp, body, modErr = applyResponseModifications(resp, action, body)
+		modResp, modBody, modErr := httputil.ApplyResponseModificationsRaw(resp, body, action)
 		if modErr != nil {
 			logger.Error("response intercept modification failed", "error", modErr)
-			httputil.WriteHTTPError(conn, gohttp.StatusBadGateway, logger)
+			writeHTTPError(conn, statusBadGateway, logger)
 			return resp, body, true
 		}
-		return resp, body, false
+		return modResp, modBody, false
 	case intercept.ActionRelease:
 		// Continue with the original response.
 	}
@@ -315,26 +235,15 @@ func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req
 	return resp, body, false
 }
 
-// applyResponseModifications applies the modifications from a modify_and_forward
-// action to the HTTP response. It delegates to the shared httputil package for
-// status code validation, CRLF injection checks, and header/body modifications.
-func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
-	return httputil.ApplyResponseModifications(resp, action, body)
-}
-
 // requestSnapshot holds a copy of the request headers and body taken before
-// intercept/transform processing. It is used to detect whether modifications
-// occurred and, if so, to record the original (unmodified) version as a
-// separate send message.
+// intercept/transform processing. Used for variant detection.
 type requestSnapshot struct {
-	headers gohttp.Header
+	headers parser.RawHeaders
 	body    []byte
 }
 
-// snapshotRequest creates a deep copy of the request headers and body for
-// later comparison. The snapshot captures the state before intercept/transform
-// processing so that we can detect changes and record both versions.
-func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
+// snapshotRawRequest creates a deep copy of the request headers and body.
+func snapshotRawRequest(headers parser.RawHeaders, body []byte) requestSnapshot {
 	snap := requestSnapshot{}
 	if headers != nil {
 		snap.headers = headers.Clone()
@@ -346,29 +255,24 @@ func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
 	return snap
 }
 
-// requestModified reports whether the request headers or body have been changed
-// relative to the snapshot taken before intercept/transform processing.
-func requestModified(snap requestSnapshot, currentHeaders gohttp.Header, currentBody []byte) bool {
+// requestModified reports whether the request headers or body have been changed.
+func requestModified(snap requestSnapshot, currentHeaders parser.RawHeaders, currentBody []byte) bool {
 	if !bytes.Equal(snap.body, currentBody) {
 		return true
 	}
-	return headersModified(snap.headers, currentHeaders)
+	return httputil.HeadersModified(snap.headers, currentHeaders)
 }
 
-// responseSnapshot holds a copy of the response status code, headers, and body
-// taken before intercept processing. It is used to detect whether modifications
-// occurred and, if so, to record the original (unmodified) version as a
-// separate receive message.
+// responseSnapshot holds a copy of the response status code, headers, and body.
 type responseSnapshot struct {
 	statusCode int
-	headers    gohttp.Header
+	headers    parser.RawHeaders
 	body       []byte
 }
 
-// snapshotResponse creates a deep copy of the response status code, headers,
-// and body for later comparison. The snapshot captures the state before
-// intercept processing so that we can detect changes and record both versions.
-func snapshotResponse(statusCode int, headers gohttp.Header, body []byte) responseSnapshot {
+// snapshotRawResponse creates a deep copy of the response status code, headers,
+// and body for later comparison.
+func snapshotRawResponse(statusCode int, headers parser.RawHeaders, body []byte) responseSnapshot {
 	snap := responseSnapshot{statusCode: statusCode}
 	if headers != nil {
 		snap.headers = headers.Clone()
@@ -380,39 +284,265 @@ func snapshotResponse(statusCode int, headers gohttp.Header, body []byte) respon
 	return snap
 }
 
-// responseModified reports whether the response status code, headers, or body
-// have been changed relative to the snapshot taken before intercept processing.
-func responseModified(snap responseSnapshot, currentStatusCode int, currentHeaders gohttp.Header, currentBody []byte) bool {
-	if snap.statusCode != currentStatusCode {
-		return true
+// handleRawForward performs raw bytes forwarding for intercepted requests.
+func (h *Handler) handleRawForward(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, iResult interceptResult, sp sendRecordParams, snap *requestSnapshot, start time.Time, logger *slog.Logger) error {
+	// Record the send phase with variant support for raw forwarding.
+	sendResult := h.recordRawSend(ctx, sp, iResult, snap, logger)
+
+	// Forward raw bytes to the upstream server.
+	sendStart := time.Now()
+	rawFwd, err := h.forwardRawUpstream(ctx, req, reqURL, iResult.RawBytes, logger)
+	if err != nil {
+		logger.Error("raw forward upstream failed", "method", req.Method, "url", reqURL.String(), "error", err)
+		writeHTTPError(conn, statusBadGateway, logger)
+		h.recordSendError(ctx, sendResult, start, err, logger)
+		return nil
 	}
-	if !bytes.Equal(snap.body, currentBody) {
-		return true
+
+	// Write raw response back to the client.
+	if err := writeRawResponseToClient(conn, rawFwd.rawResponse); err != nil {
+		return err
 	}
-	return headersModified(snap.headers, currentHeaders)
+
+	// Record the receive phase.
+	duration := time.Since(start)
+	sendMs := time.Since(sendStart).Milliseconds()
+	h.recordRawReceive(ctx, sendResult, rawFwd, start, duration, sendMs, logger)
+
+	statusCode := 0
+	if rawFwd.resp != nil {
+		statusCode = rawFwd.resp.StatusCode
+	}
+	logHTTPRequest(logger, req.Method, reqURL.String(), statusCode, duration)
+
+	return nil
 }
 
-// headersModified reports whether two header maps differ.
-func headersModified(a, b gohttp.Header) bool {
-	if len(a) != len(b) {
-		return true
+// rawForwardResult holds the result of raw forwarding to the upstream server.
+type rawForwardResult struct {
+	rawResponse []byte
+	resp        *parser.RawResponse
+	respBody    []byte
+	serverAddr  string
+}
+
+// forwardRawUpstream dials the upstream server, writes rawBytes directly,
+// reads the raw response, and returns both raw bytes and a best-effort parsed
+// HTTP response.
+func (h *Handler) forwardRawUpstream(ctx context.Context, req *parser.RawRequest, reqURL *url.URL, rawBytes []byte, logger *slog.Logger) (*rawForwardResult, error) {
+	host := reqURL.Host
+	if host == "" {
+		host = req.Headers.Get("Host")
 	}
-	for key, aVals := range a {
-		bVals, ok := b[key]
-		if !ok || len(aVals) != len(bVals) {
+	addr := host
+	scheme := reqURL.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		switch scheme {
+		case "https":
+			addr = addr + ":443"
+		default:
+			addr = addr + ":80"
+		}
+	}
+
+	useTLS := scheme == "https"
+	hostname := host
+	if h, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
+		hostname = h
+	}
+
+	pool := h.connPool
+	if pool == nil {
+		pool = &ConnPool{
+			TLSTransport:  h.effectiveTLSTransport(),
+			UpstreamProxy: h.GetUpstreamProxy(),
+		}
+	}
+
+	cr, err := pool.Get(ctx, addr, useTLS, hostname)
+	if err != nil {
+		return nil, fmt.Errorf("raw forward dial upstream %s: %w", addr, err)
+	}
+	defer cr.Conn.Close()
+
+	serverAddr := cr.Conn.RemoteAddr().String()
+
+	// Set a deadline for the entire raw forwarding operation.
+	if deadline, ok := ctx.Deadline(); ok {
+		cr.Conn.SetDeadline(deadline)
+	} else {
+		cr.Conn.SetDeadline(time.Now().Add(60 * time.Second))
+	}
+
+	// Write the raw bytes directly.
+	if _, err := cr.Conn.Write(rawBytes); err != nil {
+		return nil, fmt.Errorf("raw forward write: %w", err)
+	}
+
+	// Read the raw response from upstream using the parser.
+	rawResponse, resp, respBody, readErr := readRawResponseFromConn(cr.Conn)
+	if readErr != nil {
+		return nil, fmt.Errorf("raw forward read response: %w", readErr)
+	}
+
+	return &rawForwardResult{
+		rawResponse: rawResponse,
+		resp:        resp,
+		respBody:    respBody,
+		serverAddr:  serverAddr,
+	}, nil
+}
+
+// readRawResponseFromConn reads the complete response from the upstream connection,
+// capturing raw bytes while attempting a best-effort parser parse.
+func readRawResponseFromConn(conn net.Conn) (rawResponse []byte, resp *parser.RawResponse, respBody []byte, err error) {
+	// Capture all bytes from upstream.
+	var captured bytes.Buffer
+	tee := io.TeeReader(conn, &captured)
+	reader := bufio.NewReader(tee)
+
+	resp, parseErr := parser.ParseResponse(reader)
+	if parseErr != nil {
+		// If parsing fails, read whatever is available as raw bytes.
+		remaining, _ := io.ReadAll(io.LimitReader(reader, int64(intercept.MaxRawBytesSize)))
+		rawResponse = captured.Bytes()
+		if len(remaining) > 0 && len(rawResponse) == 0 {
+			rawResponse = remaining
+		}
+		return rawResponse, nil, nil, nil
+	}
+
+	if resp.Body != nil {
+		respBody, err = io.ReadAll(io.LimitReader(resp.Body, int64(maxRawCaptureSize)))
+		if err != nil {
+			rawResponse = captured.Bytes()
+			return rawResponse, resp, respBody, nil
+		}
+	}
+
+	rawResponse = captured.Bytes()
+	return rawResponse, resp, respBody, nil
+}
+
+// writeRawResponseToClient writes raw response bytes directly to the client
+// connection, bypassing HTTP serialization.
+func writeRawResponseToClient(conn net.Conn, rawResponse []byte) error {
+	if _, err := conn.Write(rawResponse); err != nil {
+		return fmt.Errorf("write raw response: %w", err)
+	}
+	return nil
+}
+
+// recordRawSend records the send phase for raw forwarding.
+func (h *Handler) recordRawSend(ctx context.Context, sp sendRecordParams, iResult interceptResult, snap *requestSnapshot, logger *slog.Logger) *sendRecordResult {
+	if iResult.OriginalRawBytes != nil {
+		sp.rawVariant = true
+		sp.originalRawBytes = iResult.OriginalRawBytes
+		sp.rawRequest = iResult.RawBytes
+		return h.recordSendWithVariant(ctx, sp, snap, logger)
+	}
+	return h.recordSendWithVariant(ctx, sp, snap, logger)
+}
+
+// recordRawReceive records the receive phase for raw forwarding.
+func (h *Handler) recordRawReceive(ctx context.Context, sendResult *sendRecordResult, rawFwd *rawForwardResult, start time.Time, duration time.Duration, sendMs int64, logger *slog.Logger) {
+	if sendResult == nil || h.Store == nil {
+		return
+	}
+
+	var goResp *httputil.GoHTTPResponse
+	if rawFwd.resp != nil {
+		goResp = httputil.RawResponseToHTTP(rawFwd.resp, rawFwd.respBody)
+	}
+
+	rp := receiveRecordParams{
+		start:       start,
+		duration:    duration,
+		serverAddr:  rawFwd.serverAddr,
+		resp:        goResp,
+		rawResponse: rawFwd.rawResponse,
+		respBody:    rawFwd.respBody,
+		sendMs:      &sendMs,
+	}
+
+	h.recordReceive(ctx, sendResult, rp, logger)
+}
+
+// isWebSocketUpgradeRaw checks if the raw request headers indicate a WebSocket
+// upgrade request.
+func isWebSocketUpgradeRaw(headers parser.RawHeaders) bool {
+	connection := headers.Get("Connection")
+	upgrade := headers.Get("Upgrade")
+	return headerContains(connection, "upgrade") &&
+		equalsIgnoreCase(trimSpace(upgrade), "websocket")
+}
+
+// equalsIgnoreCase performs case-insensitive string comparison.
+func equalsIgnoreCase(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if 'A' <= ca && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if 'A' <= cb && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
+// trimSpace trims leading and trailing ASCII whitespace.
+func trimSpace(s string) string {
+	start, end := 0, len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
+		end--
+	}
+	return s[start:end]
+}
+
+// headerContains checks if a comma-separated header value contains the given
+// token (case-insensitive).
+func headerContains(headerValue, token string) bool {
+	start := 0
+	for start < len(headerValue) {
+		end := start
+		for end < len(headerValue) && headerValue[end] != ',' {
+			end++
+		}
+		t := trimSpace(headerValue[start:end])
+		if equalsIgnoreCase(t, token) {
 			return true
 		}
-		for i := range aVals {
-			if aVals[i] != bVals[i] {
-				return true
-			}
-		}
+		start = end + 1
 	}
 	return false
 }
 
-// logHTTPRequest logs the completed HTTP request with method, URL, status, and
-// duration.
-func logHTTPRequest(logger *slog.Logger, req *gohttp.Request, statusCode int, duration time.Duration) {
-	logger.Info("http request", "method", req.Method, "url", req.URL.String(), "status", statusCode, "duration_ms", duration.Milliseconds())
+// isSSEResponseRaw checks if the response is a Server-Sent Events stream.
+func isSSEResponseRaw(resp *parser.RawResponse) bool {
+	ct := resp.Headers.Get("Content-Type")
+	if ct == "" {
+		return false
+	}
+	mediaType := ct
+	for i := 0; i < len(ct); i++ {
+		if ct[i] == ';' {
+			mediaType = ct[:i]
+			break
+		}
+	}
+	return equalsIgnoreCase(trimSpace(mediaType), "text/event-stream")
 }

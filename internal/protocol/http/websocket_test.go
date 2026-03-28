@@ -306,7 +306,8 @@ func TestRecordWebSocketError_Basic(t *testing.T) {
 		clientAddr: "127.0.0.1:5000",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:5000"},
-		req:        req,
+		req:        goRequestToRaw(req),
+		reqURL:     req.URL,
 	}
 
 	upstreamErr := fmt.Errorf("dial websocket upstream example.com:80: connection refused")
@@ -368,7 +369,7 @@ func TestRecordWebSocketError_NilStore(t *testing.T) {
 
 	ep := wsErrorRecordParams{
 		start: start,
-		req:   req,
+		req:   goRequestToRaw(req),
 	}
 
 	// Should not panic.
@@ -397,7 +398,7 @@ func TestRecordWebSocketError_WithTLSConnInfo(t *testing.T) {
 			TLSCipher:  "TLS_AES_128_GCM_SHA256",
 			TLSALPN:    "http/1.1",
 		},
-		req: req,
+		req: goRequestToRaw(req),
 	}
 
 	upstreamErr := fmt.Errorf("wss upstream TLS handshake: tls: handshake failure")
