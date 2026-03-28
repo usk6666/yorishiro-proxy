@@ -200,7 +200,7 @@ func h2ResultToRawResponse(h2r *http2.RoundTripResult) *parser.RawResponse {
 	resp := &parser.RawResponse{
 		Proto:      "HTTP/2.0",
 		StatusCode: h2r.StatusCode,
-		Status:     fmt.Sprintf("%d %s", h2r.StatusCode, gohttp.StatusText(h2r.StatusCode)),
+		Status:     formatStatus(h2r.StatusCode),
 		Headers:    make(parser.RawHeaders, 0, len(h2r.Headers)),
 		Body:       io.NopCloser(h2r.Body),
 	}
@@ -216,4 +216,16 @@ func h2ResultToRawResponse(h2r *http2.RoundTripResult) *parser.RawResponse {
 	}
 
 	return resp
+}
+
+// formatStatus formats an HTTP status code into a status line string.
+// For known status codes it includes the reason phrase (e.g. "200 OK").
+// For unknown codes where http.StatusText returns empty, it omits the
+// reason phrase to avoid a trailing space (e.g. "599" instead of "599 ").
+func formatStatus(code int) string {
+	reason := gohttp.StatusText(code)
+	if reason == "" {
+		return fmt.Sprintf("%d", code)
+	}
+	return fmt.Sprintf("%d %s", code, reason)
 }

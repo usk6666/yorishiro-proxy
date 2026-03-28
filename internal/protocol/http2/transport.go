@@ -145,8 +145,8 @@ func (t *Transport) SendRawFrames(ctx context.Context, req *gohttp.Request, rawB
 // The headers parameter must include HTTP/2 pseudo-headers (:method, :scheme,
 // :authority, :path) and any regular headers. The body parameter may be nil.
 //
-// The caller is responsible for closing conn after use. The returned
-// transportConn is single-use and will be closed when the method returns.
+// RoundTripOnConn takes ownership of conn and closes it before returning.
+// The caller must NOT close conn after calling this method.
 func (t *Transport) RoundTripOnConn(ctx context.Context, conn net.Conn, headers []hpack.HeaderField, body io.Reader) (*RoundTripResult, error) {
 	logger := t.logger()
 
