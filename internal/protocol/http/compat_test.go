@@ -9,6 +9,7 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	gohttp "net/http"
@@ -207,8 +208,12 @@ func isSSEResponse(resp *gohttp.Response) bool {
 
 // writeSSEResponseHeaders is a test compatibility shim.
 func writeSSEResponseHeaders(conn interface{}, resp *gohttp.Response) error {
-	// Stub — not called in production anymore.
-	return nil
+	netConn, ok := conn.(net.Conn)
+	if !ok {
+		return fmt.Errorf("writeSSEResponseHeaders: conn is not net.Conn")
+	}
+	rawResp := httputil.HTTPResponseToRaw(resp, nil)
+	return writeSSERawResponseHeaders(netConn, rawResp)
 }
 
 // writeResponse is a test compatibility shim for the old writeResponse(conn, resp, body).

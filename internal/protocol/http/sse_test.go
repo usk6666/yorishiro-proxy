@@ -393,8 +393,11 @@ func TestSSEHookContext_NilAllowed(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(input)),
 	}
 
+	rawResp := goResponseToRaw(resp, nil)
+	rawResp.Body = io.NopCloser(strings.NewReader(input))
+
 	fwd := &forwardResult{
-		resp:       goResponseToRaw(resp, nil),
+		resp:       rawResp,
 		serverAddr: "127.0.0.1:8080",
 	}
 
