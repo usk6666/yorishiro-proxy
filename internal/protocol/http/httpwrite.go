@@ -31,43 +31,12 @@ func writeHTTPError(conn net.Conn, code int, logger *slog.Logger) {
 func writeRawResponse(conn net.Conn, resp *parser.RawResponse, body []byte) error {
 	w := bufio.NewWriter(conn)
 
-	// Status line.
-	proto := resp.Proto
-	if proto == "" {
-		proto = "HTTP/1.1"
-	}
-	text := statusText(resp.StatusCode)
-	if text == "" {
-		text = "Unknown"
-	}
-	if _, err := fmt.Fprintf(w, "%s %d %s\r\n", proto, resp.StatusCode, text); err != nil {
+	if _, err := fmt.Fprintf(w, "%s\r\n", buildStatusLine(resp)); err != nil {
 		return err
 	}
 
-	// Replace Content-Length and remove Transfer-Encoding for the actual body.
-	wroteContentLength := false
-	for _, h := range resp.Headers {
-		lower := toLower(h.Name)
-		if lower == "transfer-encoding" {
-			continue
-		}
-		if lower == "content-length" {
-			if !wroteContentLength {
-				if _, err := fmt.Fprintf(w, "Content-Length: %d\r\n", len(body)); err != nil {
-					return err
-				}
-				wroteContentLength = true
-			}
-			continue
-		}
-		if _, err := fmt.Fprintf(w, "%s: %s\r\n", h.Name, h.Value); err != nil {
-			return err
-		}
-	}
-	if !wroteContentLength {
-		if _, err := fmt.Fprintf(w, "Content-Length: %d\r\n", len(body)); err != nil {
-			return err
-		}
+	if err := writeResponseHeaders(w, resp.Headers, len(body)); err != nil {
+		return err
 	}
 
 	if _, err := fmt.Fprintf(w, "\r\n"); err != nil {
@@ -79,21 +48,60 @@ func writeRawResponse(conn net.Conn, resp *parser.RawResponse, body []byte) erro
 	return w.Flush()
 }
 
+// buildStatusLine constructs the HTTP status line, preserving the original
+// reason phrase from resp.Status when available.
+func buildStatusLine(resp *parser.RawResponse) string {
+	proto := resp.Proto
+	if proto == "" {
+		proto = "HTTP/1.1"
+	}
+	if resp.Status != "" {
+		return fmt.Sprintf("%s %s", proto, resp.Status)
+	}
+	text := statusText(resp.StatusCode)
+	if text == "" {
+		text = "Unknown"
+	}
+	return fmt.Sprintf("%s %d %s", proto, resp.StatusCode, text)
+}
+
+// writeResponseHeaders writes response headers, replacing Content-Length with
+// the actual body length and removing Transfer-Encoding.
+func writeResponseHeaders(w *bufio.Writer, headers parser.RawHeaders, bodyLen int) error {
+	wroteContentLength := false
+	for _, h := range headers {
+		lower := toLower(h.Name)
+		if lower == "transfer-encoding" {
+			continue
+		}
+		if lower == "content-length" {
+			if !wroteContentLength {
+				if _, err := fmt.Fprintf(w, "Content-Length: %d\r\n", bodyLen); err != nil {
+					return err
+				}
+				wroteContentLength = true
+			}
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "%s: %s\r\n", h.Name, h.Value); err != nil {
+			return err
+		}
+	}
+	if !wroteContentLength {
+		if _, err := fmt.Fprintf(w, "Content-Length: %d\r\n", bodyLen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // writeSSERawResponseHeaders writes the HTTP response status line and headers
 // to the client connection without buffering the body. This allows the client
 // to begin processing SSE events as they arrive.
 func writeSSERawResponseHeaders(conn net.Conn, resp *parser.RawResponse) error {
 	w := bufio.NewWriter(conn)
 
-	proto := resp.Proto
-	if proto == "" {
-		proto = "HTTP/1.1"
-	}
-	text := statusText(resp.StatusCode)
-	if text == "" {
-		text = "Unknown"
-	}
-	if _, err := fmt.Fprintf(w, "%s %d %s\r\n", proto, resp.StatusCode, text); err != nil {
+	if _, err := fmt.Fprintf(w, "%s\r\n", buildStatusLine(resp)); err != nil {
 		return err
 	}
 	for _, h := range resp.Headers {
@@ -134,20 +142,28 @@ func serializeRawResponseBytes(resp *parser.RawResponse, body []byte) []byte {
 	if proto == "" {
 		proto = "HTTP/1.1"
 	}
-	text := statusText(resp.StatusCode)
-	if text == "" {
-		text = "Unknown"
+
+	// Build status line preserving the original reason phrase when available.
+	var statusLine string
+	if resp.Status != "" {
+		statusLine = fmt.Sprintf("%s %s\r\n", proto, resp.Status)
+	} else {
+		text := statusText(resp.StatusCode)
+		if text == "" {
+			text = "Unknown"
+		}
+		statusLine = fmt.Sprintf("%s %d %s\r\n", proto, resp.StatusCode, text)
 	}
 
 	// Estimate buffer size.
-	size := len(proto) + 20 // status line
+	size := len(statusLine)
 	for _, h := range resp.Headers {
 		size += len(h.Name) + len(h.Value) + 4
 	}
 	size += 2 + len(body)
 
 	buf := make([]byte, 0, size)
-	buf = append(buf, fmt.Sprintf("%s %d %s\r\n", proto, resp.StatusCode, text)...)
+	buf = append(buf, statusLine...)
 	for _, h := range resp.Headers {
 		buf = append(buf, h.Name...)
 		buf = append(buf, ": "...)

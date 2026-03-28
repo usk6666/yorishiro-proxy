@@ -16,7 +16,9 @@ import (
 
 // defaultRoundTripTimeout is the fallback deadline for RoundTripOnConn when
 // the caller's context has no deadline, to prevent indefinite blocking.
-const defaultRoundTripTimeout = 30 * time.Second
+// Set to 120s to accommodate large request/response bodies over slower
+// connections while still protecting against indefinite hangs.
+const defaultRoundTripTimeout = 120 * time.Second
 
 // H1Transport sends HTTP/1.x requests over raw connections and reads
 // responses using the custom parser, bypassing net/http entirely.
@@ -81,13 +83,33 @@ func (t *H1Transport) RoundTripOnConn(ctx context.Context, conn net.Conn, req *p
 		body = req.Body
 	}
 
-	// Write payload + body to connection.
-	if err := writeRequest(conn, payload, body); err != nil {
-		return nil, fmt.Errorf("h1transport write: %w", err)
+	// Write the request headers first (always small enough to complete quickly).
+	if _, err := io.Copy(conn, bytes.NewReader(payload)); err != nil {
+		return nil, fmt.Errorf("h1transport write headers: %w", err)
 	}
-	timing.SetWroteRequest(time.Now())
 
-	// Read response using the custom parser.
+	// Write the body in a background goroutine to prevent deadlocks with
+	// servers that stream the response while reading the request body
+	// (e.g., io.Copy(w, r.Body)). Without concurrent write+read, large
+	// bodies deadlock: the proxy blocks on writing the request body while
+	// the server blocks on writing the response, neither side making
+	// progress due to TCP backpressure.
+	//
+	// The goroutine's lifecycle is tied to the connection: when the caller
+	// closes the connection (via connClosingReader), the write fails and
+	// the goroutine exits. We do NOT wait for the goroutine here because
+	// that would re-introduce the deadlock — the response body must be
+	// read concurrently with the request body write.
+	if body != nil {
+		go func() {
+			io.Copy(conn, body) //nolint:errcheck // error handled via connection close
+			timing.SetWroteRequest(time.Now())
+		}()
+	} else {
+		timing.SetWroteRequest(time.Now())
+	}
+
+	// Read response concurrently with body writing.
 	reader := bufio.NewReaderSize(conn, 4096)
 
 	// Detect first byte to record timing.
@@ -153,7 +175,8 @@ func serializeRequest(req *parser.RawRequest) []byte {
 }
 
 // writeRequest writes the serialized header payload and then streams the body
-// (if any) to the connection.
+// (if any) to the connection. Used for raw mode where the entire request
+// (including body) is in the header parameter.
 func writeRequest(conn net.Conn, header []byte, body io.Reader) error {
 	if _, err := io.Copy(conn, bytes.NewReader(header)); err != nil {
 		return err

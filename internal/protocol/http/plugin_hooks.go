@@ -159,7 +159,7 @@ func writePluginResponseRaw(conn net.Conn, statusCode int, headers parser.RawHea
 	resp := &parser.RawResponse{
 		Proto:      "HTTP/1.1",
 		StatusCode: statusCode,
-		Status:     fmt.Sprintf("%d %s", statusCode, statusText(statusCode)),
+		Status:     formatStatus(statusCode),
 		Headers:    headers,
 		Body:       bytes.NewReader(body),
 	}

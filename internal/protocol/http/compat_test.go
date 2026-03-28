@@ -54,50 +54,6 @@ func (cr *captureReader) Reset() {
 	cr.buf.Reset()
 }
 
-// smugglingFlags is a test-only shim for backward compatibility.
-type smugglingFlags struct {
-	CLTEConflict bool
-	AmbiguousTE  bool
-	Warnings     []string
-}
-
-func (f *smugglingFlags) hasWarnings() bool {
-	return len(f.Warnings) > 0
-}
-
-// smugglingTags converts smuggling flags to tags (test compatibility shim).
-func smugglingTagsCompat(flags *smugglingFlags) map[string]string {
-	if flags == nil || !flags.hasWarnings() {
-		return nil
-	}
-	tags := make(map[string]string)
-	if flags.CLTEConflict {
-		tags["smuggling:cl_te_conflict"] = "true"
-	}
-	if flags.AmbiguousTE {
-		tags["smuggling:ambiguous_te"] = "true"
-	}
-	return tags
-}
-
-// checkRequestSmuggling is a test-only shim (no-op).
-func checkRequestSmuggling(reader *bufio.Reader, logger interface{}) *smugglingFlags {
-	return &smugglingFlags{}
-}
-
-// logSmugglingWarnings is a test-only shim (no-op).
-func logSmugglingWarnings(logger interface{}, flags *smugglingFlags, req *gohttp.Request) {}
-
-// httpHeaderToRawHeaders is a test compatibility shim.
-func httpHeaderToRawHeaders(h gohttp.Header) parser.RawHeaders {
-	return httputil.HTTPHeaderToRawHeaders(h)
-}
-
-// rawHeadersToHTTPHeader is a test compatibility shim.
-func rawHeadersToHTTPHeader(rh parser.RawHeaders) gohttp.Header {
-	return httputil.RawHeadersToHTTPHeader(rh)
-}
-
 // normalizeRequestURL is a test compatibility shim that mirrors the logic of
 // parseRequestURL from handler.go, but operates on *gohttp.Request.
 func normalizeRequestURL(ctx context.Context, req *gohttp.Request) {
@@ -149,16 +105,6 @@ func applyResponseModifications(resp *gohttp.Response, action intercept.Intercep
 	return httputil.ApplyResponseModifications(resp, action, body)
 }
 
-// serializeRawResponse is a test compatibility shim for the old function
-// that took *gohttp.Response. Uses the new implementation internally.
-func serializeRawResponse(resp *gohttp.Response, body []byte) []byte {
-	if resp == nil {
-		return nil
-	}
-	rawResp := httputil.HTTPResponseToRaw(resp, body)
-	return serializeRawResponseBytes(rawResp, body)
-}
-
 // snapshotRequest is a test compatibility shim using gohttp.Header.
 func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
 	return snapshotRawRequest(httputil.HTTPHeaderToRawHeaders(headers), body)
@@ -168,9 +114,6 @@ func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
 func requestModifiedCompat(snap requestSnapshot, currentHeaders gohttp.Header, currentBody []byte) bool {
 	return requestModified(snap, httputil.HTTPHeaderToRawHeaders(currentHeaders), currentBody)
 }
-
-// Alias for requestModifiedCompat when tests reference the old name.
-// (Already exported above as requestModifiedCompat.)
 
 // snapshotResponse is a test compatibility shim using gohttp.Header.
 func snapshotResponse(statusCode int, headers gohttp.Header, body []byte) responseSnapshot {
@@ -199,15 +142,6 @@ func headersModified(a, b gohttp.Header) bool {
 	)
 }
 
-// requestHeaders for test compatibility — converts gohttp.Request to headers.
-func requestHeadersCompat(req *gohttp.Request) gohttp.Header {
-	headers := req.Header.Clone()
-	if req.Host != "" {
-		headers["Host"] = []string{req.Host}
-	}
-	return headers
-}
-
 // isWebSocketUpgrade is a test compatibility shim.
 func isWebSocketUpgrade(req *gohttp.Request) bool {
 	return isWebSocketUpgradeRaw(httputil.HTTPHeaderToRawHeaders(req.Header))
@@ -228,25 +162,6 @@ func writeSSEResponseHeaders(conn interface{}, resp *gohttp.Response) error {
 	return writeSSERawResponseHeaders(netConn, rawResp)
 }
 
-// writeResponse is a test compatibility shim for the old writeResponse(conn, resp, body).
-func writeResponse(conn interface{}, resp *gohttp.Response, body []byte) error {
-	// Stub — tests that need this should be updated.
-	return nil
-}
-
-// removeHopByHopHeaders is a test compatibility shim.
-func removeHopByHopHeaders(header gohttp.Header) {
-	for _, h := range hopByHopHeaders {
-		header.Del(h)
-	}
-}
-
-// roundTripWithTrace is a test compatibility stub.
-func roundTripWithTrace(transport *gohttp.Transport, req *gohttp.Request) (*gohttp.Response, string, *httputil.RoundTripTiming, error) {
-	// Stub — not called in production anymore.
-	return nil, "", nil, nil
-}
-
 // sseEventToHTTPResponse is a test compatibility shim.
 func sseEventToHTTPResponse(event *SSEEvent) (*gohttp.Response, []byte) {
 	rawResp, body := sseEventToRawResponse(event)
@@ -258,11 +173,6 @@ func sseEventToHTTPResponse(event *SSEEvent) (*gohttp.Response, []byte) {
 func applyHTTPResponseToSSEEvent(original *SSEEvent, resp *gohttp.Response, body []byte) *SSEEvent {
 	rawResp := httputil.HTTPResponseToRaw(resp, body)
 	return applyRawResponseToSSEEvent(original, rawResp, body)
-}
-
-// logHTTPRequestCompat is a test compatibility shim using *gohttp.Request.
-func logHTTPRequestCompat(logger interface{}, req *gohttp.Request, statusCode int, duration interface{}) {
-	// No-op stub for test compatibility.
 }
 
 // goRequestToRaw converts a *gohttp.Request to a *parser.RawRequest for test use.

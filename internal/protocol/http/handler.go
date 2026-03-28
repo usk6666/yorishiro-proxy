@@ -198,12 +198,18 @@ func (h *Handler) GetUpstreamRouter() *UpstreamRouter {
 }
 
 // effectiveTLSTransport returns the configured TLS transport, falling back to
-// a StandardTransport with InsecureSkipVerify.
+// a StandardTransport. The InsecureSkipVerify setting is inherited from the
+// handler's base transport TLS config (set via SetInsecureSkipVerify).
+// Defaults to secure (InsecureSkipVerify: false) when not explicitly configured.
 func (h *Handler) effectiveTLSTransport() httputil.TLSTransport {
 	if h.tlsTransport != nil {
 		return h.tlsTransport
 	}
-	return &httputil.StandardTransport{InsecureSkipVerify: true}
+	insecure := false
+	if h.Transport != nil && h.Transport.TLSClientConfig != nil {
+		insecure = h.Transport.TLSClientConfig.InsecureSkipVerify
+	}
+	return &httputil.StandardTransport{InsecureSkipVerify: insecure}
 }
 
 // effectiveUpstreamRouter returns the configured UpstreamRouter or builds one
@@ -527,6 +533,11 @@ type requestBodyResult struct {
 // readAndCaptureBody reads the full request body and returns it for recording
 // (truncated to MaxBodySize if necessary). After this call the request's Body
 // reader is replaced with a re-readable copy.
+//
+// The parser already decodes chunked Transfer-Encoding, so the body is always
+// plain decoded data. When the request had chunked TE (which will be stripped
+// by hop-by-hop header removal), a Content-Length header is added to reflect
+// the actual body size.
 func readAndCaptureBody(req *parser.RawRequest, logger *slog.Logger) requestBodyResult {
 	if req.Body == nil {
 		return requestBodyResult{}
@@ -536,6 +547,14 @@ func readAndCaptureBody(req *parser.RawRequest, logger *slog.Logger) requestBody
 	if err != nil {
 		logger.Warn("failed to read request body", "error", err)
 	}
+
+	// If the request used chunked TE, add Content-Length since TE will be
+	// removed by hop-by-hop header stripping. The body is already decoded
+	// by the parser's dechunkedReader.
+	if parser.IsChunked(req.Headers) && len(fullBody) > 0 {
+		req.Headers.Set("Content-Length", fmt.Sprintf("%d", len(fullBody)))
+	}
+
 	req.Body = bytes.NewReader(fullBody)
 
 	recordBody := fullBody
@@ -630,6 +649,9 @@ func cloneRequestForUpstream(req *parser.RawRequest, reqURL *url.URL, useTLS boo
 
 // readResponseBody reads the full response body (up to MaxBodySize) and applies
 // response transforms if configured.
+//
+// The parser already decodes chunked Transfer-Encoding, so the body is always
+// plain decoded data.
 func (h *Handler) readResponseBody(resp *parser.RawResponse, logger *slog.Logger) []byte {
 	if resp.Body == nil {
 		return nil

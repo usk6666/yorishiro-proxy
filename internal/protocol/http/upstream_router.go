@@ -49,10 +49,10 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 	if err != nil {
 		return nil, fmt.Errorf("upstream router dial %s: %w", addr, err)
 	}
-	defer cr.Conn.Close()
 
 	switch cr.ALPN {
 	case "h2":
+		defer cr.Conn.Close()
 		slog.Debug("upstream router: routing to h2 transport", "addr", addr, "alpn", cr.ALPN)
 		result, h2Err := r.roundTripH2(ctx, cr.Conn, req, addr, hostname)
 		if h2Err != nil {
@@ -64,11 +64,50 @@ func (r *UpstreamRouter) RoundTrip(ctx context.Context, req *parser.RawRequest, 
 		slog.Debug("upstream router: routing to h1 transport", "addr", addr, "alpn", cr.ALPN)
 		result, h1Err := r.H1.RoundTripOnConn(ctx, cr.Conn, req)
 		if h1Err != nil {
+			cr.Conn.Close()
 			return nil, fmt.Errorf("upstream router h1 round trip: %w", h1Err)
 		}
 		result.ConnectDuration = cr.ConnectDuration
+		// Wrap the response body so the connection is closed after the body
+		// is fully consumed. This avoids buffering the entire response body
+		// in memory and prevents premature connection closure.
+		if result.Response != nil && result.Response.Body != nil {
+			result.Response.Body = &connClosingReader{
+				Reader: result.Response.Body,
+				conn:   cr.Conn,
+			}
+		} else {
+			cr.Conn.Close()
+		}
 		return result, nil
 	}
+}
+
+// connClosingReader wraps an io.Reader and closes the connection when the
+// reader returns io.EOF or when Close is called. This ensures the upstream
+// connection stays open while the response body is being read.
+type connClosingReader struct {
+	io.Reader
+	conn   net.Conn
+	closed bool
+}
+
+func (r *connClosingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil && !r.closed {
+		r.closed = true
+		r.conn.Close()
+	}
+	return n, err
+}
+
+// Close implements io.Closer to allow explicit cleanup.
+func (r *connClosingReader) Close() error {
+	if !r.closed {
+		r.closed = true
+		return r.conn.Close()
+	}
+	return nil
 }
 
 // roundTripH2 performs an HTTP/2 round trip using a pre-established h2

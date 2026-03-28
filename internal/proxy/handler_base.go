@@ -43,9 +43,13 @@ type HandlerBase struct {
 	tlsFingerprintProfile string
 }
 
-// NewDefaultTransport creates a new default *gohttp.Transport for HandlerBase.
-// This is a convenience function so that callers do not need to import net/http.
+// NewDefaultTransport creates a new default *gohttp.Transport for HandlerBase
+// by cloning http.DefaultTransport. This inherits proxy-from-environment,
+// default timeouts, and keep-alive settings from the standard library.
 func NewDefaultTransport() *gohttp.Transport {
+	if dt, ok := gohttp.DefaultTransport.(*gohttp.Transport); ok {
+		return dt.Clone()
+	}
 	return &gohttp.Transport{}
 }
 

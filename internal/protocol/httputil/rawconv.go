@@ -134,12 +134,12 @@ func HTTPResponseToRaw(resp *gohttp.Response, bodyBytes []byte) *parser.RawRespo
 	return raw
 }
 
-// GoHTTPRequest is a type alias for *net/http.Request, exported so that
+// GoHTTPRequest is a type alias for net/http.Request, exported so that
 // callers in internal/protocol/http/ can reference the type without
 // importing net/http directly.
 type GoHTTPRequest = gohttp.Request
 
-// GoHTTPResponse is a type alias for *net/http.Response, exported so that
+// GoHTTPResponse is a type alias for net/http.Response, exported so that
 // callers in internal/protocol/http/ can reference the type without
 // importing net/http directly.
 type GoHTTPResponse = gohttp.Response

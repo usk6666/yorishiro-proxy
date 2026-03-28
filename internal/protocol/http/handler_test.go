@@ -38,9 +38,9 @@ func TestSetInsecureSkipVerify_FalseDoesNotModifyTransport(t *testing.T) {
 
 	handler.SetInsecureSkipVerify(false)
 
-	// When skip is false, TLSClientConfig should remain nil (not modified).
-	if handler.Transport.TLSClientConfig != nil {
-		t.Errorf("TLSClientConfig = %v, want nil when skip is false", handler.Transport.TLSClientConfig)
+	// When skip is false, InsecureSkipVerify should remain false.
+	if handler.Transport.TLSClientConfig != nil && handler.Transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify = true, want false when skip is false")
 	}
 }
 
@@ -67,9 +67,9 @@ func TestNewHandler_DefaultTransportHasNoInsecureSkipVerify(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, nil, testutil.DiscardLogger())
 
-	// Default transport should not have TLSClientConfig set.
-	if handler.Transport.TLSClientConfig != nil {
-		t.Errorf("default transport TLSClientConfig = %v, want nil", handler.Transport.TLSClientConfig)
+	// Default transport should not have InsecureSkipVerify enabled.
+	if handler.Transport.TLSClientConfig != nil && handler.Transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("default transport InsecureSkipVerify = true, want false")
 	}
 }
 
