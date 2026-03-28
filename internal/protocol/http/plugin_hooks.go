@@ -50,10 +50,14 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn
 
 	case plugin.ActionContinue:
 		if result.Data != nil {
-			goReq, body, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
+			goReq, newBody, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
 			if applyErr != nil {
 				logger.Warn("plugin on_receive_from_client apply changes failed", "error", applyErr)
 				return req, body, false
+			}
+			// Preserve the original body when the plugin did not modify it.
+			if newBody != nil {
+				body = newBody
 			}
 			// Convert back to RawRequest.
 			req = httputil.HTTPRequestToRaw(goReq, body)
@@ -83,10 +87,14 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *parser.
 		return req, body
 	}
 
-	goReq, body, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
+	goReq, newBody, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_server apply changes failed", "error", applyErr)
 		return req, body
+	}
+	// Preserve the original body when the plugin did not modify it.
+	if newBody != nil {
+		body = newBody
 	}
 	req = httputil.HTTPRequestToRaw(goReq, body)
 
@@ -114,9 +122,13 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *parser.
 		return resp, body
 	}
 
-	goResp, body, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
+	goResp, newBody, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_receive_from_server apply changes failed", "error", applyErr)
+	}
+	// Preserve the original body when the plugin did not modify it.
+	if newBody != nil {
+		body = newBody
 	}
 	resp = httputil.HTTPResponseToRaw(goResp, body)
 
@@ -144,9 +156,13 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *parser
 		return resp, body
 	}
 
-	goResp, body, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
+	goResp, newBody, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_client apply changes failed", "error", applyErr)
+	}
+	// Preserve the original body when the plugin did not modify it.
+	if newBody != nil {
+		body = newBody
 	}
 	resp = httputil.HTTPResponseToRaw(goResp, body)
 
