@@ -307,6 +307,7 @@ func TestRecordWebSocketError_Basic(t *testing.T) {
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:5000"},
 		req:        goRequestToRaw(req),
+		reqURL:     req.URL,
 	}
 
 	upstreamErr := fmt.Errorf("dial websocket upstream example.com:80: connection refused")

@@ -9,6 +9,7 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
@@ -96,9 +98,19 @@ func rawHeadersToHTTPHeader(rh parser.RawHeaders) gohttp.Header {
 	return httputil.RawHeadersToHTTPHeader(rh)
 }
 
-// normalizeRequestURL is a test compatibility shim.
-func normalizeRequestURL(ctx interface{}, req *gohttp.Request) {
-	// No-op — the new handler uses parseRequestURL instead.
+// normalizeRequestURL is a test compatibility shim that mirrors the logic of
+// parseRequestURL from handler.go, but operates on *gohttp.Request.
+func normalizeRequestURL(ctx context.Context, req *gohttp.Request) {
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	if req.URL.Scheme == "" {
+		req.URL.Scheme = "http"
+	}
+	if target, ok := proxy.ForwardTargetFromContext(ctx); ok {
+		req.URL.Host = target
+		req.Host = target
+	}
 }
 
 // readAndCaptureRequestBody is a test compatibility shim.

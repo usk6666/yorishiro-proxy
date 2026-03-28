@@ -118,8 +118,11 @@ func TestRecordSendWithVariant_NoModification(t *testing.T) {
 
 	body := []byte("request body")
 
+	rawReq := goRequestToRaw(req)
+
 	// Snapshot matches the current state: no modification.
-	snap := snapshotRequest(req.Header, body)
+	// Use raw headers (which include Host) to match what recordSendWithVariant sees.
+	snap := snapshotRawRequest(rawReq.Headers, body)
 
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:     "conn-1",
@@ -127,7 +130,7 @@ func TestRecordSendWithVariant_NoModification(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        goRequestToRaw(req),
+		req:        rawReq,
 		reqBody:    body,
 	}, &snap, logger)
 
@@ -503,7 +506,10 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
 	body := []byte("unchanged")
 
-	snap := snapshotRequest(req.Header, body)
+	rawReq := goRequestToRaw(req)
+
+	// Use raw headers (which include Host) to match what recordSendWithVariant sees.
+	snap := snapshotRawRequest(rawReq.Headers, body)
 
 	sendResult := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:     "conn-nomod",
@@ -511,7 +517,7 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 		protocol:   "HTTP/1.x",
 		start:      start,
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
-		req:        goRequestToRaw(req),
+		req:        rawReq,
 		reqBody:    body,
 	}, &snap, logger)
 
@@ -1077,7 +1083,7 @@ func TestHeadersModified(t *testing.T) {
 			name: "different multi-value order",
 			a:    gohttp.Header{"X-Key": {"a", "b"}},
 			b:    gohttp.Header{"X-Key": {"b", "a"}},
-			want: true,
+			want: false, // HeadersModified uses frequency-based comparison (order-agnostic)
 		},
 	}
 

@@ -174,9 +174,16 @@ func HTTPRequestToRaw(goReq *gohttp.Request, bodyBytes []byte) *parser.RawReques
 	if goReq.Host != "" {
 		headers.Set("Host", goReq.Host)
 	}
+	// Use the full absolute URL when scheme and host are present (forward
+	// proxy style). RequestURI() only returns path+query which loses the
+	// host information needed for forward proxy requests.
+	reqURI := goReq.URL.RequestURI()
+	if goReq.URL.Scheme != "" && goReq.URL.Host != "" {
+		reqURI = goReq.URL.String()
+	}
 	return &parser.RawRequest{
 		Method:     goReq.Method,
-		RequestURI: goReq.URL.RequestURI(),
+		RequestURI: reqURI,
 		Proto:      goReq.Proto,
 		Headers:    headers,
 		Body:       bytes.NewReader(bodyBytes),
