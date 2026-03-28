@@ -60,6 +60,17 @@ type RoundTripResult struct {
 	ServerAddr string
 	// RawFrames contains the raw response frame bytes for L4 recording.
 	RawFrames [][]byte
+
+	// StatusCode is the HTTP status code from the :status pseudo-header.
+	// Set by RoundTripOnConn; RoundTrip also populates Response.StatusCode.
+	StatusCode int
+	// Headers contains the decoded response HPACK header fields (including
+	// pseudo-headers). Set by RoundTripOnConn to avoid lossy net/http.Header
+	// conversion.
+	Headers []hpack.HeaderField
+	// Body is a reader over the response DATA frame payloads.
+	// Set by RoundTripOnConn.
+	Body io.Reader
 }
 
 // RoundTrip sends an HTTP request to the upstream server using the custom
@@ -121,6 +132,34 @@ func (t *Transport) SendRawFrames(ctx context.Context, req *gohttp.Request, rawB
 	if err != nil {
 		t.removeConn(host, tc)
 		return nil, fmt.Errorf("transport send raw frames: %w", err)
+	}
+	return result, nil
+}
+
+// RoundTripOnConn performs an HTTP/2 round trip on a pre-established connection.
+// The connection must already have negotiated "h2" via ALPN. This method handles
+// the HTTP/2 handshake (connection preface + settings exchange), sends the
+// request headers and body as HTTP/2 frames, and returns the raw response
+// without converting through net/http types.
+//
+// The headers parameter must include HTTP/2 pseudo-headers (:method, :scheme,
+// :authority, :path) and any regular headers. The body parameter may be nil.
+//
+// RoundTripOnConn takes ownership of conn and closes it before returning.
+// The caller must NOT close conn after calling this method.
+func (t *Transport) RoundTripOnConn(ctx context.Context, conn net.Conn, headers []hpack.HeaderField, body io.Reader) (*RoundTripResult, error) {
+	logger := t.logger()
+
+	tc := newTransportConn(conn, logger)
+	defer tc.close()
+
+	if err := tc.handshake(ctx); err != nil {
+		return nil, fmt.Errorf("h2 handshake: %w", err)
+	}
+
+	result, err := tc.roundTripRaw(ctx, headers, body)
+	if err != nil {
+		return nil, fmt.Errorf("h2 round trip on conn: %w", err)
 	}
 	return result, nil
 }
@@ -520,6 +559,116 @@ func (tc *transportConn) roundTrip(ctx context.Context, req *gohttp.Request) (*R
 		ServerAddr: tc.netConn.RemoteAddr().String(),
 		RawFrames:  ss.rawFrames,
 	}, nil
+}
+
+// roundTripRaw sends an HTTP/2 request using raw HPACK header fields and an
+// optional body reader, returning the response as raw header fields and body
+// data without converting through net/http types.
+func (tc *transportConn) roundTripRaw(ctx context.Context, headers []hpack.HeaderField, body io.Reader) (*RoundTripResult, error) {
+	if tc.conn.IsClosed() {
+		return nil, fmt.Errorf("connection closed")
+	}
+	if received, _, _ := tc.conn.GoAwayReceived(); received {
+		return nil, fmt.Errorf("connection received GOAWAY")
+	}
+
+	streamID := tc.allocStreamID()
+
+	ss := &streamState{
+		done:        make(chan streamResult, 1),
+		headersDone: make(chan struct{}),
+	}
+
+	tc.streamsMu.Lock()
+	tc.streams[streamID] = ss
+	tc.streamsMu.Unlock()
+
+	defer func() {
+		tc.streamsMu.Lock()
+		delete(tc.streams, streamID)
+		tc.streamsMu.Unlock()
+	}()
+
+	// Transition to open state.
+	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
+
+	// Send request headers and body.
+	if err := tc.sendRequestRaw(ctx, streamID, headers, body); err != nil {
+		return nil, fmt.Errorf("send request on stream %d: %w", streamID, err)
+	}
+
+	// Wait for response.
+	select {
+	case <-ctx.Done():
+		tc.sendReset(streamID, ErrCodeCancel)
+		return nil, ctx.Err()
+	case result := <-ss.done:
+		if result.err != nil {
+			return nil, result.err
+		}
+	}
+
+	// Extract status code from response headers.
+	var statusCode int
+	for _, hf := range ss.headers {
+		if hf.Name == ":status" {
+			code, err := strconv.Atoi(hf.Value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid :status %q: %w", hf.Value, err)
+			}
+			statusCode = code
+			break
+		}
+	}
+	if statusCode == 0 {
+		return nil, fmt.Errorf("no :status pseudo-header in response")
+	}
+
+	return &RoundTripResult{
+		StatusCode: statusCode,
+		Headers:    ss.headers,
+		Body:       bytes.NewReader(ss.data),
+		ServerAddr: tc.netConn.RemoteAddr().String(),
+		RawFrames:  ss.rawFrames,
+	}, nil
+}
+
+// sendRequestRaw encodes HPACK header fields and an optional body as HTTP/2
+// frames on the given stream.
+func (tc *transportConn) sendRequestRaw(ctx context.Context, streamID uint32, headers []hpack.HeaderField, body io.Reader) error {
+	fragment := tc.encodeHeaders(headers)
+
+	// Read body if present.
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return fmt.Errorf("read request body: %w", err)
+		}
+	}
+
+	endStream := len(bodyBytes) == 0
+
+	// Send HEADERS frame(s).
+	tc.writeMu.Lock()
+	err := tc.writeHeaderFrames(streamID, endStream, fragment)
+	tc.writeMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	// Send DATA frame(s) if there's a body.
+	if len(bodyBytes) > 0 {
+		if err := tc.writeDataFrames(ctx, streamID, bodyBytes); err != nil {
+			return err
+		}
+		tc.conn.Streams().Transition(streamID, EventSendEndStream) //nolint:errcheck
+	} else {
+		tc.conn.Streams().Transition(streamID, EventSendEndStream) //nolint:errcheck
+	}
+
+	return nil
 }
 
 // sendRequest serializes and sends the HTTP request as HTTP/2 frames.

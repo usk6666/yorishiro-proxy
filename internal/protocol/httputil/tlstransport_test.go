@@ -488,3 +488,57 @@ func TestTLSConnectionState_PlainConn(t *testing.T) {
 		t.Error("TLSConnectionState should return false for plain net.Conn")
 	}
 }
+
+func TestRestrictALPNToH1_StandardTransport(t *testing.T) {
+	inner := &StandardTransport{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"h2", "http/1.1"},
+	}
+	restricted := RestrictALPNToH1(inner)
+	st, ok := restricted.(*StandardTransport)
+	if !ok {
+		t.Fatalf("type = %T, want *StandardTransport", restricted)
+	}
+	if len(st.NextProtos) != 1 || st.NextProtos[0] != "http/1.1" {
+		t.Errorf("NextProtos = %v, want [http/1.1]", st.NextProtos)
+	}
+	if !st.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be preserved")
+	}
+	// Original should be unchanged.
+	if len(inner.NextProtos) != 2 {
+		t.Errorf("original NextProtos = %v, should be unchanged", inner.NextProtos)
+	}
+}
+
+func TestRestrictALPNToH1_UTLSTransport(t *testing.T) {
+	inner := &UTLSTransport{
+		Profile:            ProfileChrome,
+		InsecureSkipVerify: true,
+	}
+	restricted := RestrictALPNToH1(inner)
+	ut, ok := restricted.(*UTLSTransport)
+	if !ok {
+		t.Fatalf("type = %T, want *UTLSTransport", restricted)
+	}
+	if len(ut.NextProtos) != 1 || ut.NextProtos[0] != "http/1.1" {
+		t.Errorf("NextProtos = %v, want [http/1.1]", ut.NextProtos)
+	}
+	if ut.Profile != ProfileChrome {
+		t.Errorf("Profile = %v, want ProfileChrome", ut.Profile)
+	}
+}
+
+func TestRestrictALPNToH1_UnknownType(t *testing.T) {
+	inner := &mockTLSTransport{}
+	restricted := RestrictALPNToH1(inner)
+	if restricted != inner {
+		t.Error("unknown types should be returned as-is")
+	}
+}
+
+type mockTLSTransport struct{}
+
+func (m *mockTLSTransport) TLSConnect(_ context.Context, conn net.Conn, _ string) (net.Conn, string, error) {
+	return conn, "", nil
+}

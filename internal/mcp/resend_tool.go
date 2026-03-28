@@ -819,7 +819,7 @@ func (s *Server) resendHTTPClient(params resendParams) httpDoer {
 	// is disabled). Without this, ALPN may negotiate h2 with the upstream
 	// causing "malformed HTTP response" errors.
 	if s.deps.tlsTransport != nil {
-		tlsT := httputil.HTTP1OnlyTransport(s.deps.tlsTransport)
+		tlsT := httputil.RestrictALPNToH1(s.deps.tlsTransport)
 		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if params.OverrideHost != "" {
 				addr = params.OverrideHost
