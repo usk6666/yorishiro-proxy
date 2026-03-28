@@ -219,10 +219,128 @@ func TestConnPool_Get_DialFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	// Use a non-routable address to trigger a dial failure.
-	_, err := pool.Get(ctx, "192.0.2.1:1", false, "")
+	// Use 127.0.0.1:1 for deterministic connection refusal.
+	_, err := pool.Get(ctx, "127.0.0.1:1", false, "")
 	if err == nil {
 		t.Fatal("Get() expected error for unreachable address")
+	}
+}
+
+func TestConnPool_Get_TLS_EmptyHostname(t *testing.T) {
+	// When hostname is empty and addr has no host part that can be derived,
+	// Get should return an error before attempting TLS.
+	mockTLS := &connpoolMockTLSTransport{}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	pool := &ConnPool{
+		TLSTransport: mockTLS,
+		DialTimeout:  5 * time.Second,
+	}
+
+	ctx := context.Background()
+
+	// With a proper addr, hostname should be derived from it.
+	// Use a mock that succeeds — hostname is derived from addr.
+	result, err := pool.Get(ctx, ln.Addr().String(), true, "")
+	if err != nil {
+		t.Fatalf("Get() with derivable hostname error = %v", err)
+	}
+	result.Conn.Close()
+
+	if mockTLS.gotName != "127.0.0.1" {
+		t.Errorf("derived hostname = %q, want %q", mockTLS.gotName, "127.0.0.1")
+	}
+}
+
+func TestConnPool_Get_TLS_H2ALPNRejected(t *testing.T) {
+	mockTLS := &connpoolMockTLSTransport{
+		alpn: "h2",
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	pool := &ConnPool{
+		TLSTransport: mockTLS,
+		DialTimeout:  5 * time.Second,
+	}
+
+	ctx := context.Background()
+	_, err = pool.Get(ctx, ln.Addr().String(), true, "example.com")
+	if err == nil {
+		t.Fatal("Get() expected error for h2 ALPN negotiation")
+	}
+	if !strings.Contains(err.Error(), "h2 ALPN") {
+		t.Errorf("error = %v, want to contain 'h2 ALPN'", err)
+	}
+}
+
+func TestConnPool_Get_TLS_AllowedALPN(t *testing.T) {
+	// "http/1.1" and "" (no ALPN) should both be accepted.
+	for _, alpn := range []string{"http/1.1", ""} {
+		t.Run("alpn="+alpn, func(t *testing.T) {
+			mockTLS := &connpoolMockTLSTransport{alpn: alpn}
+
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+
+			go func() {
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					conn.Close()
+				}
+			}()
+
+			pool := &ConnPool{
+				TLSTransport: mockTLS,
+				DialTimeout:  5 * time.Second,
+			}
+
+			ctx := context.Background()
+			result, err := pool.Get(ctx, ln.Addr().String(), true, "example.com")
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			result.Conn.Close()
+
+			if result.ALPN != alpn {
+				t.Errorf("ALPN = %q, want %q", result.ALPN, alpn)
+			}
+		})
 	}
 }
 

@@ -73,12 +73,30 @@ func (p *ConnPool) Get(ctx context.Context, addr string, useTLS bool, hostname s
 		}, nil
 	}
 
+	// Derive TLS hostname from addr when the caller did not provide one.
+	if hostname == "" {
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr == nil {
+			hostname = host
+		}
+		if hostname == "" {
+			rawConn.Close()
+			return nil, fmt.Errorf("connpool TLS connect %s: empty hostname for SNI/certificate verification", addr)
+		}
+	}
+
 	// Perform TLS handshake.
 	tlsTransport := p.effectiveTLSTransport()
 	tlsConn, alpn, tlsErr := tlsTransport.TLSConnect(ctx, rawConn, hostname)
 	if tlsErr != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("connpool TLS connect %s: %w", addr, tlsErr)
+	}
+
+	// Reject HTTP/2 ALPN — this transport is for HTTP/1.x only.
+	if alpn == "h2" {
+		tlsConn.Close()
+		return nil, fmt.Errorf("connpool TLS connect %s: negotiated h2 ALPN, but HTTP/1.x transport requires http/1.1 or no ALPN", addr)
 	}
 
 	return &ConnResult{
