@@ -27,6 +27,9 @@ func TestResendUpstreamRouter_DefaultRouter(t *testing.T) {
 	if ur.Pool.AllowH2 {
 		t.Error("Pool.AllowH2 must be false: resend router has no H2 transport, h2 ALPN would cause a nil dereference panic")
 	}
+	if ur.Pool.TLSTransport != nil {
+		t.Error("Pool.TLSTransport must be nil: ConnPool.effectiveTLSTransport creates a transport with ALPN restricted to http/1.1 when AllowH2 is false")
+	}
 }
 
 func TestResendUpstreamRouter_ReplayRouterOverride(t *testing.T) {
@@ -80,13 +83,13 @@ func TestBuildRawRequest_ContentLengthRecalculation(t *testing.T) {
 			wantNoCL: true,
 		},
 		{
-			name: "Transfer-Encoding chunked preserves no Content-Length",
+			name: "Transfer-Encoding chunked is stripped and Content-Length recalculated",
 			body: []byte("chunked body"),
 			headers: parser.RawHeaders{
 				{Name: "Transfer-Encoding", Value: "chunked"},
 				{Name: "Content-Length", Value: "999"},
 			},
-			wantCL: "999", // not recalculated when Transfer-Encoding is set
+			wantCL: "12", // len("chunked body") == 12; TE removed, CL recalculated
 		},
 	}
 
@@ -109,6 +112,12 @@ func TestBuildRawRequest_ContentLengthRecalculation(t *testing.T) {
 			}
 			if cl != tt.wantCL {
 				t.Errorf("Content-Length = %q, want %q", cl, tt.wantCL)
+			}
+
+			// Transfer-Encoding must always be stripped for structured resends
+			// (H1Transport writes body verbatim without chunked encoding).
+			if te := req.Headers.Get("Transfer-Encoding"); te != "" {
+				t.Errorf("Transfer-Encoding should be stripped, got %q", te)
 			}
 
 			// Verify body is readable and matches

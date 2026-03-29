@@ -611,17 +611,17 @@ func (s *Server) buildRawRequest(prep *resendPrepared) *parser.RawRequest {
 		headers = append(parser.RawHeaders{{Name: "Host", Value: prep.url.Host}}, headers...)
 	}
 
-	// Always recalculate Content-Length to match the actual body length for
-	// structured resends. When override_body or body_patches modify the body,
-	// the original Content-Length becomes stale. The old net/http.Client did
-	// this automatically. Users who need mismatched Content-Length (e.g. for
+	// Structured resend always has the full body in memory, so Content-Length
+	// is the correct framing mechanism. Remove Transfer-Encoding (the
+	// H1Transport writes body bytes verbatim without chunked encoding, so
+	// keeping TE: chunked would produce an invalid request — TE-1 fix).
+	// Users who need chunked encoding or mismatched Content-Length (e.g. for
 	// request smuggling tests) should use resend_raw.
-	if headers.Get("Transfer-Encoding") == "" {
-		if len(prep.body) > 0 {
-			headers.Set("Content-Length", fmt.Sprintf("%d", len(prep.body)))
-		} else {
-			headers.Del("Content-Length")
-		}
+	headers.Del("Transfer-Encoding")
+	if len(prep.body) > 0 {
+		headers.Set("Content-Length", fmt.Sprintf("%d", len(prep.body)))
+	} else {
+		headers.Del("Content-Length")
 	}
 
 	return &parser.RawRequest{
@@ -878,7 +878,12 @@ func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 		return s.deps.replayRouter
 	}
 	pool := &protohttp.ConnPool{
-		TLSTransport: s.deps.tlsTransport,
+		// TLSTransport is intentionally nil: ConnPool.effectiveTLSTransport()
+		// creates a StandardTransport with NextProtos restricted to ["http/1.1"]
+		// when AllowH2 is false. Passing the shared s.deps.tlsTransport would
+		// offer "h2" in ALPN, causing the server to negotiate h2 which ConnPool
+		// then rejects — breaking HTTPS resend for most servers (ALPN-1 fix).
+
 		// AllowH2 is intentionally false: the resend router does not have an
 		// H2 transport, so h2 ALPN negotiation must be prevented.
 	}
