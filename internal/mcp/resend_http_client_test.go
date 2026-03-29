@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"io"
+	"net"
 	"net/url"
 	"testing"
 
@@ -22,14 +23,31 @@ func TestResendUpstreamRouter_DefaultRouter(t *testing.T) {
 	if ur.H1 == nil {
 		t.Error("H1 transport must not be nil")
 	}
+	if ur.H2 == nil {
+		t.Error("H2 transport must not be nil")
+	}
 	if ur.Pool == nil {
 		t.Error("Pool must not be nil")
 	}
-	if ur.Pool.AllowH2 {
-		t.Error("Pool.AllowH2 must be false: resend router has no H2 transport, h2 ALPN would cause a nil dereference panic")
+	if !ur.Pool.AllowH2 {
+		t.Error("Pool.AllowH2 must be true to allow h2 ALPN negotiation for gRPC resend")
 	}
 	if ur.Pool.TLSTransport != nil {
-		t.Error("Pool.TLSTransport must be nil: ConnPool.effectiveTLSTransport creates a transport with ALPN restricted to http/1.1 when AllowH2 is false")
+		t.Error("Pool.TLSTransport must be nil when no TLS transport is configured")
+	}
+}
+
+func TestResendUpstreamRouter_TLSTransportPassthrough(t *testing.T) {
+	mock := &mockTLSTransport{}
+	s := &Server{deps: &deps{tlsTransport: mock}}
+
+	router := s.resendUpstreamRouter(resendParams{})
+	ur, ok := router.(*protohttp.UpstreamRouter)
+	if !ok {
+		t.Fatalf("expected *protohttp.UpstreamRouter, got %T", router)
+	}
+	if ur.Pool.TLSTransport != mock {
+		t.Error("Pool.TLSTransport must be the configured TLS transport (passed through without restriction)")
 	}
 }
 
@@ -47,6 +65,12 @@ type mockResendRouter struct{}
 
 func (m *mockResendRouter) RoundTrip(_ context.Context, _ *parser.RawRequest, _ string, _ bool, _ string) (*httputil.RoundTripResult, error) {
 	return nil, nil
+}
+
+type mockTLSTransport struct{}
+
+func (m *mockTLSTransport) TLSConnect(_ context.Context, conn net.Conn, _ string) (net.Conn, string, error) {
+	return conn, "h2", nil
 }
 
 func TestBuildRawRequest_ContentLengthRecalculation(t *testing.T) {
