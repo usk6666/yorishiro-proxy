@@ -71,8 +71,16 @@ Request GitHub Copilot code review immediately so it runs in parallel with Claud
 gh pr edit <PR number> --add-reviewer @copilot
 ```
 
-If this fails (e.g., Copilot not available on the repo), log a warning and continue without Copilot review.
-Record `copilot_requested = true | false` and `copilot_request_time` (timestamp of the request).
+On success, record `copilot_requested = true` and `copilot_request_time` (timestamp of the request).
+If this fails (e.g., Copilot not available on the repo), log a warning and initialize defaults:
+
+```
+copilot_requested = false
+copilot_findings = []
+copilot_review_state = "N/A"
+```
+
+Continue without Copilot review.
 
 ---
 
@@ -135,8 +143,8 @@ gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
 ```
 
 - If result > 0: Copilot review has been submitted → proceed to 2.5-3
-- If result == 0: Wait 1 minute and retry (max 5 retries = 10 minutes total from request)
-- If max retries exceeded: Log warning "Copilot review timed out" and proceed without Copilot findings
+- If result == 0: Wait 1 minute and retry, up to 4 additional attempts (5 total polling attempts at approximately 5, 6, 7, 8, 9 minutes; max ~10 minutes from `copilot_request_time`)
+- If no Copilot review after 5 polling attempts: Log warning "Copilot review timed out", set `copilot_findings = []` and `copilot_review_state = "N/A"`, and proceed without Copilot findings
 
 #### 2.5-3. Collect Copilot Review Comments
 
@@ -182,7 +190,10 @@ Parse the `FINDINGS:` section from each Claude agent's output and record whether
 ```
 code_review_has_findings = true | false
 security_review_has_findings = true | false
-copilot_has_findings = len(copilot_findings) > 0  # from Phase 2.5
+
+# If Copilot review was not requested or timed out, safe defaults are already set
+# (copilot_findings = [], copilot_review_state = "N/A") from Phase 1.5 or Phase 2.5
+copilot_has_findings = len(copilot_findings) > 0
 has_any_findings = code_review_has_findings or security_review_has_findings or copilot_has_findings
 ```
 
@@ -212,8 +223,10 @@ Severity mapping for Copilot comments:
 | APPROVED (with findings) | APPROVED (no/with findings) | Any | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix only, no re-review) |
 | Any CHANGES_REQUESTED | Any | Any | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
 
-> **Note**: Copilot findings alone do not trigger `CHANGES_REQUESTED` — they are always treated as supplementary.
-> However, if Copilot's review state is `CHANGES_REQUESTED`, it contributes to the aggregate verdict.
+> **Note**: Copilot findings — including a Copilot review state of `CHANGES_REQUESTED` — never by
+> themselves trigger an aggregate `CHANGES_REQUESTED`. Only Code Review or Security Review can cause the
+> aggregate verdict to be `CHANGES_REQUESTED`. When both Claude reviews are `APPROVED`, the verdict is
+> at most `APPROVED_WITH_FINDINGS`, even if Copilot's state is `CHANGES_REQUESTED`.
 
 ---
 
@@ -261,18 +274,18 @@ Re-run **only the reviews that were `CHANGES_REQUESTED`**:
 # For APPROVED_WITH_FINDINGS: Fix only, no re-review
 if aggregate_verdict == APPROVED_WITH_FINDINGS:
     Launch Fixer Agent (pass all findings including LOW + Copilot findings)
-    → Phase 4.5 (Copilot re-review) → Phase 5
+    → Step 4-5 (Copilot re-request only, no wait) → Phase 5
 
 # For CHANGES_REQUESTED: Fix + re-review cycle (max 2 rounds)
 current_round = 1
 
 while current_round <= 2:
     if aggregate_verdict == APPROVED or aggregate_verdict == APPROVED_WITH_FINDINGS:
-        break  → Phase 4.5 → Phase 5
+        break  → Step 4-5 → Phase 5
 
     Launch Fixer Agent (pass all findings including LOW + Copilot findings)
     Run re-review (only the side that was CHANGES_REQUESTED)
-    → Phase 4.5 (Copilot re-review on each round)
+    → Step 4-5 (Copilot re-review on each round)
     Aggregate verdict (including new Copilot findings)
 
     current_round += 1
@@ -285,7 +298,7 @@ if current_round > 2 and aggregate_verdict == CHANGES_REQUESTED:
 
 > **Skip this step** if `copilot_requested == false`.
 
-After the Fixer Agent pushes changes, re-request Copilot review and wait for new results.
+After the Fixer Agent pushes changes, re-request Copilot review.
 
 **Step 1: Re-request Copilot review**
 
@@ -296,20 +309,27 @@ gh pr edit <PR number> --add-reviewer @copilot
 > **Note**: GitHub CLI supports re-requesting Copilot review via `--add-reviewer @copilot`
 > even after a previous review has been submitted.
 
-**Step 2: Wait for new Copilot review**
+**Step 2: Wait for new Copilot review (CHANGES_REQUESTED path only)**
 
-Same polling strategy as Phase 2.5:
-- Wait 5 minutes from the re-request
-- Poll every 1 minute (max 5 retries)
-- Check that the latest Copilot review is newer than the fix commit
+> For `APPROVED_WITH_FINDINGS`: Skip Step 2 and 3 — only the re-request in Step 1 is needed.
+> Copilot will review asynchronously; the review gate does not wait.
+
+For `CHANGES_REQUESTED` path: same polling strategy as Phase 2.5 (5 total polling attempts starting at 5 minutes from re-request).
+Check that the latest Copilot review is newer than the fix commit.
 
 ```bash
+# Get the fix commit timestamp (the latest commit on the PR branch after the Fixer push)
+fix_commit_time=$(gh api repos/{owner}/{repo}/pulls/<PR number>/commits \
+  --jq 'last | .commit.committer.date')
+
 # Get the latest Copilot review timestamp
-gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
-  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer")] | last | .submitted_at'
+copilot_review_time=$(gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer")] | last | .submitted_at')
 ```
 
-Compare against the fix commit timestamp. Only collect comments from the latest review.
+Compare `copilot_review_time > fix_commit_time` to confirm the review covers the fix.
+If the latest Copilot review is older than the fix commit, continue polling.
+Only collect comments from the latest review (after the fix).
 
 **Step 3: Collect new Copilot findings**
 

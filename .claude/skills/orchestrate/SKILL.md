@@ -312,8 +312,16 @@ Request GitHub Copilot code review immediately so it runs in parallel with Claud
 gh pr edit <PR number> --add-reviewer @copilot
 ```
 
-Record `copilot_requested = true | false` and `copilot_request_time`.
-If the command fails (Copilot not available), log a warning and continue without Copilot review.
+On success, record `copilot_requested = true` and `copilot_request_time`.
+If the command fails (Copilot not available), log a warning and initialize defaults:
+
+```
+copilot_requested = false
+copilot_findings = []
+copilot_review = "UNAVAILABLE"
+```
+
+Continue without Copilot review.
 
 **Step A: Initial Review (Parallel)**
 
@@ -344,8 +352,8 @@ gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
 ```
 
 - If result > 0: Collect Copilot comments → proceed to Step B
-- If result == 0: Wait 1 minute and retry (max 5 retries = 10 minutes total)
-- If timed out: Log warning and proceed without Copilot findings
+- If result == 0: Wait 1 minute and retry, up to 4 additional attempts (5 total polling attempts at approximately 5, 6, 7, 8, 9 minutes; max ~10 minutes from `copilot_request_time`)
+- If no Copilot review after 5 polling attempts: Log warning, set `copilot_findings = []` and `copilot_review = "TIMED_OUT"`, proceed without Copilot findings
 
 Collect Copilot comments:
 
@@ -418,14 +426,19 @@ REVIEW_GATE_RESULT:
   code_review: APPROVED | CHANGES_REQUESTED
   security_review: APPROVED | CHANGES_REQUESTED
   copilot_review: AVAILABLE | UNAVAILABLE | TIMED_OUT
-  copilot_findings_count: <N>
-  copilot_findings_fixed: <N>
+  copilot_findings_initial: <N>     # number of Copilot comments in the initial review
+  copilot_findings_remaining: <N>   # number of Copilot comments in the latest re-review (0 if no re-review or unavailable)
   final_verdict: APPROVED | ESCALATED
   fix_rounds: 0 | 1 | 2
   low_fix_only: true | false
   unresolved_findings: [...]
   agent_ids: [<all sub-agent IDs launched>]
 ```
+
+> **`copilot_findings_remaining`**: Determined by counting Copilot comments in the latest
+> re-review round. If a re-review was performed and Copilot returned fewer comments,
+> the difference represents fixed findings. If no re-review occurred, set to the same
+> value as `copilot_findings_initial`.
 
 #### 2.5-3. Collect Review Results
 
@@ -449,8 +462,8 @@ pr_review_results[PR number] = {
   code_review: APPROVED | CHANGES_REQUESTED,
   security_review: APPROVED | CHANGES_REQUESTED,
   copilot_review: AVAILABLE | UNAVAILABLE | TIMED_OUT,
-  copilot_findings_count: N,
-  copilot_findings_fixed: N,
+  copilot_findings_initial: N,
+  copilot_findings_remaining: N,
   final_verdict: APPROVED | ESCALATED,
   fix_rounds: 0 | 1 | 2,
   low_fix_only: true | false,
