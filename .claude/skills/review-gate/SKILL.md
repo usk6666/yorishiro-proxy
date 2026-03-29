@@ -1,5 +1,5 @@
 ---
-description: "Gate skill for managing the PR review → Fix → re-review cycle. Run Code Review + Security Review in parallel, and auto-fix if issues are found"
+description: "Gate skill for managing the PR review → Fix → re-review cycle. Run Code Review + Security Review + Copilot Review in parallel, and auto-fix if issues are found"
 user-invokable: true
 ---
 
@@ -63,6 +63,19 @@ yorishiro-proxy operates as a MITM proxy, therefore:
 
 ---
 
+### Phase 1.5: Request Copilot Review
+
+Request GitHub Copilot code review immediately so it runs in parallel with Claude reviews.
+
+```bash
+gh pr edit <PR number> --add-reviewer @copilot
+```
+
+If this fails (e.g., Copilot not available on the repo), log a warning and continue without Copilot review.
+Record `copilot_requested = true | false` and `copilot_request_time` (timestamp of the request).
+
+---
+
 ### Phase 2: Run Reviews in Parallel
 
 #### 2-1. Load Agent Templates
@@ -100,6 +113,56 @@ Task(description="Security review PR #<N>", subagent_type="general-purpose", iso
 
 ---
 
+### Phase 2.5: Wait for and Collect Copilot Review
+
+> **Skip this phase** if `copilot_requested == false`.
+
+#### 2.5-1. Calculate Wait Time
+
+Copilot review typically takes 3-5 minutes. Wait strategy:
+
+1. Calculate elapsed time since `copilot_request_time`
+2. If less than 5 minutes have elapsed, sleep until the 5-minute mark
+3. After 5 minutes, check if Copilot review has been submitted
+
+#### 2.5-2. Poll for Copilot Review
+
+Check for Copilot review submission:
+
+```bash
+gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer")] | length'
+```
+
+- If result > 0: Copilot review has been submitted → proceed to 2.5-3
+- If result == 0: Wait 1 minute and retry (max 5 retries = 10 minutes total from request)
+- If max retries exceeded: Log warning "Copilot review timed out" and proceed without Copilot findings
+
+#### 2.5-3. Collect Copilot Review Comments
+
+Fetch Copilot's review comments:
+
+```bash
+gh api repos/{owner}/{repo}/pulls/<PR number>/comments \
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer") | {path: .path, line: .line, body: .body}]'
+```
+
+Also fetch the review body (top-level review summary):
+
+```bash
+gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer")] | last | {state: .state, body: .body}'
+```
+
+Record findings as:
+
+```
+copilot_review_state = APPROVED | CHANGES_REQUESTED | COMMENTED
+copilot_findings = [{ path, line, body }, ...]
+```
+
+---
+
 ### Phase 3: Aggregate Verdict
 
 #### 3-1. Parse Results
@@ -113,25 +176,44 @@ security_review_verdict = APPROVED | CHANGES_REQUESTED
 
 #### 3-2. Check for Findings
 
-Parse the `FINDINGS:` section from each agent's output and record whether LOW or higher findings exist.
+Parse the `FINDINGS:` section from each Claude agent's output and record whether LOW or higher findings exist.
 `FINDINGS: None` means no findings.
 
 ```
 code_review_has_findings = true | false
 security_review_has_findings = true | false
-has_any_findings = code_review_has_findings or security_review_has_findings
+copilot_has_findings = len(copilot_findings) > 0  # from Phase 2.5
+has_any_findings = code_review_has_findings or security_review_has_findings or copilot_has_findings
 ```
 
-#### 3-3. Aggregate Verdict
+#### 3-3. Format Copilot Findings for Fix
 
-| Code Review | Security Review | Aggregate Verdict | Next Action |
-|-------------|----------------|-------------------|-------------|
-| APPROVED (no findings) | APPROVED (no findings) | **APPROVED** | Phase 5 (Report) |
-| APPROVED (with findings) | APPROVED (no/with findings) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix only, no re-review) |
-| APPROVED (no findings) | APPROVED (with findings) | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix only, no re-review) |
-| APPROVED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
-| CHANGES_REQUESTED | APPROVED | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
-| CHANGES_REQUESTED | CHANGES_REQUESTED | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
+Convert Copilot review comments into a format compatible with the Fixer Agent:
+
+```
+COPILOT_FINDINGS:
+  - ID: C-1, Severity: MEDIUM, File: <path>, Line: <line>
+    Description: <comment body>
+  - ID: C-2, ...
+```
+
+Severity mapping for Copilot comments:
+- Comments suggesting security fixes → HIGH
+- Comments suggesting bug fixes → MEDIUM
+- Style/refactoring suggestions → LOW
+- Use your judgment based on the comment content
+
+#### 3-4. Aggregate Verdict
+
+| Code Review | Security Review | Copilot Review | Aggregate Verdict | Next Action |
+|-------------|----------------|----------------|-------------------|-------------|
+| APPROVED (no findings) | APPROVED (no findings) | No findings / N/A | **APPROVED** | Phase 5 (Report) |
+| APPROVED | APPROVED | Has findings | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix only, no re-review) |
+| APPROVED (with findings) | APPROVED (no/with findings) | Any | **APPROVED_WITH_FINDINGS** | Phase 4 (Fix only, no re-review) |
+| Any CHANGES_REQUESTED | Any | Any | **CHANGES_REQUESTED** | Phase 4 (Fix + re-review) |
+
+> **Note**: Copilot findings alone do not trigger `CHANGES_REQUESTED` — they are always treated as supplementary.
+> However, if Copilot's review state is `CHANGES_REQUESTED`, it contributes to the aggregate verdict.
 
 ---
 
@@ -148,6 +230,7 @@ Read `.claude/agents/fixer.md` with the Read tool and replace placeholders:
 - `{{BRANCH_NAME}}` → PR head branch name
 - `{{CODE_REVIEW_FINDINGS}}` → Code Review findings (pass all findings if present; "None — Code review passed." if none)
 - `{{SECURITY_REVIEW_FINDINGS}}` → Security Review findings (pass all findings if present; "None — Security review passed." if none)
+- `{{COPILOT_REVIEW_FINDINGS}}` → Copilot Review findings formatted in Phase 3-3 (pass all findings if present; "None — Copilot review not available or no findings." if none)
 - `{{ORIGINAL_ISSUE_ID}}` → Issue ID
 - `{{PRODUCT_CONTEXT}}` → Product context
 
@@ -177,25 +260,62 @@ Re-run **only the reviews that were `CHANGES_REQUESTED`**:
 ```
 # For APPROVED_WITH_FINDINGS: Fix only, no re-review
 if aggregate_verdict == APPROVED_WITH_FINDINGS:
-    Launch Fixer Agent (pass all findings including LOW)
-    → Phase 5 (complete without re-review)
+    Launch Fixer Agent (pass all findings including LOW + Copilot findings)
+    → Phase 4.5 (Copilot re-review) → Phase 5
 
 # For CHANGES_REQUESTED: Fix + re-review cycle (max 2 rounds)
 current_round = 1
 
 while current_round <= 2:
     if aggregate_verdict == APPROVED or aggregate_verdict == APPROVED_WITH_FINDINGS:
-        break  → Phase 5
+        break  → Phase 4.5 → Phase 5
 
-    Launch Fixer Agent (pass all findings including LOW)
+    Launch Fixer Agent (pass all findings including LOW + Copilot findings)
     Run re-review (only the side that was CHANGES_REQUESTED)
-    Aggregate verdict
+    → Phase 4.5 (Copilot re-review on each round)
+    Aggregate verdict (including new Copilot findings)
 
     current_round += 1
 
 if current_round > 2 and aggregate_verdict == CHANGES_REQUESTED:
     → ESCALATE
 ```
+
+#### 4-5. Copilot Re-review After Fix
+
+> **Skip this step** if `copilot_requested == false`.
+
+After the Fixer Agent pushes changes, re-request Copilot review and wait for new results.
+
+**Step 1: Re-request Copilot review**
+
+```bash
+gh pr edit <PR number> --add-reviewer @copilot
+```
+
+> **Note**: GitHub CLI supports re-requesting Copilot review via `--add-reviewer @copilot`
+> even after a previous review has been submitted.
+
+**Step 2: Wait for new Copilot review**
+
+Same polling strategy as Phase 2.5:
+- Wait 5 minutes from the re-request
+- Poll every 1 minute (max 5 retries)
+- Check that the latest Copilot review is newer than the fix commit
+
+```bash
+# Get the latest Copilot review timestamp
+gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer")] | last | .submitted_at'
+```
+
+Compare against the fix commit timestamp. Only collect comments from the latest review.
+
+**Step 3: Collect new Copilot findings**
+
+Fetch new Copilot comments (same as Phase 2.5-3) and update `copilot_findings`.
+New Copilot findings are included in the next fix round's input (if another round occurs)
+or reported in Phase 5 (if no more rounds).
 
 ---
 
@@ -223,6 +343,7 @@ if current_round > 2 and aggregate_verdict == CHANGES_REQUESTED:
 |--------|---------|---------|---------|-------|
 | Code Review | APPROVED/CHANGES_REQUESTED | — | — | APPROVED |
 | Security Review | CHANGES_REQUESTED | APPROVED | — | APPROVED |
+| Copilot Review | 3 comments | 1 comment | — | 0 comments |
 
 ### Findings Summary
 
@@ -289,8 +410,11 @@ but it is idempotent so no problem. This effectively functions only when `/revie
 
 ## Maximum Agent Calls Per PR (Worst Case)
 
-Initial review 2 + Fix 1 + Re-review 2 + Fix 1 + Re-review 2 = **8 calls**
+Initial review 2 + Fix 1 + Re-review 2 + Fix 1 + Re-review 2 = **8 calls** (unchanged; Copilot uses `gh` CLI, not Agent calls)
 For APPROVED_WITH_FINDINGS: Initial review 2 + Fix 1 = **3 calls**
+
+> **Note**: Copilot review request/polling uses `gh` CLI commands, not additional Agent calls.
+> The wait time adds ~5-10 minutes per round but does not increase agent concurrency.
 
 ---
 
