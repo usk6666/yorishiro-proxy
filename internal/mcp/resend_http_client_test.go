@@ -91,6 +91,16 @@ func TestBuildRawRequest_ContentLengthRecalculation(t *testing.T) {
 			},
 			wantCL: "12", // len("chunked body") == 12; TE removed, CL recalculated
 		},
+		{
+			name: "duplicate Content-Length headers are collapsed to one correct value",
+			body: []byte("dup"),
+			headers: parser.RawHeaders{
+				{Name: "Content-Length", Value: "100"},
+				{Name: "X-Between", Value: "separator"},
+				{Name: "Content-Length", Value: "200"},
+			},
+			wantCL: "3", // len("dup") == 3; both stale CLs removed, single correct CL added
+		},
 	}
 
 	for _, tt := range tests {
@@ -112,6 +122,11 @@ func TestBuildRawRequest_ContentLengthRecalculation(t *testing.T) {
 			}
 			if cl != tt.wantCL {
 				t.Errorf("Content-Length = %q, want %q", cl, tt.wantCL)
+			}
+
+			// Exactly one Content-Length header must remain.
+			if n := len(req.Headers.Values("Content-Length")); n != 1 {
+				t.Errorf("expected exactly 1 Content-Length header, got %d", n)
 			}
 
 			// Transfer-Encoding must always be stripped for structured resends

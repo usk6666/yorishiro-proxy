@@ -624,10 +624,9 @@ func (s *Server) buildRawRequest(prep *resendPrepared) *parser.RawRequest {
 	// Users who need chunked encoding or mismatched Content-Length (e.g. for
 	// request smuggling tests) should use resend_raw.
 	headers.Del("Transfer-Encoding")
+	headers.Del("Content-Length")
 	if len(prep.body) > 0 {
 		headers.Set("Content-Length", fmt.Sprintf("%d", len(prep.body)))
-	} else {
-		headers.Del("Content-Length")
 	}
 
 	return &parser.RawRequest{
