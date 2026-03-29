@@ -186,41 +186,10 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 		onRecvFrame: opts.OnRecvFrame,
 	}
 
-	// Register a bridge streamState so the existing read loop can dispatch
-	// frames to our streaming handler.
-	ss := &streamState{
-		done:        sss.done,
-		headersDone: sss.headersDone,
-	}
-
-	tc.streamsMu.Lock()
-	tc.streams[streamID] = ss
-	tc.streamsMu.Unlock()
-
 	// Transition to open state.
 	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
 
-	// Override the read loop dispatch for this stream by installing a custom
-	// handler. We need to intercept frames for this stream specifically
-	// to pipe DATA into the streaming body and handle trailers.
-	// Instead of modifying the read loop, we'll replace the streamState's
-	// behavior by using a wrapper approach.
-	//
-	// However, the existing read loop is fixed and dispatches to handleResponseHeaders,
-	// handleData, etc. which operate on streamState fields directly. For the streaming
-	// case, we need to redirect DATA writes to the pipe.
-	//
-	// Strategy: We'll use the existing streamState but override how data is handled
-	// by using a custom streamState that intercepts at the field level. Since the
-	// read loop accesses ss.data directly, we need a different approach.
-	//
-	// The cleanest solution: register a custom dispatch hook per-stream.
-
-	// Remove the bridge streamState and install the streaming dispatcher.
-	tc.streamsMu.Lock()
-	delete(tc.streams, streamID)
-	tc.streamsMu.Unlock()
-
+	// Install the streaming dispatcher for this stream.
 	tc.registerStreamingHandler(streamID, sss)
 
 	// Send HEADERS frame(s) — determine endStream from body presence.
@@ -445,6 +414,8 @@ func (tc *transportConn) streamSendData(ctx context.Context, streamID uint32, da
 // waitForSendWindow waits until the connection and stream flow control windows
 // have enough space for the requested number of bytes.
 func (tc *transportConn) waitForSendWindow(ctx context.Context, streamID uint32, needed int32) error {
+	timer := time.NewTimer(10 * time.Millisecond)
+	defer timer.Stop()
 	for {
 		connWindow := tc.conn.SendWindow()
 		streamWindow, ok := tc.conn.Streams().GetSendWindow(streamID)
@@ -463,7 +434,8 @@ func (tc *transportConn) waitForSendWindow(ctx context.Context, streamID uint32,
 			return ctx.Err()
 		case <-tc.readLoopDone:
 			return fmt.Errorf("connection closed while waiting for send window")
-		case <-time.After(10 * time.Millisecond):
+		case <-timer.C:
+			timer.Reset(10 * time.Millisecond)
 			// Retry after peer sends WINDOW_UPDATE.
 		}
 	}
@@ -601,7 +573,10 @@ func (tc *transportConn) handleStreamingData(f *frame.Frame, sss *streamingStrea
 		sss.endStream = true
 		tc.conn.Streams().Transition(streamID, EventRecvEndStream) //nolint:errcheck
 		sss.bodyWriter.Close()
-		sss.done <- streamResult{}
+		select {
+		case sss.done <- streamResult{}:
+		default:
+		}
 	}
 
 	return nil
@@ -624,6 +599,9 @@ func (tc *transportConn) processStreamingDecodedHeaders(sss *streamingStreamStat
 		sss.endStream = true
 		tc.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream) //nolint:errcheck
 		sss.bodyWriter.Close()
-		sss.done <- streamResult{}
+		select {
+		case sss.done <- streamResult{}:
+		default:
+		}
 	}
 }

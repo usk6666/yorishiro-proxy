@@ -1235,6 +1235,16 @@ func (tc *transportConn) handleGoAway(f *frame.Frame) error {
 			}
 		}
 	}
+	for id, sss := range tc.streamingStreams {
+		if id > lastStreamID {
+			goawayErr := fmt.Errorf("stream %d rejected by GOAWAY (last=%d)", id, lastStreamID)
+			sss.bodyWriter.CloseWithError(goawayErr)
+			select {
+			case sss.done <- streamResult{err: goawayErr}:
+			default:
+			}
+		}
+	}
 	tc.streamsMu.Unlock()
 
 	return nil
