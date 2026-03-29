@@ -21,6 +21,7 @@ import (
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // resendInput is the typed input for the resend tool.
@@ -530,15 +531,19 @@ func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params
 		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Use a separate timeout context for the network round trip only.
+	// The parent ctx is kept for flow recording and hooks so they do not fail
+	// with "context deadline exceeded" if the upstream request consumes most
+	// of the timeout budget.
+	rtCtx, rtCancel := context.WithTimeout(ctx, timeout)
+	defer rtCancel()
 
 	// Determine target address and TLS settings from URL.
 	addr, useTLS, hostname := resolveResendTarget(prep.url, params)
 
 	router := s.resendUpstreamRouter(params)
 	start := time.Now()
-	rtResult, err := router.RoundTrip(ctx, rawReq, addr, useTLS, hostname)
+	rtResult, err := router.RoundTrip(rtCtx, rawReq, addr, useTLS, hostname)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend request: %w", err)
 	}
@@ -566,6 +571,7 @@ func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params
 	}
 	duration := time.Since(start)
 
+	// Recording and hooks use the parent ctx, not the round-trip timeout context.
 	if err := s.recordResendFlowRaw(ctx, prep, params, rawReq, resp, respBody, start, duration); err != nil {
 		return nil, nil, err
 	}
@@ -699,9 +705,10 @@ func (s *Server) recordResendFlowRaw(ctx context.Context, prep *resendPrepared, 
 	}
 
 	// For gRPC flows, record trailers from the response headers.
-	// With UpstreamRouter, HTTP/2 trailers are included in the response headers.
-	// Detect trailer-like headers (grpc-status, grpc-message) to build the
-	// trailers message for format compatibility.
+	// Structured resend uses the H1 transport path, so gRPC trailers
+	// (grpc-status, grpc-message) arrive as regular HTTP/1.x trailing headers
+	// merged into the response headers. Detect them to build a separate
+	// trailers message for format compatibility with native gRPC flows.
 	if isGRPCFlow(prep.flow.Protocol) {
 		grpcStatus := resp.Headers.Get("Grpc-Status")
 		grpcMessage := resp.Headers.Get("Grpc-Message")
@@ -878,11 +885,13 @@ func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 		return s.deps.replayRouter
 	}
 	pool := &protohttp.ConnPool{
-		// TLSTransport is intentionally nil: ConnPool.effectiveTLSTransport()
-		// creates a StandardTransport with NextProtos restricted to ["http/1.1"]
-		// when AllowH2 is false. Passing the shared s.deps.tlsTransport would
-		// offer "h2" in ALPN, causing the server to negotiate h2 which ConnPool
-		// then rejects — breaking HTTPS resend for most servers (ALPN-1 fix).
+		// Preserve the user's configured TLS transport (including uTLS fingerprint
+		// profiles) while restricting ALPN to HTTP/1.1 only. RestrictALPNToH1
+		// clones the transport with NextProtos=["http/1.1"], so the browser
+		// fingerprint is preserved but h2 is never negotiated (ALPN-1 + TLS-1 fix).
+		// When no transport is configured, effectiveTLSTransport() creates a default
+		// StandardTransport with NextProtos=["http/1.1"] since AllowH2 is false.
+		TLSTransport: restrictTLSForResend(s.deps.tlsTransport),
 
 		// AllowH2 is intentionally false: the resend router does not have an
 		// H2 transport, so h2 ALPN negotiation must be prevented.
@@ -891,6 +900,15 @@ func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 		H1:   &protohttp.H1Transport{},
 		Pool: pool,
 	}
+}
+
+// restrictTLSForResend returns a TLS transport with ALPN restricted to HTTP/1.1.
+// When the input is nil, nil is returned so ConnPool falls back to its default.
+func restrictTLSForResend(t httputil.TLSTransport) httputil.TLSTransport {
+	if t == nil {
+		return nil
+	}
+	return httputil.RestrictALPNToH1(t)
 }
 
 // --- Resend raw ---
