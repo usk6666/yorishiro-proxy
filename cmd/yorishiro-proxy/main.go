@@ -517,7 +517,7 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	// via the MCP proxy_start tool (SetUpstreamProxy). When USK-494 activates
 	// the ConnPool in the forwarding path, SetUpstreamProxy must also sync
 	// ConnPool.UpstreamProxy so upstream proxy chaining works correctly.
-	connPool := &protohttp.ConnPool{
+	connPool := &httputil.ConnPool{
 		TLSTransport: tlsTransport,
 		DialTimeout:  cfg.DialTimeout,
 	}

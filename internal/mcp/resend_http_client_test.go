@@ -8,6 +8,7 @@ import (
 
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 func TestResendUpstreamRouter_DefaultRouter(t *testing.T) {
@@ -44,7 +45,7 @@ func TestResendUpstreamRouter_ReplayRouterOverride(t *testing.T) {
 
 type mockResendRouter struct{}
 
-func (m *mockResendRouter) RoundTrip(_ context.Context, _ *parser.RawRequest, _ string, _ bool, _ string) (*protohttp.RoundTripResult, error) {
+func (m *mockResendRouter) RoundTrip(_ context.Context, _ *parser.RawRequest, _ string, _ bool, _ string) (*httputil.RoundTripResult, error) {
 	return nil, nil
 }
 

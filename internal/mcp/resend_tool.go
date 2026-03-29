@@ -866,7 +866,7 @@ func validateOverrideHost(host string) error {
 // resendRouter abstracts upstream round-trip for the resend tool, enabling
 // test injection without net/http dependency.
 type resendRouter interface {
-	RoundTrip(ctx context.Context, req *parser.RawRequest, addr string, useTLS bool, hostname string) (*protohttp.RoundTripResult, error)
+	RoundTrip(ctx context.Context, req *parser.RawRequest, addr string, useTLS bool, hostname string) (*httputil.RoundTripResult, error)
 }
 
 // resendUpstreamRouter returns the upstream router for the resend tool.
@@ -883,7 +883,7 @@ func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 	if s.deps.replayRouter != nil {
 		return s.deps.replayRouter
 	}
-	pool := &protohttp.ConnPool{
+	pool := &httputil.ConnPool{
 		// Preserve the user's configured TLS transport (including uTLS fingerprint
 		// profiles) while restricting ALPN to HTTP/1.1 only. RestrictALPNToH1
 		// clones the transport with NextProtos=["http/1.1"], so the browser
@@ -896,7 +896,7 @@ func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 		// H2 transport, so h2 ALPN negotiation must be prevented.
 	}
 	return &protohttp.UpstreamRouter{
-		H1:   &protohttp.H1Transport{},
+		H1:   &httputil.H1Transport{},
 		Pool: pool,
 	}
 }
