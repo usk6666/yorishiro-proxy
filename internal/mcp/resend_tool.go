@@ -21,7 +21,7 @@ import (
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
 )
 
 // resendInput is the typed input for the resend tool.
@@ -875,39 +875,23 @@ type resendRouter interface {
 //
 // A new ConnPool is created per call intentionally — resend is a low-frequency
 // diagnostic operation and connection reuse across resends is not needed (YAGNI).
-// AllowH2 is false because the resend router only has an H1 transport;
-// if the upstream negotiated h2, UpstreamRouter.roundTripH2 would dereference
-// a nil H2 transport and panic. The proxy handler pipeline uses a separate
-// UpstreamRouter with H2 properly initialized.
+// AllowH2 is true so that the upstream can negotiate h2 when required (e.g. gRPC).
 func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 	if s.deps.replayRouter != nil {
 		return s.deps.replayRouter
 	}
 	pool := &protohttp.ConnPool{
-		// Preserve the user's configured TLS transport (including uTLS fingerprint
-		// profiles) while restricting ALPN to HTTP/1.1 only. RestrictALPNToH1
-		// clones the transport with NextProtos=["http/1.1"], so the browser
-		// fingerprint is preserved but h2 is never negotiated (ALPN-1 + TLS-1 fix).
-		// When no transport is configured, effectiveTLSTransport() creates a default
-		// StandardTransport with NextProtos=["http/1.1"] since AllowH2 is false.
-		TLSTransport: restrictTLSForResend(s.deps.tlsTransport),
-
-		// AllowH2 is intentionally false: the resend router does not have an
-		// H2 transport, so h2 ALPN negotiation must be prevented.
+		// Use the user's configured TLS transport as-is (including uTLS fingerprint
+		// profiles). AllowH2 enables ALPN negotiation for both http/1.1 and h2,
+		// allowing gRPC flows to be resent to h2-only upstreams.
+		TLSTransport: s.deps.tlsTransport,
+		AllowH2:      true,
 	}
 	return &protohttp.UpstreamRouter{
 		H1:   &protohttp.H1Transport{},
+		H2:   &http2.Transport{},
 		Pool: pool,
 	}
-}
-
-// restrictTLSForResend returns a TLS transport with ALPN restricted to HTTP/1.1.
-// When the input is nil, nil is returned so ConnPool falls back to its default.
-func restrictTLSForResend(t httputil.TLSTransport) httputil.TLSTransport {
-	if t == nil {
-		return nil
-	}
-	return httputil.RestrictALPNToH1(t)
 }
 
 // --- Resend raw ---
