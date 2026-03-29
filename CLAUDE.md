@@ -27,7 +27,7 @@ TCP Listener (Layer 4)
 
 | Protocol | L7 Structured View | L4 raw bytes | Notes |
 |----------|-------------------|--------------|-------|
-| HTTP/1.x | YES | YES (captureReader) | intercept raw forwarding in M27 |
+| HTTP/1.x | YES | YES (parser built-in) | Independent engine in M32; net/http removed |
 | HTTP/2 | YES | YES (frame codec) | Custom frame engine implemented in M26 |
 | gRPC | YES | YES (via HTTP/2) | |
 | WebSocket | YES | YES (per frame) | |
@@ -60,6 +60,7 @@ internal/
     http/                  # HTTP/1.x, HTTPS MITM implementation
       handler.go           # HTTP forward proxy handler
       connect.go           # CONNECT tunnel, HTTPS MITM
+      parser/              # HTTP/1.x parser (RawRequest, RawResponse, Anomaly)
     httputil/              # HTTP common utilities (TLS transport, per-host TLS config, timing)
   safety/                  # SafetyFilter engine (Input Filter + Output Filter)
     engine.go              # Rule compilation, CheckInput, FilterOutput
