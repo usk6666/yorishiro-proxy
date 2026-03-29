@@ -19,6 +19,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
@@ -279,7 +281,7 @@ type resendPrepared struct {
 	method  string
 	url     *url.URL
 	body    []byte
-	headers map[string][]string
+	headers parser.RawHeaders
 	kvStore map[string]string
 }
 
@@ -299,7 +301,7 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 
 	// SafetyFilter input check: block destructive payloads before sending.
 	// Skipped for dry-run since no actual request is sent.
-	if v := s.checkSafetyInput(prep.body, prep.url.String(), http.Header(prep.headers)); v != nil {
+	if v := s.checkSafetyInput(prep.body, prep.url.String(), prep.headers); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
@@ -315,6 +317,13 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 	}
 	if params.FlowID == "" {
 		return nil, nil, nil, fmt.Errorf("flow_id is required for resend action")
+	}
+
+	// Reject follow_redirects: the UpstreamRouter does not support redirect
+	// following (the old net/http.Client path was removed). Fail explicitly
+	// rather than silently ignoring the parameter.
+	if params.FollowRedirects != nil && *params.FollowRedirects {
+		return nil, nil, nil, fmt.Errorf("follow_redirects is not supported: the resend transport does not implement redirect following")
 	}
 
 	if err := validateHooks(params.Hooks); err != nil {
@@ -485,14 +494,9 @@ func (s *Server) validateResendScope(targetURL *url.URL, params resendParams) er
 }
 
 // buildDryRunResult creates a dry-run result from the prepared request parameters.
-func buildDryRunResult(method string, targetURL *url.URL, headers map[string][]string, reqBody []byte) *resendDryRunResult {
+func buildDryRunResult(method string, targetURL *url.URL, headers parser.RawHeaders, reqBody []byte) *resendDryRunResult {
 	bodyStr, bodyEncoding := encodeBody(reqBody)
-	previewHeaders := make(map[string][]string)
-	for k, v := range headers {
-		if len(v) > 0 {
-			previewHeaders[k] = v
-		}
-	}
+	previewHeaders := rawHeadersToMultiMap(headers)
 	return &resendDryRunResult{
 		DryRun: true,
 		RequestPreview: &requestPreview{
@@ -505,28 +509,70 @@ func buildDryRunResult(method string, targetURL *url.URL, headers map[string][]s
 	}
 }
 
-// executeResend sends the HTTP request and records the flow and messages.
+// rawHeadersToMultiMap converts parser.RawHeaders to map[string][]string
+// for JSON serialization in result types. Header names are canonicalized
+// using http.CanonicalHeaderKey so that HTTP/2 lowercase names (e.g. "content-type")
+// are normalized to the canonical form expected by consumers (e.g. "Content-Type").
+func rawHeadersToMultiMap(headers parser.RawHeaders) map[string][]string {
+	result := make(map[string][]string)
+	for _, h := range headers {
+		key := http.CanonicalHeaderKey(h.Name)
+		result[key] = append(result[key], h.Value)
+	}
+	return result
+}
+
+// executeResend sends the HTTP request via UpstreamRouter and records the flow and messages.
 func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params resendParams) (*gomcp.CallToolResult, any, error) {
-	httpReq, err := s.buildHTTPRequest(ctx, prep)
-	if err != nil {
-		return nil, nil, err
+	rawReq := s.buildRawRequest(prep)
+
+	timeout := defaultReplayTimeout
+	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
+		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
 	}
 
-	client := s.resendHTTPClient(params)
+	// Use a separate timeout context for the network round trip only.
+	// The parent ctx is kept for flow recording and hooks so they do not fail
+	// with "context deadline exceeded" if the upstream request consumes most
+	// of the timeout budget.
+	rtCtx, rtCancel := context.WithTimeout(ctx, timeout)
+	defer rtCancel()
+
+	// Determine target address and TLS settings from URL.
+	addr, useTLS, hostname := resolveResendTarget(prep.url, params)
+
+	router := s.resendUpstreamRouter(params)
 	start := time.Now()
-	resp, err := client.Do(httpReq)
+	rtResult, err := router.RoundTrip(rtCtx, rawReq, addr, useTLS, hostname)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxReplayResponseSize))
-	if err != nil {
-		return nil, nil, fmt.Errorf("read resend response body: %w", err)
+	resp := rtResult.Response
+	if resp == nil {
+		return nil, nil, fmt.Errorf("resend request: upstream returned nil response")
+	}
+
+	// Defer body close to prevent connection leak if ReadAll fails.
+	// The UpstreamRouter wraps the body with connClosingReader that closes the
+	// underlying connection when the body is closed or fully read.
+	if resp.Body != nil {
+		if closer, ok := resp.Body.(io.Closer); ok {
+			defer closer.Close()
+		}
+	}
+
+	var respBody []byte
+	if resp.Body != nil {
+		respBody, err = io.ReadAll(io.LimitReader(resp.Body, config.MaxReplayResponseSize))
+		if err != nil {
+			return nil, nil, fmt.Errorf("read resend response body: %w", err)
+		}
 	}
 	duration := time.Since(start)
 
-	if err := s.recordResendFlow(ctx, prep, params, httpReq, resp, respBody, start, duration); err != nil {
+	// Recording and hooks use the parent ctx, not the round-trip timeout context.
+	if err := s.recordResendFlowRaw(ctx, prep, params, rawReq, resp, respBody, start, duration); err != nil {
 		return nil, nil, err
 	}
 
@@ -541,68 +587,87 @@ func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params
 	// Apply SafetyFilter output masking before returning to AI agent.
 	// Raw data is already saved to the store above.
 	maskedBody := s.filterOutputBody(respBody)
-	maskedHeaders := s.filterOutputHeaders(resp.Header)
+	maskedHeaders := s.filterOutputRawHeaders(resp.Headers)
 
 	respBodyStr, respBodyEncoding := encodeBody(maskedBody)
 	return nil, &resendActionResult{
 		NewFlowID: prep.flow.ID, StatusCode: resp.StatusCode,
-		ResponseHeaders: copyHeaders(maskedHeaders), ResponseBody: respBodyStr,
+		ResponseHeaders: rawHeadersToMultiMap(maskedHeaders), ResponseBody: respBodyStr,
 		ResponseBodyEncoding: respBodyEncoding, DurationMs: duration.Milliseconds(),
 		Tag: params.Tag,
 	}, nil
 }
 
-// buildHTTPRequest creates an *http.Request from the prepared resend state.
-func (s *Server) buildHTTPRequest(ctx context.Context, prep *resendPrepared) (*http.Request, error) {
+// buildRawRequest creates a *parser.RawRequest from the prepared resend state.
+func (s *Server) buildRawRequest(prep *resendPrepared) *parser.RawRequest {
 	var body io.Reader
 	if len(prep.body) > 0 {
 		body = bytes.NewReader(prep.body)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, prep.method, prep.url.String(), body)
-	if err != nil {
-		return nil, fmt.Errorf("create resend request: %w", err)
+	// Build the request URI in origin-form (path+query). url.URL.RequestURI()
+	// returns the path?query portion, which is origin-form per RFC 7230 Section 5.3.1.
+	requestURI := prep.url.RequestURI()
+
+	headers := prep.headers.Clone()
+
+	// Ensure Host header is present. HTTP/1.1 requires it, and the old
+	// net/http.Client would set it automatically from the URL.
+	if headers.Get("Host") == "" && prep.url.Host != "" {
+		headers = append(parser.RawHeaders{{Name: "Host", Value: prep.url.Host}}, headers...)
 	}
 
-	applyHeaders(httpReq, prep.headers)
-	return httpReq, nil
-}
+	// Structured resend always has the full body in memory, so Content-Length
+	// is the correct framing mechanism. Remove Transfer-Encoding (the
+	// H1Transport writes body bytes verbatim without chunked encoding, so
+	// keeping TE: chunked would produce an invalid request — TE-1 fix).
+	// Users who need chunked encoding or mismatched Content-Length (e.g. for
+	// request smuggling tests) should use resend_raw.
+	headers.Del("Transfer-Encoding")
+	headers.Del("Content-Length")
+	if len(prep.body) > 0 {
+		headers.Set("Content-Length", fmt.Sprintf("%d", len(prep.body)))
+	}
 
-// applyHeaders sets the headers on the HTTP request, preserving multi-value headers.
-// When the Host header is set, it also updates req.Host because Go's net/http
-// ignores the Host key in req.Header and uses req.Host exclusively.
-func applyHeaders(req *http.Request, headers map[string][]string) {
-	for key, values := range headers {
-		if len(values) == 0 {
-			req.Header[key] = values
-			continue
-		}
-		for i, v := range values {
-			if i == 0 {
-				req.Header.Set(key, v)
-			} else {
-				req.Header.Add(key, v)
-			}
-		}
-		// Go's net/http ignores the "Host" key in req.Header and uses
-		// req.Host instead (mapped to :authority in HTTP/2).
-		if http.CanonicalHeaderKey(key) == "Host" && len(values) > 0 {
-			req.Host = values[0]
-		}
+	return &parser.RawRequest{
+		Method:     prep.method,
+		RequestURI: requestURI,
+		Proto:      "HTTP/1.1",
+		Headers:    headers,
+		Body:       body,
 	}
 }
 
-// copyHeaders creates a shallow copy of HTTP headers.
-func copyHeaders(src http.Header) map[string][]string {
-	result := make(map[string][]string)
-	for key, values := range src {
-		result[key] = values
+// resolveResendTarget extracts the target address, TLS flag, and hostname
+// from the URL and override_host parameter.
+func resolveResendTarget(u *url.URL, params resendParams) (addr string, useTLS bool, hostname string) {
+	useTLS = u.Scheme == "https"
+	hostname = u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if useTLS {
+			port = "443"
+		} else {
+			port = "80"
+		}
 	}
-	return result
+	addr = net.JoinHostPort(hostname, port)
+
+	// Override host routes to a different address while preserving Host header.
+	if params.OverrideHost != "" {
+		addr = params.OverrideHost
+		// Extract hostname from override for TLS SNI.
+		if h, _, err := net.SplitHostPort(params.OverrideHost); err == nil {
+			hostname = h
+		}
+	}
+
+	return addr, useTLS, hostname
 }
 
-// recordResendFlow saves the resend flow and its send/receive messages to the store.
-func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, params resendParams, httpReq *http.Request, resp *http.Response, respBody []byte, start time.Time, duration time.Duration) error {
+// recordResendFlowRaw saves the resend flow and its send/receive messages to the store.
+// It works with parser.RawRequest/RawResponse from the UpstreamRouter.
+func (s *Server) recordResendFlowRaw(ctx context.Context, prep *resendPrepared, params resendParams, rawReq *parser.RawRequest, resp *parser.RawResponse, respBody []byte, start time.Time, duration time.Duration) error {
 	var tags map[string]string
 	if params.Tag != "" {
 		tags = map[string]string{"tag": params.Tag}
@@ -620,66 +685,67 @@ func (s *Server) recordResendFlow(ctx context.Context, prep *resendPrepared, par
 	// Update prep.flow.ID to the new flow ID for the result.
 	prep.flow = newFl
 
-	recordedHeaders := make(map[string][]string)
-	for key, values := range httpReq.Header {
-		recordedHeaders[key] = values
-	}
-
 	newSendMsg := &flow.Message{
 		FlowID: newFl.ID, Sequence: 0, Direction: "send",
 		Timestamp: start, Method: prep.method, URL: prep.url,
-		Headers: recordedHeaders, Body: prep.body,
+		Headers: rawHeadersToMultiMap(rawReq.Headers), Body: prep.body,
 	}
 	if err := s.deps.store.AppendMessage(ctx, newSendMsg); err != nil {
 		return fmt.Errorf("save resend send message: %w", err)
 	}
 
-	respHeaders := make(map[string][]string)
-	for key, values := range resp.Header {
-		respHeaders[key] = values
-	}
-
 	newRecvMsg := &flow.Message{
 		FlowID: newFl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: start.Add(duration), StatusCode: resp.StatusCode,
-		Headers: respHeaders, Body: respBody,
+		Headers: rawHeadersToMultiMap(resp.Headers), Body: respBody,
 	}
 	if err := s.deps.store.AppendMessage(ctx, newRecvMsg); err != nil {
 		return fmt.Errorf("save resend receive message: %w", err)
 	}
 
-	// For gRPC flows, record trailers as a separate message to match
-	// the proxy-captured recording format (grpc_type=trailers).
-	if isGRPCFlow(prep.flow.Protocol) && len(resp.Trailer) > 0 {
-		trailerHeaders := copyHeaders(resp.Trailer)
-		trailerMeta := map[string]string{
-			"grpc_type": "trailers",
-		}
-		// Extract service/method from gRPC path (format: /package.Service/Method)
-		if prep.url != nil {
-			parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
-			if len(parts) == 2 {
-				trailerMeta["service"] = parts[0]
-				trailerMeta["method"] = parts[1]
+	// For gRPC flows, record trailers from the response headers.
+	// Structured resend uses the H1 transport path, so gRPC trailers
+	// (grpc-status, grpc-message) arrive as regular HTTP/1.x trailing headers
+	// merged into the response headers. Detect them to build a separate
+	// trailers message for format compatibility with native gRPC flows.
+	if isGRPCFlow(prep.flow.Protocol) {
+		grpcStatus := resp.Headers.Get("Grpc-Status")
+		grpcMessage := resp.Headers.Get("Grpc-Message")
+		if grpcStatus != "" {
+			trailerMeta := map[string]string{
+				"grpc_type": "trailers",
 			}
-		}
-		if grpcStatus := resp.Trailer.Get("Grpc-Status"); grpcStatus != "" {
+			if prep.url != nil {
+				parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
+				if len(parts) == 2 {
+					trailerMeta["service"] = parts[0]
+					trailerMeta["method"] = parts[1]
+				}
+			}
 			trailerMeta["grpc_status"] = grpcStatus
-		}
-		if grpcMessage := resp.Trailer.Get("Grpc-Message"); grpcMessage != "" {
-			trailerMeta["grpc_message"] = grpcMessage
-		}
-		trailerMsg := &flow.Message{
-			FlowID:     newFl.ID,
-			Sequence:   newRecvMsg.Sequence + 1,
-			Direction:  "receive",
-			Timestamp:  start.Add(duration),
-			StatusCode: resp.StatusCode,
-			Headers:    trailerHeaders,
-			Metadata:   trailerMeta,
-		}
-		if err := s.deps.store.AppendMessage(ctx, trailerMsg); err != nil {
-			return fmt.Errorf("save resend gRPC trailers message: %w", err)
+			if grpcMessage != "" {
+				trailerMeta["grpc_message"] = grpcMessage
+			}
+			// Build trailer headers from response trailer fields.
+			var trailerHeaders parser.RawHeaders
+			for _, h := range resp.Headers {
+				lower := strings.ToLower(h.Name)
+				if lower == "grpc-status" || lower == "grpc-message" || lower == "grpc-status-details-bin" {
+					trailerHeaders = append(trailerHeaders, h)
+				}
+			}
+			trailerMsg := &flow.Message{
+				FlowID:     newFl.ID,
+				Sequence:   newRecvMsg.Sequence + 1,
+				Direction:  "receive",
+				Timestamp:  start.Add(duration),
+				StatusCode: resp.StatusCode,
+				Headers:    rawHeadersToMultiMap(trailerHeaders),
+				Metadata:   trailerMeta,
+			}
+			if err := s.deps.store.AppendMessage(ctx, trailerMsg); err != nil {
+				return fmt.Errorf("save resend gRPC trailers message: %w", err)
+			}
 		}
 	}
 
@@ -745,40 +811,42 @@ func validateResendHeaders(params resendParams) error {
 	return nil
 }
 
-func buildResendHeaders(originalHeaders map[string][]string, params resendParams) map[string][]string {
-	headers := make(map[string][]string)
-	for key, values := range originalHeaders {
-		cp := make([]string, len(values))
-		copy(cp, values)
-		headers[key] = cp
-	}
+func buildResendHeaders(originalHeaders map[string][]string, params resendParams) parser.RawHeaders {
+	// Build a set of headers to remove (case-insensitive).
+	removeSet := make(map[string]bool, len(params.RemoveHeaders))
 	for _, key := range params.RemoveHeaders {
-		headers[http.CanonicalHeaderKey(key)] = []string{}
+		removeSet[strings.ToLower(key)] = true
 	}
-	// OverrideHeaders: collect all values per canonical key, replacing any original values.
-	overrideGroups := groupHeaderEntries(params.OverrideHeaders)
-	for canonical, values := range overrideGroups {
-		headers[canonical] = values
-	}
-	for _, entry := range params.AddHeaders {
-		canonical := http.CanonicalHeaderKey(entry.Key)
-		headers[canonical] = append(headers[canonical], entry.Value)
-	}
-	return headers
-}
 
-// groupHeaderEntries groups HeaderEntries by canonical header key,
-// preserving the order of values for each key.
-func groupHeaderEntries(entries HeaderEntries) map[string][]string {
-	if len(entries) == 0 {
-		return nil
+	// Build a set of headers overridden by OverrideHeaders (case-insensitive).
+	overrideSet := make(map[string]bool)
+	for _, entry := range params.OverrideHeaders {
+		overrideSet[strings.ToLower(entry.Key)] = true
 	}
-	result := make(map[string][]string)
-	for _, entry := range entries {
-		canonical := http.CanonicalHeaderKey(entry.Key)
-		result[canonical] = append(result[canonical], entry.Value)
+
+	// Copy original headers, skipping removed and overridden ones.
+	var headers parser.RawHeaders
+	for key, values := range originalHeaders {
+		lower := strings.ToLower(key)
+		if removeSet[lower] || overrideSet[lower] {
+			continue
+		}
+		for _, v := range values {
+			headers = append(headers, parser.RawHeader{Name: key, Value: v})
+		}
 	}
-	return result
+
+	// Add override headers.
+	for _, entry := range params.OverrideHeaders {
+		headers = append(headers, parser.RawHeader{Name: entry.Key, Value: entry.Value})
+	}
+
+	// Add additional headers.
+	for _, entry := range params.AddHeaders {
+		headers = append(headers, parser.RawHeader{Name: entry.Key, Value: entry.Value})
+	}
+
+	return headers
 }
 
 func validateOverrideHost(host string) error {
@@ -795,60 +863,51 @@ func validateOverrideHost(host string) error {
 	return nil
 }
 
-func (s *Server) resendHTTPClient(params resendParams) httpDoer {
-	if s.deps.replayDoer != nil {
-		return s.deps.replayDoer
+// resendRouter abstracts upstream round-trip for the resend tool, enabling
+// test injection without net/http dependency.
+type resendRouter interface {
+	RoundTrip(ctx context.Context, req *parser.RawRequest, addr string, useTLS bool, hostname string) (*protohttp.RoundTripResult, error)
+}
+
+// resendUpstreamRouter returns the upstream router for the resend tool.
+// If a test-injected replayRouter is set, it is returned; otherwise a new
+// UpstreamRouter is constructed using the configured TLS transport.
+//
+// A new ConnPool is created per call intentionally — resend is a low-frequency
+// diagnostic operation and connection reuse across resends is not needed (YAGNI).
+// AllowH2 is false because the resend router only has an H1 transport;
+// if the upstream negotiated h2, UpstreamRouter.roundTripH2 would dereference
+// a nil H2 transport and panic. The proxy handler pipeline uses a separate
+// UpstreamRouter with H2 properly initialized.
+func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
+	if s.deps.replayRouter != nil {
+		return s.deps.replayRouter
 	}
-	timeout := defaultReplayTimeout
-	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
-		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond
+	pool := &protohttp.ConnPool{
+		// Preserve the user's configured TLS transport (including uTLS fingerprint
+		// profiles) while restricting ALPN to HTTP/1.1 only. RestrictALPNToH1
+		// clones the transport with NextProtos=["http/1.1"], so the browser
+		// fingerprint is preserved but h2 is never negotiated (ALPN-1 + TLS-1 fix).
+		// When no transport is configured, effectiveTLSTransport() creates a default
+		// StandardTransport with NextProtos=["http/1.1"] since AllowH2 is false.
+		TLSTransport: restrictTLSForResend(s.deps.tlsTransport),
+
+		// AllowH2 is intentionally false: the resend router does not have an
+		// H2 transport, so h2 ALPN negotiation must be prevented.
 	}
-	dialer := &net.Dialer{Timeout: timeout}
-	transport := &http.Transport{
-		ForceAttemptHTTP2: true,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if params.OverrideHost != "" {
-				addr = params.OverrideHost
-			}
-			return dialer.DialContext(ctx, network, addr)
-		},
+	return &protohttp.UpstreamRouter{
+		H1:   &protohttp.H1Transport{},
+		Pool: pool,
 	}
-	// Use uTLS transport for HTTPS connections if configured.
-	// Restrict ALPN to HTTP/1.1 only because Go's http.Transport cannot handle
-	// HTTP/2 binary frames when DialTLSContext is set (automatic HTTP/2 upgrade
-	// is disabled). Without this, ALPN may negotiate h2 with the upstream
-	// causing "malformed HTTP response" errors.
-	if s.deps.tlsTransport != nil {
-		tlsT := httputil.RestrictALPNToH1(s.deps.tlsTransport)
-		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if params.OverrideHost != "" {
-				addr = params.OverrideHost
-			}
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				host = addr
-			}
-			rawConn, err := dialer.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			tlsConn, _, err := tlsT.TLSConnect(ctx, rawConn, host)
-			if err != nil {
-				rawConn.Close()
-				return nil, err
-			}
-			// Wrap the connection so http.Transport can detect TLS and
-			// populate resp.TLS via ConnectionState() tls.ConnectionState.
-			return httputil.WrapTLSConn(tlsConn), nil
-		}
+}
+
+// restrictTLSForResend returns a TLS transport with ALPN restricted to HTTP/1.1.
+// When the input is nil, nil is returned so ConnPool falls back to its default.
+func restrictTLSForResend(t httputil.TLSTransport) httputil.TLSTransport {
+	if t == nil {
+		return nil
 	}
-	checkRedirect := func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	if params.FollowRedirects != nil && *params.FollowRedirects {
-		checkRedirect = targetScopeCheckRedirect(s.deps.targetScope)
-	}
-	return &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: checkRedirect}
+	return httputil.RestrictALPNToH1(t)
 }
 
 // --- Resend raw ---

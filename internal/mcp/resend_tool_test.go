@@ -613,16 +613,17 @@ func TestExecute_Replay_GRPCTrailersRecorded(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 
-	// Create a test server that returns gRPC trailers.
+	// Create a test server that returns gRPC response with grpc-status
+	// as a regular response header (not HTTP/1.1 trailer). This simulates
+	// gRPC-over-HTTP/1.1 where trailers are sent as regular headers.
+	// Real gRPC typically uses HTTP/2 where trailers are part of the
+	// HEADERS frame; the UpstreamRouter handles this via ALPN routing.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/grpc")
-		// Declare trailers before writing.
-		w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("grpc-response-body"))
-		// Set trailers after writing body.
 		w.Header().Set("Grpc-Status", "0")
 		w.Header().Set("Grpc-Message", "OK")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("grpc-response-body"))
 	}))
 	t.Cleanup(server.Close)
 

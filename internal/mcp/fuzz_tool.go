@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
+	gohttp "net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -12,6 +12,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
@@ -169,8 +170,8 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 	// before sending, preventing destructive payloads via fuzz injection.
 	if s.deps.safetyEngine != nil {
 		se := s.deps.safetyEngine
-		cfg.SafetyInputChecker = func(body []byte, rawURL string, headers http.Header) error {
-			if v := se.CheckInput(body, rawURL, httputil.HTTPHeaderToRawHeaders(headers)); v != nil {
+		cfg.SafetyInputChecker = func(body []byte, rawURL string, headers parser.RawHeaders) error {
+			if v := se.CheckInput(body, rawURL, headers); v != nil {
 				return fmt.Errorf("%s", safetyViolationError(v))
 			}
 			return nil
@@ -256,11 +257,8 @@ func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Message) error {
 	if msg.URL != nil {
 		rawURL = msg.URL.String()
 	}
-	var headers http.Header
-	if msg.Headers != nil {
-		headers = http.Header(msg.Headers)
-	}
-	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, httputil.HTTPHeaderToRawHeaders(headers)); v != nil {
+	headers := httputil.HTTPHeaderToRawHeaders(gohttp.Header(msg.Headers))
+	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil

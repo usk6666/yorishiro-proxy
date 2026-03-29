@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -290,12 +290,12 @@ func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http
 
 // checkSafetyInput validates request data against the safety filter engine.
 // Returns nil if no safety engine is configured or if the input passes.
-// Returns an MCP error CallToolResult with isError=true if the input is blocked.
-func (s *Server) checkSafetyInput(body []byte, rawURL string, headers http.Header) *safety.InputViolation {
+// Returns an InputViolation if the input is blocked.
+func (s *Server) checkSafetyInput(body []byte, rawURL string, headers parser.RawHeaders) *safety.InputViolation {
 	if s.deps.safetyEngine == nil {
 		return nil
 	}
-	return s.deps.safetyEngine.CheckInput(body, rawURL, httputil.HTTPHeaderToRawHeaders(headers))
+	return s.deps.safetyEngine.CheckInput(body, rawURL, headers)
 }
 
 // safetyViolationError returns a generic error message for MCP clients when a safety
