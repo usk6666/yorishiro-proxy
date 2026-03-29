@@ -262,6 +262,62 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 	}
 }
 
+// --- anomaly extraction ---
+
+// queryAnomaly represents a structured anomaly entry extracted from flow tags.
+// Anomalies are HTTP protocol-level deviations detected during parsing, such as
+// CL/TE conflicts, duplicate Content-Length headers, or header injection attempts.
+type queryAnomaly struct {
+	// Type is the anomaly classification (e.g., "CLTE", "DuplicateCL", "HeaderInjection").
+	Type string `json:"type"`
+	// Detail provides a human-readable description of the anomaly.
+	Detail string `json:"detail"`
+}
+
+// smugglingTagToAnomalyType maps smuggling tag keys to their anomaly type names.
+var smugglingTagToAnomalyType = map[string]string{
+	"smuggling:cl_te_conflict":   "CLTE",
+	"smuggling:duplicate_cl":     "DuplicateCL",
+	"smuggling:ambiguous_te":     "AmbiguousTE",
+	"smuggling:invalid_te":       "InvalidTE",
+	"smuggling:header_injection": "HeaderInjection",
+	"smuggling:obs_fold":         "ObsFold",
+}
+
+// extractAnomalies converts smuggling:* tags into a structured anomaly list.
+// Returns nil if no anomalies are present, avoiding unnecessary JSON array allocation.
+func extractAnomalies(tags map[string]string) []queryAnomaly {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	var anomalies []queryAnomaly
+	warnings := tags["smuggling:warnings"]
+
+	for tagKey, anomalyType := range smugglingTagToAnomalyType {
+		if tags[tagKey] == "true" {
+			detail := ""
+			if warnings != "" {
+				detail = warnings
+			}
+			anomalies = append(anomalies, queryAnomaly{
+				Type:   anomalyType,
+				Detail: detail,
+			})
+		}
+	}
+
+	if len(anomalies) == 0 {
+		return nil
+	}
+
+	// Sort for deterministic output.
+	sort.Slice(anomalies, func(i, j int) bool {
+		return anomalies[i].Type < anomalies[j].Type
+	})
+	return anomalies
+}
+
 // --- flows resource ---
 
 // queryFlowsEntry is a single flow entry in the flows query response.
@@ -278,6 +334,7 @@ type queryFlowsEntry struct {
 	BlockedBy       string            `json:"blocked_by,omitempty"`
 	ProtocolSummary map[string]string `json:"protocol_summary,omitempty"`
 	Tags            map[string]string `json:"tags,omitempty"`
+	Anomalies       []queryAnomaly    `json:"anomalies,omitempty"`
 	Timestamp       string            `json:"timestamp"`
 	DurationMs      int64             `json:"duration_ms"`
 	SendMs          *int64            `json:"send_ms,omitempty"`
@@ -388,6 +445,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			BlockedBy:       fl.BlockedBy,
 			ProtocolSummary: summary,
 			Tags:            fl.Tags,
+			Anomalies:       extractAnomalies(fl.Tags),
 			Timestamp:       fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			DurationMs:      fl.Duration.Milliseconds(),
 			SendMs:          fl.SendMs,
@@ -431,6 +489,7 @@ type queryFlowResult struct {
 	WaitMs                *int64              `json:"wait_ms,omitempty"`
 	ReceiveMs             *int64              `json:"receive_ms,omitempty"`
 	Tags                  map[string]string   `json:"tags,omitempty"`
+	Anomalies             []queryAnomaly      `json:"anomalies,omitempty"`
 	BlockedBy             string              `json:"blocked_by,omitempty"`
 	RawRequest            string              `json:"raw_request,omitempty"`
 	RawResponse           string              `json:"raw_response,omitempty"`
@@ -673,6 +732,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		WaitMs:                fl.WaitMs,
 		ReceiveMs:             fl.ReceiveMs,
 		Tags:                  fl.Tags,
+		Anomalies:             extractAnomalies(fl.Tags),
 		BlockedBy:             fl.BlockedBy,
 		RawRequest:            rawReqStr,
 		RawResponse:           rawRespStr,

@@ -294,6 +294,14 @@ export interface QueryParams {
 
 // --- Query response types ---
 
+/** A structured anomaly entry detected during HTTP parsing. */
+export interface AnomalyEntry {
+  /** Anomaly classification (e.g., "CLTE", "DuplicateCL", "HeaderInjection"). */
+  type: string;
+  /** Human-readable description of the anomaly. */
+  detail: string;
+}
+
 /** Flow entry in the flows list. */
 export interface FlowEntry {
   id: string;
@@ -308,6 +316,7 @@ export interface FlowEntry {
   blocked_by?: string;
   protocol_summary?: Record<string, string>;
   tags?: Record<string, string>;
+  anomalies?: AnomalyEntry[];
   timestamp: string;
   duration_ms: number;
   send_ms?: number;
@@ -380,6 +389,7 @@ export interface FlowDetailResult {
   wait_ms?: number;
   receive_ms?: number;
   tags?: Record<string, string>;
+  anomalies?: AnomalyEntry[];
   blocked_by?: string;
   raw_request?: string;
   raw_response?: string;
