@@ -149,6 +149,41 @@
   font-size: var(--font-size-sm);
 }
 
+/* --- Anomalies --- */
+
+.sd-anomalies {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--bg-danger, rgba(239, 68, 68, 0.05));
+  border: 1px solid var(--border-danger, rgba(239, 68, 68, 0.3));
+  border-radius: var(--radius-sm);
+}
+
+.sd-anomalies-label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-danger, #ef4444);
+  display: block;
+  margin-bottom: var(--space-xs);
+}
+
+.sd-anomalies-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.sd-anomaly-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.sd-anomaly-detail {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
 /* --- Tags --- */
 
 .sd-tags {
