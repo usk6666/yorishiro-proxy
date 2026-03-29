@@ -221,8 +221,10 @@ func (h *Handler) effectiveUpstreamRouter() *UpstreamRouter {
 	pool := h.connPool
 	if pool == nil {
 		pool = &ConnPool{
-			TLSTransport:  h.effectiveTLSTransport(),
-			UpstreamProxy: h.GetUpstreamProxy(),
+			TLSTransport:   h.effectiveTLSTransport(),
+			UpstreamProxy:  h.GetUpstreamProxy(),
+			DialViaProxy:   proxy.DialViaUpstreamProxy,
+			RedactProxyURL: proxy.RedactProxyURL,
 		}
 	}
 	return &UpstreamRouter{

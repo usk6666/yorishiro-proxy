@@ -1,4 +1,4 @@
-package http
+package httputil
 
 import (
 	"context"
@@ -16,11 +16,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
-// connpoolMockTLSTransport implements httputil.TLSTransport for testing.
+// connpoolMockTLSTransport implements TLSTransport for testing.
 type connpoolMockTLSTransport struct {
 	alpn    string
 	err     error
@@ -145,7 +143,7 @@ func TestConnPool_Get_DirectTLS(t *testing.T) {
 	}()
 
 	pool := &ConnPool{
-		TLSTransport: &httputil.StandardTransport{
+		TLSTransport: &StandardTransport{
 			InsecureSkipVerify: true,
 			NextProtos:         []string{"http/1.1"},
 		},
@@ -382,6 +380,7 @@ func TestConnPool_Get_UpstreamProxy(t *testing.T) {
 	pool := &ConnPool{
 		UpstreamProxy: proxyURL,
 		DialTimeout:   5 * time.Second,
+		DialViaProxy:  testDialViaProxy,
 	}
 
 	ctx := context.Background()
@@ -434,9 +433,9 @@ func TestConnPool_Get_TLS_AllowH2(t *testing.T) {
 func TestConnPool_effectiveTLSTransport_AllowH2(t *testing.T) {
 	pool := &ConnPool{AllowH2: true}
 	transport := pool.effectiveTLSTransport()
-	st, ok := transport.(*httputil.StandardTransport)
+	st, ok := transport.(*StandardTransport)
 	if !ok {
-		t.Fatalf("transport type = %T, want *httputil.StandardTransport", transport)
+		t.Fatalf("transport type = %T, want *StandardTransport", transport)
 	}
 	// When AllowH2 is true, the default transport should offer both h2 and http/1.1.
 	if len(st.NextProtos) != 2 || st.NextProtos[0] != "h2" || st.NextProtos[1] != "http/1.1" {
@@ -450,9 +449,9 @@ func TestConnPool_effectiveTLSTransport_Default(t *testing.T) {
 	if transport == nil {
 		t.Fatal("effectiveTLSTransport returned nil")
 	}
-	st, ok := transport.(*httputil.StandardTransport)
+	st, ok := transport.(*StandardTransport)
 	if !ok {
-		t.Fatalf("default transport type = %T, want *httputil.StandardTransport", transport)
+		t.Fatalf("default transport type = %T, want *StandardTransport", transport)
 	}
 	if !st.InsecureSkipVerify {
 		t.Error("default transport should have InsecureSkipVerify=true")
@@ -529,6 +528,33 @@ func TestConnPool_Get_ConnectionLeak(t *testing.T) {
 	for _, c := range acceptedConns {
 		c.Close()
 	}
+}
+
+// testDialViaProxy is a minimal upstream proxy dialer for testing.
+// It sends a CONNECT request and returns the tunneled connection.
+func testDialViaProxy(_ context.Context, proxyURL *url.URL, targetAddr string, timeout time.Duration) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		return nil, err
+	}
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAddr, targetAddr)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp := string(buf[:n])
+	if !strings.Contains(resp, "200") {
+		conn.Close()
+		return nil, fmt.Errorf("proxy returned: %s", resp)
+	}
+	return conn, nil
 }
 
 // handleTestCONNECTProxy is a minimal HTTP CONNECT proxy for testing.

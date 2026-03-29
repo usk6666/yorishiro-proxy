@@ -13,6 +13,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
@@ -358,8 +359,10 @@ func (h *Handler) forwardRawUpstream(ctx context.Context, req *parser.RawRequest
 	pool := h.connPool
 	if pool == nil {
 		pool = &ConnPool{
-			TLSTransport:  h.effectiveTLSTransport(),
-			UpstreamProxy: h.GetUpstreamProxy(),
+			TLSTransport:   h.effectiveTLSTransport(),
+			UpstreamProxy:  h.GetUpstreamProxy(),
+			DialViaProxy:   proxy.DialViaUpstreamProxy,
+			RedactProxyURL: proxy.RedactProxyURL,
 		}
 	}
 

@@ -22,6 +22,7 @@ import (
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // resendInput is the typed input for the resend tool.
@@ -866,7 +867,7 @@ func validateOverrideHost(host string) error {
 // resendRouter abstracts upstream round-trip for the resend tool, enabling
 // test injection without net/http dependency.
 type resendRouter interface {
-	RoundTrip(ctx context.Context, req *parser.RawRequest, addr string, useTLS bool, hostname string) (*protohttp.RoundTripResult, error)
+	RoundTrip(ctx context.Context, req *parser.RawRequest, addr string, useTLS bool, hostname string) (*httputil.RoundTripResult, error)
 }
 
 // resendUpstreamRouter returns the upstream router for the resend tool.
@@ -880,7 +881,7 @@ func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 	if s.deps.replayRouter != nil {
 		return s.deps.replayRouter
 	}
-	pool := &protohttp.ConnPool{
+	pool := &httputil.ConnPool{
 		// Use the user's configured TLS transport as-is (including uTLS fingerprint
 		// profiles). AllowH2 enables ALPN negotiation for both http/1.1 and h2,
 		// allowing gRPC flows to be resent to h2-only upstreams.
@@ -888,7 +889,7 @@ func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
 		AllowH2:      true,
 	}
 	return &protohttp.UpstreamRouter{
-		H1:   &protohttp.H1Transport{},
+		H1:   &httputil.H1Transport{},
 		H2:   &http2.Transport{},
 		Pool: pool,
 	}

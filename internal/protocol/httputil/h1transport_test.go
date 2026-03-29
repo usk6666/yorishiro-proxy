@@ -1,4 +1,4 @@
-package http
+package httputil
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 func TestSerializeRequest_BasicGET(t *testing.T) {
@@ -26,10 +25,10 @@ func TestSerializeRequest_BasicGET(t *testing.T) {
 		},
 	}
 
-	got := string(serializeRequest(req))
+	got := string(SerializeRequest(req))
 	want := "GET /path?q=1 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test/1.0\r\nAccept: */*\r\n\r\n"
 	if got != want {
-		t.Errorf("serializeRequest() =\n%q\nwant\n%q", got, want)
+		t.Errorf("SerializeRequest() =\n%q\nwant\n%q", got, want)
 	}
 }
 
@@ -46,7 +45,7 @@ func TestSerializeRequest_PreservesHeaderOrder(t *testing.T) {
 		},
 	}
 
-	got := string(serializeRequest(req))
+	got := string(SerializeRequest(req))
 	lines := strings.Split(got, "\r\n")
 	// Request line + 4 headers + empty line + trailing empty
 	if len(lines) < 6 {
@@ -76,9 +75,9 @@ func TestSerializeRequest_RawValue(t *testing.T) {
 		},
 	}
 
-	got := string(serializeRequest(req))
+	got := string(SerializeRequest(req))
 	if !strings.Contains(got, "Host:  example.com  \r\n") {
-		t.Errorf("serializeRequest should use RawValue when set, got:\n%q", got)
+		t.Errorf("SerializeRequest should use RawValue when set, got:\n%q", got)
 	}
 }
 
@@ -89,9 +88,9 @@ func TestSerializeRequest_DefaultProto(t *testing.T) {
 		// Proto is empty — should default to HTTP/1.1.
 	}
 
-	got := string(serializeRequest(req))
+	got := string(SerializeRequest(req))
 	if !strings.HasPrefix(got, "GET / HTTP/1.1\r\n") {
-		t.Errorf("serializeRequest should default to HTTP/1.1, got:\n%q", got)
+		t.Errorf("SerializeRequest should default to HTTP/1.1, got:\n%q", got)
 	}
 }
 
@@ -102,10 +101,10 @@ func TestSerializeRequest_EmptyHeaders(t *testing.T) {
 		Proto:      "HTTP/1.1",
 	}
 
-	got := string(serializeRequest(req))
+	got := string(SerializeRequest(req))
 	want := "GET / HTTP/1.1\r\n\r\n"
 	if got != want {
-		t.Errorf("serializeRequest() = %q, want %q", got, want)
+		t.Errorf("SerializeRequest() = %q, want %q", got, want)
 	}
 }
 
@@ -307,7 +306,7 @@ func TestH1Transport_RoundTripOnConn_Timing(t *testing.T) {
 	receiveEnd := time.Now()
 
 	// Use ComputeTiming to verify timing is recorded.
-	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, result.Timing, receiveEnd)
+	sendMs, waitMs, receiveMs := ComputeTiming(sendStart, result.Timing, receiveEnd)
 	if sendMs == nil {
 		t.Error("sendMs should not be nil")
 	}
@@ -435,9 +434,9 @@ func TestIsKeepAlive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isKeepAlive(tt.resp)
+			got := IsKeepAlive(tt.resp)
 			if got != tt.want {
-				t.Errorf("isKeepAlive() = %v, want %v", got, tt.want)
+				t.Errorf("IsKeepAlive() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -450,15 +449,15 @@ func TestWriteRequest_HeaderAndBody(t *testing.T) {
 	header := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	body := strings.NewReader("body data")
 
-	err := writeRequest(conn, header, body)
+	err := WriteRequest(conn, header, body)
 	if err != nil {
-		t.Fatalf("writeRequest() error = %v", err)
+		t.Fatalf("WriteRequest() error = %v", err)
 	}
 
 	got := buf.String()
 	want := "GET / HTTP/1.1\r\nHost: example.com\r\n\r\nbody data"
 	if got != want {
-		t.Errorf("writeRequest() wrote %q, want %q", got, want)
+		t.Errorf("WriteRequest() wrote %q, want %q", got, want)
 	}
 }
 
@@ -468,14 +467,14 @@ func TestWriteRequest_NilBody(t *testing.T) {
 
 	header := []byte("GET / HTTP/1.1\r\n\r\n")
 
-	err := writeRequest(conn, header, nil)
+	err := WriteRequest(conn, header, nil)
 	if err != nil {
-		t.Fatalf("writeRequest() error = %v", err)
+		t.Fatalf("WriteRequest() error = %v", err)
 	}
 
 	got := buf.String()
 	if got != "GET / HTTP/1.1\r\n\r\n" {
-		t.Errorf("writeRequest() wrote %q", got)
+		t.Errorf("WriteRequest() wrote %q", got)
 	}
 }
 
