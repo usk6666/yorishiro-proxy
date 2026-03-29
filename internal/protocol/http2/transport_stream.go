@@ -1,0 +1,629 @@
+package http2
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/frame"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
+)
+
+// StreamOptions configures streaming behavior for RoundTripStream.
+type StreamOptions struct {
+	// OnSendFrame is called for each frame sent to the upstream server.
+	// The frameBytes contain the complete raw frame (header + payload).
+	// The callback must not retain the slice after returning.
+	OnSendFrame func(frameBytes []byte)
+
+	// OnRecvFrame is called for each frame received from the upstream server.
+	// The frameBytes contain the complete raw frame (header + payload).
+	// The callback must not retain the slice after returning.
+	OnRecvFrame func(frameBytes []byte)
+}
+
+// StreamRoundTripResult holds the result of a streaming HTTP/2 round trip.
+// The caller must read Body to completion before calling Trailers().
+type StreamRoundTripResult struct {
+	// StatusCode is the HTTP status code from the :status pseudo-header.
+	StatusCode int
+	// Headers contains the decoded response HPACK header fields (including
+	// pseudo-headers).
+	Headers []hpack.HeaderField
+	// Body is a reader over the response DATA frame payloads. The caller
+	// must read Body to completion (until io.EOF) to ensure trailers are
+	// available and resources are released.
+	Body io.ReadCloser
+	// ServerAddr is the remote address of the upstream server.
+	ServerAddr string
+
+	// bodyDone indicates the Body reader has reached EOF.
+	bodyDone bool
+	// trailers are populated after the response body has been fully received
+	// (END_STREAM on a trailing HEADERS frame or on the last DATA frame).
+	trailers []hpack.HeaderField
+	// trailersMu protects concurrent access to bodyDone and trailers.
+	trailersMu sync.Mutex
+}
+
+// ErrBodyNotFullyRead is returned by Trailers() when the response body has
+// not yet been read to completion.
+var ErrBodyNotFullyRead = errors.New("trailers not available: body not fully read")
+
+// Trailers returns the trailing header fields from the response.
+// It returns ErrBodyNotFullyRead if Body has not been read to EOF.
+func (r *StreamRoundTripResult) Trailers() ([]hpack.HeaderField, error) {
+	r.trailersMu.Lock()
+	defer r.trailersMu.Unlock()
+	if !r.bodyDone {
+		return nil, ErrBodyNotFullyRead
+	}
+	return r.trailers, nil
+}
+
+// markBodyDone marks the body as fully consumed and stores trailers.
+func (r *StreamRoundTripResult) markBodyDone(trailers []hpack.HeaderField) {
+	r.trailersMu.Lock()
+	defer r.trailersMu.Unlock()
+	r.bodyDone = true
+	r.trailers = trailers
+}
+
+// RoundTripStream performs a streaming HTTP/2 round trip on a pre-established
+// connection. Unlike RoundTripOnConn, it does not buffer the request body or
+// response body in memory; instead, the request body is streamed as DATA frames
+// and the response body is returned as a streaming io.ReadCloser.
+//
+// The connection must already have negotiated "h2" via ALPN. This method handles
+// the HTTP/2 handshake (connection preface + settings exchange), sends the
+// request headers and streams the body as HTTP/2 frames.
+//
+// The headers parameter must include HTTP/2 pseudo-headers (:method, :scheme,
+// :authority, :path) and any regular headers. The body parameter may be nil
+// for requests with no body.
+//
+// RoundTripStream takes ownership of conn and manages its lifecycle. The caller
+// must read the response Body to completion before the connection resources are
+// released.
+func (t *Transport) RoundTripStream(ctx context.Context, conn net.Conn, headers []hpack.HeaderField, body io.Reader, opts StreamOptions) (*StreamRoundTripResult, error) {
+	logger := t.logger()
+
+	tc := newTransportConn(conn, logger)
+
+	if err := tc.handshake(ctx); err != nil {
+		tc.close()
+		return nil, fmt.Errorf("h2 handshake: %w", err)
+	}
+
+	result, err := tc.roundTripStream(ctx, headers, body, opts)
+	if err != nil {
+		tc.close()
+		return nil, fmt.Errorf("h2 stream round trip: %w", err)
+	}
+
+	// Wrap the body to close the transport connection when done reading.
+	result.Body = &streamBodyCloser{
+		ReadCloser: result.Body,
+		tc:         tc,
+	}
+
+	return result, nil
+}
+
+// streamBodyCloser wraps the response body and closes the transport connection
+// when the body is closed.
+type streamBodyCloser struct {
+	io.ReadCloser
+	tc        *transportConn
+	closeOnce sync.Once
+}
+
+func (s *streamBodyCloser) Close() error {
+	err := s.ReadCloser.Close()
+	s.closeOnce.Do(func() {
+		s.tc.close()
+	})
+	return err
+}
+
+// streamingStreamState extends the stream state for streaming round trips.
+// It uses an io.Pipe to stream response DATA frame payloads to the caller
+// instead of buffering them in memory.
+type streamingStreamState struct {
+	// headersDone is closed when the initial response HEADERS have been received.
+	headersDone chan struct{}
+	// headers collects decoded response header fields.
+	headers []hpack.HeaderField
+	// headerBuf accumulates HEADERS/CONTINUATION fragments before END_HEADERS.
+	headerBuf []byte
+
+	// bodyWriter is the write end of the response body pipe.
+	bodyWriter *io.PipeWriter
+	// bodyReader is the read end of the response body pipe.
+	bodyReader *io.PipeReader
+
+	// trailers collects decoded trailer header fields.
+	trailers []hpack.HeaderField
+	// done is sent when the stream has fully completed (END_STREAM received).
+	done chan streamResult
+	// endStream indicates END_STREAM has been received.
+	endStream bool
+
+	// result holds the StreamRoundTripResult for trailer population.
+	result *StreamRoundTripResult
+
+	// onRecvFrame callback for frame recording.
+	onRecvFrame func(frameBytes []byte)
+}
+
+// roundTripStream performs a streaming round trip on a single transportConn.
+func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.HeaderField, body io.Reader, opts StreamOptions) (*StreamRoundTripResult, error) {
+	if tc.conn.IsClosed() {
+		return nil, fmt.Errorf("connection closed")
+	}
+	if received, _, _ := tc.conn.GoAwayReceived(); received {
+		return nil, fmt.Errorf("connection received GOAWAY")
+	}
+
+	streamID := tc.allocStreamID()
+
+	pr, pw := io.Pipe()
+	result := &StreamRoundTripResult{
+		ServerAddr: tc.netConn.RemoteAddr().String(),
+	}
+
+	sss := &streamingStreamState{
+		headersDone: make(chan struct{}),
+		bodyWriter:  pw,
+		bodyReader:  pr,
+		done:        make(chan streamResult, 1),
+		result:      result,
+		onRecvFrame: opts.OnRecvFrame,
+	}
+
+	// Register a bridge streamState so the existing read loop can dispatch
+	// frames to our streaming handler.
+	ss := &streamState{
+		done:        sss.done,
+		headersDone: sss.headersDone,
+	}
+
+	tc.streamsMu.Lock()
+	tc.streams[streamID] = ss
+	tc.streamsMu.Unlock()
+
+	// Transition to open state.
+	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
+
+	// Override the read loop dispatch for this stream by installing a custom
+	// handler. We need to intercept frames for this stream specifically
+	// to pipe DATA into the streaming body and handle trailers.
+	// Instead of modifying the read loop, we'll replace the streamState's
+	// behavior by using a wrapper approach.
+	//
+	// However, the existing read loop is fixed and dispatches to handleResponseHeaders,
+	// handleData, etc. which operate on streamState fields directly. For the streaming
+	// case, we need to redirect DATA writes to the pipe.
+	//
+	// Strategy: We'll use the existing streamState but override how data is handled
+	// by using a custom streamState that intercepts at the field level. Since the
+	// read loop accesses ss.data directly, we need a different approach.
+	//
+	// The cleanest solution: register a custom dispatch hook per-stream.
+
+	// Remove the bridge streamState and install the streaming dispatcher.
+	tc.streamsMu.Lock()
+	delete(tc.streams, streamID)
+	tc.streamsMu.Unlock()
+
+	tc.registerStreamingHandler(streamID, sss)
+
+	// Send HEADERS frame(s) — determine endStream from body presence.
+	fragment := tc.encodeHeaders(headers)
+	endStream := body == nil
+
+	tc.writeMu.Lock()
+	err := tc.writeHeaderFrames(streamID, endStream, fragment)
+	tc.writeMu.Unlock()
+	if err != nil {
+		tc.unregisterStreamingHandler(streamID)
+		pw.CloseWithError(err)
+		return nil, fmt.Errorf("send HEADERS on stream %d: %w", streamID, err)
+	}
+
+	// Record sent HEADERS frame.
+	if opts.OnSendFrame != nil {
+		// Reconstruct the raw frame bytes for the callback.
+		headerFrame := buildHeadersFrameBytes(streamID, endStream, true, fragment)
+		opts.OnSendFrame(headerFrame)
+	}
+
+	if endStream {
+		tc.conn.Streams().Transition(streamID, EventSendEndStream) //nolint:errcheck
+	}
+
+	// Start sender goroutine for body streaming.
+	senderDone := make(chan error, 1)
+	if body != nil {
+		go func() {
+			senderDone <- tc.streamSendBody(ctx, streamID, body, opts)
+		}()
+	} else {
+		close(senderDone)
+	}
+
+	// Wait for response headers.
+	select {
+	case <-ctx.Done():
+		tc.sendReset(streamID, ErrCodeCancel)
+		tc.unregisterStreamingHandler(streamID)
+		pw.CloseWithError(ctx.Err())
+		return nil, ctx.Err()
+	case <-sss.headersDone:
+		// Response headers received.
+	case r := <-sss.done:
+		// Stream completed before headers (error case).
+		tc.unregisterStreamingHandler(streamID)
+		pw.CloseWithError(r.err)
+		if r.err != nil {
+			return nil, r.err
+		}
+	}
+
+	// Extract status code.
+	for _, hf := range sss.headers {
+		if hf.Name == ":status" {
+			code, err := strconv.Atoi(hf.Value)
+			if err != nil {
+				tc.unregisterStreamingHandler(streamID)
+				pw.CloseWithError(fmt.Errorf("invalid :status: %w", err))
+				return nil, fmt.Errorf("invalid :status %q: %w", hf.Value, err)
+			}
+			result.StatusCode = code
+			break
+		}
+	}
+	if result.StatusCode == 0 {
+		tc.unregisterStreamingHandler(streamID)
+		pw.CloseWithError(fmt.Errorf("no :status"))
+		return nil, fmt.Errorf("no :status pseudo-header in response")
+	}
+
+	result.Headers = sss.headers
+	result.Body = &streamingBody{
+		reader:     pr,
+		sss:        sss,
+		tc:         tc,
+		streamID:   streamID,
+		senderDone: senderDone,
+	}
+
+	return result, nil
+}
+
+// streamingBody wraps the pipe reader and handles cleanup when the body is
+// closed or fully read.
+type streamingBody struct {
+	reader     *io.PipeReader
+	sss        *streamingStreamState
+	tc         *transportConn
+	streamID   uint32
+	senderDone <-chan error
+	closeOnce  sync.Once
+	readErr    error
+}
+
+func (sb *streamingBody) Read(p []byte) (int, error) {
+	n, err := sb.reader.Read(p)
+	if err == io.EOF {
+		sb.readErr = io.EOF
+		// Wait for sender to finish.
+		<-sb.senderDone
+		// Mark body done with trailers.
+		sb.sss.result.markBodyDone(sb.sss.trailers)
+	}
+	return n, err
+}
+
+func (sb *streamingBody) Close() error {
+	var err error
+	sb.closeOnce.Do(func() {
+		err = sb.reader.Close()
+		sb.tc.unregisterStreamingHandler(sb.streamID)
+	})
+	return err
+}
+
+// registerStreamingHandler installs a streaming handler for the given stream ID.
+func (tc *transportConn) registerStreamingHandler(streamID uint32, sss *streamingStreamState) {
+	tc.streamsMu.Lock()
+	if tc.streamingStreams == nil {
+		tc.streamingStreams = make(map[uint32]*streamingStreamState)
+	}
+	tc.streamingStreams[streamID] = sss
+	tc.streamsMu.Unlock()
+}
+
+// unregisterStreamingHandler removes the streaming handler for the given stream ID.
+func (tc *transportConn) unregisterStreamingHandler(streamID uint32) {
+	tc.streamsMu.Lock()
+	delete(tc.streamingStreams, streamID)
+	tc.streamsMu.Unlock()
+}
+
+// streamSendBody reads from body and sends DATA frames, respecting flow control.
+// When body returns io.EOF, it sends END_STREAM to half-close the stream.
+func (tc *transportConn) streamSendBody(ctx context.Context, streamID uint32, body io.Reader, opts StreamOptions) error {
+	maxPayload := int(tc.conn.PeerSettings().MaxFrameSize)
+	buf := make([]byte, maxPayload)
+
+	for {
+		n, readErr := body.Read(buf)
+		if n > 0 {
+			data := buf[:n]
+			if err := tc.streamSendData(ctx, streamID, data, readErr == io.EOF, opts); err != nil {
+				return fmt.Errorf("send DATA on stream %d: %w", streamID, err)
+			}
+		}
+		if readErr == io.EOF {
+			// If n == 0 and we got EOF, we need to send an empty DATA with END_STREAM.
+			if n == 0 {
+				if err := tc.streamSendData(ctx, streamID, nil, true, opts); err != nil {
+					return fmt.Errorf("send END_STREAM on stream %d: %w", streamID, err)
+				}
+			}
+			tc.conn.Streams().Transition(streamID, EventSendEndStream) //nolint:errcheck
+			return nil
+		}
+		if readErr != nil {
+			// Non-EOF error from body reader — reset the stream.
+			tc.sendReset(streamID, ErrCodeCancel)
+			return fmt.Errorf("read body: %w", readErr)
+		}
+	}
+}
+
+// streamSendData sends a single chunk of data as DATA frame(s) with flow control.
+func (tc *transportConn) streamSendData(ctx context.Context, streamID uint32, data []byte, endStream bool, opts StreamOptions) error {
+	maxPayload := int(tc.conn.PeerSettings().MaxFrameSize)
+
+	for len(data) > 0 || endStream {
+		chunk := data
+		isLast := endStream && len(data) <= maxPayload
+
+		if len(chunk) > maxPayload {
+			chunk = data[:maxPayload]
+			isLast = false
+		}
+
+		if len(chunk) > 0 {
+			// Wait for flow control window.
+			if err := tc.waitForSendWindow(ctx, streamID, int32(len(chunk))); err != nil {
+				return err
+			}
+
+			// Consume flow control windows.
+			n := int32(len(chunk))
+			if err := tc.conn.ConsumeSendWindow(n); err != nil {
+				return fmt.Errorf("connection flow control: %w", err)
+			}
+			if err := tc.conn.Streams().ConsumeSendWindow(streamID, n); err != nil {
+				return fmt.Errorf("stream flow control: %w", err)
+			}
+		}
+
+		tc.writeMu.Lock()
+		err := tc.writer.WriteData(streamID, isLast, chunk)
+		tc.writeMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("write DATA frame: %w", err)
+		}
+
+		// Record sent DATA frame.
+		if opts.OnSendFrame != nil {
+			rawFrame := buildDataFrameBytes(streamID, isLast, chunk)
+			opts.OnSendFrame(rawFrame)
+		}
+
+		data = data[len(chunk):]
+		if isLast {
+			return nil
+		}
+		// If we sent all data but endStream is false, break.
+		if len(data) == 0 && !endStream {
+			return nil
+		}
+	}
+	return nil
+}
+
+// waitForSendWindow waits until the connection and stream flow control windows
+// have enough space for the requested number of bytes.
+func (tc *transportConn) waitForSendWindow(ctx context.Context, streamID uint32, needed int32) error {
+	for {
+		connWindow := tc.conn.SendWindow()
+		streamWindow, ok := tc.conn.Streams().GetSendWindow(streamID)
+		if !ok {
+			return fmt.Errorf("stream %d does not exist", streamID)
+		}
+		available := connWindow
+		if streamWindow < available {
+			available = streamWindow
+		}
+		if available >= needed {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tc.readLoopDone:
+			return fmt.Errorf("connection closed while waiting for send window")
+		case <-time.After(10 * time.Millisecond):
+			// Retry after peer sends WINDOW_UPDATE.
+		}
+	}
+}
+
+// buildHeadersFrameBytes constructs raw HEADERS frame bytes for callback recording.
+func buildHeadersFrameBytes(streamID uint32, endStream, endHeaders bool, fragment []byte) []byte {
+	var flags frame.Flags
+	if endStream {
+		flags |= frame.FlagEndStream
+	}
+	if endHeaders {
+		flags |= frame.FlagEndHeaders
+	}
+	hdr := frame.Header{
+		Length:   uint32(len(fragment)),
+		Type:     frame.TypeHeaders,
+		Flags:    flags,
+		StreamID: streamID,
+	}
+	buf := hdr.AppendTo(make([]byte, 0, frame.HeaderSize+len(fragment)))
+	buf = append(buf, fragment...)
+	return buf
+}
+
+// buildDataFrameBytes constructs raw DATA frame bytes for callback recording.
+func buildDataFrameBytes(streamID uint32, endStream bool, data []byte) []byte {
+	var flags frame.Flags
+	if endStream {
+		flags |= frame.FlagEndStream
+	}
+	hdr := frame.Header{
+		Length:   uint32(len(data)),
+		Type:     frame.TypeData,
+		Flags:    flags,
+		StreamID: streamID,
+	}
+	buf := hdr.AppendTo(make([]byte, 0, frame.HeaderSize+len(data)))
+	buf = append(buf, data...)
+	return buf
+}
+
+// handleStreamingHeaders processes a HEADERS frame for a streaming stream.
+func (tc *transportConn) handleStreamingHeaders(f *frame.Frame, sss *streamingStreamState) error {
+	streamID := f.Header.StreamID
+
+	if sss.onRecvFrame != nil {
+		sss.onRecvFrame(f.RawBytes)
+	}
+
+	fragment, err := f.HeaderBlockFragment()
+	if err != nil {
+		return fmt.Errorf("stream %d header block: %w", streamID, err)
+	}
+
+	if f.Header.Flags.Has(frame.FlagEndHeaders) {
+		fields, decErr := tc.decoder.Decode(fragment)
+		if decErr != nil {
+			return fmt.Errorf("stream %d HPACK decode: %w", streamID, decErr)
+		}
+		tc.processStreamingDecodedHeaders(sss, f, fields)
+	} else {
+		sss.headerBuf = append(sss.headerBuf[:0], fragment...)
+	}
+
+	return nil
+}
+
+// handleStreamingContinuation processes a CONTINUATION frame for a streaming stream.
+func (tc *transportConn) handleStreamingContinuation(f *frame.Frame, sss *streamingStreamState) error {
+	streamID := f.Header.StreamID
+
+	if sss.onRecvFrame != nil {
+		sss.onRecvFrame(f.RawBytes)
+	}
+
+	fragment, err := f.ContinuationFragment()
+	if err != nil {
+		return fmt.Errorf("stream %d continuation: %w", streamID, err)
+	}
+
+	sss.headerBuf = append(sss.headerBuf, fragment...)
+
+	if f.Header.Flags.Has(frame.FlagEndHeaders) {
+		fields, decErr := tc.decoder.Decode(sss.headerBuf)
+		if decErr != nil {
+			return fmt.Errorf("stream %d HPACK decode: %w", streamID, decErr)
+		}
+		sss.headerBuf = sss.headerBuf[:0]
+		tc.processStreamingDecodedHeaders(sss, f, fields)
+	}
+
+	return nil
+}
+
+// handleStreamingData processes a DATA frame for a streaming stream.
+func (tc *transportConn) handleStreamingData(f *frame.Frame, sss *streamingStreamState) error {
+	streamID := f.Header.StreamID
+
+	if sss.onRecvFrame != nil {
+		sss.onRecvFrame(f.RawBytes)
+	}
+
+	payload, err := f.DataPayload()
+	if err != nil {
+		return fmt.Errorf("stream %d data payload: %w", streamID, err)
+	}
+
+	// Wait for headers to be done before writing data.
+	<-sss.headersDone
+
+	if len(payload) > 0 {
+		if _, writeErr := sss.bodyWriter.Write(payload); writeErr != nil {
+			return fmt.Errorf("stream %d write to body pipe: %w", streamID, writeErr)
+		}
+	}
+
+	// Consume receive window and send WINDOW_UPDATE asynchronously.
+	if len(payload) > 0 {
+		n := int32(len(payload))
+		tc.conn.ConsumeRecvWindow(n)                               //nolint:errcheck
+		tc.conn.Streams().ConsumeRecvWindow(streamID, n)           //nolint:errcheck
+		tc.conn.IncrementRecvWindow(uint32(n))                     //nolint:errcheck
+		tc.conn.Streams().IncrementRecvWindow(streamID, uint32(n)) //nolint:errcheck
+
+		go func() {
+			tc.writeMu.Lock()
+			defer tc.writeMu.Unlock()
+			tc.writer.WriteWindowUpdate(0, uint32(n))        //nolint:errcheck
+			tc.writer.WriteWindowUpdate(streamID, uint32(n)) //nolint:errcheck
+		}()
+	}
+
+	if f.Header.Flags.Has(frame.FlagEndStream) {
+		sss.endStream = true
+		tc.conn.Streams().Transition(streamID, EventRecvEndStream) //nolint:errcheck
+		sss.bodyWriter.Close()
+		sss.done <- streamResult{}
+	}
+
+	return nil
+}
+
+// processStreamingDecodedHeaders routes decoded headers to initial headers or
+// trailers for a streaming stream.
+func (tc *transportConn) processStreamingDecodedHeaders(sss *streamingStreamState, f *frame.Frame, fields []hpack.HeaderField) {
+	select {
+	case <-sss.headersDone:
+		// Already received initial headers — these are trailers.
+		sss.trailers = append(sss.trailers, fields...)
+	default:
+		sss.headers = append(sss.headers, fields...)
+		close(sss.headersDone)
+	}
+
+	endStream := f.Header.Flags.Has(frame.FlagEndStream)
+	if endStream {
+		sss.endStream = true
+		tc.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream) //nolint:errcheck
+		sss.bodyWriter.Close()
+		sss.done <- streamResult{}
+	}
+}
