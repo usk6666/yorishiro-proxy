@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // maxResponseSize is the maximum response body size (1 MB) to prevent OOM.
@@ -276,7 +278,7 @@ func (e *Engine) executeFuzzCase(
 	fuzzID string,
 	doerOverride HTTPDoer,
 	targetScopeChecker func(u *url.URL) error,
-	safetyInputChecker func(body []byte, rawURL string, headers http.Header) error,
+	safetyInputChecker func(body []byte, rawURL string, headers parser.RawHeaders) error,
 ) *flow.FuzzResult {
 	result := &flow.FuzzResult{
 		FuzzID:   fuzzID,
@@ -311,7 +313,7 @@ func (e *Engine) executeFuzzCase(
 		if data.URL != nil {
 			rawURL = data.URL.String()
 		}
-		if err := safetyInputChecker(data.Body, rawURL, data.Headers); err != nil {
+		if err := safetyInputChecker(data.Body, rawURL, httputil.HTTPHeaderToRawHeaders(http.Header(data.Headers))); err != nil {
 			result.Error = fmt.Sprintf("safety filter: %s", err.Error())
 			return result
 		}
@@ -500,7 +502,7 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	hookState *HookState,
 	doerOverride HTTPDoer,
 	targetScopeChecker func(u *url.URL) error,
-	safetyInputChecker func(body []byte, rawURL string, headers http.Header) error,
+	safetyInputChecker func(body []byte, rawURL string, headers parser.RawHeaders) error,
 ) *flow.FuzzResult {
 	if hooks == nil {
 		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker, safetyInputChecker)

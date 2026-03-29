@@ -28,20 +28,27 @@ import (
 // the Server struct's 28 fields. Each handler struct receives a *deps pointer
 // and accesses only the dependencies it needs.
 type deps struct {
-	appCtx                context.Context
-	ca                    *cert.CA
-	issuer                *cert.Issuer
-	store                 flow.Store
-	manager               *proxy.Manager
-	passthrough           *proxy.PassthroughList
-	scope                 *proxy.CaptureScope
-	interceptEngine       *intercept.Engine
-	interceptQueue        *intercept.Queue
-	transformPipeline     *rules.Pipeline
-	fuzzRunner            *fuzzer.Runner
-	fuzzStore             flow.FuzzStore
-	dbPath                string
-	replayDoer            httpDoer
+	appCtx            context.Context
+	ca                *cert.CA
+	issuer            *cert.Issuer
+	store             flow.Store
+	manager           *proxy.Manager
+	passthrough       *proxy.PassthroughList
+	scope             *proxy.CaptureScope
+	interceptEngine   *intercept.Engine
+	interceptQueue    *intercept.Queue
+	transformPipeline *rules.Pipeline
+	fuzzRunner        *fuzzer.Runner
+	fuzzStore         flow.FuzzStore
+	dbPath            string
+	// replayDoer is a legacy net/http.Client-based HTTP doer used by the fuzzer
+	// engine and macro HTTP calls. It will be removed once those paths migrate
+	// to UpstreamRouter.
+	replayDoer httpDoer
+	// replayRouter is a test-injectable UpstreamRouter for the resend tool's
+	// HTTP round-trip path. When nil, resendUpstreamRouter() creates a real
+	// UpstreamRouter with ConnPool.
+	replayRouter          resendRouter
 	rawReplayDialer       rawDialer
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler

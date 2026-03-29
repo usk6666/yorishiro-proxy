@@ -5,8 +5,6 @@ package mcp
 import (
 	"context"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -365,16 +363,10 @@ func TestExecuteResend_TargetScope_NoRules_AllAllowed(t *testing.T) {
 
 // --- Resend redirect target scope tests ---
 
-func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
+func TestExecuteResend_FollowRedirects_Rejected(t *testing.T) {
 	store := newTestStore(t)
 
-	// Create a redirect server that redirects to evil.com.
-	redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "http://evil.com/malicious", http.StatusFound)
-	}))
-	t.Cleanup(redirectServer.Close)
-
-	serverURL, _ := url.Parse(redirectServer.URL + "/api/test")
+	serverURL, _ := url.Parse("http://127.0.0.1:9999/api/test")
 	entry := saveTestEntry(t, store,
 		&flow.Flow{
 			Protocol:  "HTTP/1.x",
@@ -393,22 +385,13 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
-			StatusCode: 302,
-			Body:       []byte(""),
+			StatusCode: 200,
+			Body:       []byte("ok"),
 		},
 	)
 
-	// Allow the redirect server host (127.0.0.1) but not evil.com.
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
-		{Hostname: serverURL.Hostname()},
-	}, nil)
-
-	// Create a Server with target scope. The initial request to localhost succeeds
-	// (since it is in scope), then the redirect to evil.com gets blocked by the
-	// target scope check.
 	ctx := context.Background()
-	s := NewServer(ctx, nil, store, nil, WithTargetScope(ts))
+	s := NewServer(ctx, nil, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -436,11 +419,11 @@ func TestExecuteResend_TargetScope_RedirectBlocked(t *testing.T) {
 	})
 
 	if !result.IsError {
-		t.Fatal("expected error for redirect to blocked host, got success")
+		t.Fatal("expected error when follow_redirects is true, got success")
 	}
 	text := result.Content[0].(*gomcp.TextContent).Text
-	if !strings.Contains(text, "target scope") {
-		t.Errorf("error message should mention target scope, got: %s", text)
+	if !strings.Contains(text, "follow_redirects is not supported") {
+		t.Errorf("error message should mention follow_redirects not supported, got: %s", text)
 	}
 }
 

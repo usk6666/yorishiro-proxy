@@ -802,31 +802,30 @@ func TestBuildResendHeaders(t *testing.T) {
 
 	got := buildResendHeaders(original, params)
 
-	// X-Remove-Me should be present with an empty slice to suppress Go's defaults.
-	if vals, exists := got["X-Remove-Me"]; !exists {
-		t.Error("X-Remove-Me should be present with empty slice")
-	} else if len(vals) != 0 {
-		t.Errorf("X-Remove-Me = %v, want empty slice", vals)
+	// X-Remove-Me should not be present (removed).
+	if v := got.Get("X-Remove-Me"); v != "" {
+		t.Errorf("X-Remove-Me should be removed, got %q", v)
 	}
 
 	// Authorization should be overridden.
-	if v := got["Authorization"]; len(v) != 1 || v[0] != "Bearer new-token" {
-		t.Errorf("Authorization = %v, want [Bearer new-token]", v)
+	if v := got.Get("Authorization"); v != "Bearer new-token" {
+		t.Errorf("Authorization = %q, want 'Bearer new-token'", v)
 	}
 
 	// Content-Type should be unchanged.
-	if v := got["Content-Type"]; len(v) != 1 || v[0] != "application/json" {
-		t.Errorf("Content-Type = %v, want [application/json]", v)
+	if v := got.Get("Content-Type"); v != "application/json" {
+		t.Errorf("Content-Type = %q, want 'application/json'", v)
 	}
 
 	// X-Multi should have both values.
-	if v := got["X-Multi"]; len(v) != 2 || v[0] != "val1" || v[1] != "val2" {
-		t.Errorf("X-Multi = %v, want [val1, val2]", v)
+	vals := got.Values("X-Multi")
+	if len(vals) != 2 || vals[0] != "val1" || vals[1] != "val2" {
+		t.Errorf("X-Multi = %v, want [val1, val2]", vals)
 	}
 
 	// X-New should be added.
-	if v := got["X-New"]; len(v) != 1 || v[0] != "new-value" {
-		t.Errorf("X-New = %v, want [new-value]", v)
+	if v := got.Get("X-New"); v != "new-value" {
+		t.Errorf("X-New = %q, want 'new-value'", v)
 	}
 }
 
@@ -847,8 +846,9 @@ func TestBuildResendHeaders_DuplicateKeys(t *testing.T) {
 	got := buildResendHeaders(original, params)
 
 	// Host should have both override values (original replaced).
-	if v := got["Host"]; len(v) != 2 || v[0] != "evil.com" || v[1] != "evil2.com" {
-		t.Errorf("Host = %v, want [evil.com, evil2.com]", v)
+	vals := got.Values("Host")
+	if len(vals) != 2 || vals[0] != "evil.com" || vals[1] != "evil2.com" {
+		t.Errorf("Host = %v, want [evil.com, evil2.com]", vals)
 	}
 }
 
@@ -868,8 +868,9 @@ func TestBuildResendHeaders_DuplicateAddHeaders(t *testing.T) {
 	got := buildResendHeaders(original, params)
 
 	// Set-Cookie should have all three values.
-	if v := got["Set-Cookie"]; len(v) != 3 || v[0] != "cookie1=a" || v[1] != "cookie2=b" || v[2] != "cookie3=c" {
-		t.Errorf("Set-Cookie = %v, want [cookie1=a, cookie2=b, cookie3=c]", v)
+	vals := got.Values("Set-Cookie")
+	if len(vals) != 3 || vals[0] != "cookie1=a" || vals[1] != "cookie2=b" || vals[2] != "cookie3=c" {
+		t.Errorf("Set-Cookie = %v, want [cookie1=a, cookie2=b, cookie3=c]", vals)
 	}
 }
 
@@ -885,11 +886,9 @@ func TestBuildResendHeaders_CaseInsensitiveRemove(t *testing.T) {
 
 	got := buildResendHeaders(original, params)
 
-	// Content-Type should be present with empty slice even though the case doesn't match.
-	if vals, exists := got["Content-Type"]; !exists {
-		t.Error("Content-Type should be present with empty slice (case-insensitive)")
-	} else if len(vals) != 0 {
-		t.Errorf("Content-Type = %v, want empty slice", vals)
+	// Content-Type should be removed (case-insensitive match).
+	if v := got.Get("Content-Type"); v != "" {
+		t.Errorf("Content-Type should be removed, got %q", v)
 	}
 }
 
@@ -1207,9 +1206,9 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 	}
 }
 
-// TestBuildResendHeaders_RemoveHeaders_EmptySlice verifies that removed headers
-// are set to empty slices (not deleted) to suppress Go's net/http defaults.
-func TestBuildResendHeaders_RemoveHeaders_EmptySlice(t *testing.T) {
+// TestBuildResendHeaders_RemoveHeaders verifies that removed headers
+// are excluded from the result.
+func TestBuildResendHeaders_RemoveHeaders(t *testing.T) {
 	t.Parallel()
 	original := map[string][]string{
 		"User-Agent":   {"curl/7.88.1"},
@@ -1222,16 +1221,14 @@ func TestBuildResendHeaders_RemoveHeaders_EmptySlice(t *testing.T) {
 
 	got := buildResendHeaders(original, params)
 
-	// User-Agent should be present with an empty slice, not deleted.
-	if vals, exists := got["User-Agent"]; !exists {
-		t.Error("User-Agent should be present with empty slice")
-	} else if len(vals) != 0 {
-		t.Errorf("User-Agent = %v, want empty slice", vals)
+	// User-Agent should be removed.
+	if v := got.Get("User-Agent"); v != "" {
+		t.Errorf("User-Agent should be removed, got %q", v)
 	}
 
 	// Content-Type should be unchanged.
-	if v := got["Content-Type"]; len(v) != 1 || v[0] != "application/json" {
-		t.Errorf("Content-Type = %v, want [application/json]", v)
+	if v := got.Get("Content-Type"); v != "application/json" {
+		t.Errorf("Content-Type = %q, want 'application/json'", v)
 	}
 }
 
