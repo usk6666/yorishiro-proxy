@@ -505,11 +505,11 @@ export function FlowDetailPage() {
           </div>
         )}
 
-        {/* Tags (excluding smuggling:* which are shown as anomalies above) */}
-        {flowData.tags && Object.keys(flowData.tags).filter(k => !k.startsWith("smuggling:")).length > 0 && (
+        {/* Tags (excluding smuggling:* which are shown as anomalies above, only when anomalies are present) */}
+        {flowData.tags && Object.keys(flowData.tags).filter(k => flowData.anomalies?.length ? !k.startsWith("smuggling:") : true).length > 0 && (
           <div className="sd-tags">
             {Object.entries(flowData.tags)
-              .filter(([key]) => !key.startsWith("smuggling:"))
+              .filter(([key]) => flowData.anomalies?.length ? !key.startsWith("smuggling:") : true)
               .map(([key, value]) => (
                 <Badge key={key} variant="info">
                   {key}: {value}

@@ -2238,81 +2238,85 @@ func TestQuery_Sessions_FilterByConnIDAndHost(t *testing.T) {
 
 // --- Test: extractAnomalies ---
 
-func TestExtractAnomalies_NilTags(t *testing.T) {
+func TestExtractAnomalies(t *testing.T) {
 	t.Parallel()
-	result := extractAnomalies(nil)
-	if result != nil {
-		t.Errorf("expected nil for nil tags, got %v", result)
-	}
-}
 
-func TestExtractAnomalies_EmptyTags(t *testing.T) {
-	t.Parallel()
-	result := extractAnomalies(map[string]string{})
-	if result != nil {
-		t.Errorf("expected nil for empty tags, got %v", result)
+	tests := []struct {
+		name      string
+		tags      map[string]string
+		wantLen   int
+		wantNil   bool
+		wantTypes []string // expected types in sorted order (nil to skip check)
+	}{
+		{
+			name:    "nil tags",
+			tags:    nil,
+			wantNil: true,
+		},
+		{
+			name:    "empty tags",
+			tags:    map[string]string{},
+			wantNil: true,
+		},
+		{
+			name:    "no smuggling tags",
+			tags:    map[string]string{"error": "timeout"},
+			wantNil: true,
+		},
+		{
+			name: "single anomaly",
+			tags: map[string]string{
+				"smuggling:cl_te_conflict": "true",
+				"smuggling:warnings":       "CL/TE conflict detected",
+			},
+			wantLen:   1,
+			wantTypes: []string{"CLTE"},
+		},
+		{
+			name: "multiple anomalies",
+			tags: map[string]string{
+				"smuggling:cl_te_conflict":   "true",
+				"smuggling:header_injection": "true",
+				"smuggling:warnings":         "multiple issues",
+			},
+			wantLen:   2,
+			wantTypes: []string{"CLTE", "HeaderInjection"},
+		},
+		{
+			name: "all types",
+			tags: map[string]string{
+				"smuggling:cl_te_conflict":   "true",
+				"smuggling:duplicate_cl":     "true",
+				"smuggling:ambiguous_te":     "true",
+				"smuggling:invalid_te":       "true",
+				"smuggling:header_injection": "true",
+				"smuggling:obs_fold":         "true",
+			},
+			wantLen: 6,
+		},
 	}
-}
 
-func TestExtractAnomalies_NoSmugglingTags(t *testing.T) {
-	t.Parallel()
-	result := extractAnomalies(map[string]string{"error": "timeout"})
-	if result != nil {
-		t.Errorf("expected nil for non-smuggling tags, got %v", result)
-	}
-}
-
-func TestExtractAnomalies_SingleAnomaly(t *testing.T) {
-	t.Parallel()
-	tags := map[string]string{
-		"smuggling:cl_te_conflict": "true",
-		"smuggling:warnings":       "CL/TE conflict detected",
-	}
-	result := extractAnomalies(tags)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 anomaly, got %d", len(result))
-	}
-	if result[0].Type != "CLTE" {
-		t.Errorf("type = %q, want CLTE", result[0].Type)
-	}
-	if result[0].Detail != "CL/TE conflict detected" {
-		t.Errorf("detail = %q, want warning text", result[0].Detail)
-	}
-}
-
-func TestExtractAnomalies_MultipleAnomalies(t *testing.T) {
-	t.Parallel()
-	tags := map[string]string{
-		"smuggling:cl_te_conflict":   "true",
-		"smuggling:header_injection": "true",
-		"smuggling:warnings":         "multiple issues",
-	}
-	result := extractAnomalies(tags)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 anomalies, got %d", len(result))
-	}
-	// Sorted alphabetically by type.
-	if result[0].Type != "CLTE" {
-		t.Errorf("result[0].Type = %q, want CLTE", result[0].Type)
-	}
-	if result[1].Type != "HeaderInjection" {
-		t.Errorf("result[1].Type = %q, want HeaderInjection", result[1].Type)
-	}
-}
-
-func TestExtractAnomalies_AllTypes(t *testing.T) {
-	t.Parallel()
-	tags := map[string]string{
-		"smuggling:cl_te_conflict":   "true",
-		"smuggling:duplicate_cl":     "true",
-		"smuggling:ambiguous_te":     "true",
-		"smuggling:invalid_te":       "true",
-		"smuggling:header_injection": "true",
-		"smuggling:obs_fold":         "true",
-	}
-	result := extractAnomalies(tags)
-	if len(result) != 6 {
-		t.Fatalf("expected 6 anomalies, got %d", len(result))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := extractAnomalies(tt.tags)
+			if tt.wantNil {
+				if result != nil {
+					t.Errorf("expected nil, got %v", result)
+				}
+				return
+			}
+			if len(result) != tt.wantLen {
+				t.Fatalf("len = %d, want %d", len(result), tt.wantLen)
+			}
+			if tt.wantTypes != nil {
+				for i, wantType := range tt.wantTypes {
+					if result[i].Type != wantType {
+						t.Errorf("result[%d].Type = %q, want %q", i, result[i].Type, wantType)
+					}
+				}
+			}
+		})
 	}
 }
 

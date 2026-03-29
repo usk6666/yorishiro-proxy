@@ -33,13 +33,18 @@ function makeFlow(
 
 /**
  * Simulates the anomaly display logic from FlowDetailPage.
- * Filters smuggling:* keys from tags when anomalies are present.
+ * Filters smuggling:* keys from tags only when anomalies are present;
+ * otherwise returns all tags for backward compatibility.
  */
 function filterNonSmugglingTags(
   tags?: Record<string, string>,
+  anomalies?: AnomalyEntry[],
 ): [string, string][] {
   if (!tags) return [];
-  return Object.entries(tags).filter(([key]) => !key.startsWith("smuggling:"));
+  if (anomalies?.length) {
+    return Object.entries(tags).filter(([key]) => !key.startsWith("smuggling:"));
+  }
+  return Object.entries(tags);
 }
 
 // ---------------------------------------------------------------------------
@@ -110,19 +115,41 @@ describe("Anomaly types", () => {
 // ---------------------------------------------------------------------------
 
 describe("Tag filtering for anomaly display", () => {
-  it("filters smuggling:* tags from display", () => {
+  it("filters smuggling:* tags when anomalies are present", () => {
     const tags: Record<string, string> = {
       "smuggling:cl_te_conflict": "true",
       "smuggling:warnings": "CL/TE conflict",
       error: "timeout",
       streaming_type: "sse",
     };
-    const filtered = filterNonSmugglingTags(tags);
+    const anomalies: AnomalyEntry[] = [
+      { type: "CLTE", detail: "CL/TE conflict" },
+    ];
+    const filtered = filterNonSmugglingTags(tags, anomalies);
     expect(filtered).toHaveLength(2);
     expect(filtered.map(([k]) => k).sort()).toEqual([
       "error",
       "streaming_type",
     ]);
+  });
+
+  it("returns all tags including smuggling:* when no anomalies", () => {
+    const tags: Record<string, string> = {
+      "smuggling:cl_te_conflict": "true",
+      "smuggling:warnings": "CL/TE conflict",
+      error: "timeout",
+    };
+    const filtered = filterNonSmugglingTags(tags, undefined);
+    expect(filtered).toHaveLength(3);
+  });
+
+  it("returns all tags including smuggling:* when anomalies empty", () => {
+    const tags: Record<string, string> = {
+      "smuggling:cl_te_conflict": "true",
+      error: "timeout",
+    };
+    const filtered = filterNonSmugglingTags(tags, []);
+    expect(filtered).toHaveLength(2);
   });
 
   it("returns empty array for undefined tags", () => {
@@ -139,12 +166,15 @@ describe("Tag filtering for anomaly display", () => {
     expect(filtered[0][0]).toBe("error");
   });
 
-  it("returns empty when only smuggling tags", () => {
+  it("returns empty when only smuggling tags and anomalies present", () => {
     const tags: Record<string, string> = {
       "smuggling:cl_te_conflict": "true",
       "smuggling:warnings": "test",
     };
-    const filtered = filterNonSmugglingTags(tags);
+    const anomalies: AnomalyEntry[] = [
+      { type: "CLTE", detail: "test" },
+    ];
+    const filtered = filterNonSmugglingTags(tags, anomalies);
     expect(filtered).toHaveLength(0);
   });
 });
