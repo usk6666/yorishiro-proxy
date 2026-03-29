@@ -11,6 +11,7 @@ The orchestrator or skill replaces the following with actual values:
 - `{{BRANCH_NAME}}` — Branch name to fix
 - `{{CODE_REVIEW_FINDINGS}}` — Code review findings (only when CHANGES_REQUESTED)
 - `{{SECURITY_REVIEW_FINDINGS}}` — Security review findings (only when CHANGES_REQUESTED)
+- `{{COPILOT_REVIEW_FINDINGS}}` — GitHub Copilot review findings (inline comments from Copilot)
 - `{{ORIGINAL_ISSUE_ID}}` — Original Linear Issue ID
 - `{{PRODUCT_CONTEXT}}` — Product overview
 
@@ -46,6 +47,10 @@ The top priority is to precisely fix the issues identified by reviewers without 
 ### Security Review Findings
 
 {{SECURITY_REVIEW_FINDINGS}}
+
+### GitHub Copilot Review Findings
+
+{{COPILOT_REVIEW_FINDINGS}}
 
 ## First Steps
 
