@@ -16,7 +16,11 @@ import (
 
 // StreamOptions configures streaming behavior for RoundTripStream.
 type StreamOptions struct {
-	// OnSendFrame is called for each frame sent to the upstream server.
+	// OnSendFrame is called once per logical frame sent to the upstream server.
+	// For HEADERS frames, it is invoked with a single reconstructed frame
+	// (END_HEADERS=true, full header block) regardless of whether the actual
+	// wire encoding was split into HEADERS + CONTINUATION frames. For DATA
+	// frames, it is invoked per wire frame.
 	// The frameBytes contain the complete raw frame (header + payload).
 	// The callback must not retain the slice after returning.
 	OnSendFrame func(frameBytes []byte)
@@ -131,6 +135,18 @@ func (s *streamBodyCloser) Close() error {
 	return err
 }
 
+// closeIfCloser closes r if it implements io.Closer. This is used to unblock
+// a sender goroutine that may be blocked in body.Read when the context is
+// cancelled.
+func closeIfCloser(r io.Reader) {
+	if r == nil {
+		return
+	}
+	if c, ok := r.(io.Closer); ok {
+		_ = c.Close()
+	}
+}
+
 // streamingStreamState extends the stream state for streaming round trips.
 // It uses an io.Pipe to stream response DATA frame payloads to the caller
 // instead of buffering them in memory.
@@ -232,6 +248,9 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 		tc.sendReset(streamID, ErrCodeCancel)
 		tc.unregisterStreamingHandler(streamID)
 		pw.CloseWithError(ctx.Err())
+		// Close the request body to unblock the sender goroutine which may
+		// be blocked in body.Read.
+		closeIfCloser(body)
 		return nil, ctx.Err()
 	case <-sss.headersDone:
 		// Response headers received.
@@ -291,10 +310,21 @@ func (sb *streamingBody) Read(p []byte) (int, error) {
 	n, err := sb.reader.Read(p)
 	if err == io.EOF {
 		sb.readErr = io.EOF
-		// Wait for sender to finish.
-		<-sb.senderDone
-		// Mark body done with trailers.
+		// Mark body done with trailers immediately — do not block on sender.
+		// The server may send END_STREAM before the client finishes sending
+		// (e.g., early error responses in bidirectional streaming).
 		sb.sss.result.markBodyDone(sb.sss.trailers)
+
+		// Propagate any sender error asynchronously: if the sender goroutine
+		// failed, surface its error instead of io.EOF so the caller is aware.
+		select {
+		case sendErr := <-sb.senderDone:
+			if sendErr != nil {
+				return n, sendErr
+			}
+		default:
+			// Sender still running — do not block.
+		}
 	}
 	return n, err
 }
