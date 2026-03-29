@@ -611,11 +611,17 @@ func (s *Server) buildRawRequest(prep *resendPrepared) *parser.RawRequest {
 		headers = append(parser.RawHeaders{{Name: "Host", Value: prep.url.Host}}, headers...)
 	}
 
-	// Ensure Content-Length is set when there is a body. HTTP/1.1 requires
-	// Content-Length or Transfer-Encoding for request bodies. The old
-	// net/http.Client set this automatically.
-	if len(prep.body) > 0 && headers.Get("Content-Length") == "" && headers.Get("Transfer-Encoding") == "" {
-		headers.Set("Content-Length", fmt.Sprintf("%d", len(prep.body)))
+	// Always recalculate Content-Length to match the actual body length for
+	// structured resends. When override_body or body_patches modify the body,
+	// the original Content-Length becomes stale. The old net/http.Client did
+	// this automatically. Users who need mismatched Content-Length (e.g. for
+	// request smuggling tests) should use resend_raw.
+	if headers.Get("Transfer-Encoding") == "" {
+		if len(prep.body) > 0 {
+			headers.Set("Content-Length", fmt.Sprintf("%d", len(prep.body)))
+		} else {
+			headers.Del("Content-Length")
+		}
 	}
 
 	return &parser.RawRequest{
