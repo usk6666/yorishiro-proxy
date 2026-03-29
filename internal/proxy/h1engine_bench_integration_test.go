@@ -196,8 +196,10 @@ func BenchmarkH1Engine_GoHTTPClient(b *testing.B) {
 
 	proxyURL, _ := url.Parse("http://" + listener.Addr())
 	client := &gohttp.Client{
+		Timeout: 5 * time.Second,
 		Transport: &gohttp.Transport{
-			Proxy: gohttp.ProxyURL(proxyURL),
+			Proxy:                 gohttp.ProxyURL(proxyURL),
+			ResponseHeaderTimeout: 5 * time.Second,
 		},
 	}
 
