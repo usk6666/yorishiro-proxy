@@ -92,8 +92,9 @@ func (r *StreamRoundTripResult) markBodyDone(trailers []hpack.HeaderField) {
 // for requests with no body.
 //
 // RoundTripStream takes ownership of conn and manages its lifecycle. The caller
-// must read the response Body to completion before the connection resources are
-// released.
+// MUST call Body.Close() on the returned StreamRoundTripResult to release the
+// underlying connection resources, even after reading the body to EOF. This
+// follows the same contract as net/http.Response.Body.
 func (t *Transport) RoundTripStream(ctx context.Context, conn net.Conn, headers []hpack.HeaderField, body io.Reader, opts StreamOptions) (*StreamRoundTripResult, error) {
 	logger := t.logger()
 
@@ -242,24 +243,45 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 		close(senderDone)
 	}
 
-	// Wait for response headers.
-	select {
-	case <-ctx.Done():
-		tc.sendReset(streamID, ErrCodeCancel)
-		tc.unregisterStreamingHandler(streamID)
-		pw.CloseWithError(ctx.Err())
-		// Close the request body to unblock the sender goroutine which may
-		// be blocked in body.Read.
-		closeIfCloser(body)
-		return nil, ctx.Err()
-	case <-sss.headersDone:
-		// Response headers received.
-	case r := <-sss.done:
-		// Stream completed before headers (error case).
-		tc.unregisterStreamingHandler(streamID)
-		pw.CloseWithError(r.err)
-		if r.err != nil {
-			return nil, r.err
+	// Wait for response headers. We also select on senderDone so that if the
+	// sender goroutine fails (e.g., body read error or flow-control error)
+	// before headers arrive, we fail promptly instead of blocking until ctx
+	// is cancelled.
+waitForHeaders:
+	for {
+		select {
+		case <-ctx.Done():
+			tc.sendReset(streamID, ErrCodeCancel)
+			tc.unregisterStreamingHandler(streamID)
+			pw.CloseWithError(ctx.Err())
+			// Close the request body to unblock the sender goroutine which may
+			// be blocked in body.Read.
+			closeIfCloser(body)
+			return nil, ctx.Err()
+		case <-sss.headersDone:
+			break waitForHeaders
+		case r := <-sss.done:
+			// Stream completed before headers (error case or server sent
+			// END_STREAM on headers-only response).
+			tc.unregisterStreamingHandler(streamID)
+			pw.CloseWithError(r.err)
+			if r.err != nil {
+				return nil, r.err
+			}
+			break waitForHeaders
+		case err, ok := <-senderDone:
+			if !ok || err == nil {
+				// Sender completed successfully — nil out the channel and
+				// continue waiting for headers from the server.
+				senderDone = nil
+				continue
+			}
+			// Sender failed — reset the stream and return the error.
+			tc.sendReset(streamID, ErrCodeCancel)
+			tc.unregisterStreamingHandler(streamID)
+			pw.CloseWithError(err)
+			closeIfCloser(body)
+			return nil, err
 		}
 	}
 
@@ -388,82 +410,101 @@ func (tc *transportConn) streamSendBody(ctx context.Context, streamID uint32, bo
 }
 
 // streamSendData sends a single chunk of data as DATA frame(s) with flow control.
+// It sends partial frames when the available flow-control window is smaller than
+// the chunk size, avoiding head-of-line blocking under constrained flow control.
 func (tc *transportConn) streamSendData(ctx context.Context, streamID uint32, data []byte, endStream bool, opts StreamOptions) error {
 	maxPayload := int(tc.conn.PeerSettings().MaxFrameSize)
 
 	for len(data) > 0 || endStream {
-		chunk := data
-		isLast := endStream && len(data) <= maxPayload
-
-		if len(chunk) > maxPayload {
-			chunk = data[:maxPayload]
-			isLast = false
-		}
-
-		if len(chunk) > 0 {
-			// Wait for flow control window.
-			if err := tc.waitForSendWindow(ctx, streamID, int32(len(chunk))); err != nil {
+		if len(data) > 0 {
+			// Wait for any positive flow control window.
+			available, err := tc.waitForSendWindow(ctx, streamID)
+			if err != nil {
 				return err
 			}
 
+			// Compute chunk as min(len(data), maxPayload, available).
+			chunk := len(data)
+			if chunk > maxPayload {
+				chunk = maxPayload
+			}
+			if chunk > int(available) {
+				chunk = int(available)
+			}
+
+			isLast := endStream && chunk >= len(data)
+
 			// Consume flow control windows.
-			n := int32(len(chunk))
+			n := int32(chunk)
 			if err := tc.conn.ConsumeSendWindow(n); err != nil {
 				return fmt.Errorf("connection flow control: %w", err)
 			}
 			if err := tc.conn.Streams().ConsumeSendWindow(streamID, n); err != nil {
 				return fmt.Errorf("stream flow control: %w", err)
 			}
+
+			tc.writeMu.Lock()
+			err = tc.writer.WriteData(streamID, isLast, data[:chunk])
+			tc.writeMu.Unlock()
+			if err != nil {
+				return fmt.Errorf("write DATA frame: %w", err)
+			}
+
+			// Record sent DATA frame.
+			if opts.OnSendFrame != nil {
+				rawFrame := buildDataFrameBytes(streamID, isLast, data[:chunk])
+				opts.OnSendFrame(rawFrame)
+			}
+
+			data = data[chunk:]
+			if isLast {
+				return nil
+			}
+			continue
 		}
 
+		// len(data) == 0 && endStream: send empty DATA with END_STREAM.
 		tc.writeMu.Lock()
-		err := tc.writer.WriteData(streamID, isLast, chunk)
+		err := tc.writer.WriteData(streamID, true, nil)
 		tc.writeMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("write DATA frame: %w", err)
 		}
 
-		// Record sent DATA frame.
 		if opts.OnSendFrame != nil {
-			rawFrame := buildDataFrameBytes(streamID, isLast, chunk)
+			rawFrame := buildDataFrameBytes(streamID, true, nil)
 			opts.OnSendFrame(rawFrame)
 		}
-
-		data = data[len(chunk):]
-		if isLast {
-			return nil
-		}
-		// If we sent all data but endStream is false, break.
-		if len(data) == 0 && !endStream {
-			return nil
-		}
+		return nil
 	}
 	return nil
 }
 
 // waitForSendWindow waits until the connection and stream flow control windows
-// have enough space for the requested number of bytes.
-func (tc *transportConn) waitForSendWindow(ctx context.Context, streamID uint32, needed int32) error {
+// have any positive space available, and returns the available window size.
+// The caller should send min(data, maxPayload, available) to avoid head-of-line
+// blocking under constrained flow control.
+func (tc *transportConn) waitForSendWindow(ctx context.Context, streamID uint32) (int32, error) {
 	timer := time.NewTimer(10 * time.Millisecond)
 	defer timer.Stop()
 	for {
 		connWindow := tc.conn.SendWindow()
 		streamWindow, ok := tc.conn.Streams().GetSendWindow(streamID)
 		if !ok {
-			return fmt.Errorf("stream %d does not exist", streamID)
+			return 0, fmt.Errorf("stream %d does not exist", streamID)
 		}
 		available := connWindow
 		if streamWindow < available {
 			available = streamWindow
 		}
-		if available >= needed {
-			return nil
+		if available > 0 {
+			return available, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return 0, ctx.Err()
 		case <-tc.readLoopDone:
-			return fmt.Errorf("connection closed while waiting for send window")
+			return 0, fmt.Errorf("connection closed while waiting for send window")
 		case <-timer.C:
 			timer.Reset(10 * time.Millisecond)
 			// Retry after peer sends WINDOW_UPDATE.
