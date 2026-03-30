@@ -218,8 +218,12 @@ func (a *goHTTPWriterAdapter) WriteData(data []byte) error {
 }
 
 func (a *goHTTPWriterAdapter) WriteTrailers(trailers []hpack.HeaderField) error {
+	h := a.ResponseWriter.Header()
 	for _, hf := range trailers {
-		a.ResponseWriter.Header().Add(gohttp.TrailerPrefix+hf.Name, hf.Value)
+		h.Add("Trailer", hf.Name)
+	}
+	for _, hf := range trailers {
+		h.Add(gohttp.TrailerPrefix+hf.Name, hf.Value)
 	}
 	return nil
 }

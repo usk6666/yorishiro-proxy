@@ -1431,7 +1431,7 @@ func removeHTTP2HopByHop(header gohttp.Header) {
 
 // isNoBodyStatus returns true for HTTP status codes that must not include a
 // message body per RFC 9110 §6.4.1: 1xx (informational), 204 (No Content),
-// and 304 (Not Modified).
+// 205 (Reset Content), and 304 (Not Modified).
 func isNoBodyStatus(code int) bool {
-	return (code >= 100 && code < 200) || code == 204 || code == 304
+	return (code >= 100 && code < 200) || code == 204 || code == 205 || code == 304
 }
