@@ -65,9 +65,15 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w h2ResponseW
 		hpackHeaders = append(hpackHeaders, hpack.HeaderField{
 			Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
 		})
-		w.WriteHeaders(statusCode, hpackHeaders)
+		if err := w.WriteHeaders(statusCode, hpackHeaders); err != nil {
+			logger.Debug("failed to write plugin respond headers", "error", err)
+			return req, body, true
+		}
 		if len(respBody) > 0 {
-			w.WriteData(respBody)
+			if err := w.WriteData(respBody); err != nil {
+				logger.Debug("failed to write plugin respond body", "error", err)
+				return req, body, true
+			}
 		}
 		logger.Info("plugin responded to request", "hook", "on_receive_from_client",
 			"method", req.Method, "url", req.URL.String(), "status", statusCode)

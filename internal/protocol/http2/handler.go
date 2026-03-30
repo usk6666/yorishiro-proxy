@@ -125,6 +125,10 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 	// Restrict ALPN to HTTP/1.1 only for the legacy gohttp.Transport path.
 	// Go's http.Transport cannot handle HTTP/2 frames when DialTLSContext is
 	// set (it disables automatic HTTP/2 upgrade).
+	//
+	// NOTE: RestrictALPNToH1 breaks gRPC upstream (h2 required). This is a
+	// known limitation of the legacy gRPC path that will be resolved in USK-520
+	// (gRPC pipeline rewrite to use ConnPool + h2Transport).
 	h1Transport := httputil.RestrictALPNToH1(t)
 	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		rawConn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
@@ -646,8 +650,13 @@ func writeSafetyFilterResponse(w h2ResponseWriter, violation *safety.InputViolat
 		{Name: "x-block-reason", Value: "safety_filter"},
 		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
 	}
-	w.WriteHeaders(gohttp.StatusForbidden, headers)
-	w.WriteData(body)
+	if err := w.WriteHeaders(gohttp.StatusForbidden, headers); err != nil {
+		slog.Debug("failed to write safety filter response headers", "error", err)
+		return
+	}
+	if err := w.WriteData(body); err != nil {
+		slog.Debug("failed to write safety filter response body", "error", err)
+	}
 }
 
 // checkRateLimit enforces rate limits. Returns true if the request was blocked.
@@ -676,8 +685,13 @@ func writeRateLimitResponse(w h2ResponseWriter) {
 		{Name: "retry-after", Value: "1"},
 		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
 	}
-	w.WriteHeaders(gohttp.StatusTooManyRequests, headers)
-	w.WriteData([]byte(body))
+	if err := w.WriteHeaders(gohttp.StatusTooManyRequests, headers); err != nil {
+		slog.Debug("failed to write rate limit response headers", "error", err)
+		return
+	}
+	if err := w.WriteData([]byte(body)); err != nil {
+		slog.Debug("failed to write rate limit response body", "error", err)
+	}
 }
 
 // writeScopeBlockResponse writes a 403 Forbidden response for scope violations.
@@ -688,8 +702,13 @@ func writeScopeBlockResponse(w h2ResponseWriter, target, reason string) {
 		{Name: "content-type", Value: "application/json"},
 		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
 	}
-	w.WriteHeaders(gohttp.StatusForbidden, headers)
-	w.WriteData([]byte(body))
+	if err := w.WriteHeaders(gohttp.StatusForbidden, headers); err != nil {
+		slog.Debug("failed to write scope block response headers", "error", err)
+		return
+	}
+	if err := w.WriteData([]byte(body)); err != nil {
+		slog.Debug("failed to write scope block response body", "error", err)
+	}
 }
 
 // runClientPluginHook dispatches the on_receive_from_client plugin hook.

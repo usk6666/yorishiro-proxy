@@ -984,6 +984,9 @@ func (rw *frameResponseWriter) WriteData(data []byte) error {
 func (rw *frameResponseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
+	if !rw.headersSent {
+		return fmt.Errorf("WriteTrailers called before WriteHeaders")
+	}
 	rw.h2Trailers = trailers
 	return nil
 }
