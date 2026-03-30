@@ -433,6 +433,10 @@ func (sb *streamingBody) Read(p []byte) (int, error) {
 func (sb *streamingBody) Close() error {
 	var err error
 	sb.closeOnce.Do(func() {
+		// Abort the streaming state to signal the writer goroutine and close
+		// the pipe writer. This ensures no goroutine leak even if the caller
+		// closes the body before END_STREAM (C-15 fix).
+		sb.sss.abort(fmt.Errorf("body closed"))
 		err = sb.reader.Close()
 		// Close the request body to unblock the sender goroutine if it is
 		// blocked in body.Read (C-8 fix: prevent goroutine leak).
