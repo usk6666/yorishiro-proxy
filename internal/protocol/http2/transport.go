@@ -315,6 +315,10 @@ type transportConn struct {
 	streamsMu sync.Mutex
 	streams   map[uint32]*streamState
 
+	// streamingStreams maps stream IDs to streaming handlers.
+	// Used by RoundTripStream for pipe-based response body delivery.
+	streamingStreams map[uint32]*streamingStreamState
+
 	// readLoopDone is closed when the background read loop exits.
 	readLoopDone chan struct{}
 	// closeOnce ensures the connection is closed exactly once.
@@ -1035,9 +1039,16 @@ func (tc *transportConn) handleSettings(f *frame.Frame) error {
 func (tc *transportConn) handleResponseHeaders(f *frame.Frame) error {
 	streamID := f.Header.StreamID
 
+	// Check for streaming handler first.
 	tc.streamsMu.Lock()
+	sss, isStreaming := tc.streamingStreams[streamID]
 	ss, ok := tc.streams[streamID]
 	tc.streamsMu.Unlock()
+
+	if isStreaming {
+		return tc.handleStreamingHeaders(f, sss)
+	}
+
 	if !ok {
 		// Unknown stream; might be after a reset. Ignore.
 		return nil
@@ -1068,9 +1079,16 @@ func (tc *transportConn) handleResponseHeaders(f *frame.Frame) error {
 func (tc *transportConn) handleContinuation(f *frame.Frame) error {
 	streamID := f.Header.StreamID
 
+	// Check for streaming handler first.
 	tc.streamsMu.Lock()
+	sss, isStreaming := tc.streamingStreams[streamID]
 	ss, ok := tc.streams[streamID]
 	tc.streamsMu.Unlock()
+
+	if isStreaming {
+		return tc.handleStreamingContinuation(f, sss)
+	}
+
 	if !ok {
 		return nil
 	}
@@ -1120,9 +1138,16 @@ func (tc *transportConn) processDecodedHeaders(ss *streamState, f *frame.Frame, 
 func (tc *transportConn) handleData(f *frame.Frame) error {
 	streamID := f.Header.StreamID
 
+	// Check for streaming handler first.
 	tc.streamsMu.Lock()
+	sss, isStreaming := tc.streamingStreams[streamID]
 	ss, ok := tc.streams[streamID]
 	tc.streamsMu.Unlock()
+
+	if isStreaming {
+		return tc.handleStreamingData(f, sss)
+	}
+
 	if !ok {
 		return nil
 	}
@@ -1210,6 +1235,16 @@ func (tc *transportConn) handleGoAway(f *frame.Frame) error {
 			}
 		}
 	}
+	for id, sss := range tc.streamingStreams {
+		if id > lastStreamID {
+			goawayErr := fmt.Errorf("stream %d rejected by GOAWAY (last=%d)", id, lastStreamID)
+			sss.abort(goawayErr)
+			select {
+			case sss.done <- streamResult{err: goawayErr}:
+			default:
+			}
+		}
+	}
 	tc.streamsMu.Unlock()
 
 	return nil
@@ -1223,16 +1258,28 @@ func (tc *transportConn) handleRSTStream(f *frame.Frame) error {
 	}
 
 	streamID := f.Header.StreamID
+	rstErr := &StreamError{StreamID: streamID, Code: errCode, Reason: "RST_STREAM received"}
 
 	tc.streamsMu.Lock()
+	sss, isStreaming := tc.streamingStreams[streamID]
 	ss, ok := tc.streams[streamID]
 	tc.streamsMu.Unlock()
+
+	if isStreaming {
+		sss.abort(rstErr)
+		select {
+		case sss.done <- streamResult{err: rstErr}:
+		default:
+		}
+		return nil
+	}
+
 	if !ok {
 		return nil
 	}
 
 	select {
-	case ss.done <- streamResult{err: &StreamError{StreamID: streamID, Code: errCode, Reason: "RST_STREAM received"}}:
+	case ss.done <- streamResult{err: rstErr}:
 	default:
 	}
 
@@ -1251,10 +1298,18 @@ func (tc *transportConn) handleReadError(err error) {
 
 // closeWithError signals all pending streams with an error and closes the connection.
 func (tc *transportConn) closeWithError(err error) {
+	connErr := fmt.Errorf("connection error: %w", err)
 	tc.streamsMu.Lock()
 	for _, ss := range tc.streams {
 		select {
-		case ss.done <- streamResult{err: fmt.Errorf("connection error: %w", err)}:
+		case ss.done <- streamResult{err: connErr}:
+		default:
+		}
+	}
+	for _, sss := range tc.streamingStreams {
+		sss.abort(connErr)
+		select {
+		case sss.done <- streamResult{err: connErr}:
 		default:
 		}
 	}
