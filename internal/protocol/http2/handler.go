@@ -86,10 +86,10 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 			},
 		},
 		connPool: &httputil.ConnPool{
-			// Initialize with a safe default (InsecureSkipVerify=false) so that
-			// if SetTLSTransport is not called, upstream cert verification is
-			// still enabled rather than silently skipped.
-			TLSTransport:   &httputil.StandardTransport{InsecureSkipVerify: false},
+			// Leave TLSTransport nil so that ConnPool's effectiveTLSTransport()
+			// provides the default (InsecureSkipVerify=true for proxy use-case).
+			// Production code calls SetTLSTransport or SetInsecureSkipVerify
+			// during initialization to configure the desired behavior.
 			AllowH2:        true,
 			DialViaProxy:   proxy.DialViaUpstreamProxy,
 			RedactProxyURL: proxy.RedactProxyURL,
@@ -170,6 +170,12 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 	defer h.tlsMu.Unlock()
 	if st, ok := h.connPool.TLSTransport.(*httputil.StandardTransport); ok {
 		st.InsecureSkipVerify = skip
+	} else if h.connPool.TLSTransport == nil {
+		// When no TLSTransport is explicitly configured, create a
+		// StandardTransport with the requested setting so that the
+		// caller's intent is preserved instead of relying on the
+		// ConnPool default (which is InsecureSkipVerify=true).
+		h.connPool.TLSTransport = &httputil.StandardTransport{InsecureSkipVerify: skip}
 	}
 }
 
@@ -1390,4 +1396,9 @@ func removeHTTP2HopByHop(header gohttp.Header) {
 	header.Del("Proxy-Connection")
 	header.Del("Transfer-Encoding")
 	header.Del("Upgrade")
+	// RFC 7540 §8.1.2.2: TE is a hop-by-hop header. The only allowed value
+	// in HTTP/2 is "trailers"; remove TE unless it is exactly "trailers".
+	if te := header.Get("Te"); te != "" && !strings.EqualFold(te, "trailers") {
+		header.Del("Te")
+	}
 }

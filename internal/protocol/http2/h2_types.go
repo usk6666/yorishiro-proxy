@@ -271,8 +271,19 @@ func buildH2HeadersFromGoHTTP(req *gohttp.Request) []hpack.HeaderField {
 
 	for name, vals := range req.Header {
 		lower := strings.ToLower(name)
-		if lower == "host" || lower == "connection" || lower == "keep-alive" ||
-			lower == "proxy-connection" || lower == "transfer-encoding" || lower == "upgrade" {
+		if lower == "host" {
+			continue
+		}
+		// Filter HTTP/2 hop-by-hop headers (RFC 9113 §8.2.2), but allow
+		// "te: trailers" which is the only TE value permitted in HTTP/2.
+		if isHopByHopHeader(lower) {
+			if lower == "te" {
+				for _, v := range vals {
+					if strings.EqualFold(v, "trailers") {
+						headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
+					}
+				}
+			}
 			continue
 		}
 		for _, v := range vals {

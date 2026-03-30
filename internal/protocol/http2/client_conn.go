@@ -940,8 +940,10 @@ func (rw *frameResponseWriter) WriteHeaders(statusCode int, headers []hpack.Head
 		rw.mu.Unlock()
 		return fmt.Errorf("headers already sent")
 	}
+	// Mark wroteHeader to prevent Header()/WriteHeader() from racing, but
+	// defer headersSent until after the wire write succeeds so that state
+	// remains consistent on write failure.
 	rw.wroteHeader = true
-	rw.headersSent = true
 	rw.statusCode = statusCode
 	rw.mu.Unlock()
 
@@ -959,8 +961,13 @@ func (rw *frameResponseWriter) WriteHeaders(statusCode int, headers []hpack.Head
 	cc.writeMu.Unlock()
 	if err != nil {
 		cc.logger.Debug("failed to write response HEADERS (h2)", "stream_id", rw.streamID, "error", err)
+		return err
 	}
-	return err
+
+	rw.mu.Lock()
+	rw.headersSent = true
+	rw.mu.Unlock()
+	return nil
 }
 
 // WriteData implements h2ResponseWriter. It sends response body data as DATA

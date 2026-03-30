@@ -47,36 +47,9 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w h2ResponseW
 		return req, body, true
 
 	case plugin.ActionRespond:
-		statusCode, pluginHeaders, respBody := plugin.BuildRespondResponse(result.ResponseData)
-		var hpackHeaders []hpack.HeaderField
-		for _, hdr := range pluginHeaders {
-			// HTTP/2 requires lowercase header names (RFC 9113 §8.2).
-			// plugin.BuildRespondResponse may return canonicalized names
-			// like "Content-Type" which would cause PROTOCOL_ERROR in HPACK.
-			name := strings.ToLower(hdr.Name)
-			// Filter HTTP/1.1 hop-by-hop / connection-specific headers that
-			// are prohibited in HTTP/2 (RFC 9113 §8.2.2). Emitting these in
-			// HTTP/2 HEADERS can cause PROTOCOL_ERROR.
-			if isHopByHopHeader(name) {
-				continue
-			}
-			hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: name, Value: hdr.Value})
-		}
-		hpackHeaders = append(hpackHeaders, hpack.HeaderField{
-			Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
-		})
-		if err := w.WriteHeaders(statusCode, hpackHeaders); err != nil {
-			logger.Debug("failed to write plugin respond headers", "error", err)
-			return req, body, true
-		}
-		if len(respBody) > 0 {
-			if err := w.WriteData(respBody); err != nil {
-				logger.Debug("failed to write plugin respond body", "error", err)
-				return req, body, true
-			}
-		}
+		writePluginRespondResponse(w, result.ResponseData, logger)
 		logger.Info("plugin responded to request", "hook", "on_receive_from_client",
-			"method", req.Method, "url", req.URL.String(), "status", statusCode)
+			"method", req.Method, "url", req.URL.String())
 		return req, body, true
 
 	case plugin.ActionContinue:
@@ -210,4 +183,34 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 	}
 
 	return resp, body
+}
+
+// writePluginRespondResponse writes a plugin ActionRespond response to the
+// client. It filters hop-by-hop and duplicate content-length headers, then
+// adds an authoritative content-length based on the actual body length.
+func writePluginRespondResponse(w h2ResponseWriter, responseData map[string]any, logger *slog.Logger) {
+	statusCode, pluginHeaders, respBody := plugin.BuildRespondResponse(responseData)
+	var hpackHeaders []hpack.HeaderField
+	for _, hdr := range pluginHeaders {
+		// HTTP/2 requires lowercase header names (RFC 9113 §8.2).
+		name := strings.ToLower(hdr.Name)
+		// Filter hop-by-hop headers (RFC 9113 §8.2.2) and plugin-provided
+		// content-length (we add the authoritative value below).
+		if isHopByHopHeader(name) || name == "content-length" {
+			continue
+		}
+		hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: name, Value: hdr.Value})
+	}
+	hpackHeaders = append(hpackHeaders, hpack.HeaderField{
+		Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
+	})
+	if err := w.WriteHeaders(statusCode, hpackHeaders); err != nil {
+		logger.Debug("failed to write plugin respond headers", "error", err)
+		return
+	}
+	if len(respBody) > 0 {
+		if err := w.WriteData(respBody); err != nil {
+			logger.Debug("failed to write plugin respond body", "error", err)
+		}
+	}
 }
