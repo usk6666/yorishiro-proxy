@@ -322,6 +322,15 @@ func TestReadClientPreface_Invalid(t *testing.T) {
 	}
 }
 
+// must is a test helper that panics on error. Used to simplify test handler
+// bodies that convert h2Request to gohttp.Request.
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(fmt.Sprintf("must: %v", err))
+	}
+	return v
+}
+
 // h2cTestConn is a helper that manages a TCP listener-based h2c test connection.
 // Using TCP instead of net.Pipe() avoids synchronous pipe deadlocks.
 type h2cTestConn struct {
@@ -337,7 +346,7 @@ type h2cTestConn struct {
 
 // newH2CTestConn sets up an h2c test: starts a clientConn server on a TCP listener,
 // connects as a client, performs the HTTP/2 handshake, and returns the ready-to-use test connection.
-func newH2CTestConn(t *testing.T, handler func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request)) *h2cTestConn {
+func newH2CTestConn(t *testing.T, handler func(ctx context.Context, w h2ResponseWriter, req *h2Request)) *h2cTestConn {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -429,7 +438,8 @@ func TestClientConn_FullH2CExchange(t *testing.T) {
 	var received []receivedReq
 	handlerDone := make(chan struct{}, 1)
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, req := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
@@ -523,7 +533,8 @@ func TestClientConn_POSTWithBody(t *testing.T) {
 	var receivedBody string
 	handlerDone := make(chan struct{}, 1)
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, req := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
@@ -612,7 +623,8 @@ func TestClientConn_MultipleStreams(t *testing.T) {
 	var paths []string
 	handlerDone := make(chan struct{}, 3)
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, req := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		defer func() { handlerDone <- struct{}{} }()
 		mu.Lock()
 		paths = append(paths, req.URL.Path)
@@ -664,7 +676,8 @@ func TestClientConn_MultipleStreams(t *testing.T) {
 
 // TestClientConn_PingPong tests PING frame handling.
 func TestClientConn_PingPong(t *testing.T) {
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, _ := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		w.WriteHeader(gohttp.StatusOK)
 	}
 
@@ -694,7 +707,8 @@ func TestClientConn_PingPong(t *testing.T) {
 
 // TestClientConn_GoAway tests GOAWAY handling.
 func TestClientConn_GoAway(t *testing.T) {
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, _ := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		w.WriteHeader(gohttp.StatusOK)
 	}
 
@@ -726,7 +740,8 @@ func TestClientConn_InvalidPreface(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, _ := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		w.WriteHeader(gohttp.StatusOK)
 	}
 
@@ -765,7 +780,8 @@ func TestClientConn_InvalidPreface(t *testing.T) {
 
 // TestClientConn_EvenStreamIDRejected tests that even-numbered client streams are rejected.
 func TestClientConn_EvenStreamIDRejected(t *testing.T) {
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, _ := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		w.WriteHeader(gohttp.StatusOK)
 	}
 
@@ -793,7 +809,8 @@ func TestClientConn_EvenStreamIDRejected(t *testing.T) {
 
 // TestClientConn_WindowUpdate tests that WINDOW_UPDATE frames are handled.
 func TestClientConn_WindowUpdate(t *testing.T) {
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, _ := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		w.WriteHeader(gohttp.StatusOK)
 	}
 
@@ -832,7 +849,8 @@ func TestClientConn_WriteChunking(t *testing.T) {
 		largeBody[i] = byte(i % 256)
 	}
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, _ := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write(largeBody)
@@ -904,7 +922,8 @@ func TestClientConn_StreamingFlush(t *testing.T) {
 	ready := make(chan struct{})
 	done := make(chan struct{})
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, _ := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
 		w.(gohttp.Flusher).Flush()
@@ -984,7 +1003,8 @@ func TestClientConn_DataWithoutEndStream_StreamingDispatch(t *testing.T) {
 	var receivedBody string
 	handlerDone := make(chan struct{}, 1)
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, req := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
@@ -1083,7 +1103,8 @@ func TestClientConn_StreamingBody_MultipleDataFrames(t *testing.T) {
 	var receivedBody string
 	handlerDone := make(chan struct{}, 1)
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, req := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		defer func() { handlerDone <- struct{}{} }()
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
@@ -1153,7 +1174,8 @@ func TestClientConn_StreamingBody_RSTStream(t *testing.T) {
 	bodyReadStarted := make(chan struct{})
 	handlerDone := make(chan struct{})
 
-	handler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	handler := func(ctx context.Context, h2w h2ResponseWriter, h2r *h2Request) {
+		w, req := asGoHTTPResponseWriter(h2w), must(h2RequestToGoHTTP(ctx, h2r))
 		defer close(handlerDone)
 		// Signal that we've started reading the body.
 		close(bodyReadStarted)

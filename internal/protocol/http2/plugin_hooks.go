@@ -7,8 +7,10 @@ import (
 	"io"
 	"log/slog"
 	gohttp "net/http"
+	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 )
 
 // dispatchOnReceiveFromClient dispatches the on_receive_from_client hook.
@@ -18,7 +20,7 @@ import (
 // The txCtx is a mutable dict shared across all hooks within the same transaction.
 // rawFrames contains the raw HTTP/2 frame bytes received from the client,
 // which are injected into the hook data as an optional "raw_frames" field.
-func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
+func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w h2ResponseWriter, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
 	if h.pluginEngine == nil {
 		return req, body, false
 	}
@@ -39,23 +41,15 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.Resp
 
 	switch result.Action {
 	case plugin.ActionDrop:
-		w.WriteHeader(gohttp.StatusBadGateway)
+		writeErrorResponse(w, gohttp.StatusBadGateway)
 		logger.Info("plugin dropped request", "hook", "on_receive_from_client",
 			"method", req.Method, "url", req.URL.String())
 		return req, body, true
 
 	case plugin.ActionRespond:
-		statusCode, headers, respBody := plugin.BuildRespondResponse(result.ResponseData)
-		for _, hdr := range headers {
-			w.Header().Add(hdr.Name, hdr.Value)
-		}
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
-		w.WriteHeader(statusCode)
-		if len(respBody) > 0 {
-			w.Write(respBody)
-		}
+		writePluginRespondResponse(w, result.ResponseData, logger)
 		logger.Info("plugin responded to request", "hook", "on_receive_from_client",
-			"method", req.Method, "url", req.URL.String(), "status", statusCode)
+			"method", req.Method, "url", req.URL.String())
 		return req, body, true
 
 	case plugin.ActionContinue:
@@ -189,4 +183,41 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 	}
 
 	return resp, body
+}
+
+// writePluginRespondResponse writes a plugin ActionRespond response to the
+// client. It filters hop-by-hop and duplicate content-length headers, then
+// adds an authoritative content-length based on the actual body length.
+func writePluginRespondResponse(w h2ResponseWriter, responseData map[string]any, logger *slog.Logger) {
+	statusCode, pluginHeaders, respBody := plugin.BuildRespondResponse(responseData)
+	var hpackHeaders []hpack.HeaderField
+	for _, hdr := range pluginHeaders {
+		// HTTP/2 requires lowercase header names (RFC 9113 §8.2).
+		name := strings.ToLower(hdr.Name)
+		// Filter pseudo-headers (WriteHeaders injects :status),
+		// hop-by-hop headers (RFC 9113 §8.2.2), and plugin-provided
+		// content-length (we add the authoritative value below).
+		if strings.HasPrefix(name, ":") || isHopByHopHeader(name) || name == "content-length" {
+			continue
+		}
+		hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: name, Value: hdr.Value})
+	}
+	// RFC 9110 §6.4.1: 1xx, 204, 205, and 304 must not include a body.
+	noBody := isNoBodyStatus(statusCode)
+	if noBody {
+		respBody = nil
+	} else {
+		hpackHeaders = append(hpackHeaders, hpack.HeaderField{
+			Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
+		})
+	}
+	if err := w.WriteHeaders(statusCode, hpackHeaders); err != nil {
+		logger.Debug("failed to write plugin respond headers", "error", err)
+		return
+	}
+	if len(respBody) > 0 {
+		if err := w.WriteData(respBody); err != nil {
+			logger.Debug("failed to write plugin respond body", "error", err)
+		}
+	}
 }

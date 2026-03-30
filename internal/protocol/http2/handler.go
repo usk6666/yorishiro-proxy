@@ -14,6 +14,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -45,13 +47,16 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 type Handler struct {
 	proxy.HandlerBase
 
-	// tlsMu protects Transport.DialTLSContext from concurrent access
-	// when SetTLSTransport is called while requests are in flight.
+	// tlsMu protects connPool.TLSTransport and Transport.DialTLSContext from
+	// concurrent access when SetTLSTransport is called while requests are in flight.
 	tlsMu sync.RWMutex
 
+	// connPool manages upstream connections for the unary HTTP/2 path using
+	// ConnPool + ALPN routing instead of gohttp.Transport.
+	connPool *httputil.ConnPool
+
 	// h2Transport is the custom HTTP/2 frame-engine transport used for raw mode
-	// forwarding. When nil, raw mode forwarding is not available and the proxy
-	// falls back to structured mode.
+	// forwarding and ConnPool-based unary upstream routing.
 	h2Transport *Transport
 
 	// grpcHandler processes gRPC flow recording when Content-Type: application/grpc
@@ -81,19 +86,37 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 				ForceAttemptHTTP2: true,
 			},
 		},
+		connPool: &httputil.ConnPool{
+			// Leave TLSTransport nil so that ConnPool's effectiveTLSTransport()
+			// provides the default (InsecureSkipVerify=true for proxy use-case).
+			// Production code calls SetTLSTransport or SetInsecureSkipVerify
+			// during initialization to configure the desired behavior.
+			AllowH2:        true,
+			DialViaProxy:   proxy.DialViaUpstreamProxy,
+			RedactProxyURL: proxy.RedactProxyURL,
+		},
 	}
 }
 
 // SetTLSTransport configures the TLS transport used for upstream TLS connections.
 // When set, the handler uses this transport (e.g. uTLS with browser fingerprinting)
-// instead of the standard crypto/tls library. The transport's DialTLSContext on
-// the underlying gohttp.Transport is reconfigured to route TLS handshakes through
-// the provided TLSTransport. If t is nil, the default crypto/tls behavior is restored.
+// instead of the standard crypto/tls library.
+//
+// For the unary HTTP/2 path, the ConnPool's TLSTransport is updated directly —
+// it supports full ALPN negotiation (including h2).
+//
+// For the legacy gRPC path (still using gohttp.Transport until USK-520), ALPN
+// is restricted to HTTP/1.1 via DialTLSContext.
+//
+// If t is nil, the default crypto/tls behavior is restored.
 //
 // This method is safe to call concurrently with in-flight requests.
 func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 	h.tlsMu.Lock()
 	defer h.tlsMu.Unlock()
+
+	// Update ConnPool for the unary path (supports full ALPN including h2).
+	h.connPool.TLSTransport = t
 
 	if t == nil {
 		h.Transport.DialTLSContext = nil
@@ -103,6 +126,10 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 	// Restrict ALPN to HTTP/1.1 only for the legacy gohttp.Transport path.
 	// Go's http.Transport cannot handle HTTP/2 frames when DialTLSContext is
 	// set (it disables automatic HTTP/2 upgrade).
+	//
+	// NOTE: RestrictALPNToH1 breaks gRPC upstream (h2 required). This is a
+	// known limitation of the legacy gRPC path that will be resolved in USK-520
+	// (gRPC pipeline rewrite to use ConnPool + h2Transport).
 	h1Transport := httputil.RestrictALPNToH1(t)
 	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		rawConn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
@@ -131,6 +158,41 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 		// Wrap the connection so http.Transport can detect TLS and
 		// populate resp.TLS via ConnectionState() tls.ConnectionState.
 		return httputil.WrapTLSConn(tlsConn), nil
+	}
+}
+
+// SetInsecureSkipVerify overrides HandlerBase.SetInsecureSkipVerify to also
+// update the ConnPool's default TLSTransport for the unary HTTP/2 path.
+// When skip is true, the ConnPool's StandardTransport is configured with
+// InsecureSkipVerify=true so that upstream certificate verification is disabled.
+func (h *Handler) SetInsecureSkipVerify(skip bool) {
+	h.HandlerBase.SetInsecureSkipVerify(skip)
+	h.tlsMu.Lock()
+	defer h.tlsMu.Unlock()
+	if st, ok := h.connPool.TLSTransport.(*httputil.StandardTransport); ok {
+		st.InsecureSkipVerify = skip
+	} else if h.connPool.TLSTransport == nil {
+		// When no TLSTransport is explicitly configured, create a
+		// StandardTransport with the requested setting so that the
+		// caller's intent is preserved instead of relying on the
+		// ConnPool default (which is InsecureSkipVerify=true).
+		h.connPool.TLSTransport = &httputil.StandardTransport{InsecureSkipVerify: skip}
+	}
+}
+
+// SetUpstreamProxy overrides HandlerBase.SetUpstreamProxy to also update the
+// ConnPool's upstream proxy for the unary HTTP/2 path.
+func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
+	h.HandlerBase.SetUpstreamProxy(proxyURL)
+	h.tlsMu.Lock()
+	defer h.tlsMu.Unlock()
+	h.connPool.UpstreamProxy = proxyURL
+	// Ensure ConnPool has the proxy dial/redact functions when a proxy is set.
+	// These are also set in NewHandler, but re-affirm here for safety in case
+	// the ConnPool was replaced after construction.
+	if proxyURL != nil {
+		h.connPool.DialViaProxy = proxy.DialViaUpstreamProxy
+		h.connPool.RedactProxyURL = proxy.RedactProxyURL
 	}
 }
 
@@ -239,7 +301,7 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 	connID := proxy.ConnIDFromContext(ctx)
 	clientAddr := proxy.ClientAddrFromContext(ctx)
 
-	streamHandler := func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request) {
+	streamHandler := func(ctx context.Context, w h2ResponseWriter, req *h2Request) {
 		h.handleStream(ctx, w, req, connID, clientAddr, connectAuthority, tlsMeta, logger)
 	}
 
@@ -266,8 +328,9 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn net.Conn, connectAuthorit
 // streamContext holds the state for a single HTTP/2 stream being proxied.
 type streamContext struct {
 	ctx              context.Context
-	w                gohttp.ResponseWriter
-	req              *gohttp.Request
+	w                h2ResponseWriter
+	h2req            *h2Request
+	req              *gohttp.Request // derived from h2req for subsystem compatibility
 	connID           string
 	clientAddr       string
 	connectAuthority string
@@ -286,8 +349,6 @@ type streamContext struct {
 	// for this stream. Extracted from the context set by clientConn.dispatchStream.
 	reqRawFrames [][]byte
 	// respRawFrames holds the raw HTTP/2 frame bytes from the upstream response.
-	// NOTE: Currently always nil. Will be populated when the custom Transport
-	// is integrated into the handler's upstream forwarding path.
 	respRawFrames [][]byte
 
 	// interceptRawAction holds the intercept action when raw mode is active.
@@ -300,27 +361,26 @@ type streamContext struct {
 	txCtx          map[string]any
 }
 
+// goHTTPWriter returns the underlying gohttp.ResponseWriter from the
+// h2ResponseWriter. Used by gRPC streaming code that still requires the
+// gohttp.ResponseWriter interface (until USK-520).
+func (sc *streamContext) goHTTPWriter() gohttp.ResponseWriter {
+	return asGoHTTPResponseWriter(sc.w)
+}
+
 // handleStream proxies a single HTTP/2 stream to the upstream server
 // and records the flow.
 func (h *Handler) handleStream(
 	ctx context.Context,
-	w gohttp.ResponseWriter,
-	req *gohttp.Request,
+	w h2ResponseWriter,
+	h2req *h2Request,
 	connID, clientAddr, connectAuthority string,
 	tlsMeta tlsMetadata,
 	logger *slog.Logger,
 ) {
-	sc := &streamContext{
-		ctx:              ctx,
-		w:                w,
-		req:              req,
-		connID:           connID,
-		clientAddr:       clientAddr,
-		connectAuthority: connectAuthority,
-		tlsMeta:          tlsMeta,
-		logger:           logger,
-		start:            time.Now(),
-		reqRawFrames:     rawFramesFromContext(ctx),
+	sc := h.initStreamContext(ctx, w, h2req, connID, clientAddr, connectAuthority, tlsMeta, logger)
+	if sc == nil {
+		return
 	}
 
 	if h.tryHandleGRPCStream(sc) {
@@ -378,11 +438,50 @@ func (h *Handler) handleStream(
 
 	outReq = h.runServerPluginHook(sc, outReq)
 
+	h.forwardAndRecord(sc, outReq, &snap)
+}
+
+// initStreamContext creates a streamContext from an h2Request, converting to
+// gohttp.Request for subsystem compatibility. Returns nil if conversion fails.
+func (h *Handler) initStreamContext(
+	ctx context.Context,
+	w h2ResponseWriter,
+	h2req *h2Request,
+	connID, clientAddr, connectAuthority string,
+	tlsMeta tlsMetadata,
+	logger *slog.Logger,
+) *streamContext {
+	goReq, err := h2RequestToGoHTTP(ctx, h2req)
+	if err != nil {
+		logger.Error("HTTP/2 failed to convert h2Request to gohttp.Request", "error", err)
+		w.WriteHeaders(gohttp.StatusBadRequest, nil)
+		return nil
+	}
+
+	return &streamContext{
+		ctx:              ctx,
+		w:                w,
+		h2req:            h2req,
+		req:              goReq,
+		connID:           connID,
+		clientAddr:       clientAddr,
+		connectAuthority: connectAuthority,
+		tlsMeta:          tlsMeta,
+		logger:           logger,
+		start:            time.Now(),
+		reqRawFrames:     rawFramesFromContext(ctx),
+	}
+}
+
+// forwardAndRecord performs upstream forwarding, response processing, output
+// filtering, and flow recording. Extracted from handleStream to reduce
+// cyclomatic complexity.
+func (h *Handler) forwardAndRecord(sc *streamContext, outReq *gohttp.Request, snap *requestSnapshot) {
 	isGRPC := h.grpcHandler != nil && isGRPCContentType(sc.req.Header.Get("Content-Type"))
 
 	var sendResult *sendRecordResult
 	if !isGRPC {
-		sendResult = h.recordSendWithVariant(sc.ctx, sc.srp, &snap, sc.logger)
+		sendResult = h.recordSendWithVariant(sc.ctx, sc.srp, snap, sc.logger)
 	}
 
 	fwd, ok := h.forwardUpstream(sc, outReq, sendResult)
@@ -550,14 +649,21 @@ func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
 }
 
 // writeSafetyFilterResponse writes a 403 Forbidden response for safety filter violations.
-func writeSafetyFilterResponse(w gohttp.ResponseWriter, violation *safety.InputViolation) {
+func writeSafetyFilterResponse(w h2ResponseWriter, violation *safety.InputViolation) {
 	body := proxy.BuildSafetyFilterResponseBody(violation)
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Blocked-By", "yorishiro-proxy")
-	w.Header().Set("X-Block-Reason", "safety_filter")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(gohttp.StatusForbidden)
-	w.Write(body)
+	headers := []hpack.HeaderField{
+		{Name: "content-type", Value: "application/json"},
+		{Name: "x-blocked-by", Value: "yorishiro-proxy"},
+		{Name: "x-block-reason", Value: "safety_filter"},
+		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
+	}
+	if err := w.WriteHeaders(gohttp.StatusForbidden, headers); err != nil {
+		slog.Debug("failed to write safety filter response headers", "error", err)
+		return
+	}
+	if err := w.WriteData(body); err != nil {
+		slog.Debug("failed to write safety filter response body", "error", err)
+	}
 }
 
 // checkRateLimit enforces rate limits. Returns true if the request was blocked.
@@ -577,25 +683,39 @@ func (h *Handler) checkRateLimit(sc *streamContext) bool {
 }
 
 // writeRateLimitResponse writes a 429 Too Many Requests response for rate limiting.
-func writeRateLimitResponse(w gohttp.ResponseWriter) {
+func writeRateLimitResponse(w h2ResponseWriter) {
 	body := `{"error":"rate limit exceeded","blocked_by":"rate_limit"}`
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Blocked-By", "yorishiro-proxy")
-	w.Header().Set("X-Block-Reason", "rate_limit")
-	w.Header().Set("Retry-After", "1")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(gohttp.StatusTooManyRequests)
-	w.Write([]byte(body))
+	headers := []hpack.HeaderField{
+		{Name: "content-type", Value: "application/json"},
+		{Name: "x-blocked-by", Value: "yorishiro-proxy"},
+		{Name: "x-block-reason", Value: "rate_limit"},
+		{Name: "retry-after", Value: "1"},
+		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
+	}
+	if err := w.WriteHeaders(gohttp.StatusTooManyRequests, headers); err != nil {
+		slog.Debug("failed to write rate limit response headers", "error", err)
+		return
+	}
+	if err := w.WriteData([]byte(body)); err != nil {
+		slog.Debug("failed to write rate limit response body", "error", err)
+	}
 }
 
 // writeScopeBlockResponse writes a 403 Forbidden response for scope violations.
-func writeScopeBlockResponse(w gohttp.ResponseWriter, target, reason string) {
+func writeScopeBlockResponse(w h2ResponseWriter, target, reason string) {
 	body := fmt.Sprintf(`{"error":"blocked by target scope","target":%q,"reason":%q}`,
 		target, reason)
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(gohttp.StatusForbidden)
-	w.Write([]byte(body))
+	headers := []hpack.HeaderField{
+		{Name: "content-type", Value: "application/json"},
+		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
+	}
+	if err := w.WriteHeaders(gohttp.StatusForbidden, headers); err != nil {
+		slog.Debug("failed to write scope block response headers", "error", err)
+		return
+	}
+	if err := w.WriteData([]byte(body)); err != nil {
+		slog.Debug("failed to write scope block response body", "error", err)
+	}
 }
 
 // runClientPluginHook dispatches the on_receive_from_client plugin hook.
@@ -640,9 +760,12 @@ func (h *Handler) buildOutboundRequest(sc *streamContext) (*gohttp.Request, bool
 	if err != nil {
 		sc.logger.Error("HTTP/2 failed to build upstream request", "error", err)
 		h.recordOutReqError(sc.ctx, sc.srp, err, sc.logger)
-		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
 		return nil, false
 	}
+	// Explicitly set ContentLength since io.NopCloser hides the size from
+	// gohttp.NewRequestWithContext's automatic detection.
+	outReq.ContentLength = int64(len(sc.reqBody))
 	for key, vals := range sc.req.Header {
 		outReq.Header[key] = vals
 	}
@@ -672,14 +795,14 @@ func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Reque
 			return outReq, true
 		case intercept.ActionDrop:
 			h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
-			sc.w.WriteHeader(gohttp.StatusBadGateway)
+			writeErrorResponse(sc.w, gohttp.StatusBadGateway)
 			sc.logger.Info("intercepted HTTP/2 request dropped (raw mode)",
 				"method", sc.req.Method, "url", sc.reqURL.String())
 			return nil, false
 		default:
 			sc.logger.Error("HTTP/2 raw intercept: unknown action type",
 				"action_type", action.Type)
-			sc.w.WriteHeader(gohttp.StatusBadGateway)
+			writeErrorResponse(sc.w, gohttp.StatusBadGateway)
 			return nil, false
 		}
 	}
@@ -687,7 +810,7 @@ func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Reque
 	switch action.Type {
 	case intercept.ActionDrop:
 		h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
-		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
 		sc.logger.Info("intercepted HTTP/2 request dropped",
 			"method", sc.req.Method, "url", sc.reqURL.String())
 		return nil, false
@@ -705,7 +828,7 @@ func (h *Handler) applyRequestInterceptMods(sc *streamContext, outReq *gohttp.Re
 	outReq, modErr = applyInterceptModifications(outReq, action, sc.reqBody)
 	if modErr != nil {
 		sc.logger.Error("HTTP/2 intercept modification failed", "error", modErr)
-		sc.w.WriteHeader(gohttp.StatusBadRequest)
+		writeErrorResponse(sc.w, gohttp.StatusBadRequest)
 		return nil, false
 	}
 	if action.OverrideURL != "" && h.TargetScope != nil && h.TargetScope.HasRules() {
@@ -783,13 +906,151 @@ type forwardUpstreamResult struct {
 }
 
 func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
+	// For gRPC (streaming) requests, continue using the legacy gohttp.Transport
+	// path until USK-520 migrates gRPC to the new transport.
+	isGRPC := h.grpcHandler != nil && isGRPCContentType(sc.req.Header.Get("Content-Type"))
+	if isGRPC {
+		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
+	}
+
+	return h.forwardUpstreamConnPool(sc, outReq, sendResult)
+}
+
+// forwardUpstreamConnPool forwards the request via ConnPool + ALPN routing.
+// This is the new unary path that replaces roundTripWithTrace for non-gRPC
+// HTTP/2 requests.
+func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
 	sendStart := time.Now()
+
+	// Use url.URL.Hostname()/Port() for correct IPv6 bracket handling.
+	// strings.Contains(host, ":") would always match IPv6 literals like [::1].
+	hostname := outReq.URL.Hostname()
+	port := outReq.URL.Port()
+	useTLS := outReq.URL.Scheme == "https"
+	if port == "" {
+		if useTLS {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	addr := net.JoinHostPort(hostname, port)
+
+	// Non-TLS upstreams cannot negotiate ALPN, so ConnPool.Get would always
+	// fall back to the legacy path after a redundant dial. Short-circuit here.
+	if !useTLS {
+		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
+	}
+
+	h.tlsMu.RLock()
+	cr, err := h.connPool.Get(sc.ctx, addr, useTLS, hostname)
+	h.tlsMu.RUnlock()
+	if err != nil {
+		sc.logger.Error("HTTP/2 upstream connection failed",
+			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
+		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
+		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		return nil, false
+	}
+
+	var result *forwardUpstreamResult
+
+	switch cr.ALPN {
+	case "h2":
+		// forwardH2 → RoundTripOnConn takes ownership of cr.Conn and closes
+		// it before returning; the caller must NOT close cr.Conn after this call.
+		result, err = h.forwardH2(sc.ctx, cr.Conn, outReq)
+	default:
+		// For non-h2 connections, close the ConnPool connection and fall back
+		// to the legacy gohttp.Transport path which handles HTTP/1.1 properly
+		// (chunked encoding, connection reuse, etc.).
+		//
+		// Known trade-off: this causes a double TLS handshake — once in
+		// ConnPool (to discover ALPN) and again in gohttp.Transport. This is
+		// acceptable because ConnPool intentionally has no pooling (YAGNI) and
+		// the non-h2 fallback is not the primary path. If this becomes a
+		// bottleneck, adding ALPN-aware connection reuse to ConnPool would be
+		// the correct fix (not caching here).
+		cr.Conn.Close()
+		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
+	}
+	if err != nil {
+		sc.logger.Error("HTTP/2 upstream request failed",
+			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err, "alpn", cr.ALPN)
+		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
+		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		return nil, false
+	}
+
+	receiveEnd := time.Now()
+	// For the ConnPool path we don't have httptrace hooks. Compute a
+	// simplified timing: send includes connect + request, receive is the
+	// remainder. Wait is unavailable (nil).
+	totalMs := receiveEnd.Sub(sendStart).Milliseconds()
+	connectMs := cr.ConnectDuration.Milliseconds()
+	sendVal := connectMs
+	if sendVal > totalMs {
+		sendVal = totalMs
+	}
+	receiveVal := totalMs - sendVal
+	if receiveVal < 0 {
+		receiveVal = 0
+	}
+	result.sendMs = &sendVal
+	result.receiveMs = &receiveVal
+
+	return result, true
+}
+
+// forwardH2 forwards a request via the HTTP/2 frame engine on a pre-established
+// h2 connection. It converts the outbound gohttp.Request to hpack headers and
+// uses RoundTripOnConn.
+func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.Request) (*forwardUpstreamResult, error) {
+	// Build hpack headers from the gohttp.Request.
+	headers := buildH2HeadersFromGoHTTP(outReq)
+
+	h.tlsMu.RLock()
+	transport := h.h2Transport
+	h.tlsMu.RUnlock()
+	if transport == nil {
+		transport = &Transport{Logger: h.Logger}
+	}
+
+	h2Result, err := transport.RoundTripOnConn(ctx, conn, headers, outReq.Body)
+	if err != nil {
+		return nil, fmt.Errorf("h2 round trip: %w", err)
+	}
+
+	// Convert h2 result to gohttp.Response for downstream compatibility.
+	resp := h2ResultToGoHTTPResponse(h2Result)
+
+	fullRespBody, readErr := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
+	if readErr != nil {
+		return nil, fmt.Errorf("read h2 response body: %w", readErr)
+	}
+	resp.Body.Close()
+
+	return &forwardUpstreamResult{
+		resp:          resp,
+		serverAddr:    conn.RemoteAddr().String(),
+		respBody:      fullRespBody,
+		respRawFrames: h2Result.RawFrames,
+	}, nil
+}
+
+// forwardUpstreamLegacy uses the gohttp.Transport for forwarding (gRPC path).
+// This is the original implementation, kept for backward compatibility until
+// USK-520 migrates gRPC to ConnPool.
+func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
+	sendStart := time.Now()
+	h.tlsMu.RLock()
 	resp, serverAddr, timing, err := h.roundTripWithTrace(outReq)
+	h.tlsMu.RUnlock()
 	if err != nil {
 		sc.logger.Error("HTTP/2 upstream request failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
-		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
 		return nil, false
 	}
 	defer resp.Body.Close()
@@ -821,7 +1082,7 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 	}
 	switch action.Type {
 	case intercept.ActionDrop:
-		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
 		sc.logger.Info("intercepted HTTP/2 response dropped",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "status", resp.StatusCode)
 		return nil, nil, false
@@ -830,7 +1091,7 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 		resp, fullRespBody, modErr = applyResponseModifications(resp, action, fullRespBody)
 		if modErr != nil {
 			sc.logger.Error("HTTP/2 response intercept modification failed", "error", modErr)
-			sc.w.WriteHeader(gohttp.StatusBadGateway)
+			writeErrorResponse(sc.w, gohttp.StatusBadGateway)
 			return nil, nil, false
 		}
 		return resp, fullRespBody, true
@@ -848,45 +1109,49 @@ func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *gohttp.Respons
 }
 
 // writeResponseToClient writes the HTTP response headers, body, and trailers
-// to the client. For HTTP/2, trailers are sent as a HEADERS frame with
-// END_STREAM after the body. Go's net/http server handles this automatically
-// when trailer keys are declared via the "Trailer" header before WriteHeader,
-// and trailer values are set on the ResponseWriter's Header after the body
-// is written.
+// to the client using h2ResponseWriter for direct HPACK encoding.
 func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte) {
-	// Declare trailer keys before WriteHeader so Go's HTTP/2 server knows to
-	// send them as a trailing HEADERS frame.
-	var trailerKeys []string
-	for key := range resp.Trailer {
-		trailerKeys = append(trailerKeys, key)
-	}
-	if len(trailerKeys) > 0 {
-		sc.w.Header().Set("Trailer", strings.Join(trailerKeys, ", "))
-	}
-
 	// Remove HTTP/1.1 hop-by-hop headers from the upstream response before
 	// writing to the HTTP/2 client. These headers are invalid in HTTP/2
 	// (RFC 9113 §8.2.2) and cause PROTOCOL_ERROR when the upstream is
 	// HTTP/1.1 (e.g., when DialTLSContext restricts ALPN to http/1.1).
 	removeHTTP2HopByHop(resp.Header)
 
-	for key, vals := range resp.Header {
-		for _, val := range vals {
-			sc.w.Header().Add(key, val)
-		}
+	// RFC 9110 §6.4.1: 1xx, 204, 205, and 304 responses must not contain a body.
+	// Strip Content-Length and suppress DATA frames for these statuses.
+	noBody := isNoBodyStatus(resp.StatusCode)
+	if noBody {
+		resp.Header.Del("Content-Length")
+		body = nil
+	} else if len(body) > 0 {
+		// Recalculate Content-Length to match the actual body bytes being sent.
+		// The body may have been modified by transform/intercept/output-filter
+		// after the upstream response was received, making the original
+		// Content-Length incorrect.
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	} else {
+		resp.Header.Del("Content-Length")
 	}
-	sc.w.WriteHeader(resp.StatusCode)
+
+	// Convert response headers to hpack fields.
+	respHeaders := goHTTPHeaderToHpack(resp.Header)
+
+	if err := sc.w.WriteHeaders(resp.StatusCode, respHeaders); err != nil {
+		sc.logger.Debug("HTTP/2 failed to write response headers", "error", err)
+		return
+	}
+
 	if len(body) > 0 {
-		if _, err := sc.w.Write(body); err != nil {
+		if err := sc.w.WriteData(body); err != nil {
 			sc.logger.Debug("HTTP/2 failed to write response body", "error", err)
 		}
 	}
 
-	// Set trailer values after body write. Go's HTTP/2 server sends these as
-	// a HEADERS(END_STREAM) frame when the handler returns.
-	for key, vals := range resp.Trailer {
-		for _, val := range vals {
-			sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+	// Write trailers if present.
+	if len(resp.Trailer) > 0 {
+		trailerFields := goHTTPHeaderToHpack(resp.Trailer)
+		if err := sc.w.WriteTrailers(trailerFields); err != nil {
+			sc.logger.Debug("HTTP/2 failed to write response trailers", "error", err)
 		}
 	}
 }
@@ -1159,4 +1424,16 @@ func removeHTTP2HopByHop(header gohttp.Header) {
 	header.Del("Proxy-Connection")
 	header.Del("Transfer-Encoding")
 	header.Del("Upgrade")
+	// RFC 7540 §8.1.2.2: TE is a hop-by-hop header. The only allowed value
+	// in HTTP/2 is "trailers"; remove TE unless it is exactly "trailers".
+	if te := header.Get("Te"); te != "" && !strings.EqualFold(te, "trailers") {
+		header.Del("Te")
+	}
+}
+
+// isNoBodyStatus returns true for HTTP status codes that must not include a
+// message body per RFC 9110 §6.4.1: 1xx (informational), 204 (No Content),
+// 205 (Reset Content), and 304 (Not Modified).
+func isNoBodyStatus(code int) bool {
+	return (code >= 100 && code < 200) || code == 204 || code == 205 || code == 304
 }

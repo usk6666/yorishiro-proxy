@@ -834,7 +834,7 @@ func TestForwardGRPCResponseChunk_SubsystemError(t *testing.T) {
 
 			rec := httptest.NewRecorder()
 			sc := &streamContext{
-				w:      rec,
+				w:      &goHTTPWriterAdapter{ResponseWriter: rec},
 				logger: testutil.DiscardLogger(),
 			}
 
