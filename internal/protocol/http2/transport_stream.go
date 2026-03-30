@@ -271,71 +271,20 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 		close(senderDone)
 	}
 
-	// Wait for response headers. We also select on senderDone so that if the
-	// sender goroutine fails (e.g., body read error or flow-control error)
-	// before headers arrive, we fail promptly instead of blocking until ctx
-	// is cancelled.
-waitForHeaders:
-	for {
-		select {
-		case <-ctx.Done():
-			tc.sendReset(streamID, ErrCodeCancel)
-			tc.unregisterStreamingHandler(streamID)
-			pw.CloseWithError(ctx.Err())
-			close(sss.dataCh)
-			// Close the request body to unblock the sender goroutine which may
-			// be blocked in body.Read.
-			closeIfCloser(body)
-			return nil, ctx.Err()
-		case <-sss.headersDone:
-			break waitForHeaders
-		case r := <-sss.done:
-			// Stream completed before headers (error case or server sent
-			// END_STREAM on headers-only response).
-			tc.unregisterStreamingHandler(streamID)
-			if r.err != nil {
-				pw.CloseWithError(r.err)
-				close(sss.dataCh)
-				return nil, r.err
-			}
-			break waitForHeaders
-		case err, ok := <-senderDone:
-			if !ok || err == nil {
-				// Sender completed successfully — nil out the channel and
-				// continue waiting for headers from the server.
-				senderDone = nil
-				continue
-			}
-			// Sender failed — reset the stream and return the error.
-			tc.sendReset(streamID, ErrCodeCancel)
-			tc.unregisterStreamingHandler(streamID)
-			pw.CloseWithError(err)
-			close(sss.dataCh)
-			closeIfCloser(body)
-			return nil, err
-		}
+	// Wait for response headers (or sender/stream error).
+	if err := tc.waitForStreamHeaders(ctx, streamID, sss, senderDone, pw, body); err != nil {
+		return nil, err
 	}
 
-	// Extract status code.
-	for _, hf := range sss.headers {
-		if hf.Name == ":status" {
-			code, err := strconv.Atoi(hf.Value)
-			if err != nil {
-				tc.unregisterStreamingHandler(streamID)
-				pw.CloseWithError(fmt.Errorf("invalid :status: %w", err))
-				close(sss.dataCh)
-				return nil, fmt.Errorf("invalid :status %q: %w", hf.Value, err)
-			}
-			result.StatusCode = code
-			break
-		}
-	}
-	if result.StatusCode == 0 {
+	// Extract and validate status code.
+	statusCode, err := extractStatusCode(sss.headers)
+	if err != nil {
 		tc.unregisterStreamingHandler(streamID)
-		pw.CloseWithError(fmt.Errorf("no :status"))
+		pw.CloseWithError(err)
 		close(sss.dataCh)
-		return nil, fmt.Errorf("no :status pseudo-header in response")
+		return nil, err
 	}
+	result.StatusCode = statusCode
 
 	result.Headers = sss.headers
 	result.Body = &streamingBody{
@@ -348,6 +297,59 @@ waitForHeaders:
 	}
 
 	return result, nil
+}
+
+// waitForStreamHeaders blocks until response headers arrive, the stream
+// completes, the sender fails, or the context is cancelled. It returns nil
+// on success and an error on failure (after cleaning up resources).
+func (tc *transportConn) waitForStreamHeaders(ctx context.Context, streamID uint32, sss *streamingStreamState, senderDone chan error, pw *io.PipeWriter, body io.Reader) error {
+	for {
+		select {
+		case <-ctx.Done():
+			tc.sendReset(streamID, ErrCodeCancel)
+			tc.unregisterStreamingHandler(streamID)
+			pw.CloseWithError(ctx.Err())
+			close(sss.dataCh)
+			closeIfCloser(body)
+			return ctx.Err()
+		case <-sss.headersDone:
+			return nil
+		case r := <-sss.done:
+			tc.unregisterStreamingHandler(streamID)
+			if r.err != nil {
+				pw.CloseWithError(r.err)
+				close(sss.dataCh)
+				return r.err
+			}
+			return nil
+		case err, ok := <-senderDone:
+			if !ok || err == nil {
+				senderDone = nil
+				continue
+			}
+			tc.sendReset(streamID, ErrCodeCancel)
+			tc.unregisterStreamingHandler(streamID)
+			pw.CloseWithError(err)
+			close(sss.dataCh)
+			closeIfCloser(body)
+			return err
+		}
+	}
+}
+
+// extractStatusCode finds and parses the :status pseudo-header from the
+// response headers. Returns an error if missing or malformed.
+func extractStatusCode(headers []hpack.HeaderField) (int, error) {
+	for _, hf := range headers {
+		if hf.Name == ":status" {
+			code, err := strconv.Atoi(hf.Value)
+			if err != nil {
+				return 0, fmt.Errorf("invalid :status %q: %w", hf.Value, err)
+			}
+			return code, nil
+		}
+	}
+	return 0, fmt.Errorf("no :status pseudo-header in response")
 }
 
 // streamingBody wraps the pipe reader and handles cleanup when the body is
