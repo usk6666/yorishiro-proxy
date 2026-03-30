@@ -161,8 +161,6 @@ type streamingStreamState struct {
 
 	// bodyWriter is the write end of the response body pipe.
 	bodyWriter *io.PipeWriter
-	// bodyReader is the read end of the response body pipe.
-	bodyReader *io.PipeReader
 
 	// dataCh decouples the read loop from pipe writes. The read loop sends
 	// copied DATA payloads (or nil to signal EOF) to this channel, and a
@@ -264,7 +262,6 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 	sss := &streamingStreamState{
 		headersDone: make(chan struct{}),
 		bodyWriter:  pw,
-		bodyReader:  pr,
 		dataCh:      make(chan []byte, 64),
 		abortCh:     make(chan struct{}),
 		done:        make(chan streamResult, 1),
@@ -404,13 +401,11 @@ type streamingBody struct {
 	senderDone <-chan error
 	reqBody    io.Reader // original request body; closed on Close() to unblock sender
 	closeOnce  sync.Once
-	readErr    error
 }
 
 func (sb *streamingBody) Read(p []byte) (int, error) {
 	n, err := sb.reader.Read(p)
 	if err == io.EOF {
-		sb.readErr = io.EOF
 		// Mark body done with trailers immediately — do not block on sender.
 		// The server may send END_STREAM before the client finishes sending
 		// (e.g., early error responses in bidirectional streaming).
@@ -709,8 +704,15 @@ func (tc *transportConn) handleStreamingData(f *frame.Frame, sss *streamingStrea
 		return fmt.Errorf("stream %d data payload: %w", streamID, err)
 	}
 
-	// Wait for headers to be done before writing data.
-	<-sss.headersDone
+	// Wait for headers to be done before writing data, but allow abort to
+	// break the wait. An aborted stream may still receive DATA from untrusted
+	// peers (protocol violation); blocking unconditionally would deadlock the
+	// read loop.
+	select {
+	case <-sss.headersDone:
+	case <-sss.abortCh:
+		return nil
+	}
 
 	// Send a copy of the payload to the writer goroutine via the data channel.
 	// The copy is necessary because the frame buffer may be reused by the reader.
