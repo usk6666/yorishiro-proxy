@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -196,6 +197,68 @@ func (m *mockStore) Entries() []mockEntry {
 	return entries
 }
 
+// goHTTPWriterAdapter wraps a gohttp.ResponseWriter to implement h2ResponseWriter.
+// Used in tests that create HTTP/2 handlers via gohttp.Server.
+type goHTTPWriterAdapter struct {
+	gohttp.ResponseWriter
+}
+
+func (a *goHTTPWriterAdapter) WriteHeaders(statusCode int, headers []hpack.HeaderField) error {
+	for _, hf := range headers {
+		a.ResponseWriter.Header().Add(hf.Name, hf.Value)
+	}
+	a.ResponseWriter.WriteHeader(statusCode)
+	return nil
+}
+
+func (a *goHTTPWriterAdapter) WriteData(data []byte) error {
+	_, err := a.ResponseWriter.Write(data)
+	return err
+}
+
+func (a *goHTTPWriterAdapter) WriteTrailers(trailers []hpack.HeaderField) error {
+	for _, hf := range trailers {
+		a.ResponseWriter.Header().Set(gohttp.TrailerPrefix+hf.Name, hf.Value)
+	}
+	return nil
+}
+
+func (a *goHTTPWriterAdapter) Flush() {
+	if f, ok := a.ResponseWriter.(gohttp.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// goHTTPRequestToHpackHeaders converts a gohttp.Request to hpack header fields
+// for building an h2Request in tests.
+func goHTTPRequestToHpackHeaders(req *gohttp.Request) []hpack.HeaderField {
+	scheme := "http"
+	if req.URL != nil && req.URL.Scheme != "" {
+		scheme = req.URL.Scheme
+	}
+	path := "/"
+	if req.URL != nil {
+		path = req.URL.RequestURI()
+	}
+	authority := req.Host
+	if authority == "" && req.URL != nil {
+		authority = req.URL.Host
+	}
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: req.Method},
+		{Name: ":scheme", Value: scheme},
+		{Name: ":authority", Value: authority},
+		{Name: ":path", Value: path},
+	}
+	for name, vals := range req.Header {
+		for _, v := range vals {
+			headers = append(headers, hpack.HeaderField{Name: name, Value: v})
+		}
+	}
+	return headers
+}
+
 // newH2CClientForAddr returns an HTTP client configured for h2c with a custom dialer
 // that always connects to the given address. It supports both http:// and https://
 // URLs, routing all connections through the h2c proxy.
@@ -238,7 +301,14 @@ func startH2CProxyListener(t *testing.T, handler *Handler, connID, clientAddr, c
 
 	proxyHTTPHandler := gohttp.HandlerFunc(func(w gohttp.ResponseWriter, req *gohttp.Request) {
 		hctx := proxy.ContextWithConnID(proxy.ContextWithClientAddr(ctx, clientAddr), connID)
-		handler.handleStream(hctx, w, req, connID, clientAddr, connectAuthority, tlsMeta, handler.Logger)
+		// Convert gohttp.Request to h2Request for the new handler signature.
+		h2req, buildErr := buildH2Request(goHTTPRequestToHpackHeaders(req), req.Body, false, nil)
+		if buildErr != nil {
+			w.WriteHeader(gohttp.StatusBadRequest)
+			return
+		}
+		adapter := &goHTTPWriterAdapter{ResponseWriter: w}
+		handler.handleStream(hctx, adapter, h2req, connID, clientAddr, connectAuthority, tlsMeta, handler.Logger)
 	})
 
 	protos := &gohttp.Protocols{}

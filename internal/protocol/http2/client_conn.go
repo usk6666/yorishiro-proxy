@@ -71,7 +71,9 @@ type clientConn struct {
 	wg sync.WaitGroup
 
 	// streamHandler is called for each completed request.
-	streamHandler func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request)
+	// Uses hpack native types (h2ResponseWriter, *h2Request) instead of
+	// gohttp.ResponseWriter / *gohttp.Request for lossless header handling.
+	streamHandler func(ctx context.Context, w h2ResponseWriter, req *h2Request)
 }
 
 // newClientConn creates a new clientConn from a raw net.Conn.
@@ -79,7 +81,7 @@ func newClientConn(
 	ctx context.Context,
 	conn net.Conn,
 	logger *slog.Logger,
-	handler func(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request),
+	handler func(ctx context.Context, w h2ResponseWriter, req *h2Request),
 ) *clientConn {
 	ctx, cancel := context.WithCancel(ctx)
 	cc := &clientConn{
@@ -585,11 +587,24 @@ func (cc *clientConn) handleRSTStreamFrame(f *frame.Frame) error {
 	return nil
 }
 
-// dispatchStream builds an http.Request from the decoded headers and a
+// dispatchStream builds an h2Request from the decoded headers and a
 // complete body ([]byte), then invokes the stream handler in a new goroutine.
 // Used when END_STREAM was set on HEADERS (no body or body fully buffered).
 func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderField, body []byte) error {
-	req, err := buildHTTPRequest(cc.ctx, headers, body)
+	// Extract raw frames before cleaning up pending state.
+	var rawFrames [][]byte
+	if sr := cc.pendingStreams[streamID]; sr != nil {
+		rawFrames = sr.rawFrames
+	}
+
+	// Clean up pending state — request is complete (END_STREAM received).
+	delete(cc.pendingStreams, streamID)
+
+	var bodyReader io.ReadCloser
+	if len(body) > 0 {
+		bodyReader = io.NopCloser(bytes.NewReader(body))
+	}
+	req, err := buildH2Request(headers, bodyReader, true, rawFrames)
 	if err != nil {
 		return &StreamError{
 			StreamID: streamID,
@@ -599,15 +614,6 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 	}
 
 	rw := newFrameResponseWriter(cc, streamID)
-
-	// Extract raw frames before cleaning up pending state.
-	var rawFrames [][]byte
-	if sr := cc.pendingStreams[streamID]; sr != nil {
-		rawFrames = sr.rawFrames
-	}
-
-	// Clean up pending state — request is complete (END_STREAM received).
-	delete(cc.pendingStreams, streamID)
 
 	streamCtx := contextWithRawFrames(cc.ctx, rawFrames)
 
@@ -623,7 +629,7 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 	return nil
 }
 
-// dispatchStreamWithBody builds an http.Request from the decoded headers and
+// dispatchStreamWithBody builds an h2Request from the decoded headers and
 // a streaming body (io.Reader), then invokes the stream handler in a new
 // goroutine. Used when HEADERS did not carry END_STREAM and the body will
 // arrive in subsequent DATA frames via an io.Pipe.
@@ -637,7 +643,24 @@ func (cc *clientConn) dispatchStream(streamID uint32, headers []hpack.HeaderFiel
 // DATA frame. It is stored in the context so that handlers (e.g. gRPC
 // intercept) can detect unary RPCs without blocking on a body read probe.
 func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.HeaderField, body io.Reader, endStreamCh chan struct{}) error {
-	req, err := buildHTTPRequestWithReader(cc.ctx, headers, body)
+	// Extract raw frames accumulated so far (HEADERS + CONTINUATION only).
+	// Note: pendingStreams is NOT deleted here — DATA frames will continue
+	// to append to sr.rawFrames and write to bodyPipe. However, DATA frame
+	// raw bytes appended after this point are NOT visible through streamCtx
+	// because the context snapshot is captured here. This is a known trade-off
+	// of streaming dispatch: the handler must start before all DATA arrives.
+	var rawFrames [][]byte
+	if sr := cc.pendingStreams[streamID]; sr != nil {
+		rawFrames = sr.rawFrames
+	}
+
+	var bodyReader io.ReadCloser
+	if rc, ok := body.(io.ReadCloser); ok {
+		bodyReader = rc
+	} else {
+		bodyReader = io.NopCloser(body)
+	}
+	req, err := buildH2Request(headers, bodyReader, false, rawFrames)
 	if err != nil {
 		// Clean up streaming state on error: close the pipe so the writer
 		// side (handleStreamingData) does not block, and remove the pending
@@ -654,17 +677,6 @@ func (cc *clientConn) dispatchStreamWithBody(streamID uint32, headers []hpack.He
 	}
 
 	rw := newFrameResponseWriter(cc, streamID)
-
-	// Extract raw frames accumulated so far (HEADERS + CONTINUATION only).
-	// Note: pendingStreams is NOT deleted here — DATA frames will continue
-	// to append to sr.rawFrames and write to bodyPipe. However, DATA frame
-	// raw bytes appended after this point are NOT visible through streamCtx
-	// because the context snapshot is captured here. This is a known trade-off
-	// of streaming dispatch: the handler must start before all DATA arrives.
-	var rawFrames [][]byte
-	if sr := cc.pendingStreams[streamID]; sr != nil {
-		rawFrames = sr.rawFrames
-	}
 
 	streamCtx := contextWithRawFrames(cc.ctx, rawFrames)
 	streamCtx = contextWithEndStreamCh(streamCtx, endStreamCh)
@@ -837,9 +849,12 @@ func isConnectionClosed(err error) bool {
 		strings.Contains(msg, "connection reset by peer")
 }
 
-// frameResponseWriter implements http.ResponseWriter by writing HTTP/2 frames
-// back to the client connection. Write() sends DATA frames immediately
-// (chunked to peer's MaxFrameSize) to support gRPC streaming.
+// frameResponseWriter implements both http.ResponseWriter and h2ResponseWriter
+// by writing HTTP/2 frames back to the client connection. Write() sends DATA
+// frames immediately (chunked to peer's MaxFrameSize) to support gRPC streaming.
+//
+// The h2ResponseWriter methods (WriteHeaders, WriteData, WriteTrailers) write
+// hpack headers directly, bypassing the lossy net/http.Header conversion.
 type frameResponseWriter struct {
 	cc       *clientConn
 	streamID uint32
@@ -851,6 +866,10 @@ type frameResponseWriter struct {
 	headers      gohttp.Header
 	trailers     gohttp.Header
 	bytesWritten int // total body bytes written via Write()
+
+	// h2Trailers holds trailer fields set via WriteTrailers (h2ResponseWriter).
+	// When non-nil, finish() sends these instead of collecting from gohttp.Header.
+	h2Trailers []hpack.HeaderField
 }
 
 // newFrameResponseWriter creates a new frameResponseWriter for the given stream.
@@ -899,7 +918,8 @@ func (rw *frameResponseWriter) WriteHeader(statusCode int) {
 	rw.statusCode = statusCode
 }
 
-// Flush implements http.Flusher. It ensures the HEADERS frame has been sent.
+// Flush implements http.Flusher and h2ResponseWriter. It ensures the HEADERS
+// frame has been sent.
 func (rw *frameResponseWriter) Flush() {
 	rw.mu.Lock()
 	if !rw.wroteHeader {
@@ -909,6 +929,63 @@ func (rw *frameResponseWriter) Flush() {
 		rw.mu.Unlock()
 	}
 	rw.ensureHeadersSent()
+}
+
+// WriteHeaders implements h2ResponseWriter. It sends the response HEADERS frame
+// with the given status code and hpack header fields directly, without going
+// through net/http.Header.
+func (rw *frameResponseWriter) WriteHeaders(statusCode int, headers []hpack.HeaderField) error {
+	rw.mu.Lock()
+	if rw.headersSent {
+		rw.mu.Unlock()
+		return fmt.Errorf("headers already sent")
+	}
+	rw.wroteHeader = true
+	rw.headersSent = true
+	rw.statusCode = statusCode
+	rw.mu.Unlock()
+
+	var hpackFields []hpack.HeaderField
+	hpackFields = append(hpackFields, hpack.HeaderField{
+		Name:  ":status",
+		Value: fmt.Sprintf("%d", statusCode),
+	})
+	hpackFields = append(hpackFields, headers...)
+
+	cc := rw.cc
+	cc.writeMu.Lock()
+	encoded := cc.encoder.Encode(hpackFields)
+	err := cc.writer.WriteHeaders(rw.streamID, false, true, encoded)
+	cc.writeMu.Unlock()
+	if err != nil {
+		cc.logger.Debug("failed to write response HEADERS (h2)", "stream_id", rw.streamID, "error", err)
+	}
+	return err
+}
+
+// WriteData implements h2ResponseWriter. It sends response body data as DATA
+// frames, chunking to the peer's MaxFrameSize.
+func (rw *frameResponseWriter) WriteData(data []byte) error {
+	rw.mu.Lock()
+	if !rw.headersSent {
+		rw.mu.Unlock()
+		return fmt.Errorf("headers not sent; call WriteHeaders first")
+	}
+	rw.mu.Unlock()
+
+	_, err := rw.writeDataChunked(data)
+	return err
+}
+
+// WriteTrailers implements h2ResponseWriter. It stores trailer fields to be
+// sent as a HEADERS(END_STREAM) frame when the handler returns via finish().
+// The trailers are sent in finish() rather than immediately, to match the
+// HTTP/2 specification that trailers end the stream.
+func (rw *frameResponseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	rw.h2Trailers = trailers
+	return nil
 }
 
 // ensureHeadersSent sends the response HEADERS frame if not yet sent.
@@ -994,6 +1071,28 @@ func (rw *frameResponseWriter) finish() {
 	headersSent := rw.headersSent
 	respHeaders := rw.headers.Clone()
 	rw.mu.Unlock()
+
+	// If h2Trailers were set via WriteTrailers (h2ResponseWriter path),
+	// use them directly instead of collecting from net/http.Header.
+	if rw.h2Trailers != nil {
+		cc := rw.cc
+		hasTrailers := len(rw.h2Trailers) > 0
+		if !headersSent {
+			rw.finishWithHeaders(respHeaders, hasTrailers)
+		} else if hasTrailers {
+			rw.finishWithH2Trailers()
+		} else {
+			cc.writeMu.Lock()
+			if err := cc.writer.WriteData(rw.streamID, true, nil); err != nil {
+				cc.writeMu.Unlock()
+				cc.logger.Debug("failed to write end-stream DATA", "stream_id", rw.streamID, "error", err)
+				return
+			}
+			cc.writeMu.Unlock()
+		}
+		cc.h2conn.Streams().Transition(rw.streamID, EventSendEndStream)
+		return
+	}
 
 	// Collect trailers from the header map.
 	rw.collectTrailers(respHeaders)
@@ -1084,6 +1183,20 @@ func (rw *frameResponseWriter) finishWithHeaders(respHeaders gohttp.Header, hasT
 	if hasTrailers {
 		rw.finishWithTrailers()
 	}
+}
+
+// finishWithH2Trailers sends h2Trailers (set via WriteTrailers) as a HEADERS
+// frame with END_STREAM, using hpack native types directly.
+func (rw *frameResponseWriter) finishWithH2Trailers() {
+	cc := rw.cc
+	cc.writeMu.Lock()
+	encoded := cc.encoder.Encode(rw.h2Trailers)
+	if err := cc.writer.WriteHeaders(rw.streamID, true, true, encoded); err != nil {
+		cc.writeMu.Unlock()
+		cc.logger.Debug("failed to write response trailers (h2)", "stream_id", rw.streamID, "error", err)
+		return
+	}
+	cc.writeMu.Unlock()
 }
 
 // finishWithTrailers sends trailers as a HEADERS frame with END_STREAM.

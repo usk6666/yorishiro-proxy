@@ -9,6 +9,7 @@ import (
 	gohttp "net/http"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 )
 
 // dispatchOnReceiveFromClient dispatches the on_receive_from_client hook.
@@ -18,7 +19,7 @@ import (
 // The txCtx is a mutable dict shared across all hooks within the same transaction.
 // rawFrames contains the raw HTTP/2 frame bytes received from the client,
 // which are injected into the hook data as an optional "raw_frames" field.
-func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.ResponseWriter, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
+func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w h2ResponseWriter, req *gohttp.Request, body []byte, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) (*gohttp.Request, []byte, bool) {
 	if h.pluginEngine == nil {
 		return req, body, false
 	}
@@ -39,20 +40,23 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w gohttp.Resp
 
 	switch result.Action {
 	case plugin.ActionDrop:
-		w.WriteHeader(gohttp.StatusBadGateway)
+		writeErrorResponse(w, gohttp.StatusBadGateway)
 		logger.Info("plugin dropped request", "hook", "on_receive_from_client",
 			"method", req.Method, "url", req.URL.String())
 		return req, body, true
 
 	case plugin.ActionRespond:
-		statusCode, headers, respBody := plugin.BuildRespondResponse(result.ResponseData)
-		for _, hdr := range headers {
-			w.Header().Add(hdr.Name, hdr.Value)
+		statusCode, pluginHeaders, respBody := plugin.BuildRespondResponse(result.ResponseData)
+		var hpackHeaders []hpack.HeaderField
+		for _, hdr := range pluginHeaders {
+			hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: hdr.Name, Value: hdr.Value})
 		}
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
-		w.WriteHeader(statusCode)
+		hpackHeaders = append(hpackHeaders, hpack.HeaderField{
+			Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
+		})
+		w.WriteHeaders(statusCode, hpackHeaders)
 		if len(respBody) > 0 {
-			w.Write(respBody)
+			w.WriteData(respBody)
 		}
 		logger.Info("plugin responded to request", "hook", "on_receive_from_client",
 			"method", req.Method, "url", req.URL.String(), "status", statusCode)
