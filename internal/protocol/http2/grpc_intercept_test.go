@@ -58,7 +58,8 @@ func makeGRPCStreamContext(t *testing.T, body []byte, endStreamCh chan struct{})
 		},
 		Body: io.NopCloser(bytes.NewReader(body)),
 	}
-	w := httptest.NewRecorder()
+	rec := httptest.NewRecorder()
+	w := &goHTTPWriterAdapter{ResponseWriter: rec}
 	ctx := context.Background()
 	if endStreamCh != nil {
 		ctx = contextWithEndStreamCh(ctx, endStreamCh)
@@ -70,7 +71,7 @@ func makeGRPCStreamContext(t *testing.T, body []byte, endStreamCh chan struct{})
 		w:      w,
 		logger: testutil.DiscardLogger(),
 		start:  time.Now(),
-	}, w
+	}, rec
 }
 
 func TestHandleGRPCIntercept_UnaryDrop(t *testing.T) {
@@ -394,7 +395,8 @@ func makeGRPCResponseInterceptContext(t *testing.T) (*Handler, *streamContext, *
 		},
 		Body: gohttp.NoBody,
 	}
-	w := httptest.NewRecorder()
+	rec := httptest.NewRecorder()
+	w := &goHTTPWriterAdapter{ResponseWriter: rec}
 	sc := &streamContext{
 		ctx:    context.Background(),
 		req:    req,
@@ -403,7 +405,7 @@ func makeGRPCResponseInterceptContext(t *testing.T) (*Handler, *streamContext, *
 		logger: testutil.DiscardLogger(),
 		start:  time.Now(),
 	}
-	return handler, sc, w, queue
+	return handler, sc, rec, queue
 }
 
 // makeGRPCResponse creates an *http.Response with a gRPC body and trailers.

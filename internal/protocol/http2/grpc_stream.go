@@ -103,7 +103,7 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 		blocked := state.reqBlocked
 		state.mu.Unlock()
 		if blocked {
-			writeGRPCStatus(sc.w, gohttp.StatusOK, 7, "request blocked by safety filter") // PERMISSION_DENIED
+			writeGRPCStatus(sc.goHTTPWriter(), gohttp.StatusOK, 7, "request blocked by safety filter") // PERMISSION_DENIED
 		}
 		return
 	}
@@ -112,7 +112,7 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 	// Response intercept check: if response matches intercept rules,
 	// buffer the unary response body + trailers for AI agent review.
 	if h.handleGRPCResponseIntercept(sc, state, resp) {
-		if flusher, ok := sc.w.(gohttp.Flusher); ok {
+		if flusher, ok := sc.goHTTPWriter().(gohttp.Flusher); ok {
 			flusher.Flush()
 		}
 		// Close request body to unblock the request-streaming goroutine
@@ -142,7 +142,7 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 		h.writeGRPCTrailers(sc, resp)
 	}
 
-	if flusher, ok := sc.w.(gohttp.Flusher); ok {
+	if flusher, ok := sc.goHTTPWriter().(gohttp.Flusher); ok {
 		flusher.Flush()
 	}
 
@@ -320,7 +320,7 @@ func (h *Handler) buildGRPCOutboundRequest(sc *streamContext, pr *io.PipeReader)
 	if err != nil {
 		sc.logger.Error("gRPC failed to build upstream request", "error", err)
 		pr.Close()
-		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		sc.goHTTPWriter().WriteHeader(gohttp.StatusBadGateway)
 		return nil, false
 	}
 	for key, vals := range sc.req.Header {
@@ -345,7 +345,7 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, outReq *gohttp.Request, re
 	if err != nil {
 		sc.logger.Error("gRPC upstream request failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
-		sc.w.WriteHeader(gohttp.StatusBadGateway)
+		sc.goHTTPWriter().WriteHeader(gohttp.StatusBadGateway)
 		reqWg.Wait()
 		return nil, false
 	}
@@ -379,7 +379,7 @@ func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Respo
 		}
 	}
 	if len(trailerKeys) > 0 {
-		sc.w.Header().Set("Trailer", joinTrailerKeys(trailerKeys))
+		sc.goHTTPWriter().Header().Set("Trailer", joinTrailerKeys(trailerKeys))
 	}
 
 	for key, vals := range resp.Header {
@@ -393,10 +393,10 @@ func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Respo
 			continue
 		}
 		for _, val := range vals {
-			sc.w.Header().Add(key, val)
+			sc.goHTTPWriter().Header().Add(key, val)
 		}
 	}
-	sc.w.WriteHeader(resp.StatusCode)
+	sc.goHTTPWriter().WriteHeader(resp.StatusCode)
 }
 
 // streamGRPCResponseBody reads the response body from upstream and streams
@@ -415,7 +415,7 @@ func (h *Handler) writeGRPCResponseHeaders(sc *streamContext, resp *gohttp.Respo
 //
 // If the output filter blocks a frame, the stream is terminated.
 func (h *Handler) streamGRPCResponseBody(sc *streamContext, state *grpcStreamState, resp *gohttp.Response) {
-	flusher, _ := sc.w.(gohttp.Flusher)
+	flusher, _ := sc.goHTTPWriter().(gohttp.Flusher)
 	hasSubsystems := h.SafetyEngine != nil || h.pluginEngine != nil || h.transformPipeline != nil
 
 	var subsystemBuf *protogrpc.FrameBuffer
@@ -461,7 +461,7 @@ func (h *Handler) newGRPCResponseSubsystemBuf(sc *streamContext, state *grpcStre
 			state.mu.Unlock()
 			return fmt.Errorf("gRPC response frame blocked by output filter")
 		}
-		if _, err := sc.w.Write(wireBytes); err != nil {
+		if _, err := sc.goHTTPWriter().Write(wireBytes); err != nil {
 			return err
 		}
 		if flusher != nil {
@@ -476,7 +476,7 @@ func (h *Handler) newGRPCResponseSubsystemBuf(sc *streamContext, state *grpcStre
 // it is written directly to the client. Returns true if the stream should stop.
 func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamState, subsystemBuf *protogrpc.FrameBuffer, flusher gohttp.Flusher, chunk []byte, hasSubsystems bool) bool {
 	if !hasSubsystems {
-		if _, writeErr := sc.w.Write(chunk); writeErr != nil {
+		if _, writeErr := sc.goHTTPWriter().Write(chunk); writeErr != nil {
 			sc.logger.Debug("gRPC failed to write response to client", "error", writeErr)
 			return true
 		}
@@ -497,12 +497,12 @@ func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamS
 		state.mu.Unlock()
 		if blocked {
 			sc.logger.Warn("gRPC response stream terminated by output filter")
-			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
-			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response blocked by output filter"))
+			sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
+			sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response blocked by output filter"))
 		} else {
 			sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
-			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
-			sc.w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response subsystem processing error"))
+			sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "13")
+			sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+"Grpc-Message", percentEncodeGRPCMessage("response subsystem processing error"))
 		}
 		return true
 	}
@@ -520,7 +520,7 @@ func (h *Handler) forwardGRPCResponseChunk(sc *streamContext, state *grpcStreamS
 func (h *Handler) writeGRPCTrailers(sc *streamContext, resp *gohttp.Response) {
 	for key, vals := range resp.Trailer {
 		for _, val := range vals {
-			sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+			sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+key, val)
 		}
 	}
 
@@ -532,7 +532,7 @@ func (h *Handler) writeGRPCTrailers(sc *streamContext, resp *gohttp.Response) {
 		for _, key := range grpcTrailerKeyList {
 			if vals, ok := resp.Header[key]; ok {
 				for _, val := range vals {
-					sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+					sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+key, val)
 				}
 			}
 		}
@@ -870,7 +870,7 @@ func (h *Handler) waitGRPCInterceptAction(sc *streamContext, id string, actionCh
 func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.InterceptAction, body []byte) bool {
 	switch action.Type {
 	case intercept.ActionDrop:
-		writeGRPCStatus(sc.w, gohttp.StatusOK, 10, "intercepted request dropped") // ABORTED
+		writeGRPCStatus(sc.goHTTPWriter(), gohttp.StatusOK, 10, "intercepted request dropped") // ABORTED
 		sc.logger.Info("intercepted gRPC request dropped",
 			"method", sc.req.Method, "url", sc.reqURL.String())
 		return true
@@ -1138,7 +1138,7 @@ func (h *Handler) buildGRPCResponseInterceptMetadata(sc *streamContext, resp *go
 func (h *Handler) applyGRPCResponseInterceptAction(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, action intercept.InterceptAction, body []byte, trailers gohttp.Header) {
 	switch action.Type {
 	case intercept.ActionDrop:
-		writeGRPCStatus(sc.w, gohttp.StatusOK, 10, "intercepted response dropped") // ABORTED
+		writeGRPCStatus(sc.goHTTPWriter(), gohttp.StatusOK, 10, "intercepted response dropped") // ABORTED
 		sc.logger.Info("intercepted gRPC response dropped",
 			"method", sc.req.Method, "url", sc.reqURL.String())
 		return
@@ -1168,10 +1168,10 @@ func (h *Handler) applyGRPCResponseInterceptAction(sc *streamContext, state *grp
 func (h *Handler) writeGRPCInterceptedResponse(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, body []byte, trailers gohttp.Header) {
 	h.writeGRPCResponseHeaders(sc, resp)
 	if len(body) > 0 {
-		if _, err := sc.w.Write(body); err != nil {
+		if _, err := sc.goHTTPWriter().Write(body); err != nil {
 			sc.logger.Debug("gRPC response intercept: failed to write body", "error", err)
 		}
-		if flusher, ok := sc.w.(gohttp.Flusher); ok {
+		if flusher, ok := sc.goHTTPWriter().(gohttp.Flusher); ok {
 			flusher.Flush()
 		}
 	}
@@ -1195,14 +1195,14 @@ func (h *Handler) writeGRPCInterceptedResponse(sc *streamContext, state *grpcStr
 func (h *Handler) writeGRPCInterceptedTrailers(sc *streamContext, resp *gohttp.Response, trailers gohttp.Header) {
 	for key, vals := range trailers {
 		for _, val := range vals {
-			sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+			sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+key, val)
 		}
 	}
 	if len(trailers) == 0 {
 		for _, key := range grpcTrailerKeyList {
 			if vals, ok := resp.Header[key]; ok {
 				for _, val := range vals {
-					sc.w.Header().Set(gohttp.TrailerPrefix+key, val)
+					sc.goHTTPWriter().Header().Set(gohttp.TrailerPrefix+key, val)
 				}
 			}
 		}
