@@ -3,14 +3,15 @@ package http2
 import (
 	"context"
 	"log/slog"
-	gohttp "net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -60,14 +61,14 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 		return rec
 	}
 
-	if !h.shouldCapture(sc.req.Method, sc.reqURL) {
+	if !h.shouldCapture(sc.h2req.Method, sc.reqURL) {
 		return rec
 	}
 
 	// Parse service/method from URL path.
-	service, method, err := protogrpc.ParseServiceMethod(sc.req.URL.Path)
+	service, method, err := protogrpc.ParseServiceMethod(sc.h2req.Path)
 	if err != nil {
-		sc.logger.Warn("gRPC failed to parse service/method", "path", sc.req.URL.Path, "error", err)
+		sc.logger.Warn("gRPC failed to parse service/method", "path", sc.h2req.Path, "error", err)
 		service = "unknown"
 		method = "unknown"
 	}
@@ -75,7 +76,7 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	rec.method = method
 
 	// Extract grpc-encoding from request headers.
-	rec.grpcEncoding = sc.req.Header.Get("grpc-encoding")
+	rec.grpcEncoding = hpackGetHeader(sc.h2req.AllHeaders, "grpc-encoding")
 
 	// Create flow with State="active".
 	protocol := proxy.SOCKS5Protocol(ctx, "gRPC")
@@ -110,9 +111,9 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: sc.start,
-		Method:    sc.req.Method,
+		Method:    sc.h2req.Method,
 		URL:       sc.reqURL,
-		Headers:   requestHeaders(sc.req),
+		Headers:   h2RequestHeaders(sc.h2req),
 		Metadata: map[string]string{
 			"service":   service,
 			"method":    method,
@@ -196,12 +197,12 @@ func (r *grpcProgressiveRecorder) recordFrame(ctx context.Context, frame *protog
 	}
 }
 
-// completeFlow updates the flow to State="complete" with final metadata.
+// completeFlowH2 updates the flow to State="complete" with final metadata.
 // It determines the flow type based on the frame counts and records
-// response trailers.
-func (r *grpcProgressiveRecorder) completeFlow(
+// response trailers from a StreamRoundTripResult.
+func (r *grpcProgressiveRecorder) completeFlowH2(
 	ctx context.Context,
-	resp *gohttp.Response,
+	result *StreamRoundTripResult,
 	reqFrameCount, respFrameCount int,
 	duration time.Duration,
 ) {
@@ -211,20 +212,25 @@ func (r *grpcProgressiveRecorder) completeFlow(
 
 	flowType := protogrpc.ClassifyFlowType(reqFrameCount, respFrameCount)
 
-	// Extract gRPC metadata from trailers.
-	var trailers map[string][]string
-	if resp != nil && resp.Trailer != nil {
-		trailers = make(map[string][]string, len(resp.Trailer))
-		for k, vals := range resp.Trailer {
-			trailers[k] = vals
+	// Extract trailers from StreamRoundTripResult.
+	var hpackTrailers []hpack.HeaderField
+	if result != nil {
+		var err error
+		hpackTrailers, err = result.Trailers()
+		if err != nil {
+			r.logger.Debug("gRPC completeFlow: trailers not available", "error", err)
 		}
 	}
 
-	grpcStatus := protogrpc.ExtractGRPCStatus(trailers, respHeadersMap(resp))
-	grpcMessage := protogrpc.ExtractGRPCMessage(trailers, respHeadersMap(resp))
+	// Convert hpack trailers to map for gRPC status extraction.
+	trailerMap := hpackToGoHTTPHeaderMap(hpackTrailers)
+	respHeaderMap := hpackToGoHTTPHeaderMap(result.Headers)
+
+	grpcStatus := protogrpc.ExtractGRPCStatus(trailerMap, respHeaderMap)
+	grpcMessage := protogrpc.ExtractGRPCMessage(trailerMap, respHeaderMap)
 
 	// Record final receive message with trailers and status.
-	r.recordTrailersMessage(ctx, resp, trailers, grpcStatus, grpcMessage)
+	r.recordTrailersMessageH2(ctx, result, hpackTrailers, grpcStatus, grpcMessage)
 
 	// Build tags, preserving SOCKS5 metadata from the context.
 	totalMessages := int(r.messageCount.Load())
@@ -240,17 +246,11 @@ func (r *grpcProgressiveRecorder) completeFlow(
 		tags["grpc_messages_recorded"] = strconv.Itoa(totalMessages)
 	}
 
-	tlsCertSubject := ""
-	if resp != nil {
-		tlsCertSubject = extractTLSCertSubject(resp)
-	}
-
 	update := flow.FlowUpdate{
-		State:                "complete",
-		FlowType:             flowType,
-		Duration:             duration,
-		Tags:                 tags,
-		TLSServerCertSubject: tlsCertSubject,
+		State:    "complete",
+		FlowType: flowType,
+		Duration: duration,
+		Tags:     tags,
 	}
 	if err := r.store.UpdateFlow(ctx, r.flowID, update); err != nil {
 		r.logger.Error("gRPC progressive flow completion failed",
@@ -260,13 +260,12 @@ func (r *grpcProgressiveRecorder) completeFlow(
 	}
 }
 
-// recordTrailersMessage records the final receive message with trailers
-// and gRPC status metadata. It also marks trailers-only responses when
-// no response DATA frames were received.
-func (r *grpcProgressiveRecorder) recordTrailersMessage(
+// recordTrailersMessageH2 records the final receive message with trailers
+// and gRPC status metadata from hpack types.
+func (r *grpcProgressiveRecorder) recordTrailersMessageH2(
 	ctx context.Context,
-	resp *gohttp.Response,
-	trailers map[string][]string,
+	result *StreamRoundTripResult,
+	trailers []hpack.HeaderField,
 	grpcStatus, grpcMessage string,
 ) {
 	finalSeq := int(r.seq.Add(1) - 1)
@@ -281,10 +280,9 @@ func (r *grpcProgressiveRecorder) recordTrailersMessage(
 	if grpcMessage != "" {
 		finalMeta["grpc_message"] = grpcMessage
 	}
-	// Mark as trailers-only using the HTTP/2 response pattern rather than
-	// frame count, which could be zero due to parse failure rather than a
-	// genuine Trailers-Only response.
-	if resp != nil && isGRPCTrailersOnly(resp) {
+	// Mark as trailers-only when grpc-status is in the initial HEADERS
+	// and there are no separate trailing headers.
+	if result != nil && len(trailers) == 0 && isGRPCTrailersOnlyH2(result) {
 		finalMeta["grpc_trailers_only"] = "true"
 	}
 
@@ -298,10 +296,10 @@ func (r *grpcProgressiveRecorder) recordTrailersMessage(
 		Timestamp: time.Now(),
 		Metadata:  finalMeta,
 	}
-	if resp != nil {
-		finalMsg.StatusCode = resp.StatusCode
-		if trailers != nil {
-			finalMsg.Headers = trailers
+	if result != nil {
+		finalMsg.StatusCode = result.StatusCode
+		if len(trailers) > 0 {
+			finalMsg.Headers = hpackToGoHTTPHeaderMap(trailers)
 		}
 	}
 	if err := r.store.AppendMessage(ctx, finalMsg); err != nil {
@@ -312,10 +310,18 @@ func (r *grpcProgressiveRecorder) recordTrailersMessage(
 	}
 }
 
-// respHeadersMap safely returns response headers or nil.
-func respHeadersMap(resp *gohttp.Response) map[string][]string {
-	if resp == nil {
-		return nil
+// h2RequestHeaders converts h2Request headers to map[string][]string for
+// flow recording, including pseudo-headers as :method, :authority, etc.
+func h2RequestHeaders(req *h2Request) map[string][]string {
+	headers := make(map[string][]string)
+	for _, hf := range req.AllHeaders {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
+		}
+		headers[hf.Name] = append(headers[hf.Name], hf.Value)
 	}
-	return resp.Header
+	if req.Authority != "" {
+		headers["host"] = []string{req.Authority}
+	}
+	return headers
 }

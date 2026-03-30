@@ -402,7 +402,13 @@ func (tc *transportConn) handshake(ctx context.Context) error {
 		return fmt.Errorf("send SETTINGS ACK: %w", err)
 	}
 
-	// Update writer max frame size from peer settings.
+	// Update reader and writer max frame size from peer settings. This must
+	// happen before the readLoop goroutine processes new frames from the
+	// background reader, since readFramesIntoChannel accesses the reader's
+	// maxFrameSize field concurrently. The frame channel buffer (capacity 4)
+	// ensures the background reader has room to enqueue frames without
+	// blocking, allowing applyPeerFrameSize to complete before the readLoop
+	// starts consuming.
 	tc.applyPeerFrameSize()
 
 	// The handshake reader goroutine continues reading from tc.reader and

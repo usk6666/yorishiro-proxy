@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	gohttp "net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,10 +16,35 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
+
+// h2cSubsysTestServer wraps an h2c test server with a URL field.
+type h2cSubsysTestServer struct {
+	URL    string
+	cancel context.CancelFunc
+}
+
+func (s *h2cSubsysTestServer) Close() { s.cancel() }
+
+func newH2CSubsysTestServer(t *testing.T, handler gohttp.Handler) *h2cSubsysTestServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	protos := &gohttp.Protocols{}
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
+	server := &gohttp.Server{Handler: handler, Protocols: protos}
+	ctx, cancel := context.WithCancel(context.Background())
+	go server.Serve(ln)
+	go func() { <-ctx.Done(); server.Close() }()
+	return &h2cSubsysTestServer{URL: "http://" + ln.Addr().String(), cancel: cancel}
+}
 
 // decodeProtobufFrame parses a gRPC frame and decodes the protobuf payload to JSON.
 func decodeProtobufFrame(t *testing.T, data []byte) string {
@@ -246,6 +272,18 @@ func TestApplyGRPCAutoTransform_WithRule(t *testing.T) {
 			Method: "POST",
 			URL:    &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 			Header: gohttp.Header{},
+		},
+		h2req: &h2Request{
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "POST"},
+				{Name: ":scheme", Value: "http"},
+				{Name: ":authority", Value: "example.com"},
+				{Name: ":path", Value: "/test"},
+			},
+			Method:    "POST",
+			Scheme:    "http",
+			Authority: "example.com",
+			Path:      "/test",
 		},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 	}
@@ -533,7 +571,7 @@ func TestProcessGRPCRequestFrame_DecodeFailure_Passthrough(t *testing.T) {
 func TestGRPCStream_SafetyFilter_E2E(t *testing.T) {
 	respPayload := []byte("response-data")
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CSubsysTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read: %v", err)
@@ -608,7 +646,7 @@ func TestGRPCStream_OutputFilter_E2E(t *testing.T) {
 	}
 	respFrame := protogrpc.EncodeFrame(false, respProto)
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CSubsysTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -684,7 +722,7 @@ func TestGRPCStream_OutputFilter_E2E(t *testing.T) {
 // TestGRPCStream_AutoTransform_E2E tests auto-transform in the gRPC streaming path.
 func TestGRPCStream_AutoTransform_E2E(t *testing.T) {
 	// Upstream echoes the request body as response.
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CSubsysTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)

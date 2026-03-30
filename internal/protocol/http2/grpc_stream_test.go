@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,33 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
+// startH2CUpstream starts an h2c-capable upstream server for gRPC testing.
+// Returns the server address and a cancel function.
+func startH2CUpstream(t *testing.T, handler gohttp.Handler) (string, func()) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	protos := &gohttp.Protocols{}
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
+	server := &gohttp.Server{Handler: handler, Protocols: protos}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		server.Serve(ln)
+	}()
+	go func() {
+		<-ctx.Done()
+		server.Close()
+	}()
+
+	return ln.Addr().String(), cancel
+}
+
 // TestHandleGRPCStream_UnaryOverStreaming verifies that a gRPC unary RPC
 // (single request frame, single response frame) works correctly through
 // the streaming transport path.
@@ -21,8 +49,8 @@ func TestHandleGRPCStream_UnaryOverStreaming(t *testing.T) {
 	reqPayload := []byte("unary-request")
 	respPayload := []byte("unary-response")
 
-	// Start upstream HTTP/1.1 server (sufficient for unary).
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	// Start h2c upstream server (HTTP/2 cleartext, required for RoundTripStream).
+	upstreamAddr, upstreamCancel := startH2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read body: %v", err)
@@ -44,7 +72,7 @@ func TestHandleGRPCStream_UnaryOverStreaming(t *testing.T) {
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write(protogrpc.EncodeFrame(false, respPayload))
 	}))
-	defer upstream.Close()
+	defer upstreamCancel()
 
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
@@ -56,8 +84,9 @@ func TestHandleGRPCStream_UnaryOverStreaming(t *testing.T) {
 
 	client := newH2CClientForAddr(proxyAddr)
 
+	upstreamURL := "http://" + upstreamAddr
 	reqBody := protogrpc.EncodeFrame(false, reqPayload)
-	req, _ := gohttp.NewRequest("POST", upstream.URL+"/test.Service/Method", bytes.NewReader(reqBody))
+	req, _ := gohttp.NewRequest("POST", upstreamURL+"/test.Service/Method", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/grpc")
 
 	resp, err := client.Do(req)
@@ -102,13 +131,11 @@ func TestHandleGRPCStream_UnaryOverStreaming(t *testing.T) {
 // TestHandleGRPCStream_StreamingNoDeadlock verifies that gRPC streaming
 // does not deadlock by sending multiple request frames through a pipe.
 // The pipe-based body is streamed by the proxy without full buffering.
-// This test uses an HTTP/1.1 upstream (sufficient to verify the proxy's
-// streaming behavior on the client→proxy leg).
 func TestHandleGRPCStream_StreamingNoDeadlock(t *testing.T) {
 	const numFrames = 3
 
 	// Upstream reads all request frames and echoes them in the response.
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, upstreamCancel := startH2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read: %v", err)
@@ -128,7 +155,7 @@ func TestHandleGRPCStream_StreamingNoDeadlock(t *testing.T) {
 			w.Write(protogrpc.EncodeFrame(f.Compressed, f.Payload))
 		}
 	}))
-	defer upstream.Close()
+	defer upstreamCancel()
 
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
@@ -144,7 +171,8 @@ func TestHandleGRPCStream_StreamingNoDeadlock(t *testing.T) {
 
 	client := newH2CClientForAddr(proxyAddr)
 
-	req, _ := gohttp.NewRequest("POST", upstream.URL+"/test.Echo/Stream", bodyPR)
+	upstreamURL := "http://" + upstreamAddr
+	req, _ := gohttp.NewRequest("POST", upstreamURL+"/test.Echo/Stream", bodyPR)
 	req.Header.Set("Content-Type", "application/grpc")
 
 	// Start request in background.
@@ -255,12 +283,12 @@ func TestHandleGRPCStream_NonGRPCUsesBufferedPath(t *testing.T) {
 // TestHandleGRPCStream_EmptyBody verifies that a gRPC request with no body
 // frames is handled gracefully.
 func TestHandleGRPCStream_EmptyBody(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, upstreamCancel := startH2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
 	}))
-	defer upstream.Close()
+	defer upstreamCancel()
 
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
@@ -272,7 +300,7 @@ func TestHandleGRPCStream_EmptyBody(t *testing.T) {
 
 	client := newH2CClientForAddr(proxyAddr)
 
-	req, _ := gohttp.NewRequest("POST", upstream.URL+"/test.Service/Empty", gohttp.NoBody)
+	req, _ := gohttp.NewRequest("POST", "http://"+upstreamAddr+"/test.Service/Empty", gohttp.NoBody)
 	req.Header.Set("Content-Type", "application/grpc")
 
 	resp, err := client.Do(req)
@@ -292,7 +320,7 @@ func TestHandleGRPCStream_EmptyBody(t *testing.T) {
 func TestHandleGRPCStream_MultipleRequestFrames(t *testing.T) {
 	payloads := []string{"frame-1", "frame-2", "frame-3"}
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, upstreamCancel := startH2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read: %v", err)
@@ -312,7 +340,7 @@ func TestHandleGRPCStream_MultipleRequestFrames(t *testing.T) {
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write(protogrpc.EncodeFrame(false, []byte("response")))
 	}))
-	defer upstream.Close()
+	defer upstreamCancel()
 
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
@@ -329,7 +357,7 @@ func TestHandleGRPCStream_MultipleRequestFrames(t *testing.T) {
 		reqBody.Write(protogrpc.EncodeFrame(false, []byte(p)))
 	}
 
-	req, _ := gohttp.NewRequest("POST", upstream.URL+"/test.Service/ClientStream", &reqBody)
+	req, _ := gohttp.NewRequest("POST", "http://"+upstreamAddr+"/test.Service/ClientStream", &reqBody)
 	req.Header.Set("Content-Type", "application/grpc")
 
 	resp, err := client.Do(req)
@@ -473,9 +501,8 @@ func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Upstream sets grpc-status as a regular header with no body.
-			// This simulates the Trailers-Only state: resp.Header contains
-			// grpc-status and resp.Trailer is empty.
-			upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+			// This simulates the Trailers-Only state.
+			upstreamAddr, upstreamCancel := startH2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 				io.Copy(io.Discard, r.Body)
 				w.Header().Set("Content-Type", "application/grpc")
 				w.Header().Set("Grpc-Status", tt.grpcStatus)
@@ -483,9 +510,8 @@ func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
 					w.Header().Set("Grpc-Message", tt.grpcMsg)
 				}
 				w.WriteHeader(gohttp.StatusOK)
-				// No body — Trailers-Only pattern.
 			}))
-			defer upstream.Close()
+			defer upstreamCancel()
 
 			store := &mockStore{}
 			handler := NewHandler(store, testutil.DiscardLogger())
@@ -499,7 +525,7 @@ func TestHandleGRPCStream_TrailersOnly(t *testing.T) {
 			client := newH2CClientForAddr(proxyAddr)
 
 			req, _ := gohttp.NewRequest("POST",
-				upstream.URL+"/test.Service/TrailersOnly", gohttp.NoBody)
+				"http://"+upstreamAddr+"/test.Service/TrailersOnly", gohttp.NoBody)
 			req.Header.Set("Content-Type", "application/grpc")
 
 			resp, err := client.Do(req)
@@ -672,7 +698,7 @@ func TestHandleGRPCStream_TrailersOnlyNoDeadlock(t *testing.T) {
 func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 	respPayload := []byte("normal-response")
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstreamAddr, upstreamCancel := startH2CUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
@@ -683,7 +709,7 @@ func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 		w.Header().Set(gohttp.TrailerPrefix+"Grpc-Status", "0")
 		w.Header().Set(gohttp.TrailerPrefix+"Grpc-Message", "OK")
 	}))
-	defer upstream.Close()
+	defer upstreamCancel()
 
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
@@ -698,7 +724,7 @@ func TestHandleGRPCStream_NormalTrailers(t *testing.T) {
 
 	reqBody := protogrpc.EncodeFrame(false, []byte("request"))
 	req, _ := gohttp.NewRequest("POST",
-		upstream.URL+"/test.Service/Normal", bytes.NewReader(reqBody))
+		"http://"+upstreamAddr+"/test.Service/Normal", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/grpc")
 
 	resp, err := client.Do(req)
@@ -845,14 +871,12 @@ func TestForwardGRPCResponseChunk_SubsystemError(t *testing.T) {
 
 			chunk := protogrpc.EncodeFrame(false, []byte("sensitive-data"))
 
-			done := handler.forwardGRPCResponseChunk(sc, state, subsystemBuf, rec, chunk, true)
+			done := handler.forwardGRPCResponseChunkH2(sc, state, subsystemBuf, chunk, true)
 			if !done {
-				t.Error("expected forwardGRPCResponseChunk to return true (stop), got false")
+				t.Error("expected forwardGRPCResponseChunkH2 to return true (stop), got false")
 			}
 
 			// Verify no raw response bytes leaked to the client body.
-			// The recorder body should only contain the gRPC error status trailer,
-			// not the original chunk data.
 			body := rec.Body.Bytes()
 			if bytes.Contains(body, []byte("sensitive-data")) {
 				t.Error("raw response bytes leaked to client: found sensitive-data in response body")
