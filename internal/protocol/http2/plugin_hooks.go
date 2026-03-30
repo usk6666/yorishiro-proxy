@@ -53,7 +53,14 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w h2ResponseW
 			// HTTP/2 requires lowercase header names (RFC 9113 §8.2).
 			// plugin.BuildRespondResponse may return canonicalized names
 			// like "Content-Type" which would cause PROTOCOL_ERROR in HPACK.
-			hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: strings.ToLower(hdr.Name), Value: hdr.Value})
+			name := strings.ToLower(hdr.Name)
+			// Filter HTTP/1.1 hop-by-hop / connection-specific headers that
+			// are prohibited in HTTP/2 (RFC 9113 §8.2.2). Emitting these in
+			// HTTP/2 HEADERS can cause PROTOCOL_ERROR.
+			if isHopByHopHeader(name) {
+				continue
+			}
+			hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: name, Value: hdr.Value})
 		}
 		hpackHeaders = append(hpackHeaders, hpack.HeaderField{
 			Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),

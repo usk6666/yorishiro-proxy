@@ -85,12 +85,11 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 				ForceAttemptHTTP2: true,
 			},
 		},
-		// ConnPool.TLSTransport is nil here and set later via SetTLSTransport,
-		// which is always called during initialization before any requests.
-		// The non-TLS short-circuit in forwardUpstreamConnPool ensures ConnPool.Get
-		// is only called with useTLS=true, so TLSTransport will always be set
-		// by the time it is needed.
 		connPool: &httputil.ConnPool{
+			// Initialize with a safe default (InsecureSkipVerify=false) so that
+			// if SetTLSTransport is not called, upstream cert verification is
+			// still enabled rather than silently skipped.
+			TLSTransport:   &httputil.StandardTransport{InsecureSkipVerify: false},
 			AllowH2:        true,
 			DialViaProxy:   proxy.DialViaUpstreamProxy,
 			RedactProxyURL: proxy.RedactProxyURL,
@@ -154,6 +153,19 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 		// Wrap the connection so http.Transport can detect TLS and
 		// populate resp.TLS via ConnectionState() tls.ConnectionState.
 		return httputil.WrapTLSConn(tlsConn), nil
+	}
+}
+
+// SetInsecureSkipVerify overrides HandlerBase.SetInsecureSkipVerify to also
+// update the ConnPool's default TLSTransport for the unary HTTP/2 path.
+// When skip is true, the ConnPool's StandardTransport is configured with
+// InsecureSkipVerify=true so that upstream certificate verification is disabled.
+func (h *Handler) SetInsecureSkipVerify(skip bool) {
+	h.HandlerBase.SetInsecureSkipVerify(skip)
+	h.tlsMu.Lock()
+	defer h.tlsMu.Unlock()
+	if st, ok := h.connPool.TLSTransport.(*httputil.StandardTransport); ok {
+		st.InsecureSkipVerify = skip
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -218,7 +219,7 @@ func (a *goHTTPWriterAdapter) WriteData(data []byte) error {
 
 func (a *goHTTPWriterAdapter) WriteTrailers(trailers []hpack.HeaderField) error {
 	for _, hf := range trailers {
-		a.ResponseWriter.Header().Set(gohttp.TrailerPrefix+hf.Name, hf.Value)
+		a.ResponseWriter.Header().Add(gohttp.TrailerPrefix+hf.Name, hf.Value)
 	}
 	return nil
 }
@@ -253,7 +254,7 @@ func goHTTPRequestToHpackHeaders(req *gohttp.Request) []hpack.HeaderField {
 	}
 	for name, vals := range req.Header {
 		for _, v := range vals {
-			headers = append(headers, hpack.HeaderField{Name: name, Value: v})
+			headers = append(headers, hpack.HeaderField{Name: strings.ToLower(name), Value: v})
 		}
 	}
 	return headers
