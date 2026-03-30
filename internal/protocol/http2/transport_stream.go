@@ -25,9 +25,11 @@ type StreamOptions struct {
 	// The callback must not retain the slice after returning.
 	OnSendFrame func(frameBytes []byte)
 
-	// OnRecvFrame is called for each frame received from the upstream server.
-	// The frameBytes contain the complete raw frame (header + payload).
-	// The callback must not retain the slice after returning.
+	// OnRecvFrame is called for each stream-associated frame (HEADERS,
+	// CONTINUATION, DATA) received from the upstream server for this stream.
+	// It is not invoked for connection-level frames such as SETTINGS, PING,
+	// or GOAWAY. The frameBytes contain the complete raw frame (header +
+	// payload). The callback must not retain the slice after returning.
 	OnRecvFrame func(frameBytes []byte)
 }
 
@@ -67,7 +69,9 @@ func (r *StreamRoundTripResult) Trailers() ([]hpack.HeaderField, error) {
 	if !r.bodyDone {
 		return nil, ErrBodyNotFullyRead
 	}
-	return r.trailers, nil
+	cp := make([]hpack.HeaderField, len(r.trailers))
+	copy(cp, r.trailers)
+	return cp, nil
 }
 
 // markBodyDone marks the body as fully consumed and stores trailers.
@@ -164,8 +168,9 @@ type streamingStreamState struct {
 
 	// dataCh decouples the read loop from pipe writes. The read loop sends
 	// copied DATA payloads (or nil to signal EOF) to this channel, and a
-	// dedicated writer goroutine drains it into bodyWriter. This prevents
-	// the read loop from blocking on slow application reads.
+	// dedicated writer goroutine drains it into bodyWriter. This buffering
+	// reduces how often the read loop blocks on slow application reads, but
+	// backpressure still applies once the channel's capacity is exhausted.
 	dataCh chan []byte
 
 	// abortCh is closed once to signal teardown of the streaming stream.
