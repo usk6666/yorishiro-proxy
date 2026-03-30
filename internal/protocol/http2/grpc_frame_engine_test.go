@@ -17,34 +17,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// h2cTestServer wraps an h2c server with httptest.Server-compatible fields.
-type h2cTestServer struct {
-	Listener net.Listener
-	cancel   context.CancelFunc
-}
-
-func (s *h2cTestServer) Close() {
-	s.cancel()
-}
-
-// newH2CTestServer starts an h2c-capable test server, replacing
-// httptest.NewServer for gRPC tests that need HTTP/2 upstream.
-func newH2CTestServer(t *testing.T, handler gohttp.Handler) *h2cTestServer {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	protos := &gohttp.Protocols{}
-	protos.SetHTTP1(true)
-	protos.SetUnencryptedHTTP2(true)
-	server := &gohttp.Server{Handler: handler, Protocols: protos}
-	ctx, cancel := context.WithCancel(context.Background())
-	go server.Serve(ln)
-	go func() { <-ctx.Done(); server.Close() }()
-	return &h2cTestServer{Listener: ln, cancel: cancel}
-}
-
 // startFrameEngineProxy creates a proxy using the new clientConn frame engine
 // (replacing startH2CProxyListener's h2c.NewHandler). The proxy accepts h2c
 // connections, routes streams through handleStream(), and returns the listener

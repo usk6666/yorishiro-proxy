@@ -340,7 +340,8 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 	// Non-TLS upstreams cannot negotiate ALPN. For h2c, dial directly and
 	// use the connection as-is since h2c is cleartext HTTP/2.
 	if !useTLS {
-		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+		dialer := net.Dialer{Timeout: 10 * time.Second}
+		conn, err := dialer.DialContext(sc.ctx, "tcp", addr)
 		if err != nil {
 			sc.logger.Error("gRPC upstream connection failed",
 				"method", req.Method, "url", sc.reqURL.String(), "error", err)
@@ -539,9 +540,13 @@ func (h *Handler) forwardGRPCResponseChunkH2(sc *streamContext, state *grpcStrea
 			sc.logger.Warn("gRPC response subsystem buffer error", "error", fbErr)
 		}
 		// Write error trailers to signal the client.
+		errMsg := "response subsystem processing error"
+		if blocked {
+			errMsg = "response blocked by output filter"
+		}
 		errorTrailers := []hpack.HeaderField{
 			{Name: "grpc-status", Value: "13"},
-			{Name: "grpc-message", Value: percentEncodeGRPCMessage("response blocked by output filter")},
+			{Name: "grpc-message", Value: percentEncodeGRPCMessage(errMsg)},
 		}
 		if err := sc.w.WriteTrailers(errorTrailers); err != nil {
 			sc.logger.Debug("gRPC failed to write error trailers", "error", err)

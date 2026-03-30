@@ -224,7 +224,10 @@ func (r *grpcProgressiveRecorder) completeFlowH2(
 
 	// Convert hpack trailers to map for gRPC status extraction.
 	trailerMap := hpackToGoHTTPHeaderMap(hpackTrailers)
-	respHeaderMap := hpackToGoHTTPHeaderMap(result.Headers)
+	var respHeaderMap map[string][]string
+	if result != nil {
+		respHeaderMap = hpackToGoHTTPHeaderMap(result.Headers)
+	}
 
 	grpcStatus := protogrpc.ExtractGRPCStatus(trailerMap, respHeaderMap)
 	grpcMessage := protogrpc.ExtractGRPCMessage(trailerMap, respHeaderMap)
