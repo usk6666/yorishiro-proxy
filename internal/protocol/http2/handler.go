@@ -959,11 +959,18 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 	case "h2":
 		// forwardH2 → RoundTripOnConn takes ownership of cr.Conn and closes
 		// it before returning; the caller must NOT close cr.Conn after this call.
-		result, err = h.forwardH2(sc.ctx, cr.Conn, outReq, cr.ConnectDuration)
+		result, err = h.forwardH2(sc.ctx, cr.Conn, outReq)
 	default:
 		// For non-h2 connections, close the ConnPool connection and fall back
 		// to the legacy gohttp.Transport path which handles HTTP/1.1 properly
 		// (chunked encoding, connection reuse, etc.).
+		//
+		// Known trade-off: this causes a double TLS handshake — once in
+		// ConnPool (to discover ALPN) and again in gohttp.Transport. This is
+		// acceptable because ConnPool intentionally has no pooling (YAGNI) and
+		// the non-h2 fallback is not the primary path. If this becomes a
+		// bottleneck, adding ALPN-aware connection reuse to ConnPool would be
+		// the correct fix (not caching here).
 		cr.Conn.Close()
 		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
 	}
@@ -998,7 +1005,7 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 // forwardH2 forwards a request via the HTTP/2 frame engine on a pre-established
 // h2 connection. It converts the outbound gohttp.Request to hpack headers and
 // uses RoundTripOnConn.
-func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.Request, connectDuration time.Duration) (*forwardUpstreamResult, error) {
+func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.Request) (*forwardUpstreamResult, error) {
 	// Build hpack headers from the gohttp.Request.
 	headers := buildH2HeadersFromGoHTTP(outReq)
 
@@ -1108,13 +1115,19 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 	// HTTP/1.1 (e.g., when DialTLSContext restricts ALPN to http/1.1).
 	removeHTTP2HopByHop(resp.Header)
 
-	// Recalculate Content-Length to match the actual body bytes being sent.
-	// The body may have been modified by transform/intercept/output-filter
-	// after the upstream response was received, making the original
-	// Content-Length incorrect.
-	if len(body) > 0 && resp.StatusCode != 204 && resp.StatusCode != 304 {
+	// RFC 9110 §6.4.1: 1xx, 204, and 304 responses must not contain a body.
+	// Strip Content-Length and suppress DATA frames for these statuses.
+	noBody := isNoBodyStatus(resp.StatusCode)
+	if noBody {
+		resp.Header.Del("Content-Length")
+		body = nil
+	} else if len(body) > 0 {
+		// Recalculate Content-Length to match the actual body bytes being sent.
+		// The body may have been modified by transform/intercept/output-filter
+		// after the upstream response was received, making the original
+		// Content-Length incorrect.
 		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	} else if len(body) == 0 {
+	} else {
 		resp.Header.Del("Content-Length")
 	}
 
@@ -1414,4 +1427,11 @@ func removeHTTP2HopByHop(header gohttp.Header) {
 	if te := header.Get("Te"); te != "" && !strings.EqualFold(te, "trailers") {
 		header.Del("Te")
 	}
+}
+
+// isNoBodyStatus returns true for HTTP status codes that must not include a
+// message body per RFC 9110 §6.4.1: 1xx (informational), 204 (No Content),
+// and 304 (Not Modified).
+func isNoBodyStatus(code int) bool {
+	return (code >= 100 && code < 200) || code == 204 || code == 304
 }

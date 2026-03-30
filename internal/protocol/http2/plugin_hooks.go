@@ -202,9 +202,15 @@ func writePluginRespondResponse(w h2ResponseWriter, responseData map[string]any,
 		}
 		hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: name, Value: hdr.Value})
 	}
-	hpackHeaders = append(hpackHeaders, hpack.HeaderField{
-		Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
-	})
+	// RFC 9110 §6.4.1: 1xx, 204, and 304 must not include a body.
+	noBody := isNoBodyStatus(statusCode)
+	if noBody {
+		respBody = nil
+	} else {
+		hpackHeaders = append(hpackHeaders, hpack.HeaderField{
+			Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
+		})
+	}
 	if err := w.WriteHeaders(statusCode, hpackHeaders); err != nil {
 		logger.Debug("failed to write plugin respond headers", "error", err)
 		return
