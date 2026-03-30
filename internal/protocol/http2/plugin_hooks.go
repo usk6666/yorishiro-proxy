@@ -202,7 +202,7 @@ func writePluginRespondResponse(w h2ResponseWriter, responseData map[string]any,
 		}
 		hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: name, Value: hdr.Value})
 	}
-	// RFC 9110 §6.4.1: 1xx, 204, and 304 must not include a body.
+	// RFC 9110 §6.4.1: 1xx, 204, 205, and 304 must not include a body.
 	noBody := isNoBodyStatus(statusCode)
 	if noBody {
 		respBody = nil

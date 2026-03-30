@@ -1043,7 +1043,9 @@ func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.R
 // USK-520 migrates gRPC to ConnPool.
 func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
 	sendStart := time.Now()
+	h.tlsMu.RLock()
 	resp, serverAddr, timing, err := h.roundTripWithTrace(outReq)
+	h.tlsMu.RUnlock()
 	if err != nil {
 		sc.logger.Error("HTTP/2 upstream request failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
@@ -1115,7 +1117,7 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 	// HTTP/1.1 (e.g., when DialTLSContext restricts ALPN to http/1.1).
 	removeHTTP2HopByHop(resp.Header)
 
-	// RFC 9110 §6.4.1: 1xx, 204, and 304 responses must not contain a body.
+	// RFC 9110 §6.4.1: 1xx, 204, 205, and 304 responses must not contain a body.
 	// Strip Content-Length and suppress DATA frames for these statuses.
 	noBody := isNoBodyStatus(resp.StatusCode)
 	if noBody {
