@@ -70,6 +70,7 @@ func TestRoundTripStream_BasicStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoundTripStream: %v", err)
 	}
+	defer result.Body.Close()
 
 	if result.StatusCode != 200 {
 		t.Errorf("status = %d, want 200", result.StatusCode)
@@ -79,7 +80,6 @@ func TestRoundTripStream_BasicStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	result.Body.Close()
 
 	if string(respBody) != "streaming-response-data" {
 		t.Errorf("body = %q, want streaming-response-data", respBody)
@@ -127,6 +127,7 @@ func TestRoundTripStream_NoBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoundTripStream: %v", err)
 	}
+	defer result.Body.Close()
 
 	if result.StatusCode != 204 {
 		t.Errorf("status = %d, want 204", result.StatusCode)
@@ -136,7 +137,6 @@ func TestRoundTripStream_NoBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	result.Body.Close()
 
 	if len(respBody) != 0 {
 		t.Errorf("body = %q, want empty", respBody)
@@ -204,6 +204,7 @@ func TestRoundTripStream_Trailers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoundTripStream: %v", err)
 	}
+	defer result.Body.Close()
 
 	// Trailers should not be available before reading body.
 	_, trErr := result.Trailers()
@@ -216,7 +217,6 @@ func TestRoundTripStream_Trailers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	result.Body.Close()
 
 	if string(body) != "data-payload" {
 		t.Errorf("body = %q, want data-payload", body)
@@ -343,12 +343,12 @@ func TestRoundTripStream_OnSendRecvFrameCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoundTripStream: %v", err)
 	}
+	defer result.Body.Close()
 
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	result.Body.Close()
 
 	if string(body) != "callback-test" {
 		t.Errorf("body = %q, want callback-test", body)
@@ -457,12 +457,12 @@ func TestRoundTripStream_LargeBodyFlowControl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoundTripStream: %v", err)
 	}
+	defer result.Body.Close()
 
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	result.Body.Close()
 
 	if string(body) != "ok" {
 		t.Errorf("body = %q, want ok", body)
@@ -535,6 +535,7 @@ func TestRoundTripStream_HeadersEndStreamNoBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoundTripStream: %v", err)
 	}
+	defer result.Body.Close()
 
 	if result.StatusCode != 204 {
 		t.Errorf("status = %d, want 204", result.StatusCode)
@@ -544,7 +545,6 @@ func TestRoundTripStream_HeadersEndStreamNoBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	result.Body.Close()
 
 	if len(body) != 0 {
 		t.Errorf("body = %q, want empty", body)
@@ -722,11 +722,12 @@ func TestRoundTripStream_BidirectionalStreaming(t *testing.T) {
 		t.Errorf("status = %d, want 200", result.StatusCode)
 	}
 
+	defer result.Body.Close()
+
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	result.Body.Close()
 
 	if string(body) != "chunk1chunk2" {
 		t.Errorf("body = %q, want chunk1chunk2", body)

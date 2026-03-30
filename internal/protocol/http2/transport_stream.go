@@ -164,6 +164,12 @@ type streamingStreamState struct {
 	// bodyReader is the read end of the response body pipe.
 	bodyReader *io.PipeReader
 
+	// dataCh decouples the read loop from pipe writes. The read loop sends
+	// copied DATA payloads (or nil to signal EOF) to this channel, and a
+	// dedicated writer goroutine drains it into bodyWriter. This prevents
+	// the read loop from blocking on slow application reads.
+	dataCh chan []byte
+
 	// trailers collects decoded trailer header fields.
 	trailers []hpack.HeaderField
 	// done is sent when the stream has fully completed (END_STREAM received).
@@ -198,10 +204,31 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 		headersDone: make(chan struct{}),
 		bodyWriter:  pw,
 		bodyReader:  pr,
+		dataCh:      make(chan []byte, 64),
 		done:        make(chan streamResult, 1),
 		result:      result,
 		onRecvFrame: opts.OnRecvFrame,
 	}
+
+	// Start a dedicated writer goroutine that drains dataCh into the pipe.
+	// This decouples the read loop from application backpressure (C-7 fix).
+	go func() {
+		for payload := range sss.dataCh {
+			if payload == nil {
+				// nil sentinel signals end-of-stream; close the pipe.
+				sss.bodyWriter.Close()
+				return
+			}
+			if _, err := sss.bodyWriter.Write(payload); err != nil {
+				// Pipe closed by reader — drain remaining items and exit.
+				for range sss.dataCh {
+				}
+				return
+			}
+		}
+		// Channel closed without nil sentinel (e.g., error path).
+		sss.bodyWriter.Close()
+	}()
 
 	// Transition to open state.
 	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
@@ -219,6 +246,7 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 	if err != nil {
 		tc.unregisterStreamingHandler(streamID)
 		pw.CloseWithError(err)
+		close(sss.dataCh)
 		return nil, fmt.Errorf("send HEADERS on stream %d: %w", streamID, err)
 	}
 
@@ -254,6 +282,7 @@ waitForHeaders:
 			tc.sendReset(streamID, ErrCodeCancel)
 			tc.unregisterStreamingHandler(streamID)
 			pw.CloseWithError(ctx.Err())
+			close(sss.dataCh)
 			// Close the request body to unblock the sender goroutine which may
 			// be blocked in body.Read.
 			closeIfCloser(body)
@@ -264,8 +293,9 @@ waitForHeaders:
 			// Stream completed before headers (error case or server sent
 			// END_STREAM on headers-only response).
 			tc.unregisterStreamingHandler(streamID)
-			pw.CloseWithError(r.err)
 			if r.err != nil {
+				pw.CloseWithError(r.err)
+				close(sss.dataCh)
 				return nil, r.err
 			}
 			break waitForHeaders
@@ -280,6 +310,7 @@ waitForHeaders:
 			tc.sendReset(streamID, ErrCodeCancel)
 			tc.unregisterStreamingHandler(streamID)
 			pw.CloseWithError(err)
+			close(sss.dataCh)
 			closeIfCloser(body)
 			return nil, err
 		}
@@ -292,6 +323,7 @@ waitForHeaders:
 			if err != nil {
 				tc.unregisterStreamingHandler(streamID)
 				pw.CloseWithError(fmt.Errorf("invalid :status: %w", err))
+				close(sss.dataCh)
 				return nil, fmt.Errorf("invalid :status %q: %w", hf.Value, err)
 			}
 			result.StatusCode = code
@@ -301,6 +333,7 @@ waitForHeaders:
 	if result.StatusCode == 0 {
 		tc.unregisterStreamingHandler(streamID)
 		pw.CloseWithError(fmt.Errorf("no :status"))
+		close(sss.dataCh)
 		return nil, fmt.Errorf("no :status pseudo-header in response")
 	}
 
@@ -311,6 +344,7 @@ waitForHeaders:
 		tc:         tc,
 		streamID:   streamID,
 		senderDone: senderDone,
+		reqBody:    body,
 	}
 
 	return result, nil
@@ -324,6 +358,7 @@ type streamingBody struct {
 	tc         *transportConn
 	streamID   uint32
 	senderDone <-chan error
+	reqBody    io.Reader // original request body; closed on Close() to unblock sender
 	closeOnce  sync.Once
 	readErr    error
 }
@@ -355,6 +390,9 @@ func (sb *streamingBody) Close() error {
 	var err error
 	sb.closeOnce.Do(func() {
 		err = sb.reader.Close()
+		// Close the request body to unblock the sender goroutine if it is
+		// blocked in body.Read (C-8 fix: prevent goroutine leak).
+		closeIfCloser(sb.reqBody)
 		sb.tc.unregisterStreamingHandler(sb.streamID)
 	})
 	return err
@@ -380,8 +418,16 @@ func (tc *transportConn) unregisterStreamingHandler(streamID uint32) {
 // streamSendBody reads from body and sends DATA frames, respecting flow control.
 // When body returns io.EOF, it sends END_STREAM to half-close the stream.
 func (tc *transportConn) streamSendBody(ctx context.Context, streamID uint32, body io.Reader, opts StreamOptions) error {
-	maxPayload := int(tc.conn.PeerSettings().MaxFrameSize)
-	buf := make([]byte, maxPayload)
+	// Cap the read buffer to a reasonable I/O chunk size. MaxFrameSize can be
+	// up to 16MB per the HTTP/2 spec, but the actual frame splitting is handled
+	// by streamSendData which respects MaxFrameSize. The read buffer just needs
+	// to be a practical I/O size (C-10 fix).
+	const maxReadBuf = 32 * 1024 // 32KB
+	bufSize := int(tc.conn.PeerSettings().MaxFrameSize)
+	if bufSize > maxReadBuf {
+		bufSize = maxReadBuf
+	}
+	buf := make([]byte, bufSize)
 
 	for {
 		n, readErr := body.Read(buf)
@@ -618,10 +664,13 @@ func (tc *transportConn) handleStreamingData(f *frame.Frame, sss *streamingStrea
 	// Wait for headers to be done before writing data.
 	<-sss.headersDone
 
+	// Send a copy of the payload to the writer goroutine via the data channel.
+	// The copy is necessary because the frame buffer may be reused by the reader.
+	// This decouples the read loop from application backpressure (C-7 fix).
 	if len(payload) > 0 {
-		if _, writeErr := sss.bodyWriter.Write(payload); writeErr != nil {
-			return fmt.Errorf("stream %d write to body pipe: %w", streamID, writeErr)
-		}
+		cp := make([]byte, len(payload))
+		copy(cp, payload)
+		sss.dataCh <- cp
 	}
 
 	// Consume receive window and send WINDOW_UPDATE asynchronously.
@@ -643,7 +692,8 @@ func (tc *transportConn) handleStreamingData(f *frame.Frame, sss *streamingStrea
 	if f.Header.Flags.Has(frame.FlagEndStream) {
 		sss.endStream = true
 		tc.conn.Streams().Transition(streamID, EventRecvEndStream) //nolint:errcheck
-		sss.bodyWriter.Close()
+		// Send nil sentinel to signal the writer goroutine to close the pipe.
+		sss.dataCh <- nil
 		select {
 		case sss.done <- streamResult{}:
 		default:
@@ -669,7 +719,8 @@ func (tc *transportConn) processStreamingDecodedHeaders(sss *streamingStreamStat
 	if endStream {
 		sss.endStream = true
 		tc.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream) //nolint:errcheck
-		sss.bodyWriter.Close()
+		// Send nil sentinel to signal the writer goroutine to close the pipe.
+		sss.dataCh <- nil
 		select {
 		case sss.done <- streamResult{}:
 		default:

@@ -1239,6 +1239,7 @@ func (tc *transportConn) handleGoAway(f *frame.Frame) error {
 		if id > lastStreamID {
 			goawayErr := fmt.Errorf("stream %d rejected by GOAWAY (last=%d)", id, lastStreamID)
 			sss.bodyWriter.CloseWithError(goawayErr)
+			close(sss.dataCh)
 			select {
 			case sss.done <- streamResult{err: goawayErr}:
 			default:
@@ -1267,6 +1268,7 @@ func (tc *transportConn) handleRSTStream(f *frame.Frame) error {
 
 	if isStreaming {
 		sss.bodyWriter.CloseWithError(rstErr)
+		close(sss.dataCh)
 		select {
 		case sss.done <- streamResult{err: rstErr}:
 		default:
@@ -1308,6 +1310,7 @@ func (tc *transportConn) closeWithError(err error) {
 	}
 	for _, sss := range tc.streamingStreams {
 		sss.bodyWriter.CloseWithError(connErr)
+		close(sss.dataCh)
 		select {
 		case sss.done <- streamResult{err: connErr}:
 		default:
