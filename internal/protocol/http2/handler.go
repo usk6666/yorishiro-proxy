@@ -14,6 +14,7 @@ import (
 	gohttp "net/http"
 	"net/http/httptrace"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1106,6 +1107,16 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 	// (RFC 9113 §8.2.2) and cause PROTOCOL_ERROR when the upstream is
 	// HTTP/1.1 (e.g., when DialTLSContext restricts ALPN to http/1.1).
 	removeHTTP2HopByHop(resp.Header)
+
+	// Recalculate Content-Length to match the actual body bytes being sent.
+	// The body may have been modified by transform/intercept/output-filter
+	// after the upstream response was received, making the original
+	// Content-Length incorrect.
+	if len(body) > 0 && resp.StatusCode != 204 && resp.StatusCode != 304 {
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	} else if len(body) == 0 {
+		resp.Header.Del("Content-Length")
+	}
 
 	// Convert response headers to hpack fields.
 	respHeaders := goHTTPHeaderToHpack(resp.Header)
