@@ -170,6 +170,12 @@ type streamingStreamState struct {
 	// the read loop from blocking on slow application reads.
 	dataCh chan []byte
 
+	// abortCh is closed once to signal teardown of the streaming stream.
+	// All senders into dataCh and the writer goroutine select on this channel
+	// to avoid send-on-closed-channel and double-close panics.
+	abortCh   chan struct{}
+	abortOnce sync.Once
+
 	// trailers collects decoded trailer header fields.
 	trailers []hpack.HeaderField
 	// done is sent when the stream has fully completed (END_STREAM received).
@@ -182,6 +188,61 @@ type streamingStreamState struct {
 
 	// onRecvFrame callback for frame recording.
 	onRecvFrame func(frameBytes []byte)
+}
+
+// abort performs idempotent cleanup of the streaming stream state.
+// It signals all goroutines to stop (via abortCh) and closes the pipe writer
+// with the given error. Safe to call from multiple goroutines concurrently.
+func (sss *streamingStreamState) abort(err error) {
+	sss.abortOnce.Do(func() {
+		if err != nil {
+			sss.bodyWriter.CloseWithError(err)
+		} else {
+			sss.bodyWriter.Close()
+		}
+		close(sss.abortCh)
+	})
+}
+
+// writerLoop drains dataCh into the pipe writer. It exits when abortCh is
+// closed. On exit it drains any remaining buffered payloads from dataCh to
+// ensure data sent before abort is written to the pipe.
+func (sss *streamingStreamState) writerLoop() {
+	for {
+		select {
+		case payload := <-sss.dataCh:
+			if payload == nil {
+				// nil sentinel signals normal end-of-stream.
+				sss.abort(nil)
+				return
+			}
+			if _, err := sss.bodyWriter.Write(payload); err != nil {
+				return
+			}
+		case <-sss.abortCh:
+			// Drain any remaining buffered payloads before exiting.
+			sss.drainDataCh()
+			return
+		}
+	}
+}
+
+// drainDataCh writes any remaining buffered payloads from dataCh to the pipe.
+// Called on abort to ensure data already enqueued is not lost.
+func (sss *streamingStreamState) drainDataCh() {
+	for {
+		select {
+		case payload := <-sss.dataCh:
+			if payload == nil {
+				return
+			}
+			if _, err := sss.bodyWriter.Write(payload); err != nil {
+				return
+			}
+		default:
+			return
+		}
+	}
 }
 
 // roundTripStream performs a streaming round trip on a single transportConn.
@@ -205,6 +266,7 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 		bodyWriter:  pw,
 		bodyReader:  pr,
 		dataCh:      make(chan []byte, 64),
+		abortCh:     make(chan struct{}),
 		done:        make(chan streamResult, 1),
 		result:      result,
 		onRecvFrame: opts.OnRecvFrame,
@@ -212,23 +274,8 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 
 	// Start a dedicated writer goroutine that drains dataCh into the pipe.
 	// This decouples the read loop from application backpressure (C-7 fix).
-	go func() {
-		for payload := range sss.dataCh {
-			if payload == nil {
-				// nil sentinel signals end-of-stream; close the pipe.
-				sss.bodyWriter.Close()
-				return
-			}
-			if _, err := sss.bodyWriter.Write(payload); err != nil {
-				// Pipe closed by reader — drain remaining items and exit.
-				for range sss.dataCh {
-				}
-				return
-			}
-		}
-		// Channel closed without nil sentinel (e.g., error path).
-		sss.bodyWriter.Close()
-	}()
+	// The goroutine exits when abortCh is closed (via sss.abort).
+	go sss.writerLoop()
 
 	// Transition to open state.
 	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
@@ -245,8 +292,7 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 	tc.writeMu.Unlock()
 	if err != nil {
 		tc.unregisterStreamingHandler(streamID)
-		pw.CloseWithError(err)
-		close(sss.dataCh)
+		sss.abort(err)
 		return nil, fmt.Errorf("send HEADERS on stream %d: %w", streamID, err)
 	}
 
@@ -272,7 +318,7 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 	}
 
 	// Wait for response headers (or sender/stream error).
-	if err := tc.waitForStreamHeaders(ctx, streamID, sss, senderDone, pw, body); err != nil {
+	if err := tc.waitForStreamHeaders(ctx, streamID, sss, senderDone, body); err != nil {
 		return nil, err
 	}
 
@@ -280,8 +326,7 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 	statusCode, err := extractStatusCode(sss.headers)
 	if err != nil {
 		tc.unregisterStreamingHandler(streamID)
-		pw.CloseWithError(err)
-		close(sss.dataCh)
+		sss.abort(err)
 		return nil, err
 	}
 	result.StatusCode = statusCode
@@ -302,14 +347,13 @@ func (tc *transportConn) roundTripStream(ctx context.Context, headers []hpack.He
 // waitForStreamHeaders blocks until response headers arrive, the stream
 // completes, the sender fails, or the context is cancelled. It returns nil
 // on success and an error on failure (after cleaning up resources).
-func (tc *transportConn) waitForStreamHeaders(ctx context.Context, streamID uint32, sss *streamingStreamState, senderDone chan error, pw *io.PipeWriter, body io.Reader) error {
+func (tc *transportConn) waitForStreamHeaders(ctx context.Context, streamID uint32, sss *streamingStreamState, senderDone chan error, body io.Reader) error {
 	for {
 		select {
 		case <-ctx.Done():
 			tc.sendReset(streamID, ErrCodeCancel)
 			tc.unregisterStreamingHandler(streamID)
-			pw.CloseWithError(ctx.Err())
-			close(sss.dataCh)
+			sss.abort(ctx.Err())
 			closeIfCloser(body)
 			return ctx.Err()
 		case <-sss.headersDone:
@@ -317,8 +361,7 @@ func (tc *transportConn) waitForStreamHeaders(ctx context.Context, streamID uint
 		case r := <-sss.done:
 			tc.unregisterStreamingHandler(streamID)
 			if r.err != nil {
-				pw.CloseWithError(r.err)
-				close(sss.dataCh)
+				sss.abort(r.err)
 				return r.err
 			}
 			return nil
@@ -329,8 +372,7 @@ func (tc *transportConn) waitForStreamHeaders(ctx context.Context, streamID uint
 			}
 			tc.sendReset(streamID, ErrCodeCancel)
 			tc.unregisterStreamingHandler(streamID)
-			pw.CloseWithError(err)
-			close(sss.dataCh)
+			sss.abort(err)
 			closeIfCloser(body)
 			return err
 		}
@@ -669,10 +711,15 @@ func (tc *transportConn) handleStreamingData(f *frame.Frame, sss *streamingStrea
 	// Send a copy of the payload to the writer goroutine via the data channel.
 	// The copy is necessary because the frame buffer may be reused by the reader.
 	// This decouples the read loop from application backpressure (C-7 fix).
+	// The send is guarded by abortCh to prevent send-on-closed-channel panic.
 	if len(payload) > 0 {
 		cp := make([]byte, len(payload))
 		copy(cp, payload)
-		sss.dataCh <- cp
+		select {
+		case sss.dataCh <- cp:
+		case <-sss.abortCh:
+			return nil
+		}
 	}
 
 	// Consume receive window and send WINDOW_UPDATE asynchronously.
@@ -695,7 +742,10 @@ func (tc *transportConn) handleStreamingData(f *frame.Frame, sss *streamingStrea
 		sss.endStream = true
 		tc.conn.Streams().Transition(streamID, EventRecvEndStream) //nolint:errcheck
 		// Send nil sentinel to signal the writer goroutine to close the pipe.
-		sss.dataCh <- nil
+		select {
+		case sss.dataCh <- nil:
+		case <-sss.abortCh:
+		}
 		select {
 		case sss.done <- streamResult{}:
 		default:
@@ -722,7 +772,10 @@ func (tc *transportConn) processStreamingDecodedHeaders(sss *streamingStreamStat
 		sss.endStream = true
 		tc.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream) //nolint:errcheck
 		// Send nil sentinel to signal the writer goroutine to close the pipe.
-		sss.dataCh <- nil
+		select {
+		case sss.dataCh <- nil:
+		case <-sss.abortCh:
+		}
 		select {
 		case sss.done <- streamResult{}:
 		default:

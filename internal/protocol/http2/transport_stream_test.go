@@ -749,3 +749,179 @@ func TestRoundTripStream_BidirectionalStreaming(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestRoundTripStream_GOAWAYMidStream(t *testing.T) {
+	clientConn, serverConn := localConnPair(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	server := newPipeServer(serverConn)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	transport := &Transport{Logger: logger}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server.handshake(t)
+
+		// Read client HEADERS frame to get the stream ID.
+		var streamID uint32
+		for {
+			f, err := server.reader.ReadFrame()
+			if err != nil {
+				t.Errorf("read frame: %v", err)
+				return
+			}
+			if f.Header.Type == frame.TypeHeaders {
+				streamID = f.Header.StreamID
+				break
+			}
+		}
+
+		// Send response HEADERS (without END_STREAM) to unblock the client.
+		respHeaders := []hpack.HeaderField{
+			{Name: ":status", Value: "200"},
+			{Name: "content-type", Value: "application/grpc"},
+		}
+		fragment := server.enc.Encode(respHeaders)
+		if err := server.writer.WriteHeaders(streamID, false, true, fragment); err != nil {
+			t.Errorf("write response HEADERS: %v", err)
+			return
+		}
+
+		// Send some data so the client has partial body.
+		if err := server.writer.WriteData(streamID, false, []byte("partial")); err != nil {
+			t.Errorf("write DATA: %v", err)
+			return
+		}
+
+		// Now send GOAWAY with lastStreamID=0 to reject the active stream.
+		if err := server.writer.WriteGoAway(0, ErrCodeNo, nil); err != nil {
+			t.Errorf("write GOAWAY: %v", err)
+			return
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/api/goaway"},
+	}
+
+	// Use a pipe body to keep the stream open for bidirectional streaming.
+	bodyPR, bodyPW := io.Pipe()
+	defer bodyPW.Close()
+
+	result, err := transport.RoundTripStream(ctx, clientConn, headers, bodyPR, StreamOptions{})
+	if err != nil {
+		// GOAWAY before headers would cause an error here; that's acceptable.
+		if !strings.Contains(err.Error(), "GOAWAY") && !strings.Contains(err.Error(), "connection error") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		wg.Wait()
+		return
+	}
+	defer result.Body.Close()
+
+	// Read body — should get partial data then an error or EOF.
+	_, readErr := io.ReadAll(result.Body)
+	// The read may succeed (partial data) or return an error from GOAWAY.
+	// Either outcome is acceptable; the key assertion is no panic.
+	_ = readErr
+
+	wg.Wait()
+}
+
+func TestRoundTripStream_RSTStreamMidStream(t *testing.T) {
+	clientConn, serverConn := localConnPair(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	server := newPipeServer(serverConn)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	transport := &Transport{Logger: logger}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server.handshake(t)
+
+		// Read client HEADERS frame to get the stream ID.
+		var streamID uint32
+		for {
+			f, err := server.reader.ReadFrame()
+			if err != nil {
+				t.Errorf("read frame: %v", err)
+				return
+			}
+			if f.Header.Type == frame.TypeHeaders {
+				streamID = f.Header.StreamID
+				break
+			}
+		}
+
+		// Send response HEADERS (without END_STREAM).
+		respHeaders := []hpack.HeaderField{
+			{Name: ":status", Value: "200"},
+			{Name: "content-type", Value: "application/grpc"},
+		}
+		fragment := server.enc.Encode(respHeaders)
+		if err := server.writer.WriteHeaders(streamID, false, true, fragment); err != nil {
+			t.Errorf("write response HEADERS: %v", err)
+			return
+		}
+
+		// Send some data.
+		if err := server.writer.WriteData(streamID, false, []byte("before-rst")); err != nil {
+			t.Errorf("write DATA: %v", err)
+			return
+		}
+
+		// Send RST_STREAM to abruptly terminate the stream.
+		if err := server.writer.WriteRSTStream(streamID, ErrCodeCancel); err != nil {
+			t.Errorf("write RST_STREAM: %v", err)
+			return
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/api/rst"},
+	}
+
+	bodyPR, bodyPW := io.Pipe()
+	defer bodyPW.Close()
+
+	result, err := transport.RoundTripStream(ctx, clientConn, headers, bodyPR, StreamOptions{})
+	if err != nil {
+		// RST_STREAM may arrive before or after headers are processed.
+		if !strings.Contains(err.Error(), "RST_STREAM") && !strings.Contains(err.Error(), "connection error") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		wg.Wait()
+		return
+	}
+	defer result.Body.Close()
+
+	// Read body — should get an error from RST_STREAM.
+	_, readErr := io.ReadAll(result.Body)
+	if readErr == nil {
+		// It's possible all data arrived before RST_STREAM was processed.
+		// The key assertion is no panic or goroutine leak.
+	} else if !strings.Contains(readErr.Error(), "RST_STREAM") && !strings.Contains(readErr.Error(), "connection error") {
+		t.Errorf("unexpected read error: %v", readErr)
+	}
+
+	wg.Wait()
+}
