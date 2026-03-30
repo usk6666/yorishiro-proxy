@@ -7,6 +7,7 @@ import (
 	"io"
 	gohttp "net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
@@ -221,10 +222,17 @@ func h2RequestToGoHTTP(ctx context.Context, req *h2Request) (*gohttp.Request, er
 }
 
 // goHTTPHeaderToHpack converts gohttp.Header to hpack header fields.
+// Keys are sorted for deterministic output order.
 func goHTTPHeaderToHpack(h gohttp.Header) []hpack.HeaderField {
+	keys := make([]string, 0, len(h))
+	for name := range h {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+
 	var fields []hpack.HeaderField
-	for name, vals := range h {
-		for _, v := range vals {
+	for _, name := range keys {
+		for _, v := range h[name] {
 			fields = append(fields, hpack.HeaderField{
 				Name:  strings.ToLower(name),
 				Value: v,

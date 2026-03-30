@@ -939,7 +939,9 @@ func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.R
 	// Build hpack headers from the gohttp.Request.
 	headers := buildH2HeadersFromGoHTTP(outReq)
 
+	h.tlsMu.RLock()
 	transport := h.h2Transport
+	h.tlsMu.RUnlock()
 	if transport == nil {
 		transport = &Transport{Logger: h.Logger}
 	}
