@@ -194,9 +194,10 @@ func writePluginRespondResponse(w h2ResponseWriter, responseData map[string]any,
 	for _, hdr := range pluginHeaders {
 		// HTTP/2 requires lowercase header names (RFC 9113 §8.2).
 		name := strings.ToLower(hdr.Name)
-		// Filter hop-by-hop headers (RFC 9113 §8.2.2) and plugin-provided
+		// Filter pseudo-headers (WriteHeaders injects :status),
+		// hop-by-hop headers (RFC 9113 §8.2.2), and plugin-provided
 		// content-length (we add the authoritative value below).
-		if isHopByHopHeader(name) || name == "content-length" {
+		if strings.HasPrefix(name, ":") || isHopByHopHeader(name) || name == "content-length" {
 			continue
 		}
 		hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: name, Value: hdr.Value})

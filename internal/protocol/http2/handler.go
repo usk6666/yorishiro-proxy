@@ -956,6 +956,8 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 
 	switch cr.ALPN {
 	case "h2":
+		// forwardH2 → RoundTripOnConn takes ownership of cr.Conn and closes
+		// it before returning; the caller must NOT close cr.Conn after this call.
 		result, err = h.forwardH2(sc.ctx, cr.Conn, outReq, cr.ConnectDuration)
 	default:
 		// For non-h2 connections, close the ConnPool connection and fall back
