@@ -85,8 +85,15 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 				ForceAttemptHTTP2: true,
 			},
 		},
+		// ConnPool.TLSTransport is nil here and set later via SetTLSTransport,
+		// which is always called during initialization before any requests.
+		// The non-TLS short-circuit in forwardUpstreamConnPool ensures ConnPool.Get
+		// is only called with useTLS=true, so TLSTransport will always be set
+		// by the time it is needed.
 		connPool: &httputil.ConnPool{
-			AllowH2: true,
+			AllowH2:        true,
+			DialViaProxy:   proxy.DialViaUpstreamProxy,
+			RedactProxyURL: proxy.RedactProxyURL,
 		},
 	}
 }
@@ -157,6 +164,13 @@ func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
 	h.tlsMu.Lock()
 	defer h.tlsMu.Unlock()
 	h.connPool.UpstreamProxy = proxyURL
+	// Ensure ConnPool has the proxy dial/redact functions when a proxy is set.
+	// These are also set in NewHandler, but re-affirm here for safety in case
+	// the ConnPool was replaced after construction.
+	if proxyURL != nil {
+		h.connPool.DialViaProxy = proxy.DialViaUpstreamProxy
+		h.connPool.RedactProxyURL = proxy.RedactProxyURL
+	}
 }
 
 // SetH2Transport sets the custom HTTP/2 frame-engine transport used for raw
@@ -870,16 +884,25 @@ func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sen
 func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
 	sendStart := time.Now()
 
-	addr := outReq.URL.Host
-	if !strings.Contains(addr, ":") {
-		if outReq.URL.Scheme == "https" {
-			addr += ":443"
+	// Use url.URL.Hostname()/Port() for correct IPv6 bracket handling.
+	// strings.Contains(host, ":") would always match IPv6 literals like [::1].
+	hostname := outReq.URL.Hostname()
+	port := outReq.URL.Port()
+	useTLS := outReq.URL.Scheme == "https"
+	if port == "" {
+		if useTLS {
+			port = "443"
 		} else {
-			addr += ":80"
+			port = "80"
 		}
 	}
-	hostname := outReq.URL.Hostname()
-	useTLS := outReq.URL.Scheme == "https"
+	addr := net.JoinHostPort(hostname, port)
+
+	// Non-TLS upstreams cannot negotiate ALPN, so ConnPool.Get would always
+	// fall back to the legacy path after a redundant dial. Short-circuit here.
+	if !useTLS {
+		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
+	}
 
 	h.tlsMu.RLock()
 	cr, err := h.connPool.Get(sc.ctx, addr, useTLS, hostname)

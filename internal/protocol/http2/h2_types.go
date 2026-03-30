@@ -42,8 +42,9 @@ type h2Request struct {
 
 	// Body is the request body. May be nil for bodyless requests.
 	Body io.ReadCloser
-	// EndStream indicates whether END_STREAM was set on the HEADERS frame
-	// (i.e., no body follows).
+	// EndStream indicates whether END_STREAM was set on the HEADERS frame.
+	// When true, no DATA frames follow on the wire; however, the Body field
+	// may still be non-nil if data was accumulated before dispatch.
 	EndStream bool
 	// RawFrames holds the raw HTTP/2 frame bytes received from the client.
 	RawFrames [][]byte

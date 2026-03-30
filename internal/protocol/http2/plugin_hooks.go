@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	gohttp "net/http"
+	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
@@ -49,7 +50,10 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w h2ResponseW
 		statusCode, pluginHeaders, respBody := plugin.BuildRespondResponse(result.ResponseData)
 		var hpackHeaders []hpack.HeaderField
 		for _, hdr := range pluginHeaders {
-			hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: hdr.Name, Value: hdr.Value})
+			// HTTP/2 requires lowercase header names (RFC 9113 §8.2).
+			// plugin.BuildRespondResponse may return canonicalized names
+			// like "Content-Type" which would cause PROTOCOL_ERROR in HPACK.
+			hpackHeaders = append(hpackHeaders, hpack.HeaderField{Name: strings.ToLower(hdr.Name), Value: hdr.Value})
 		}
 		hpackHeaders = append(hpackHeaders, hpack.HeaderField{
 			Name: "content-length", Value: fmt.Sprintf("%d", len(respBody)),
