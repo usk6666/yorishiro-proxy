@@ -33,8 +33,7 @@ func TestPluginHook_OnReceiveFromClient_Continue(t *testing.T) {
 	// Plugin adds X-Plugin-Added header and continues.
 	script := writeStarlarkScript(t, "add_header.star", `
 def on_receive_from_client(data):
-    headers = data["headers"]
-    headers["X-Plugin-Added"] = ["plugin-value"]
+    data["headers"].append({"name": "X-Plugin-Added", "value": "plugin-value"})
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -216,8 +215,7 @@ func TestPluginHook_OnBeforeSendToServer_ModifyRequest(t *testing.T) {
 	// Plugin modifies request headers before sending to server.
 	script := writeStarlarkScript(t, "modify_before_send.star", `
 def on_before_send_to_server(data):
-    headers = data["headers"]
-    headers["X-Before-Send"] = ["added-by-plugin"]
+    data["headers"].append({"name": "X-Before-Send", "value": "added-by-plugin"})
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -281,8 +279,7 @@ func TestPluginHook_OnReceiveFromServer_ModifyResponse(t *testing.T) {
 	// Plugin modifies response headers after receiving from server.
 	script := writeStarlarkScript(t, "modify_response.star", `
 def on_receive_from_server(data):
-    headers = data["headers"]
-    headers["X-Plugin-Response"] = ["modified"]
+    data["headers"].append({"name": "X-Plugin-Response", "value": "modified"})
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -345,8 +342,7 @@ func TestPluginHook_OnBeforeSendToClient_ModifyResponse(t *testing.T) {
 	// Plugin modifies response before sending to client.
 	script := writeStarlarkScript(t, "modify_before_client.star", `
 def on_before_send_to_client(data):
-    headers = data["headers"]
-    headers["X-Before-Client"] = ["final-touch"]
+    data["headers"].append({"name": "X-Before-Client", "value": "final-touch"})
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -408,8 +404,7 @@ func TestPluginHook_FlowRecording_WithPlugin(t *testing.T) {
 	// Integration test: plugin adds a header, request flows through, and flow is recorded.
 	script := writeStarlarkScript(t, "record_test.star", `
 def on_receive_from_client(data):
-    headers = data["headers"]
-    headers["X-Plugin-Trace"] = ["traced"]
+    data["headers"].append({"name": "X-Plugin-Trace", "value": "traced"})
     return {"action": "CONTINUE", "data": data}
 `)
 
