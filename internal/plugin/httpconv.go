@@ -283,13 +283,24 @@ func headersToMap(h parser.RawHeaders) map[string]any {
 	return m
 }
 
-// mapToHeaders converts a map (from Starlark) back to parser.RawHeaders.
-// Supports map[string]any with []any string values or []string values.
+// mapToHeaders converts a plugin-returned header value back to parser.RawHeaders.
+// Supports two formats:
+//   - Ordered array: []any of map[string]any with "name" and "value" keys
+//     (lossless format from RawRequestToMap/RawResponseToMap)
+//   - Legacy map: map[string]any with []any string values or []string values
+//     (lossy format from HTTPRequestToMap/HTTPResponseToMap)
 func mapToHeaders(v any) parser.RawHeaders {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return nil
+	switch val := v.(type) {
+	case []any:
+		return orderedArrayToRawHeaders(val)
+	case map[string]any:
+		return mapFormatToHeaders(val)
 	}
+	return nil
+}
+
+// mapFormatToHeaders converts a map[string]any (legacy format) to parser.RawHeaders.
+func mapFormatToHeaders(m map[string]any) parser.RawHeaders {
 	var h parser.RawHeaders
 	for k, val := range m {
 		safeKey := sanitizeHeaderToken(k)

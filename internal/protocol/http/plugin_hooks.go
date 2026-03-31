@@ -9,7 +9,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // dispatchOnReceiveFromClient dispatches the on_receive_from_client hook.
@@ -18,8 +17,7 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn
 		return req, body, false
 	}
 
-	goReq := httputil.RawRequestToHTTP(req, body)
-	data := plugin.HTTPRequestToMap(goReq, body, connInfo, "HTTP/1.x")
+	data := plugin.RawRequestToMap(req, body, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromClient, data)
@@ -50,7 +48,7 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn
 
 	case plugin.ActionContinue:
 		if result.Data != nil {
-			goReq, newBody, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
+			req, newBody, applyErr := plugin.ApplyRawRequestChanges(req, result.Data)
 			if applyErr != nil {
 				logger.Warn("plugin on_receive_from_client apply changes failed", "error", applyErr)
 				return req, body, false
@@ -59,8 +57,6 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, conn net.Conn
 			if newBody != nil {
 				body = newBody
 			}
-			// Convert back to RawRequest.
-			req = httputil.HTTPRequestToRaw(goReq, body)
 		}
 	}
 
@@ -73,8 +69,7 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *parser.
 		return req, body
 	}
 
-	goReq := httputil.RawRequestToHTTP(req, body)
-	data := plugin.HTTPRequestToMap(goReq, body, connInfo, "HTTP/1.x")
+	data := plugin.RawRequestToMap(req, body, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToServer, data)
@@ -87,7 +82,7 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *parser.
 		return req, body
 	}
 
-	goReq, newBody, applyErr := plugin.ApplyHTTPRequestChanges(goReq, result.Data)
+	req, newBody, applyErr := plugin.ApplyRawRequestChanges(req, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_server apply changes failed", "error", applyErr)
 		return req, body
@@ -96,7 +91,6 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, req *parser.
 	if newBody != nil {
 		body = newBody
 	}
-	req = httputil.HTTPRequestToRaw(goReq, body)
 
 	return req, body
 }
@@ -107,9 +101,7 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *parser.
 		return resp, body
 	}
 
-	goReq := httputil.RawRequestToHTTP(req, nil)
-	goResp := httputil.RawResponseToHTTP(resp, body)
-	data := plugin.HTTPResponseToMap(goResp, body, goReq, connInfo, "HTTP/1.x")
+	data := plugin.RawResponseToMap(resp, body, req, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromServer, data)
@@ -122,7 +114,7 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *parser.
 		return resp, body
 	}
 
-	goResp, newBody, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
+	resp, newBody, applyErr := plugin.ApplyRawResponseChanges(resp, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_receive_from_server apply changes failed", "error", applyErr)
 	}
@@ -130,7 +122,6 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *parser.
 	if newBody != nil {
 		body = newBody
 	}
-	resp = httputil.HTTPResponseToRaw(goResp, body)
 
 	return resp, body
 }
@@ -141,9 +132,7 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *parser
 		return resp, body
 	}
 
-	goReq := httputil.RawRequestToHTTP(req, nil)
-	goResp := httputil.RawResponseToHTTP(resp, body)
-	data := plugin.HTTPResponseToMap(goResp, body, goReq, connInfo, "HTTP/1.x")
+	data := plugin.RawResponseToMap(resp, body, req, connInfo, "HTTP/1.x")
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToClient, data)
@@ -156,7 +145,7 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *parser
 		return resp, body
 	}
 
-	goResp, newBody, applyErr := plugin.ApplyHTTPResponseChanges(goResp, result.Data)
+	resp, newBody, applyErr := plugin.ApplyRawResponseChanges(resp, result.Data)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_client apply changes failed", "error", applyErr)
 	}
@@ -164,7 +153,6 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *parser
 	if newBody != nil {
 		body = newBody
 	}
-	resp = httputil.HTTPResponseToRaw(goResp, body)
 
 	return resp, body
 }
