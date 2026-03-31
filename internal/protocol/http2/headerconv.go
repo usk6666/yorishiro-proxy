@@ -84,12 +84,13 @@ func hpackHeadersToPluginMap(fields []hpack.HeaderField) map[string]any {
 		if strings.HasPrefix(hf.Name, ":") {
 			continue
 		}
-		if existing, ok := m[hf.Name]; ok {
+		key := textproto.CanonicalMIMEHeaderKey(hf.Name)
+		if existing, ok := m[key]; ok {
 			if list, ok := existing.([]any); ok {
-				m[hf.Name] = append(list, hf.Value)
+				m[key] = append(list, hf.Value)
 			}
 		} else {
-			m[hf.Name] = []any{hf.Value}
+			m[key] = []any{hf.Value}
 		}
 	}
 	return m

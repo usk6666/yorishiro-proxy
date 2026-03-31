@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"sync"
@@ -1104,6 +1105,18 @@ func (h *Handler) handleGRPCResponseInterceptH2(sc *streamContext, state *grpcSt
 		// Restore the body on the result for the streaming path.
 		result.Body = resp.Body
 		return false
+	}
+
+	// After body is fully consumed by bufferGRPCUnaryResponseBody, trailers
+	// become available via result.Trailers(). Populate resp.Trailer so that
+	// the intercept enqueue/apply logic has access to them.
+	if hpackTrailers, err := result.Trailers(); err == nil {
+		for _, hf := range hpackTrailers {
+			if strings.HasPrefix(hf.Name, ":") {
+				continue
+			}
+			resp.Trailer.Set(textproto.CanonicalMIMEHeaderKey(hf.Name), hf.Value)
+		}
 	}
 
 	action := h.enqueueGRPCResponseIntercept(sc, resp, body, jsonBody, frame, trailers, matchedRules)
