@@ -709,11 +709,14 @@ func TestIntegration_GRPC_TLS_ALPN_ErrorPath_H1Only(t *testing.T) {
 		t.Fatalf("gRPC request to h1-only upstream: %v", err)
 	}
 	defer resp.Body.Close()
-	io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 
 	// When the upstream only supports h1, the gRPC pipeline returns 502
 	// (gRPC requires h2 ALPN). The key verification is that the request
 	// completes without deadlocking and a flow is recorded.
+	if resp.StatusCode != gohttp.StatusBadGateway {
+		t.Fatalf("expected HTTP 502 Bad Gateway for h1-only upstream gRPC request, got %d (body: %q)", resp.StatusCode, string(body))
+	}
 
 	// Poll for flow recording instead of fixed sleep.
 	var allFlows []*flow.Flow
