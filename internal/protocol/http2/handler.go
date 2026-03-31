@@ -987,9 +987,9 @@ func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.R
 	}, nil
 }
 
-// forwardUpstreamLegacy uses the gohttp.Transport for forwarding (gRPC path).
-// This is the original implementation, kept for backward compatibility until
-// USK-520 migrates gRPC to ConnPool.
+// forwardUpstreamLegacy uses the gohttp.Transport for forwarding.
+// Used as a fallback for non-TLS upstreams (no ALPN negotiation possible)
+// and non-h2 ALPN results (HTTP/1.1 fallback) from forwardUpstreamConnPool.
 func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
 	sendStart := time.Now()
 	h.tlsMu.RLock()
