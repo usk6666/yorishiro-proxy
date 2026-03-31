@@ -14,6 +14,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -58,6 +59,20 @@ func makeGRPCStreamContext(t *testing.T, body []byte, endStreamCh chan struct{})
 		},
 		Body: io.NopCloser(bytes.NewReader(body)),
 	}
+	h2req := &h2Request{
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":scheme", Value: "https"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test.Service/Method"},
+			{Name: "content-type", Value: "application/grpc+proto"},
+		},
+		Method:    "POST",
+		Scheme:    "https",
+		Authority: "example.com",
+		Path:      "/test.Service/Method",
+		Body:      io.NopCloser(bytes.NewReader(body)),
+	}
 	rec := httptest.NewRecorder()
 	w := &goHTTPWriterAdapter{ResponseWriter: rec}
 	ctx := context.Background()
@@ -67,6 +82,7 @@ func makeGRPCStreamContext(t *testing.T, body []byte, endStreamCh chan struct{})
 	return &streamContext{
 		ctx:    ctx,
 		req:    req,
+		h2req:  h2req,
 		reqURL: reqURL,
 		w:      w,
 		logger: testutil.DiscardLogger(),
@@ -397,9 +413,23 @@ func makeGRPCResponseInterceptContext(t *testing.T) (*Handler, *streamContext, *
 	}
 	rec := httptest.NewRecorder()
 	w := &goHTTPWriterAdapter{ResponseWriter: rec}
+	h2req := &h2Request{
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":scheme", Value: "https"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test.Service/Method"},
+			{Name: "content-type", Value: "application/grpc+proto"},
+		},
+		Method:    "POST",
+		Scheme:    "https",
+		Authority: "example.com",
+		Path:      "/test.Service/Method",
+	}
 	sc := &streamContext{
 		ctx:    context.Background(),
 		req:    req,
+		h2req:  h2req,
 		reqURL: reqURL,
 		w:      w,
 		logger: testutil.DiscardLogger(),

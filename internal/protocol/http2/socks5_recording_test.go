@@ -9,6 +9,7 @@ import (
 	gohttp "net/http"
 
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -183,11 +184,25 @@ func TestGRPCProgressiveRecorder_SOCKS5TagLifecycle(t *testing.T) {
 	req, _ := gohttp.NewRequestWithContext(ctx, "POST", reqURL.String(), nil)
 	req.Header.Set("Content-Type", "application/grpc")
 
+	h2req := &h2Request{
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":scheme", Value: "https"},
+			{Name: ":authority", Value: "grpc.example.com"},
+			{Name: ":path", Value: "/my.Service/MyMethod"},
+			{Name: "content-type", Value: "application/grpc"},
+		},
+		Method:    "POST",
+		Scheme:    "https",
+		Authority: "grpc.example.com",
+		Path:      "/my.Service/MyMethod",
+	}
 	sc := &streamContext{
 		ctx:        ctx,
 		connID:     "conn-grpc-1",
 		clientAddr: "127.0.0.1:54321",
 		req:        req,
+		h2req:      h2req,
 		reqURL:     reqURL,
 		flowScheme: "https",
 		start:      time.Now(),
@@ -220,13 +235,13 @@ func TestGRPCProgressiveRecorder_SOCKS5TagLifecycle(t *testing.T) {
 		t.Errorf("tags[socks5_auth_user] = %q, want %q", fl.Tags["socks5_auth_user"], "grpcuser")
 	}
 
-	// Phase 2: completeFlow should preserve SOCKS5 tags.
-	resp := &gohttp.Response{
+	// Phase 2: completeFlowH2 should preserve SOCKS5 tags.
+	result := &StreamRoundTripResult{
 		StatusCode: 200,
-		Header:     gohttp.Header{"Grpc-Status": {"0"}},
-		Trailer:    gohttp.Header{"Grpc-Status": {"0"}},
+		Headers:    goHTTPHeaderToHpack(gohttp.Header{"Grpc-Status": {"0"}}),
 	}
-	rec.completeFlow(ctx, resp, 1, 1, 100*time.Millisecond)
+	result.markBodyDone(goHTTPHeaderToHpack(gohttp.Header{"Grpc-Status": {"0"}}))
+	rec.completeFlowH2(ctx, result, 1, 1, 100*time.Millisecond)
 
 	// Re-read the flow after completion.
 	entries = store.Entries()

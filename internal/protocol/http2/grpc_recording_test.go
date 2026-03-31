@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	gohttp "net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -20,7 +19,7 @@ func TestGRPCProgressiveRecording_Unary(t *testing.T) {
 	reqPayload := []byte("unary-request")
 	respPayload := []byte("unary-response")
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read body: %v", err)
@@ -143,7 +142,7 @@ func TestGRPCProgressiveRecording_Unary(t *testing.T) {
 func TestGRPCProgressiveRecording_ServerStreaming(t *testing.T) {
 	respPayloads := []string{"resp-1", "resp-2", "resp-3"}
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 
 		w.Header().Set("Content-Type", "application/grpc")
@@ -218,7 +217,7 @@ func TestGRPCProgressiveRecording_BidiStreaming(t *testing.T) {
 	const numReqFrames = 3
 	const numRespFrames = 3
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read: %v", err)
@@ -302,7 +301,7 @@ func TestGRPCProgressiveRecording_BidiStreaming(t *testing.T) {
 // TestGRPCProgressiveRecording_EmptyBody verifies that a gRPC request
 // with no body still creates a flow and completes it.
 func TestGRPCProgressiveRecording_EmptyBody(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -358,7 +357,7 @@ func TestGRPCProgressiveRecording_FlowActiveBeforeComplete(t *testing.T) {
 	// Use a channel to pause the upstream so we can check state mid-stream.
 	proceed := make(chan struct{})
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -437,7 +436,7 @@ func TestGRPCProgressiveRecording_FlowActiveBeforeComplete(t *testing.T) {
 // TestGRPCProgressiveRecording_CompressedFrameMetadata verifies that
 // compressed frame metadata is correctly recorded.
 func TestGRPCProgressiveRecording_CompressedFrameMetadata(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -494,7 +493,7 @@ func TestGRPCProgressiveRecording_CompressedFrameMetadata(t *testing.T) {
 // TestGRPCProgressiveRecording_ServiceMethodParsing verifies that service
 // and method names are correctly parsed from the URL path.
 func TestGRPCProgressiveRecording_ServiceMethodParsing(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -557,7 +556,7 @@ func TestGRPCProgressiveRecording_ServiceMethodParsing(t *testing.T) {
 // TestGRPCProgressiveRecording_NilStore verifies that progressive recording
 // gracefully handles a nil store (no-op).
 func TestGRPCProgressiveRecording_NilStore(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -595,7 +594,7 @@ func TestGRPCProgressiveRecording_NilStore(t *testing.T) {
 // responses (no DATA frames) are recorded with grpc_trailers_only metadata.
 func TestGRPCProgressiveRecording_TrailersOnly(t *testing.T) {
 	// Upstream returns a trailers-only response (grpc-status in headers, no body).
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.Header().Set("Grpc-Status", "12") // UNIMPLEMENTED
@@ -664,7 +663,7 @@ func TestGRPCProgressiveRecording_TrailersOnly(t *testing.T) {
 // TestGRPCProgressiveRecording_NormalUnary_NoTrailersOnlyMetadata verifies that
 // normal unary RPCs with response DATA frames do NOT have grpc_trailers_only.
 func TestGRPCProgressiveRecording_NormalUnary_NoTrailersOnlyMetadata(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
