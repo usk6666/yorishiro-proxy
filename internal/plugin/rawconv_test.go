@@ -568,9 +568,9 @@ func TestOrderedArrayToRawHeaders(t *testing.T) {
 			},
 		},
 		{
-			name: "empty array",
+			name: "empty array returns empty non-nil slice",
 			list: []any{},
-			want: nil,
+			want: parser.RawHeaders{},
 		},
 		{
 			name: "skip invalid items",
@@ -596,12 +596,6 @@ func TestOrderedArrayToRawHeaders(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := orderedArrayToRawHeaders(tt.list)
-			if tt.want == nil {
-				if got != nil {
-					t.Errorf("got %v, want nil", got)
-				}
-				return
-			}
 			if len(got) != len(tt.want) {
 				t.Fatalf("length = %d, want %d", len(got), len(tt.want))
 			}
@@ -710,6 +704,84 @@ func TestMapToHeaders_LegacyMapFormat(t *testing.T) {
 	vals := h.Values("X-Multi")
 	if len(vals) != 2 {
 		t.Fatalf("X-Multi values = %d, want 2", len(vals))
+	}
+}
+
+func TestApplyRawRequestChanges_NilRequest(t *testing.T) {
+	_, _, err := ApplyRawRequestChanges(nil, map[string]any{"method": "POST"})
+	if err == nil {
+		t.Error("expected error for nil request")
+	}
+}
+
+func TestApplyRawResponseChanges_NilResponse(t *testing.T) {
+	_, _, err := ApplyRawResponseChanges(nil, map[string]any{"status_code": 404})
+	if err == nil {
+		t.Error("expected error for nil response")
+	}
+}
+
+func TestApplyRawResponseChanges_StatusStringSynced(t *testing.T) {
+	resp := &parser.RawResponse{
+		Proto:      "HTTP/1.1",
+		StatusCode: 200,
+		Status:     "200 OK",
+		Headers:    parser.RawHeaders{},
+	}
+	data := map[string]any{
+		"status_code": 404,
+	}
+	resp, _, err := ApplyRawResponseChanges(resp, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 404 {
+		t.Errorf("status_code = %d, want 404", resp.StatusCode)
+	}
+	if resp.Status != "404 Not Found" {
+		t.Errorf("status = %q, want %q", resp.Status, "404 Not Found")
+	}
+}
+
+func TestApplyRawResponseChanges_StatusUnchangedWhenCodeSame(t *testing.T) {
+	resp := &parser.RawResponse{
+		Proto:      "HTTP/1.1",
+		StatusCode: 200,
+		Status:     "200 Custom Reason",
+		Headers:    parser.RawHeaders{},
+	}
+	data := map[string]any{
+		"status_code": 200,
+	}
+	resp, _, err := ApplyRawResponseChanges(resp, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Custom reason should be preserved when code doesn't change.
+	if resp.Status != "200 Custom Reason" {
+		t.Errorf("status = %q, want %q (preserved)", resp.Status, "200 Custom Reason")
+	}
+}
+
+func TestApplyRawRequestChanges_EmptyHeadersClears(t *testing.T) {
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "/",
+		Proto:      "HTTP/1.1",
+		Headers: parser.RawHeaders{
+			{Name: "Host", Value: "example.com"},
+			{Name: "X-Custom", Value: "val"},
+		},
+	}
+	data := map[string]any{
+		"headers": []any{}, // empty array should clear all headers
+	}
+	req, _, err := ApplyRawRequestChanges(req, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(req.Headers) != 0 {
+		t.Errorf("headers length = %d, want 0 (cleared)", len(req.Headers))
 	}
 }
 

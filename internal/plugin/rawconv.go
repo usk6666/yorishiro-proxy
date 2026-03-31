@@ -105,6 +105,9 @@ func RawResponseToMap(resp *parser.RawResponse, body []byte, req *parser.RawRequ
 // back to a parser.RawRequest. It updates method, URL, headers, and body
 // from the data map. Only keys present in the data map are applied.
 func ApplyRawRequestChanges(req *parser.RawRequest, data map[string]any) (*parser.RawRequest, []byte, error) {
+	if req == nil {
+		return nil, nil, fmt.Errorf("apply raw request changes: nil request")
+	}
 	if data == nil {
 		return req, nil, nil
 	}
@@ -186,12 +189,16 @@ func applyRawURL(req *parser.RawRequest, data map[string]any) error {
 // back to a parser.RawResponse. It updates status code, headers, and body
 // from the data map. Only keys present in the data map are applied.
 func ApplyRawResponseChanges(resp *parser.RawResponse, data map[string]any) (*parser.RawResponse, []byte, error) {
+	if resp == nil {
+		return nil, nil, fmt.Errorf("apply raw response changes: nil response")
+	}
 	if data == nil {
 		return resp, nil, nil
 	}
 
-	// Apply status code.
+	// Apply status code and sync Status string for wire serialization.
 	if v, ok := data["status_code"]; ok {
+		oldCode := resp.StatusCode
 		switch sc := v.(type) {
 		case int:
 			resp.StatusCode = validStatusCode(sc, resp.StatusCode)
@@ -199,6 +206,9 @@ func ApplyRawResponseChanges(resp *parser.RawResponse, data map[string]any) (*pa
 			resp.StatusCode = validStatusCode(int(sc), resp.StatusCode)
 		case float64:
 			resp.StatusCode = validStatusCode(int(sc), resp.StatusCode)
+		}
+		if resp.StatusCode != oldCode {
+			resp.Status = formatRawStatus(resp.StatusCode)
 		}
 	}
 
@@ -224,6 +234,32 @@ func ApplyRawResponseChanges(resp *parser.RawResponse, data map[string]any) (*pa
 	return resp, body, nil
 }
 
+// formatRawStatus returns a status string like "404 Not Found" for standard
+// codes, or just the numeric string for unknown codes. This is used to keep
+// resp.Status in sync with resp.StatusCode after plugin modifications.
+// Uses a minimal lookup table to avoid importing net/http.
+func formatRawStatus(code int) string {
+	if text, ok := commonStatusText[code]; ok {
+		return fmt.Sprintf("%d %s", code, text)
+	}
+	return fmt.Sprintf("%d", code)
+}
+
+// commonStatusText maps HTTP status codes to reason phrases for the most
+// commonly encountered codes. This avoids importing net/http in rawconv.go.
+var commonStatusText = map[int]string{
+	100: "Continue", 101: "Switching Protocols",
+	200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
+	301: "Moved Permanently", 302: "Found", 303: "See Other",
+	304: "Not Modified", 307: "Temporary Redirect", 308: "Permanent Redirect",
+	400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+	404: "Not Found", 405: "Method Not Allowed", 408: "Request Timeout",
+	409: "Conflict", 413: "Content Too Large", 415: "Unsupported Media Type",
+	422: "Unprocessable Entity", 429: "Too Many Requests",
+	500: "Internal Server Error", 502: "Bad Gateway",
+	503: "Service Unavailable", 504: "Gateway Timeout",
+}
+
 // rawHeadersToOrderedList converts parser.RawHeaders to an ordered list of
 // maps, where each map has "name" and "value" keys. This preserves header
 // order, casing, and duplicate headers.
@@ -242,10 +278,9 @@ func rawHeadersToOrderedList(h parser.RawHeaders) []any {
 }
 
 // orderedArrayToRawHeaders converts a []any of {name, value} maps to RawHeaders.
+// Returns an empty (non-nil) RawHeaders for an empty list, allowing plugins to
+// clear all headers by setting headers to an empty array.
 func orderedArrayToRawHeaders(list []any) parser.RawHeaders {
-	if len(list) == 0 {
-		return nil
-	}
 	h := make(parser.RawHeaders, 0, len(list))
 	for _, item := range list {
 		m, ok := item.(map[string]any)
@@ -261,9 +296,6 @@ func orderedArrayToRawHeaders(list []any) parser.RawHeaders {
 			Name:  sanitizeHeaderToken(name),
 			Value: sanitizeHeaderToken(value),
 		})
-	}
-	if len(h) == 0 {
-		return nil
 	}
 	return h
 }
