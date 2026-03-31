@@ -35,6 +35,10 @@ const (
 )
 
 // statusTexts maps HTTP status codes to their reason phrases.
+//
+// NOTE: internal/flow/har.go contains a local copy of this map to avoid an
+// import cycle (httputil -> flow -> httputil via variant.go). When adding or
+// changing entries here, update the copy in flow/har.go as well.
 var statusTexts = map[int]string{
 	StatusContinue:           "Continue",
 	StatusSwitchingProtocols: "Switching Protocols",
