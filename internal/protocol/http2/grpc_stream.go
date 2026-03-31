@@ -966,13 +966,22 @@ func writeGRPCStatusH2(w h2ResponseWriter, grpcStatus int, message string) {
 	headers := []hpack.HeaderField{
 		{Name: "content-type", Value: "application/grpc"},
 	}
-	w.WriteHeaders(gohttp.StatusOK, headers)
+	if err := w.WriteHeaders(gohttp.StatusOK, headers); err != nil {
+		slog.Error("failed to write gRPC status headers over HTTP/2", "error", err)
+		return
+	}
 
 	trailers := []hpack.HeaderField{
 		{Name: "grpc-status", Value: fmt.Sprintf("%d", grpcStatus)},
 		{Name: "grpc-message", Value: percentEncodeGRPCMessage(message)},
 	}
-	w.WriteTrailers(trailers)
+	if err := w.WriteTrailers(trailers); err != nil {
+		slog.Error("failed to write gRPC status trailers",
+			"error", err,
+			"grpc_status", grpcStatus,
+			"message", message,
+		)
+	}
 }
 
 // applyOutputFilterHpackHeaders applies the output filter to hpack response
