@@ -105,9 +105,11 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 // When set, the handler uses this transport (e.g. uTLS with browser fingerprinting)
 // instead of the standard crypto/tls library.
 //
-// The ConnPool's TLSTransport is updated directly — it supports full ALPN
-// negotiation (including h2) and routes to h2Transport or H1Transport based
-// on the negotiated protocol.
+// The ConnPool's TLSTransport is updated directly and is used to establish
+// upstream TLS connections, including ALPN negotiation (e.g. h2 vs. http/1.1).
+// HTTP/2 upstream connections negotiated via ALPN are handled by h2Transport;
+// HTTP/1.1 upstream requests on the unary path currently fall back to the
+// legacy net/http path and do not reuse the ConnPool-established TLS connection.
 //
 // If t is nil, the default crypto/tls behavior is restored.
 //

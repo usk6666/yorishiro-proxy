@@ -50,8 +50,9 @@ func TestSetTLSTransport_RoutesUpstreamTLS(t *testing.T) {
 	handler.SetTLSTransport(mock)
 
 	// Configure the gohttp.Transport for the non-h2 fallback path.
-	// httptest.NewTLSServer negotiates http/1.1 (not h2), so ConnPool routes
-	// to forwardUpstreamLegacy which uses gohttp.Transport.
+	// The mock TLSTransport wraps StandardTransport which defaults to
+	// http/1.1 ALPN, so ConnPool routes to forwardUpstreamLegacy which
+	// uses gohttp.Transport.
 	handler.Transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	addr, cancel := startH2CProxyListener(t, handler,

@@ -344,7 +344,11 @@ func TestIntegration_GRPC_TLS_ALPN_UnaryProxy(t *testing.T) {
 	var allMsgs []*flow.Message
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		allMsgs, _ = store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		var msgErr error
+		allMsgs, msgErr = store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		if msgErr != nil {
+			t.Fatalf("GetMessages: %v", msgErr)
+		}
 		if len(allMsgs) >= 2 {
 			break
 		}
@@ -520,7 +524,11 @@ func TestIntegration_GRPC_TLS_ALPN_FlowRecording(t *testing.T) {
 	var allMsgs []*flow.Message
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		allMsgs, _ = store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		var msgErr error
+		allMsgs, msgErr = store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		if msgErr != nil {
+			t.Fatalf("GetMessages: %v", msgErr)
+		}
 		if len(allMsgs) >= 3 {
 			break
 		}
@@ -636,7 +644,11 @@ func TestIntegration_GRPC_TLS_ALPN_H2Negotiation(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
 
-	// Verify flow was recorded as gRPC with h2 ALPN negotiation.
+	// Verify flow was recorded as gRPC.
+	// Note: ConnInfo.TLSALPN records the client→proxy ALPN (always h2 for
+	// HTTP/2 handler), not the proxy→upstream negotiation. The upstream h2
+	// negotiation is verified implicitly: if ALPN negotiated h1 instead of
+	// h2, sendGRPCUpstream would return 502 and the request would fail above.
 	flows := pollGRPCALPNFlows(t, ctx, store, 1)
 	fl := flows[0]
 	if fl.Protocol != "gRPC" {
@@ -645,17 +657,12 @@ func TestIntegration_GRPC_TLS_ALPN_H2Negotiation(t *testing.T) {
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
-	if fl.ConnInfo == nil {
-		t.Fatal("ConnInfo is nil, expected connection metadata")
-	}
-	if fl.ConnInfo.TLSALPN != "h2" {
-		t.Errorf("TLSALPN = %q, want %q", fl.ConnInfo.TLSALPN, "h2")
-	}
 }
 
 // TestIntegration_GRPC_TLS_ALPN_ErrorPath_H1Only verifies that when the
-// upstream only supports HTTP/1.1 (no h2), the gRPC request still gets
-// handled (falls back to the legacy non-h2 path) and the flow is recorded.
+// upstream only supports HTTP/1.1 (no h2), the gRPC request fails fast
+// with a 502 (since gRPC requires h2) without deadlocking, and a flow
+// is recorded.
 func TestIntegration_GRPC_TLS_ALPN_ErrorPath_H1Only(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -704,9 +711,9 @@ func TestIntegration_GRPC_TLS_ALPN_ErrorPath_H1Only(t *testing.T) {
 	defer resp.Body.Close()
 	io.ReadAll(resp.Body)
 
-	// When the upstream only supports h1, the proxy should still return a
-	// response (possibly not a successful gRPC response, but not a deadlock).
-	// The key verification here is that the request completes without hanging.
+	// When the upstream only supports h1, the gRPC pipeline returns 502
+	// (gRPC requires h2 ALPN). The key verification is that the request
+	// completes without deadlocking and a flow is recorded.
 
 	// Poll for flow recording instead of fixed sleep.
 	var allFlows []*flow.Flow
