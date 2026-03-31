@@ -403,6 +403,10 @@ func buildUpstreamGRPCHeaders(req *h2Request) []hpack.HeaderField {
 			continue
 		}
 		lower := strings.ToLower(hf.Name)
+		// Skip "host" to avoid conflict with :authority in HTTP/2.
+		if lower == "host" {
+			continue
+		}
 		if isHopByHopHeader(lower) {
 			// Allow "te: trailers" which is the only TE value permitted in HTTP/2.
 			if lower == "te" && strings.EqualFold(hf.Value, "trailers") {
@@ -922,7 +926,6 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 		// Sync modifications back to h2req so the streaming upstream path
 		// (which reads from sc.h2req) picks up the changes.
 		sc.h2req.Body = sc.req.Body
-		sc.h2req.AllHeaders = syncH2ReqHeadersFromGoHTTP(sc.h2req.AllHeaders, sc.req.Header)
 		// Sync pseudo-headers if intercept changed Host or URL.
 		if host := sc.req.Host; host != "" {
 			sc.h2req.Authority = host
@@ -932,6 +935,9 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 		if sc.req.URL != nil {
 			sc.h2req.Path = sc.req.URL.RequestURI()
 		}
+		// Rebuild AllHeaders: update pseudo-header values from h2req fields,
+		// then replace non-pseudo headers from gohttp.Header.
+		sc.h2req.AllHeaders = syncH2ReqHeaders(sc.h2req, sc.req.Header)
 		return false
 
 	default:
@@ -1028,15 +1034,25 @@ func (h *Handler) applyOutputFilterHpackTrailers(trailers []hpack.HeaderField, l
 // pseudo-headers from the original hpack headers and replacing non-pseudo
 // headers with the values from gohttp.Header (which may have been modified
 // by intercept actions).
-func syncH2ReqHeadersFromGoHTTP(origHeaders []hpack.HeaderField, goHeaders gohttp.Header) []hpack.HeaderField {
-	// Preserve pseudo-headers from the original.
+// syncH2ReqHeaders rebuilds AllHeaders from the h2req's pseudo-header fields
+// and the modified gohttp.Header. This ensures both pseudo-headers and regular
+// headers in AllHeaders reflect intercept modifications.
+func syncH2ReqHeaders(req *h2Request, goHeaders gohttp.Header) []hpack.HeaderField {
+	// Rebuild pseudo-headers from the h2req convenience fields.
 	var result []hpack.HeaderField
-	for _, hf := range origHeaders {
-		if strings.HasPrefix(hf.Name, ":") {
-			result = append(result, hf)
-		}
+	if req.Method != "" {
+		result = append(result, hpack.HeaderField{Name: ":method", Value: req.Method})
 	}
-	// Append non-pseudo headers from gohttp.Header.
+	if req.Scheme != "" {
+		result = append(result, hpack.HeaderField{Name: ":scheme", Value: req.Scheme})
+	}
+	if req.Authority != "" {
+		result = append(result, hpack.HeaderField{Name: ":authority", Value: req.Authority})
+	}
+	if req.Path != "" {
+		result = append(result, hpack.HeaderField{Name: ":path", Value: req.Path})
+	}
+	// Append non-pseudo headers from gohttp.Header (intercept-modified).
 	result = append(result, goHTTPHeaderToHpack(goHeaders)...)
 	return result
 }
@@ -1117,7 +1133,7 @@ func (h *Handler) handleGRPCResponseInterceptH2(sc *streamContext, state *grpcSt
 	// Convert to gohttp.Response temporarily for the intercept API.
 	resp := streamResultToGoHTTPResponse(result)
 
-	body, jsonBody, frame, trailers, ok := h.bufferGRPCUnaryResponseBody(sc, resp)
+	body, jsonBody, frame, _, ok := h.bufferGRPCUnaryResponseBody(sc, resp)
 	if !ok {
 		// Not a unary response or decode failed — fall back to streaming path.
 		// Restore the body on the result for the streaming path.
@@ -1137,9 +1153,9 @@ func (h *Handler) handleGRPCResponseInterceptH2(sc *streamContext, state *grpcSt
 		}
 	}
 
-	// Re-clone trailers from resp.Trailer so enqueue/apply see the final trailers,
+	// Clone trailers from resp.Trailer so enqueue/apply see the final trailers,
 	// including grpc-status/grpc-message populated from result.Trailers() above.
-	trailers = resp.Trailer.Clone()
+	trailers := resp.Trailer.Clone()
 
 	action := h.enqueueGRPCResponseIntercept(sc, resp, body, jsonBody, frame, trailers, matchedRules)
 	h.applyGRPCResponseInterceptActionH2(sc, state, resp, result, action, body, trailers)
