@@ -25,9 +25,8 @@ func rawHeadersToHTTPHeader(rh parser.RawHeaders) gohttp.Header {
 // hpackGetHeader returns the first value for the given header name from hpack
 // fields, performing a case-insensitive comparison. Returns "" if not found.
 func hpackGetHeader(fields []hpack.HeaderField, name string) string {
-	lower := strings.ToLower(name)
 	for _, hf := range fields {
-		if strings.ToLower(hf.Name) == lower {
+		if strings.EqualFold(hf.Name, name) {
 			return hf.Value
 		}
 	}

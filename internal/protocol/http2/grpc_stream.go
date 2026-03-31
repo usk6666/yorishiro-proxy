@@ -325,12 +325,37 @@ func (h *Handler) forwardGRPCRequestChunk(sc *streamContext, state *grpcStreamSt
 // result and true on success, or nil and false on failure.
 // On failure, it waits for the request goroutine to finish.
 func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, req *h2Request, body io.Reader, reqWg *sync.WaitGroup) (*StreamRoundTripResult, bool) {
-	useTLS := req.Scheme == "https"
+	// Derive TLS from the resolved scheme (sc.flowScheme), not the raw
+	// :scheme pseudo-header. For CONNECT tunnels, resolveSchemeAndHost
+	// forces https regardless of the client's :scheme value.
+	scheme := sc.flowScheme
+	if scheme == "" && sc.reqURL != nil {
+		scheme = sc.reqURL.Scheme
+	}
+	useTLS := strings.EqualFold(scheme, "https")
+
+	// Parse authority from :authority, falling back to Host header.
+	authority := req.Authority
+	if authority == "" {
+		if sc.req != nil && sc.req.Host != "" {
+			authority = sc.req.Host
+		} else {
+			authority = hpackGetHeader(req.AllHeaders, "host")
+		}
+	}
+	if authority == "" {
+		sc.logger.Warn("gRPC upstream request missing :authority/Host header",
+			"method", req.Method, "url", sc.reqURL.String())
+		writeErrorResponse(sc.w, gohttp.StatusBadRequest)
+		if pr, ok := body.(*io.PipeReader); ok {
+			pr.CloseWithError(fmt.Errorf("missing :authority/Host header"))
+		}
+		reqWg.Wait()
+		return nil, false
+	}
 
 	// Parse authority using net/url for robust IPv6 bracket handling.
-	// net.SplitHostPort fails for bare IPv6 literals like "[::1]" without
-	// port, and net.JoinHostPort would double-bracket them.
-	authorityURL := &url.URL{Host: req.Authority}
+	authorityURL := &url.URL{Host: authority}
 	hostname := authorityURL.Hostname()
 	port := authorityURL.Port()
 	if port == "" {
@@ -390,7 +415,17 @@ func (h *Handler) sendGRPCUpstreamOnConn(sc *streamContext, state *grpcStreamSta
 	// create duplicate messages with conflicting semantics.
 	opts := StreamOptions{}
 
-	result, err := h.h2Transport.RoundTripStream(sc.ctx, conn, upstreamHeaders, body, opts)
+	// Ensure h2Transport is available, matching the lazy-init pattern in
+	// forwardH2 to avoid panics when Handler is constructed without NewHandler.
+	h.tlsMu.Lock()
+	tr := h.h2Transport
+	if tr == nil {
+		tr = &Transport{Logger: h.Logger}
+		h.h2Transport = tr
+	}
+	h.tlsMu.Unlock()
+
+	result, err := tr.RoundTripStream(sc.ctx, conn, upstreamHeaders, body, opts)
 	if err != nil {
 		sc.logger.Error("gRPC upstream request failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
