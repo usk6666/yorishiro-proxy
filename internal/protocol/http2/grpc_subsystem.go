@@ -553,7 +553,7 @@ func applyGRPCResponsePluginHookH2(
 	}
 
 	data := map[string]any{
-		"method":      sc.h2req.Method,
+		"method":      scMethod(sc),
 		"url":         sc.reqURL.String(),
 		"status_code": statusCode,
 		"headers":     hpackHeadersToPluginMap(respHeaders),

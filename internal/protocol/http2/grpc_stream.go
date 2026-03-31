@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -325,35 +326,23 @@ func (h *Handler) forwardGRPCRequestChunk(sc *streamContext, state *grpcStreamSt
 func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, req *h2Request, body io.Reader, reqWg *sync.WaitGroup) (*StreamRoundTripResult, bool) {
 	useTLS := req.Scheme == "https"
 
-	addr := req.Authority
-	hostname, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		// Authority may not include a port; default based on scheme.
-		hostname = addr
+	// Parse authority using net/url for robust IPv6 bracket handling.
+	// net.SplitHostPort fails for bare IPv6 literals like "[::1]" without
+	// port, and net.JoinHostPort would double-bracket them.
+	authorityURL := &url.URL{Host: req.Authority}
+	hostname := authorityURL.Hostname()
+	port := authorityURL.Port()
+	if port == "" {
 		if useTLS {
-			addr = net.JoinHostPort(addr, "443")
+			port = "443"
 		} else {
-			addr = net.JoinHostPort(addr, "80")
+			port = "80"
 		}
 	}
-
-	// Non-TLS upstreams cannot negotiate ALPN. For h2c, dial directly and
-	// use the connection as-is since h2c is cleartext HTTP/2.
-	if !useTLS {
-		dialer := net.Dialer{Timeout: 10 * time.Second}
-		conn, err := dialer.DialContext(sc.ctx, "tcp", addr)
-		if err != nil {
-			sc.logger.Error("gRPC upstream connection failed",
-				"method", req.Method, "url", sc.reqURL.String(), "error", err)
-			writeErrorResponse(sc.w, gohttp.StatusBadGateway)
-			reqWg.Wait()
-			return nil, false
-		}
-		return h.sendGRPCUpstreamOnConn(sc, state, req, body, conn, reqWg)
-	}
+	addr := net.JoinHostPort(hostname, port)
 
 	h.tlsMu.RLock()
-	cr, err := h.connPool.Get(sc.ctx, addr, true, hostname)
+	cr, err := h.connPool.Get(sc.ctx, addr, useTLS, hostname)
 	h.tlsMu.RUnlock()
 	if err != nil {
 		sc.logger.Error("gRPC upstream connection failed",
@@ -363,7 +352,9 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 		return nil, false
 	}
 
-	if cr.ALPN != "h2" {
+	// For TLS connections, verify ALPN negotiated h2. For cleartext (h2c),
+	// ALPN is not negotiated — the connection is used as-is.
+	if useTLS && cr.ALPN != "h2" {
 		cr.Conn.Close()
 		sc.logger.Error("gRPC requires h2 ALPN",
 			"method", req.Method, "url", sc.reqURL.String(), "alpn", cr.ALPN)
@@ -913,6 +904,7 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 			sc.logger.Warn("gRPC intercept raw mode not supported, releasing",
 				"method", sc.h2req.Method, "url", sc.reqURL.String())
 			sc.req.Body = io.NopCloser(bytes.NewReader(body))
+			sc.h2req.Body = sc.req.Body
 			return false
 		}
 		if action.OverrideBody != nil {
@@ -921,11 +913,16 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 			sc.req.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		h.applyGRPCInterceptHeaderMods(sc, action)
+		// Sync modifications back to h2req so the streaming upstream path
+		// (which reads from sc.h2req) picks up the changes.
+		sc.h2req.Body = sc.req.Body
+		sc.h2req.AllHeaders = syncH2ReqHeadersFromGoHTTP(sc.h2req.AllHeaders, sc.req.Header)
 		return false
 
 	default:
-		// Release: restore original body.
+		// Release: restore original body and sync to h2req.
 		sc.req.Body = io.NopCloser(bytes.NewReader(body))
+		sc.h2req.Body = sc.req.Body
 		return false
 	}
 }
@@ -956,15 +953,20 @@ func writeGRPCStatus(w gohttp.ResponseWriter, httpStatus int, grpcStatus int, me
 }
 
 // writeGRPCStatusH2 writes a gRPC error response using h2ResponseWriter
-// with hpack native types. Sends headers with grpc-status and grpc-message
-// as a Trailers-Only response (HTTP 200 + trailers in same HEADERS frame).
+// with hpack native types. Per the gRPC Trailers-Only pattern, content-type
+// is sent in the initial HEADERS frame, and grpc-status/grpc-message are
+// sent as trailers (HEADERS frame with END_STREAM).
 func writeGRPCStatusH2(w h2ResponseWriter, grpcStatus int, message string) {
 	headers := []hpack.HeaderField{
 		{Name: "content-type", Value: "application/grpc"},
+	}
+	w.WriteHeaders(gohttp.StatusOK, headers)
+
+	trailers := []hpack.HeaderField{
 		{Name: "grpc-status", Value: fmt.Sprintf("%d", grpcStatus)},
 		{Name: "grpc-message", Value: percentEncodeGRPCMessage(message)},
 	}
-	w.WriteHeaders(gohttp.StatusOK, headers)
+	w.WriteTrailers(trailers)
 }
 
 // applyOutputFilterHpackHeaders applies the output filter to hpack response
@@ -996,6 +998,23 @@ func (h *Handler) applyOutputFilterHpackTrailers(trailers []hpack.HeaderField, l
 	goHeaders := hpackToGoHTTPHeader(trailers)
 	goHeaders = h.ApplyOutputFilterHeaders(goHeaders, logger)
 	return goHTTPHeaderToHpack(goHeaders)
+}
+
+// syncH2ReqHeadersFromGoHTTP rebuilds h2req.AllHeaders by preserving
+// pseudo-headers from the original hpack headers and replacing non-pseudo
+// headers with the values from gohttp.Header (which may have been modified
+// by intercept actions).
+func syncH2ReqHeadersFromGoHTTP(origHeaders []hpack.HeaderField, goHeaders gohttp.Header) []hpack.HeaderField {
+	// Preserve pseudo-headers from the original.
+	var result []hpack.HeaderField
+	for _, hf := range origHeaders {
+		if strings.HasPrefix(hf.Name, ":") {
+			result = append(result, hf)
+		}
+	}
+	// Append non-pseudo headers from gohttp.Header.
+	result = append(result, goHTTPHeaderToHpack(goHeaders)...)
+	return result
 }
 
 // percentEncodeGRPCMessage percent-encodes a gRPC status message per the

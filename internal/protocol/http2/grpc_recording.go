@@ -314,7 +314,7 @@ func (r *grpcProgressiveRecorder) recordTrailersMessageH2(
 }
 
 // h2RequestHeaders converts h2Request headers to map[string][]string for
-// flow recording, including pseudo-headers as :method, :authority, etc.
+// flow recording. Pseudo-headers are excluded; host is derived from :authority.
 func h2RequestHeaders(req *h2Request) map[string][]string {
 	headers := make(map[string][]string)
 	for _, hf := range req.AllHeaders {
