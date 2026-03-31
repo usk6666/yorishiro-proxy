@@ -39,11 +39,18 @@ func newH2CTestServer(t *testing.T, handler gohttp.Handler) *h2cTestServer {
 	protos.SetUnencryptedHTTP2(true)
 	server := &gohttp.Server{Handler: handler, Protocols: protos}
 	ctx, cancel := context.WithCancel(context.Background())
-	go server.Serve(ln)
+	go func() {
+		if err := server.Serve(ln); err != nil && err != gohttp.ErrServerClosed {
+			// Cannot use t.Fatalf from a goroutine; log and let test timeout.
+			t.Errorf("h2c test server.Serve: %v", err)
+		}
+	}()
 	go func() { <-ctx.Done(); server.Close() }()
-	return &h2cTestServer{
+	s := &h2cTestServer{
 		Listener: ln,
 		URL:      "http://" + ln.Addr().String(),
 		cancel:   cancel,
 	}
+	t.Cleanup(s.Close)
+	return s
 }

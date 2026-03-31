@@ -102,7 +102,7 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 		blocked := state.reqBlocked
 		state.mu.Unlock()
 		if blocked {
-			writeGRPCStatusH2(sc.w, 7, "request blocked by safety filter") // PERMISSION_DENIED
+			writeGRPCStatusH2(sc.w, 7, "request blocked by safety filter", sc.logger) // PERMISSION_DENIED
 		}
 		return
 	}
@@ -900,7 +900,7 @@ func (h *Handler) waitGRPCInterceptAction(sc *streamContext, id string, actionCh
 func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.InterceptAction, body []byte) bool {
 	switch action.Type {
 	case intercept.ActionDrop:
-		writeGRPCStatusH2(sc.w, 10, "intercepted request dropped") // ABORTED
+		writeGRPCStatusH2(sc.w, 10, "intercepted request dropped", sc.logger) // ABORTED
 		sc.logger.Info("intercepted gRPC request dropped",
 			"method", sc.h2req.Method, "url", sc.reqURL.String())
 		return true
@@ -923,6 +923,15 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 		// (which reads from sc.h2req) picks up the changes.
 		sc.h2req.Body = sc.req.Body
 		sc.h2req.AllHeaders = syncH2ReqHeadersFromGoHTTP(sc.h2req.AllHeaders, sc.req.Header)
+		// Sync pseudo-headers if intercept changed Host or URL.
+		if host := sc.req.Host; host != "" {
+			sc.h2req.Authority = host
+		} else if host := sc.req.Header.Get("Host"); host != "" {
+			sc.h2req.Authority = host
+		}
+		if sc.req.URL != nil {
+			sc.h2req.Path = sc.req.URL.RequestURI()
+		}
 		return false
 
 	default:
@@ -962,12 +971,12 @@ func writeGRPCStatus(w gohttp.ResponseWriter, httpStatus int, grpcStatus int, me
 // with hpack native types. Per the gRPC Trailers-Only pattern, content-type
 // is sent in the initial HEADERS frame, and grpc-status/grpc-message are
 // sent as trailers (HEADERS frame with END_STREAM).
-func writeGRPCStatusH2(w h2ResponseWriter, grpcStatus int, message string) {
+func writeGRPCStatusH2(w h2ResponseWriter, grpcStatus int, message string, logger *slog.Logger) {
 	headers := []hpack.HeaderField{
 		{Name: "content-type", Value: "application/grpc"},
 	}
 	if err := w.WriteHeaders(gohttp.StatusOK, headers); err != nil {
-		slog.Error("failed to write gRPC status headers over HTTP/2", "error", err)
+		logger.Error("failed to write gRPC status headers over HTTP/2", "error", err)
 		return
 	}
 
@@ -976,7 +985,7 @@ func writeGRPCStatusH2(w h2ResponseWriter, grpcStatus int, message string) {
 		{Name: "grpc-message", Value: percentEncodeGRPCMessage(message)},
 	}
 	if err := w.WriteTrailers(trailers); err != nil {
-		slog.Error("failed to write gRPC status trailers",
+		logger.Error("failed to write gRPC status trailers",
 			"error", err,
 			"grpc_status", grpcStatus,
 			"message", message,
@@ -1127,6 +1136,10 @@ func (h *Handler) handleGRPCResponseInterceptH2(sc *streamContext, state *grpcSt
 			resp.Trailer.Set(textproto.CanonicalMIMEHeaderKey(hf.Name), hf.Value)
 		}
 	}
+
+	// Re-clone trailers from resp.Trailer so enqueue/apply see the final trailers,
+	// including grpc-status/grpc-message populated from result.Trailers() above.
+	trailers = resp.Trailer.Clone()
 
 	action := h.enqueueGRPCResponseIntercept(sc, resp, body, jsonBody, frame, trailers, matchedRules)
 	h.applyGRPCResponseInterceptActionH2(sc, state, resp, result, action, body, trailers)
@@ -1301,7 +1314,7 @@ func (h *Handler) buildGRPCResponseInterceptMetadata(sc *streamContext, resp *go
 func (h *Handler) applyGRPCResponseInterceptActionH2(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, result *StreamRoundTripResult, action intercept.InterceptAction, body []byte, trailers gohttp.Header) {
 	switch action.Type {
 	case intercept.ActionDrop:
-		writeGRPCStatusH2(sc.w, 10, "intercepted response dropped") // ABORTED
+		writeGRPCStatusH2(sc.w, 10, "intercepted response dropped", sc.logger) // ABORTED
 		sc.logger.Info("intercepted gRPC response dropped",
 			"method", sc.h2req.Method, "url", sc.reqURL.String())
 		return
