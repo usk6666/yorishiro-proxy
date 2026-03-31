@@ -255,11 +255,18 @@ func (r *grpcProgressiveRecorder) completeFlowH2(
 		tags["grpc_messages_recorded"] = strconv.Itoa(totalMessages)
 	}
 
+	// Populate upstream server address from StreamRoundTripResult.
+	var serverAddr string
+	if result != nil && result.ServerAddr != "" {
+		serverAddr = result.ServerAddr
+	}
+
 	update := flow.FlowUpdate{
-		State:    "complete",
-		FlowType: flowType,
-		Duration: duration,
-		Tags:     tags,
+		State:      "complete",
+		FlowType:   flowType,
+		Duration:   duration,
+		Tags:       tags,
+		ServerAddr: serverAddr,
 	}
 	if err := r.store.UpdateFlow(ctx, r.flowID, update); err != nil {
 		r.logger.Error("gRPC progressive flow completion failed",
