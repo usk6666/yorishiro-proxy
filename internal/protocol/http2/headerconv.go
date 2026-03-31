@@ -2,6 +2,7 @@ package http2
 
 import (
 	gohttp "net/http"
+	"net/textproto"
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
@@ -69,7 +70,8 @@ func hpackToGoHTTPHeaderMap(fields []hpack.HeaderField) map[string][]string {
 		if strings.HasPrefix(hf.Name, ":") {
 			continue
 		}
-		m[hf.Name] = append(m[hf.Name], hf.Value)
+		key := textproto.CanonicalMIMEHeaderKey(hf.Name)
+		m[key] = append(m[key], hf.Value)
 	}
 	return m
 }

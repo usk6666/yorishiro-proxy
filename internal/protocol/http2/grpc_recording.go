@@ -3,6 +3,7 @@ package http2
 import (
 	"context"
 	"log/slog"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -321,10 +322,11 @@ func h2RequestHeaders(req *h2Request) map[string][]string {
 		if strings.HasPrefix(hf.Name, ":") {
 			continue
 		}
-		headers[hf.Name] = append(headers[hf.Name], hf.Value)
+		key := textproto.CanonicalMIMEHeaderKey(hf.Name)
+		headers[key] = append(headers[key], hf.Value)
 	}
 	if req.Authority != "" {
-		headers["host"] = []string{req.Authority}
+		headers["Host"] = []string{req.Authority}
 	}
 	return headers
 }

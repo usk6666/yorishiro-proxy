@@ -417,13 +417,18 @@ func buildUpstreamGRPCHeaders(req *h2Request) []hpack.HeaderField {
 // writeGRPCResponseHeadersH2 writes the upstream response headers to the
 // client using h2ResponseWriter with hpack native types.
 func (h *Handler) writeGRPCResponseHeadersH2(sc *streamContext, statusCode int, headers []hpack.HeaderField) {
-	// Filter out pseudo-headers and trailer declaration headers.
+	// Filter out pseudo-headers, trailer declaration headers, and gRPC
+	// trailer fields (grpc-status, grpc-message, grpc-status-details-bin).
+	// gRPC trailer fields must only appear in the trailing HEADERS frame
+	// (written by writeGRPCTrailersH2), not in the initial response HEADERS.
+	// Including them here would cause duplication in Trailers-Only responses.
 	var filtered []hpack.HeaderField
 	for _, hf := range headers {
 		if strings.HasPrefix(hf.Name, ":") {
 			continue
 		}
-		if strings.EqualFold(hf.Name, "trailer") {
+		switch strings.ToLower(hf.Name) {
+		case "trailer", "grpc-status", "grpc-message", "grpc-status-details-bin":
 			continue
 		}
 		filtered = append(filtered, hf)
