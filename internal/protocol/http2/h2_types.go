@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // Anomaly describes a protocol-level anomaly detected in an HTTP/2 request.
@@ -300,7 +301,7 @@ func buildH2HeadersFromGoHTTP(req *gohttp.Request) []hpack.HeaderField {
 func h2ResultToGoHTTPResponse(r *RoundTripResult) *gohttp.Response {
 	resp := &gohttp.Response{
 		StatusCode: r.StatusCode,
-		Status:     fmt.Sprintf("%d %s", r.StatusCode, gohttp.StatusText(r.StatusCode)),
+		Status:     fmt.Sprintf("%d %s", r.StatusCode, httputil.StatusText(r.StatusCode)),
 		Proto:      "HTTP/2.0",
 		ProtoMajor: 2,
 		ProtoMinor: 0,

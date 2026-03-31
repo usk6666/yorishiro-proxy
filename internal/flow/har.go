@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -372,7 +371,7 @@ func buildHARResponse(msg *Message, protocol string, includeBodies bool) *HARRes
 
 	resp := &HARResponse{
 		Status:      msg.StatusCode,
-		StatusText:  http.StatusText(msg.StatusCode),
+		StatusText:  statusText(msg.StatusCode),
 		HTTPVersion: protocolToHTTPVersion(protocol),
 		Headers:     headersToHAR(msg.Headers),
 		HeadersSize: -1,
@@ -609,4 +608,23 @@ func bodyToText(body []byte) string {
 		return string(body)
 	}
 	return base64.StdEncoding.EncodeToString(body)
+}
+
+// statusText returns the reason phrase for an HTTP status code.
+// This is a local copy to avoid an import cycle with httputil (which imports flow).
+// The canonical source is httputil.StatusText.
+var httpStatusTexts = map[int]string{
+	100: "Continue", 101: "Switching Protocols",
+	200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
+	301: "Moved Permanently", 302: "Found", 304: "Not Modified",
+	307: "Temporary Redirect", 308: "Permanent Redirect",
+	400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+	404: "Not Found", 405: "Method Not Allowed", 408: "Request Timeout",
+	413: "Request Entity Too Large", 429: "Too Many Requests",
+	500: "Internal Server Error", 501: "Not Implemented",
+	502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout",
+}
+
+func statusText(code int) string {
+	return httpStatusTexts[code]
 }

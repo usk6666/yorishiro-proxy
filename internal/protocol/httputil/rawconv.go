@@ -135,7 +135,7 @@ func HTTPResponseToRaw(resp *gohttp.Response, bodyBytes []byte) *parser.RawRespo
 	// when resp.Status is empty.
 	status := resp.Status
 	if status == "" {
-		status = fmt.Sprintf("%d %s", resp.StatusCode, gohttp.StatusText(resp.StatusCode))
+		status = fmt.Sprintf("%d %s", resp.StatusCode, StatusText(resp.StatusCode))
 	}
 
 	raw := &parser.RawResponse{

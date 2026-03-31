@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	gohttp "net/http"
 )
 
 // WriteHTTPError writes a minimal HTTP/1.1 error response to conn and logs
@@ -14,7 +13,7 @@ import (
 // The response contains no body (Content-Length: 0) and signals the client to
 // close the connection (Connection: close).
 func WriteHTTPError(conn net.Conn, statusCode int, logger *slog.Logger) {
-	statusText := gohttp.StatusText(statusCode)
+	statusText := StatusText(statusCode)
 	if statusText == "" {
 		statusText = "Unknown"
 	}
