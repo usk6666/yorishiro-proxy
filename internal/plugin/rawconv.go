@@ -77,6 +77,7 @@ func RawResponseToMap(resp *parser.RawResponse, body []byte, req *parser.RawRequ
 	m := map[string]any{
 		"status_code": resp.StatusCode,
 		"headers":     rawHeadersToOrderedList(resp.Headers),
+		"trailers":    map[string]any{},
 		"body":        body,
 		"protocol":    protocol,
 	}
@@ -131,8 +132,14 @@ func ApplyRawRequestChanges(req *parser.RawRequest, data map[string]any) (*parse
 	}
 
 	// Apply host from explicit "host" key (overrides Host header).
+	// Also update RequestURI when it is absolute-form so that downstream
+	// URL parsing observes the override.
 	if v, ok := data["host"].(string); ok && v != "" {
 		req.Headers.Set("Host", v)
+		if u, err := url.Parse(req.RequestURI); err == nil && u.IsAbs() {
+			u.Host = v
+			req.RequestURI = u.String()
+		}
 	}
 
 	// Extract body.

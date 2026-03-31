@@ -247,6 +247,26 @@ func TestRawResponseToMap_NilRequest(t *testing.T) {
 	}
 }
 
+func TestRawResponseToMap_TrailersKeyPresent(t *testing.T) {
+	resp := &parser.RawResponse{
+		Proto:      "HTTP/1.1",
+		StatusCode: 200,
+		Headers:    parser.RawHeaders{},
+	}
+	m := RawResponseToMap(resp, nil, nil, nil, "HTTP/1.x")
+	trailers, ok := m["trailers"]
+	if !ok {
+		t.Fatal("trailers key should be present for backward compatibility")
+	}
+	tm, ok := trailers.(map[string]any)
+	if !ok {
+		t.Fatal("trailers should be map[string]any")
+	}
+	if len(tm) != 0 {
+		t.Errorf("trailers should be empty map, got %v", tm)
+	}
+}
+
 func TestApplyRawRequestChanges(t *testing.T) {
 	req := &parser.RawRequest{
 		Method:     "GET",
@@ -407,6 +427,52 @@ func TestApplyRawRequestChanges_HostOverridesHeader(t *testing.T) {
 	}
 	if v := req.Headers.Get("Host"); v != "override.com" {
 		t.Errorf("Host = %q, want %q", v, "override.com")
+	}
+}
+
+func TestApplyRawRequestChanges_HostRewritesAbsoluteURI(t *testing.T) {
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "http://old.com/path?q=1",
+		Proto:      "HTTP/1.1",
+		Headers: parser.RawHeaders{
+			{Name: "Host", Value: "old.com"},
+		},
+	}
+	data := map[string]any{
+		"host": "new.com",
+	}
+	req, _, err := ApplyRawRequestChanges(req, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v := req.Headers.Get("Host"); v != "new.com" {
+		t.Errorf("Host = %q, want %q", v, "new.com")
+	}
+	if req.RequestURI != "http://new.com/path?q=1" {
+		t.Errorf("RequestURI = %q, want %q", req.RequestURI, "http://new.com/path?q=1")
+	}
+}
+
+func TestApplyRawRequestChanges_HostRelativeURIUnchanged(t *testing.T) {
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "/relative",
+		Proto:      "HTTP/1.1",
+		Headers: parser.RawHeaders{
+			{Name: "Host", Value: "original.com"},
+		},
+	}
+	data := map[string]any{
+		"host": "override.com",
+	}
+	req, _, err := ApplyRawRequestChanges(req, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Relative URI should not be modified.
+	if req.RequestURI != "/relative" {
+		t.Errorf("RequestURI = %q, want %q (unchanged for relative URI)", req.RequestURI, "/relative")
 	}
 }
 
