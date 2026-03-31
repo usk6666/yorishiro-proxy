@@ -56,21 +56,19 @@ func (devNull) Write(p []byte) (int, error) { return len(p), nil }
 
 func TestRecordReceiveVariant_NoModification(t *testing.T) {
 	w := &mockWriter{}
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{"Content-Type": {"text/plain"}},
-	}
+	headers := h2r(gohttp.Header{"Content-Type": {"text/plain"}})
 	body := []byte("hello")
-	snap := SnapshotResponse(200, h2r(resp.Header), body)
+	snap := SnapshotResponse(200, headers, body)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:       "f1",
-		RecvSequence: 1,
-		Start:        time.Now(),
-		Duration:     50 * time.Millisecond,
-		ServerAddr:   "10.0.0.1:80",
-		Resp:         resp,
-		RespBody:     body,
+		FlowID:         "f1",
+		RecvSequence:   1,
+		Start:          time.Now(),
+		Duration:       50 * time.Millisecond,
+		ServerAddr:     "10.0.0.1:80",
+		RespStatusCode: 200,
+		RespHeaders:    headers,
+		RespBody:       body,
 	}, &snap, discardLogger())
 
 	if len(w.messages) != 1 {
@@ -96,19 +94,16 @@ func TestRecordReceiveVariant_NoModification(t *testing.T) {
 
 func TestRecordReceiveVariant_NilSnap(t *testing.T) {
 	w := &mockWriter{}
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-	}
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:       "f2",
-		RecvSequence: 1,
-		Start:        time.Now(),
-		Duration:     50 * time.Millisecond,
-		ServerAddr:   "10.0.0.1:80",
-		Resp:         resp,
-		RespBody:     []byte("ok"),
+		FlowID:         "f2",
+		RecvSequence:   1,
+		Start:          time.Now(),
+		Duration:       50 * time.Millisecond,
+		ServerAddr:     "10.0.0.1:80",
+		RespStatusCode: 200,
+		RespHeaders:    parser.RawHeaders{},
+		RespBody:       []byte("ok"),
 	}, nil, discardLogger())
 
 	if len(w.messages) != 1 {
@@ -121,23 +116,19 @@ func TestRecordReceiveVariant_NilSnap(t *testing.T) {
 
 func TestRecordReceiveVariant_StatusModified(t *testing.T) {
 	w := &mockWriter{}
-	headers := gohttp.Header{"Content-Type": {"text/plain"}}
+	headers := h2r(gohttp.Header{"Content-Type": {"text/plain"}})
 	body := []byte("body")
-	snap := SnapshotResponse(200, h2r(headers), body)
-
-	resp := &gohttp.Response{
-		StatusCode: 403,
-		Header:     headers.Clone(),
-	}
+	snap := SnapshotResponse(200, headers, body)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:       "f3",
-		RecvSequence: 2,
-		Start:        time.Now(),
-		Duration:     100 * time.Millisecond,
-		ServerAddr:   "10.0.0.1:443",
-		Resp:         resp,
-		RespBody:     body,
+		FlowID:         "f3",
+		RecvSequence:   2,
+		Start:          time.Now(),
+		Duration:       100 * time.Millisecond,
+		ServerAddr:     "10.0.0.1:443",
+		RespStatusCode: 403,
+		RespHeaders:    headers.Clone(),
+		RespBody:       body,
 	}, &snap, discardLogger())
 
 	if len(w.messages) != 2 {
@@ -176,25 +167,21 @@ func TestRecordReceiveVariant_StatusModified(t *testing.T) {
 
 func TestRecordReceiveVariant_BodyModified(t *testing.T) {
 	w := &mockWriter{}
-	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	headers := h2r(gohttp.Header{"Content-Type": {"application/json"}})
 	origBody := []byte(`{"v":"original"}`)
 	modBody := []byte(`{"v":"modified"}`)
 
-	snap := SnapshotResponse(200, h2r(headers), origBody)
-
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     headers.Clone(),
-	}
+	snap := SnapshotResponse(200, headers, origBody)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:       "f4",
-		RecvSequence: 1,
-		Start:        time.Now(),
-		Duration:     50 * time.Millisecond,
-		ServerAddr:   "10.0.0.1:80",
-		Resp:         resp,
-		RespBody:     modBody,
+		FlowID:         "f4",
+		RecvSequence:   1,
+		Start:          time.Now(),
+		Duration:       50 * time.Millisecond,
+		ServerAddr:     "10.0.0.1:80",
+		RespStatusCode: 200,
+		RespHeaders:    headers.Clone(),
+		RespBody:       modBody,
 	}, &snap, discardLogger())
 
 	if len(w.messages) != 2 {
@@ -210,27 +197,23 @@ func TestRecordReceiveVariant_BodyModified(t *testing.T) {
 
 func TestRecordReceiveVariant_RawResponseOnOriginalOnly(t *testing.T) {
 	w := &mockWriter{}
-	headers := gohttp.Header{}
+	headers := parser.RawHeaders{}
 	origBody := []byte("original")
 	modBody := []byte("modified")
 	rawResp := []byte("HTTP/1.1 200 OK\r\n\r\noriginal")
 
-	snap := SnapshotResponse(200, h2r(headers), origBody)
-
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     headers.Clone(),
-	}
+	snap := SnapshotResponse(200, headers, origBody)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:       "f5",
-		RecvSequence: 1,
-		Start:        time.Now(),
-		Duration:     50 * time.Millisecond,
-		ServerAddr:   "10.0.0.1:80",
-		Resp:         resp,
-		RespBody:     modBody,
-		RawResponse:  rawResp,
+		FlowID:         "f5",
+		RecvSequence:   1,
+		Start:          time.Now(),
+		Duration:       50 * time.Millisecond,
+		ServerAddr:     "10.0.0.1:80",
+		RespStatusCode: 200,
+		RespHeaders:    headers,
+		RespBody:       modBody,
+		RawResponse:    rawResp,
 	}, &snap, discardLogger())
 
 	if len(w.messages) != 2 {
@@ -246,10 +229,6 @@ func TestRecordReceiveVariant_RawResponseOnOriginalOnly(t *testing.T) {
 
 func TestRecordReceiveVariant_TLSCertSubject(t *testing.T) {
 	w := &mockWriter{}
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-	}
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
 		FlowID:               "f6",
@@ -258,7 +237,8 @@ func TestRecordReceiveVariant_TLSCertSubject(t *testing.T) {
 		Duration:             50 * time.Millisecond,
 		ServerAddr:           "10.0.0.1:443",
 		TLSServerCertSubject: "CN=example.com",
-		Resp:                 resp,
+		RespStatusCode:       200,
+		RespHeaders:          parser.RawHeaders{},
 		RespBody:             []byte("ok"),
 	}, nil, discardLogger())
 
@@ -273,20 +253,17 @@ func TestRecordReceiveVariant_TLSCertSubject(t *testing.T) {
 
 func TestRecordReceiveVariant_AppendError(t *testing.T) {
 	w := &mockWriter{appendErr: fmt.Errorf("db write error")}
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-	}
 
 	// Should not panic on append error.
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:       "f7",
-		RecvSequence: 1,
-		Start:        time.Now(),
-		Duration:     50 * time.Millisecond,
-		ServerAddr:   "10.0.0.1:80",
-		Resp:         resp,
-		RespBody:     []byte("ok"),
+		FlowID:         "f7",
+		RecvSequence:   1,
+		Start:          time.Now(),
+		Duration:       50 * time.Millisecond,
+		ServerAddr:     "10.0.0.1:80",
+		RespStatusCode: 200,
+		RespHeaders:    parser.RawHeaders{},
+		RespBody:       []byte("ok"),
 	}, nil, discardLogger())
 
 	// Flow update should still be attempted.

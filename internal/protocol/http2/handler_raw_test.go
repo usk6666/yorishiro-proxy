@@ -275,7 +275,7 @@ func TestHandleRequestIntercept_RawModeRelease(t *testing.T) {
 	sc.srp.reqURL = sc.reqURL
 
 	outReq, _ := http.NewRequest("GET", "http://example.com/test", nil)
-	snap := snapshotRequest(outReq.Header, nil)
+	snap := snapshotRequest(goHTTPHeaderToHpack(outReq.Header), nil)
 
 	// Release in raw mode.
 	go func() {
@@ -343,7 +343,7 @@ func TestHandleRequestIntercept_RawModeModifyAndForward(t *testing.T) {
 	sc.srp.reqURL = sc.reqURL
 
 	outReq, _ := http.NewRequest("GET", "http://example.com/test", nil)
-	snap := snapshotRequest(outReq.Header, nil)
+	snap := snapshotRequest(goHTTPHeaderToHpack(outReq.Header), nil)
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
