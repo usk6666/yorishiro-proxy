@@ -49,6 +49,11 @@ func TestSetTLSTransport_RoutesUpstreamTLS(t *testing.T) {
 	}
 	handler.SetTLSTransport(mock)
 
+	// Configure the gohttp.Transport for the non-h2 fallback path.
+	// httptest.NewTLSServer negotiates http/1.1 (not h2), so ConnPool routes
+	// to forwardUpstreamLegacy which uses gohttp.Transport.
+	handler.Transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
 	addr, cancel := startH2CProxyListener(t, handler,
 		"test-utls", "127.0.0.1:55555",
 		upstream.Listener.Addr().String(),
@@ -75,7 +80,7 @@ func TestSetTLSTransport_RoutesUpstreamTLS(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "utls-ok")
 	}
 
-	// Verify the mock TLS transport was actually invoked.
+	// Verify the mock TLS transport was actually invoked via ConnPool.
 	if mock.calls.Load() == 0 {
 		t.Error("TLSTransport.TLSConnect was not called")
 	}
@@ -94,13 +99,13 @@ func TestSetTLSTransport_NilRestoresDefault(t *testing.T) {
 		inner: &httputil.StandardTransport{InsecureSkipVerify: true},
 	}
 	handler.SetTLSTransport(mock)
-	if handler.Transport.DialTLSContext == nil {
-		t.Fatal("DialTLSContext should be set after SetTLSTransport")
+	if handler.connPool.TLSTransport == nil {
+		t.Fatal("ConnPool.TLSTransport should be set after SetTLSTransport")
 	}
 
 	handler.SetTLSTransport(nil)
-	if handler.Transport.DialTLSContext != nil {
-		t.Error("DialTLSContext should be nil after SetTLSTransport(nil)")
+	if handler.connPool.TLSTransport != nil {
+		t.Error("ConnPool.TLSTransport should be nil after SetTLSTransport(nil)")
 	}
 }
 
@@ -115,6 +120,8 @@ func TestSetTLSTransport_FlowRecording(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
 	handler.SetTLSTransport(&httputil.StandardTransport{InsecureSkipVerify: true})
+	// Configure gohttp.Transport for the non-h2 fallback path.
+	handler.Transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	addr, cancel := startH2CProxyListener(t, handler,
 		"test-utls-rec", "127.0.0.1:55556",
@@ -215,10 +222,9 @@ func TestSetTLSTransport_HandshakeFailure(t *testing.T) {
 }
 
 func TestSetTLSTransport_GRPCContentType(t *testing.T) {
-	// Verify that gRPC streams also use the custom TLS transport (they go
-	// through the same gohttp.Transport). We don't need a real gRPC server;
-	// we just need to confirm the mock transport is called when the stream
-	// has a gRPC content type.
+	// Verify that gRPC streams also use the custom TLS transport via ConnPool.
+	// We don't need a real gRPC server; we just need to confirm the mock
+	// transport is called when the stream has a gRPC content type.
 	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		// Echo back a simple response for the gRPC-like request.
 		w.Header().Set("Content-Type", "application/grpc")
@@ -235,6 +241,8 @@ func TestSetTLSTransport_GRPCContentType(t *testing.T) {
 		inner: &httputil.StandardTransport{InsecureSkipVerify: true},
 	}
 	handler.SetTLSTransport(mock)
+	// Configure gohttp.Transport for the non-h2 fallback path.
+	handler.Transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	addr, cancel := startH2CProxyListener(t, handler,
 		"test-grpc-utls", "127.0.0.1:55558",
