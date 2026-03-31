@@ -47,8 +47,10 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 type Handler struct {
 	proxy.HandlerBase
 
-	// tlsMu protects connPool.TLSTransport from concurrent access when
-	// SetTLSTransport is called while requests are in flight.
+	// tlsMu protects the handler's upstream transport and connection-pool
+	// configuration from concurrent access. It guards reads and writes of
+	// connPool (including connPool.Get and connPool.TLSTransport), h2Transport,
+	// and the legacy Transport while requests are in flight.
 	tlsMu sync.RWMutex
 
 	// connPool manages upstream connections for the unary HTTP/2 path using

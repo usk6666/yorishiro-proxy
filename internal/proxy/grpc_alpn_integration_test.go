@@ -636,7 +636,7 @@ func TestIntegration_GRPC_TLS_ALPN_H2Negotiation(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
 
-	// Verify flow was recorded as gRPC.
+	// Verify flow was recorded as gRPC with h2 ALPN negotiation.
 	flows := pollGRPCALPNFlows(t, ctx, store, 1)
 	fl := flows[0]
 	if fl.Protocol != "gRPC" {
@@ -644,6 +644,12 @@ func TestIntegration_GRPC_TLS_ALPN_H2Negotiation(t *testing.T) {
 	}
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
+	}
+	if fl.ConnInfo == nil {
+		t.Fatal("ConnInfo is nil, expected connection metadata")
+	}
+	if fl.ConnInfo.TLSALPN != "h2" {
+		t.Errorf("TLSALPN = %q, want %q", fl.ConnInfo.TLSALPN, "h2")
 	}
 }
 
@@ -702,13 +708,17 @@ func TestIntegration_GRPC_TLS_ALPN_ErrorPath_H1Only(t *testing.T) {
 	// response (possibly not a successful gRPC response, but not a deadlock).
 	// The key verification here is that the request completes without hanging.
 
-	// Wait briefly for flow recording.
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify a flow was recorded (may be gRPC or HTTP/2 depending on the path).
-	allFlows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
-	if err != nil {
-		t.Fatalf("ListFlows: %v", err)
+	// Poll for flow recording instead of fixed sleep.
+	var allFlows []*flow.Flow
+	for i := 0; i < 60; i++ {
+		time.Sleep(100 * time.Millisecond)
+		allFlows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+		if err != nil {
+			t.Fatalf("ListFlows: %v", err)
+		}
+		if len(allFlows) > 0 {
+			break
+		}
 	}
 	if len(allFlows) == 0 {
 		t.Error("no flows recorded for h1-only upstream gRPC request")
