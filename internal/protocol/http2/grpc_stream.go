@@ -325,47 +325,15 @@ func (h *Handler) forwardGRPCRequestChunk(sc *streamContext, state *grpcStreamSt
 // result and true on success, or nil and false on failure.
 // On failure, it waits for the request goroutine to finish.
 func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, req *h2Request, body io.Reader, reqWg *sync.WaitGroup) (*StreamRoundTripResult, bool) {
-	// Derive TLS from the resolved scheme (sc.flowScheme), not the raw
-	// :scheme pseudo-header. For CONNECT tunnels, resolveSchemeAndHost
-	// forces https regardless of the client's :scheme value.
-	scheme := sc.flowScheme
-	if scheme == "" && sc.reqURL != nil {
-		scheme = sc.reqURL.Scheme
-	}
-	useTLS := strings.EqualFold(scheme, "https")
-
-	// Parse authority from :authority, falling back to Host header.
-	authority := req.Authority
-	if authority == "" {
-		if sc.req != nil && sc.req.Host != "" {
-			authority = sc.req.Host
-		} else {
-			authority = hpackGetHeader(req.AllHeaders, "host")
-		}
-	}
-	if authority == "" {
-		sc.logger.Warn("gRPC upstream request missing :authority/Host header",
-			"method", req.Method, "url", sc.reqURL.String())
+	addr, hostname, useTLS, err := resolveGRPCUpstreamAddr(sc, req)
+	if err != nil {
+		sc.logger.Warn("gRPC upstream address resolution failed",
+			"method", req.Method, "url", sc.reqURL.String(), "error", err)
 		writeErrorResponse(sc.w, gohttp.StatusBadRequest)
-		if pr, ok := body.(*io.PipeReader); ok {
-			pr.CloseWithError(fmt.Errorf("missing :authority/Host header"))
-		}
+		closePipeReader(body, err)
 		reqWg.Wait()
 		return nil, false
 	}
-
-	// Parse authority using net/url for robust IPv6 bracket handling.
-	authorityURL := &url.URL{Host: authority}
-	hostname := authorityURL.Hostname()
-	port := authorityURL.Port()
-	if port == "" {
-		if useTLS {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	addr := net.JoinHostPort(hostname, port)
 
 	h.tlsMu.RLock()
 	cr, err := h.connPool.Get(sc.ctx, addr, useTLS, hostname)
@@ -374,11 +342,7 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 		sc.logger.Error("gRPC upstream connection failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
 		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
-		// Close the pipe reader to unblock the request-streaming goroutine
-		// which may be blocked on pw.Write().
-		if pr, ok := body.(*io.PipeReader); ok {
-			pr.CloseWithError(err)
-		}
+		closePipeReader(body, err)
 		reqWg.Wait()
 		return nil, false
 	}
@@ -391,9 +355,7 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 		sc.logger.Error("gRPC requires h2 ALPN",
 			"method", req.Method, "url", sc.reqURL.String(), "alpn", cr.ALPN)
 		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
-		if pr, ok := body.(*io.PipeReader); ok {
-			pr.CloseWithError(alpnErr)
-		}
+		closePipeReader(body, alpnErr)
 		reqWg.Wait()
 		return nil, false
 	}
@@ -430,17 +392,63 @@ func (h *Handler) sendGRPCUpstreamOnConn(sc *streamContext, state *grpcStreamSta
 		sc.logger.Error("gRPC upstream request failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
 		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
-		// Close the pipe reader to unblock the request-streaming goroutine
-		// which may be blocked on pw.Write() if RoundTripStream failed
-		// before consuming the pipe.
-		if pr, ok := body.(*io.PipeReader); ok {
-			pr.CloseWithError(err)
-		}
+		closePipeReader(body, err)
 		reqWg.Wait()
 		return nil, false
 	}
 
 	return result, true
+}
+
+// resolveGRPCUpstreamAddr resolves the upstream address, hostname, and TLS
+// mode for a gRPC request. It derives TLS from the resolved scheme and parses
+// authority from :authority with fallback to Host header.
+func resolveGRPCUpstreamAddr(sc *streamContext, req *h2Request) (addr, hostname string, useTLS bool, err error) {
+	// Derive TLS from the resolved scheme (sc.flowScheme), not the raw
+	// :scheme pseudo-header. For CONNECT tunnels, resolveSchemeAndHost
+	// forces https regardless of the client's :scheme value.
+	scheme := sc.flowScheme
+	if scheme == "" && sc.reqURL != nil {
+		scheme = sc.reqURL.Scheme
+	}
+	useTLS = strings.EqualFold(scheme, "https")
+
+	// Parse authority from :authority, falling back to Host header.
+	authority := req.Authority
+	if authority == "" {
+		if sc.req != nil && sc.req.Host != "" {
+			authority = sc.req.Host
+		} else {
+			authority = hpackGetHeader(req.AllHeaders, "host")
+		}
+	}
+	if authority == "" {
+		return "", "", false, fmt.Errorf("missing :authority/Host header")
+	}
+
+	// Parse using net/url for robust IPv6 bracket handling.
+	authorityURL := &url.URL{Host: authority}
+	hostname = authorityURL.Hostname()
+	if hostname == "" {
+		return "", "", false, fmt.Errorf("malformed authority: %q", authority)
+	}
+	port := authorityURL.Port()
+	if port == "" {
+		if useTLS {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(hostname, port), hostname, useTLS, nil
+}
+
+// closePipeReader closes the body as a PipeReader to unblock any goroutine
+// blocked on the corresponding PipeWriter.
+func closePipeReader(body io.Reader, err error) {
+	if pr, ok := body.(*io.PipeReader); ok {
+		pr.CloseWithError(err)
+	}
 }
 
 // buildUpstreamGRPCHeaders constructs the upstream HPACK headers for a gRPC
@@ -762,6 +770,10 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 func (h *Handler) handleGRPCIntercept(sc *streamContext, matchedRules []string) bool {
 	body, jsonBody, frame, ok := h.bufferGRPCUnaryBody(sc)
 	if !ok {
+		// bufferGRPCUnaryBody restores sc.req.Body on failure. Sync to
+		// sc.h2req.Body so the streaming path (which reads from h2req)
+		// picks up the restored body.
+		sc.h2req.Body = sc.req.Body
 		return false
 	}
 
@@ -1080,10 +1092,6 @@ func (h *Handler) applyOutputFilterHpackTrailers(trailers []hpack.HeaderField, l
 	return goHTTPHeaderToHpack(goHeaders)
 }
 
-// syncH2ReqHeadersFromGoHTTP rebuilds h2req.AllHeaders by preserving
-// pseudo-headers from the original hpack headers and replacing non-pseudo
-// headers with the values from gohttp.Header (which may have been modified
-// by intercept actions).
 // syncH2ReqHeaders rebuilds AllHeaders from the h2req's pseudo-header fields
 // and the modified gohttp.Header. This ensures both pseudo-headers and regular
 // headers in AllHeaders reflect intercept modifications.

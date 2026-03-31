@@ -74,7 +74,7 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	}
 	service, method, err := protogrpc.ParseServiceMethod(grpcPath)
 	if err != nil {
-		sc.logger.Warn("gRPC failed to parse service/method", "path", sc.h2req.Path, "error", err)
+		sc.logger.Warn("gRPC failed to parse service/method", "parsed_path", grpcPath, "h2_path", sc.h2req.Path, "error", err)
 		service = "unknown"
 		method = "unknown"
 	}
