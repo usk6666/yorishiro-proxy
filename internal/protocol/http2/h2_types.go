@@ -170,8 +170,8 @@ func (req *h2Request) setPseudoField(name, value string) {
 }
 
 // h2RequestToGoHTTP converts an h2Request to a *gohttp.Request for subsystems
-// that still require net/http types (gRPC streaming, recording, intercept, etc.).
-// This is a temporary bridge until those subsystems are migrated (USK-520).
+// that still require net/http types (recording, intercept, etc.).
+// This is a temporary bridge until those subsystems are fully migrated.
 func h2RequestToGoHTTP(ctx context.Context, req *h2Request) (*gohttp.Request, error) {
 	httpHeaders := make(gohttp.Header)
 	for _, hf := range req.AllHeaders {
@@ -329,9 +329,9 @@ func writeErrorResponse(w h2ResponseWriter, statusCode int) {
 }
 
 // asGoHTTPResponseWriter extracts a gohttp.ResponseWriter from an
-// h2ResponseWriter. This is used by the gRPC path which still requires
-// gohttp.ResponseWriter (until USK-520). Panics if the underlying type
-// does not implement gohttp.ResponseWriter (frameResponseWriter always does).
+// h2ResponseWriter. This is used by the gRPC request intercept path and
+// tests which still require gohttp.ResponseWriter. Panics if the underlying
+// type does not implement gohttp.ResponseWriter (frameResponseWriter always does).
 func asGoHTTPResponseWriter(w h2ResponseWriter) gohttp.ResponseWriter {
 	if rw, ok := w.(gohttp.ResponseWriter); ok {
 		return rw

@@ -3,41 +3,43 @@ package frame
 import (
 	"fmt"
 	"io"
+	"sync/atomic"
 )
 
 // Reader reads HTTP/2 frames from an underlying io.Reader.
 //
 // It enforces frame size limits per SETTINGS_MAX_FRAME_SIZE and preserves
-// raw bytes for each frame read. The reader is not safe for concurrent use.
+// raw bytes for each frame read. SetMaxFrameSize is safe to call
+// concurrently with ReadFrame (the maxFrameSize field uses atomic access).
 type Reader struct {
 	r            io.Reader
-	maxFrameSize uint32
+	maxFrameSize atomic.Uint32
 	headerBuf    [HeaderSize]byte
 }
 
 // NewReader creates a Reader that reads frames from r.
 // The initial maximum frame size is set to DefaultMaxFrameSize (16384).
 func NewReader(r io.Reader) *Reader {
-	return &Reader{
-		r:            r,
-		maxFrameSize: DefaultMaxFrameSize,
-	}
+	rd := &Reader{r: r}
+	rd.maxFrameSize.Store(DefaultMaxFrameSize)
+	return rd
 }
 
 // SetMaxFrameSize updates the maximum allowed frame payload size.
 // The value must be between DefaultMaxFrameSize and MaxAllowedFrameSize
 // inclusive, per RFC 9113 Section 6.5.2.
+// This method is safe to call concurrently with ReadFrame.
 func (rd *Reader) SetMaxFrameSize(size uint32) error {
 	if size < DefaultMaxFrameSize || size > MaxAllowedFrameSize {
 		return fmt.Errorf("set max frame size: %d out of range [%d, %d]", size, DefaultMaxFrameSize, MaxAllowedFrameSize)
 	}
-	rd.maxFrameSize = size
+	rd.maxFrameSize.Store(size)
 	return nil
 }
 
 // MaxFrameSize returns the current maximum allowed frame payload size.
 func (rd *Reader) MaxFrameSize() uint32 {
-	return rd.maxFrameSize
+	return rd.maxFrameSize.Load()
 }
 
 // ReadFrame reads the next HTTP/2 frame from the underlying reader.
@@ -69,8 +71,9 @@ func (rd *Reader) ReadFrame() (*Frame, error) {
 	}
 
 	// Enforce frame size limit.
-	if hdr.Length > rd.maxFrameSize {
-		return nil, fmt.Errorf("read frame: payload length %d exceeds max frame size %d", hdr.Length, rd.maxFrameSize)
+	maxSize := rd.maxFrameSize.Load()
+	if hdr.Length > maxSize {
+		return nil, fmt.Errorf("read frame: payload length %d exceeds max frame size %d", hdr.Length, maxSize)
 	}
 
 	// Allocate raw bytes buffer: header + payload.

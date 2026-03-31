@@ -95,6 +95,7 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 			DialViaProxy:   proxy.DialViaUpstreamProxy,
 			RedactProxyURL: proxy.RedactProxyURL,
 		},
+		h2Transport: &Transport{Logger: logger},
 	}
 }
 
@@ -359,13 +360,6 @@ type streamContext struct {
 	// Plugin state shared across hooks for this stream.
 	pluginConnInfo *plugin.ConnInfo
 	txCtx          map[string]any
-}
-
-// goHTTPWriter returns the underlying gohttp.ResponseWriter from the
-// h2ResponseWriter. Used by gRPC streaming code that still requires the
-// gohttp.ResponseWriter interface (until USK-520).
-func (sc *streamContext) goHTTPWriter() gohttp.ResponseWriter {
-	return asGoHTTPResponseWriter(sc.w)
 }
 
 // handleStream proxies a single HTTP/2 stream to the upstream server
@@ -906,13 +900,9 @@ type forwardUpstreamResult struct {
 }
 
 func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
-	// For gRPC (streaming) requests, continue using the legacy gohttp.Transport
-	// path until USK-520 migrates gRPC to the new transport.
-	isGRPC := h.grpcHandler != nil && isGRPCContentType(sc.req.Header.Get("Content-Type"))
-	if isGRPC {
-		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
-	}
-
+	// gRPC requests are handled by tryHandleGRPCStream → handleGRPCStream
+	// using ConnPool + h2Transport.RoundTripStream (USK-520). They never
+	// reach this path.
 	return h.forwardUpstreamConnPool(sc, outReq, sendResult)
 }
 

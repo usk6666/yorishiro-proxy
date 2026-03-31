@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	gohttp "net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -192,7 +191,7 @@ func TestFrameEngine_GRPCUnary(t *testing.T) {
 	reqPayload := []byte("unary-req")
 	respPayload := []byte("unary-resp")
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read body: %v", err)
@@ -268,7 +267,7 @@ func TestFrameEngine_GRPCUnary(t *testing.T) {
 func TestFrameEngine_GRPCServerStreaming(t *testing.T) {
 	respPayloads := []string{"resp-1", "resp-2", "resp-3"}
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -343,7 +342,7 @@ func TestFrameEngine_GRPCServerStreaming(t *testing.T) {
 func TestFrameEngine_GRPCClientStreaming(t *testing.T) {
 	payloads := []string{"frame-1", "frame-2", "frame-3"}
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("upstream read: %v", err)
@@ -421,7 +420,7 @@ func TestFrameEngine_GRPCBidiStreaming(t *testing.T) {
 	const numReqFrames = 3
 	const numRespFrames = 3
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, _ := io.ReadAll(r.Body)
 		frames, _ := protogrpc.ReadAllFrames(body)
 		w.Header().Set("Content-Type", "application/grpc")
@@ -496,7 +495,7 @@ func TestFrameEngine_GRPCBidiStreaming(t *testing.T) {
 // TestFrameEngine_GRPCEmptyBody verifies gRPC with no body through the
 // new frame engine.
 func TestFrameEngine_GRPCEmptyBody(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -540,7 +539,7 @@ func TestFrameEngine_GRPCEmptyBody(t *testing.T) {
 // (Grpc-Status, Grpc-Message) are correctly forwarded through the frame
 // engine's trailer HEADERS frame.
 func TestFrameEngine_GRPCTrailersPreserved(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
@@ -597,7 +596,7 @@ func TestFrameEngine_GRPCTrailersPreserved(t *testing.T) {
 // TestFrameEngine_GRPCMetadataRecording verifies that gRPC service/method
 // metadata is correctly parsed and recorded via the frame engine.
 func TestFrameEngine_GRPCMetadataRecording(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -655,7 +654,7 @@ func TestFrameEngine_GRPCMetadataRecording(t *testing.T) {
 // TestFrameEngine_NonGRPCNotCapturedAsGRPC verifies that non-gRPC requests
 // through the frame engine are recorded as HTTP/2, not gRPC.
 func TestFrameEngine_NonGRPCNotCapturedAsGRPC(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write([]byte("ok"))
@@ -719,7 +718,7 @@ func TestFrameEngine_GRPCContentTypeVariants(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+			upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 				io.Copy(io.Discard, r.Body)
 				w.Header().Set("Content-Type", tt.contentType)
 				w.WriteHeader(gohttp.StatusOK)
@@ -783,7 +782,7 @@ func TestFrameEngine_GRPCContentTypeVariants(t *testing.T) {
 // TestFrameEngine_GRPCNilStore verifies that the gRPC path handles nil store
 // gracefully through the frame engine.
 func TestFrameEngine_GRPCNilStore(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -817,7 +816,7 @@ func TestFrameEngine_GRPCProgressiveRecordingFrameMessages(t *testing.T) {
 	reqPayload := []byte("progressive-req")
 	respPayload := []byte("progressive-resp")
 
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, _ := io.ReadAll(r.Body)
 		frames, _ := protogrpc.ReadAllFrames(body)
 		_ = frames
@@ -903,7 +902,7 @@ func TestFrameEngine_GRPCProgressiveRecordingFrameMessages(t *testing.T) {
 // TestFrameEngine_GRPCMultipleStreams verifies that multiple gRPC streams
 // on the same connection are handled correctly by the frame engine.
 func TestFrameEngine_GRPCMultipleStreams(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -957,7 +956,7 @@ func TestFrameEngine_GRPCMultipleStreams(t *testing.T) {
 // The frame engine stores raw bytes in streamRequest.rawFrames, and these
 // should eventually be accessible for L4 recording.
 func TestFrameEngine_GRPCFlowRawFrameRecording(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
@@ -1003,7 +1002,7 @@ func TestFrameEngine_GRPCFlowRawFrameRecording(t *testing.T) {
 // Flush() correctly works for gRPC streaming where headers must be sent
 // before data frames.
 func TestFrameEngine_GRPCWriteFlush(t *testing.T) {
-	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+	upstream := newH2CTestServer(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/grpc")
 		w.WriteHeader(gohttp.StatusOK)
