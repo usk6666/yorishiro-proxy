@@ -40,6 +40,15 @@ TCP Listener (Layer 4)
 - No external proxy libraries — built on standard library
 - MCP-first: all operations are exposed as MCP tools
 
+### MITM Implementation Principles
+
+As a MITM proxy, yorishiro-proxy must faithfully represent wire-level reality. The following principles apply to all data path code (`internal/protocol/`, `internal/proxy/`, `internal/flow/`, `internal/plugin/`).
+
+1. **Do not normalize what the wire did not normalize** — Header name casing, header order, duplicate headers with different casing, and whitespace must be preserved exactly as observed on the wire. If the wire sends `Set-Cookie: a=1` and `set-cookie: b=2`, they are two distinct headers with different names. Do not merge, canonicalize, or reorder.
+2. **Each protocol has its own canonical form; do not unify across protocols** — HTTP/1.x headers are case-insensitive but preserve wire casing. HTTP/2 headers are lowercase by spec (RFC 9113). These are different realities and must be handled by protocol-specific code paths, not forced into a shared normalized representation.
+3. **Prefer lossless representations over convenient ones** — Use ordered arrays (`[{name, value}, ...]`) over maps (`{name: [values]}`) for headers. Use protocol-native types (RawHeaders for HTTP/1.x, hpack.HeaderField for HTTP/2) over bridge types (gohttp.Header). Convenience helpers may be provided on top but must not be the storage format.
+4. **`net/http` usage policy** — Data path code must not use `net/http` types for transport or data representation. Use internal types (RawRequest/RawResponse, hpack types). `net/http` is permitted only in the control plane: MCP server (`internal/mcp/`), CLI (`cmd/`), self-update (`internal/selfupdate/`), and status code constants (via `internal/protocol/httputil` shared package, see USK-522).
+
 ## Package Layout
 
 ```
