@@ -349,6 +349,11 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 		sc.logger.Error("gRPC upstream connection failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
 		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		// Close the pipe reader to unblock the request-streaming goroutine
+		// which may be blocked on pw.Write().
+		if pr, ok := body.(*io.PipeReader); ok {
+			pr.CloseWithError(err)
+		}
 		reqWg.Wait()
 		return nil, false
 	}
@@ -357,9 +362,13 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 	// ALPN is not negotiated — the connection is used as-is.
 	if useTLS && cr.ALPN != "h2" {
 		cr.Conn.Close()
+		alpnErr := fmt.Errorf("gRPC requires h2 ALPN, got %q", cr.ALPN)
 		sc.logger.Error("gRPC requires h2 ALPN",
 			"method", req.Method, "url", sc.reqURL.String(), "alpn", cr.ALPN)
 		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		if pr, ok := body.(*io.PipeReader); ok {
+			pr.CloseWithError(alpnErr)
+		}
 		reqWg.Wait()
 		return nil, false
 	}
@@ -386,6 +395,12 @@ func (h *Handler) sendGRPCUpstreamOnConn(sc *streamContext, state *grpcStreamSta
 		sc.logger.Error("gRPC upstream request failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
 		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		// Close the pipe reader to unblock the request-streaming goroutine
+		// which may be blocked on pw.Write() if RoundTripStream failed
+		// before consuming the pipe.
+		if pr, ok := body.(*io.PipeReader); ok {
+			pr.CloseWithError(err)
+		}
 		reqWg.Wait()
 		return nil, false
 	}

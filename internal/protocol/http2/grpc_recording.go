@@ -66,8 +66,13 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 		return rec
 	}
 
-	// Parse service/method from URL path.
-	service, method, err := protogrpc.ParseServiceMethod(sc.h2req.Path)
+	// Parse service/method from URL path. Use sc.reqURL.Path (already parsed)
+	// instead of sc.h2req.Path which may contain a query string.
+	grpcPath := sc.h2req.Path
+	if sc.reqURL != nil {
+		grpcPath = sc.reqURL.Path
+	}
+	service, method, err := protogrpc.ParseServiceMethod(grpcPath)
 	if err != nil {
 		sc.logger.Warn("gRPC failed to parse service/method", "path", sc.h2req.Path, "error", err)
 		service = "unknown"
