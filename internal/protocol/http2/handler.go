@@ -47,8 +47,10 @@ var http2Preface = []byte("PRI * HTTP/2.0\r\n")
 type Handler struct {
 	proxy.HandlerBase
 
-	// tlsMu protects connPool.TLSTransport and Transport.DialTLSContext from
-	// concurrent access when SetTLSTransport is called while requests are in flight.
+	// tlsMu protects the handler's upstream transport and connection-pool
+	// configuration from concurrent access. It guards reads and writes of
+	// connPool (including connPool.Get and connPool.TLSTransport), h2Transport,
+	// and the legacy Transport while requests are in flight.
 	tlsMu sync.RWMutex
 
 	// connPool manages upstream connections for the unary HTTP/2 path using
@@ -103,11 +105,11 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 // When set, the handler uses this transport (e.g. uTLS with browser fingerprinting)
 // instead of the standard crypto/tls library.
 //
-// For the unary HTTP/2 path, the ConnPool's TLSTransport is updated directly —
-// it supports full ALPN negotiation (including h2).
-//
-// For the legacy gRPC path (still using gohttp.Transport until USK-520), ALPN
-// is restricted to HTTP/1.1 via DialTLSContext.
+// The ConnPool's TLSTransport is updated directly and is used to establish
+// upstream TLS connections, including ALPN negotiation (e.g. h2 vs. http/1.1).
+// HTTP/2 upstream connections negotiated via ALPN are handled by h2Transport;
+// HTTP/1.1 upstream requests on the unary path currently fall back to the
+// legacy net/http path and do not reuse the ConnPool-established TLS connection.
 //
 // If t is nil, the default crypto/tls behavior is restored.
 //
@@ -116,50 +118,7 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 	h.tlsMu.Lock()
 	defer h.tlsMu.Unlock()
 
-	// Update ConnPool for the unary path (supports full ALPN including h2).
 	h.connPool.TLSTransport = t
-
-	if t == nil {
-		h.Transport.DialTLSContext = nil
-		h.Transport.ForceAttemptHTTP2 = false
-		return
-	}
-	// Restrict ALPN to HTTP/1.1 only for the legacy gohttp.Transport path.
-	// Go's http.Transport cannot handle HTTP/2 frames when DialTLSContext is
-	// set (it disables automatic HTTP/2 upgrade).
-	//
-	// NOTE: RestrictALPNToH1 breaks gRPC upstream (h2 required). This is a
-	// known limitation of the legacy gRPC path that will be resolved in USK-520
-	// (gRPC pipeline rewrite to use ConnPool + h2Transport).
-	h1Transport := httputil.RestrictALPNToH1(t)
-	h.Transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		rawConn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, fmt.Errorf("dial upstream %s: %w", addr, err)
-		}
-
-		host, _, err := net.SplitHostPort(addr)
-		if err != nil {
-			rawConn.Close()
-			return nil, fmt.Errorf("parse upstream address %s: %w", addr, err)
-		}
-
-		tlsConn, negotiatedProto, err := h1Transport.TLSConnect(ctx, rawConn, host)
-		if err != nil {
-			rawConn.Close()
-			return nil, fmt.Errorf("TLS connect to %s: %w", addr, err)
-		}
-
-		// Log ALPN negotiation result for debugging protocol mismatches.
-		h.Logger.Debug("upstream TLS handshake complete",
-			"addr", addr,
-			"negotiated_protocol", negotiatedProto,
-		)
-
-		// Wrap the connection so http.Transport can detect TLS and
-		// populate resp.TLS via ConnectionState() tls.ConnectionState.
-		return httputil.WrapTLSConn(tlsConn), nil
-	}
 }
 
 // SetInsecureSkipVerify overrides HandlerBase.SetInsecureSkipVerify to also
@@ -1104,7 +1063,7 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 	// Remove HTTP/1.1 hop-by-hop headers from the upstream response before
 	// writing to the HTTP/2 client. These headers are invalid in HTTP/2
 	// (RFC 9113 §8.2.2) and cause PROTOCOL_ERROR when the upstream is
-	// HTTP/1.1 (e.g., when DialTLSContext restricts ALPN to http/1.1).
+	// HTTP/1.1 (e.g., when ALPN negotiation falls back to http/1.1).
 	removeHTTP2HopByHop(resp.Header)
 
 	// RFC 9110 §6.4.1: 1xx, 204, 205, and 304 responses must not contain a body.

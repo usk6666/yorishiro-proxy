@@ -351,32 +351,3 @@ func WrapTLSConn(conn net.Conn) net.Conn {
 		return conn
 	}
 }
-
-// RestrictALPNToH1 returns a copy of the TLSTransport with ALPN restricted to
-// HTTP/1.1 only. This is needed for legacy code paths where Go's http.Transport
-// is used with DialTLSContext — http.Transport cannot handle HTTP/2 frames when
-// DialTLSContext is set (even with ForceAttemptHTTP2, non-*tls.Conn connections
-// are not upgraded to HTTP/2).
-//
-// New code should prefer UpstreamRouter which performs ALPN-based routing and
-// does not require ALPN restriction.
-//
-// For StandardTransport, a copy with NextProtos=["http/1.1"] is created.
-// For UTLSTransport, a copy with NextProtos=["http/1.1"] is created, which
-// modifies the browser profile's ALPN extension while preserving the rest of
-// the fingerprint.
-// For unknown types, the inner transport is used as-is (best effort).
-func RestrictALPNToH1(inner TLSTransport) TLSTransport {
-	switch t := inner.(type) {
-	case *StandardTransport:
-		clone := *t
-		clone.NextProtos = []string{"http/1.1"}
-		return &clone
-	case *UTLSTransport:
-		clone := *t
-		clone.NextProtos = []string{"http/1.1"}
-		return &clone
-	default:
-		return inner
-	}
-}
