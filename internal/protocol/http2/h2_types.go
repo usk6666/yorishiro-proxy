@@ -301,7 +301,7 @@ func buildH2HeadersFromGoHTTP(req *gohttp.Request) []hpack.HeaderField {
 func h2ResultToGoHTTPResponse(r *RoundTripResult) *gohttp.Response {
 	resp := &gohttp.Response{
 		StatusCode: r.StatusCode,
-		Status:     fmt.Sprintf("%d %s", r.StatusCode, httputil.StatusText(r.StatusCode)),
+		Status:     httputil.FormatStatus(r.StatusCode),
 		Proto:      "HTTP/2.0",
 		ProtoMajor: 2,
 		ProtoMinor: 0,

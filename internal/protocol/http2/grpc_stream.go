@@ -1238,7 +1238,7 @@ func isGRPCTrailersOnlyH2(result *StreamRoundTripResult) bool {
 func streamResultToGoHTTPResponse(result *StreamRoundTripResult) *gohttp.Response {
 	resp := &gohttp.Response{
 		StatusCode: result.StatusCode,
-		Status:     fmt.Sprintf("%d %s", result.StatusCode, httputil.StatusText(result.StatusCode)),
+		Status:     httputil.FormatStatus(result.StatusCode),
 		Proto:      "HTTP/2.0",
 		ProtoMajor: 2,
 		ProtoMinor: 0,

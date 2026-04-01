@@ -87,7 +87,7 @@ func ApplyResponseModifications(resp *gohttp.Response, action intercept.Intercep
 			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
 		}
 		resp.StatusCode = action.OverrideStatus
-		resp.Status = fmt.Sprintf("%d %s", action.OverrideStatus, StatusText(action.OverrideStatus))
+		resp.Status = FormatStatus(action.OverrideStatus)
 	}
 
 	if err := ValidateCRLFHeaders(action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders); err != nil {

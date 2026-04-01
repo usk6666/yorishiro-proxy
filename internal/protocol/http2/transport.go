@@ -1351,7 +1351,7 @@ func (tc *transportConn) buildResponse(req *gohttp.Request, ss *streamState) (*g
 				return nil, fmt.Errorf("invalid :status %q: %w", hf.Value, err)
 			}
 			resp.StatusCode = code
-			resp.Status = fmt.Sprintf("%d %s", code, httputil.StatusText(code))
+			resp.Status = httputil.FormatStatus(code)
 			continue
 		}
 		if strings.HasPrefix(hf.Name, ":") {

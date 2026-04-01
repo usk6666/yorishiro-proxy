@@ -2,7 +2,6 @@ package httputil
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	gohttp "net/http"
 	"net/url"
@@ -135,7 +134,7 @@ func HTTPResponseToRaw(resp *gohttp.Response, bodyBytes []byte) *parser.RawRespo
 	// when resp.Status is empty.
 	status := resp.Status
 	if status == "" {
-		status = fmt.Sprintf("%d %s", resp.StatusCode, StatusText(resp.StatusCode))
+		status = FormatStatus(resp.StatusCode)
 	}
 
 	raw := &parser.RawResponse{
