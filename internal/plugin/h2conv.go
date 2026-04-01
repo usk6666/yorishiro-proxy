@@ -113,8 +113,8 @@ func H2ResponseToMap(
 }
 
 // ApplyH2RequestChanges applies modifications from a plugin hook result back
-// to HTTP/2 request fields. It returns the updated method, authority, path,
-// hpack headers, and body. Only keys present in the data map are applied.
+// to HTTP/2 request fields. It returns the updated method, scheme, authority,
+// path, hpack headers, and body. Only keys present in the data map are applied.
 func ApplyH2RequestChanges(
 	method, scheme, authority, path string,
 	allHeaders []hpack.HeaderField,
