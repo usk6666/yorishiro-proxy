@@ -86,26 +86,16 @@ func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action 
 
 	ApplyHeaderModifications(&req.Headers, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
 
-	// When OverrideURL is set, enforce Host to match the validated URL
-	// after header modifications. Prevents Host from diverging via header rules.
-	// Use Del+Set to ensure exactly one Host header on the wire (AddHeaders
-	// may have appended a duplicate that Set alone would not remove).
-	if modURL != nil {
-		req.Headers.Del("Host")
-		req.Headers.Set("Host", modURL.Host)
-	}
-
 	if action.OverrideBody != nil {
 		bodyBytes = []byte(*action.OverrideBody)
 	}
 
 	// Sync Content-Length and Transfer-Encoding headers with the actual body.
-	// Use Del+Set to ensure exactly one Content-Length on the wire even if
-	// AddHeaders appended a duplicate that Set alone would not remove.
 	req.Headers.Del("Transfer-Encoding")
-	req.Headers.Del("Content-Length")
 	if len(bodyBytes) > 0 {
 		req.Headers.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+	} else {
+		req.Headers.Del("Content-Length")
 	}
 
 	req.Body = bytes.NewReader(bodyBytes)
@@ -139,9 +129,10 @@ func ApplyResponseModifications(resp *parser.RawResponse, action intercept.Inter
 	if action.OverrideResponseBody != nil {
 		body = []byte(*action.OverrideResponseBody)
 		resp.Headers.Del("Transfer-Encoding")
-		resp.Headers.Del("Content-Length")
 		if len(body) > 0 {
 			resp.Headers.Set("Content-Length", strconv.Itoa(len(body)))
+		} else {
+			resp.Headers.Del("Content-Length")
 		}
 		resp.Body = bytes.NewReader(body)
 	}

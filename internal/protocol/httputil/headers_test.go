@@ -618,61 +618,67 @@ func TestApplyResponseModifications(t *testing.T) {
 	})
 }
 
-func TestApplyRequestModifications_HostReenforcedAfterHeaderMods(t *testing.T) {
-	// When OverrideURL and AddHeaders both set Host, the final Host
-	// must match OverrideURL to prevent routing divergence.
-	req := &parser.RawRequest{
-		Method:     "GET",
-		RequestURI: "/test",
-		Proto:      "HTTP/1.1",
-		Headers: parser.RawHeaders{
-			{Name: "Host", Value: "original.com"},
-		},
-	}
-	action := intercept.InterceptAction{
-		OverrideURL: "https://correct.example.com/path",
-		AddHeaders:  map[string]string{"Host": "attacker.com"},
-	}
-	got, _, modURL, err := ApplyRequestModifications(req, nil, action)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if modURL == nil {
-		t.Fatal("expected non-nil modURL")
-	}
-	// Host must match the override URL, not the AddHeaders value.
-	if got.Headers.Get("Host") != "correct.example.com" {
-		t.Errorf("Host = %q, want %q", got.Headers.Get("Host"), "correct.example.com")
-	}
-	// There must be exactly one Host header on the wire (no duplicates).
-	if hosts := got.Headers.Values("Host"); len(hosts) != 1 {
-		t.Errorf("expected exactly 1 Host header, got %d: %v", len(hosts), hosts)
-	}
+func TestApplyRequestModifications_UserHostOverridePreservedWithOverrideURL(t *testing.T) {
+	// MITM proxy must allow pentester to set Host != URL for Host header
+	// injection testing. When OverrideURL sets Host initially, a subsequent
+	// AddHeaders Host must win (user intent takes priority).
+	t.Run("AddHeaders Host overrides URL-derived Host", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "GET",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers: parser.RawHeaders{
+				{Name: "Host", Value: "original.com"},
+			},
+		}
+		action := intercept.InterceptAction{
+			OverrideURL: "https://backend.example.com/path",
+			AddHeaders:  map[string]string{"Host": "attacker.com"},
+		}
+		got, _, modURL, err := ApplyRequestModifications(req, nil, action)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if modURL == nil {
+			t.Fatal("expected non-nil modURL")
+		}
+		// The user-specified Host via AddHeaders must be preserved for
+		// pentesting Host header injection scenarios.
+		hosts := got.Headers.Values("Host")
+		found := false
+		for _, h := range hosts {
+			if h == "attacker.com" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("user-specified Host 'attacker.com' not found in headers: %v", hosts)
+		}
+	})
 
-	// Also test with OverrideHeaders trying to change Host.
-	req2 := &parser.RawRequest{
-		Method:     "GET",
-		RequestURI: "/test",
-		Proto:      "HTTP/1.1",
-		Headers: parser.RawHeaders{
-			{Name: "Host", Value: "original.com"},
-		},
-	}
-	action2 := intercept.InterceptAction{
-		OverrideURL:     "https://correct.example.com/path",
-		OverrideHeaders: map[string]string{"Host": "attacker.com"},
-	}
-	got2, _, _, err := ApplyRequestModifications(req2, nil, action2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got2.Headers.Get("Host") != "correct.example.com" {
-		t.Errorf("Host = %q, want %q", got2.Headers.Get("Host"), "correct.example.com")
-	}
-	// There must be exactly one Host header on the wire (no duplicates).
-	if hosts2 := got2.Headers.Values("Host"); len(hosts2) != 1 {
-		t.Errorf("expected exactly 1 Host header, got %d: %v", len(hosts2), hosts2)
-	}
+	t.Run("OverrideHeaders Host overrides URL-derived Host", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "GET",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers: parser.RawHeaders{
+				{Name: "Host", Value: "original.com"},
+			},
+		}
+		action := intercept.InterceptAction{
+			OverrideURL:     "https://backend.example.com/path",
+			OverrideHeaders: map[string]string{"Host": "attacker.com"},
+		}
+		got, _, _, err := ApplyRequestModifications(req, nil, action)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// OverrideHeaders replaces the URL-derived Host with user value.
+		if got.Headers.Get("Host") != "attacker.com" {
+			t.Errorf("Host = %q, want %q", got.Headers.Get("Host"), "attacker.com")
+		}
+	})
 }
 
 func TestApplyResponseModifications_BodyReaderUpdated(t *testing.T) {
