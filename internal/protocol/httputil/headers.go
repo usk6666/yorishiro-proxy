@@ -92,7 +92,7 @@ func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action 
 		// Sync Content-Length and Transfer-Encoding headers with the actual body,
 		// but only when AutoContentLength is enabled (default: true).
 		// When disabled, pentesters can craft intentional CL/TE conflicts.
-		if autoContentLength(action.AutoContentLength) {
+		if AutoContentLength(action.AutoContentLength) {
 			req.Headers.Del("Transfer-Encoding")
 			if len(bodyBytes) > 0 {
 				req.Headers.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
@@ -134,7 +134,7 @@ func ApplyResponseModifications(resp *parser.RawResponse, action intercept.Inter
 		body = []byte(*action.OverrideResponseBody)
 		// Sync Content-Length and Transfer-Encoding headers with the actual body,
 		// but only when AutoContentLength is enabled (default: true).
-		if autoContentLength(action.AutoContentLength) {
+		if AutoContentLength(action.AutoContentLength) {
 			resp.Headers.Del("Transfer-Encoding")
 			if len(body) > 0 {
 				resp.Headers.Set("Content-Length", strconv.Itoa(len(body)))
@@ -148,9 +148,9 @@ func ApplyResponseModifications(resp *parser.RawResponse, action intercept.Inter
 	return resp, body, nil
 }
 
-// autoContentLength returns the effective value of the AutoContentLength flag.
+// AutoContentLength returns the effective value of the AutoContentLength flag.
 // When the pointer is nil, the default is true (auto-sync enabled).
-func autoContentLength(flag *bool) bool {
+func AutoContentLength(flag *bool) bool {
 	if flag == nil {
 		return true
 	}

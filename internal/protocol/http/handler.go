@@ -470,11 +470,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	respSnap := snapshotRawResponse(fwd.resp.StatusCode, fwd.resp.Headers, fullRespBody)
 
 	// Response intercept.
-	var respDropped bool
-	fwd.resp, fullRespBody, respDropped = h.applyInterceptResponse(ctx, conn, req, reqURL, fwd.resp, fullRespBody, logger)
-	if respDropped {
+	rir := h.applyInterceptResponse(ctx, conn, req, reqURL, fwd.resp, fullRespBody, logger)
+	if rir.dropped {
 		return nil
 	}
+	fwd.resp, fullRespBody = rir.resp, rir.body
 
 	// Plugin hook: on_before_send_to_client.
 	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
@@ -487,7 +487,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	// Output filter: mask sensitive data.
 	fullRespBody, fwd.resp.Headers = h.ApplyOutputFilter(fullRespBody, fwd.resp.Headers, logger)
 
-	if err := writeRawResponse(conn, fwd.resp, fullRespBody); err != nil {
+	if err := writeRawResponse(conn, fwd.resp, fullRespBody, rir.autoContentLength); err != nil {
 		return fmt.Errorf("write response: %w", err)
 	}
 
