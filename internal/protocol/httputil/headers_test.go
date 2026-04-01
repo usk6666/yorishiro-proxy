@@ -618,6 +618,82 @@ func TestApplyResponseModifications(t *testing.T) {
 	})
 }
 
+func TestApplyRequestModifications_HostReenforcedAfterHeaderMods(t *testing.T) {
+	// When OverrideURL and AddHeaders both set Host, the final Host
+	// must match OverrideURL to prevent routing divergence.
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "/test",
+		Proto:      "HTTP/1.1",
+		Headers: parser.RawHeaders{
+			{Name: "Host", Value: "original.com"},
+		},
+	}
+	action := intercept.InterceptAction{
+		OverrideURL: "https://correct.example.com/path",
+		AddHeaders:  map[string]string{"Host": "attacker.com"},
+	}
+	got, _, modURL, err := ApplyRequestModifications(req, nil, action)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if modURL == nil {
+		t.Fatal("expected non-nil modURL")
+	}
+	// Host must match the override URL, not the AddHeaders value.
+	if got.Headers.Get("Host") != "correct.example.com" {
+		t.Errorf("Host = %q, want %q", got.Headers.Get("Host"), "correct.example.com")
+	}
+
+	// Also test with OverrideHeaders trying to change Host.
+	req2 := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "/test",
+		Proto:      "HTTP/1.1",
+		Headers: parser.RawHeaders{
+			{Name: "Host", Value: "original.com"},
+		},
+	}
+	action2 := intercept.InterceptAction{
+		OverrideURL:     "https://correct.example.com/path",
+		OverrideHeaders: map[string]string{"Host": "attacker.com"},
+	}
+	got2, _, _, err := ApplyRequestModifications(req2, nil, action2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got2.Headers.Get("Host") != "correct.example.com" {
+		t.Errorf("Host = %q, want %q", got2.Headers.Get("Host"), "correct.example.com")
+	}
+}
+
+func TestApplyResponseModifications_BodyReaderUpdated(t *testing.T) {
+	// When OverrideResponseBody is set, resp.Body must reflect the new body.
+	resp := &parser.RawResponse{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Headers:    parser.RawHeaders{},
+		Body:       bytes.NewReader([]byte("old body")),
+	}
+	newBody := "new response body"
+	action := intercept.InterceptAction{OverrideResponseBody: &newBody}
+	got, gotBody, err := ApplyResponseModifications(resp, action, []byte("old body"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(gotBody) != "new response body" {
+		t.Errorf("body = %q, want %q", string(gotBody), "new response body")
+	}
+	// Verify resp.Body reader contains the overridden body.
+	b, readErr := io.ReadAll(got.Body)
+	if readErr != nil {
+		t.Fatalf("failed to read Body: %v", readErr)
+	}
+	if string(b) != "new response body" {
+		t.Errorf("Body reader = %q, want %q", string(b), "new response body")
+	}
+}
+
 func TestApplyRequestModificationsRaw_Delegates(t *testing.T) {
 	// Verify that ApplyRequestModificationsRaw delegates to ApplyRequestModifications.
 	req := &parser.RawRequest{

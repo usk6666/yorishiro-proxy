@@ -86,6 +86,12 @@ func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action 
 
 	ApplyHeaderModifications(&req.Headers, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
 
+	// When OverrideURL is set, enforce Host to match the validated URL
+	// after header modifications. Prevents Host from diverging via header rules.
+	if modURL != nil {
+		req.Headers.Set("Host", modURL.Host)
+	}
+
 	if action.OverrideBody != nil {
 		bodyBytes = []byte(*action.OverrideBody)
 	}
@@ -134,6 +140,7 @@ func ApplyResponseModifications(resp *parser.RawResponse, action intercept.Inter
 		} else {
 			resp.Headers.Del("Content-Length")
 		}
+		resp.Body = bytes.NewReader(body)
 	}
 
 	return resp, body, nil
