@@ -373,7 +373,7 @@ func (h *Handler) handleStream(
 		return
 	}
 
-	snap := snapshotRequest(outReq.Header, sc.srp.reqBody)
+	snap := snapshotRequest(goHTTPHeaderToHpack(outReq.Header), sc.srp.reqBody)
 
 	outReq, ok = h.handleRequestIntercept(sc, outReq, &snap)
 	if !ok {
@@ -463,9 +463,11 @@ func (h *Handler) forwardAndRecord(sc *streamContext, outReq *gohttp.Request, sn
 	// Output filter: mask sensitive data in response body, headers, and
 	// trailers before sending to client. Raw (unmasked) data is preserved
 	// in Flow Store. Trailers (e.g. grpc-message) may contain PII.
-	fullRespBody, resp.Header = h.ApplyOutputFilter(fullRespBody, resp.Header, sc.logger)
+	maskedRespHeaders := httpHeaderToRawHeaders(resp.Header)
+	fullRespBody, maskedRespHeaders = h.ApplyOutputFilter(fullRespBody, maskedRespHeaders, sc.logger)
+	resp.Header = rawHeadersToHTTPHeader(maskedRespHeaders)
 	if len(resp.Trailer) > 0 {
-		resp.Trailer = h.ApplyOutputFilterHeaders(resp.Trailer, sc.logger)
+		resp.Trailer = rawHeadersToHTTPHeader(h.ApplyOutputFilterHeaders(httpHeaderToRawHeaders(resp.Trailer), sc.logger))
 	}
 
 	writeResponseToClient(sc, resp, fullRespBody)
@@ -579,7 +581,7 @@ func (h *Handler) checkTargetScope(sc *streamContext) bool {
 
 // checkSafetyFilter enforces safety filter rules. Returns true if the request was blocked.
 func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
-	violation := h.CheckSafetyFilter(sc.reqBody, sc.req.URL.String(), sc.req.Header)
+	violation := h.CheckSafetyFilter(sc.reqBody, sc.req.URL.String(), httpHeaderToRawHeaders(sc.req.Header))
 	if violation == nil {
 		return false
 	}

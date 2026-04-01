@@ -1068,9 +1068,9 @@ func (h *Handler) applyOutputFilterHpackHeaders(headers []hpack.HeaderField, log
 	if h.SafetyEngine == nil {
 		return headers
 	}
-	// Convert to gohttp.Header for the existing output filter API.
-	goHeaders := hpackToGoHTTPHeader(headers)
-	_, goHeaders = h.ApplyOutputFilter(nil, goHeaders, logger)
+	// Convert to RawHeaders for the output filter API.
+	rh := hpackToRawHeaders(headers)
+	_, rh = h.ApplyOutputFilter(nil, rh, logger)
 	// Convert back, preserving pseudo-headers from the original.
 	var result []hpack.HeaderField
 	for _, hf := range headers {
@@ -1078,7 +1078,9 @@ func (h *Handler) applyOutputFilterHpackHeaders(headers []hpack.HeaderField, log
 			result = append(result, hf)
 		}
 	}
-	result = append(result, goHTTPHeaderToHpack(goHeaders)...)
+	for _, h := range rh {
+		result = append(result, hpack.HeaderField{Name: strings.ToLower(h.Name), Value: h.Value})
+	}
 	return result
 }
 
@@ -1088,9 +1090,13 @@ func (h *Handler) applyOutputFilterHpackTrailers(trailers []hpack.HeaderField, l
 	if h.SafetyEngine == nil {
 		return trailers
 	}
-	goHeaders := hpackToGoHTTPHeader(trailers)
-	goHeaders = h.ApplyOutputFilterHeaders(goHeaders, logger)
-	return goHTTPHeaderToHpack(goHeaders)
+	rh := hpackToRawHeaders(trailers)
+	rh = h.ApplyOutputFilterHeaders(rh, logger)
+	var result []hpack.HeaderField
+	for _, h := range rh {
+		result = append(result, hpack.HeaderField{Name: strings.ToLower(h.Name), Value: h.Value})
+	}
+	return result
 }
 
 // syncH2ReqHeaders rebuilds AllHeaders from the h2req's pseudo-header fields
@@ -1408,7 +1414,8 @@ func (h *Handler) applyGRPCResponseInterceptActionH2(sc *streamContext, state *g
 
 	// Pass through subsystems and write to client.
 	body, resp, trailers = h.runGRPCResponseSubsystems(sc, state, resp, body, trailers)
-	_, resp.Header = h.ApplyOutputFilter(nil, resp.Header, sc.logger)
+	_, maskedRespHeaders := h.ApplyOutputFilter(nil, httpHeaderToRawHeaders(resp.Header), sc.logger)
+	resp.Header = rawHeadersToHTTPHeader(maskedRespHeaders)
 	h.writeGRPCInterceptedResponseH2(sc, state, resp, body, trailers)
 }
 
@@ -1433,7 +1440,7 @@ func (h *Handler) writeGRPCInterceptedResponseH2(sc *streamContext, state *grpcS
 
 	// Apply output filter to trailers before writing.
 	if len(trailers) > 0 {
-		trailers = h.ApplyOutputFilterHeaders(trailers, sc.logger)
+		trailers = rawHeadersToHTTPHeader(h.ApplyOutputFilterHeaders(httpHeaderToRawHeaders(trailers), sc.logger))
 	}
 
 	// Write trailers using h2ResponseWriter.

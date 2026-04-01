@@ -8,24 +8,43 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
+// goHeaderToHpack converts gohttp.Header to []hpack.HeaderField for testing.
+func goHeaderToHpack(h gohttp.Header) []hpack.HeaderField {
+	return goHTTPHeaderToHpack(h)
+}
+
 func TestSnapshotRequest_H2(t *testing.T) {
-	headers := gohttp.Header{
+	headers := goHeaderToHpack(gohttp.Header{
 		"Content-Type":  {"application/json"},
 		"Authorization": {"Bearer token"},
-	}
+	})
 	body := []byte(`{"key":"value"}`)
 
 	snap := snapshotRequest(headers, body)
 
 	// Verify deep copy: modifying original should not affect snapshot.
-	headers.Set("Content-Type", "text/plain")
+	for i := range headers {
+		if headers[i].Name == "content-type" {
+			headers[i].Value = "text/plain"
+			break
+		}
+	}
 	body[0] = 'X'
 
-	if snap.headers.Get("Content-Type") != "application/json" {
-		t.Errorf("snapshot headers mutated: got %q", snap.headers.Get("Content-Type"))
+	// Find content-type in snapshot.
+	var ctVal string
+	for _, hf := range snap.headers {
+		if hf.Name == "content-type" {
+			ctVal = hf.Value
+			break
+		}
+	}
+	if ctVal != "application/json" {
+		t.Errorf("snapshot headers mutated: got %q", ctVal)
 	}
 	if snap.body[0] != '{' {
 		t.Errorf("snapshot body mutated: got %q", snap.body)
@@ -43,7 +62,7 @@ func TestSnapshotRequest_NilInputs_H2(t *testing.T) {
 }
 
 func TestRequestModified_NoChange_H2(t *testing.T) {
-	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	headers := goHeaderToHpack(gohttp.Header{"Content-Type": {"application/json"}})
 	body := []byte("hello")
 	snap := snapshotRequest(headers, body)
 
@@ -53,7 +72,7 @@ func TestRequestModified_NoChange_H2(t *testing.T) {
 }
 
 func TestRequestModified_BodyChanged_H2(t *testing.T) {
-	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	headers := goHeaderToHpack(gohttp.Header{"Content-Type": {"application/json"}})
 	body := []byte("hello")
 	snap := snapshotRequest(headers, body)
 
@@ -63,12 +82,13 @@ func TestRequestModified_BodyChanged_H2(t *testing.T) {
 }
 
 func TestRequestModified_HeaderChanged_H2(t *testing.T) {
-	headers := gohttp.Header{"Content-Type": {"application/json"}}
+	headers := goHeaderToHpack(gohttp.Header{"Content-Type": {"application/json"}})
 	body := []byte("hello")
 	snap := snapshotRequest(headers, body)
 
-	modifiedHeaders := headers.Clone()
-	modifiedHeaders.Set("X-New", "true")
+	modifiedHeaders := make([]hpack.HeaderField, len(headers))
+	copy(modifiedHeaders, headers)
+	modifiedHeaders = append(modifiedHeaders, hpack.HeaderField{Name: "x-new", Value: "true"})
 
 	if !requestModified(snap, modifiedHeaders, body) {
 		t.Error("expected modification detected for added header")
@@ -89,7 +109,7 @@ func TestRecordSendWithVariant_NoModification_H2(t *testing.T) {
 	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/path"}
 	body := []byte("request body")
 
-	snap := snapshotRequest(req.Header, body)
+	snap := snapshotRequest(goHeaderToHpack(req.Header), body)
 
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:   "conn-1",
@@ -132,7 +152,7 @@ func TestRecordSendWithVariant_BodyModified_H2(t *testing.T) {
 	originalBody := []byte(`{"key":"original"}`)
 	modifiedBody := []byte(`{"key":"modified"}`)
 
-	snap := snapshotRequest(req.Header, originalBody)
+	snap := snapshotRequest(goHeaderToHpack(req.Header), originalBody)
 
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:   "conn-2",
@@ -186,7 +206,7 @@ func TestRecordSendWithVariant_HeaderModified_H2(t *testing.T) {
 	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/path"}
 	body := []byte("body")
 
-	snap := snapshotRequest(req.Header, body)
+	snap := snapshotRequest(goHeaderToHpack(req.Header), body)
 
 	// Simulate header modification.
 	req.Header.Set("Authorization", "Bearer modified")
@@ -250,7 +270,7 @@ func TestRecordSendWithVariant_NilStore_H2(t *testing.T) {
 
 	req := &gohttp.Request{Method: "GET", Header: gohttp.Header{}}
 	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/"}
-	snap := snapshotRequest(req.Header, nil)
+	snap := snapshotRequest(goHeaderToHpack(req.Header), nil)
 
 	result := handler.recordSendWithVariant(context.Background(), sendRecordParams{
 		start:  time.Now(),
@@ -280,7 +300,7 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 	originalBody := []byte(`{"action":"original"}`)
 	modifiedBody := []byte(`{"action":"modified"}`)
 
-	snap := snapshotRequest(req.Header, originalBody)
+	snap := snapshotRequest(goHeaderToHpack(req.Header), originalBody)
 
 	// Phase 1: Record send with variant.
 	sendResult := handler.recordSendWithVariant(ctx, sendRecordParams{
@@ -343,16 +363,16 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 	}
 }
 
-func TestHeadersModified_H2(t *testing.T) {
+func TestHpackHeadersModified_H2(t *testing.T) {
 	tests := []struct {
 		name string
-		a, b gohttp.Header
+		a, b []hpack.HeaderField
 		want bool
 	}{
 		{
 			name: "identical",
-			a:    gohttp.Header{"X-Key": {"val"}},
-			b:    gohttp.Header{"X-Key": {"val"}},
+			a:    []hpack.HeaderField{{Name: "x-key", Value: "val"}},
+			b:    []hpack.HeaderField{{Name: "x-key", Value: "val"}},
 			want: false,
 		},
 		{
@@ -363,23 +383,23 @@ func TestHeadersModified_H2(t *testing.T) {
 		},
 		{
 			name: "a has extra key",
-			a:    gohttp.Header{"X-Key": {"val"}, "X-Extra": {"v"}},
-			b:    gohttp.Header{"X-Key": {"val"}},
+			a:    []hpack.HeaderField{{Name: "x-key", Value: "val"}, {Name: "x-extra", Value: "v"}},
+			b:    []hpack.HeaderField{{Name: "x-key", Value: "val"}},
 			want: true,
 		},
 		{
 			name: "different value",
-			a:    gohttp.Header{"X-Key": {"old"}},
-			b:    gohttp.Header{"X-Key": {"new"}},
+			a:    []hpack.HeaderField{{Name: "x-key", Value: "old"}},
+			b:    []hpack.HeaderField{{Name: "x-key", Value: "new"}},
 			want: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := headersModified(tt.a, tt.b)
+			got := hpackHeadersModified(tt.a, tt.b)
 			if got != tt.want {
-				t.Errorf("headersModified() = %v, want %v", got, tt.want)
+				t.Errorf("hpackHeadersModified() = %v, want %v", got, tt.want)
 			}
 		})
 	}

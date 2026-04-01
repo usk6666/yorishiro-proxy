@@ -258,7 +258,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 	}
 
 	// Merge existing tags with fingerprint detection results.
-	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, httputil.HTTPHeaderToRawHeaders(p.resp.Header), p.respBody)
+	respHeaders := httputil.HTTPHeaderToRawHeaders(p.resp.Header)
+	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, respHeaders, p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
@@ -267,7 +268,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		Duration:             p.duration,
 		ServerAddr:           p.serverAddr,
 		TLSServerCertSubject: p.tlsServerCertSubject,
-		Resp:                 p.resp,
+		RespStatusCode:       p.resp.StatusCode,
+		RespHeaders:          respHeaders,
 		RespBody:             p.respBody,
 		RawResponse:          p.rawResponse,
 		Tags:                 tags,

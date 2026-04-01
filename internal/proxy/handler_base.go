@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -134,11 +134,11 @@ func (b *HandlerBase) SetSafetyEngine(engine *safety.Engine) {
 // CheckSafetyFilter evaluates the safety engine's input rules against
 // the request body, URL, and headers. Returns the first violation found,
 // or nil if no rules matched or the engine is not configured.
-func (b *HandlerBase) CheckSafetyFilter(body []byte, rawURL string, headers gohttp.Header) *safety.InputViolation {
+func (b *HandlerBase) CheckSafetyFilter(body []byte, rawURL string, headers parser.RawHeaders) *safety.InputViolation {
 	if b.SafetyEngine == nil {
 		return nil
 	}
-	return b.SafetyEngine.CheckInput(body, rawURL, httputil.HTTPHeaderToRawHeaders(headers))
+	return b.SafetyEngine.CheckInput(body, rawURL, headers)
 }
 
 // SafetyFilterAction looks up the action for the matched safety rule.
@@ -231,13 +231,13 @@ func (b *HandlerBase) TLSFingerprint() string {
 // is returned unchanged. The caller is responsible for ensuring Content-Length
 // is recalculated when the masked body is written to the client (e.g. via
 // writeResponse / writeResponseToClient).
-func (b *HandlerBase) ApplyOutputFilter(body []byte, headers gohttp.Header, logger *slog.Logger) ([]byte, gohttp.Header) {
+func (b *HandlerBase) ApplyOutputFilter(body []byte, headers parser.RawHeaders, logger *slog.Logger) ([]byte, parser.RawHeaders) {
 	if b.SafetyEngine == nil {
 		return body, headers
 	}
 
 	bodyResult := b.SafetyEngine.FilterOutput(body)
-	maskedHeaders, headerMatches := b.SafetyEngine.FilterOutputHeaders(httputil.HTTPHeaderToRawHeaders(headers))
+	maskedHeaders, headerMatches := b.SafetyEngine.FilterOutputHeaders(headers)
 
 	// Log matches for observability.
 	for _, m := range bodyResult.Matches {
@@ -249,24 +249,24 @@ func (b *HandlerBase) ApplyOutputFilter(body []byte, headers gohttp.Header, logg
 			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
 	}
 
-	return bodyResult.Data, httputil.RawHeadersToHTTPHeader(maskedHeaders)
+	return bodyResult.Data, maskedHeaders
 }
 
 // ApplyOutputFilterHeaders applies the safety engine's output filter to HTTP
 // headers (typically trailers). If the engine is not configured or no rules
 // match, the headers are returned unchanged. This is separated from
 // ApplyOutputFilter to allow independent filtering of response trailers.
-func (b *HandlerBase) ApplyOutputFilterHeaders(headers gohttp.Header, logger *slog.Logger) gohttp.Header {
+func (b *HandlerBase) ApplyOutputFilterHeaders(headers parser.RawHeaders, logger *slog.Logger) parser.RawHeaders {
 	if b.SafetyEngine == nil {
 		return headers
 	}
 
-	masked, matches := b.SafetyEngine.FilterOutputHeaders(httputil.HTTPHeaderToRawHeaders(headers))
+	masked, matches := b.SafetyEngine.FilterOutputHeaders(headers)
 	for _, m := range matches {
 		logger.Info("output filter matched trailer",
 			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
 	}
-	return httputil.RawHeadersToHTTPHeader(masked)
+	return masked
 }
 
 // ConnLogger returns the connection-scoped logger from context,

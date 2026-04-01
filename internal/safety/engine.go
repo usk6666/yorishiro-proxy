@@ -3,7 +3,7 @@ package safety
 import (
 	"fmt"
 	"log/slog"
-	gohttp "net/http"
+	"net/textproto"
 	"regexp"
 	"sort"
 	"strings"
@@ -345,7 +345,7 @@ func matchAllHeaders(re *regexp.Regexp, headers parser.RawHeaders) (bool, string
 	// Group values by header name in a single pass.
 	grouped := make(map[string][]string, len(headers))
 	for _, h := range headers {
-		key := gohttp.CanonicalHeaderKey(h.Name)
+		key := textproto.CanonicalMIMEHeaderKey(h.Name)
 		grouped[key] = append(grouped[key], h.Value)
 	}
 	keys := make([]string, 0, len(grouped))

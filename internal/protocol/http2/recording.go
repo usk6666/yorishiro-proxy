@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -116,16 +118,17 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 // and, if so, to record the original (unmodified) version as a separate send
 // message.
 type requestSnapshot struct {
-	headers gohttp.Header
+	headers []hpack.HeaderField
 	body    []byte
 }
 
 // snapshotRequest creates a deep copy of the request headers and body for
 // later comparison.
-func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
+func snapshotRequest(headers []hpack.HeaderField, body []byte) requestSnapshot {
 	snap := requestSnapshot{}
 	if headers != nil {
-		snap.headers = headers.Clone()
+		snap.headers = make([]hpack.HeaderField, len(headers))
+		copy(snap.headers, headers)
 	}
 	if body != nil {
 		snap.body = make([]byte, len(body))
@@ -136,27 +139,21 @@ func snapshotRequest(headers gohttp.Header, body []byte) requestSnapshot {
 
 // requestModified reports whether the request headers or body have been changed
 // relative to the snapshot.
-func requestModified(snap requestSnapshot, currentHeaders gohttp.Header, currentBody []byte) bool {
+func requestModified(snap requestSnapshot, currentHeaders []hpack.HeaderField, currentBody []byte) bool {
 	if !bytes.Equal(snap.body, currentBody) {
 		return true
 	}
-	return headersModified(snap.headers, currentHeaders)
+	return hpackHeadersModified(snap.headers, currentHeaders)
 }
 
-// headersModified reports whether two header maps differ.
-func headersModified(a, b gohttp.Header) bool {
+// hpackHeadersModified reports whether two hpack header field slices differ.
+func hpackHeadersModified(a, b []hpack.HeaderField) bool {
 	if len(a) != len(b) {
 		return true
 	}
-	for key, aVals := range a {
-		bVals, ok := b[key]
-		if !ok || len(aVals) != len(bVals) {
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Value != b[i].Value {
 			return true
-		}
-		for i := range aVals {
-			if aVals[i] != bVals[i] {
-				return true
-			}
 		}
 	}
 	return false
@@ -181,7 +178,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	}
 
 	// Detect whether modification occurred.
-	modified := snap != nil && requestModified(*snap, p.req.Header, p.reqBody)
+	modified := snap != nil && requestModified(*snap, goHTTPHeaderToHpack(p.req.Header), p.reqBody)
 
 	protocol := proxy.SOCKS5Protocol(ctx, "HTTP/2")
 	tags := proxy.MergeSOCKS5Tags(ctx, nil)
@@ -205,10 +202,12 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	if modified {
 		// Inject Host into the snapshot headers (the snapshot was taken from
 		// req.Header which does not contain Host per Go's net/http design).
-		origHeaders := snap.headers.Clone()
+		origHpackHeaders := make([]hpack.HeaderField, len(snap.headers))
+		copy(origHpackHeaders, snap.headers)
 		if p.req.Host != "" {
-			origHeaders["Host"] = []string{p.req.Host}
+			origHpackHeaders = append(origHpackHeaders, hpack.HeaderField{Name: "host", Value: p.req.Host})
 		}
+		origHeaders := hpackToGoHTTPHeaderMap(origHpackHeaders)
 		// Record the original (unmodified) request as sequence 0.
 		// RawBytes is attached to the original message because it represents
 		// the wire-observed bytes before any intercept modifications.
@@ -314,7 +313,7 @@ func (h *Handler) recordReceive(ctx context.Context, sendResult *sendRecordResul
 // separate receive message.
 type responseSnapshot struct {
 	statusCode int
-	headers    gohttp.Header
+	headers    parser.RawHeaders
 	body       []byte
 }
 
@@ -323,7 +322,7 @@ type responseSnapshot struct {
 func snapshotResponse(statusCode int, headers gohttp.Header, body []byte) responseSnapshot {
 	snap := responseSnapshot{statusCode: statusCode}
 	if headers != nil {
-		snap.headers = headers.Clone()
+		snap.headers = httpHeaderToRawHeaders(headers)
 	}
 	if body != nil {
 		snap.body = make([]byte, len(body))
@@ -353,14 +352,15 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 	if snap != nil {
 		s := httputil.ResponseSnapshot{
 			StatusCode: snap.statusCode,
-			Headers:    httpHeaderToRawHeaders(snap.headers),
+			Headers:    snap.headers,
 			Body:       snap.body,
 		}
 		sharedSnap = &s
 	}
 
 	tags := proxy.MergeSOCKS5Tags(ctx, nil)
-	tags = httputil.MergeTechnologyTags(tags, h.detector, httpHeaderToRawHeaders(p.resp.Header), p.respBody)
+	respHeaders := httpHeaderToRawHeaders(p.resp.Header)
+	tags = httputil.MergeTechnologyTags(tags, h.detector, respHeaders, p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
@@ -369,7 +369,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		Duration:             p.duration,
 		ServerAddr:           p.serverAddr,
 		TLSServerCertSubject: p.tlsServerCertSubject,
-		Resp:                 p.resp,
+		RespStatusCode:       p.resp.StatusCode,
+		RespHeaders:          respHeaders,
 		RespBody:             p.respBody,
 		RawResponse:          joinRawFrames(p.rawFrames),
 		RawResponseMetadata:  buildFrameMetadata(p.rawFrames, nil),
