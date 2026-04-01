@@ -644,6 +644,10 @@ func TestApplyRequestModifications_HostReenforcedAfterHeaderMods(t *testing.T) {
 	if got.Headers.Get("Host") != "correct.example.com" {
 		t.Errorf("Host = %q, want %q", got.Headers.Get("Host"), "correct.example.com")
 	}
+	// There must be exactly one Host header on the wire (no duplicates).
+	if hosts := got.Headers.Values("Host"); len(hosts) != 1 {
+		t.Errorf("expected exactly 1 Host header, got %d: %v", len(hosts), hosts)
+	}
 
 	// Also test with OverrideHeaders trying to change Host.
 	req2 := &parser.RawRequest{
@@ -664,6 +668,10 @@ func TestApplyRequestModifications_HostReenforcedAfterHeaderMods(t *testing.T) {
 	}
 	if got2.Headers.Get("Host") != "correct.example.com" {
 		t.Errorf("Host = %q, want %q", got2.Headers.Get("Host"), "correct.example.com")
+	}
+	// There must be exactly one Host header on the wire (no duplicates).
+	if hosts2 := got2.Headers.Values("Host"); len(hosts2) != 1 {
+		t.Errorf("expected exactly 1 Host header, got %d: %v", len(hosts2), hosts2)
 	}
 }
 
