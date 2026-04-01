@@ -22,24 +22,25 @@ An orchestration skill that understands milestones, analyzes dependencies, and d
 
 **Do this first on every run.** The orchestrator first adopts the product owner's perspective.
 
-#### 0-1. Understand Milestone Status
+#### 0-1. Fetch All External Context (Parallel)
 
-```
-mcp__linear-server__list_milestones(project=yorishiro-proxy)
-```
+Launch all of the following **in a single parallel batch** (5 calls total):
 
-Fetch the name, description, and `progress` of all milestones at once.
-Immediately understand overall project progress from the progress field:
+- `mcp__linear-server__list_milestones(project=yorishiro-proxy)`
+- `mcp__linear-server__get_document(id=d413edd7-d296-433a-ab94-11d4dd57d883)` (roadmap)
+- `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=started)`
+- `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=backlog)`
+- `mcp__linear-server__list_issues(team=Usk6666, project=yorishiro-proxy, state=unstarted)`
+
+#### 0-2. Process Fetched Data
+
+From the milestone list, classify progress:
 
 - `progress == 100` → Complete
 - `0 < progress < 100` → Active (in progress)
 - `progress == 0` → Not started
 
-#### 0-2. Load the Roadmap
-
-Fetch the roadmap document with `mcp__linear-server__get_document` (id=d413edd7-d296-433a-ab94-11d4dd57d883).
-
-Extract and understand the following from the roadmap:
+From the roadmap document, extract:
 
 - **Product goal**: What is being built and for whom
 - **Milestone structure**: The goal and delivered value of each milestone
@@ -47,28 +48,14 @@ Extract and understand the following from the roadmap:
 - **Issue ordering within milestones**: Natural implementation order of Issues within each milestone
 - **Technical decisions**: Design decisions already made (storage choice, protocol strategy, etc.)
 
-#### 0-3. Fetch Only Incomplete Issues
-
-Fetch the following **in parallel**:
-
-- `mcp__linear-server__list_issues` (team=Usk6666, project=yorishiro-proxy, state=started)
-- `mcp__linear-server__list_issues` (team=Usk6666, project=yorishiro-proxy, state=backlog)
-- `mcp__linear-server__list_issues` (team=Usk6666, project=yorishiro-proxy, state=unstarted)
-
-Group the fetched Issues by `projectMilestone` field.
+Group fetched Issues by `projectMilestone` field.
 **Do not fetch completed Issues.** Use milestone progress + roadmap Issue table to track completion status.
-
 Only fetch specific completed Issues individually with `get_issue(id)` when needed for building dependency context.
 
-#### 0-4. Check Current Codebase State
+> **Note**: Codebase state checks (file existence, type verification) are deferred to Phase 1-1
+> where they can be done precisely for the specific dependencies that matter.
 
-Confirm the following at the project root to understand what has been implemented:
-
-- Check package structure with `ls internal/`
-- Confirm existence of key files (stub vs. implemented)
-- Current `make test` pass status (if needed)
-
-#### 0-5. Generate Current State Summary
+#### 0-3. Generate Current State Summary
 
 Present a concise milestone-based summary to the user:
 
@@ -113,6 +100,10 @@ Fetch each Issue's description with `mcp__linear-server__get_issue` and determin
 
 Also refer to Linear's `blockedBy` / `blocks` fields, but if not set,
 infer dependency relationships from the roadmap's Issue ordering and Issue content.
+
+When a dependency is identified, **verify it against the actual codebase** (e.g., check that
+the expected file/type/interface exists with Glob or Grep). This replaces the former Phase 0
+codebase check with targeted, dependency-driven verification.
 
 #### 1-2. Identify Parallel Execution Groups
 
@@ -175,23 +166,20 @@ Task tool settings for each Issue:
 
 **Building `{{PRODUCT_CONTEXT}}`:**
 
-From the information gathered in Phase 0, build a summary that helps sub-agents understand
-where their Issue fits in the overall product. Include the following:
+From the information gathered in Phase 0, build a **dynamic-only** summary.
+Sub-agents read `CLAUDE.md` as their first step, so do not duplicate static architecture
+or package layout information that is already documented there.
+
+Focus on milestone-specific and Issue-specific context:
 
 ```
-yorishiro-proxy is a network proxy (MCP server) for AI agents.
-Provides traffic interception, recording, and replay capabilities for vulnerability assessment.
-
-Architecture: TCP Listener → Protocol Detection → Protocol Handler → Session Recording → MCP Tool
-Storage: SQLite (modernc.org/sqlite, WAL mode)
-
 Current milestone: <Milestone name>
 Goal: <milestone description>
 Progress: <progress>%
 This Issue is part of <Milestone name>, and <description of Issue's position>.
 
 Relevant design decisions:
-- <Technical decisions related to this Issue>
+- <Technical decisions related to this Issue, derived from the roadmap>
 ```
 
 **Building `{{DEPENDENCY_CONTEXT}}`:**
