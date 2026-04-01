@@ -868,41 +868,6 @@ func TestApplyResponseModifications_BodyReaderUpdated(t *testing.T) {
 	}
 }
 
-func TestApplyRequestModificationsRaw_Delegates(t *testing.T) {
-	// Verify that ApplyRequestModificationsRaw delegates to ApplyRequestModifications.
-	req := &parser.RawRequest{
-		Method:     "GET",
-		RequestURI: "/test",
-		Proto:      "HTTP/1.1",
-		Headers:    parser.RawHeaders{},
-	}
-	action := intercept.InterceptAction{OverrideMethod: "PUT"}
-	got, _, _, err := ApplyRequestModificationsRaw(req, nil, action)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Method != "PUT" {
-		t.Errorf("Method = %q, want %q", got.Method, "PUT")
-	}
-}
-
-func TestApplyResponseModificationsRaw_Delegates(t *testing.T) {
-	// Verify that ApplyResponseModificationsRaw delegates to ApplyResponseModifications.
-	resp := &parser.RawResponse{
-		StatusCode: 200,
-		Status:     "200 OK",
-		Headers:    parser.RawHeaders{},
-	}
-	action := intercept.InterceptAction{OverrideStatus: 503}
-	got, _, err := ApplyResponseModificationsRaw(resp, nil, action)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.StatusCode != 503 {
-		t.Errorf("StatusCode = %d, want 503", got.StatusCode)
-	}
-}
-
 func TestApplyRequestModifications_BodyReader(t *testing.T) {
 	// Verify that the Body reader on the returned RawRequest reflects the body.
 	req := &parser.RawRequest{

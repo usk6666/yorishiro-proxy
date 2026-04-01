@@ -58,7 +58,7 @@ func (h *Handler) applyIntercept(ctx context.Context, conn net.Conn, req *parser
 				OriginalRawBytes: rawRequest,
 			}
 		}
-		modReq, modBody, modURL, modErr := httputil.ApplyRequestModificationsRaw(req, recordReqBody, action)
+		modReq, modBody, modURL, modErr := httputil.ApplyRequestModifications(req, recordReqBody, action)
 		if modErr != nil {
 			logger.Error("intercept modification failed", "error", modErr)
 			writeHTTPError(conn, statusBadRequest, logger)
@@ -235,7 +235,7 @@ func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req
 			"method", req.Method, "url", reqURL.String(), "status", resp.StatusCode)
 		return responseInterceptResult{resp: resp, body: body, dropped: true, autoContentLength: acl}
 	case intercept.ActionModifyAndForward:
-		modResp, modBody, modErr := httputil.ApplyResponseModificationsRaw(resp, body, action)
+		modResp, modBody, modErr := httputil.ApplyResponseModifications(resp, action, body)
 		if modErr != nil {
 			logger.Error("response intercept modification failed", "error", modErr)
 			writeHTTPError(conn, statusBadGateway, logger)
