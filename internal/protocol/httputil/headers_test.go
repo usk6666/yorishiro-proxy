@@ -210,6 +210,69 @@ func TestApplyRequestModifications(t *testing.T) {
 		}
 	})
 
+	t.Run("CRLF validation before mutation", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "GET",
+			RequestURI: "/original",
+			Proto:      "HTTP/1.1",
+			Headers:    parser.RawHeaders{},
+		}
+		action := intercept.InterceptAction{
+			OverrideMethod:  "POST",
+			OverrideHeaders: map[string]string{"X-Bad\r\n": "val"},
+		}
+		_, _, _, err := ApplyRequestModifications(req, nil, action)
+		if err == nil {
+			t.Fatal("expected CRLF error")
+		}
+		// Method must not be mutated when validation fails.
+		if req.Method != "GET" {
+			t.Errorf("Method = %q, want %q (should not be mutated on validation error)", req.Method, "GET")
+		}
+	})
+
+	t.Run("URL with empty host rejected", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "GET",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers:    parser.RawHeaders{},
+		}
+		action := intercept.InterceptAction{OverrideURL: "https:///path"}
+		_, _, _, err := ApplyRequestModifications(req, nil, action)
+		if err == nil {
+			t.Fatal("expected error for URL with empty host")
+		}
+	})
+
+	t.Run("opaque URL rejected", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "GET",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers:    parser.RawHeaders{},
+		}
+		action := intercept.InterceptAction{OverrideURL: "https:example.com/path"}
+		_, _, _, err := ApplyRequestModifications(req, nil, action)
+		if err == nil {
+			t.Fatal("expected error for opaque URL")
+		}
+	})
+
+	t.Run("URL with fragment rejected", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "GET",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers:    parser.RawHeaders{},
+		}
+		action := intercept.InterceptAction{OverrideURL: "https://example.com/path#frag"}
+		_, _, _, err := ApplyRequestModifications(req, nil, action)
+		if err == nil {
+			t.Fatal("expected error for URL with fragment")
+		}
+	})
+
 	t.Run("no URL override returns nil modURL", func(t *testing.T) {
 		req := &parser.RawRequest{
 			Method:     "GET",

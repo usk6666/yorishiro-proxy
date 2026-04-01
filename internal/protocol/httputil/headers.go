@@ -54,8 +54,9 @@ func ApplyHeaderModifications(h *parser.RawHeaders, override, add map[string]str
 // Returns the modified RawRequest, the (possibly overridden) body bytes, the
 // parsed URL after override (nil when no URL override was applied), and any error.
 func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action intercept.InterceptAction) (*parser.RawRequest, []byte, *url.URL, error) {
-	if action.OverrideMethod != "" {
-		req.Method = action.OverrideMethod
+	// Validate all inputs before mutating the request (CWE-113 / Copilot C-1).
+	if err := ValidateCRLFHeaders(action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders); err != nil {
+		return req, bodyBytes, nil, err
 	}
 
 	var modURL *url.URL
@@ -65,18 +66,22 @@ func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action 
 			return req, bodyBytes, nil, err
 		}
 		modURL = parsed
-		// Update RequestURI. Preserve absolute-form when scheme+host are present.
-		if parsed.Scheme != "" && parsed.Host != "" {
-			req.RequestURI = parsed.String()
-		} else {
-			req.RequestURI = parsed.RequestURI()
-		}
-		// Update Host header to match the override URL.
-		req.Headers.Set("Host", parsed.Host)
 	}
 
-	if err := ValidateCRLFHeaders(action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders); err != nil {
-		return req, bodyBytes, nil, err
+	// All validations passed — apply mutations.
+	if action.OverrideMethod != "" {
+		req.Method = action.OverrideMethod
+	}
+
+	if modURL != nil {
+		// Update RequestURI. Preserve absolute-form when scheme+host are present.
+		if modURL.Scheme != "" && modURL.Host != "" {
+			req.RequestURI = modURL.String()
+		} else {
+			req.RequestURI = modURL.RequestURI()
+		}
+		// Update Host header to match the override URL.
+		req.Headers.Set("Host", modURL.Host)
 	}
 
 	ApplyHeaderModifications(&req.Headers, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
@@ -125,7 +130,8 @@ func ApplyResponseModifications(resp *parser.RawResponse, action intercept.Inter
 }
 
 // validateURL validates a URL override string and enforces http/https-only
-// scheme restriction to prevent SSRF (CWE-918).
+// scheme restriction to prevent SSRF (CWE-918). It also rejects malformed
+// URLs such as those with empty host, opaque form, or fragments.
 func validateURL(overrideURL string) (*url.URL, error) {
 	parsed, err := url.Parse(overrideURL)
 	if err != nil {
@@ -133,6 +139,15 @@ func validateURL(overrideURL string) (*url.URL, error) {
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, fmt.Errorf("unsupported override URL scheme %q: only http and https are allowed", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("invalid override URL %q: host is required", overrideURL)
+	}
+	if parsed.Opaque != "" {
+		return nil, fmt.Errorf("invalid override URL %q: opaque URLs are not allowed", overrideURL)
+	}
+	if parsed.Fragment != "" {
+		return nil, fmt.Errorf("invalid override URL %q: fragments are not allowed", overrideURL)
 	}
 	return parsed, nil
 }
