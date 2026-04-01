@@ -21,6 +21,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
@@ -329,7 +330,7 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 	if err != nil {
 		sc.logger.Warn("gRPC upstream address resolution failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
-		writeErrorResponse(sc.w, gohttp.StatusBadRequest)
+		writeErrorResponse(sc.w, httputil.StatusBadRequest)
 		closePipeReader(body, err)
 		reqWg.Wait()
 		return nil, false
@@ -341,7 +342,7 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 	if err != nil {
 		sc.logger.Error("gRPC upstream connection failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		closePipeReader(body, err)
 		reqWg.Wait()
 		return nil, false
@@ -354,7 +355,7 @@ func (h *Handler) sendGRPCUpstream(sc *streamContext, state *grpcStreamState, re
 		alpnErr := fmt.Errorf("gRPC requires h2 ALPN, got %q", cr.ALPN)
 		sc.logger.Error("gRPC requires h2 ALPN",
 			"method", req.Method, "url", sc.reqURL.String(), "alpn", cr.ALPN)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		closePipeReader(body, alpnErr)
 		reqWg.Wait()
 		return nil, false
@@ -391,7 +392,7 @@ func (h *Handler) sendGRPCUpstreamOnConn(sc *streamContext, state *grpcStreamSta
 	if err != nil {
 		sc.logger.Error("gRPC upstream request failed",
 			"method", req.Method, "url", sc.reqURL.String(), "error", err)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		closePipeReader(body, err)
 		reqWg.Wait()
 		return nil, false
@@ -1043,7 +1044,7 @@ func writeGRPCStatusH2(w h2ResponseWriter, grpcStatus int, message string, logge
 	headers := []hpack.HeaderField{
 		{Name: "content-type", Value: "application/grpc"},
 	}
-	if err := w.WriteHeaders(gohttp.StatusOK, headers); err != nil {
+	if err := w.WriteHeaders(httputil.StatusOK, headers); err != nil {
 		logger.Error("failed to write gRPC status headers over HTTP/2", "error", err)
 		return
 	}
@@ -1237,7 +1238,7 @@ func isGRPCTrailersOnlyH2(result *StreamRoundTripResult) bool {
 func streamResultToGoHTTPResponse(result *StreamRoundTripResult) *gohttp.Response {
 	resp := &gohttp.Response{
 		StatusCode: result.StatusCode,
-		Status:     fmt.Sprintf("%d %s", result.StatusCode, gohttp.StatusText(result.StatusCode)),
+		Status:     httputil.FormatStatus(result.StatusCode),
 		Proto:      "HTTP/2.0",
 		ProtoMajor: 2,
 		ProtoMinor: 0,

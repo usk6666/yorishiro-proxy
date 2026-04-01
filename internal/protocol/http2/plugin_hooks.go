@@ -11,6 +11,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // dispatchOnReceiveFromClient dispatches the on_receive_from_client hook.
@@ -41,7 +42,7 @@ func (h *Handler) dispatchOnReceiveFromClient(ctx context.Context, w h2ResponseW
 
 	switch result.Action {
 	case plugin.ActionDrop:
-		writeErrorResponse(w, gohttp.StatusBadGateway)
+		writeErrorResponse(w, httputil.StatusBadGateway)
 		logger.Info("plugin dropped request", "hook", "on_receive_from_client",
 			"method", req.Method, "url", req.URL.String())
 		return req, body, true

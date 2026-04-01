@@ -407,7 +407,7 @@ func (h *Handler) initStreamContext(
 	goReq, err := h2RequestToGoHTTP(ctx, h2req)
 	if err != nil {
 		logger.Error("HTTP/2 failed to convert h2Request to gohttp.Request", "error", err)
-		w.WriteHeaders(gohttp.StatusBadRequest, nil)
+		w.WriteHeaders(httputil.StatusBadRequest, nil)
 		return nil
 	}
 
@@ -610,7 +610,7 @@ func writeSafetyFilterResponse(w h2ResponseWriter, violation *safety.InputViolat
 		{Name: "x-block-reason", Value: "safety_filter"},
 		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
 	}
-	if err := w.WriteHeaders(gohttp.StatusForbidden, headers); err != nil {
+	if err := w.WriteHeaders(httputil.StatusForbidden, headers); err != nil {
 		slog.Debug("failed to write safety filter response headers", "error", err)
 		return
 	}
@@ -645,7 +645,7 @@ func writeRateLimitResponse(w h2ResponseWriter) {
 		{Name: "retry-after", Value: "1"},
 		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
 	}
-	if err := w.WriteHeaders(gohttp.StatusTooManyRequests, headers); err != nil {
+	if err := w.WriteHeaders(httputil.StatusTooManyRequests, headers); err != nil {
 		slog.Debug("failed to write rate limit response headers", "error", err)
 		return
 	}
@@ -662,7 +662,7 @@ func writeScopeBlockResponse(w h2ResponseWriter, target, reason string) {
 		{Name: "content-type", Value: "application/json"},
 		{Name: "content-length", Value: fmt.Sprintf("%d", len(body))},
 	}
-	if err := w.WriteHeaders(gohttp.StatusForbidden, headers); err != nil {
+	if err := w.WriteHeaders(httputil.StatusForbidden, headers); err != nil {
 		slog.Debug("failed to write scope block response headers", "error", err)
 		return
 	}
@@ -713,7 +713,7 @@ func (h *Handler) buildOutboundRequest(sc *streamContext) (*gohttp.Request, bool
 	if err != nil {
 		sc.logger.Error("HTTP/2 failed to build upstream request", "error", err)
 		h.recordOutReqError(sc.ctx, sc.srp, err, sc.logger)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return nil, false
 	}
 	// Explicitly set ContentLength since io.NopCloser hides the size from
@@ -748,14 +748,14 @@ func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Reque
 			return outReq, true
 		case intercept.ActionDrop:
 			h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
-			writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+			writeErrorResponse(sc.w, httputil.StatusBadGateway)
 			sc.logger.Info("intercepted HTTP/2 request dropped (raw mode)",
 				"method", sc.req.Method, "url", sc.reqURL.String())
 			return nil, false
 		default:
 			sc.logger.Error("HTTP/2 raw intercept: unknown action type",
 				"action_type", action.Type)
-			writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+			writeErrorResponse(sc.w, httputil.StatusBadGateway)
 			return nil, false
 		}
 	}
@@ -763,7 +763,7 @@ func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Reque
 	switch action.Type {
 	case intercept.ActionDrop:
 		h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		sc.logger.Info("intercepted HTTP/2 request dropped",
 			"method", sc.req.Method, "url", sc.reqURL.String())
 		return nil, false
@@ -781,7 +781,7 @@ func (h *Handler) applyRequestInterceptMods(sc *streamContext, outReq *gohttp.Re
 	outReq, modErr = applyInterceptModifications(outReq, action, sc.reqBody)
 	if modErr != nil {
 		sc.logger.Error("HTTP/2 intercept modification failed", "error", modErr)
-		writeErrorResponse(sc.w, gohttp.StatusBadRequest)
+		writeErrorResponse(sc.w, httputil.StatusBadRequest)
 		return nil, false
 	}
 	if action.OverrideURL != "" && h.TargetScope != nil && h.TargetScope.HasRules() {
@@ -898,7 +898,7 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 		sc.logger.Error("HTTP/2 upstream connection failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return nil, false
 	}
 
@@ -927,7 +927,7 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 		sc.logger.Error("HTTP/2 upstream request failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err, "alpn", cr.ALPN)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return nil, false
 	}
 
@@ -999,7 +999,7 @@ func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outReq *gohttp.Reques
 		sc.logger.Error("HTTP/2 upstream request failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return nil, false
 	}
 	defer resp.Body.Close()
@@ -1031,7 +1031,7 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 	}
 	switch action.Type {
 	case intercept.ActionDrop:
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		sc.logger.Info("intercepted HTTP/2 response dropped",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "status", resp.StatusCode)
 		return nil, nil, false
@@ -1040,7 +1040,7 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 		resp, fullRespBody, modErr = applyResponseModifications(resp, action, fullRespBody)
 		if modErr != nil {
 			sc.logger.Error("HTTP/2 response intercept modification failed", "error", modErr)
-			writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+			writeErrorResponse(sc.w, httputil.StatusBadGateway)
 			return nil, nil, false
 		}
 		return resp, fullRespBody, true

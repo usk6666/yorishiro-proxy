@@ -325,7 +325,7 @@ func mapFormatToHeaders(m map[string]any) parser.RawHeaders {
 // BuildRespondResponse constructs an HTTP response map from a RESPOND action's
 // ResponseData. Returns status code, headers map, and body bytes.
 func BuildRespondResponse(responseData map[string]any) (statusCode int, headers parser.RawHeaders, body []byte) {
-	statusCode = gohttp.StatusOK // default
+	statusCode = httputil.StatusOK // default
 
 	if v, ok := responseData["status_code"]; ok {
 		switch sc := v.(type) {
@@ -353,7 +353,7 @@ func BuildRespondResponse(responseData map[string]any) (statusCode int, headers 
 		}
 	}
 
-	statusCode = validStatusCode(statusCode, gohttp.StatusOK)
+	statusCode = validStatusCode(statusCode, httputil.StatusOK)
 
 	return statusCode, headers, body
 }

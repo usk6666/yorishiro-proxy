@@ -3,11 +3,11 @@ package http2
 import (
 	"bytes"
 	"io"
-	gohttp "net/http"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -26,13 +26,13 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 	rawBytes := action.RawOverride
 	if len(rawBytes) == 0 {
 		sc.logger.Error("HTTP/2 raw forward: no raw bytes to send")
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return
 	}
 
 	if h.h2Transport == nil {
 		sc.logger.Error("HTTP/2 raw forward: h2Transport not configured, cannot forward raw frames")
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return
 	}
 
@@ -50,7 +50,7 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 		sc.logger.Error("HTTP/2 raw forward upstream failed",
 			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
-		writeErrorResponse(sc.w, gohttp.StatusBadGateway)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return
 	}
 
