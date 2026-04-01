@@ -290,7 +290,7 @@ func TestApplyRequestModifications(t *testing.T) {
 		}
 	})
 
-	t.Run("transfer-encoding removed and content-length synced", func(t *testing.T) {
+	t.Run("no body override preserves TE and CL", func(t *testing.T) {
 		req := &parser.RawRequest{
 			Method:     "POST",
 			RequestURI: "/test",
@@ -306,15 +306,16 @@ func TestApplyRequestModifications(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.Headers.Get("Transfer-Encoding") != "" {
-			t.Errorf("Transfer-Encoding should be removed, got %q", got.Headers.Get("Transfer-Encoding"))
+		// Without body override, TE and CL must be preserved as-is.
+		if got.Headers.Get("Transfer-Encoding") != "chunked" {
+			t.Errorf("Transfer-Encoding = %q, want %q (should be preserved without body override)", got.Headers.Get("Transfer-Encoding"), "chunked")
 		}
-		if got.Headers.Get("Content-Length") != "5" {
-			t.Errorf("Content-Length = %q, want %q", got.Headers.Get("Content-Length"), "5")
+		if got.Headers.Get("Content-Length") != "999" {
+			t.Errorf("Content-Length = %q, want %q (should be preserved without body override)", got.Headers.Get("Content-Length"), "999")
 		}
 	})
 
-	t.Run("empty body removes content-length", func(t *testing.T) {
+	t.Run("no body override preserves content-length on empty body", func(t *testing.T) {
 		req := &parser.RawRequest{
 			Method:     "GET",
 			RequestURI: "/test",
@@ -328,8 +329,114 @@ func TestApplyRequestModifications(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		// Without body override, CL must be preserved.
+		if got.Headers.Get("Content-Length") != "42" {
+			t.Errorf("Content-Length = %q, want %q (should be preserved without body override)", got.Headers.Get("Content-Length"), "42")
+		}
+	})
+
+	t.Run("body override syncs CL and removes TE by default", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "POST",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "999"},
+			},
+		}
+		body := "hello"
+		action := intercept.InterceptAction{OverrideBody: &body}
+		got, _, _, err := ApplyRequestModifications(req, []byte("old"), action)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Headers.Get("Transfer-Encoding") != "" {
+			t.Errorf("Transfer-Encoding should be removed on body override, got %q", got.Headers.Get("Transfer-Encoding"))
+		}
+		if got.Headers.Get("Content-Length") != "5" {
+			t.Errorf("Content-Length = %q, want %q", got.Headers.Get("Content-Length"), "5")
+		}
+	})
+
+	t.Run("body override with empty body removes CL", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "POST",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "42"},
+			},
+		}
+		emptyBody := ""
+		action := intercept.InterceptAction{OverrideBody: &emptyBody}
+		got, _, _, err := ApplyRequestModifications(req, []byte("old"), action)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Headers.Get("Transfer-Encoding") != "" {
+			t.Errorf("Transfer-Encoding should be removed, got %q", got.Headers.Get("Transfer-Encoding"))
+		}
 		if got.Headers.Get("Content-Length") != "" {
-			t.Errorf("Content-Length should be removed for empty body, got %q", got.Headers.Get("Content-Length"))
+			t.Errorf("Content-Length should be removed for empty body override, got %q", got.Headers.Get("Content-Length"))
+		}
+	})
+
+	t.Run("AutoContentLength false preserves CL/TE on body override", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "POST",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "999"},
+			},
+		}
+		body := "hello"
+		autoSync := false
+		action := intercept.InterceptAction{
+			OverrideBody:      &body,
+			AutoContentLength: &autoSync,
+		}
+		got, _, _, err := ApplyRequestModifications(req, []byte("old"), action)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// With AutoContentLength=false, TE and CL must be preserved for smuggling tests.
+		if got.Headers.Get("Transfer-Encoding") != "chunked" {
+			t.Errorf("Transfer-Encoding = %q, want %q (AutoContentLength=false)", got.Headers.Get("Transfer-Encoding"), "chunked")
+		}
+		if got.Headers.Get("Content-Length") != "999" {
+			t.Errorf("Content-Length = %q, want %q (AutoContentLength=false)", got.Headers.Get("Content-Length"), "999")
+		}
+	})
+
+	t.Run("AutoContentLength true explicitly syncs CL/TE", func(t *testing.T) {
+		req := &parser.RawRequest{
+			Method:     "POST",
+			RequestURI: "/test",
+			Proto:      "HTTP/1.1",
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "999"},
+			},
+		}
+		body := "hello"
+		autoSync := true
+		action := intercept.InterceptAction{
+			OverrideBody:      &body,
+			AutoContentLength: &autoSync,
+		}
+		got, _, _, err := ApplyRequestModifications(req, []byte("old"), action)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Headers.Get("Transfer-Encoding") != "" {
+			t.Errorf("Transfer-Encoding should be removed, got %q", got.Headers.Get("Transfer-Encoding"))
+		}
+		if got.Headers.Get("Content-Length") != "5" {
+			t.Errorf("Content-Length = %q, want %q", got.Headers.Get("Content-Length"), "5")
 		}
 	})
 
@@ -602,6 +709,59 @@ func TestApplyResponseModifications(t *testing.T) {
 		}
 		if got.Headers.Get("Content-Length") != "" {
 			t.Errorf("Content-Length should be removed for empty body, got %q", got.Headers.Get("Content-Length"))
+		}
+	})
+
+	t.Run("response body override AutoContentLength false preserves CL/TE", func(t *testing.T) {
+		resp := &parser.RawResponse{
+			StatusCode: 200,
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "999"},
+			},
+		}
+		body := "new body"
+		autoSync := false
+		action := intercept.InterceptAction{
+			OverrideResponseBody: &body,
+			AutoContentLength:    &autoSync,
+		}
+		got, gotBody, err := ApplyResponseModifications(resp, action, []byte("old"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(gotBody) != "new body" {
+			t.Errorf("body = %q, want %q", string(gotBody), "new body")
+		}
+		// With AutoContentLength=false, TE and CL must be preserved.
+		if got.Headers.Get("Transfer-Encoding") != "chunked" {
+			t.Errorf("Transfer-Encoding = %q, want %q (AutoContentLength=false)", got.Headers.Get("Transfer-Encoding"), "chunked")
+		}
+		if got.Headers.Get("Content-Length") != "999" {
+			t.Errorf("Content-Length = %q, want %q (AutoContentLength=false)", got.Headers.Get("Content-Length"), "999")
+		}
+	})
+
+	t.Run("no response body override preserves CL/TE", func(t *testing.T) {
+		resp := &parser.RawResponse{
+			StatusCode: 200,
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "42"},
+			},
+		}
+		action := intercept.InterceptAction{
+			OverrideStatus: 201,
+		}
+		got, _, err := ApplyResponseModifications(resp, action, []byte("body"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Headers.Get("Transfer-Encoding") != "chunked" {
+			t.Errorf("Transfer-Encoding = %q, want %q (no body override)", got.Headers.Get("Transfer-Encoding"), "chunked")
+		}
+		if got.Headers.Get("Content-Length") != "42" {
+			t.Errorf("Content-Length = %q, want %q (no body override)", got.Headers.Get("Content-Length"), "42")
 		}
 	})
 

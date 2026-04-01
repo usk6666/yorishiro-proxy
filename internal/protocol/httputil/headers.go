@@ -88,14 +88,18 @@ func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action 
 
 	if action.OverrideBody != nil {
 		bodyBytes = []byte(*action.OverrideBody)
-	}
 
-	// Sync Content-Length and Transfer-Encoding headers with the actual body.
-	req.Headers.Del("Transfer-Encoding")
-	if len(bodyBytes) > 0 {
-		req.Headers.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
-	} else {
-		req.Headers.Del("Content-Length")
+		// Sync Content-Length and Transfer-Encoding headers with the actual body,
+		// but only when AutoContentLength is enabled (default: true).
+		// When disabled, pentesters can craft intentional CL/TE conflicts.
+		if autoContentLength(action.AutoContentLength) {
+			req.Headers.Del("Transfer-Encoding")
+			if len(bodyBytes) > 0 {
+				req.Headers.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			} else {
+				req.Headers.Del("Content-Length")
+			}
+		}
 	}
 
 	req.Body = bytes.NewReader(bodyBytes)
@@ -128,16 +132,29 @@ func ApplyResponseModifications(resp *parser.RawResponse, action intercept.Inter
 
 	if action.OverrideResponseBody != nil {
 		body = []byte(*action.OverrideResponseBody)
-		resp.Headers.Del("Transfer-Encoding")
-		if len(body) > 0 {
-			resp.Headers.Set("Content-Length", strconv.Itoa(len(body)))
-		} else {
-			resp.Headers.Del("Content-Length")
+		// Sync Content-Length and Transfer-Encoding headers with the actual body,
+		// but only when AutoContentLength is enabled (default: true).
+		if autoContentLength(action.AutoContentLength) {
+			resp.Headers.Del("Transfer-Encoding")
+			if len(body) > 0 {
+				resp.Headers.Set("Content-Length", strconv.Itoa(len(body)))
+			} else {
+				resp.Headers.Del("Content-Length")
+			}
 		}
 		resp.Body = bytes.NewReader(body)
 	}
 
 	return resp, body, nil
+}
+
+// autoContentLength returns the effective value of the AutoContentLength flag.
+// When the pointer is nil, the default is true (auto-sync enabled).
+func autoContentLength(flag *bool) bool {
+	if flag == nil {
+		return true
+	}
+	return *flag
 }
 
 // validateURL validates a URL override string and enforces http/https-only
