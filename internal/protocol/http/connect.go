@@ -264,7 +264,7 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 
 	fullRespBody, fwd.resp.Headers = h.ApplyOutputFilter(fullRespBody, fwd.resp.Headers, logger)
 
-	if err := writeRawResponse(conn, fwd.resp, fullRespBody); err != nil {
+	if err := writeRawResponse(conn, fwd.resp, fullRespBody, true); err != nil {
 		return fmt.Errorf("write response: %w", err)
 	}
 
@@ -601,11 +601,11 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	respSnap := snapshotRawResponse(fwd.resp.StatusCode, fwd.resp.Headers, fullRespBody)
 
-	var respDropped bool
-	fwd.resp, fullRespBody, respDropped = h.applyInterceptResponse(ctx, conn, req, reqURL, fwd.resp, fullRespBody, logger)
-	if respDropped {
+	rir := h.applyInterceptResponse(ctx, conn, req, reqURL, fwd.resp, fullRespBody, logger)
+	if rir.dropped {
 		return nil
 	}
+	fwd.resp, fullRespBody = rir.resp, rir.body
 
 	// Plugin hook: on_before_send_to_client.
 	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
@@ -616,7 +616,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 
 	fullRespBody, fwd.resp.Headers = h.ApplyOutputFilter(fullRespBody, fwd.resp.Headers, logger)
 
-	if err := writeRawResponse(conn, fwd.resp, fullRespBody); err != nil {
+	if err := writeRawResponse(conn, fwd.resp, fullRespBody, rir.autoContentLength); err != nil {
 		return fmt.Errorf("write response: %w", err)
 	}
 
