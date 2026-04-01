@@ -27,7 +27,12 @@ func TestSnapshotRequest_H2(t *testing.T) {
 	snap := snapshotRequest(headers, body)
 
 	// Verify deep copy: modifying original should not affect snapshot.
-	headers[0].Value = "text/plain"
+	for i := range headers {
+		if headers[i].Name == "content-type" {
+			headers[i].Value = "text/plain"
+			break
+		}
+	}
 	body[0] = 'X'
 
 	// Find content-type in snapshot.

@@ -1078,7 +1078,7 @@ func (h *Handler) applyOutputFilterHpackHeaders(headers []hpack.HeaderField, log
 		}
 	}
 	for _, h := range rh {
-		result = append(result, hpack.HeaderField{Name: h.Name, Value: h.Value})
+		result = append(result, hpack.HeaderField{Name: strings.ToLower(h.Name), Value: h.Value})
 	}
 	return result
 }
@@ -1093,7 +1093,7 @@ func (h *Handler) applyOutputFilterHpackTrailers(trailers []hpack.HeaderField, l
 	rh = h.ApplyOutputFilterHeaders(rh, logger)
 	var result []hpack.HeaderField
 	for _, h := range rh {
-		result = append(result, hpack.HeaderField{Name: h.Name, Value: h.Value})
+		result = append(result, hpack.HeaderField{Name: strings.ToLower(h.Name), Value: h.Value})
 	}
 	return result
 }
