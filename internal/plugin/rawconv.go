@@ -15,8 +15,8 @@ import (
 // duplicate header distinction that would be lost via the gohttp.Request path.
 //
 // The headers field uses an ordered array format: []map[string]any where each
-// element has "name" and "value" keys. This differs from HTTPRequestToMap which
-// uses map[string][]any (lossy: no order, normalized casing).
+// element has "name" and "value" keys. This is a lossless format that preserves
+// order, casing, and duplicate header distinction.
 func RawRequestToMap(req *parser.RawRequest, body []byte, connInfo *ConnInfo, protocol string) map[string]any {
 	if req == nil {
 		return map[string]any{}
@@ -162,7 +162,7 @@ func ApplyRawRequestChanges(req *parser.RawRequest, data map[string]any) (*parse
 // applyRawURL updates the request URI from the data map if present.
 // Only http, https, and empty schemes are allowed to prevent SSRF.
 func applyRawURL(req *parser.RawRequest, data map[string]any) error {
-	// Prefer "url" key (same as HTTPRequestToMap).
+	// Prefer "url" key.
 	v, ok := data["url"].(string)
 	if !ok || v == "" {
 		// Fall back to "request_uri" key.

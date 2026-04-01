@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -46,13 +47,14 @@ func setupPluginEngine(t *testing.T, scriptPath, protocol string, hooks []string
 }
 
 func TestPluginHook_H2_OnReceiveFromClient_Continue(t *testing.T) {
-	// Plugin adds X-Plugin-H2 header and continues.
+	// Plugin adds x-plugin-h2 header and continues (ordered array format).
 	script := writeStarlarkScript(t, "add_header.star", `
 def on_receive_from_client(data):
     if data["protocol"] != "h2":
         return {"action": "CONTINUE", "data": data}
-    headers = data["headers"]
-    headers["X-Plugin-H2"] = ["h2-value"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-plugin-h2", "value": "h2-value"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -178,8 +180,9 @@ def on_receive_from_client(data):
 func TestPluginHook_H2_OnBeforeSendToServer_ModifyRequest(t *testing.T) {
 	script := writeStarlarkScript(t, "modify_before_send.star", `
 def on_before_send_to_server(data):
-    headers = data["headers"]
-    headers["X-Before-Send-H2"] = ["added-by-plugin"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-before-send-h2", "value": "added-by-plugin"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -225,8 +228,9 @@ def on_before_send_to_server(data):
 func TestPluginHook_H2_OnReceiveFromServer_ModifyResponse(t *testing.T) {
 	script := writeStarlarkScript(t, "modify_response.star", `
 def on_receive_from_server(data):
-    headers = data["headers"]
-    headers["X-Plugin-Response-H2"] = ["modified"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-plugin-response-h2", "value": "modified"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -271,8 +275,9 @@ def on_receive_from_server(data):
 func TestPluginHook_H2_OnBeforeSendToClient_ModifyResponse(t *testing.T) {
 	script := writeStarlarkScript(t, "modify_before_client.star", `
 def on_before_send_to_client(data):
-    headers = data["headers"]
-    headers["X-Before-Client-H2"] = ["final-touch"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-before-client-h2", "value": "final-touch"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -369,8 +374,9 @@ func TestPluginHook_H2_ProtocolField(t *testing.T) {
 	script := writeStarlarkScript(t, "check_protocol.star", `
 def on_receive_from_client(data):
     proto = data["protocol"]
-    headers = data["headers"]
-    headers["X-Protocol"] = [proto]
+    headers = list(data["headers"])
+    headers.append({"name": "x-protocol", "value": proto})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -463,8 +469,9 @@ func TestPluginHook_H2_RawFramesAbsentViaH2CHelper(t *testing.T) {
 def on_receive_from_client(data):
     raw = data.get("raw_frames", None)
     if raw != None:
-        headers = data["headers"]
-        headers["X-Frame-Count"] = [str(len(raw))]
+        headers = list(data["headers"])
+        headers.append({"name": "x-frame-count", "value": str(len(raw))})
+        data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -515,8 +522,9 @@ func TestPluginHook_H2_NoRawFramesBackwardCompat(t *testing.T) {
 	script := writeStarlarkScript(t, "no_raw_frames.star", `
 def on_receive_from_client(data):
     # Plugin ignores raw_frames entirely — backward compatible.
-    headers = data["headers"]
-    headers["X-Compat"] = ["ok"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-compat", "value": "ok"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -558,12 +566,128 @@ def on_receive_from_client(data):
 	}
 }
 
+func TestApplyH2RequestFields_CONNECTPseudoHeaders(t *testing.T) {
+	// RFC 9113 §8.5: CONNECT requests MUST include only :method and :authority.
+	// :scheme and :path MUST NOT be present.
+	tests := []struct {
+		name            string
+		method          string
+		scheme          string
+		authority       string
+		path            string
+		wantScheme      bool
+		wantPath        bool
+		wantPseudoNames []string
+	}{
+		{
+			name:            "normal GET includes all pseudo-headers",
+			method:          "GET",
+			scheme:          "https",
+			authority:       "example.com",
+			path:            "/foo",
+			wantScheme:      true,
+			wantPath:        true,
+			wantPseudoNames: []string{":method", ":scheme", ":authority", ":path"},
+		},
+		{
+			name:            "CONNECT omits :scheme and :path",
+			method:          "CONNECT",
+			scheme:          "",
+			authority:       "example.com:443",
+			path:            "",
+			wantScheme:      false,
+			wantPath:        false,
+			wantPseudoNames: []string{":method", ":authority"},
+		},
+		{
+			name:            "CONNECT with scheme still omits :scheme",
+			method:          "CONNECT",
+			scheme:          "https",
+			authority:       "example.com:443",
+			path:            "",
+			wantScheme:      false,
+			wantPath:        false,
+			wantPseudoNames: []string{":method", ":authority"},
+		},
+		{
+			name:            "extended CONNECT (RFC 8441) includes :path when non-empty",
+			method:          "CONNECT",
+			scheme:          "",
+			authority:       "example.com",
+			path:            "/ws",
+			wantScheme:      false,
+			wantPath:        true,
+			wantPseudoNames: []string{":method", ":authority", ":path"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &h2Request{}
+			regularHeaders := []hpack.HeaderField{
+				{Name: "content-type", Value: "text/plain"},
+			}
+
+			applyH2RequestFields(req, tt.method, tt.scheme, tt.authority, tt.path, regularHeaders)
+
+			// Collect pseudo-header names from AllHeaders.
+			var pseudoNames []string
+			for _, hf := range req.AllHeaders {
+				if strings.HasPrefix(hf.Name, ":") {
+					pseudoNames = append(pseudoNames, hf.Name)
+				}
+			}
+
+			if len(pseudoNames) != len(tt.wantPseudoNames) {
+				t.Fatalf("pseudo-headers = %v, want %v", pseudoNames, tt.wantPseudoNames)
+			}
+			for i, name := range pseudoNames {
+				if name != tt.wantPseudoNames[i] {
+					t.Errorf("pseudo-header[%d] = %q, want %q", i, name, tt.wantPseudoNames[i])
+				}
+			}
+
+			// Verify :scheme presence.
+			hasScheme := false
+			hasPath := false
+			for _, hf := range req.AllHeaders {
+				if hf.Name == ":scheme" {
+					hasScheme = true
+				}
+				if hf.Name == ":path" {
+					hasPath = true
+				}
+			}
+			if hasScheme != tt.wantScheme {
+				t.Errorf(":scheme present = %v, want %v", hasScheme, tt.wantScheme)
+			}
+			if hasPath != tt.wantPath {
+				t.Errorf(":path present = %v, want %v", hasPath, tt.wantPath)
+			}
+
+			// Regular headers should always be present after pseudo-headers.
+			lastPseudo := -1
+			for i, hf := range req.AllHeaders {
+				if strings.HasPrefix(hf.Name, ":") {
+					lastPseudo = i
+				}
+			}
+			for i, hf := range req.AllHeaders {
+				if !strings.HasPrefix(hf.Name, ":") && i <= lastPseudo {
+					t.Errorf("regular header %q at index %d before last pseudo-header at %d", hf.Name, i, lastPseudo)
+				}
+			}
+		})
+	}
+}
+
 func TestPluginHook_H2_FlowRecording_WithPlugin(t *testing.T) {
 	// Integration test: plugin adds a header, request flows through, and flow is recorded.
 	script := writeStarlarkScript(t, "record_test.star", `
 def on_receive_from_client(data):
-    headers = data["headers"]
-    headers["X-Plugin-Trace"] = ["traced"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-plugin-trace", "value": "traced"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
