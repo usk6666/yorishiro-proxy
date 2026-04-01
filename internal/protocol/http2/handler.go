@@ -316,6 +316,12 @@ type streamContext struct {
 	// http.Transport.RoundTrip. Set by handleRequestIntercept.
 	interceptRawAction *intercept.InterceptAction
 
+	// respAutoContentLength controls CL/TE normalization in the response write
+	// path. true (default) = recalculate CL and strip TE; false = passthrough.
+	// Set by handleResponseIntercept when the intercept action has
+	// AutoContentLength=false.
+	respAutoContentLength bool
+
 	// Plugin state shared across hooks for this stream.
 	pluginConnInfo *plugin.ConnInfo
 	txCtx          map[string]any
@@ -412,17 +418,18 @@ func (h *Handler) initStreamContext(
 	}
 
 	return &streamContext{
-		ctx:              ctx,
-		w:                w,
-		h2req:            h2req,
-		req:              goReq,
-		connID:           connID,
-		clientAddr:       clientAddr,
-		connectAuthority: connectAuthority,
-		tlsMeta:          tlsMeta,
-		logger:           logger,
-		start:            time.Now(),
-		reqRawFrames:     rawFramesFromContext(ctx),
+		ctx:                   ctx,
+		w:                     w,
+		h2req:                 h2req,
+		req:                   goReq,
+		connID:                connID,
+		clientAddr:            clientAddr,
+		connectAuthority:      connectAuthority,
+		tlsMeta:               tlsMeta,
+		logger:                logger,
+		start:                 time.Now(),
+		reqRawFrames:          rawFramesFromContext(ctx),
+		respAutoContentLength: true,
 	}
 }
 
@@ -1074,6 +1081,10 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 	if !intercepted {
 		return resp, fullRespBody, true
 	}
+
+	// Propagate AutoContentLength flag to the write path.
+	sc.respAutoContentLength = httputil.AutoContentLength(action.AutoContentLength)
+
 	switch action.Type {
 	case intercept.ActionDrop:
 		writeErrorResponse(sc.w, httputil.StatusBadGateway)
@@ -1104,6 +1115,11 @@ func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *gohttp.Respons
 
 // writeResponseToClient writes the HTTP response headers, body, and trailers
 // to the client using h2ResponseWriter for direct HPACK encoding.
+//
+// When sc.respAutoContentLength is true (default), Content-Length is
+// recalculated to match the actual body. When false (intercept with flag
+// disabled), Content-Length is preserved as-is to allow intentional CL
+// mismatches for pentest scenarios.
 func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte) {
 	// Remove HTTP/1.1 hop-by-hop headers from the upstream response before
 	// writing to the HTTP/2 client. These headers are invalid in HTTP/2
@@ -1113,19 +1129,20 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 
 	// RFC 9110 §6.4.1: 1xx, 204, 205, and 304 responses must not contain a body.
 	// Strip Content-Length and suppress DATA frames for these statuses.
+	// This RFC-mandated behavior is always applied regardless of the flag.
 	noBody := isNoBodyStatus(resp.StatusCode)
 	if noBody {
 		resp.Header.Del("Content-Length")
 		body = nil
-	} else if len(body) > 0 {
-		// Recalculate Content-Length to match the actual body bytes being sent.
-		// The body may have been modified by transform/intercept/output-filter
-		// after the upstream response was received, making the original
-		// Content-Length incorrect.
-		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	} else {
-		resp.Header.Del("Content-Length")
+	} else if sc.respAutoContentLength {
+		// Default: recalculate Content-Length to match the actual body bytes.
+		if len(body) > 0 {
+			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		} else {
+			resp.Header.Del("Content-Length")
+		}
 	}
+	// When !sc.respAutoContentLength && !noBody: preserve headers as-is.
 
 	// Convert response headers to hpack fields.
 	respHeaders := goHTTPHeaderToHpack(resp.Header)

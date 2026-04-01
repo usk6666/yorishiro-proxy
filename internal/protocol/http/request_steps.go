@@ -209,31 +209,44 @@ func (h *Handler) interceptResponse(ctx context.Context, req *parser.RawRequest,
 }
 
 // applyInterceptResponse checks response intercept rules and applies modifications.
-func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, resp *parser.RawResponse, body []byte, logger *slog.Logger) (*parser.RawResponse, []byte, bool) {
+// responseInterceptResult holds the outcome of applyInterceptResponse,
+// including the AutoContentLength flag from the intercept action.
+type responseInterceptResult struct {
+	resp    *parser.RawResponse
+	body    []byte
+	dropped bool
+	// autoContentLength controls CL/TE normalization in the write path.
+	// true (default) = recalculate CL and strip TE; false = passthrough.
+	autoContentLength bool
+}
+
+func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, resp *parser.RawResponse, body []byte, logger *slog.Logger) responseInterceptResult {
 	action, intercepted := h.interceptResponse(ctx, req, reqURL, resp, body, logger)
 	if !intercepted {
-		return resp, body, false
+		return responseInterceptResult{resp: resp, body: body, autoContentLength: true}
 	}
+
+	acl := httputil.AutoContentLength(action.AutoContentLength)
 
 	switch action.Type {
 	case intercept.ActionDrop:
 		writeHTTPError(conn, statusBadGateway, logger)
 		logger.Info("intercepted response dropped",
 			"method", req.Method, "url", reqURL.String(), "status", resp.StatusCode)
-		return resp, body, true
+		return responseInterceptResult{resp: resp, body: body, dropped: true, autoContentLength: acl}
 	case intercept.ActionModifyAndForward:
 		modResp, modBody, modErr := httputil.ApplyResponseModificationsRaw(resp, body, action)
 		if modErr != nil {
 			logger.Error("response intercept modification failed", "error", modErr)
 			writeHTTPError(conn, statusBadGateway, logger)
-			return resp, body, true
+			return responseInterceptResult{resp: resp, body: body, dropped: true, autoContentLength: acl}
 		}
-		return modResp, modBody, false
+		return responseInterceptResult{resp: modResp, body: modBody, autoContentLength: acl}
 	case intercept.ActionRelease:
-		// Continue with the original response.
+		// Continue with the original response, but respect the flag.
 	}
 
-	return resp, body, false
+	return responseInterceptResult{resp: resp, body: body, autoContentLength: acl}
 }
 
 // requestSnapshot holds a copy of the request headers and body taken before

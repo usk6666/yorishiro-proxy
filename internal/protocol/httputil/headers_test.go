@@ -938,3 +938,27 @@ func containsSubstr(s, substr string) bool {
 	}
 	return false
 }
+
+func TestAutoContentLength(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name string
+		flag *bool
+		want bool
+	}{
+		{name: "nil defaults to true", flag: nil, want: true},
+		{name: "true returns true", flag: &trueVal, want: true},
+		{name: "false returns false", flag: &falseVal, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AutoContentLength(tt.flag)
+			if got != tt.want {
+				t.Errorf("AutoContentLength(%v) = %v, want %v", tt.flag, got, tt.want)
+			}
+		})
+	}
+}

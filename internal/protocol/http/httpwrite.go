@@ -26,16 +26,18 @@ func writeHTTPError(conn net.Conn, code int, logger *slog.Logger) {
 // writeRawResponse writes a parser.RawResponse to a net.Conn. The body bytes
 // are provided separately because resp.Body may have been consumed.
 //
-// This replaces the old writeResponse(conn, *gohttp.Response, body) function
-// and writeResponseToClient.
-func writeRawResponse(conn net.Conn, resp *parser.RawResponse, body []byte) error {
+// When autoContentLength is true (default for non-intercept paths),
+// Content-Length is recalculated to match the actual body length and
+// Transfer-Encoding is removed. When false (intercept with flag disabled),
+// headers are preserved as-is to allow intentional CL/TE mismatches.
+func writeRawResponse(conn net.Conn, resp *parser.RawResponse, body []byte, autoContentLength bool) error {
 	w := bufio.NewWriter(conn)
 
 	if _, err := fmt.Fprintf(w, "%s\r\n", buildStatusLine(resp)); err != nil {
 		return err
 	}
 
-	if err := writeResponseHeaders(w, resp.Headers, len(body)); err != nil {
+	if err := writeResponseHeaders(w, resp.Headers, len(body), autoContentLength); err != nil {
 		return err
 	}
 
@@ -65,9 +67,21 @@ func buildStatusLine(resp *parser.RawResponse) string {
 	return fmt.Sprintf("%s %d %s", proto, resp.StatusCode, text)
 }
 
-// writeResponseHeaders writes response headers, replacing Content-Length with
-// the actual body length and removing Transfer-Encoding.
-func writeResponseHeaders(w *bufio.Writer, headers parser.RawHeaders, bodyLen int) error {
+// writeResponseHeaders writes response headers. When autoContentLength is true,
+// Content-Length is replaced with the actual body length and Transfer-Encoding
+// is removed (default behavior). When false, all headers are written as-is,
+// preserving any intentional CL/TE mismatches set by the pentester.
+func writeResponseHeaders(w *bufio.Writer, headers parser.RawHeaders, bodyLen int, autoContentLength bool) error {
+	if !autoContentLength {
+		// Passthrough mode: write headers exactly as-is.
+		for _, h := range headers {
+			if _, err := fmt.Fprintf(w, "%s: %s\r\n", h.Name, h.Value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	wroteContentLength := false
 	for _, h := range headers {
 		lower := toLower(h.Name)

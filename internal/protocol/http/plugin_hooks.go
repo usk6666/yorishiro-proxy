@@ -169,5 +169,5 @@ func writePluginResponseRaw(conn net.Conn, statusCode int, headers parser.RawHea
 	}
 	resp.Headers.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	resp.Headers.Set("Connection", "close")
-	return writeRawResponse(conn, resp, body)
+	return writeRawResponse(conn, resp, body, true)
 }

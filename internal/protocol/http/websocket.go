@@ -93,7 +93,7 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *parse
 	if resp.StatusCode != statusSwitchingProtocols {
 		logger.Warn("websocket upgrade rejected by upstream", "status", resp.StatusCode)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		writeRawResponse(conn, resp, body)
+		writeRawResponse(conn, resp, body, true)
 		return nil
 	}
 
@@ -199,7 +199,7 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 	if resp.StatusCode != statusSwitchingProtocols {
 		logger.Warn("wss websocket upgrade rejected by upstream", "status", resp.StatusCode)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		writeRawResponse(conn, resp, body)
+		writeRawResponse(conn, resp, body, true)
 		return nil
 	}
 
