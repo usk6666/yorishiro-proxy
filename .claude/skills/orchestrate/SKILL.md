@@ -352,11 +352,17 @@ gh api repos/{owner}/{repo}/pulls/<PR number>/comments \
 
 Format as `COPILOT_FINDINGS` with severity inferred from comment content (security→HIGH, bug→MEDIUM, style→LOW).
 
-**Step B: Aggregate Verdict**
+**Step B: MITM Compatibility Triage + Aggregate Verdict**
+
+Before aggregating, apply MITM Compatibility Triage to **all findings** (Claude + Copilot).
+Reject findings that conflict with MITM proxy design principles (header deduplication,
+Host=URL enforcement, canonicalization, reordering, `net/http` type usage in data path).
+See the detailed triage rules in `/review-gate` SKILL.md Phase 3-3.5.
+Remove `REJECTED_MITM` findings from the lists passed to the Fixer; include them in the final report.
 
 Extract `VERDICT:` and `FINDINGS:` from each Claude agent's output, plus Copilot findings:
-- Both `APPROVED` with no findings and no Copilot findings → Review complete for this PR
-- Both `APPROVED` but LOW or higher findings (or Copilot findings) → Step C-1 (Fix only, no re-review)
+- Both `APPROVED` with no findings and no Copilot findings (after triage) → Review complete for this PR
+- Both `APPROVED` but LOW or higher findings (or Copilot findings) remain after triage → Step C-1 (Fix only, no re-review)
 - Either `CHANGES_REQUESTED` → Step C-2 (Fix + re-review)
 
 **Step C-1: Fix Only (APPROVED_WITH_FINDINGS)**
