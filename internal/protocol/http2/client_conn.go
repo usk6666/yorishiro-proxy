@@ -16,6 +16,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // clientMagic is the HTTP/2 connection preface that clients must send.
@@ -894,7 +895,7 @@ func (rw *frameResponseWriter) Write(data []byte) (int, error) {
 	rw.mu.Lock()
 	if !rw.wroteHeader {
 		rw.mu.Unlock()
-		rw.WriteHeader(gohttp.StatusOK)
+		rw.WriteHeader(httputil.StatusOK)
 		rw.mu.Lock()
 	}
 	rw.mu.Unlock()
@@ -924,7 +925,7 @@ func (rw *frameResponseWriter) Flush() {
 	rw.mu.Lock()
 	if !rw.wroteHeader {
 		rw.mu.Unlock()
-		rw.WriteHeader(gohttp.StatusOK)
+		rw.WriteHeader(httputil.StatusOK)
 	} else {
 		rw.mu.Unlock()
 	}
@@ -1075,7 +1076,7 @@ func (rw *frameResponseWriter) writeDataChunked(p []byte) (int, error) {
 func (rw *frameResponseWriter) finish() {
 	rw.mu.Lock()
 	if !rw.wroteHeader {
-		rw.statusCode = gohttp.StatusOK
+		rw.statusCode = httputil.StatusOK
 		rw.wroteHeader = true
 	}
 	headersSent := rw.headersSent
