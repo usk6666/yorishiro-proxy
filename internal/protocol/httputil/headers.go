@@ -107,23 +107,33 @@ func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action 
 // action directly on a RawResponse. It validates status code range, CRLF
 // injection, and then applies status/header/body overrides.
 func ApplyResponseModifications(resp *parser.RawResponse, action intercept.InterceptAction, body []byte) (*parser.RawResponse, []byte, error) {
+	// Validate all inputs before mutating the response.
 	if action.OverrideStatus > 0 {
 		if action.OverrideStatus < 100 || action.OverrideStatus > 999 {
 			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
 		}
-		resp.StatusCode = action.OverrideStatus
-		resp.Status = FormatStatus(action.OverrideStatus)
 	}
 
 	if err := ValidateCRLFHeaders(action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders); err != nil {
 		return resp, body, fmt.Errorf("response %w", err)
 	}
 
+	// All validations passed — apply mutations.
+	if action.OverrideStatus > 0 {
+		resp.StatusCode = action.OverrideStatus
+		resp.Status = FormatStatus(action.OverrideStatus)
+	}
+
 	ApplyHeaderModifications(&resp.Headers, action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders)
 
 	if action.OverrideResponseBody != nil {
 		body = []byte(*action.OverrideResponseBody)
-		resp.Headers.Set("Content-Length", strconv.Itoa(len(body)))
+		resp.Headers.Del("Transfer-Encoding")
+		if len(body) > 0 {
+			resp.Headers.Set("Content-Length", strconv.Itoa(len(body)))
+		} else {
+			resp.Headers.Del("Content-Length")
+		}
 	}
 
 	return resp, body, nil

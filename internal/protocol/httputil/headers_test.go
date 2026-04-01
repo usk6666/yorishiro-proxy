@@ -532,6 +532,79 @@ func TestApplyResponseModifications(t *testing.T) {
 		}
 	})
 
+	t.Run("CRLF validation before status mutation", func(t *testing.T) {
+		resp := &parser.RawResponse{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Headers:    parser.RawHeaders{},
+		}
+		action := intercept.InterceptAction{
+			OverrideStatus:          403,
+			OverrideResponseHeaders: map[string]string{"X-Bad\r\n": "val"},
+		}
+		_, _, err := ApplyResponseModifications(resp, action, nil)
+		if err == nil {
+			t.Fatal("expected CRLF error")
+		}
+		// Status must not be mutated when validation fails.
+		if resp.StatusCode != 200 {
+			t.Errorf("StatusCode = %d, want 200 (should not be mutated on validation error)", resp.StatusCode)
+		}
+		if resp.Status != "200 OK" {
+			t.Errorf("Status = %q, want %q (should not be mutated on validation error)", resp.Status, "200 OK")
+		}
+	})
+
+	t.Run("response body override removes transfer-encoding", func(t *testing.T) {
+		resp := &parser.RawResponse{
+			StatusCode: 200,
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "999"},
+			},
+		}
+		body := "new body"
+		action := intercept.InterceptAction{OverrideResponseBody: &body}
+		got, gotBody, err := ApplyResponseModifications(resp, action, []byte("old"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(gotBody) != "new body" {
+			t.Errorf("body = %q, want %q", string(gotBody), "new body")
+		}
+		if got.Headers.Get("Transfer-Encoding") != "" {
+			t.Errorf("Transfer-Encoding should be removed, got %q", got.Headers.Get("Transfer-Encoding"))
+		}
+		if got.Headers.Get("Content-Length") != "8" {
+			t.Errorf("Content-Length = %q, want %q", got.Headers.Get("Content-Length"), "8")
+		}
+	})
+
+	t.Run("response body override with empty body removes content-length", func(t *testing.T) {
+		resp := &parser.RawResponse{
+			StatusCode: 200,
+			Headers: parser.RawHeaders{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+				{Name: "Content-Length", Value: "42"},
+			},
+		}
+		emptyBody := ""
+		action := intercept.InterceptAction{OverrideResponseBody: &emptyBody}
+		got, gotBody, err := ApplyResponseModifications(resp, action, []byte("old"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(gotBody) != "" {
+			t.Errorf("body = %q, want empty", string(gotBody))
+		}
+		if got.Headers.Get("Transfer-Encoding") != "" {
+			t.Errorf("Transfer-Encoding should be removed, got %q", got.Headers.Get("Transfer-Encoding"))
+		}
+		if got.Headers.Get("Content-Length") != "" {
+			t.Errorf("Content-Length should be removed for empty body, got %q", got.Headers.Get("Content-Length"))
+		}
+	})
+
 	t.Run("invalid status above 999", func(t *testing.T) {
 		resp := &parser.RawResponse{
 			StatusCode: 200,
