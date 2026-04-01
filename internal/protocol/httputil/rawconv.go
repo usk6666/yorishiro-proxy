@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 
 // RawRequestToHTTP converts a parser.RawRequest to a *net/http.Request.
@@ -148,25 +147,10 @@ func HTTPResponseToRaw(resp *gohttp.Response, bodyBytes []byte) *parser.RawRespo
 	return raw
 }
 
-// GoHTTPRequest is a type alias for net/http.Request, exported so that
-// callers in internal/protocol/http/ can reference the type without
-// importing net/http directly.
-type GoHTTPRequest = gohttp.Request
-
 // GoHTTPResponse is a type alias for net/http.Response, exported so that
 // callers in internal/protocol/http/ can reference the type without
 // importing net/http directly.
 type GoHTTPResponse = gohttp.Response
-
-// GoHTTPHeader is a type alias for net/http.Header.
-type GoHTTPHeader = gohttp.Header
-
-// ApplyRequestModificationsRaw applies intercept modifications to a
-// parser.RawRequest and returns the modified RawRequest plus body.
-// It operates directly on the RawRequest without gohttp conversion.
-func ApplyRequestModificationsRaw(req *parser.RawRequest, bodyBytes []byte, action intercept.InterceptAction) (*parser.RawRequest, []byte, *url.URL, error) {
-	return ApplyRequestModifications(req, bodyBytes, action)
-}
 
 // HTTPRequestToRaw converts a *net/http.Request back to a parser.RawRequest.
 func HTTPRequestToRaw(goReq *gohttp.Request, bodyBytes []byte) *parser.RawRequest {
@@ -199,11 +183,4 @@ func HTTPRequestToRaw(goReq *gohttp.Request, bodyBytes []byte) *parser.RawReques
 		Headers:    headers,
 		Body:       bytes.NewReader(bodyBytes),
 	}
-}
-
-// ApplyResponseModificationsRaw applies intercept modifications to a
-// parser.RawResponse and returns the modified RawResponse plus body.
-// It operates directly on the RawResponse without gohttp conversion.
-func ApplyResponseModificationsRaw(resp *parser.RawResponse, body []byte, action intercept.InterceptAction) (*parser.RawResponse, []byte, error) {
-	return ApplyResponseModifications(resp, action, body)
 }
