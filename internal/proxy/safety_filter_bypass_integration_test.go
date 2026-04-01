@@ -539,7 +539,7 @@ func TestSafetyFilterBypass_InputFilter_HeaderSQL(t *testing.T) {
 	targetURL := fmt.Sprintf("http://%s/api/data", addr)
 
 	// Create request with destructive SQL in a custom header.
-	req, err := gohttp.NewRequestWithContext(context.Background(), "GET", targetURL, nil)
+	req, err := gohttp.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
