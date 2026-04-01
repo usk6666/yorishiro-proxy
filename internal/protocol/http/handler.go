@@ -365,8 +365,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	bodyResult := readAndCaptureBody(req, logger)
 
 	// Safety filter enforcement.
-	safetyHeaders := httputil.RawHeadersToHTTPHeader(req.Headers)
-	if violation := h.CheckSafetyFilter(bodyResult.recordBody, reqURL.String(), safetyHeaders); violation != nil {
+	if violation := h.CheckSafetyFilter(bodyResult.recordBody, reqURL.String(), req.Headers); violation != nil {
 		if h.SafetyFilterAction(violation) == safety.ActionBlock {
 			h.writeSafetyFilterResponse(conn, violation, logger)
 			h.recordBlockedSession(ctx, req, reqURL, bodyResult.recordBody, req.RawBytes, bodyResult.truncated, req.Anomalies, start, connID, clientAddr, "safety_filter", violation, logger)
@@ -486,9 +485,7 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	copy(rawRespBody, fullRespBody)
 
 	// Output filter: mask sensitive data.
-	goHeaders := httputil.RawHeadersToHTTPHeader(fwd.resp.Headers)
-	fullRespBody, goHeaders = h.ApplyOutputFilter(fullRespBody, goHeaders, logger)
-	fwd.resp.Headers = httputil.HTTPHeaderToRawHeaders(goHeaders)
+	fullRespBody, fwd.resp.Headers = h.ApplyOutputFilter(fullRespBody, fwd.resp.Headers, logger)
 
 	if err := writeRawResponse(conn, fwd.resp, fullRespBody); err != nil {
 		return fmt.Errorf("write response: %w", err)

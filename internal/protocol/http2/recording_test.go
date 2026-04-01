@@ -837,7 +837,7 @@ func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
 	originalBody := []byte(`{"key":"original"}`)
 	modifiedBody := []byte(`{"key":"modified"}`)
 
-	snap := snapshotRequest(req.Header, originalBody)
+	snap := snapshotRequest(goHTTPHeaderToHpack(req.Header), originalBody)
 
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		connID:    "conn-variant-raw",

@@ -3,7 +3,6 @@ package httputil
 import (
 	"context"
 	"log/slog"
-	gohttp "net/http"
 	"strings"
 	"time"
 
@@ -46,8 +45,10 @@ type ReceiveVariantParams struct {
 	// TLSServerCertSubject is the subject DN of the upstream server's TLS
 	// certificate. Only set for TLS connections.
 	TLSServerCertSubject string
-	// Resp is the (possibly modified) response.
-	Resp *gohttp.Response
+	// RespStatusCode is the HTTP response status code.
+	RespStatusCode int
+	// RespHeaders holds the (possibly modified) response headers.
+	RespHeaders parser.RawHeaders
 	// RespBody is the (possibly modified) response body bytes.
 	RespBody []byte
 	// RawResponse holds the raw wire bytes of the response. May be nil for
@@ -90,7 +91,7 @@ func RecordReceiveVariant(
 	logger *slog.Logger,
 ) {
 	modified := snap != nil && ResponseModified(
-		*snap, p.Resp.StatusCode, HTTPHeaderToRawHeaders(p.Resp.Header), p.RespBody,
+		*snap, p.RespStatusCode, p.RespHeaders, p.RespBody,
 	)
 
 	if !modified {
@@ -112,7 +113,7 @@ func recordSingleReceive(
 	logger *slog.Logger,
 ) {
 	body, decompressed, truncated := decompressAndTruncate(
-		p.RespBody, p.Resp.Header.Get("Content-Encoding"), logger,
+		p.RespBody, p.RespHeaders.Get("Content-Encoding"), logger,
 	)
 
 	msg := &flow.Message{
@@ -120,8 +121,8 @@ func recordSingleReceive(
 		Sequence:      p.RecvSequence,
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
-		StatusCode:    p.Resp.StatusCode,
-		Headers:       RecordingHeaders(p.Resp.Header, decompressed, len(body)),
+		StatusCode:    p.RespStatusCode,
+		Headers:       RawHeadersToHTTPHeader(RecordingHeadersRaw(p.RespHeaders, decompressed, len(body))),
 		Body:          body,
 		RawBytes:      p.RawResponse,
 		BodyTruncated: truncated,
@@ -174,7 +175,7 @@ func recordModifiedReceive(
 	logger *slog.Logger,
 ) {
 	body, decompressed, truncated := decompressAndTruncate(
-		p.RespBody, p.Resp.Header.Get("Content-Encoding"), logger,
+		p.RespBody, p.RespHeaders.Get("Content-Encoding"), logger,
 	)
 
 	msg := &flow.Message{
@@ -182,8 +183,8 @@ func recordModifiedReceive(
 		Sequence:      p.RecvSequence + 1,
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
-		StatusCode:    p.Resp.StatusCode,
-		Headers:       RecordingHeaders(p.Resp.Header, decompressed, len(body)),
+		StatusCode:    p.RespStatusCode,
+		Headers:       RawHeadersToHTTPHeader(RecordingHeadersRaw(p.RespHeaders, decompressed, len(body))),
 		Body:          body,
 		BodyTruncated: truncated,
 		Metadata:      map[string]string{"variant": "modified"},
