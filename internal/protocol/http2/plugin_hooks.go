@@ -155,7 +155,13 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 		return resp, body
 	}
 	resp.StatusCode = newStatus
-	resp.Header = hpackToGoHTTPHeader(newHeaders)
+	// Only update resp.Header if the plugin actually changed headers.
+	// When newHeaders is the same slice as respHeaders (plugin didn't modify),
+	// skip the hpack→gohttp conversion to avoid a lossy gohttp→hpack→gohttp
+	// round-trip that may reorder headers due to gohttp.Header being a map.
+	if !sameHpackSlice(respHeaders, newHeaders) {
+		resp.Header = hpackToGoHTTPHeader(newHeaders)
+	}
 	if newTrailers != nil {
 		resp.Trailer = hpackToGoHTTPHeader(newTrailers)
 	}
@@ -211,7 +217,11 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 		return resp, body
 	}
 	resp.StatusCode = newStatus
-	resp.Header = hpackToGoHTTPHeader(newHeaders)
+	// Only update resp.Header if the plugin actually changed headers.
+	// See dispatchOnReceiveFromServer for rationale.
+	if !sameHpackSlice(respHeaders, newHeaders) {
+		resp.Header = hpackToGoHTTPHeader(newHeaders)
+	}
 	if newTrailers != nil {
 		resp.Trailer = hpackToGoHTTPHeader(newTrailers)
 	}
@@ -280,6 +290,18 @@ func applyH2RequestFields(req *h2Request, method, scheme, authority, path string
 	allHeaders = append(allHeaders, hpack.HeaderField{Name: ":path", Value: path})
 	allHeaders = append(allHeaders, regularHeaders...)
 	req.AllHeaders = allHeaders
+}
+
+// sameHpackSlice reports whether a and b share the same backing array and length,
+// i.e., b was returned unmodified from a function that received a.
+func sameHpackSlice(a, b []hpack.HeaderField) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	return &a[0] == &b[0]
 }
 
 // Note: hpackToGoHTTPHeader is defined in headerconv.go and reused here.
