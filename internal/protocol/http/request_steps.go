@@ -103,10 +103,20 @@ func (h *Handler) applyTransform(req *parser.RawRequest, reqURL *url.URL, record
 	if h.transformPipeline == nil {
 		return recordReqBody
 	}
+	origLen := len(recordReqBody)
 	rh := req.Headers
 	rh, recordReqBody = h.transformPipeline.TransformRequest(req.Method, reqURL, rh, recordReqBody)
 	req.Headers = rh
 	req.Body = bytes.NewReader(recordReqBody)
+
+	// When the body size changes (e.g., replace_body), update Content-Length
+	// so the upstream receives the correct value. Without this, the upstream
+	// will either hang waiting for more bytes or discard trailing data.
+	if len(recordReqBody) != origLen {
+		rh.Del("Content-Length")
+		rh.Set("Content-Length", fmt.Sprintf("%d", len(recordReqBody)))
+	}
+
 	return recordReqBody
 }
 
