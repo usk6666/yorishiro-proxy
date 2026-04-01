@@ -1297,10 +1297,19 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 }
 
 // applyInterceptModifications applies the modifications from a modify_and_forward
-// action to the HTTP/2 request. It delegates to the shared httputil package for
-// CRLF validation, URL scheme enforcement, and header/body modifications.
+// action to the HTTP/2 request. It converts to RawRequest, applies modifications
+// via the shared httputil package, and converts back.
 func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
-	return httputil.ApplyRequestModifications(req, action)
+	rawReq := httputil.HTTPRequestToRaw(req, originalBody)
+	modRaw, modBody, modURL, err := httputil.ApplyRequestModifications(rawReq, originalBody, action)
+	if err != nil {
+		return req, err
+	}
+	modReq := httputil.RawRequestToHTTP(modRaw, modBody)
+	if modURL != nil {
+		modReq.URL = modURL
+	}
+	return modReq, nil
 }
 
 // interceptResponse checks if the response matches any intercept rules and,
@@ -1352,10 +1361,16 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 }
 
 // applyResponseModifications applies the modifications from a modify_and_forward
-// action to the HTTP/2 response. It delegates to the shared httputil package for
-// status code validation, CRLF injection checks, and header/body modifications.
+// action to the HTTP/2 response. It converts to RawResponse, applies modifications
+// via the shared httputil package, and converts back.
 func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
-	return httputil.ApplyResponseModifications(resp, action, body)
+	rawResp := httputil.HTTPResponseToRaw(resp, body)
+	modRaw, modBody, err := httputil.ApplyResponseModifications(rawResp, action, body)
+	if err != nil {
+		return resp, body, err
+	}
+	modResp := httputil.RawResponseToHTTP(modRaw, modBody)
+	return modResp, modBody, nil
 }
 
 // isGRPCContentType reports whether the Content-Type indicates a gRPC request.
