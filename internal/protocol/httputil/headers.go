@@ -3,8 +3,6 @@ package httputil
 import (
 	"bytes"
 	"fmt"
-	"io"
-	gohttp "net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -50,76 +48,117 @@ func ApplyHeaderModifications(h *parser.RawHeaders, override, add map[string]str
 }
 
 // ApplyRequestModifications applies the modifications from a modify_and_forward
-// action to an HTTP request. It validates URL scheme, CRLF injection, and then
-// applies method/URL/header/body overrides.
-func ApplyRequestModifications(req *gohttp.Request, action intercept.InterceptAction) (*gohttp.Request, error) {
+// action directly on a RawRequest. It validates URL scheme, CRLF injection,
+// and then applies method/URL/header/body overrides.
+//
+// Returns the modified RawRequest, the (possibly overridden) body bytes, the
+// parsed URL after override (nil when no URL override was applied), and any error.
+func ApplyRequestModifications(req *parser.RawRequest, bodyBytes []byte, action intercept.InterceptAction) (*parser.RawRequest, []byte, *url.URL, error) {
+	// Validate all inputs before mutating the request (CWE-113 / Copilot C-1).
+	if err := ValidateCRLFHeaders(action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders); err != nil {
+		return req, bodyBytes, nil, err
+	}
+
+	var modURL *url.URL
+	if action.OverrideURL != "" {
+		parsed, err := validateURL(action.OverrideURL)
+		if err != nil {
+			return req, bodyBytes, nil, err
+		}
+		modURL = parsed
+	}
+
+	// All validations passed — apply mutations.
 	if action.OverrideMethod != "" {
 		req.Method = action.OverrideMethod
 	}
 
-	if err := validateAndApplyURL(req, action.OverrideURL); err != nil {
-		return req, err
+	if modURL != nil {
+		// Update RequestURI. Preserve absolute-form when scheme+host are present.
+		if modURL.Scheme != "" && modURL.Host != "" {
+			req.RequestURI = modURL.String()
+		} else {
+			req.RequestURI = modURL.RequestURI()
+		}
+		// Update Host header to match the override URL.
+		req.Headers.Set("Host", modURL.Host)
 	}
 
-	if err := ValidateCRLFHeaders(action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders); err != nil {
-		return req, err
-	}
-
-	rh := HTTPHeaderToRawHeaders(req.Header)
-	ApplyHeaderModifications(&rh, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
-	req.Header = RawHeadersToHTTPHeader(rh)
+	ApplyHeaderModifications(&req.Headers, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
 
 	if action.OverrideBody != nil {
-		bodyBytes := []byte(*action.OverrideBody)
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		req.ContentLength = int64(len(bodyBytes))
+		bodyBytes = []byte(*action.OverrideBody)
 	}
 
-	return req, nil
+	// Sync Content-Length and Transfer-Encoding headers with the actual body.
+	req.Headers.Del("Transfer-Encoding")
+	if len(bodyBytes) > 0 {
+		req.Headers.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+	} else {
+		req.Headers.Del("Content-Length")
+	}
+
+	req.Body = bytes.NewReader(bodyBytes)
+
+	return req, bodyBytes, modURL, nil
 }
 
 // ApplyResponseModifications applies the modifications from a modify_and_forward
-// action to an HTTP response. It validates status code range, CRLF injection,
-// and then applies status/header/body overrides.
-func ApplyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
+// action directly on a RawResponse. It validates status code range, CRLF
+// injection, and then applies status/header/body overrides.
+func ApplyResponseModifications(resp *parser.RawResponse, action intercept.InterceptAction, body []byte) (*parser.RawResponse, []byte, error) {
+	// Validate all inputs before mutating the response.
 	if action.OverrideStatus > 0 {
 		if action.OverrideStatus < 100 || action.OverrideStatus > 999 {
 			return resp, body, fmt.Errorf("invalid override status code %d: must be between 100 and 999", action.OverrideStatus)
 		}
-		resp.StatusCode = action.OverrideStatus
-		resp.Status = FormatStatus(action.OverrideStatus)
 	}
 
 	if err := ValidateCRLFHeaders(action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders); err != nil {
 		return resp, body, fmt.Errorf("response %w", err)
 	}
 
-	respRH := HTTPHeaderToRawHeaders(resp.Header)
-	ApplyHeaderModifications(&respRH, action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders)
-	resp.Header = RawHeadersToHTTPHeader(respRH)
+	// All validations passed — apply mutations.
+	if action.OverrideStatus > 0 {
+		resp.StatusCode = action.OverrideStatus
+		resp.Status = FormatStatus(action.OverrideStatus)
+	}
+
+	ApplyHeaderModifications(&resp.Headers, action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders)
 
 	if action.OverrideResponseBody != nil {
 		body = []byte(*action.OverrideResponseBody)
-		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		resp.Headers.Del("Transfer-Encoding")
+		if len(body) > 0 {
+			resp.Headers.Set("Content-Length", strconv.Itoa(len(body)))
+		} else {
+			resp.Headers.Del("Content-Length")
+		}
+		resp.Body = bytes.NewReader(body)
 	}
 
 	return resp, body, nil
 }
 
-// validateAndApplyURL validates and applies a URL override to the request.
-// It enforces http/https-only scheme restriction to prevent SSRF (CWE-918).
-func validateAndApplyURL(req *gohttp.Request, overrideURL string) error {
-	if overrideURL == "" {
-		return nil
-	}
+// validateURL validates a URL override string and enforces http/https-only
+// scheme restriction to prevent SSRF (CWE-918). It also rejects malformed
+// URLs such as those with empty host, opaque form, or fragments.
+func validateURL(overrideURL string) (*url.URL, error) {
 	parsed, err := url.Parse(overrideURL)
 	if err != nil {
-		return fmt.Errorf("invalid override URL: %w", err)
+		return nil, fmt.Errorf("invalid override URL: %w", err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("unsupported override URL scheme %q: only http and https are allowed", parsed.Scheme)
+		return nil, fmt.Errorf("unsupported override URL scheme %q: only http and https are allowed", parsed.Scheme)
 	}
-	req.URL = parsed
-	req.Host = parsed.Host
-	return nil
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("invalid override URL %q: host is required", overrideURL)
+	}
+	if parsed.Opaque != "" {
+		return nil, fmt.Errorf("invalid override URL %q: opaque URLs are not allowed", overrideURL)
+	}
+	if parsed.Fragment != "" {
+		return nil, fmt.Errorf("invalid override URL %q: fragments are not allowed", overrideURL)
+	}
+	return parsed, nil
 }

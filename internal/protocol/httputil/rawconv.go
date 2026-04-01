@@ -163,22 +163,9 @@ type GoHTTPHeader = gohttp.Header
 
 // ApplyRequestModificationsRaw applies intercept modifications to a
 // parser.RawRequest and returns the modified RawRequest plus body.
-// This wraps ApplyRequestModifications to handle the conversion at the
-// httputil boundary.
+// It operates directly on the RawRequest without gohttp conversion.
 func ApplyRequestModificationsRaw(req *parser.RawRequest, bodyBytes []byte, action intercept.InterceptAction) (*parser.RawRequest, []byte, *url.URL, error) {
-	goReq := RawRequestToHTTP(req, bodyBytes)
-	modified, err := ApplyRequestModifications(goReq, action)
-	if err != nil {
-		return req, bodyBytes, nil, err
-	}
-	// Read modified body if override was applied.
-	modBody := bodyBytes
-	if action.OverrideBody != nil {
-		modBody = []byte(*action.OverrideBody)
-	}
-	// Convert back to RawRequest.
-	rawReq := HTTPRequestToRaw(modified, modBody)
-	return rawReq, modBody, modified.URL, nil
+	return ApplyRequestModifications(req, bodyBytes, action)
 }
 
 // HTTPRequestToRaw converts a *net/http.Request back to a parser.RawRequest.
@@ -216,12 +203,7 @@ func HTTPRequestToRaw(goReq *gohttp.Request, bodyBytes []byte) *parser.RawReques
 
 // ApplyResponseModificationsRaw applies intercept modifications to a
 // parser.RawResponse and returns the modified RawResponse plus body.
+// It operates directly on the RawResponse without gohttp conversion.
 func ApplyResponseModificationsRaw(resp *parser.RawResponse, body []byte, action intercept.InterceptAction) (*parser.RawResponse, []byte, error) {
-	goResp := RawResponseToHTTP(resp, body)
-	modResp, modBody, err := ApplyResponseModifications(goResp, action, body)
-	if err != nil {
-		return resp, body, err
-	}
-	rawResp := HTTPResponseToRaw(modResp, modBody)
-	return rawResp, modBody, nil
+	return ApplyResponseModifications(resp, action, body)
 }

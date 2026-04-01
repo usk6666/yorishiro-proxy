@@ -96,13 +96,30 @@ func extractRawRequest(capture *captureReader, captureStart int, reader *bufio.R
 }
 
 // applyInterceptModifications is a test compatibility shim.
+// It converts gohttp types to raw types, applies modifications, and converts back.
 func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
-	return httputil.ApplyRequestModifications(req, action)
+	rawReq := httputil.HTTPRequestToRaw(req, originalBody)
+	modRaw, modBody, modURL, err := httputil.ApplyRequestModifications(rawReq, originalBody, action)
+	if err != nil {
+		return req, err
+	}
+	modReq := httputil.RawRequestToHTTP(modRaw, modBody)
+	if modURL != nil {
+		modReq.URL = modURL
+	}
+	return modReq, nil
 }
 
 // applyResponseModifications is a test compatibility shim.
+// It converts gohttp types to raw types, applies modifications, and converts back.
 func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
-	return httputil.ApplyResponseModifications(resp, action, body)
+	rawResp := httputil.HTTPResponseToRaw(resp, body)
+	modRaw, modBody, err := httputil.ApplyResponseModifications(rawResp, action, body)
+	if err != nil {
+		return resp, body, err
+	}
+	modResp := httputil.RawResponseToHTTP(modRaw, modBody)
+	return modResp, modBody, nil
 }
 
 // snapshotRequest is a test compatibility shim using gohttp.Header.
