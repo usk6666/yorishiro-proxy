@@ -116,6 +116,15 @@ type InterceptAction struct {
 	RemoveResponseHeaders []string
 	// OverrideResponseBody replaces the entire response body.
 	OverrideResponseBody *string
+
+	// AutoContentLength controls whether Content-Length and Transfer-Encoding
+	// headers are automatically synchronized when the body is overridden.
+	// When true (the default), body override triggers TE deletion and CL update.
+	// When false, CL/TE headers are left untouched even on body override,
+	// allowing pentesters to craft intentional CL/TE conflicts for HTTP
+	// Request Smuggling tests.
+	// This flag has no effect when the body is not overridden.
+	AutoContentLength *bool
 }
 
 // InterceptedRequest represents a request or response that has been intercepted

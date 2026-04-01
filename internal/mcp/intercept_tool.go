@@ -58,6 +58,12 @@ type interceptParams struct {
 	AddResponseHeaders      map[string]string `json:"add_response_headers,omitempty" jsonschema:"response headers to add (response phase, structured mode)"`
 	RemoveResponseHeaders   []string          `json:"remove_response_headers,omitempty" jsonschema:"response headers to remove (response phase, structured mode)"`
 	OverrideResponseBody    *string           `json:"override_response_body,omitempty" jsonschema:"response body override (response phase, structured mode)"`
+
+	// AutoContentLength controls automatic Content-Length/Transfer-Encoding sync
+	// when the body is overridden. Defaults to true. Set to false to preserve
+	// CL/TE headers as-is, enabling intentional CL/TE conflicts for HTTP
+	// Request Smuggling tests.
+	AutoContentLength *bool `json:"auto_content_length,omitempty" jsonschema:"auto-sync Content-Length on body override (default true; false preserves CL/TE for smuggling tests)"`
 }
 
 // availableInterceptActions lists the valid action names for the intercept tool.
@@ -312,6 +318,8 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 		AddResponseHeaders:      params.AddResponseHeaders,
 		RemoveResponseHeaders:   params.RemoveResponseHeaders,
 		OverrideResponseBody:    overrideResponseBody,
+		// CL/TE sync control.
+		AutoContentLength: params.AutoContentLength,
 	}
 
 	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {

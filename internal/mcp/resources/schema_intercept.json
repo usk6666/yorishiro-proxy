@@ -77,6 +77,10 @@
         "override_response_body": {
           "type": "string",
           "description": "Response body override (response phase, structured mode)."
+        },
+        "auto_content_length": {
+          "type": "boolean",
+          "description": "Auto-sync Content-Length and remove Transfer-Encoding on body override (default true). Set to false to preserve CL/TE headers as-is for HTTP Request Smuggling tests."
         }
       },
       "additionalProperties": false
