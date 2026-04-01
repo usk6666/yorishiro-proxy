@@ -214,6 +214,45 @@ Severity mapping for Copilot comments:
 - Style/refactoring suggestions → LOW
 - Use your judgment based on the comment content
 
+#### 3-3.5. MITM Compatibility Triage
+
+**Before passing findings to the Fixer**, evaluate every finding (from all sources — Copilot,
+Code Review, and Security Review) against the MITM Implementation Principles in `CLAUDE.md`.
+
+yorishiro-proxy is a pentesting MITM proxy. Users intentionally craft anomalous requests
+(duplicate headers, Host ≠ URL, mixed-case header names, etc.) for security testing.
+Review tools — especially Copilot — do not understand this context and frequently suggest
+"fixes" that would destroy wire fidelity or block pentesting use cases.
+
+**Reject a finding (`REJECTED_MITM`) if it suggests any of the following in data path code**
+(`internal/protocol/`, `internal/proxy/`, `internal/flow/`, `internal/plugin/`):
+
+| Pattern | Example suggestion | Why reject |
+|---------|-------------------|------------|
+| Deduplicate headers | "Del before Set to ensure single header" | Users intentionally inject duplicate headers (Host header injection, request smuggling) |
+| Enforce Host = URL | "Re-derive Host from URL to prevent mismatch" | Host ≠ URL mismatch is a valid pentesting technique |
+| Canonicalize header names | "Use CanonicalHeaderKey" or "Lowercase header names" | Wire casing must be preserved (HTTP/1.x is case-insensitive but MITM must not normalize) |
+| Reorder headers | "Sort headers alphabetically" | Header order must match wire observation |
+| Normalize whitespace | "Trim header value whitespace" | Whitespace in headers may be intentional for testing |
+| Use `net/http` types in data path | "Use http.Header instead of RawHeaders" | `net/http` types canonicalize and lose wire fidelity |
+
+**Accept a finding even if it touches data path code when it addresses**:
+- Security of the proxy itself (CRLF injection in proxy internals, SSRF scheme validation)
+- Code correctness unrelated to wire data (nil checks, resource leaks, race conditions)
+- Validation-before-mutation ordering
+
+**Triage output format:**
+
+For each rejected finding, record:
+```
+REJECTED_MITM:
+  - ID: C-3, Source: Copilot, Reason: "Suggests header deduplication — violates wire fidelity for pentesting"
+  - ID: F-2, Source: Code Review, Reason: "Suggests Host=URL enforcement — blocks Host header injection testing"
+```
+
+Remove `REJECTED_MITM` findings from the lists passed to the Fixer.
+Include the `REJECTED_MITM` list in the Phase 5 report for visibility.
+
 #### 3-4. Aggregate Verdict
 
 | Code Review | Security Review | Copilot Review | Aggregate Verdict | Next Action |
@@ -371,6 +410,14 @@ or reported in Phase 5 (if no more rounds).
 |----|----------|----------|--------|
 | F-1 | HIGH | Correctness | FIXED (Round 1) |
 | S-1 | MEDIUM | InputValidation | FIXED (Round 1) |
+
+### MITM-Rejected Findings (if any)
+
+The following findings were rejected because they conflict with MITM proxy design principles:
+
+| ID | Source | Reason |
+|----|--------|--------|
+| C-3 | Copilot | Suggests header deduplication — violates wire fidelity |
 
 ### Escalation (ESCALATED only)
 

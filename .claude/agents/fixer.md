@@ -84,6 +84,22 @@ Fix findings in this order:
 - **Preserve existing tests**: Do not break existing tests
 - **No refactoring**: Do not refactor code unrelated to the findings
 
+### MITM Design Principle Guardrail
+
+yorishiro-proxy is a pentesting MITM proxy. Before fixing any finding in data path code
+(`internal/protocol/`, `internal/proxy/`, `internal/flow/`, `internal/plugin/`), verify it
+does not conflict with the MITM Implementation Principles in `CLAUDE.md`.
+
+**Skip a finding with status `REJECTED_MITM` if it suggests:**
+- Deduplicating headers (users intentionally inject duplicates for pentesting)
+- Enforcing Host = URL (Host ≠ URL mismatch is a valid pentesting technique)
+- Canonicalizing or reordering header names (wire casing/order must be preserved)
+- Normalizing whitespace in header values
+- Using `net/http` types in the data path (they canonicalize and lose wire fidelity)
+
+**Do fix** findings about proxy-internal security (CRLF injection, SSRF validation),
+code correctness (nil checks, race conditions, resource leaks), and validation ordering.
+
 ### Fixing Security Findings
 
 Take special care when fixing security findings:
@@ -132,8 +148,8 @@ After completing the work, report the final message in the following format:
 
 ```
 FIX_SUMMARY:
-  - ID: F-1, Status: FIXED | PARTIALLY_FIXED | UNRESOLVED
-    Action: <description of fix applied>
+  - ID: F-1, Status: FIXED | PARTIALLY_FIXED | UNRESOLVED | REJECTED_MITM
+    Action: <description of fix applied, or reason for MITM rejection>
   - ID: S-2, Status: FIXED
     Action: <description of fix applied>
   ...
