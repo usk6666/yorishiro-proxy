@@ -170,19 +170,13 @@ func TestRecordReceive_Basic(t *testing.T) {
 	}
 
 	// Then record receive.
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{"Content-Type": {"text/plain"}},
-	}
 	duration := 50 * time.Millisecond
 
 	handler.recordReceive(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   duration,
 		serverAddr: "93.184.216.34:80",
-		resp:       resp,
+		resp:       testRawResponse(200, gohttp.Header{"Content-Type": {"text/plain"}}),
 		respBody:   []byte("response body"),
 	}, logger)
 
@@ -219,18 +213,11 @@ func TestRecordReceive_NilSendResult(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{},
-	}
-
 	// Should be a no-op when sendResult is nil.
 	handler.recordReceive(ctx, nil, receiveRecordParams{
 		start:    time.Now(),
 		duration: time.Millisecond,
-		resp:     resp,
+		resp:     testRawResponse(200, gohttp.Header{}),
 		respBody: []byte("ok"),
 	}, logger)
 
@@ -514,18 +501,12 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 
 	// Phase 2: Record receive.
 	duration := 100 * time.Millisecond
-	resp := &gohttp.Response{
-		StatusCode: 201,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{"Content-Type": {"application/json"}},
-	}
 
 	handler.recordReceive(ctx, sendResult, receiveRecordParams{
 		start:       start,
 		duration:    duration,
 		serverAddr:  "93.184.216.34:80",
-		resp:        resp,
+		resp:        testRawResponse(201, gohttp.Header{"Content-Type": {"application/json"}}),
 		respBody:    []byte(`{"status":"created"}`),
 		rawResponse: []byte("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n"),
 	}, logger)

@@ -11,6 +11,20 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
+// rawHeadersToMap converts parser.RawHeaders to map[string][]string without
+// going through net/http.Header. This preserves header name casing exactly as
+// observed on the wire (MITM wire fidelity principle).
+func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
+	if rh == nil {
+		return make(map[string][]string)
+	}
+	m := make(map[string][]string, len(rh))
+	for _, h := range rh {
+		m[h.Name] = append(m[h.Name], h.Value)
+	}
+	return m
+}
+
 // requestHeaders returns RawHeaders with the Host header explicitly set.
 // This ensures accurate flow recording since the parser preserves Host in
 // the RawHeaders directly (unlike Go's net/http which strips it).
@@ -89,7 +103,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           reqURL,
-		Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
+		Headers:       rawHeadersToMap(requestHeaders(p.req)),
 		Body:          p.reqBody,
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
@@ -162,7 +176,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Timestamp:     p.start,
 			Method:        p.req.Method,
 			URL:           reqURL,
-			Headers:       httputil.RawHeadersToHTTPHeader(origHeaders),
+			Headers:       rawHeadersToMap(origHeaders),
 			Body:          origBody,
 			RawBytes:      origRawBytes,
 			BodyTruncated: p.reqTruncated,
@@ -180,7 +194,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			Timestamp:     p.start,
 			Method:        p.req.Method,
 			URL:           reqURL,
-			Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
+			Headers:       rawHeadersToMap(requestHeaders(p.req)),
 			Body:          p.reqBody,
 			RawBytes:      modRawBytes,
 			BodyTruncated: p.reqTruncated,
@@ -201,7 +215,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           reqURL,
-		Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
+		Headers:       rawHeadersToMap(requestHeaders(p.req)),
 		Body:          p.reqBody,
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
@@ -214,8 +228,6 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 }
 
 // receiveRecordParams holds the parameters needed to record the receive phase.
-// NOTE: resp still uses *httputil.GoHTTPResponse because the shared
-// httputil.RecordReceiveVariant function expects it.
 type receiveRecordParams struct {
 	start      time.Time
 	duration   time.Duration
@@ -223,7 +235,7 @@ type receiveRecordParams struct {
 
 	tlsServerCertSubject string
 
-	resp        *httputil.GoHTTPResponse
+	resp        *parser.RawResponse
 	rawResponse []byte
 	respBody    []byte
 
@@ -258,8 +270,7 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 	}
 
 	// Merge existing tags with fingerprint detection results.
-	respHeaders := httputil.HTTPHeaderToRawHeaders(p.resp.Header)
-	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, respHeaders, p.respBody)
+	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, p.resp.Headers, p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
@@ -269,7 +280,7 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		ServerAddr:           p.serverAddr,
 		TLSServerCertSubject: p.tlsServerCertSubject,
 		RespStatusCode:       p.resp.StatusCode,
-		RespHeaders:          respHeaders,
+		RespHeaders:          p.resp.Headers,
 		RespBody:             p.respBody,
 		RawResponse:          p.rawResponse,
 		Tags:                 tags,
@@ -341,7 +352,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		Timestamp:     p.start,
 		Method:        p.req.Method,
 		URL:           reqURL,
-		Headers:       httputil.RawHeadersToHTTPHeader(requestHeaders(p.req)),
+		Headers:       rawHeadersToMap(requestHeaders(p.req)),
 		Body:          p.reqBody,
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
@@ -371,7 +382,7 @@ type sessionRecordParams struct {
 	rawRequest   []byte
 	reqTruncated bool
 
-	resp        *httputil.GoHTTPResponse
+	resp        *parser.RawResponse
 	rawResponse []byte
 	respBody    []byte
 }
