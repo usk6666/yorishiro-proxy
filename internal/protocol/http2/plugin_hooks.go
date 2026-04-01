@@ -279,15 +279,22 @@ func applyH2RequestFields(req *h2Request, method, scheme, authority, path string
 	req.Path = path
 
 	// Rebuild AllHeaders: pseudo-headers first, then regular headers.
+	// RFC 9113 §8.5: CONNECT requests MUST include only :method and :authority;
+	// :scheme and :path MUST NOT be present (unless extended CONNECT per RFC 8441,
+	// which provides a non-empty path).
+	isConnect := strings.EqualFold(method, "CONNECT")
+
 	allHeaders := make([]hpack.HeaderField, 0, 4+len(regularHeaders))
 	allHeaders = append(allHeaders, hpack.HeaderField{Name: ":method", Value: method})
-	if scheme != "" {
+	if scheme != "" && !isConnect {
 		allHeaders = append(allHeaders, hpack.HeaderField{Name: ":scheme", Value: scheme})
 	}
 	if authority != "" {
 		allHeaders = append(allHeaders, hpack.HeaderField{Name: ":authority", Value: authority})
 	}
-	allHeaders = append(allHeaders, hpack.HeaderField{Name: ":path", Value: path})
+	if !isConnect || path != "" {
+		allHeaders = append(allHeaders, hpack.HeaderField{Name: ":path", Value: path})
+	}
 	allHeaders = append(allHeaders, regularHeaders...)
 	req.AllHeaders = allHeaders
 }

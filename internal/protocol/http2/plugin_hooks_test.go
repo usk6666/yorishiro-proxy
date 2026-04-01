@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -562,6 +563,121 @@ def on_receive_from_client(data):
 	}
 	if got := resp.Header.Get("X-Received-Compat"); got != "ok" {
 		t.Errorf("X-Received-Compat = %q, want %q", got, "ok")
+	}
+}
+
+func TestApplyH2RequestFields_CONNECTPseudoHeaders(t *testing.T) {
+	// RFC 9113 §8.5: CONNECT requests MUST include only :method and :authority.
+	// :scheme and :path MUST NOT be present.
+	tests := []struct {
+		name            string
+		method          string
+		scheme          string
+		authority       string
+		path            string
+		wantScheme      bool
+		wantPath        bool
+		wantPseudoNames []string
+	}{
+		{
+			name:            "normal GET includes all pseudo-headers",
+			method:          "GET",
+			scheme:          "https",
+			authority:       "example.com",
+			path:            "/foo",
+			wantScheme:      true,
+			wantPath:        true,
+			wantPseudoNames: []string{":method", ":scheme", ":authority", ":path"},
+		},
+		{
+			name:            "CONNECT omits :scheme and :path",
+			method:          "CONNECT",
+			scheme:          "",
+			authority:       "example.com:443",
+			path:            "",
+			wantScheme:      false,
+			wantPath:        false,
+			wantPseudoNames: []string{":method", ":authority"},
+		},
+		{
+			name:            "CONNECT with scheme still omits :scheme",
+			method:          "CONNECT",
+			scheme:          "https",
+			authority:       "example.com:443",
+			path:            "",
+			wantScheme:      false,
+			wantPath:        false,
+			wantPseudoNames: []string{":method", ":authority"},
+		},
+		{
+			name:            "extended CONNECT (RFC 8441) includes :path when non-empty",
+			method:          "CONNECT",
+			scheme:          "",
+			authority:       "example.com",
+			path:            "/ws",
+			wantScheme:      false,
+			wantPath:        true,
+			wantPseudoNames: []string{":method", ":authority", ":path"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &h2Request{}
+			regularHeaders := []hpack.HeaderField{
+				{Name: "content-type", Value: "text/plain"},
+			}
+
+			applyH2RequestFields(req, tt.method, tt.scheme, tt.authority, tt.path, regularHeaders)
+
+			// Collect pseudo-header names from AllHeaders.
+			var pseudoNames []string
+			for _, hf := range req.AllHeaders {
+				if strings.HasPrefix(hf.Name, ":") {
+					pseudoNames = append(pseudoNames, hf.Name)
+				}
+			}
+
+			if len(pseudoNames) != len(tt.wantPseudoNames) {
+				t.Fatalf("pseudo-headers = %v, want %v", pseudoNames, tt.wantPseudoNames)
+			}
+			for i, name := range pseudoNames {
+				if name != tt.wantPseudoNames[i] {
+					t.Errorf("pseudo-header[%d] = %q, want %q", i, name, tt.wantPseudoNames[i])
+				}
+			}
+
+			// Verify :scheme presence.
+			hasScheme := false
+			hasPath := false
+			for _, hf := range req.AllHeaders {
+				if hf.Name == ":scheme" {
+					hasScheme = true
+				}
+				if hf.Name == ":path" {
+					hasPath = true
+				}
+			}
+			if hasScheme != tt.wantScheme {
+				t.Errorf(":scheme present = %v, want %v", hasScheme, tt.wantScheme)
+			}
+			if hasPath != tt.wantPath {
+				t.Errorf(":path present = %v, want %v", hasPath, tt.wantPath)
+			}
+
+			// Regular headers should always be present after pseudo-headers.
+			lastPseudo := -1
+			for i, hf := range req.AllHeaders {
+				if strings.HasPrefix(hf.Name, ":") {
+					lastPseudo = i
+				}
+			}
+			for i, hf := range req.AllHeaders {
+				if !strings.HasPrefix(hf.Name, ":") && i <= lastPseudo {
+					t.Errorf("regular header %q at index %d before last pseudo-header at %d", hf.Name, i, lastPseudo)
+				}
+			}
+		})
 	}
 }
 
