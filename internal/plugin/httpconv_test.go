@@ -2,253 +2,10 @@ package plugin
 
 import (
 	"bytes"
-	gohttp "net/http"
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
-
-func TestHTTPRequestToMap(t *testing.T) {
-	req, _ := gohttp.NewRequest("POST", "https://example.com/api?key=val", nil)
-	req.Host = "example.com"
-	req.Header.Set("Content-Type", "application/json")
-	body := []byte(`{"foo":"bar"}`)
-	ci := &ConnInfo{ClientAddr: "10.0.0.1:1234", TLSVersion: "TLS 1.3"}
-
-	m := HTTPRequestToMap(req, body, ci, "HTTP/1.x")
-
-	if v := m["method"].(string); v != "POST" {
-		t.Errorf("method = %q, want %q", v, "POST")
-	}
-	if v := m["scheme"].(string); v != "https" {
-		t.Errorf("scheme = %q, want %q", v, "https")
-	}
-	if v := m["host"].(string); v != "example.com" {
-		t.Errorf("host = %q, want %q", v, "example.com")
-	}
-	if v := m["path"].(string); v != "/api" {
-		t.Errorf("path = %q, want %q", v, "/api")
-	}
-	if v := m["query"].(string); v != "key=val" {
-		t.Errorf("query = %q, want %q", v, "key=val")
-	}
-	if v := m["protocol"].(string); v != "HTTP/1.x" {
-		t.Errorf("protocol = %q, want %q", v, "HTTP/1.x")
-	}
-	if v, ok := m["body"].([]byte); !ok || !bytes.Equal(v, body) {
-		t.Errorf("body = %v, want %v", m["body"], body)
-	}
-
-	// Check headers include Host.
-	headers, ok := m["headers"].(map[string]any)
-	if !ok {
-		t.Fatal("headers is not map[string]any")
-	}
-	hostVals, ok := headers["Host"].([]any)
-	if !ok || len(hostVals) == 0 || hostVals[0] != "example.com" {
-		t.Errorf("headers[Host] = %v, want [example.com]", headers["Host"])
-	}
-
-	// Check conn_info.
-	connInfo, ok := m["conn_info"].(map[string]any)
-	if !ok {
-		t.Fatal("conn_info is not map[string]any")
-	}
-	if v := connInfo["client_addr"].(string); v != "10.0.0.1:1234" {
-		t.Errorf("conn_info.client_addr = %q, want %q", v, "10.0.0.1:1234")
-	}
-}
-
-func TestHTTPRequestToMap_NilRequest(t *testing.T) {
-	m := HTTPRequestToMap(nil, nil, nil, "")
-	if len(m) != 0 {
-		t.Errorf("nil request should return empty map, got %v", m)
-	}
-}
-
-func TestHTTPRequestToMap_NilConnInfo(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/", nil)
-	m := HTTPRequestToMap(req, nil, nil, "HTTP/1.x")
-	ci, ok := m["conn_info"].(map[string]any)
-	if !ok {
-		t.Fatal("conn_info should be present even when nil ConnInfo")
-	}
-	if len(ci) != 0 {
-		t.Errorf("conn_info should be empty map, got %v", ci)
-	}
-}
-
-func TestHTTPResponseToMap(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{"Content-Type": {"application/json"}},
-	}
-	req, _ := gohttp.NewRequest("GET", "http://example.com/api", nil)
-	req.Host = "example.com"
-	body := []byte(`{"result":"ok"}`)
-	ci := &ConnInfo{ServerAddr: "93.184.216.34:80"}
-
-	m := HTTPResponseToMap(resp, body, req, ci, "HTTP/1.x")
-
-	if v, ok := m["status_code"].(int); !ok || v != 200 {
-		t.Errorf("status_code = %v, want 200", m["status_code"])
-	}
-	if v := m["protocol"].(string); v != "HTTP/1.x" {
-		t.Errorf("protocol = %q, want %q", v, "HTTP/1.x")
-	}
-
-	// Check request summary.
-	reqSummary, ok := m["request"].(map[string]any)
-	if !ok {
-		t.Fatal("request should be map[string]any")
-	}
-	if v := reqSummary["method"].(string); v != "GET" {
-		t.Errorf("request.method = %q, want %q", v, "GET")
-	}
-
-	// Check conn_info.
-	connInfo, ok := m["conn_info"].(map[string]any)
-	if !ok {
-		t.Fatal("conn_info should be map[string]any")
-	}
-	if v := connInfo["server_addr"].(string); v != "93.184.216.34:80" {
-		t.Errorf("conn_info.server_addr = %q, want %q", v, "93.184.216.34:80")
-	}
-}
-
-func TestHTTPResponseToMap_NilResponse(t *testing.T) {
-	m := HTTPResponseToMap(nil, nil, nil, nil, "")
-	if len(m) != 0 {
-		t.Errorf("nil response should return empty map, got %v", m)
-	}
-}
-
-func TestApplyHTTPRequestChanges(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/old", nil)
-	req.Host = "example.com"
-	req.Header.Set("X-Original", "yes")
-
-	data := map[string]any{
-		"method": "POST",
-		"url":    "http://example.com/new",
-		"headers": map[string]any{
-			"X-Modified": []any{"yes"},
-		},
-		"body": []byte("new-body"),
-	}
-
-	req, body, err := ApplyHTTPRequestChanges(req, data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if req.Method != "POST" {
-		t.Errorf("method = %q, want %q", req.Method, "POST")
-	}
-	if req.URL.Path != "/new" {
-		t.Errorf("path = %q, want %q", req.URL.Path, "/new")
-	}
-	if req.Header.Get("X-Modified") != "yes" {
-		t.Errorf("X-Modified = %q, want %q", req.Header.Get("X-Modified"), "yes")
-	}
-	if !bytes.Equal(body, []byte("new-body")) {
-		t.Errorf("body = %q, want %q", body, "new-body")
-	}
-}
-
-func TestApplyHTTPRequestChanges_URLSchemeValidation(t *testing.T) {
-	tests := []struct {
-		name        string
-		url         string
-		wantApplied bool // true if URL should be updated
-	}{
-		{"http scheme allowed", "http://example.com/new", true},
-		{"https scheme allowed", "https://example.com/new", true},
-		{"empty scheme allowed (relative)", "/relative/path", true},
-		{"file scheme rejected", "file:///etc/passwd", false},
-		{"gopher scheme rejected", "gopher://evil.com/", false},
-		{"ftp scheme rejected", "ftp://evil.com/file", false},
-		{"javascript scheme rejected", "javascript:alert(1)", false},
-		{"data scheme rejected", "data:text/html,<h1>evil</h1>", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			originalURL := "http://example.com/original"
-			req, _ := gohttp.NewRequest("GET", originalURL, nil)
-			data := map[string]any{
-				"url": tt.url,
-			}
-			req, _, err := ApplyHTTPRequestChanges(req, data)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tt.wantApplied {
-				if req.URL.String() == originalURL {
-					t.Errorf("URL should have been updated to %q but was not", tt.url)
-				}
-			} else {
-				if req.URL.String() != originalURL {
-					t.Errorf("URL should remain %q for disallowed scheme, got %q", originalURL, req.URL.String())
-				}
-			}
-		})
-	}
-}
-
-func TestApplyHTTPRequestChanges_InvalidURL(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/", nil)
-	data := map[string]any{
-		"url": "://invalid",
-	}
-	_, _, err := ApplyHTTPRequestChanges(req, data)
-	if err == nil {
-		t.Error("expected error for invalid URL")
-	}
-}
-
-func TestApplyHTTPRequestChanges_NilData(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/", nil)
-	result, body, err := ApplyHTTPRequestChanges(req, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != req {
-		t.Error("nil data should return original request")
-	}
-	if body != nil {
-		t.Error("nil data should return nil body")
-	}
-}
-
-func TestApplyHTTPResponseChanges(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{"X-Original": {"yes"}},
-	}
-
-	data := map[string]any{
-		"status_code": int64(404),
-		"headers": map[string]any{
-			"X-Modified": []any{"yes"},
-		},
-		"body": []byte("not found"),
-	}
-
-	resp, body, err := ApplyHTTPResponseChanges(resp, data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if resp.StatusCode != 404 {
-		t.Errorf("status_code = %d, want 404", resp.StatusCode)
-	}
-	if resp.Header.Get("X-Modified") != "yes" {
-		t.Errorf("X-Modified = %q, want %q", resp.Header.Get("X-Modified"), "yes")
-	}
-	if !bytes.Equal(body, []byte("not found")) {
-		t.Errorf("body = %q, want %q", body, "not found")
-	}
-}
 
 func TestBuildRespondResponse(t *testing.T) {
 	responseData := map[string]any{
@@ -287,27 +44,51 @@ func TestBuildRespondResponse_Defaults(t *testing.T) {
 	}
 }
 
-func TestHeadersToMap_RoundTrip(t *testing.T) {
-	original := gohttp.Header{
-		"Content-Type":  {"application/json"},
-		"Authorization": {"Bearer token123"},
-		"Accept":        {"text/html", "application/json"},
+func TestBuildRespondResponse_OrderedArrayHeaders(t *testing.T) {
+	responseData := map[string]any{
+		"status_code": int64(200),
+		"headers": []any{
+			map[string]any{"name": "content-type", "value": "text/html"},
+			map[string]any{"name": "x-custom", "value": "val"},
+		},
+		"body": []byte("hello"),
 	}
 
-	m := headersToMap(httputil.HTTPHeaderToRawHeaders(original))
-	restored := mapToHeaders(m)
+	statusCode, headers, body := BuildRespondResponse(responseData)
 
-	for key, wantVals := range original {
-		gotVals := restored.Values(key)
-		if len(gotVals) != len(wantVals) {
-			t.Errorf("header %q: got %d values, want %d", key, len(gotVals), len(wantVals))
-			continue
-		}
-		for i, want := range wantVals {
-			if gotVals[i] != want {
-				t.Errorf("header %q[%d] = %q, want %q", key, i, gotVals[i], want)
+	if statusCode != 200 {
+		t.Errorf("statusCode = %d, want 200", statusCode)
+	}
+	if len(headers) != 2 {
+		t.Fatalf("headers length = %d, want 2", len(headers))
+	}
+	if headers[0].Name != "content-type" || headers[0].Value != "text/html" {
+		t.Errorf("headers[0] = {%q, %q}, want content-type: text/html", headers[0].Name, headers[0].Value)
+	}
+	if !bytes.Equal(body, []byte("hello")) {
+		t.Errorf("body = %q, want %q", body, "hello")
+	}
+}
+
+func TestBuildRespondResponse_InvalidStatusCode(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode any
+		want       int
+	}{
+		{"zero int", int(0), 200},
+		{"negative int64", int64(-1), 200},
+		{"too large float64", float64(1000), 200},
+		{"valid int", int(403), 403},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := map[string]any{"status_code": tt.statusCode}
+			code, _, _ := BuildRespondResponse(data)
+			if code != tt.want {
+				t.Errorf("BuildRespondResponse status = %d, want %d", code, tt.want)
 			}
-		}
+		})
 	}
 }
 
@@ -347,11 +128,9 @@ func TestMapToHeaders_SanitizesCRLF(t *testing.T) {
 	if v := h.Get("X-Safe"); v != "clean" {
 		t.Errorf("X-Safe = %q, want %q", v, "clean")
 	}
-	// Key should have CRLF stripped.
 	if v := h.Get("X-EvilInjected"); v != "value" {
 		t.Errorf("X-EvilInjected = %q, want %q", v, "value")
 	}
-	// Value should have CRLF stripped.
 	if v := h.Get("X-Evil-Value"); v != "valInjected: yes" {
 		t.Errorf("X-Evil-Value = %q, want %q", v, "valInjected: yes")
 	}
@@ -360,6 +139,13 @@ func TestMapToHeaders_SanitizesCRLF(t *testing.T) {
 	}
 	if v := h.Get("X-String-Slice"); v != "slicevalue" {
 		t.Errorf("X-String-Slice = %q, want %q", v, "slicevalue")
+	}
+}
+
+func TestMapToHeaders_NilInput(t *testing.T) {
+	h := mapToHeaders(nil)
+	if h != nil {
+		t.Errorf("nil input should return nil, got %v", h)
 	}
 }
 
@@ -386,132 +172,6 @@ func TestValidStatusCode(t *testing.T) {
 				t.Errorf("validStatusCode(%d, %d) = %d, want %d", tt.code, tt.fallback, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestApplyHTTPResponseChanges_InvalidStatusCode(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-	}
-	data := map[string]any{
-		"status_code": 0,
-	}
-	resp, _, err := ApplyHTTPResponseChanges(resp, data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Invalid status code 0 should preserve original 200.
-	if resp.StatusCode != 200 {
-		t.Errorf("status_code = %d, want 200 (fallback)", resp.StatusCode)
-	}
-}
-
-func TestApplyHTTPResponseChanges_NegativeStatusCode(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-	}
-	data := map[string]any{
-		"status_code": -1,
-	}
-	resp, _, err := ApplyHTTPResponseChanges(resp, data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status_code = %d, want 200 (fallback)", resp.StatusCode)
-	}
-}
-
-func TestHTTPResponseToMap_Trailers(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{"Content-Type": {"application/grpc"}},
-		Trailer:    gohttp.Header{"Grpc-Status": {"0"}, "Grpc-Message": {"OK"}},
-	}
-	req, _ := gohttp.NewRequest("POST", "http://example.com/grpc.Service/Method", nil)
-	body := []byte("grpc-body")
-
-	m := HTTPResponseToMap(resp, body, req, nil, "h2")
-
-	trailers, ok := m["trailers"].(map[string]any)
-	if !ok {
-		t.Fatal("trailers should be map[string]any")
-	}
-	grpcStatus, ok := trailers["Grpc-Status"].([]any)
-	if !ok || len(grpcStatus) == 0 || grpcStatus[0] != "0" {
-		t.Errorf("trailers[Grpc-Status] = %v, want [0]", trailers["Grpc-Status"])
-	}
-	grpcMsg, ok := trailers["Grpc-Message"].([]any)
-	if !ok || len(grpcMsg) == 0 || grpcMsg[0] != "OK" {
-		t.Errorf("trailers[Grpc-Message] = %v, want [OK]", trailers["Grpc-Message"])
-	}
-}
-
-func TestHTTPResponseToMap_NilTrailers(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-		Trailer:    nil,
-	}
-	m := HTTPResponseToMap(resp, nil, nil, nil, "HTTP/1.x")
-
-	trailers, ok := m["trailers"].(map[string]any)
-	if !ok {
-		t.Fatal("trailers should be map[string]any even when nil")
-	}
-	if len(trailers) != 0 {
-		t.Errorf("trailers should be empty map, got %v", trailers)
-	}
-}
-
-func TestApplyHTTPResponseChanges_Trailers(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-		Trailer:    gohttp.Header{"Grpc-Status": {"0"}},
-	}
-
-	data := map[string]any{
-		"trailers": map[string]any{
-			"Grpc-Status":  []any{"13"},
-			"Grpc-Message": []any{"internal error"},
-		},
-	}
-
-	resp, _, err := ApplyHTTPResponseChanges(resp, data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if got := resp.Trailer.Get("Grpc-Status"); got != "13" {
-		t.Errorf("Grpc-Status = %q, want %q", got, "13")
-	}
-	if got := resp.Trailer.Get("Grpc-Message"); got != "internal error" {
-		t.Errorf("Grpc-Message = %q, want %q", got, "internal error")
-	}
-}
-
-func TestApplyHTTPResponseChanges_TrailersNotPresent(t *testing.T) {
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		Header:     gohttp.Header{},
-		Trailer:    gohttp.Header{"Original": {"yes"}},
-	}
-
-	// data without trailers key — should not modify existing trailers.
-	data := map[string]any{
-		"status_code": 200,
-	}
-
-	resp, _, err := ApplyHTTPResponseChanges(resp, data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if got := resp.Trailer.Get("Original"); got != "yes" {
-		t.Errorf("Original trailer = %q, want %q (should be preserved)", got, "yes")
 	}
 }
 
@@ -562,7 +222,6 @@ func TestInjectRawFrames(t *testing.T) {
 				if len(list) != tt.wantLen {
 					t.Errorf("raw_frames length = %d, want %d", len(list), tt.wantLen)
 				}
-				// Verify each element is []byte with correct content.
 				for i, item := range list {
 					b, ok := item.([]byte)
 					if !ok {
@@ -582,53 +241,64 @@ func TestInjectRawFrames(t *testing.T) {
 	}
 }
 
-func TestInjectRawFrames_BackwardCompatibility(t *testing.T) {
-	// Existing plugins that don't use raw_frames should work fine.
-	// Verify that other keys are not affected.
-	req, _ := gohttp.NewRequest("GET", "http://example.com/", nil)
-	data := HTTPRequestToMap(req, []byte("body"), nil, "h2")
-
-	// Before injection: no raw_frames.
-	if _, ok := data["raw_frames"]; ok {
-		t.Error("raw_frames should not be present before injection")
-	}
-
-	// Inject raw frames.
-	InjectRawFrames(data, [][]byte{{0x01, 0x02}})
-
-	// Verify other keys are untouched.
-	if v := data["method"].(string); v != "GET" {
-		t.Errorf("method = %q, want GET", v)
-	}
-	if v := data["protocol"].(string); v != "h2" {
-		t.Errorf("protocol = %q, want h2", v)
-	}
-
-	// Verify raw_frames is present.
-	frames, ok := data["raw_frames"].([]any)
-	if !ok || len(frames) != 1 {
-		t.Errorf("raw_frames = %v, want 1 element", data["raw_frames"])
-	}
-}
-
-func TestBuildRespondResponse_InvalidStatusCode(t *testing.T) {
+func TestExtractBody(t *testing.T) {
 	tests := []struct {
-		name       string
-		statusCode any
-		want       int
+		name string
+		data map[string]any
+		want []byte
 	}{
-		{"zero int", int(0), 200},
-		{"negative int64", int64(-1), 200},
-		{"too large float64", float64(1000), 200},
-		{"valid int", int(403), 403},
+		{"bytes body", map[string]any{"body": []byte("hello")}, []byte("hello")},
+		{"string body", map[string]any{"body": "hello"}, []byte("hello")},
+		{"no body key", map[string]any{}, nil},
+		{"int body ignored", map[string]any{"body": 42}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := map[string]any{"status_code": tt.statusCode}
-			code, _, _ := BuildRespondResponse(data)
-			if code != tt.want {
-				t.Errorf("BuildRespondResponse status = %d, want %d", code, tt.want)
+			got := extractBody(tt.data)
+			if !bytes.Equal(got, tt.want) {
+				t.Errorf("extractBody() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMapFormatToHeaders(t *testing.T) {
+	m := map[string]any{
+		"Content-Type": []any{"text/html"},
+		"Accept":       []string{"text/plain", "application/json"},
+		"X-Single":     "value",
+	}
+	h := mapFormatToHeaders(m)
+
+	if v := h.Get("Content-Type"); v != "text/html" {
+		t.Errorf("Content-Type = %q, want %q", v, "text/html")
+	}
+	acceptVals := h.Values("Accept")
+	if len(acceptVals) != 2 {
+		t.Fatalf("Accept values = %d, want 2", len(acceptVals))
+	}
+	if v := h.Get("X-Single"); v != "value" {
+		t.Errorf("X-Single = %q, want %q", v, "value")
+	}
+}
+
+func TestMapToHeaders_RoundTripWithOrderedArray(t *testing.T) {
+	// Verify ordered array → RawHeaders → ordered array round trip.
+	original := parser.RawHeaders{
+		{Name: "Content-Type", Value: "text/html"},
+		{Name: "Set-Cookie", Value: "a=1"},
+		{Name: "set-cookie", Value: "b=2"},
+	}
+	// Convert to ordered list (like RawRequestToMap does).
+	list := rawHeadersToOrderedList(original)
+	// Convert back via mapToHeaders (simulating plugin return).
+	restored := mapToHeaders(list)
+	if len(restored) != len(original) {
+		t.Fatalf("length = %d, want %d", len(restored), len(original))
+	}
+	for i, h := range restored {
+		if h.Name != original[i].Name || h.Value != original[i].Value {
+			t.Errorf("headers[%d] = {%q, %q}, want {%q, %q}", i, h.Name, h.Value, original[i].Name, original[i].Value)
+		}
 	}
 }

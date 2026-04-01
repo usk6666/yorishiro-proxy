@@ -46,13 +46,14 @@ func setupPluginEngine(t *testing.T, scriptPath, protocol string, hooks []string
 }
 
 func TestPluginHook_H2_OnReceiveFromClient_Continue(t *testing.T) {
-	// Plugin adds X-Plugin-H2 header and continues.
+	// Plugin adds x-plugin-h2 header and continues (ordered array format).
 	script := writeStarlarkScript(t, "add_header.star", `
 def on_receive_from_client(data):
     if data["protocol"] != "h2":
         return {"action": "CONTINUE", "data": data}
-    headers = data["headers"]
-    headers["X-Plugin-H2"] = ["h2-value"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-plugin-h2", "value": "h2-value"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -178,8 +179,9 @@ def on_receive_from_client(data):
 func TestPluginHook_H2_OnBeforeSendToServer_ModifyRequest(t *testing.T) {
 	script := writeStarlarkScript(t, "modify_before_send.star", `
 def on_before_send_to_server(data):
-    headers = data["headers"]
-    headers["X-Before-Send-H2"] = ["added-by-plugin"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-before-send-h2", "value": "added-by-plugin"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -225,8 +227,9 @@ def on_before_send_to_server(data):
 func TestPluginHook_H2_OnReceiveFromServer_ModifyResponse(t *testing.T) {
 	script := writeStarlarkScript(t, "modify_response.star", `
 def on_receive_from_server(data):
-    headers = data["headers"]
-    headers["X-Plugin-Response-H2"] = ["modified"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-plugin-response-h2", "value": "modified"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -271,8 +274,9 @@ def on_receive_from_server(data):
 func TestPluginHook_H2_OnBeforeSendToClient_ModifyResponse(t *testing.T) {
 	script := writeStarlarkScript(t, "modify_before_client.star", `
 def on_before_send_to_client(data):
-    headers = data["headers"]
-    headers["X-Before-Client-H2"] = ["final-touch"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-before-client-h2", "value": "final-touch"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -369,8 +373,9 @@ func TestPluginHook_H2_ProtocolField(t *testing.T) {
 	script := writeStarlarkScript(t, "check_protocol.star", `
 def on_receive_from_client(data):
     proto = data["protocol"]
-    headers = data["headers"]
-    headers["X-Protocol"] = [proto]
+    headers = list(data["headers"])
+    headers.append({"name": "x-protocol", "value": proto})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -463,8 +468,9 @@ func TestPluginHook_H2_RawFramesAbsentViaH2CHelper(t *testing.T) {
 def on_receive_from_client(data):
     raw = data.get("raw_frames", None)
     if raw != None:
-        headers = data["headers"]
-        headers["X-Frame-Count"] = [str(len(raw))]
+        headers = list(data["headers"])
+        headers.append({"name": "x-frame-count", "value": str(len(raw))})
+        data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -515,8 +521,9 @@ func TestPluginHook_H2_NoRawFramesBackwardCompat(t *testing.T) {
 	script := writeStarlarkScript(t, "no_raw_frames.star", `
 def on_receive_from_client(data):
     # Plugin ignores raw_frames entirely — backward compatible.
-    headers = data["headers"]
-    headers["X-Compat"] = ["ok"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-compat", "value": "ok"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 
@@ -562,8 +569,9 @@ func TestPluginHook_H2_FlowRecording_WithPlugin(t *testing.T) {
 	// Integration test: plugin adds a header, request flows through, and flow is recorded.
 	script := writeStarlarkScript(t, "record_test.star", `
 def on_receive_from_client(data):
-    headers = data["headers"]
-    headers["X-Plugin-Trace"] = ["traced"]
+    headers = list(data["headers"])
+    headers.append({"name": "x-plugin-trace", "value": "traced"})
+    data["headers"] = headers
     return {"action": "CONTINUE", "data": data}
 `)
 

@@ -162,8 +162,8 @@ func TestTrailers_PluginHook_ObservesAndModifiesTrailers(t *testing.T) {
 	// Plugin reads trailers from the response and modifies them.
 	script := writeStarlarkScript(t, "modify_trailers.star", `
 def on_receive_from_server(data):
-    trailers = data.get("trailers", {})
-    trailers["X-Plugin-Trailer"] = ["added-by-plugin"]
+    trailers = list(data.get("trailers", []))
+    trailers.append({"name": "x-plugin-trailer", "value": "added-by-plugin"})
     data["trailers"] = trailers
     return {"action": "CONTINUE", "data": data}
 `)
