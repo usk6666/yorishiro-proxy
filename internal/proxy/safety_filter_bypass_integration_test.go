@@ -639,8 +639,9 @@ func TestSafetyFilterBypass_OutputFilter_GzipResponse(t *testing.T) {
 		w.Write(compressed.Bytes())
 	})
 
-	// Disable the Go HTTP client's automatic decompression so we can see
-	// what the proxy actually sent.
+	// NOTE: We do not use buildSafetyProxy here because we need
+	// DisableCompression: true on the HTTP transport to inspect the raw
+	// compressed bytes the proxy forwards.
 	cfg := productionLikeConfig{
 		PeekTimeout:        5 * time.Second,
 		MaxConnections:     64,
@@ -716,6 +717,9 @@ func TestSafetyFilterBypass_OutputFilter_DeflateResponse(t *testing.T) {
 		w.Write(compressed.Bytes())
 	})
 
+	// NOTE: We do not use buildSafetyProxy here because we need
+	// DisableCompression: true on the HTTP transport to inspect the raw
+	// compressed bytes the proxy forwards.
 	cfg := productionLikeConfig{
 		PeekTimeout:        5 * time.Second,
 		MaxConnections:     64,
