@@ -129,7 +129,7 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 
 	data := plugin.H2ResponseToMap(
 		resp.StatusCode, respHeaders, respTrailers, body,
-		h2req.Method, h2req.Authority, h2req.Path,
+		h2req.Method, h2req.Scheme, h2req.Authority, h2req.Path,
 		connInfo, "h2",
 	)
 	if rawFrames != nil {
@@ -191,7 +191,7 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 
 	data := plugin.H2ResponseToMap(
 		resp.StatusCode, respHeaders, respTrailers, body,
-		h2req.Method, h2req.Authority, h2req.Path,
+		h2req.Method, h2req.Scheme, h2req.Authority, h2req.Path,
 		connInfo, "h2",
 	)
 	if rawFrames != nil {

@@ -74,7 +74,7 @@ func H2ResponseToMap(
 	headers []hpack.HeaderField,
 	trailers []hpack.HeaderField,
 	body []byte,
-	reqMethod, reqAuthority, reqPath string,
+	reqMethod, reqScheme, reqAuthority, reqPath string,
 	connInfo *ConnInfo,
 	protocol string,
 ) map[string]any {
@@ -100,7 +100,11 @@ func H2ResponseToMap(
 		}
 		urlStr := reqPath
 		if reqAuthority != "" {
-			urlStr = "https://" + reqAuthority + reqPath
+			scheme := reqScheme
+			if scheme == "" {
+				scheme = "https"
+			}
+			urlStr = scheme + "://" + reqAuthority + reqPath
 		}
 		reqSummary["url"] = urlStr
 		m["request"] = reqSummary

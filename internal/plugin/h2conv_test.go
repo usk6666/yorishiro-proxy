@@ -119,7 +119,7 @@ func TestH2ResponseToMap(t *testing.T) {
 	body := []byte(`{"result":"ok"}`)
 	ci := &ConnInfo{ServerAddr: "93.184.216.34:443"}
 
-	m := H2ResponseToMap(200, headers, trailers, body, "GET", "example.com", "/api", ci, "h2")
+	m := H2ResponseToMap(200, headers, trailers, body, "GET", "https", "example.com", "/api", ci, "h2")
 
 	if v, ok := m["status_code"].(int); !ok || v != 200 {
 		t.Errorf("status_code = %v, want 200", m["status_code"])
@@ -173,14 +173,14 @@ func TestH2ResponseToMap(t *testing.T) {
 }
 
 func TestH2ResponseToMap_NoRequestSummary(t *testing.T) {
-	m := H2ResponseToMap(200, nil, nil, nil, "", "", "", nil, "h2")
+	m := H2ResponseToMap(200, nil, nil, nil, "", "", "", "", nil, "h2")
 	if _, ok := m["request"]; ok {
 		t.Error("request key should not be present when reqMethod is empty")
 	}
 }
 
 func TestH2ResponseToMap_NilTrailers(t *testing.T) {
-	m := H2ResponseToMap(200, nil, nil, nil, "GET", "", "/", nil, "h2")
+	m := H2ResponseToMap(200, nil, nil, nil, "GET", "", "", "/", nil, "h2")
 	trlrs, ok := m["trailers"].([]any)
 	if !ok {
 		t.Fatal("trailers should be []any even when nil")
