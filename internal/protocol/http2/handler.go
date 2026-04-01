@@ -684,7 +684,28 @@ func (h *Handler) runClientPluginHook(sc *streamContext) bool {
 	}
 	txCtx := plugin.NewTxCtx()
 	var terminated bool
-	sc.req, sc.reqBody, terminated = h.dispatchOnReceiveFromClient(sc.ctx, sc.w, sc.req, sc.reqBody, pluginConnInfo, txCtx, sc.reqRawFrames, sc.logger)
+	sc.h2req, sc.reqBody, terminated = h.dispatchOnReceiveFromClient(sc.ctx, sc.w, sc.h2req, sc.reqBody, pluginConnInfo, txCtx, sc.reqRawFrames, sc.logger)
+	if !terminated && h.pluginEngine != nil {
+		// Re-derive gohttp.Request from h2req after plugin modification.
+		// Preserve URL scheme and host from sc.req which were set by
+		// resolveSchemeAndHost (these are not part of h2req fields).
+		goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
+		if err != nil {
+			sc.logger.Error("HTTP/2 failed to convert h2Request after plugin hook", "error", err)
+			writeErrorResponse(sc.w, httputil.StatusBadRequest)
+			sc.pluginConnInfo = pluginConnInfo
+			sc.txCtx = txCtx
+			return true
+		}
+		goReq.URL.Scheme = sc.req.URL.Scheme
+		if goReq.URL.Host == "" {
+			goReq.URL.Host = sc.req.URL.Host
+		}
+		if goReq.Host == "" {
+			goReq.Host = sc.req.Host
+		}
+		sc.req = goReq
+	}
 	// Store txCtx and pluginConnInfo on the context for later hooks — we
 	// piggyback on the streamContext's context value.  For simplicity we
 	// store them as unexported fields (added below).
@@ -835,11 +856,33 @@ func (h *Handler) applyResponseTransform(resp *gohttp.Response, body []byte) (go
 
 // runServerPluginHook dispatches the on_before_send_to_server hook.
 func (h *Handler) runServerPluginHook(sc *streamContext, outReq *gohttp.Request) *gohttp.Request {
-	outReq, body := h.dispatchOnBeforeSendToServer(sc.ctx, outReq, sc.reqBody, sc.pluginConnInfo, sc.txCtx, sc.reqRawFrames, sc.logger)
+	var body []byte
+	sc.h2req, body = h.dispatchOnBeforeSendToServer(sc.ctx, sc.h2req, sc.reqBody, sc.pluginConnInfo, sc.txCtx, sc.reqRawFrames, sc.logger)
 	if body != nil {
 		outReq.Body = io.NopCloser(bytes.NewReader(body))
 		outReq.ContentLength = int64(len(body))
 		sc.reqBody = body
+	}
+	// When plugin engine is active, re-derive the outbound gohttp.Request
+	// from the (possibly modified) h2req.
+	if h.pluginEngine != nil {
+		goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
+		if err != nil {
+			sc.logger.Warn("HTTP/2 failed to convert h2Request after server plugin hook", "error", err)
+			return outReq
+		}
+		// Carry over the body from the stream context.
+		goReq.Body = io.NopCloser(bytes.NewReader(sc.reqBody))
+		goReq.ContentLength = int64(len(sc.reqBody))
+		// Preserve URL scheme and host from the outbound request.
+		goReq.URL.Scheme = outReq.URL.Scheme
+		if goReq.URL.Host == "" {
+			goReq.URL.Host = outReq.URL.Host
+		}
+		if goReq.Host == "" {
+			goReq.Host = outReq.Host
+		}
+		return goReq
 	}
 	return outReq
 }
@@ -1054,8 +1097,8 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 // runResponsePluginHooks dispatches the on_receive_from_server and
 // on_before_send_to_client hooks.
 func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *gohttp.Response, fullRespBody []byte) (*gohttp.Response, []byte) {
-	resp, fullRespBody = h.dispatchOnReceiveFromServer(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
-	resp, fullRespBody = h.dispatchOnBeforeSendToClient(sc.ctx, resp, fullRespBody, sc.req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
+	resp, fullRespBody = h.dispatchOnReceiveFromServer(sc.ctx, resp, fullRespBody, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
+	resp, fullRespBody = h.dispatchOnBeforeSendToClient(sc.ctx, resp, fullRespBody, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
 	return resp, fullRespBody
 }
 
