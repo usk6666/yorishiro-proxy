@@ -247,6 +247,18 @@ func (h *Handler) applyInterceptResponse(ctx context.Context, conn net.Conn, req
 			"method", req.Method, "url", reqURL.String(), "status", resp.StatusCode)
 		return responseInterceptResult{resp: resp, body: body, dropped: true, autoContentLength: acl}
 	case intercept.ActionModifyAndForward:
+		if action.IsRawMode() {
+			// Raw mode: write override bytes directly to the client connection,
+			// bypassing L7 serialization. This is the response-side equivalent
+			// of raw request forwarding.
+			logger.Info("intercept raw mode response modify_and_forward",
+				"method", req.Method, "url", reqURL.String(),
+				"raw_override_size", len(action.RawOverride))
+			if _, err := conn.Write(action.RawOverride); err != nil {
+				logger.Error("response intercept raw write failed", "error", err)
+			}
+			return responseInterceptResult{resp: resp, body: body, dropped: true, autoContentLength: acl}
+		}
 		modResp, modBody, modErr := httputil.ApplyResponseModifications(resp, action, body)
 		if modErr != nil {
 			logger.Error("response intercept modification failed", "error", modErr)
