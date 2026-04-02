@@ -495,12 +495,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	duration := time.Since(start)
 	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 
-	goResp := httputil.RawResponseToHTTP(fwd.resp, rawRespBody)
 	h.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:       start,
 		duration:    duration,
 		serverAddr:  fwd.serverAddr,
-		resp:        goResp,
+		resp:        fwd.resp,
 		rawResponse: rawResponse,
 		respBody:    rawRespBody,
 		sendMs:      sendMs,

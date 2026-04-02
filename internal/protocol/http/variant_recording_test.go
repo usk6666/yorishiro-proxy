@@ -442,18 +442,12 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 
 	// Phase 2: Record receive (should use sequence 2).
 	duration := 100 * time.Millisecond
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{"Content-Type": {"application/json"}},
-	}
 
 	handler.recordReceive(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   duration,
 		serverAddr: "93.184.216.34:80",
-		resp:       resp,
+		resp:       testRawResponse(200, gohttp.Header{"Content-Type": {"application/json"}}),
 		respBody:   []byte(`{"status":"ok"}`),
 	}, logger)
 
@@ -528,17 +522,11 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 1", sendResult.recvSequence)
 	}
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{},
-	}
 	handler.recordReceive(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   50 * time.Millisecond,
 		serverAddr: "93.184.216.34:80",
-		resp:       resp,
+		resp:       testRawResponse(200, gohttp.Header{}),
 		respBody:   []byte("ok"),
 	}, logger)
 
@@ -732,21 +720,18 @@ func TestRecordReceiveWithVariant_NoModification(t *testing.T) {
 		req:      goRequestToRaw(req),
 	}, logger)
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1, ProtoMinor: 1,
-		Header: gohttp.Header{"Content-Type": {"text/plain"}},
-	}
+	respHeaders := gohttp.Header{"Content-Type": {"text/plain"}}
 	body := []byte("response body")
+	rawResp := testRawResponse(200, respHeaders)
 
 	// Snapshot matches current: no modification.
-	snap := snapshotResponse(resp.StatusCode, resp.Header, body)
+	snap := snapshotResponse(200, respHeaders, body)
 
 	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   50 * time.Millisecond,
 		serverAddr: "93.184.216.34:80",
-		resp:       resp,
+		resp:       rawResp,
 		respBody:   body,
 	}, &snap, logger)
 
@@ -789,17 +774,11 @@ func TestRecordReceiveWithVariant_StatusModified(t *testing.T) {
 	snap := snapshotResponse(200, origHeaders, body)
 
 	// After intercept: status changed to 403.
-	modifiedResp := &gohttp.Response{
-		StatusCode: 403,
-		ProtoMajor: 1, ProtoMinor: 1,
-		Header: origHeaders.Clone(),
-	}
-
 	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   50 * time.Millisecond,
 		serverAddr: "93.184.216.34:80",
-		resp:       modifiedResp,
+		resp:       testRawResponse(403, origHeaders.Clone()),
 		respBody:   body,
 	}, &snap, logger)
 
@@ -850,17 +829,11 @@ func TestRecordReceiveWithVariant_BodyModified(t *testing.T) {
 
 	snap := snapshotResponse(200, headers, origBody)
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1, ProtoMinor: 1,
-		Header: headers.Clone(),
-	}
-
 	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   50 * time.Millisecond,
 		serverAddr: "93.184.216.34:80",
-		resp:       resp,
+		resp:       testRawResponse(200, headers.Clone()),
 		respBody:   modBody,
 	}, &snap, logger)
 
@@ -896,18 +869,12 @@ func TestRecordReceiveWithVariant_NilSnap(t *testing.T) {
 		req:      goRequestToRaw(req),
 	}, logger)
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1, ProtoMinor: 1,
-		Header: gohttp.Header{},
-	}
-
 	// Nil snapshot should behave like recordReceive (no variant).
 	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   50 * time.Millisecond,
 		serverAddr: "93.184.216.34:80",
-		resp:       resp,
+		resp:       testRawResponse(200, gohttp.Header{}),
 		respBody:   []byte("ok"),
 	}, nil, logger)
 
@@ -926,7 +893,7 @@ func TestRecordReceiveWithVariant_NilSendResult(t *testing.T) {
 
 	// Should be a no-op with nil sendResult.
 	handler.recordReceiveWithVariant(context.Background(), nil, receiveRecordParams{
-		resp:     &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}},
+		resp:     testRawResponse(200, gohttp.Header{}),
 		respBody: []byte("ok"),
 	}, &responseSnapshot{statusCode: 200, headers: nil, body: []byte("ok")}, testutil.DiscardLogger())
 	// No panic = pass.
@@ -972,17 +939,11 @@ func TestRecordReceiveWithVariant_SequenceWithSendVariant(t *testing.T) {
 	respHeaders := gohttp.Header{"Content-Type": {"application/json"}}
 	respSnap := snapshotResponse(200, respHeaders, origRespBody)
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1, ProtoMinor: 1,
-		Header: respHeaders.Clone(),
-	}
-
 	handler.recordReceiveWithVariant(ctx, sendResult, receiveRecordParams{
 		start:      start,
 		duration:   100 * time.Millisecond,
 		serverAddr: "93.184.216.34:80",
-		resp:       resp,
+		resp:       testRawResponse(200, respHeaders.Clone()),
 		respBody:   modRespBody,
 	}, &respSnap, logger)
 
