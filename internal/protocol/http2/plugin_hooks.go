@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	gohttp "net/http"
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
@@ -111,24 +110,20 @@ func (h *Handler) dispatchOnBeforeSendToServer(ctx context.Context, h2req *h2Req
 	return h2req, body
 }
 
-// dispatchOnReceiveFromServer dispatches the on_receive_from_server hook.
-// Returns the (possibly modified) response status code, headers, trailers, and body.
-// The txCtx is a mutable dict shared across all hooks within the same transaction.
-// rawFrames contains the raw HTTP/2 frame bytes received from the upstream server,
-// which are injected into the hook data as an optional "raw_frames" field.
-func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.Response, body []byte, h2req *h2Request, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) (*gohttp.Response, []byte) {
+// dispatchOnReceiveFromServerH2 dispatches the on_receive_from_server hook
+// using hpack native types (no gohttp.Response).
+func (h *Handler) dispatchOnReceiveFromServerH2(ctx context.Context, resp *h2Response, h2req *h2Request, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) *h2Response {
 	if h.pluginEngine == nil {
-		return resp, body
+		return resp
 	}
 
-	respHeaders := goHTTPHeaderToHpack(resp.Header)
 	var respTrailers []hpack.HeaderField
-	if resp.Trailer != nil {
-		respTrailers = goHTTPHeaderToHpack(resp.Trailer)
+	if resp.Trailers != nil {
+		respTrailers = resp.Trailers
 	}
 
 	data := plugin.H2ResponseToMap(
-		resp.StatusCode, respHeaders, respTrailers, body,
+		resp.StatusCode, resp.Headers, respTrailers, resp.Body,
 		h2req.Method, h2req.Scheme, h2req.Authority, h2req.Path,
 		connInfo, "h2",
 	)
@@ -140,57 +135,48 @@ func (h *Handler) dispatchOnReceiveFromServer(ctx context.Context, resp *gohttp.
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnReceiveFromServer, data)
 	if err != nil {
 		logger.Warn("plugin on_receive_from_server error", "error", err)
-		return resp, body
+		return resp
 	}
 	plugin.ExtractTxCtx(result, txCtx)
 	if result == nil || result.Data == nil {
-		return resp, body
+		return resp
 	}
 
 	newStatus, newHeaders, newTrailers, newBody, applyErr := plugin.ApplyH2ResponseChanges(
-		resp.StatusCode, respHeaders, respTrailers, result.Data,
+		resp.StatusCode, resp.Headers, respTrailers, result.Data,
 	)
 	if applyErr != nil {
 		logger.Warn("plugin on_receive_from_server apply changes failed", "error", applyErr)
-		return resp, body
+		return resp
 	}
 	resp.StatusCode = newStatus
-	// Only update resp.Header if the plugin actually changed headers.
-	// When newHeaders is the same slice as respHeaders (plugin didn't modify),
-	// skip the hpack→gohttp conversion to avoid a lossy gohttp→hpack→gohttp
-	// round-trip that may reorder headers due to gohttp.Header being a map.
-	if !sameHpackSlice(respHeaders, newHeaders) {
-		resp.Header = hpackToGoHTTPHeader(newHeaders)
+	if !sameHpackSlice(resp.Headers, newHeaders) {
+		resp.Headers = newHeaders
 	}
 	if newTrailers != nil {
-		resp.Trailer = hpackToGoHTTPHeader(newTrailers)
+		resp.Trailers = newTrailers
 	}
 	if newBody != nil {
-		body = newBody
-		resp.ContentLength = int64(len(body))
+		resp.Body = newBody
 	}
 
-	return resp, body
+	return resp
 }
 
-// dispatchOnBeforeSendToClient dispatches the on_before_send_to_client hook.
-// Returns the (possibly modified) response and body.
-// The txCtx is a mutable dict shared across all hooks within the same transaction.
-// rawFrames contains the raw HTTP/2 frame bytes received from the upstream server,
-// which are injected into the hook data as an optional "raw_frames" field.
-func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp.Response, body []byte, h2req *h2Request, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) (*gohttp.Response, []byte) {
+// dispatchOnBeforeSendToClientH2 dispatches the on_before_send_to_client hook
+// using hpack native types (no gohttp.Response).
+func (h *Handler) dispatchOnBeforeSendToClientH2(ctx context.Context, resp *h2Response, h2req *h2Request, connInfo *plugin.ConnInfo, txCtx map[string]any, rawFrames [][]byte, logger *slog.Logger) *h2Response {
 	if h.pluginEngine == nil {
-		return resp, body
+		return resp
 	}
 
-	respHeaders := goHTTPHeaderToHpack(resp.Header)
 	var respTrailers []hpack.HeaderField
-	if resp.Trailer != nil {
-		respTrailers = goHTTPHeaderToHpack(resp.Trailer)
+	if resp.Trailers != nil {
+		respTrailers = resp.Trailers
 	}
 
 	data := plugin.H2ResponseToMap(
-		resp.StatusCode, respHeaders, respTrailers, body,
+		resp.StatusCode, resp.Headers, respTrailers, resp.Body,
 		h2req.Method, h2req.Scheme, h2req.Authority, h2req.Path,
 		connInfo, "h2",
 	)
@@ -202,35 +188,32 @@ func (h *Handler) dispatchOnBeforeSendToClient(ctx context.Context, resp *gohttp
 	result, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnBeforeSendToClient, data)
 	if err != nil {
 		logger.Warn("plugin on_before_send_to_client error", "error", err)
-		return resp, body
+		return resp
 	}
 	plugin.ExtractTxCtx(result, txCtx)
 	if result == nil || result.Data == nil {
-		return resp, body
+		return resp
 	}
 
 	newStatus, newHeaders, newTrailers, newBody, applyErr := plugin.ApplyH2ResponseChanges(
-		resp.StatusCode, respHeaders, respTrailers, result.Data,
+		resp.StatusCode, resp.Headers, respTrailers, result.Data,
 	)
 	if applyErr != nil {
 		logger.Warn("plugin on_before_send_to_client apply changes failed", "error", applyErr)
-		return resp, body
+		return resp
 	}
 	resp.StatusCode = newStatus
-	// Only update resp.Header if the plugin actually changed headers.
-	// See dispatchOnReceiveFromServer for rationale.
-	if !sameHpackSlice(respHeaders, newHeaders) {
-		resp.Header = hpackToGoHTTPHeader(newHeaders)
+	if !sameHpackSlice(resp.Headers, newHeaders) {
+		resp.Headers = newHeaders
 	}
 	if newTrailers != nil {
-		resp.Trailer = hpackToGoHTTPHeader(newTrailers)
+		resp.Trailers = newTrailers
 	}
 	if newBody != nil {
-		body = newBody
-		resp.ContentLength = int64(len(body))
+		resp.Body = newBody
 	}
 
-	return resp, body
+	return resp
 }
 
 // writePluginRespondResponse writes a plugin ActionRespond response to the
@@ -310,5 +293,3 @@ func sameHpackSlice(a, b []hpack.HeaderField) bool {
 	}
 	return &a[0] == &b[0]
 }
-
-// Note: hpackToGoHTTPHeader is defined in headerconv.go and reused here.

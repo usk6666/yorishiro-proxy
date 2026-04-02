@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/frame"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -40,7 +40,18 @@ func TestInterceptRequestSetsRawBytes(t *testing.T) {
 		buildTestFrame(frame.TypeData, frame.FlagEndStream, 1, []byte("body")),
 	}
 
-	req, _ := http.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 
 	// Release the intercept immediately in a goroutine.
 	go func() {
@@ -57,7 +68,7 @@ func TestInterceptRequestSetsRawBytes(t *testing.T) {
 		queue.Respond(item.ID, intercept.InterceptAction{Type: intercept.ActionRelease})
 	}()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, rawFrames, testutil.DiscardLogger())
+	action, intercepted := handler.interceptRequest(context.Background(), h2req, nil, rawFrames, testutil.DiscardLogger())
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
 	}
@@ -89,7 +100,18 @@ func TestInterceptRequestRawModeRelease(t *testing.T) {
 		buildTestFrame(frame.TypeHeaders, frame.FlagEndHeaders|frame.FlagEndStream, 1, []byte("hdr")),
 	}
 
-	req, _ := http.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 
 	// Release in raw mode.
 	go func() {
@@ -104,7 +126,7 @@ func TestInterceptRequestRawModeRelease(t *testing.T) {
 		})
 	}()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, rawFrames, testutil.DiscardLogger())
+	action, intercepted := handler.interceptRequest(context.Background(), h2req, nil, rawFrames, testutil.DiscardLogger())
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
 	}
@@ -128,8 +150,14 @@ func TestRecordRawSend_Unmodified(t *testing.T) {
 	originalRawBytes := joinRawFrames(rawFrames)
 
 	sc := &streamContext{
-		ctx:          context.Background(),
-		req:          mustNewRequest("GET", "http://example.com/test"),
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "GET", Scheme: "http", Authority: "example.com", Path: "/test",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "GET"}, {Name: ":scheme", Value: "http"},
+				{Name: ":authority", Value: "example.com"}, {Name: ":path", Value: "/test"},
+			},
+		},
 		reqURL:       mustParseURL("http://example.com/test"),
 		connID:       "conn-1",
 		clientAddr:   "127.0.0.1:1234",
@@ -142,7 +170,9 @@ func TestRecordRawSend_Unmodified(t *testing.T) {
 			connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		},
 	}
-	sc.srp.req = sc.req
+	sc.srp.method = sc.h2req.Method
+	sc.srp.host = sc.h2req.Authority
+	sc.srp.headers = sc.h2req.AllHeaders
 	sc.srp.reqURL = sc.reqURL
 	sc.srp.rawFrames = rawFrames
 
@@ -181,8 +211,14 @@ func TestRecordRawSend_Modified(t *testing.T) {
 	modifiedRawBytes := buildTestFrame(frame.TypeHeaders, frame.FlagEndHeaders|frame.FlagEndStream, 1, []byte("modified-hdr"))
 
 	sc := &streamContext{
-		ctx:          context.Background(),
-		req:          mustNewRequest("GET", "http://example.com/test"),
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "GET", Scheme: "http", Authority: "example.com", Path: "/test",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "GET"}, {Name: ":scheme", Value: "http"},
+				{Name: ":authority", Value: "example.com"}, {Name: ":path", Value: "/test"},
+			},
+		},
 		reqURL:       mustParseURL("http://example.com/test"),
 		connID:       "conn-1",
 		clientAddr:   "127.0.0.1:1234",
@@ -195,7 +231,9 @@ func TestRecordRawSend_Modified(t *testing.T) {
 			connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		},
 	}
-	sc.srp.req = sc.req
+	sc.srp.method = sc.h2req.Method
+	sc.srp.host = sc.h2req.Authority
+	sc.srp.headers = sc.h2req.AllHeaders
 	sc.srp.reqURL = sc.reqURL
 	sc.srp.rawFrames = rawFrames
 
@@ -264,18 +302,26 @@ func TestHandleRequestIntercept_RawModeRelease(t *testing.T) {
 	}
 
 	sc := &streamContext{
-		ctx:          context.Background(),
-		req:          mustNewRequest("GET", "http://example.com/test"),
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "GET", Scheme: "http", Authority: "example.com", Path: "/test",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "GET"}, {Name: ":scheme", Value: "http"},
+				{Name: ":authority", Value: "example.com"}, {Name: ":path", Value: "/test"},
+			},
+		},
 		reqURL:       mustParseURL("http://example.com/test"),
 		logger:       testutil.DiscardLogger(),
 		reqRawFrames: rawFrames,
 		srp:          sendRecordParams{reqBody: nil},
 	}
-	sc.srp.req = sc.req
+	sc.srp.method = sc.h2req.Method
+	sc.srp.host = sc.h2req.Authority
+	sc.srp.headers = sc.h2req.AllHeaders
 	sc.srp.reqURL = sc.reqURL
 
-	outReq, _ := http.NewRequest("GET", "http://example.com/test", nil)
-	snap := snapshotRequest(goHTTPHeaderToHpack(outReq.Header), nil)
+	outHeaders := buildH2HeadersFromH2Req(sc.h2req)
+	snap := snapshotRequest(sc.h2req.RegularHeaders(), nil)
 
 	// Release in raw mode.
 	go func() {
@@ -290,7 +336,7 @@ func TestHandleRequestIntercept_RawModeRelease(t *testing.T) {
 		})
 	}()
 
-	_, ok := handler.handleRequestIntercept(sc, outReq, &snap)
+	_, ok := handler.handleRequestIntercept(sc, outHeaders, &snap)
 	if !ok {
 		t.Fatal("expected ok=true from handleRequestIntercept")
 	}
@@ -332,18 +378,26 @@ func TestHandleRequestIntercept_RawModeModifyAndForward(t *testing.T) {
 	editedRaw := buildTestFrame(frame.TypeHeaders, frame.FlagEndHeaders|frame.FlagEndStream, 1, []byte("edited"))
 
 	sc := &streamContext{
-		ctx:          context.Background(),
-		req:          mustNewRequest("GET", "http://example.com/test"),
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "GET", Scheme: "http", Authority: "example.com", Path: "/test",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "GET"}, {Name: ":scheme", Value: "http"},
+				{Name: ":authority", Value: "example.com"}, {Name: ":path", Value: "/test"},
+			},
+		},
 		reqURL:       mustParseURL("http://example.com/test"),
 		logger:       testutil.DiscardLogger(),
 		reqRawFrames: rawFrames,
 		srp:          sendRecordParams{reqBody: nil},
 	}
-	sc.srp.req = sc.req
+	sc.srp.method = sc.h2req.Method
+	sc.srp.host = sc.h2req.Authority
+	sc.srp.headers = sc.h2req.AllHeaders
 	sc.srp.reqURL = sc.reqURL
 
-	outReq, _ := http.NewRequest("GET", "http://example.com/test", nil)
-	snap := snapshotRequest(goHTTPHeaderToHpack(outReq.Header), nil)
+	outHeaders := buildH2HeadersFromH2Req(sc.h2req)
+	snap := snapshotRequest(sc.h2req.RegularHeaders(), nil)
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -358,7 +412,7 @@ func TestHandleRequestIntercept_RawModeModifyAndForward(t *testing.T) {
 		})
 	}()
 
-	_, ok := handler.handleRequestIntercept(sc, outReq, &snap)
+	_, ok := handler.handleRequestIntercept(sc, outHeaders, &snap)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -372,14 +426,6 @@ func TestHandleRequestIntercept_RawModeModifyAndForward(t *testing.T) {
 }
 
 // --- helpers ---
-
-func mustNewRequest(method, rawURL string) *http.Request {
-	req, err := http.NewRequest(method, rawURL, nil)
-	if err != nil {
-		panic(err)
-	}
-	return req
-}
 
 func mustParseURL(rawURL string) *url.URL {
 	u, err := url.Parse(rawURL)

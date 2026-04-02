@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
-	gohttp "net/http"
 	"net/url"
 	"time"
 
@@ -16,16 +15,15 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
-// requestHeaders returns a clone of the request headers with the Host header
-// explicitly set from req.Host. Go's net/http strips the Host header from
-// Request.Header and stores it in Request.Host, so we must re-inject it for
-// accurate flow recording.
-func requestHeaders(req *gohttp.Request) gohttp.Header {
-	headers := req.Header.Clone()
-	if req.Host != "" {
-		headers["Host"] = []string{req.Host}
+// requestHeadersMap returns a map[string][]string of the request headers for
+// recording. It includes the host header from h2req's :authority, preserving
+// wire casing (no canonicalization).
+func requestHeadersMap(headers []hpack.HeaderField, host string) map[string][]string {
+	m := hpackToHeaderMap(headers)
+	if host != "" {
+		m["host"] = []string{host}
 	}
-	return headers
+	return m
 }
 
 // sendRecordParams holds the parameters needed to record the send phase
@@ -37,8 +35,10 @@ type sendRecordParams struct {
 	start      time.Time
 	connInfo   *flow.ConnectionInfo
 
-	req          *gohttp.Request
+	method       string
 	reqURL       *url.URL
+	host         string
+	headers      []hpack.HeaderField
 	reqBody      []byte
 	reqTruncated bool
 
@@ -70,7 +70,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		return nil
 	}
 
-	if !h.shouldCapture(p.req.Method, p.reqURL) {
+	if !h.shouldCapture(p.method, p.reqURL) {
 		return nil
 	}
 
@@ -89,7 +89,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("HTTP/2 flow save failed",
-			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+			"method", p.method, "url", p.reqURL.String(), "error", err)
 		return nil
 	}
 
@@ -98,9 +98,9 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
-		Method:        p.req.Method,
+		Method:        p.method,
 		URL:           p.reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       requestHeadersMap(p.headers, p.host),
 		Body:          p.reqBody,
 		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
@@ -182,12 +182,17 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		return nil
 	}
 
-	if !h.shouldCapture(p.req.Method, p.reqURL) {
+	if !h.shouldCapture(p.method, p.reqURL) {
 		return nil
 	}
 
-	// Detect whether modification occurred.
-	modified := snap != nil && requestModified(*snap, goHTTPHeaderToHpack(p.req.Header), p.reqBody)
+	// Detect whether modification occurred by comparing against regular headers.
+	currentRegular := hpackToRawHeaders(p.headers)
+	var currentHpack []hpack.HeaderField
+	for _, h := range currentRegular {
+		currentHpack = append(currentHpack, hpack.HeaderField{Name: h.Name, Value: h.Value})
+	}
+	modified := snap != nil && requestModified(*snap, currentHpack, p.reqBody)
 
 	protocol := proxy.SOCKS5Protocol(ctx, "HTTP/2")
 	tags := proxy.MergeSOCKS5Tags(ctx, nil)
@@ -204,29 +209,26 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("HTTP/2 flow save failed",
-			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+			"method", p.method, "url", p.reqURL.String(), "error", err)
 		return nil
 	}
 
 	if modified {
-		// Inject Host into the snapshot headers (the snapshot was taken from
-		// req.Header which does not contain Host per Go's net/http design).
+		// Build original headers map from snapshot.
 		origHpackHeaders := make([]hpack.HeaderField, len(snap.headers))
 		copy(origHpackHeaders, snap.headers)
-		if p.req.Host != "" {
-			origHpackHeaders = append(origHpackHeaders, hpack.HeaderField{Name: "host", Value: p.req.Host})
+		if p.host != "" {
+			origHpackHeaders = append(origHpackHeaders, hpack.HeaderField{Name: "host", Value: p.host})
 		}
-		origHeaders := hpackToGoHTTPHeaderMap(origHpackHeaders)
+		origHeaders := hpackToHeaderMap(origHpackHeaders)
 		// Record the original (unmodified) request as sequence 0.
-		// RawBytes is attached to the original message because it represents
-		// the wire-observed bytes before any intercept modifications.
 		origMeta := buildFrameMetadata(p.rawFrames, map[string]string{"variant": "original"})
 		originalMsg := &flow.Message{
 			FlowID:        fl.ID,
 			Sequence:      0,
 			Direction:     "send",
 			Timestamp:     p.start,
-			Method:        p.req.Method,
+			Method:        p.method,
 			URL:           p.reqURL,
 			Headers:       origHeaders,
 			Body:          snap.body,
@@ -239,15 +241,14 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		}
 
 		// Record the modified request as sequence 1.
-		// RawBytes is nil for modified messages — they are not wire-observed.
 		modifiedMsg := &flow.Message{
 			FlowID:        fl.ID,
 			Sequence:      1,
 			Direction:     "send",
 			Timestamp:     p.start,
-			Method:        p.req.Method,
+			Method:        p.method,
 			URL:           p.reqURL,
-			Headers:       requestHeaders(p.req),
+			Headers:       requestHeadersMap(p.headers, p.host),
 			Body:          p.reqBody,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "modified"},
@@ -265,9 +266,9 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
-		Method:        p.req.Method,
+		Method:        p.method,
 		URL:           p.reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       requestHeadersMap(p.headers, p.host),
 		Body:          p.reqBody,
 		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
@@ -291,8 +292,9 @@ type receiveRecordParams struct {
 	// certificate. Only set for HTTPS (h2) connections.
 	tlsServerCertSubject string
 
-	resp     *gohttp.Response
-	respBody []byte
+	statusCode  int
+	respHeaders []hpack.HeaderField
+	respBody    []byte
 
 	// sendMs is the time in milliseconds to send the request upstream.
 	sendMs *int64
@@ -326,16 +328,15 @@ type responseSnapshot struct {
 	body       []byte
 }
 
-// snapshotResponse creates a deep copy of the response status code, headers,
-// and body for later comparison.
-func snapshotResponse(statusCode int, headers gohttp.Header, body []byte) responseSnapshot {
-	snap := responseSnapshot{statusCode: statusCode}
-	if headers != nil {
-		snap.headers = httpHeaderToRawHeaders(headers)
+// snapshotH2Response creates a deep copy of the h2Response for later comparison.
+func snapshotH2Response(resp *h2Response) responseSnapshot {
+	snap := responseSnapshot{statusCode: resp.StatusCode}
+	if resp.Headers != nil {
+		snap.headers = hpackToRawHeaders(resp.Headers)
 	}
-	if body != nil {
-		snap.body = make([]byte, len(body))
-		copy(snap.body, body)
+	if resp.Body != nil {
+		snap.body = make([]byte, len(resp.Body))
+		copy(snap.body, resp.Body)
 	}
 	return snap
 }
@@ -353,10 +354,6 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		return
 	}
 
-	if p.resp == nil {
-		return
-	}
-
 	var sharedSnap *httputil.ResponseSnapshot
 	if snap != nil {
 		s := httputil.ResponseSnapshot{
@@ -368,8 +365,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 	}
 
 	tags := proxy.MergeSOCKS5Tags(ctx, nil)
-	respHeaders := httpHeaderToRawHeaders(p.resp.Header)
-	tags = httputil.MergeTechnologyTags(tags, h.detector, respHeaders, p.respBody)
+	respRawHeaders := hpackToRawHeaders(p.respHeaders)
+	tags = httputil.MergeTechnologyTags(tags, h.detector, respRawHeaders, p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
 		FlowID:               sendResult.flowID,
@@ -378,8 +375,8 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 		Duration:             p.duration,
 		ServerAddr:           p.serverAddr,
 		TLSServerCertSubject: p.tlsServerCertSubject,
-		RespStatusCode:       p.resp.StatusCode,
-		RespHeaders:          respHeaders,
+		RespStatusCode:       p.statusCode,
+		RespHeaders:          respRawHeaders,
 		RespBody:             p.respBody,
 		RawResponse:          joinRawFrames(p.rawFrames),
 		RawResponseMetadata:  buildFrameMetadata(p.rawFrames, nil),
@@ -422,7 +419,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		return
 	}
 
-	if !h.shouldCapture(p.req.Method, p.reqURL) {
+	if !h.shouldCapture(p.method, p.reqURL) {
 		return
 	}
 
@@ -444,7 +441,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("HTTP/2 intercept drop flow save failed",
-			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+			"method", p.method, "url", p.reqURL.String(), "error", err)
 		return
 	}
 
@@ -453,9 +450,9 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
-		Method:        p.req.Method,
+		Method:        p.method,
 		URL:           p.reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       requestHeadersMap(p.headers, p.host),
 		Body:          p.reqBody,
 		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
@@ -474,7 +471,7 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 		return
 	}
 
-	if !h.shouldCapture(p.req.Method, p.reqURL) {
+	if !h.shouldCapture(p.method, p.reqURL) {
 		return
 	}
 
@@ -495,7 +492,7 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("HTTP/2 outReq error flow save failed",
-			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
+			"method", p.method, "url", p.reqURL.String(), "error", err)
 		return
 	}
 
@@ -504,9 +501,9 @@ func (h *Handler) recordOutReqError(ctx context.Context, p sendRecordParams, bui
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
-		Method:        p.req.Method,
+		Method:        p.method,
 		URL:           p.reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       requestHeadersMap(p.headers, p.host),
 		Body:          p.reqBody,
 		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,
@@ -533,7 +530,7 @@ func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blocked
 		return
 	}
 
-	if !h.shouldCapture(p.req.Method, p.reqURL) {
+	if !h.shouldCapture(p.method, p.reqURL) {
 		return
 	}
 
@@ -569,7 +566,7 @@ func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blocked
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		logger.Error("HTTP/2 blocked flow save failed",
-			"blocked_by", blockedBy, "method", p.req.Method, "url", p.reqURL.String(), "error", err)
+			"blocked_by", blockedBy, "method", p.method, "url", p.reqURL.String(), "error", err)
 		return
 	}
 
@@ -578,9 +575,9 @@ func (h *Handler) recordBlocked(ctx context.Context, p sendRecordParams, blocked
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
-		Method:        p.req.Method,
+		Method:        p.method,
 		URL:           p.reqURL,
-		Headers:       requestHeaders(p.req),
+		Headers:       requestHeadersMap(p.headers, p.host),
 		Body:          p.reqBody,
 		RawBytes:      joinRawFrames(p.rawFrames),
 		BodyTruncated: p.reqTruncated,

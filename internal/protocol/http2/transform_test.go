@@ -30,7 +30,8 @@ func TestApplyRequestTransform_NilPipeline(t *testing.T) {
 		srp:     sendRecordParams{reqBody: body},
 	}
 
-	handler.applyRequestTransform(sc, outReq)
+	outHeaders := buildH2HeadersFromGoHTTP(outReq)
+	handler.applyRequestTransform(sc, &outHeaders)
 
 	// Body should remain unchanged.
 	if string(sc.reqBody) != `{"token":"old-value"}` {
@@ -63,11 +64,19 @@ func TestApplyRequestTransform_WithReplaceBody(t *testing.T) {
 	outReq.Header.Set("Content-Type", "application/json")
 
 	sc := &streamContext{
+		h2req: &h2Request{
+			Method:    "POST",
+			Scheme:    "http",
+			Authority: "example.com",
+			Path:      "/api",
+		},
+		reqURL:  outReq.URL,
 		reqBody: body,
 		srp:     sendRecordParams{reqBody: body},
 	}
 
-	handler.applyRequestTransform(sc, outReq)
+	outHeaders := buildH2HeadersFromGoHTTP(outReq)
+	handler.applyRequestTransform(sc, &outHeaders)
 
 	want := `{"token":"new-value"}`
 	if string(sc.reqBody) != want {
@@ -75,14 +84,6 @@ func TestApplyRequestTransform_WithReplaceBody(t *testing.T) {
 	}
 	if string(sc.srp.reqBody) != want {
 		t.Errorf("srp.reqBody = %q, want %q", sc.srp.reqBody, want)
-	}
-	// Verify outReq body is also updated.
-	reqBodyBytes, _ := io.ReadAll(outReq.Body)
-	if string(reqBodyBytes) != want {
-		t.Errorf("outReq.Body = %q, want %q", reqBodyBytes, want)
-	}
-	if outReq.ContentLength != int64(len(want)) {
-		t.Errorf("outReq.ContentLength = %d, want %d", outReq.ContentLength, len(want))
 	}
 }
 
@@ -110,13 +111,21 @@ func TestApplyRequestTransform_AddHeader(t *testing.T) {
 	outReq, _ := gohttp.NewRequest("POST", "http://example.com/api", bytes.NewReader(body))
 
 	sc := &streamContext{
+		h2req: &h2Request{
+			Method:    "POST",
+			Scheme:    "http",
+			Authority: "example.com",
+			Path:      "/api",
+		},
+		reqURL:  outReq.URL,
 		reqBody: body,
 		srp:     sendRecordParams{reqBody: body},
 	}
 
-	handler.applyRequestTransform(sc, outReq)
+	outHeaders := buildH2HeadersFromGoHTTP(outReq)
+	handler.applyRequestTransform(sc, &outHeaders)
 
-	if got := outReq.Header.Get("X-Custom-Header"); got != "injected" {
+	if got := hpackGetHeader(outHeaders, "X-Custom-Header"); got != "injected" {
 		t.Errorf("X-Custom-Header = %q, want %q", got, "injected")
 	}
 }
@@ -130,13 +139,13 @@ func TestApplyResponseTransform_NilPipeline(t *testing.T) {
 	}
 	body := []byte("original-body")
 
-	gotHeader, gotBody := handler.applyResponseTransform(resp, body)
+	gotHeader, gotBody := handler.applyResponseTransform(&h2Response{StatusCode: resp.StatusCode, Headers: goHTTPHeaderToHpack(resp.Header), Body: body})
 
 	if string(gotBody) != "original-body" {
 		t.Errorf("body = %q, want %q", gotBody, "original-body")
 	}
-	if gotHeader.Get("Content-Type") != "text/plain" {
-		t.Errorf("Content-Type = %q, want %q", gotHeader.Get("Content-Type"), "text/plain")
+	if hpackGetHeader(gotHeader, "Content-Type") != "text/plain" {
+		t.Errorf("Content-Type = %q, want %q", hpackGetHeader(gotHeader, "Content-Type"), "text/plain")
 	}
 }
 
@@ -166,7 +175,7 @@ func TestApplyResponseTransform_WithReplaceBody(t *testing.T) {
 	}
 	body := []byte(`{"data":"secret-value"}`)
 
-	_, gotBody := handler.applyResponseTransform(resp, body)
+	_, gotBody := handler.applyResponseTransform(&h2Response{StatusCode: resp.StatusCode, Headers: goHTTPHeaderToHpack(resp.Header), Body: body})
 
 	want := `{"data":"REDACTED-value"}`
 	if string(gotBody) != want {
@@ -200,9 +209,9 @@ func TestApplyResponseTransform_SetHeader(t *testing.T) {
 	}
 	body := []byte("test")
 
-	gotHeader, _ := handler.applyResponseTransform(resp, body)
+	gotHeader, _ := handler.applyResponseTransform(&h2Response{StatusCode: resp.StatusCode, Headers: goHTTPHeaderToHpack(resp.Header), Body: body})
 
-	if got := gotHeader.Get("X-Transformed"); got != "true" {
+	if got := hpackGetHeader(gotHeader, "X-Transformed"); got != "true" {
 		t.Errorf("X-Transformed = %q, want %q", got, "true")
 	}
 }
