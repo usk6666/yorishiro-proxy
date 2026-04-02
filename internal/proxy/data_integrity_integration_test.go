@@ -39,11 +39,6 @@ func generateBinaryData(size int) []byte {
 	return data
 }
 
-// containsSubstring checks if s contains substr.
-func containsSubstring(s, substr string) bool {
-	return strings.Contains(s, substr)
-}
-
 // sha256sum returns the hex-encoded SHA-256 digest of the given data.
 func sha256sum(data []byte) string {
 	h := sha256.Sum256(data)
@@ -161,8 +156,12 @@ func TestIntegration_DataIntegrity_H2TLS_LargeBody_ByteForByte(t *testing.T) {
 		w.WriteHeader(gohttp.StatusOK)
 		w.Write(body)
 	}))
+	defer upstream.Close()
 
-	_, upstreamPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	_, upstreamPort, err := net.SplitHostPort(upstream.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
 
 	store := newH2FEStore(t, ctx)
 
@@ -174,13 +173,13 @@ func TestIntegration_DataIntegrity_H2TLS_LargeBody_ByteForByte(t *testing.T) {
 	listener, httpHandler, h2Handler, proxyCancel := startH2FETLSProxy(t, ctx, store, ca)
 	defer proxyCancel()
 
-	// Configure transports to trust the test upstream.
+	// Configure transports to trust the self-signed test upstream (test only).
 	httpHandler.SetTransport(&gohttp.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test only
 		ForceAttemptHTTP2: true,
 	})
 	h2Handler.SetTransport(&gohttp.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test only
 		ForceAttemptHTTP2: true,
 	})
 
@@ -318,7 +317,7 @@ func TestIntegration_DataIntegrity_GRPC_ProtobufPayload(t *testing.T) {
 		t.Error("decoded protobuf response is empty")
 	}
 	for _, expected := range []string{"integrity-test-payload", "verification-data-12345"} {
-		if !containsSubstring(decoded, expected) {
+		if !strings.Contains(decoded, expected) {
 			t.Errorf("decoded protobuf missing expected value %q in: %s", expected, decoded)
 		}
 	}
@@ -354,7 +353,7 @@ func TestIntegration_DataIntegrity_GRPC_ProtobufPayload(t *testing.T) {
 			t.Errorf("protobuf decode recorded body: %v", recDecErr)
 		} else {
 			for _, expected := range []string{"integrity-test-payload", "verification-data-12345"} {
-				if !containsSubstring(recordedDecoded, expected) {
+				if !strings.Contains(recordedDecoded, expected) {
 					t.Errorf("recorded decoded protobuf missing %q in: %s", expected, recordedDecoded)
 				}
 			}
@@ -582,7 +581,10 @@ func TestIntegration_DataIntegrity_HTTPS_BinaryBody(t *testing.T) {
 	go upstreamServer.Serve(tlsLn)
 	defer upstreamServer.Close()
 
-	_, upstreamPort, _ := net.SplitHostPort(upstreamLn.Addr().String())
+	_, upstreamPort, err := net.SplitHostPort(upstreamLn.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
 
 	// Start MITM proxy with CA.
 	ca := &cert.CA{}
@@ -601,9 +603,9 @@ func TestIntegration_DataIntegrity_HTTPS_BinaryBody(t *testing.T) {
 	listener, httpHandler, proxyCancel := startHTTPSProxy(t, ctx, store, ca)
 	defer proxyCancel()
 
-	// Configure upstream transport to trust the test upstream server.
+	// Configure upstream transport to trust the self-signed test upstream (test only).
 	httpHandler.SetTransport(&gohttp.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test only
 	})
 
 	client := httpsProxyClient(listener.Addr(), ca.Certificate())
