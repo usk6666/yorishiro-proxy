@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
-	gohttp "net/http"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -83,8 +83,8 @@ func runWSRelay(t *testing.T, handler *Handler, clientEnd, upstreamEnd net.Conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {

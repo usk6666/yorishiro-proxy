@@ -108,10 +108,8 @@ func (h *Handler) handleWebSocket(ctx context.Context, conn net.Conn, req *parse
 	}
 
 	// Delegate to the WebSocket handler for frame relay.
-	goReq := httputil.RawRequestToHTTP(req, nil)
-	goResp := httputil.RawResponseToHTTP(resp, nil)
 	wsHandler := h.newWSHandler(logger)
-	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, goReq, goResp, connID, clientAddr, connInfo)
+	return wsHandler.HandleUpgrade(ctx, conn, upstreamConn, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
 // handleWebSocketTLS processes a WebSocket upgrade request in HTTPS MITM mode (WSS).
@@ -217,10 +215,8 @@ func (h *Handler) handleWebSocketTLS(ctx context.Context, conn net.Conn, connect
 		TLSServerCertSubject: tlsCertSubject,
 	}
 
-	goReq := httputil.RawRequestToHTTP(req, nil)
-	goResp := httputil.RawResponseToHTTP(resp, nil)
 	wsHandler := h.newWSHandler(logger)
-	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, goReq, goResp, connID, clientAddr, connInfo)
+	return wsHandler.HandleUpgrade(ctx, conn, upstreamTLS, upstreamReader, req, resp, connID, clientAddr, connInfo)
 }
 
 func (h *Handler) newWSHandler(logger *slog.Logger) *ws.Handler {
@@ -253,6 +249,19 @@ func (h *Handler) wsHTTP1Transport() httputil.TLSTransport {
 		return &cp
 	}
 	return t
+}
+
+// rawHeadersToMap converts parser.RawHeaders to map[string][]string without
+// importing net/http. This preserves wire-observed header name casing.
+func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
+	if rh == nil {
+		return make(map[string][]string)
+	}
+	m := make(map[string][]string, len(rh))
+	for _, hdr := range rh {
+		m[hdr.Name] = append(m[hdr.Name], hdr.Value)
+	}
+	return m
 }
 
 func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParams, upstreamErr error, logger *slog.Logger) {
@@ -290,7 +299,7 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 		Timestamp: p.start,
 		Method:    p.req.Method,
 		URL:       p.reqURL,
-		Headers:   httputil.RawHeadersToHTTPHeader(p.req.Headers),
+		Headers:   rawHeadersToMap(p.req.Headers),
 	}
 	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
 		logger.Error("websocket error send message save failed", "error", err)

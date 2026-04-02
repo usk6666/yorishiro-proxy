@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	gohttp "net/http"
 	"sync"
 	"testing"
 	"time"
@@ -14,8 +13,17 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
+
+// headerGet retrieves the first value for a header name from a map[string][]string.
+func headerGet(h map[string][]string, name string) string {
+	if vals, ok := h[name]; ok && len(vals) > 0 {
+		return vals[0]
+	}
+	return ""
+}
 
 // mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
@@ -164,8 +172,8 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -309,8 +317,8 @@ func TestHandleUpgrade_BinaryFrame(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -388,8 +396,8 @@ func TestHandleUpgrade_PingPongRelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -487,8 +495,8 @@ func TestHandleUpgrade_FragmentedMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -578,8 +586,8 @@ func TestHandleUpgrade_CloseFrameEndsRelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -651,8 +659,8 @@ func TestHandleUpgrade_NormalCloseStateComplete(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-			resp := &gohttp.Response{StatusCode: 101}
+			req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+			resp := &parser.RawResponse{StatusCode: 101}
 
 			errCh := make(chan error, 1)
 			go func() {
@@ -744,8 +752,8 @@ func TestHandleUpgrade_ConnectionDropStateError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -785,8 +793,8 @@ func TestHandleUpgrade_ContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -823,8 +831,8 @@ func TestHandleUpgrade_NilStore(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -867,8 +875,8 @@ func TestHandleUpgrade_ConnInfoRecorded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "wss://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "wss://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	connInfo := &flow.ConnectionInfo{
 		ClientAddr: "10.0.0.1:12345",
@@ -928,8 +936,8 @@ func TestHandleUpgrade_MultipleMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -1036,19 +1044,24 @@ func TestHandleUpgrade_UpgradeRequestResponseRecorded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/chat", nil)
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	req.Header.Set("Sec-WebSocket-Version", "13")
+	req := &parser.RawRequest{
+		Method:     "GET",
+		RequestURI: "ws://example.com/chat",
+		Headers: parser.RawHeaders{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+			{Name: "Sec-WebSocket-Key", Value: "dGhlIHNhbXBsZSBub25jZQ=="},
+			{Name: "Sec-WebSocket-Version", Value: "13"},
+		},
+	}
 
-	respHeader := gohttp.Header{}
-	respHeader.Set("Upgrade", "websocket")
-	respHeader.Set("Connection", "Upgrade")
-	respHeader.Set("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
-	resp := &gohttp.Response{
+	resp := &parser.RawResponse{
 		StatusCode: 101,
-		Header:     respHeader,
+		Headers: parser.RawHeaders{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+			{Name: "Sec-WebSocket-Accept", Value: "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="},
+		},
 	}
 
 	connInfo := &flow.ConnectionInfo{
@@ -1114,13 +1127,11 @@ func TestHandleUpgrade_UpgradeRequestResponseRecorded(t *testing.T) {
 	if upgradeReqMsg.URL.String() != "ws://example.com/chat" {
 		t.Errorf("upgrade request URL = %q, want %q", upgradeReqMsg.URL.String(), "ws://example.com/chat")
 	}
-	reqHeaders := gohttp.Header(upgradeReqMsg.Headers)
-	if reqHeaders.Get("Upgrade") != "websocket" {
-		t.Errorf("upgrade request Upgrade header = %q, want %q", reqHeaders.Get("Upgrade"), "websocket")
+	if got := headerGet(upgradeReqMsg.Headers, "Upgrade"); got != "websocket" {
+		t.Errorf("upgrade request Upgrade header = %q, want %q", got, "websocket")
 	}
-	if reqHeaders.Get("Sec-WebSocket-Key") != "dGhlIHNhbXBsZSBub25jZQ==" {
-		t.Errorf("upgrade request Sec-WebSocket-Key = %q, want %q",
-			reqHeaders.Get("Sec-WebSocket-Key"), "dGhlIHNhbXBsZSBub25jZQ==")
+	if got := headerGet(upgradeReqMsg.Headers, "Sec-WebSocket-Key"); got != "dGhlIHNhbXBsZSBub25jZQ==" {
+		t.Errorf("upgrade request Sec-WebSocket-Key = %q, want %q", got, "dGhlIHNhbXBsZSBub25jZQ==")
 	}
 
 	// Find the upgrade response message (sequence=1, direction="receive").
@@ -1137,10 +1148,8 @@ func TestHandleUpgrade_UpgradeRequestResponseRecorded(t *testing.T) {
 	if upgradeRespMsg.StatusCode != 101 {
 		t.Errorf("upgrade response StatusCode = %d, want %d", upgradeRespMsg.StatusCode, 101)
 	}
-	respHeaders := gohttp.Header(upgradeRespMsg.Headers)
-	if respHeaders.Get("Sec-WebSocket-Accept") != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
-		t.Errorf("upgrade response Sec-WebSocket-Accept = %q, want %q",
-			respHeaders.Get("Sec-WebSocket-Accept"), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+	if got := headerGet(upgradeRespMsg.Headers, "Sec-WebSocket-Accept"); got != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
+		t.Errorf("upgrade response Sec-WebSocket-Accept = %q, want %q", got, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
 	}
 
 	// Verify data frame sequences start at 2.
@@ -1168,8 +1177,8 @@ func TestHandleUpgrade_UpgradeRecordedWithNilStore(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -1204,8 +1213,8 @@ func TestHandleUpgrade_ConnectionDrop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {

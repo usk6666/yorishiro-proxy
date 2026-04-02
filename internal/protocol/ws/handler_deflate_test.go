@@ -6,11 +6,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
-	gohttp "net/http"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -28,10 +28,13 @@ func TestHandleUpgrade_DeflateCompressedTextFrame(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	respHeader := gohttp.Header{}
-	respHeader.Set("Sec-WebSocket-Extensions", "permessage-deflate; server_no_context_takeover; client_no_context_takeover")
-	resp := &gohttp.Response{StatusCode: 101, Header: respHeader}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{
+		StatusCode: 101,
+		Headers: parser.RawHeaders{
+			{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate; server_no_context_takeover; client_no_context_takeover"},
+		},
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -128,10 +131,13 @@ func TestHandleUpgrade_DeflateCompressedServerFrame(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	respHeader := gohttp.Header{}
-	respHeader.Set("Sec-WebSocket-Extensions", "permessage-deflate")
-	resp := &gohttp.Response{StatusCode: 101, Header: respHeader}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{
+		StatusCode: 101,
+		Headers: parser.RawHeaders{
+			{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate"},
+		},
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -215,8 +221,8 @@ func TestHandleUpgrade_NoDeflate_RSV1NotSet(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101} // No extensions header.
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101} // No extensions header.
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -285,10 +291,13 @@ func TestHandleUpgrade_DeflateCompressedBinaryFrame(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	respHeader := gohttp.Header{}
-	respHeader.Set("Sec-WebSocket-Extensions", "permessage-deflate; client_no_context_takeover")
-	resp := &gohttp.Response{StatusCode: 101, Header: respHeader}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{
+		StatusCode: 101,
+		Headers: parser.RawHeaders{
+			{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate; client_no_context_takeover"},
+		},
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -368,11 +377,14 @@ func TestHandleUpgrade_DeflateContextTakeover_MultipleMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	respHeader := gohttp.Header{}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
 	// No no_context_takeover flags — context takeover is enabled (default).
-	respHeader.Set("Sec-WebSocket-Extensions", "permessage-deflate")
-	resp := &gohttp.Response{StatusCode: 101, Header: respHeader}
+	resp := &parser.RawResponse{
+		StatusCode: 101,
+		Headers: parser.RawHeaders{
+			{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate"},
+		},
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
