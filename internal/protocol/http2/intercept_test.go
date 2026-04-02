@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -42,10 +43,21 @@ func TestSetInterceptQueue(t *testing.T) {
 
 func TestInterceptRequest_NoEngineOrQueue(t *testing.T) {
 	handler := NewHandler(nil, testutil.DiscardLogger())
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when engine/queue are nil")
 	}
@@ -60,10 +72,21 @@ func TestInterceptRequest_OnlyEngineNoQueue(t *testing.T) {
 	handler.SetInterceptEngine(engine)
 	// queue is nil
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
-	_, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	_, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when queue is nil")
 	}
@@ -75,10 +98,21 @@ func TestInterceptRequest_OnlyQueueNoEngine(t *testing.T) {
 	handler.SetInterceptQueue(queue)
 	// engine is nil
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
-	_, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	_, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when engine is nil")
 	}
@@ -104,10 +138,21 @@ func TestInterceptRequest_NoMatchingRules(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	req, _ := gohttp.NewRequest("GET", "http://different.example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "different.example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "different.example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
-	_, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	_, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 	if intercepted {
 		t.Error("expected not intercepted when no rules match")
 	}
@@ -132,7 +177,18 @@ func TestInterceptRequest_Release(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
 	// Respond with release in a goroutine.
@@ -155,7 +211,7 @@ func TestInterceptRequest_Release(t *testing.T) {
 		t.Error("timed out waiting for item in queue")
 	}()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 	wg.Wait()
 
 	if !intercepted {
@@ -185,7 +241,18 @@ func TestInterceptRequest_Drop(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
 	// Respond with drop in a goroutine.
@@ -200,7 +267,7 @@ func TestInterceptRequest_Drop(t *testing.T) {
 		}
 	}()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
@@ -231,11 +298,22 @@ func TestInterceptRequest_TimeoutAutoRelease(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
 	// Do not respond — let it timeout.
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
@@ -266,10 +344,21 @@ func TestInterceptRequest_TimeoutAutoDrop(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
-	action, intercepted := handler.interceptRequest(context.Background(), req, nil, nil, logger)
+	action, intercepted := handler.interceptRequest(context.Background(), h2req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
@@ -299,7 +388,18 @@ func TestInterceptRequest_ContextCancellation(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	logger := testutil.DiscardLogger()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -308,7 +408,7 @@ func TestInterceptRequest_ContextCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	action, intercepted := handler.interceptRequest(ctx, req, nil, nil, logger)
+	action, intercepted := handler.interceptRequest(ctx, h2req, nil, nil, logger)
 
 	if !intercepted {
 		t.Fatal("expected request to be intercepted")
@@ -321,54 +421,98 @@ func TestInterceptRequest_ContextCancellation(t *testing.T) {
 // --- applyInterceptModifications tests ---
 
 func TestApplyInterceptModifications_OverrideMethod(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	action := intercept.InterceptAction{
 		OverrideMethod: "POST",
 	}
 
-	modified, err := applyInterceptModifications(req, action, nil)
+	modHeaders, _, _, err := applyInterceptModifications(h2req, action, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if modified.Method != "POST" {
-		t.Errorf("method = %q, want %q", modified.Method, "POST")
+	if hpackGetPseudo(modHeaders, ":method") != "POST" {
+		t.Errorf("method = %q, want %q", hpackGetPseudo(modHeaders, ":method"), "POST")
 	}
 }
 
 func TestApplyInterceptModifications_OverrideURL(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/old", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/old",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/old"},
+		},
+	}
 	action := intercept.InterceptAction{
 		OverrideURL: "https://other.com/new",
 	}
 
-	modified, err := applyInterceptModifications(req, action, nil)
+	modHeaders, _, _, err := applyInterceptModifications(h2req, action, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if modified.URL.String() != "https://other.com/new" {
-		t.Errorf("URL = %q, want %q", modified.URL.String(), "https://other.com/new")
+	if hpackGetPseudo(modHeaders, ":authority") != "other.com" {
+		t.Errorf("URL = %q, want %q", hpackGetPseudo(modHeaders, ":authority"), "other.com")
 	}
-	if modified.Host != "other.com" {
-		t.Errorf("Host = %q, want %q", modified.Host, "other.com")
-	}
+	// Host check removed — authority is already verified above via :authority pseudo-header.
 }
 
 func TestApplyInterceptModifications_InvalidURLScheme(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	action := intercept.InterceptAction{
 		OverrideURL: "ftp://malicious.com/exploit",
 	}
 
-	_, err := applyInterceptModifications(req, action, nil)
+	_, _, _, err := applyInterceptModifications(h2req, action, nil)
 	if err == nil {
 		t.Fatal("expected error for unsupported URL scheme")
 	}
 }
 
 func TestApplyInterceptModifications_Headers(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
-	req.Header.Set("X-Original", "value")
-	req.Header.Set("X-Remove-Me", "gone")
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
+	h2req.AllHeaders = append(h2req.AllHeaders,
+		hpack.HeaderField{Name: "x-original", Value: "value"},
+		hpack.HeaderField{Name: "x-remove-me", Value: "gone"},
+	)
 
 	action := intercept.InterceptAction{
 		OverrideHeaders: map[string]string{"X-Override": "new-val"},
@@ -376,60 +520,78 @@ func TestApplyInterceptModifications_Headers(t *testing.T) {
 		RemoveHeaders:   []string{"X-Remove-Me"},
 	}
 
-	modified, err := applyInterceptModifications(req, action, nil)
+	modHeaders, _, _, err := applyInterceptModifications(h2req, action, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if modified.Header.Get("X-Override") != "new-val" {
-		t.Errorf("X-Override = %q, want %q", modified.Header.Get("X-Override"), "new-val")
+	if hpackGetHeader(modHeaders, "X-Override") != "new-val" {
+		t.Errorf("X-Override = %q, want %q", hpackGetHeader(modHeaders, "X-Override"), "new-val")
 	}
-	if modified.Header.Get("X-Added") != "added-val" {
-		t.Errorf("X-Added = %q, want %q", modified.Header.Get("X-Added"), "added-val")
+	if hpackGetHeader(modHeaders, "X-Added") != "added-val" {
+		t.Errorf("X-Added = %q, want %q", hpackGetHeader(modHeaders, "X-Added"), "added-val")
 	}
-	if modified.Header.Get("X-Remove-Me") != "" {
-		t.Errorf("X-Remove-Me should be removed, got %q", modified.Header.Get("X-Remove-Me"))
+	if hpackGetHeader(modHeaders, "X-Remove-Me") != "" {
+		t.Errorf("X-Remove-Me should be removed, got %q", hpackGetHeader(modHeaders, "X-Remove-Me"))
 	}
-	if modified.Header.Get("X-Original") != "value" {
-		t.Errorf("X-Original = %q, want %q", modified.Header.Get("X-Original"), "value")
+	if hpackGetHeader(modHeaders, "x-original") != "value" {
+		t.Errorf("x-original = %q, want %q", hpackGetHeader(modHeaders, "x-original"), "value")
 	}
 }
 
 func TestApplyInterceptModifications_OverrideBody(t *testing.T) {
-	req, _ := gohttp.NewRequest("POST", "http://example.com/test", bytes.NewReader([]byte("original")))
+	h2req := &h2Request{
+		Method:    "POST",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 
 	newBody := "modified-body"
 	action := intercept.InterceptAction{
 		OverrideBody: &newBody,
 	}
 
-	modified, err := applyInterceptModifications(req, action, []byte("original"))
+	_, modBody, _, err := applyInterceptModifications(h2req, action, []byte("original"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	body, _ := io.ReadAll(modified.Body)
-	if string(body) != "modified-body" {
-		t.Errorf("body = %q, want %q", body, "modified-body")
-	}
-	if modified.ContentLength != int64(len("modified-body")) {
-		t.Errorf("content length = %d, want %d", modified.ContentLength, len("modified-body"))
+	if string(modBody) != "modified-body" {
+		t.Errorf("body = %q, want %q", modBody, "modified-body")
 	}
 }
 
 func TestApplyInterceptModifications_NoChanges(t *testing.T) {
-	req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+	h2req := &h2Request{
+		Method:    "GET",
+		Scheme:    "http",
+		Authority: "example.com",
+		Path:      "/test",
+		AllHeaders: []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		},
+	}
 	action := intercept.InterceptAction{} // all zero values
 
-	modified, err := applyInterceptModifications(req, action, nil)
+	modHeaders, _, _, err := applyInterceptModifications(h2req, action, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if modified.Method != "GET" {
-		t.Errorf("method = %q, want %q", modified.Method, "GET")
+	if hpackGetPseudo(modHeaders, ":method") != "GET" {
+		t.Errorf("method = %q, want %q", hpackGetPseudo(modHeaders, ":method"), "GET")
 	}
-	if modified.URL.String() != "http://example.com/test" {
-		t.Errorf("URL = %q, want %q", modified.URL.String(), "http://example.com/test")
+	if hpackGetPseudo(modHeaders, ":authority") != "example.com" {
+		t.Errorf("authority = %q, want %q", hpackGetPseudo(modHeaders, ":authority"), "example.com")
 	}
 }
 
@@ -489,7 +651,18 @@ func TestApplyInterceptModifications_CRLFValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, _ := gohttp.NewRequest("GET", "http://example.com/test", nil)
+			h2req := &h2Request{
+				Method:    "GET",
+				Scheme:    "http",
+				Authority: "example.com",
+				Path:      "/test",
+				AllHeaders: []hpack.HeaderField{
+					{Name: ":method", Value: "GET"},
+					{Name: ":scheme", Value: "http"},
+					{Name: ":authority", Value: "example.com"},
+					{Name: ":path", Value: "/test"},
+				},
+			}
 			action := intercept.InterceptAction{
 				Type:            intercept.ActionModifyAndForward,
 				OverrideHeaders: tt.overrideHeaders,
@@ -497,7 +670,7 @@ func TestApplyInterceptModifications_CRLFValidation(t *testing.T) {
 				RemoveHeaders:   tt.removeHeaders,
 			}
 
-			_, err := applyInterceptModifications(req, action, nil)
+			_, _, _, err := applyInterceptModifications(h2req, action, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

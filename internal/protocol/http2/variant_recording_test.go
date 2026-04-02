@@ -115,9 +115,9 @@ func TestRecordSendWithVariant_NoModification_H2(t *testing.T) {
 		connID:   "conn-1",
 		start:    time.Now(),
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
-		reqURL:   reqURL,
-		reqBody:  body,
+		method:   req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
+		reqURL:  reqURL,
+		reqBody: body,
 	}, &snap, logger)
 
 	if result == nil {
@@ -158,9 +158,9 @@ func TestRecordSendWithVariant_BodyModified_H2(t *testing.T) {
 		connID:   "conn-2",
 		start:    time.Now(),
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
-		reqURL:   reqURL,
-		reqBody:  modifiedBody,
+		method:   req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
+		reqURL:  reqURL,
+		reqBody: modifiedBody,
 	}, &snap, logger)
 
 	if result == nil {
@@ -215,9 +215,9 @@ func TestRecordSendWithVariant_HeaderModified_H2(t *testing.T) {
 		connID:   "conn-3",
 		start:    time.Now(),
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
-		reqURL:   reqURL,
-		reqBody:  body,
+		method:   req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
+		reqURL:  reqURL,
+		reqBody: body,
 	}, &snap, logger)
 
 	if result == nil {
@@ -232,11 +232,14 @@ func TestRecordSendWithVariant_HeaderModified_H2(t *testing.T) {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
 
-	if gohttp.Header(msgs[0].Headers).Get("Authorization") != "Bearer original" {
-		t.Errorf("original Authorization = %q", gohttp.Header(msgs[0].Headers).Get("Authorization"))
+	// Headers are stored in lowercase (HTTP/2 convention from hpack).
+	origAuth := msgs[0].Headers["authorization"]
+	if len(origAuth) == 0 || origAuth[0] != "Bearer original" {
+		t.Errorf("original authorization = %v", origAuth)
 	}
-	if gohttp.Header(msgs[1].Headers).Get("Authorization") != "Bearer modified" {
-		t.Errorf("modified Authorization = %q", gohttp.Header(msgs[1].Headers).Get("Authorization"))
+	modAuth := msgs[1].Headers["authorization"]
+	if len(modAuth) == 0 || modAuth[0] != "Bearer modified" {
+		t.Errorf("modified authorization = %v", modAuth)
 	}
 }
 
@@ -253,8 +256,8 @@ func TestRecordSendWithVariant_NilSnap_H2(t *testing.T) {
 	result := handler.recordSendWithVariant(ctx, sendRecordParams{
 		start:    time.Now(),
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:      req,
-		reqURL:   reqURL,
+		method:   req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
+		reqURL: reqURL,
 	}, nil, logger)
 
 	if result == nil {
@@ -274,7 +277,7 @@ func TestRecordSendWithVariant_NilStore_H2(t *testing.T) {
 
 	result := handler.recordSendWithVariant(context.Background(), sendRecordParams{
 		start:  time.Now(),
-		req:    req,
+		method: req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
 		reqURL: reqURL,
 	}, &snap, testutil.DiscardLogger())
 
@@ -307,9 +310,9 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 		connID:   "conn-lifecycle",
 		start:    start,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "10.0.0.1:5000"},
-		req:      req,
-		reqURL:   reqURL,
-		reqBody:  modifiedBody,
+		method:   req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
+		reqURL:  reqURL,
+		reqBody: modifiedBody,
 	}, &snap, logger)
 
 	if sendResult == nil {
@@ -321,14 +324,12 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 
 	// Phase 2: Record receive at sequence 2.
 	handler.recordReceive(ctx, sendResult, receiveRecordParams{
-		start:      start,
-		duration:   100 * time.Millisecond,
-		serverAddr: "93.184.216.34:80",
-		resp: &gohttp.Response{
-			StatusCode: 200,
-			Header:     gohttp.Header{"Content-Type": {"application/json"}},
-		},
-		respBody: []byte(`{"status":"ok"}`),
+		start:       start,
+		duration:    100 * time.Millisecond,
+		serverAddr:  "93.184.216.34:80",
+		statusCode:  200,
+		respHeaders: []hpack.HeaderField{{Name: "content-type", Value: "application/json"}},
+		respBody:    []byte(`{"status":"ok"}`),
 	}, logger)
 
 	// Verify: 3 messages total with correct sequences.

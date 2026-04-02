@@ -7,8 +7,10 @@ import (
 	"io"
 	gohttp "net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
@@ -83,6 +85,15 @@ type h2ResponseWriter interface {
 
 	// Flush ensures any buffered HEADERS frame has been sent to the wire.
 	Flush()
+}
+
+// h2Response represents an HTTP/2 response using hpack native types.
+// It carries the response data through the pipeline without gohttp conversion.
+type h2Response struct {
+	StatusCode int
+	Headers    []hpack.HeaderField // regular headers (no pseudo-headers)
+	Trailers   []hpack.HeaderField
+	Body       []byte
 }
 
 // buildH2Request constructs an h2Request from decoded HPACK header fields
@@ -169,9 +180,162 @@ func (req *h2Request) setPseudoField(name, value string) {
 	}
 }
 
+// h2RequestURL builds a *url.URL from the h2Request pseudo-headers.
+func h2RequestURL(req *h2Request) *url.URL {
+	path := req.Path
+	u := &url.URL{
+		Scheme: req.Scheme,
+		Host:   req.Authority,
+		Path:   path,
+	}
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		u.Path = path[:idx]
+		u.RawQuery = path[idx+1:]
+	}
+	return u
+}
+
+// h2RequestToRaw converts an h2Request to a parser.RawRequest for the intercept
+// pipeline. The pseudo-headers are converted to method/requestURI, and regular
+// headers are preserved as RawHeaders.
+func h2RequestToRaw(req *h2Request, bodyBytes []byte) *parser.RawRequest {
+	headers := hpackToRawHeaders(req.AllHeaders)
+	// Set Host from :authority if not already present.
+	if req.Authority != "" && headers.Get("host") == "" {
+		headers.Set("host", req.Authority)
+	}
+	// Build RequestURI from pseudo-headers.
+	reqURI := req.Path
+	if req.Scheme != "" && req.Authority != "" {
+		u := &url.URL{
+			Scheme: req.Scheme,
+			Host:   req.Authority,
+			Path:   req.Path,
+		}
+		if idx := strings.IndexByte(req.Path, '?'); idx >= 0 {
+			u.Path = req.Path[:idx]
+			u.RawQuery = req.Path[idx+1:]
+		}
+		reqURI = u.String()
+	}
+	// Sync Content-Length with actual body bytes.
+	headers.Del("transfer-encoding")
+	if len(bodyBytes) > 0 {
+		headers.Set("content-length", strconv.Itoa(len(bodyBytes)))
+	} else {
+		headers.Del("content-length")
+	}
+
+	return &parser.RawRequest{
+		Method:     req.Method,
+		RequestURI: reqURI,
+		Proto:      "HTTP/2.0",
+		Headers:    headers,
+		Body:       bytes.NewReader(bodyBytes),
+	}
+}
+
+// h2ResponseToRaw converts h2Response hpack headers + status to a
+// parser.RawResponse for the intercept pipeline.
+func h2ResponseToRaw(statusCode int, headers []hpack.HeaderField, body []byte) *parser.RawResponse {
+	return &parser.RawResponse{
+		Proto:      "HTTP/2.0",
+		StatusCode: statusCode,
+		Status:     httputil.FormatStatus(statusCode),
+		Headers:    hpackToRawHeaders(headers),
+		Body:       io.NopCloser(bytes.NewReader(body)),
+	}
+}
+
+// rawHeadersToHpackWithPseudo builds hpack headers including pseudo-headers
+// from a RawRequest after intercept modification. The method/scheme/authority/path
+// come from the modified request; regular headers come from the modified RawHeaders.
+func rawHeadersToHpackWithPseudo(method, scheme, authority, path string, rh parser.RawHeaders) []hpack.HeaderField {
+	isConnect := strings.EqualFold(method, "CONNECT")
+	headers := make([]hpack.HeaderField, 0, 4+len(rh))
+	headers = append(headers, hpack.HeaderField{Name: ":method", Value: method})
+	if scheme != "" && !isConnect {
+		headers = append(headers, hpack.HeaderField{Name: ":scheme", Value: scheme})
+	}
+	if authority != "" {
+		headers = append(headers, hpack.HeaderField{Name: ":authority", Value: authority})
+	}
+	if !isConnect || path != "" {
+		headers = append(headers, hpack.HeaderField{Name: ":path", Value: path})
+	}
+	// Append regular headers, skipping host (represented by :authority).
+	for _, h := range rh {
+		if strings.EqualFold(h.Name, "host") {
+			continue
+		}
+		headers = append(headers, hpack.HeaderField{Name: h.Name, Value: h.Value})
+	}
+	return headers
+}
+
+// buildH2HeadersFromH2Req constructs HTTP/2 HPACK header fields for upstream
+// forwarding from an h2Request's fields. Pseudo-headers are included; hop-by-hop
+// headers are filtered.
+func buildH2HeadersFromH2Req(req *h2Request) []hpack.HeaderField {
+	path := req.Path
+	if path == "" {
+		path = "/"
+	}
+
+	scheme := req.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+
+	authority := req.Authority
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: req.Method},
+		{Name: ":scheme", Value: scheme},
+		{Name: ":authority", Value: authority},
+		{Name: ":path", Value: path},
+	}
+
+	for _, hf := range req.AllHeaders {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
+		}
+		lower := hf.Name // HTTP/2 headers are already lowercase per RFC 9113
+		if lower == "host" {
+			continue
+		}
+		if isHopByHopHeader(lower) {
+			if lower == "te" && strings.EqualFold(hf.Value, "trailers") {
+				headers = append(headers, hf)
+			}
+			continue
+		}
+		headers = append(headers, hf)
+	}
+
+	return headers
+}
+
+// removeHpackHopByHop returns hpack fields with HTTP/2 hop-by-hop headers
+// removed. TE: trailers is preserved per RFC 9113. Returns the same slice
+// if no removals needed.
+func removeHpackHopByHop(fields []hpack.HeaderField) []hpack.HeaderField {
+	result := make([]hpack.HeaderField, 0, len(fields))
+	for _, hf := range fields {
+		if isHopByHopHeader(hf.Name) {
+			if hf.Name == "te" && strings.EqualFold(hf.Value, "trailers") {
+				result = append(result, hf)
+			}
+			continue
+		}
+		result = append(result, hf)
+	}
+	return result
+}
+
 // h2RequestToGoHTTP converts an h2Request to a *gohttp.Request for subsystems
-// that still require net/http types (recording, intercept, etc.).
-// This is a temporary bridge until those subsystems are fully migrated.
+// that still require net/http types (legacy transport, gRPC intercept, tests).
+// Callers in the data path should prefer hpack native types.
 func h2RequestToGoHTTP(ctx context.Context, req *h2Request) (*gohttp.Request, error) {
 	httpHeaders := make(gohttp.Header)
 	for _, hf := range req.AllHeaders {
@@ -224,6 +388,8 @@ func h2RequestToGoHTTP(ctx context.Context, req *h2Request) (*gohttp.Request, er
 
 // goHTTPHeaderToHpack converts gohttp.Header to hpack header fields.
 // Key order follows map iteration order (non-deterministic).
+// This is a bridge for test code and legacy paths; data path code should
+// use hpack native types directly.
 func goHTTPHeaderToHpack(h gohttp.Header) []hpack.HeaderField {
 	keys := make([]string, 0, len(h))
 	for name := range h {
@@ -243,7 +409,7 @@ func goHTTPHeaderToHpack(h gohttp.Header) []hpack.HeaderField {
 
 // buildH2HeadersFromGoHTTP converts a gohttp.Request into HTTP/2 HPACK header
 // fields including pseudo-headers. Used for forwarding upstream via the h2 frame
-// engine when the request is still in gohttp.Request form.
+// engine when the request is still in gohttp.Request form (legacy transport path).
 func buildH2HeadersFromGoHTTP(req *gohttp.Request) []hpack.HeaderField {
 	path := req.URL.RequestURI()
 	if path == "" {
@@ -293,8 +459,8 @@ func buildH2HeadersFromGoHTTP(req *gohttp.Request) []hpack.HeaderField {
 }
 
 // h2ResultToGoHTTPResponse converts an HTTP/2 RoundTripResult to a
-// *gohttp.Response for downstream subsystem compatibility. This is a temporary
-// bridge until recording and intercept are migrated to hpack native types.
+// *gohttp.Response for the legacy transport path and gRPC subsystem.
+// Data path code should use h2Response directly.
 func h2ResultToGoHTTPResponse(r *RoundTripResult) *gohttp.Response {
 	resp := &gohttp.Response{
 		StatusCode: r.StatusCode,
@@ -319,6 +485,23 @@ func h2ResultToGoHTTPResponse(r *RoundTripResult) *gohttp.Response {
 	}
 
 	return resp
+}
+
+// h2ResultToH2Response converts an HTTP/2 RoundTripResult to an h2Response
+// with hpack native types (no gohttp conversion).
+func h2ResultToH2Response(r *RoundTripResult, body []byte) *h2Response {
+	var headers []hpack.HeaderField
+	for _, hf := range r.Headers {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
+		}
+		headers = append(headers, hf)
+	}
+	return &h2Response{
+		StatusCode: r.StatusCode,
+		Headers:    headers,
+		Body:       body,
+	}
 }
 
 // writeErrorResponse writes a simple error response via h2ResponseWriter.

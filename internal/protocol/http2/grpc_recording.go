@@ -3,9 +3,7 @@ package http2
 import (
 	"context"
 	"log/slog"
-	"net/textproto"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -105,7 +103,7 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	}
 	if err := h.Store.SaveFlow(ctx, fl); err != nil {
 		sc.logger.Error("gRPC progressive flow save failed",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
+			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
 		return rec
 	}
 
@@ -229,10 +227,10 @@ func (r *grpcProgressiveRecorder) completeFlowH2(
 	}
 
 	// Convert hpack trailers to map for gRPC status extraction.
-	trailerMap := hpackToGoHTTPHeaderMap(hpackTrailers)
+	trailerMap := hpackToHeaderMap(hpackTrailers)
 	var respHeaderMap map[string][]string
 	if result != nil {
-		respHeaderMap = hpackToGoHTTPHeaderMap(result.Headers)
+		respHeaderMap = hpackToHeaderMap(result.Headers)
 	}
 
 	grpcStatus := protogrpc.ExtractGRPCStatus(trailerMap, respHeaderMap)
@@ -315,7 +313,7 @@ func (r *grpcProgressiveRecorder) recordTrailersMessageH2(
 	if result != nil {
 		finalMsg.StatusCode = result.StatusCode
 		if len(trailers) > 0 {
-			finalMsg.Headers = hpackToGoHTTPHeaderMap(trailers)
+			finalMsg.Headers = hpackToHeaderMap(trailers)
 		}
 	}
 	if err := r.store.AppendMessage(ctx, finalMsg); err != nil {
@@ -328,17 +326,11 @@ func (r *grpcProgressiveRecorder) recordTrailersMessageH2(
 
 // h2RequestHeaders converts h2Request headers to map[string][]string for
 // flow recording. Pseudo-headers are excluded; host is derived from :authority.
+// Header name casing is preserved as-is (no canonicalization).
 func h2RequestHeaders(req *h2Request) map[string][]string {
-	headers := make(map[string][]string)
-	for _, hf := range req.AllHeaders {
-		if strings.HasPrefix(hf.Name, ":") {
-			continue
-		}
-		key := textproto.CanonicalMIMEHeaderKey(hf.Name)
-		headers[key] = append(headers[key], hf.Value)
-	}
+	m := hpackToHeaderMap(req.AllHeaders)
 	if req.Authority != "" {
-		headers["Host"] = []string{req.Authority}
+		m["host"] = []string{req.Authority}
 	}
-	return headers
+	return m
 }

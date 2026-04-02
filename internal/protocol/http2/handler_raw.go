@@ -1,12 +1,12 @@
 package http2
 
 import (
-	"bytes"
 	"io"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
@@ -38,17 +38,27 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 
 	// Determine if the raw bytes were modified (modify_and_forward vs release).
 	originalRawBytes := joinRawFrames(sc.reqRawFrames)
-	isModified := !bytes.Equal(rawBytes, originalRawBytes)
+	isModified := !equalBytes(rawBytes, originalRawBytes)
 
 	// Record the send phase with variant support for raw mode.
 	sendResult := h.recordRawSend(sc, rawBytes, isModified)
 
 	// Forward raw frames to upstream using the custom HTTP/2 transport.
+	// Build a minimal gohttp.Request for the legacy SendRawFrames API.
+	goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
+	if err != nil {
+		sc.logger.Error("HTTP/2 raw forward: failed to build gohttp request", "error", err)
+		writeErrorResponse(sc.w, httputil.StatusBadGateway)
+		return
+	}
+	goReq.URL = cloneURL(sc.reqURL)
+	goReq.Host = sc.reqURL.Host
+
 	sendStart := time.Now()
-	result, err := h.h2Transport.SendRawFrames(sc.ctx, sc.req, rawBytes)
+	result, err := h.h2Transport.SendRawFrames(sc.ctx, goReq, rawBytes)
 	if err != nil {
 		sc.logger.Error("HTTP/2 raw forward upstream failed",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
+			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
 		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return
@@ -67,30 +77,56 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 	wMs := sMs // approximation: no TTFB separation for custom transport
 	rMs := int64(0)
 
-	// Write response to client.
-	writeResponseToClient(sc, resp, fullRespBody)
+	// Convert legacy response to h2Response for writeH2ResponseToClient.
+	respHeaders := goHTTPHeaderToHpack(resp.Header)
+	var respTrailers []hpack.HeaderField
+	if len(resp.Trailer) > 0 {
+		respTrailers = goHTTPHeaderToHpack(resp.Trailer)
+	}
+	h2resp := &h2Response{
+		StatusCode: resp.StatusCode,
+		Headers:    respHeaders,
+		Trailers:   respTrailers,
+		Body:       fullRespBody,
+	}
+
+	writeH2ResponseToClient(sc, h2resp)
 
 	duration := time.Since(sc.start)
 
 	// Record receive phase.
 	h.recordReceiveWithVariant(sc.ctx, sendResult, receiveRecordParams{
-		start:      sc.start,
-		duration:   duration,
-		serverAddr: result.ServerAddr,
-		resp:       resp,
-		respBody:   fullRespBody,
-		sendMs:     &sMs,
-		waitMs:     &wMs,
-		receiveMs:  &rMs,
-		rawFrames:  result.RawFrames,
+		start:       sc.start,
+		duration:    duration,
+		serverAddr:  result.ServerAddr,
+		statusCode:  resp.StatusCode,
+		respHeaders: respHeaders,
+		respBody:    fullRespBody,
+		sendMs:      &sMs,
+		waitMs:      &wMs,
+		receiveMs:   &rMs,
+		rawFrames:   result.RawFrames,
 	}, nil, sc.logger)
 
 	sc.logger.Info("http/2 raw forward request",
-		"method", sc.req.Method,
+		"method", sc.h2req.Method,
 		"url", sc.reqURL.String(),
 		"status", resp.StatusCode,
 		"raw_modified", isModified,
 		"duration_ms", duration.Milliseconds())
+}
+
+// equalBytes compares two byte slices for equality.
+func equalBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // recordRawSend records the send phase for a raw mode forwarded request.
@@ -98,7 +134,7 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 // messages: original (variant="original") and modified (variant="modified").
 // When not modified (raw release), it records a single send message.
 func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified bool) *sendRecordResult {
-	if h.Store == nil || !h.shouldCapture(sc.req.Method, sc.reqURL) {
+	if h.Store == nil || !h.shouldCapture(sc.h2req.Method, sc.reqURL) {
 		return nil
 	}
 
@@ -123,9 +159,11 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 	}
 	if err := h.Store.SaveFlow(sc.ctx, fl); err != nil {
 		sc.logger.Error("HTTP/2 raw forward: flow save failed",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
+			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
 		return nil
 	}
+
+	reqHeaders := requestHeadersMap(sc.h2req.AllHeaders, sc.h2req.Authority)
 
 	// Sequence 0: original (wire-observed raw frames).
 	origMeta := buildFrameMetadata(sc.reqRawFrames, map[string]string{"variant": "original"})
@@ -134,9 +172,9 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     sc.start,
-		Method:        sc.req.Method,
+		Method:        sc.h2req.Method,
 		URL:           sc.reqURL,
-		Headers:       requestHeaders(sc.req),
+		Headers:       reqHeaders,
 		Body:          sc.srp.reqBody,
 		RawBytes:      joinRawFrames(sc.reqRawFrames),
 		BodyTruncated: sc.srp.reqTruncated,
@@ -153,9 +191,9 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 		Sequence:      1,
 		Direction:     "send",
 		Timestamp:     sc.start,
-		Method:        sc.req.Method,
+		Method:        sc.h2req.Method,
 		URL:           sc.reqURL,
-		Headers:       requestHeaders(sc.req),
+		Headers:       reqHeaders,
 		Body:          sc.srp.reqBody,
 		RawBytes:      rawBytes,
 		BodyTruncated: sc.srp.reqTruncated,

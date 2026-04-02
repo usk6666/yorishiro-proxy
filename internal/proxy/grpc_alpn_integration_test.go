@@ -579,8 +579,8 @@ func TestIntegration_GRPC_TLS_ALPN_FlowRecording(t *testing.T) {
 		}
 	}
 	if headerMsg != nil {
-		// Headers are stored with canonical MIME key format ("Content-Type").
-		ct := headerMsg.Headers["Content-Type"]
+		// HTTP/2 headers are lowercase per RFC 9113; recording preserves wire casing.
+		ct := headerMsg.Headers["content-type"]
 		if len(ct) == 0 || !strings.HasPrefix(ct[0], "application/grpc") {
 			t.Errorf("send Content-Type = %v, want application/grpc*", ct)
 		}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -318,7 +319,7 @@ func TestHandleStream_ProgressiveRecording_NilStore(t *testing.T) {
 func TestRecordSend_NilStore(t *testing.T) {
 	handler := NewHandler(nil, testutil.DiscardLogger())
 	result := handler.recordSend(context.Background(), sendRecordParams{
-		req:    &gohttp.Request{Method: "GET"},
+		method: "GET", headers: []hpack.HeaderField{{Name: ":method", Value: "GET"}},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 	}, testutil.DiscardLogger())
 	if result != nil {
@@ -336,9 +337,9 @@ func TestRecordSend_CreatesActiveSession(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
-		reqURL:     reqURL,
-		reqBody:    []byte("request-body"),
+		method:     "GET", headers: nil,
+		reqURL:  reqURL,
+		reqBody: []byte("request-body"),
 	}
 
 	result := handler.recordSend(context.Background(), p, testutil.DiscardLogger())
@@ -375,7 +376,7 @@ func TestRecordReceive_NilSendResult(t *testing.T) {
 
 	// Should be a no-op when sendResult is nil.
 	handler.recordReceive(context.Background(), nil, receiveRecordParams{
-		resp: &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}},
+		statusCode: 200, respHeaders: nil,
 	}, testutil.DiscardLogger())
 
 	entries := store.Entries()
@@ -395,21 +396,19 @@ func TestRecordReceive_CompletesSession(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
-		reqURL:     reqURL,
+		method:     "GET", headers: nil,
+		reqURL: reqURL,
 	}, testutil.DiscardLogger())
 
 	// Now record the receive.
 	start := time.Now()
 	handler.recordReceive(context.Background(), sendResult, receiveRecordParams{
-		start:      start,
-		duration:   100 * time.Millisecond,
-		serverAddr: "93.184.216.34:80",
-		resp: &gohttp.Response{
-			StatusCode: 200,
-			Header:     gohttp.Header{"Content-Type": {"text/plain"}},
-		},
-		respBody: []byte("response-body"),
+		start:       start,
+		duration:    100 * time.Millisecond,
+		serverAddr:  "93.184.216.34:80",
+		statusCode:  200,
+		respHeaders: []hpack.HeaderField{{Name: "content-type", Value: "text/plain"}},
+		respBody:    []byte("response-body"),
 	}, testutil.DiscardLogger())
 
 	entries := store.Entries()
@@ -462,8 +461,8 @@ func TestRecordSendError_SetsErrorState(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
-		reqURL:     reqURL,
+		method:     "GET", headers: nil,
+		reqURL: reqURL,
 	}, testutil.DiscardLogger())
 
 	// Record the error.
@@ -503,9 +502,9 @@ func TestRecordInterceptDrop_RecordsSession(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "POST", Header: gohttp.Header{}},
-		reqURL:     reqURL,
-		reqBody:    []byte("drop-body"),
+		method:     "POST", headers: nil,
+		reqURL:  reqURL,
+		reqBody: []byte("drop-body"),
 	}
 
 	handler.recordInterceptDrop(context.Background(), p, testutil.DiscardLogger())
@@ -549,8 +548,8 @@ func TestRecordOutReqError_RecordsSession(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
-		reqURL:     reqURL,
+		method:     "GET", headers: nil,
+		reqURL: reqURL,
 	}
 
 	handler.recordOutReqError(context.Background(), p, errors.New("invalid URL"), testutil.DiscardLogger())
@@ -583,7 +582,7 @@ func TestRecordOutReqError_NilStore(t *testing.T) {
 
 	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}
 	p := sendRecordParams{
-		req:    &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
+		method: "GET", headers: nil,
 		reqURL: reqURL,
 	}
 
@@ -596,7 +595,7 @@ func TestRecordInterceptDrop_NilStore(t *testing.T) {
 
 	reqURL := &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}
 	p := sendRecordParams{
-		req:    &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
+		method: "GET", headers: nil,
 		reqURL: reqURL,
 	}
 
@@ -614,8 +613,8 @@ func TestRecordReceive_WithTLSCertSubject(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234", TLSVersion: "TLS 1.3"},
-		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
-		reqURL:     reqURL,
+		method:     "GET", headers: nil,
+		reqURL: reqURL,
 	}, testutil.DiscardLogger())
 
 	handler.recordReceive(context.Background(), sendResult, receiveRecordParams{
@@ -623,11 +622,9 @@ func TestRecordReceive_WithTLSCertSubject(t *testing.T) {
 		duration:             50 * time.Millisecond,
 		serverAddr:           "93.184.216.34:443",
 		tlsServerCertSubject: "CN=secure.example.com",
-		resp: &gohttp.Response{
-			StatusCode: 200,
-			Header:     gohttp.Header{},
-		},
-		respBody: []byte("secure-response"),
+		statusCode:           200,
+		respHeaders:          nil,
+		respBody:             []byte("secure-response"),
 	}, testutil.DiscardLogger())
 
 	entries := store.Entries()
@@ -670,31 +667,24 @@ func TestRequestHeaders_InjectsHost(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := &gohttp.Request{
-				Method: "GET",
-				Host:   tt.host,
-				Header: gohttp.Header{"X-Custom": {"value"}},
+			hpackHeaders := []hpack.HeaderField{
+				{Name: "x-custom", Value: "value"},
 			}
 
-			headers := requestHeaders(req)
+			headers := requestHeadersMap(hpackHeaders, tt.host)
 
-			if headers.Get("X-Custom") != "value" {
-				t.Errorf("X-Custom = %q, want %q", headers.Get("X-Custom"), "value")
+			if vals, ok := headers["x-custom"]; !ok || vals[0] != "value" {
+				t.Errorf("x-custom = %v, want [value]", headers["x-custom"])
 			}
 
 			if tt.wantHost == "" {
-				if _, ok := headers["Host"]; ok {
-					t.Errorf("Host header should not be present for empty host")
+				if _, ok := headers["host"]; ok {
+					t.Errorf("host header should not be present for empty host")
 				}
 			} else {
-				if headers.Get("Host") != tt.wantHost {
-					t.Errorf("Host = %q, want %q", headers.Get("Host"), tt.wantHost)
+				if vals, ok := headers["host"]; !ok || vals[0] != tt.wantHost {
+					t.Errorf("host = %v, want [%s]", headers["host"], tt.wantHost)
 				}
-			}
-
-			// Verify it does not mutate the original req.Header.
-			if _, ok := req.Header["Host"]; ok {
-				t.Error("requestHeaders should not mutate req.Header")
 			}
 		})
 	}
@@ -716,7 +706,9 @@ func TestRecordSend_HostHeader(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        req,
+		method:     req.Method,
+		host:       req.Host,
+		headers:    goHTTPHeaderToHpack(req.Header),
 		reqURL:     reqURL,
 	}, testutil.DiscardLogger())
 
@@ -729,9 +721,9 @@ func TestRecordSend_HostHeader(t *testing.T) {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
 
-	hostVals := entries[0].Send.Headers["Host"]
+	hostVals := entries[0].Send.Headers["host"]
 	if len(hostVals) != 1 || hostVals[0] != "example.com" {
-		t.Errorf("Host header = %v, want [example.com]", hostVals)
+		t.Errorf("host header = %v, want [example.com]", hostVals)
 	}
 }
 
@@ -750,10 +742,10 @@ func TestRecordSend_WithRawFrames(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "POST", Header: gohttp.Header{}},
-		reqURL:     reqURL,
-		reqBody:    []byte("body"),
-		rawFrames:  [][]byte{frame1, frame2},
+		method:     "POST", headers: nil,
+		reqURL:    reqURL,
+		reqBody:   []byte("body"),
+		rawFrames: [][]byte{frame1, frame2},
 	}
 
 	result := handler.recordSend(context.Background(), p, testutil.DiscardLogger())
@@ -800,8 +792,8 @@ func TestRecordSend_NoRawFrames(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
-		reqURL:     reqURL,
+		method:     "GET", headers: nil,
+		reqURL: reqURL,
 	}
 
 	result := handler.recordSend(context.Background(), p, testutil.DiscardLogger())
@@ -843,7 +835,9 @@ func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
 		connID:    "conn-variant-raw",
 		start:     time.Now(),
 		connInfo:  &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:       req,
+		method:    req.Method,
+		host:      req.Host,
+		headers:   goHTTPHeaderToHpack(req.Header),
 		reqURL:    reqURL,
 		reqBody:   modifiedBody,
 		rawFrames: [][]byte{frame1},
@@ -899,10 +893,10 @@ func TestRecordInterceptDrop_WithRawFrames(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "POST", Header: gohttp.Header{}},
-		reqURL:     reqURL,
-		reqBody:    []byte("drop-body"),
-		rawFrames:  [][]byte{frame1},
+		method:     "POST", headers: nil,
+		reqURL:    reqURL,
+		reqBody:   []byte("drop-body"),
+		rawFrames: [][]byte{frame1},
 	}
 
 	handler.recordInterceptDrop(context.Background(), p, testutil.DiscardLogger())
@@ -932,23 +926,21 @@ func TestRecordReceive_WithRawFrames(t *testing.T) {
 		clientAddr: "127.0.0.1:1234",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
-		req:        &gohttp.Request{Method: "GET", Header: gohttp.Header{}},
-		reqURL:     reqURL,
+		method:     "GET", headers: nil,
+		reqURL: reqURL,
 	}, testutil.DiscardLogger())
 
 	respFrame1 := []byte{0x00, 0x00, 0x05, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01}
 	respFrame2 := []byte{0x00, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01}
 
 	handler.recordReceive(context.Background(), sendResult, receiveRecordParams{
-		start:      time.Now(),
-		duration:   50 * time.Millisecond,
-		serverAddr: "93.184.216.34:80",
-		resp: &gohttp.Response{
-			StatusCode: 200,
-			Header:     gohttp.Header{"Content-Type": {"text/plain"}},
-		},
-		respBody:  []byte("response"),
-		rawFrames: [][]byte{respFrame1, respFrame2},
+		start:       time.Now(),
+		duration:    50 * time.Millisecond,
+		serverAddr:  "93.184.216.34:80",
+		statusCode:  200,
+		respHeaders: []hpack.HeaderField{{Name: "content-type", Value: "text/plain"}},
+		respBody:    []byte("response"),
+		rawFrames:   [][]byte{respFrame1, respFrame2},
 	}, testutil.DiscardLogger())
 
 	entries := store.Entries()
@@ -994,7 +986,9 @@ func TestRecordBlocked_TargetScope(t *testing.T) {
 		scheme:     "http",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:12345"},
-		req:        req,
+		method:     req.Method,
+		host:       req.Host,
+		headers:    goHTTPHeaderToHpack(req.Header),
 		reqURL:     reqURL,
 		rawFrames:  [][]byte{{0x01, 0x02}},
 	}
@@ -1059,7 +1053,9 @@ func TestRecordBlocked_RateLimit(t *testing.T) {
 		scheme:     "http",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:23456"},
-		req:        req,
+		method:     req.Method,
+		host:       req.Host,
+		headers:    goHTTPHeaderToHpack(req.Header),
 		reqURL:     reqURL,
 		reqBody:    []byte("request-body"),
 	}
@@ -1110,7 +1106,9 @@ func TestRecordBlocked_RateLimitWithTags(t *testing.T) {
 		scheme:     "http",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:23456"},
-		req:        req,
+		method:     req.Method,
+		host:       req.Host,
+		headers:    goHTTPHeaderToHpack(req.Header),
 		reqURL:     reqURL,
 	}
 
@@ -1153,7 +1151,9 @@ func TestRecordBlocked_SafetyFilter(t *testing.T) {
 		scheme:     "http",
 		start:      time.Now(),
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:34567"},
-		req:        req,
+		method:     req.Method,
+		host:       req.Host,
+		headers:    goHTTPHeaderToHpack(req.Header),
 		reqURL:     reqURL,
 		reqBody:    []byte("DROP TABLE users"),
 		rawFrames:  [][]byte{{0xAA, 0xBB}, {0xCC, 0xDD}},
@@ -1214,10 +1214,12 @@ func TestRecordBlocked_NilStore(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", reqURL.String(), nil)
 
 	p := sendRecordParams{
-		connID: "conn-nil",
-		start:  time.Now(),
-		req:    req,
-		reqURL: reqURL,
+		connID:  "conn-nil",
+		start:   time.Now(),
+		method:  req.Method,
+		host:    req.Host,
+		headers: goHTTPHeaderToHpack(req.Header),
+		reqURL:  reqURL,
 	}
 
 	// Should not panic with nil store.
@@ -1239,10 +1241,12 @@ func TestRecordBlocked_CaptureScope(t *testing.T) {
 	req, _ := gohttp.NewRequest("GET", reqURL.String(), nil)
 
 	p := sendRecordParams{
-		connID: "conn-scope",
-		start:  time.Now(),
-		req:    req,
-		reqURL: reqURL,
+		connID:  "conn-scope",
+		start:   time.Now(),
+		method:  req.Method,
+		host:    req.Host,
+		headers: goHTTPHeaderToHpack(req.Header),
+		reqURL:  reqURL,
 	}
 
 	handler.recordBlocked(ctx, p, "rate_limit", nil, nil, handler.Logger)

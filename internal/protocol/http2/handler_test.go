@@ -1043,19 +1043,24 @@ func TestResolveSchemeAndHost(t *testing.T) {
 			}
 
 			handler := &Handler{}
-			reqURL := &url.URL{
-				Host:   tt.reqURLHost,
-				Scheme: tt.reqURLScheme,
-				Path:   "/test",
+			authority := tt.reqHost
+			h2req := &h2Request{
+				Method:    "GET",
+				Scheme:    tt.reqURLScheme,
+				Authority: authority,
+				Path:      "/test",
+				AllHeaders: []hpack.HeaderField{
+					{Name: ":method", Value: "GET"},
+					{Name: ":authority", Value: authority},
+					{Name: ":path", Value: "/test"},
+				},
 			}
-			req := &gohttp.Request{
-				Host:   tt.reqHost,
-				URL:    reqURL,
-				Header: gohttp.Header{},
+			if tt.reqURLScheme != "" {
+				h2req.AllHeaders = append([]hpack.HeaderField{{Name: ":scheme", Value: tt.reqURLScheme}}, h2req.AllHeaders...)
 			}
 			sc := &streamContext{
 				ctx:              ctx,
-				req:              req,
+				h2req:            h2req,
 				connectAuthority: tt.connectAuthority,
 			}
 
@@ -1064,14 +1069,11 @@ func TestResolveSchemeAndHost(t *testing.T) {
 			if sc.flowScheme != tt.wantScheme {
 				t.Errorf("flowScheme = %q, want %q", sc.flowScheme, tt.wantScheme)
 			}
-			if sc.req.URL.Host != tt.wantURLHost {
-				t.Errorf("req.URL.Host = %q, want %q", sc.req.URL.Host, tt.wantURLHost)
-			}
 			if sc.reqURL.Host != tt.wantURLHost {
 				t.Errorf("reqURL.Host = %q, want %q", sc.reqURL.Host, tt.wantURLHost)
 			}
-			if tt.wantReqHost != "" && sc.req.Host != tt.wantReqHost {
-				t.Errorf("req.Host = %q, want %q", sc.req.Host, tt.wantReqHost)
+			if tt.wantReqHost != "" && sc.h2req.Authority != tt.wantReqHost {
+				t.Errorf("h2req.Authority = %q, want %q", sc.h2req.Authority, tt.wantReqHost)
 			}
 		})
 	}

@@ -20,10 +20,31 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
+
+// ensureGoHTTPReq lazily builds sc.req from h2req if not already built.
+// This is needed by the gRPC intercept path which manipulates sc.req.Body,
+// sc.req.Header, etc. The unary HTTP/2 path does NOT call this.
+func ensureGoHTTPReq(sc *streamContext) error {
+	if sc.req != nil {
+		return nil
+	}
+	goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
+	if err != nil {
+		return err
+	}
+	// Sync URL from resolved reqURL.
+	if sc.reqURL != nil {
+		goReq.URL = cloneURL(sc.reqURL)
+		goReq.Host = sc.reqURL.Host
+	}
+	sc.req = goReq
+	return nil
+}
 
 // grpcStreamState holds the mutable state accumulated during gRPC stream
 // processing. It is passed between the sub-methods of handleGRPCStream.
@@ -417,11 +438,7 @@ func resolveGRPCUpstreamAddr(sc *streamContext, req *h2Request) (addr, hostname 
 	// Parse authority from :authority, falling back to Host header.
 	authority := req.Authority
 	if authority == "" {
-		if sc.req != nil && sc.req.Host != "" {
-			authority = sc.req.Host
-		} else {
-			authority = hpackGetHeader(req.AllHeaders, "host")
-		}
+		authority = hpackGetHeader(req.AllHeaders, "host")
 	}
 	if authority == "" {
 		return "", "", false, fmt.Errorf("missing :authority/Host header")
@@ -733,6 +750,14 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 
 	h.resolveSchemeAndHost(sc)
 
+	// Build gohttp.Request lazily for gRPC intercept path which still needs it
+	// for Body management and header Set/Add/Del operations.
+	if err := ensureGoHTTPReq(sc); err != nil {
+		sc.logger.Error("HTTP/2 gRPC: failed to build gohttp request", "error", err)
+		writeErrorResponse(sc.w, httputil.StatusBadRequest)
+		return true
+	}
+
 	if h.checkTargetScope(sc) {
 		return true
 	}
@@ -742,7 +767,7 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 
 	// Intercept check for gRPC requests.
 	if h.InterceptEngine != nil && h.InterceptQueue != nil {
-		matchedRules := h.InterceptEngine.MatchRequestRules(sc.h2req.Method, sc.req.URL, hpackToRawHeaders(sc.h2req.AllHeaders))
+		matchedRules := h.InterceptEngine.MatchRequestRules(sc.h2req.Method, sc.reqURL, hpackToRawHeaders(sc.h2req.AllHeaders))
 		if len(matchedRules) > 0 {
 			handled := h.handleGRPCIntercept(sc, matchedRules)
 			if handled {
@@ -913,7 +938,7 @@ func (h *Handler) enqueueGRPCIntercept(sc *streamContext, body []byte, jsonBody 
 		Metadata: h.buildGRPCInterceptMetadata(sc, frame),
 	}
 
-	id, actionCh := h.InterceptQueue.Enqueue(sc.h2req.Method, sc.req.URL, hpackToRawHeaders(sc.h2req.AllHeaders), []byte(jsonBody), matchedRules, opts)
+	id, actionCh := h.InterceptQueue.Enqueue(sc.h2req.Method, sc.reqURL, hpackToRawHeaders(sc.h2req.AllHeaders), []byte(jsonBody), matchedRules, opts)
 	defer h.InterceptQueue.Remove(id)
 
 	return h.waitGRPCInterceptAction(sc, id, actionCh)
@@ -1357,7 +1382,7 @@ func (h *Handler) enqueueGRPCResponseIntercept(sc *streamContext, resp *gohttp.R
 	}
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		sc.h2req.Method, sc.req.URL, resp.StatusCode, httpHeaderToRawHeaders(resp.Header), []byte(jsonBody), matchedRules, opts,
+		sc.h2req.Method, sc.reqURL, resp.StatusCode, hpackToRawHeaders(goHTTPHeaderToHpack(resp.Header)), []byte(jsonBody), matchedRules, opts,
 	)
 	defer h.InterceptQueue.Remove(id)
 
@@ -1523,4 +1548,62 @@ func (h *Handler) runGRPCResponseSubsystems(sc *streamContext, state *grpcStream
 	}
 
 	return wireBytes, resp, trailers
+}
+
+// httpHeaderToRawHeaders converts gohttp.Header to parser.RawHeaders for
+// the gRPC intercept path which still uses gohttp types internally.
+// Header name casing is preserved as-is.
+func httpHeaderToRawHeaders(h gohttp.Header) parser.RawHeaders {
+	if h == nil {
+		return nil
+	}
+	var rh parser.RawHeaders
+	for name, vals := range h {
+		for _, v := range vals {
+			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+		}
+	}
+	return rh
+}
+
+// rawHeadersToHTTPHeader converts parser.RawHeaders back to gohttp.Header
+// for the gRPC intercept path. Uses Add() which canonicalizes header names.
+// This is acceptable in the gRPC path where headers come from the gohttp
+// response and are already canonicalized.
+func rawHeadersToHTTPHeader(rh parser.RawHeaders) gohttp.Header {
+	if rh == nil {
+		return make(gohttp.Header)
+	}
+	h := make(gohttp.Header, len(rh))
+	for _, hdr := range rh {
+		h.Add(hdr.Name, hdr.Value)
+	}
+	return h
+}
+
+// hpackToGoHTTPHeader converts hpack header fields to gohttp.Header for
+// the gRPC intercept path. Uses Add() which canonicalizes header names.
+func hpackToGoHTTPHeader(fields []hpack.HeaderField) gohttp.Header {
+	h := make(gohttp.Header)
+	for _, hf := range fields {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
+		}
+		h.Add(hf.Name, hf.Value)
+	}
+	return h
+}
+
+// cloneHeaders creates a deep copy of a gohttp.Header map for the gRPC path.
+func cloneHeaders(h gohttp.Header) gohttp.Header {
+	if h == nil {
+		return nil
+	}
+	clone := make(gohttp.Header, len(h))
+	for k, vals := range h {
+		cp := make([]string, len(vals))
+		copy(cp, vals)
+		clone[k] = cp
+	}
+	return clone
 }

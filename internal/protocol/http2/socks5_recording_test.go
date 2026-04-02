@@ -63,7 +63,7 @@ func TestRecordSend_SOCKS5Protocol(t *testing.T) {
 				connID: "conn-1",
 				scheme: "https",
 				start:  time.Now(),
-				req:    req,
+				method: req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
 				reqURL: reqURL,
 			}, handler.Logger)
 
@@ -112,7 +112,7 @@ func TestRecordSendWithVariant_SOCKS5Protocol(t *testing.T) {
 		connID: "conn-2",
 		scheme: "https",
 		start:  time.Now(),
-		req:    req,
+		method: req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
 		reqURL: reqURL,
 	}, nil, handler.Logger)
 
@@ -150,7 +150,7 @@ func TestRecordInterceptDrop_SOCKS5Protocol(t *testing.T) {
 		connID: "conn-3",
 		scheme: "https",
 		start:  time.Now(),
-		req:    req,
+		method: req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
 		reqURL: reqURL,
 	}, handler.Logger)
 
@@ -292,7 +292,7 @@ func TestRecordOutReqError_SOCKS5Protocol(t *testing.T) {
 		connID: "conn-4",
 		scheme: "https",
 		start:  time.Now(),
-		req:    req,
+		method: req.Method, host: req.Host, headers: goHTTPHeaderToHpack(req.Header),
 		reqURL: reqURL,
 	}, gohttp.ErrAbortHandler, handler.Logger)
 

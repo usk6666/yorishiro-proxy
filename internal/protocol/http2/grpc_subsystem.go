@@ -8,6 +8,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -68,35 +69,26 @@ func applyGRPCSafetyFilter(engine *safety.Engine, jsonBody string, rawURL string
 	return engine.CheckInput([]byte(jsonBody), rawURL, hpackToRawHeaders(headers))
 }
 
-// scMethod returns the request method from h2req or falls back to req.
+// scMethod returns the request method from h2req.
 func scMethod(sc *streamContext) string {
 	if sc.h2req != nil {
 		return sc.h2req.Method
 	}
-	if sc.req != nil {
-		return sc.req.Method
-	}
 	return ""
 }
 
-// scHeaders returns the hpack headers from h2req or converts from req.
+// scHeaders returns the hpack headers from h2req.
 func scHeaders(sc *streamContext) []hpack.HeaderField {
 	if sc.h2req != nil {
 		return sc.h2req.AllHeaders
 	}
-	if sc.req != nil {
-		return goHTTPHeaderToHpack(sc.req.Header)
-	}
 	return nil
 }
 
-// scHeadersPluginMap returns headers in plugin map format from h2req or req.
+// scHeadersPluginMap returns headers in plugin map format from h2req.
 func scHeadersPluginMap(sc *streamContext) map[string]any {
 	if sc.h2req != nil {
 		return hpackHeadersToPluginMap(sc.h2req.AllHeaders)
-	}
-	if sc.req != nil {
-		return headersToPluginMap(sc.req.Header)
 	}
 	return nil
 }
@@ -202,7 +194,7 @@ func applyGRPCResponsePluginHook(
 	}
 
 	data := map[string]any{
-		"method":      sc.req.Method,
+		"method":      scMethod(sc),
 		"url":         sc.reqURL.String(),
 		"status_code": 0,
 		"headers":     respHeaders,
@@ -253,7 +245,24 @@ func applyGRPCAutoTransformResponse(pipeline *rules.Pipeline, statusCode int, he
 	if pipeline == nil || pipeline.Len() == 0 {
 		return jsonBody, false
 	}
-	_, body := pipeline.TransformResponse(statusCode, httpHeaderToRawHeaders(headers), []byte(jsonBody))
+	var rh parser.RawHeaders
+	for name, vals := range headers {
+		for _, v := range vals {
+			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+		}
+	}
+	_, body := pipeline.TransformResponse(statusCode, rh, []byte(jsonBody))
+	newJSON := string(body)
+	return newJSON, newJSON != jsonBody
+}
+
+// applyGRPCAutoTransformResponseHpack applies auto-transform rules using hpack
+// native types for the response direction.
+func applyGRPCAutoTransformResponseHpack(pipeline *rules.Pipeline, statusCode int, headers []hpack.HeaderField, jsonBody string) (string, bool) {
+	if pipeline == nil || pipeline.Len() == 0 {
+		return jsonBody, false
+	}
+	_, body := pipeline.TransformResponse(statusCode, hpackToRawHeaders(headers), []byte(jsonBody))
 	newJSON := string(body)
 	return newJSON, newJSON != jsonBody
 }
@@ -490,9 +499,8 @@ func (h *Handler) processGRPCResponseFrameH2(
 
 	// 2. Auto-transform (response direction).
 	if h.transformPipeline != nil {
-		goHeaders := hpackToGoHTTPHeader(respHeaders)
-		transformedJSON, tChanged := applyGRPCAutoTransformResponse(
-			h.transformPipeline, statusCode, goHeaders, currentJSON)
+		transformedJSON, tChanged := applyGRPCAutoTransformResponseHpack(
+			h.transformPipeline, statusCode, respHeaders, currentJSON)
 		if tChanged {
 			currentJSON = transformedJSON
 			modified = true
