@@ -788,4 +788,3 @@ func TestMCPQuery_Variant_RawInterceptMode(t *testing.T) {
 		t.Errorf("variant message count = %d, want 2 (original + modified)", variantCount)
 	}
 }
-
