@@ -223,7 +223,7 @@ func h2RequestToGoHTTP(ctx context.Context, req *h2Request) (*gohttp.Request, er
 }
 
 // goHTTPHeaderToHpack converts gohttp.Header to hpack header fields.
-// Keys are sorted for deterministic output order.
+// Key order follows map iteration order (non-deterministic).
 func goHTTPHeaderToHpack(h gohttp.Header) []hpack.HeaderField {
 	keys := make([]string, 0, len(h))
 	for name := range h {
