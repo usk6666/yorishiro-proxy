@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
-	gohttp "net/http"
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -68,8 +68,8 @@ func TestInterceptFrame_HoldAndRelease(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -152,8 +152,8 @@ func TestInterceptFrame_HoldAndModify(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	go func() {
 		handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-1", "127.0.0.1:1234", nil)
@@ -227,8 +227,8 @@ func TestInterceptFrame_HoldAndDrop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	go func() {
 		handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-1", "127.0.0.1:1234", nil)
@@ -329,8 +329,8 @@ func TestInterceptFrame_ReverseDirectionNotHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	go func() {
 		handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-1", "127.0.0.1:1234", nil)
@@ -386,8 +386,8 @@ func TestInterceptFrame_NoMatchPassesThrough(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	go func() {
 		handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-1", "127.0.0.1:1234", nil)
@@ -446,8 +446,8 @@ func TestInterceptFrame_QueueCapacityAutoRelease(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	go func() {
 		handler.HandleUpgrade(ctx, clientConn, upstreamConn, nil, req, resp, "conn-1", "127.0.0.1:1234", nil)

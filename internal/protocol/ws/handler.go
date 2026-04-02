@@ -8,7 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -66,15 +67,46 @@ func (h *Handler) SetInterceptQueue(queue *intercept.Queue) {
 }
 
 // wsScheme determines the WebSocket scheme ("ws" or "wss") from the upgrade
-// request URL or TLS connection metadata.
-func wsScheme(upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) string {
-	if upgradeReq.URL != nil && (upgradeReq.URL.Scheme == "https" || upgradeReq.URL.Scheme == "wss") {
-		return "wss"
+// request URI or TLS connection metadata.
+func wsScheme(upgradeReq *parser.RawRequest, connInfo *flow.ConnectionInfo) string {
+	if upgradeReq != nil {
+		if u, err := url.ParseRequestURI(upgradeReq.RequestURI); err == nil {
+			if u.Scheme == "https" || u.Scheme == "wss" {
+				return "wss"
+			}
+		}
 	}
 	if connInfo != nil && connInfo.TLSVersion != "" {
 		return "wss"
 	}
 	return "ws"
+}
+
+// parseUpgradeURL parses the RequestURI of the upgrade request into a *url.URL.
+// Returns nil if the request is nil or the URI cannot be parsed.
+func parseUpgradeURL(req *parser.RawRequest) *url.URL {
+	if req == nil {
+		return nil
+	}
+	u, err := url.ParseRequestURI(req.RequestURI)
+	if err != nil {
+		return &url.URL{Path: req.RequestURI}
+	}
+	return u
+}
+
+// rawHeadersToMap converts parser.RawHeaders to map[string][]string without
+// importing net/http. This preserves wire-observed header name casing and order
+// within each name, matching the flow.Message.Headers type.
+func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
+	if rh == nil {
+		return make(map[string][]string)
+	}
+	m := make(map[string][]string, len(rh))
+	for _, hdr := range rh {
+		m[hdr.Name] = append(m[hdr.Name], hdr.Value)
+	}
+	return m
 }
 
 // HandleUpgrade processes a WebSocket upgrade request. It forwards the upgrade
@@ -87,12 +119,12 @@ func wsScheme(upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) string 
 //   - upstreamConn: the upstream connection to the WebSocket server
 //   - upstreamBufReader: optional bufio.Reader wrapping upstreamConn that may contain
 //     buffered bytes from HTTP response parsing. If nil, a new bufio.Reader is created.
-//   - upgradeReq: the original HTTP Upgrade request
-//   - upgradeResp: the 101 Switching Protocols response from upstream
+//   - upgradeReq: the original HTTP Upgrade request (parser.RawRequest)
+//   - upgradeResp: the 101 Switching Protocols response from upstream (parser.RawResponse)
 //   - connID: connection identifier for log correlation
 //   - clientAddr: client's remote address
 //   - connInfo: optional connection metadata (TLS info etc.)
-func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, upgradeReq *gohttp.Request, upgradeResp *gohttp.Response, connID, clientAddr string, connInfo *flow.ConnectionInfo) error {
+func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, upgradeReq *parser.RawRequest, upgradeResp *parser.RawResponse, connID, clientAddr string, connInfo *flow.ConnectionInfo) error {
 	start := time.Now()
 
 	// Create the WebSocket flow record.
@@ -113,16 +145,18 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 		}
 	}
 
+	upgradeURL := parseUpgradeURL(upgradeReq)
+
 	h.logger.Info("websocket flow started",
 		"flow_id", fl.ID,
 		"conn_id", connID,
-		"url", upgradeReq.URL.String(),
+		"url", upgradeReq.RequestURI,
 	)
 
 	// Record the Upgrade request as the first message (sequence=0, direction="send").
 	// This mirrors the error path in recordWebSocketError so that WebSocket flows
 	// have the URL, Method, and Headers available for search and resend.
-	h.recordUpgradeRequest(ctx, fl.ID, upgradeReq, start)
+	h.recordUpgradeRequest(ctx, fl.ID, upgradeReq, upgradeURL, start)
 
 	// Record the Upgrade response as the second message (sequence=1, direction="receive").
 	h.recordUpgradeResponse(ctx, fl.ID, upgradeResp, start)
@@ -130,7 +164,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	// Parse permessage-deflate extension from the upgrade response.
 	var clientDeflate, serverDeflate *deflateState
 	if upgradeResp != nil {
-		extHeader := upgradeResp.Header.Get("Sec-WebSocket-Extensions")
+		extHeader := upgradeResp.Headers.Get("Sec-WebSocket-Extensions")
 		clientParams, serverParams := parseDeflateExtension(extHeader)
 		if clientParams.enabled {
 			clientDeflate = newDeflateState(clientParams)
@@ -149,7 +183,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	}
 
 	// Run bidirectional frame relay.
-	err, closeReceived := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq, connInfo, clientDeflate, serverDeflate)
+	err, closeReceived := h.relayFrames(ctx, clientConn, upstreamConn, upstreamBufReader, fl.ID, start, upgradeReq.RequestURI, connInfo, clientDeflate, serverDeflate)
 
 	// Update flow state to complete.
 	duration := time.Since(start)
@@ -178,7 +212,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 // (sequence=0) so that the flow contains URL, Method, and Headers for search
 // and resend. This matches the format used by recordWebSocketError in the
 // HTTP handler's error path.
-func (h *Handler) recordUpgradeRequest(ctx context.Context, flowID string, req *gohttp.Request, start time.Time) {
+func (h *Handler) recordUpgradeRequest(ctx context.Context, flowID string, req *parser.RawRequest, reqURL *url.URL, start time.Time) {
 	if h.store == nil {
 		return
 	}
@@ -189,8 +223,8 @@ func (h *Handler) recordUpgradeRequest(ctx context.Context, flowID string, req *
 		Direction: "send",
 		Timestamp: start,
 		Method:    req.Method,
-		URL:       req.URL,
-		Headers:   req.Header,
+		URL:       reqURL,
+		Headers:   rawHeadersToMap(req.Headers),
 	}
 	if err := h.store.AppendMessage(ctx, msg); err != nil {
 		h.logger.Error("websocket upgrade request message save failed",
@@ -201,7 +235,7 @@ func (h *Handler) recordUpgradeRequest(ctx context.Context, flowID string, req *
 // recordUpgradeResponse records the HTTP 101 Switching Protocols response as a
 // receive message (sequence=1) so that the flow contains the response status
 // code and headers.
-func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp *gohttp.Response, start time.Time) {
+func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp *parser.RawResponse, start time.Time) {
 	if h.store == nil {
 		return
 	}
@@ -212,7 +246,7 @@ func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp
 		Direction:  "receive",
 		Timestamp:  start,
 		StatusCode: resp.StatusCode,
-		Headers:    resp.Header,
+		Headers:    rawHeadersToMap(resp.Headers),
 	}
 	if err := h.store.AppendMessage(ctx, msg); err != nil {
 		h.logger.Error("websocket upgrade response message save failed",
@@ -224,7 +258,7 @@ func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp
 // between the client and upstream server. Each frame is recorded to the
 // flow store. The relay stops when a Close frame is received, a connection
 // error occurs, or the context is cancelled.
-func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, clientDeflate, serverDeflate *deflateState) (retErr error, gotClose bool) {
+func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.Conn, upstreamBufReader *bufio.Reader, flowID string, start time.Time, upgradeURL string, connInfo *flow.ConnectionInfo, clientDeflate, serverDeflate *deflateState) (retErr error, gotClose bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -255,7 +289,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start, upgradeReq, connInfo, &closeReceived, clientDeflate)
+		err := h.relayDirection(ctx, clientReader, upstreamConn, flowID, "send", &seq, start, upgradeURL, connInfo, &closeReceived, clientDeflate)
 		errCh <- err
 		cancel()
 	}()
@@ -264,7 +298,7 @@ func (h *Handler) relayFrames(ctx context.Context, clientConn, upstreamConn net.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start, upgradeReq, connInfo, &closeReceived, serverDeflate)
+		err := h.relayDirection(ctx, upstreamReader, clientConn, flowID, "receive", &seq, start, upgradeURL, connInfo, &closeReceived, serverDeflate)
 		errCh <- err
 		cancel()
 	}()
@@ -308,7 +342,7 @@ type fragmentState struct {
 //
 // If a plugin returns ActionDrop, the frame is silently skipped.
 // If a plugin modifies the payload via result Data, the modified payload is used.
-func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, closeReceived *atomic.Bool, ds *deflateState) error {
+func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Conn, flowID, direction string, seq *atomic.Int64, start time.Time, upgradeURL string, connInfo *flow.ConnectionInfo, closeReceived *atomic.Bool, ds *deflateState) error {
 	hooks := resolveHookPair(direction)
 
 	var frag fragmentState
@@ -331,7 +365,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 		// plugins from dropping Close frames, which would cause the relay to hang
 		// until context timeout (CWE-400).
 		if !frame.IsControl() {
-			if dropped := h.dispatchDataFrameHooks(ctx, hooks, frame, upgradeReq, connInfo, flowID); dropped {
+			if dropped := h.dispatchDataFrameHooks(ctx, hooks, frame, upgradeURL, connInfo, flowID); dropped {
 				continue
 			}
 		}
@@ -341,7 +375,7 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 			continue
 		}
 
-		done, err := h.processFrameAfterHooks(ctx, frame, flowID, direction, hooks.direction, seq, start, dst, &frag, upgradeReq, closeReceived, ds)
+		done, err := h.processFrameAfterHooks(ctx, frame, flowID, direction, hooks.direction, seq, start, dst, &frag, upgradeURL, closeReceived, ds)
 		if err != nil {
 			return err
 		}
@@ -357,12 +391,12 @@ func (h *Handler) relayDirection(ctx context.Context, src io.Reader, dst net.Con
 //
 // When permessage-deflate is active (ds != nil and ds.params.enabled), data frames
 // with RSV1 set are decompressed for recording but forwarded as-is on the wire.
-func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, upgradeReq *gohttp.Request, closeReceived *atomic.Bool, ds *deflateState) (bool, error) {
+func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, upgradeURL string, closeReceived *atomic.Bool, ds *deflateState) (bool, error) {
 	// Determine if this frame is permessage-deflate compressed.
 	compressed := !frame.IsControl() && frame.RSV1 && ds != nil && ds.params.enabled
 
 	// Safety filter: apply to text frames only (opcode 0x1).
-	safetyMeta, rawPayload, blocked := h.applySafetyToFrame(frame, direction, upgradeReq, flowID)
+	safetyMeta, rawPayload, blocked := h.applySafetyToFrame(frame, direction, upgradeURL, flowID)
 	if blocked {
 		if !frame.Fin {
 			frag.dropping = true
@@ -374,7 +408,7 @@ func (h *Handler) processFrameAfterHooks(ctx context.Context, frame *Frame, flow
 
 	// Intercept check: evaluate intercept rules for data frames.
 	if !frame.IsControl() {
-		if intercepted := h.interceptFrame(ctx, frame, flowID, direction, wsDirection, seq, start, dst, frag, safetyMeta, rawPayload, upgradeReq); intercepted {
+		if intercepted := h.interceptFrame(ctx, frame, flowID, direction, wsDirection, seq, start, dst, frag, safetyMeta, rawPayload, upgradeURL); intercepted {
 			return false, nil
 		}
 	}
@@ -422,12 +456,12 @@ func resolveHookPair(direction string) hookPair {
 
 // dispatchDataFrameHooks dispatches the receive and send plugin hooks for a
 // data frame. Returns true if the frame should be dropped.
-func (h *Handler) dispatchDataFrameHooks(ctx context.Context, hooks hookPair, frame *Frame, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, flowID string) bool {
+func (h *Handler) dispatchDataFrameHooks(ctx context.Context, hooks hookPair, frame *Frame, upgradeURL string, connInfo *flow.ConnectionInfo, flowID string) bool {
 	frameTxCtx := plugin.NewTxCtx()
-	if dropped := h.dispatchFrameHook(ctx, hooks.receiveHook, frame, hooks.direction, upgradeReq, connInfo, flowID, frameTxCtx); dropped {
+	if dropped := h.dispatchFrameHook(ctx, hooks.receiveHook, frame, hooks.direction, upgradeURL, connInfo, flowID, frameTxCtx); dropped {
 		return true
 	}
-	return h.dispatchFrameHook(ctx, hooks.sendHook, frame, hooks.direction, upgradeReq, connInfo, flowID, frameTxCtx)
+	return h.dispatchFrameHook(ctx, hooks.sendHook, frame, hooks.direction, upgradeURL, connInfo, flowID, frameTxCtx)
 }
 
 // handleBlockedFragment checks if a continuation frame belongs to a blocked
@@ -546,19 +580,14 @@ func (h *Handler) closeOversizedMessage(dst net.Conn, frag *fragmentState, frame
 }
 
 // buildFrameData constructs the plugin hook data map for a WebSocket frame.
-func (h *Handler) buildFrameData(frame *Frame, direction string, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo) map[string]any {
+func (h *Handler) buildFrameData(frame *Frame, direction string, upgradeURL string, connInfo *flow.ConnectionInfo) map[string]any {
 	data := map[string]any{
 		"opcode":      int(frame.Opcode),
 		"opcode_name": OpcodeString(frame.Opcode),
 		"payload":     frame.Payload,
 		"fin":         frame.Fin,
 		"direction":   direction,
-	}
-
-	if upgradeReq != nil && upgradeReq.URL != nil {
-		data["upgrade_url"] = upgradeReq.URL.String()
-	} else {
-		data["upgrade_url"] = ""
+		"upgrade_url": upgradeURL,
 	}
 
 	connInfoMap := map[string]any{}
@@ -585,12 +614,12 @@ func (h *Handler) buildFrameData(frame *Frame, direction string, upgradeReq *goh
 // After a plugin modifies the payload, the new size is checked against
 // config.MaxWebSocketMessageSize. If exceeded, the modification is discarded
 // and the original payload is preserved (CWE-400 mitigation).
-func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame *Frame, direction string, upgradeReq *gohttp.Request, connInfo *flow.ConnectionInfo, flowID string, txCtx map[string]any) bool {
+func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame *Frame, direction string, upgradeURL string, connInfo *flow.ConnectionInfo, flowID string, txCtx map[string]any) bool {
 	if h.pluginEngine == nil {
 		return false
 	}
 
-	data := h.buildFrameData(frame, direction, upgradeReq, connInfo)
+	data := h.buildFrameData(frame, direction, upgradeURL, connInfo)
 	plugin.InjectTxCtx(data, txCtx)
 
 	result, err := h.pluginEngine.Dispatch(ctx, hook, data)
@@ -651,13 +680,13 @@ func (h *Handler) dispatchFrameHook(ctx context.Context, hook plugin.Hook, frame
 //   - safetyMeta: metadata about the safety filter match (nil if no match)
 //   - rawPayload: the original unmasked payload for recording (nil unless output filter masked)
 //   - blocked: true if the frame should be dropped (not forwarded)
-func (h *Handler) applySafetyToFrame(frame *Frame, direction string, upgradeReq *gohttp.Request, flowID string) (*safetyMetadata, []byte, bool) {
+func (h *Handler) applySafetyToFrame(frame *Frame, direction string, upgradeURL string, flowID string) (*safetyMetadata, []byte, bool) {
 	if h.safetyEngine == nil || frame.IsControl() || frame.Opcode != OpcodeText {
 		return nil, nil, false
 	}
 
 	if direction == "send" {
-		meta := h.applySafetyInputFilter(frame, upgradeReq, flowID)
+		meta := h.applySafetyInputFilter(frame, upgradeURL, flowID)
 		if meta != nil && meta.blocked {
 			return meta, nil, true
 		}
@@ -685,12 +714,7 @@ type safetyMetadata struct {
 }
 
 // applySafetyInputFilter runs CheckInput on a text frame payload in the send direction.
-func (h *Handler) applySafetyInputFilter(frame *Frame, upgradeReq *gohttp.Request, flowID string) *safetyMetadata {
-	var upgradeURL string
-	if upgradeReq != nil && upgradeReq.URL != nil {
-		upgradeURL = upgradeReq.URL.String()
-	}
-
+func (h *Handler) applySafetyInputFilter(frame *Frame, upgradeURL string, flowID string) *safetyMetadata {
 	violation := h.safetyEngine.CheckInput(frame.Payload, upgradeURL, nil)
 	if violation == nil {
 		return nil
@@ -764,14 +788,9 @@ func (h *Handler) applySafetyOutputFilter(frame *Frame, flowID string) {
 // is naturally blocked while waiting for the intercept action. Same-direction
 // frames cannot arrive during the hold because the reader goroutine is blocked.
 // The reverse direction runs in a separate goroutine and is unaffected.
-func (h *Handler) interceptFrame(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, safetyMeta *safetyMetadata, rawPayload []byte, upgradeReq *gohttp.Request) bool {
+func (h *Handler) interceptFrame(ctx context.Context, frame *Frame, flowID, direction, wsDirection string, seq *atomic.Int64, start time.Time, dst net.Conn, frag *fragmentState, safetyMeta *safetyMetadata, rawPayload []byte, upgradeURL string) bool {
 	if h.interceptEngine == nil || h.interceptQueue == nil {
 		return false
-	}
-
-	var upgradeURL string
-	if upgradeReq != nil && upgradeReq.URL != nil {
-		upgradeURL = upgradeReq.URL.String()
 	}
 
 	matchedRules := h.interceptEngine.MatchWebSocketFrameRules(upgradeURL, wsDirection, flowID)

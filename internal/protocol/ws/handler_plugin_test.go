@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
-	gohttp "net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -85,8 +85,8 @@ def on_before_send_to_client(data):
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -166,8 +166,8 @@ def on_receive_from_client(data):
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -251,8 +251,8 @@ def on_before_send_to_server(data):
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -350,8 +350,8 @@ def on_receive_from_client(data):
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	connInfo := &flow.ConnectionInfo{
 		ClientAddr: "10.0.0.1:12345",
@@ -434,8 +434,8 @@ def on_before_send_to_client(data):
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -496,8 +496,8 @@ func TestHandleUpgrade_NilPluginEngine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-	resp := &gohttp.Response{StatusCode: 101}
+	req := &parser.RawRequest{Method: "GET", RequestURI: "ws://example.com/ws"}
+	resp := &parser.RawResponse{StatusCode: 101}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -554,7 +554,7 @@ func TestBuildFrameData(t *testing.T) {
 		Payload: []byte("test"),
 	}
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/chat", nil)
+	upgradeURL := "ws://example.com/chat"
 	connInfo := &flow.ConnectionInfo{
 		ClientAddr: "10.0.0.1:1234",
 		ServerAddr: "10.0.0.2:443",
@@ -562,7 +562,7 @@ func TestBuildFrameData(t *testing.T) {
 		TLSCipher:  "AES_256_GCM",
 	}
 
-	data := handler.buildFrameData(frame, "client_to_server", req, connInfo)
+	data := handler.buildFrameData(frame, "client_to_server", upgradeURL, connInfo)
 
 	// Verify all expected keys.
 	if data["opcode"] != int(OpcodeText) {
@@ -624,15 +624,13 @@ func TestDispatchFrameHook_PayloadSizeLimit(t *testing.T) {
 		Payload: originalPayload,
 	}
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-
 	txCtx := plugin.NewTxCtx()
 	dropped := handler.dispatchFrameHook(
 		context.Background(),
 		plugin.HookOnReceiveFromClient,
 		frame,
 		"client_to_server",
-		req,
+		"ws://example.com/ws",
 		nil,
 		"test-flow",
 		txCtx,
@@ -671,15 +669,13 @@ func TestDispatchFrameHook_PayloadWithinLimit(t *testing.T) {
 		Payload: []byte("original"),
 	}
 
-	req, _ := gohttp.NewRequest("GET", "ws://example.com/ws", nil)
-
 	txCtx := plugin.NewTxCtx()
 	dropped := handler.dispatchFrameHook(
 		context.Background(),
 		plugin.HookOnReceiveFromClient,
 		frame,
 		"client_to_server",
-		req,
+		"ws://example.com/ws",
 		nil,
 		"test-flow",
 		txCtx,
@@ -703,7 +699,7 @@ func TestBuildFrameData_NilConnInfo(t *testing.T) {
 		Payload: []byte{0x01, 0x02},
 	}
 
-	data := handler.buildFrameData(frame, "server_to_client", nil, nil)
+	data := handler.buildFrameData(frame, "server_to_client", "", nil)
 
 	if data["upgrade_url"] != "" {
 		t.Errorf("upgrade_url = %v, want empty string", data["upgrade_url"])
