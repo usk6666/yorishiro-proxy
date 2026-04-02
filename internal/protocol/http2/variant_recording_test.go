@@ -393,6 +393,18 @@ func TestHpackHeadersModified_H2(t *testing.T) {
 			b:    []hpack.HeaderField{{Name: "x-key", Value: "new"}},
 			want: true,
 		},
+		{
+			name: "same fields different order",
+			a:    []hpack.HeaderField{{Name: "x-a", Value: "1"}, {Name: "x-b", Value: "2"}},
+			b:    []hpack.HeaderField{{Name: "x-b", Value: "2"}, {Name: "x-a", Value: "1"}},
+			want: false,
+		},
+		{
+			name: "duplicate fields different order",
+			a:    []hpack.HeaderField{{Name: "x-a", Value: "1"}, {Name: "x-a", Value: "2"}, {Name: "x-b", Value: "3"}},
+			b:    []hpack.HeaderField{{Name: "x-b", Value: "3"}, {Name: "x-a", Value: "2"}, {Name: "x-a", Value: "1"}},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {

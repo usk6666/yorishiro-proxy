@@ -147,12 +147,21 @@ func requestModified(snap requestSnapshot, currentHeaders []hpack.HeaderField, c
 }
 
 // hpackHeadersModified reports whether two hpack header field slices differ.
+// The comparison is order-independent because both slices may originate from
+// gohttp.Header (a map) whose iteration order is non-deterministic.
 func hpackHeadersModified(a, b []hpack.HeaderField) bool {
 	if len(a) != len(b) {
 		return true
 	}
-	for i := range a {
-		if a[i].Name != b[i].Name || a[i].Value != b[i].Value {
+	// Build a frequency map of name+value pairs from a, then subtract b.
+	freq := make(map[string]int, len(a))
+	for _, f := range a {
+		freq[f.Name+"\x00"+f.Value]++
+	}
+	for _, f := range b {
+		key := f.Name + "\x00" + f.Value
+		freq[key]--
+		if freq[key] < 0 {
 			return true
 		}
 	}
