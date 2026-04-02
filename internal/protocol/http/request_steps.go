@@ -470,16 +470,11 @@ func (h *Handler) recordRawReceive(ctx context.Context, sendResult *sendRecordRe
 		return
 	}
 
-	var goResp *httputil.GoHTTPResponse
-	if rawFwd.resp != nil {
-		goResp = httputil.RawResponseToHTTP(rawFwd.resp, rawFwd.respBody)
-	}
-
 	rp := receiveRecordParams{
 		start:       start,
 		duration:    duration,
 		serverAddr:  rawFwd.serverAddr,
-		resp:        goResp,
+		resp:        rawFwd.resp,
 		rawResponse: rawFwd.rawResponse,
 		respBody:    rawFwd.respBody,
 		sendMs:      &sendMs,

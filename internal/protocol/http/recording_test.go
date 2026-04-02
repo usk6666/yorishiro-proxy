@@ -24,13 +24,6 @@ func TestRecordHTTPSession_Basic(t *testing.T) {
 	goReq, _ := gohttp.NewRequest("GET", "http://example.com/path", nil)
 	req := goRequestToRaw(goReq)
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{"Content-Type": {"text/plain"}},
-	}
-
 	handler.recordHTTPSession(ctx, sessionRecordParams{
 		connID:     "conn-1",
 		clientAddr: "127.0.0.1:1234",
@@ -41,7 +34,7 @@ func TestRecordHTTPSession_Basic(t *testing.T) {
 		connInfo:   &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234", ServerAddr: "93.184.216.34:80"},
 		req:        req,
 		reqBody:    []byte("request body"),
-		resp:       resp,
+		resp:       testRawResponse(200, gohttp.Header{"Content-Type": {"text/plain"}}),
 		respBody:   []byte("response body"),
 	}, logger)
 
@@ -86,12 +79,6 @@ func TestRecordHTTPSession_NilStore(t *testing.T) {
 
 	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
 	req := goRequestToRaw(goReq)
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{},
-	}
 
 	// Should not panic.
 	handler.recordHTTPSession(ctx, sessionRecordParams{
@@ -99,7 +86,7 @@ func TestRecordHTTPSession_NilStore(t *testing.T) {
 		start:    time.Now(),
 		duration: time.Millisecond,
 		req:      req,
-		resp:     resp,
+		resp:     testRawResponse(200, gohttp.Header{}),
 		respBody: []byte("ok"),
 	}, logger)
 }
@@ -122,13 +109,6 @@ func TestRecordHTTPSession_WithReqURL(t *testing.T) {
 		RawQuery: "key=value",
 	}
 
-	resp := &gohttp.Response{
-		StatusCode: 201,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{},
-	}
-
 	handler.recordHTTPSession(ctx, sessionRecordParams{
 		protocol: "HTTPS",
 		start:    time.Now(),
@@ -137,7 +117,7 @@ func TestRecordHTTPSession_WithReqURL(t *testing.T) {
 		req:      req,
 		reqURL:   reqURL,
 		reqBody:  []byte("body"),
-		resp:     resp,
+		resp:     testRawResponse(201, gohttp.Header{}),
 		respBody: []byte("created"),
 	}, logger)
 
@@ -159,12 +139,6 @@ func TestRecordHTTPSession_Tags(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	goReq, _ := gohttp.NewRequest("GET", "http://example.com", nil)
 	req := goRequestToRaw(goReq)
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{},
-	}
 
 	tags := map[string]string{"smuggling:cl_te_conflict": "true"}
 
@@ -175,7 +149,7 @@ func TestRecordHTTPSession_Tags(t *testing.T) {
 		tags:     tags,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
-		resp:     resp,
+		resp:     testRawResponse(200, gohttp.Header{}),
 		respBody: []byte("ok"),
 	}, logger)
 
@@ -197,12 +171,6 @@ func TestRecordHTTPSession_TLSConnInfo(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	goReq, _ := gohttp.NewRequest("GET", "https://example.com", nil)
 	req := goRequestToRaw(goReq)
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{},
-	}
 
 	handler.recordHTTPSession(ctx, sessionRecordParams{
 		protocol: "HTTPS",
@@ -217,7 +185,7 @@ func TestRecordHTTPSession_TLSConnInfo(t *testing.T) {
 			TLSServerCertSubject: "CN=example.com",
 		},
 		req:      req,
-		resp:     resp,
+		resp:     testRawResponse(200, gohttp.Header{}),
 		respBody: []byte("ok"),
 	}, logger)
 
@@ -311,20 +279,13 @@ func TestRecordHTTPSession_HostHeader(t *testing.T) {
 	// Ensure Host header is set on the RawRequest.
 	req.Headers.Set("Host", "example.com")
 
-	resp := &gohttp.Response{
-		StatusCode: 200,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     gohttp.Header{},
-	}
-
 	handler.recordHTTPSession(ctx, sessionRecordParams{
 		protocol: "HTTP/1.x",
 		start:    time.Now(),
 		duration: time.Millisecond,
 		connInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:1234"},
 		req:      req,
-		resp:     resp,
+		resp:     testRawResponse(200, gohttp.Header{}),
 		respBody: []byte("ok"),
 	}, logger)
 

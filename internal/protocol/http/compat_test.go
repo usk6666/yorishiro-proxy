@@ -202,6 +202,16 @@ func goResponseToRaw(resp *gohttp.Response, body []byte) *parser.RawResponse {
 	return httputil.HTTPResponseToRaw(resp, body)
 }
 
+// testRawResponse creates a *parser.RawResponse for test use from a status code
+// and gohttp.Header. This avoids constructing a full *gohttp.Response in tests
+// that only need to pass a response to receiveRecordParams.
+func testRawResponse(statusCode int, headers gohttp.Header) *parser.RawResponse {
+	return &parser.RawResponse{
+		StatusCode: statusCode,
+		Headers:    httputil.HTTPHeaderToRawHeaders(headers),
+	}
+}
+
 // readRawResponse is a test compatibility shim for the old readRawResponse function.
 func readRawResponse(conn net.Conn) (rawResponse []byte, resp *gohttp.Response, respBody []byte, err error) {
 	rawResp, rawParsed, rawBody, readErr := readRawResponseFromConn(conn)

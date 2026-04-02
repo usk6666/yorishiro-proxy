@@ -271,12 +271,11 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	duration := time.Since(start)
 	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 
-	goResp := httputil.RawResponseToHTTP(fwd.resp, rawRespBody)
 	h.recordReceive(ctx, sendResult, receiveRecordParams{
 		start:       start,
 		duration:    duration,
 		serverAddr:  fwd.serverAddr,
-		resp:        goResp,
+		resp:        fwd.resp,
 		rawResponse: rawResponse,
 		respBody:    rawRespBody,
 		sendMs:      sendMs,
@@ -623,7 +622,6 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	duration := time.Since(start)
 	sendMs, waitMs, receiveMs := httputil.ComputeTiming(sendStart, fwd.timing, receiveEnd)
 
-	goResp := httputil.RawResponseToHTTP(fwd.resp, rawRespBody)
 	// NOTE: Since we now use ConnPool/UpstreamRouter, the TLS cert info
 	// from the upstream connection is not directly accessible via resp.TLS.
 	// This information should be obtained from the ConnPool result in the future.
@@ -631,7 +629,7 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		start:       start,
 		duration:    duration,
 		serverAddr:  fwd.serverAddr,
-		resp:        goResp,
+		resp:        fwd.resp,
 		rawResponse: rawResponse,
 		respBody:    rawRespBody,
 		sendMs:      sendMs,

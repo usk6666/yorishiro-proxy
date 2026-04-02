@@ -147,11 +147,6 @@ func HTTPResponseToRaw(resp *gohttp.Response, bodyBytes []byte) *parser.RawRespo
 	return raw
 }
 
-// GoHTTPResponse is a type alias for net/http.Response, exported so that
-// callers in internal/protocol/http/ can reference the type without
-// importing net/http directly.
-type GoHTTPResponse = gohttp.Response
-
 // HTTPRequestToRaw converts a *net/http.Request back to a parser.RawRequest.
 func HTTPRequestToRaw(goReq *gohttp.Request, bodyBytes []byte) *parser.RawRequest {
 	headers := HTTPHeaderToRawHeaders(goReq.Header)
