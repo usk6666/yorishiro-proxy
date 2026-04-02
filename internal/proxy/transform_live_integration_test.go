@@ -115,9 +115,9 @@ func TestTransformLive_Request_SetHeader(t *testing.T) {
 	defer cancel()
 
 	// Upstream captures the received Authorization header.
-	var gotAuth string
+	authCh := make(chan string, 1)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		gotAuth = r.Header.Get("Authorization")
+		authCh <- r.Header.Get("Authorization")
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -159,8 +159,14 @@ func TestTransformLive_Request_SetHeader(t *testing.T) {
 	if resp.StatusCode != gohttp.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
-	if gotAuth != "Bearer test-token-xyz" {
-		t.Errorf("upstream received Authorization = %q, want %q", gotAuth, "Bearer test-token-xyz")
+
+	select {
+	case gotAuth := <-authCh:
+		if gotAuth != "Bearer test-token-xyz" {
+			t.Errorf("upstream received Authorization = %q, want %q", gotAuth, "Bearer test-token-xyz")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
 	}
 }
 
@@ -169,11 +175,14 @@ func TestTransformLive_Request_RemoveHeader(t *testing.T) {
 	defer cancel()
 
 	// Upstream checks that X-Debug header is absent.
-	var gotDebug string
-	var debugPresent bool
+	type debugResult struct {
+		value   string
+		present bool
+	}
+	debugCh := make(chan debugResult, 1)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		gotDebug = r.Header.Get("X-Debug")
-		_, debugPresent = r.Header["X-Debug"]
+		_, present := r.Header["X-Debug"]
+		debugCh <- debugResult{value: r.Header.Get("X-Debug"), present: present}
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -212,8 +221,14 @@ func TestTransformLive_Request_RemoveHeader(t *testing.T) {
 	if resp.StatusCode != gohttp.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
-	if debugPresent {
-		t.Errorf("upstream received X-Debug header (value=%q), expected it to be removed", gotDebug)
+
+	select {
+	case dr := <-debugCh:
+		if dr.present {
+			t.Errorf("upstream received X-Debug header (value=%q), expected it to be removed", dr.value)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
 	}
 }
 
@@ -222,10 +237,10 @@ func TestTransformLive_Request_ReplaceBody(t *testing.T) {
 	defer cancel()
 
 	// Upstream captures the received body.
-	var gotBody string
+	bodyCh := make(chan string, 1)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		b, _ := io.ReadAll(r.Body)
-		gotBody = string(b)
+		bodyCh <- string(b)
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -233,7 +248,7 @@ func TestTransformLive_Request_ReplaceBody(t *testing.T) {
 
 	pipeline := rules.NewPipeline()
 	err := pipeline.AddRule(rules.Rule{
-		ID:        "replace-host",
+		ID:        "replace-body-content",
 		Enabled:   true,
 		Priority:  10,
 		Direction: rules.DirectionRequest,
@@ -270,8 +285,13 @@ func TestTransformLive_Request_ReplaceBody(t *testing.T) {
 	}
 
 	wantBody := `{"target":"staging.example.com","action":"deploy"}`
-	if gotBody != wantBody {
-		t.Errorf("upstream received body = %q, want %q", gotBody, wantBody)
+	select {
+	case gotBody := <-bodyCh:
+		if gotBody != wantBody {
+			t.Errorf("upstream received body = %q, want %q", gotBody, wantBody)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
 	}
 }
 
@@ -413,9 +433,9 @@ func TestTransformLive_NonMatchingRequest_PassesUnmodified(t *testing.T) {
 	defer cancel()
 
 	// Upstream captures all headers.
-	var receivedHeaders gohttp.Header
+	headersCh := make(chan gohttp.Header, 1)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		receivedHeaders = r.Header.Clone()
+		headersCh <- r.Header.Clone()
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "untouched")
 	}))
@@ -460,9 +480,14 @@ func TestTransformLive_NonMatchingRequest_PassesUnmodified(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
 
-	// Authorization header should NOT be present.
-	if auth := receivedHeaders.Get("Authorization"); auth != "" {
-		t.Errorf("upstream received Authorization = %q on non-matching path, expected empty", auth)
+	select {
+	case receivedHeaders := <-headersCh:
+		// Authorization header should NOT be present.
+		if auth := receivedHeaders.Get("Authorization"); auth != "" {
+			t.Errorf("upstream received Authorization = %q on non-matching path, expected empty", auth)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -476,9 +501,9 @@ func TestTransformLive_DisabledRule_NotApplied(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var gotAuth string
+	authCh := make(chan string, 1)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		gotAuth = r.Header.Get("Authorization")
+		authCh <- r.Header.Get("Authorization")
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -518,8 +543,14 @@ func TestTransformLive_DisabledRule_NotApplied(t *testing.T) {
 	if resp.StatusCode != gohttp.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
-	if gotAuth != "" {
-		t.Errorf("disabled rule should not inject header, but upstream received Authorization = %q", gotAuth)
+
+	select {
+	case gotAuth := <-authCh:
+		if gotAuth != "" {
+			t.Errorf("disabled rule should not inject header, but upstream received Authorization = %q", gotAuth)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
 	}
 }
 
@@ -789,9 +820,9 @@ func TestTransformLive_MultipleRules_PriorityOrder(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var receivedHeaders gohttp.Header
+	headersCh := make(chan gohttp.Header, 1)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		receivedHeaders = r.Header.Clone()
+		headersCh <- r.Header.Clone()
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -849,8 +880,13 @@ func TestTransformLive_MultipleRules_PriorityOrder(t *testing.T) {
 
 	// The second rule (priority 20) runs after first (priority 10),
 	// so the final value should be from the second rule.
-	if got := receivedHeaders.Get("X-Token"); got != "second-value" {
-		t.Errorf("X-Token = %q, want %q (second rule should overwrite first)", got, "second-value")
+	select {
+	case receivedHeaders := <-headersCh:
+		if got := receivedHeaders.Get("X-Token"); got != "second-value" {
+			t.Errorf("X-Token = %q, want %q (second rule should overwrite first)", got, "second-value")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
 	}
 }
 
@@ -860,9 +896,9 @@ func TestTransformLive_BothDirection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var upstreamGotProxy string
+	proxyCh := make(chan string, 1)
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		upstreamGotProxy = r.Header.Get("X-Via-Proxy")
+		proxyCh <- r.Header.Get("X-Via-Proxy")
 		w.WriteHeader(gohttp.StatusOK)
 		fmt.Fprint(w, "ok")
 	}))
@@ -904,8 +940,13 @@ func TestTransformLive_BothDirection(t *testing.T) {
 	}
 
 	// Request side: upstream should have received the header.
-	if upstreamGotProxy != "true" {
-		t.Errorf("upstream X-Via-Proxy = %q, want %q", upstreamGotProxy, "true")
+	select {
+	case upstreamGotProxy := <-proxyCh:
+		if upstreamGotProxy != "true" {
+			t.Errorf("upstream X-Via-Proxy = %q, want %q", upstreamGotProxy, "true")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
 	}
 
 	// Response side: client should also receive the header.
