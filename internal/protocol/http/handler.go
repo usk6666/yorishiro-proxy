@@ -810,7 +810,7 @@ func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *parser.
 		Timestamp:     start,
 		Method:        req.Method,
 		URL:           reqURL,
-		Headers:       httputil.RawHeadersToHTTPHeader(req.Headers),
+		Headers:       rawHeadersToMap(req.Headers),
 		Body:          reqBody,
 		RawBytes:      rawRequest,
 		BodyTruncated: reqTruncated,

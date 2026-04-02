@@ -13,7 +13,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // fuzzInput is the typed input for the fuzz tool.
@@ -257,7 +256,7 @@ func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Message) error {
 	if msg.URL != nil {
 		rawURL = msg.URL.String()
 	}
-	headers := httputil.HTTPHeaderToRawHeaders(gohttp.Header(msg.Headers))
+	headers := httpHeaderToRawHeaders(gohttp.Header(msg.Headers))
 	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}
