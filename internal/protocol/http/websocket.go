@@ -251,19 +251,6 @@ func (h *Handler) wsHTTP1Transport() httputil.TLSTransport {
 	return t
 }
 
-// rawHeadersToMap converts parser.RawHeaders to map[string][]string without
-// importing net/http. This preserves wire-observed header name casing.
-func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
-	if rh == nil {
-		return make(map[string][]string)
-	}
-	m := make(map[string][]string, len(rh))
-	for _, hdr := range rh {
-		m[hdr.Name] = append(m[hdr.Name], hdr.Value)
-	}
-	return m
-}
-
 func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParams, upstreamErr error, logger *slog.Logger) {
 	if h.Store == nil {
 		return
