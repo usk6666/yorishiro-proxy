@@ -290,7 +290,7 @@ type streamContext struct {
 	ctx              context.Context
 	w                h2ResponseWriter
 	h2req            *h2Request
-	req              *gohttp.Request // derived from h2req for subsystem compatibility
+	req              *gohttp.Request // lazily built for gRPC intercept path only
 	connID           string
 	clientAddr       string
 	connectAuthority string
@@ -374,14 +374,11 @@ func (h *Handler) handleStream(
 
 	h.refreshRecordParams(sc)
 
-	outReq, ok := h.buildOutboundRequest(sc)
-	if !ok {
-		return
-	}
+	outHeaders := h.buildOutboundHeaders(sc)
 
-	snap := snapshotRequest(goHTTPHeaderToHpack(outReq.Header), sc.srp.reqBody)
+	snap := snapshotRequest(sc.h2req.RegularHeaders(), sc.srp.reqBody)
 
-	outReq, ok = h.handleRequestIntercept(sc, outReq, &snap)
+	outHeaders, ok := h.handleRequestIntercept(sc, outHeaders, &snap)
 	if !ok {
 		return
 	}
@@ -393,15 +390,15 @@ func (h *Handler) handleStream(
 		return
 	}
 
-	h.applyRequestTransform(sc, outReq)
+	h.applyRequestTransform(sc, &outHeaders)
 
-	outReq = h.runServerPluginHook(sc, outReq)
+	outHeaders = h.runServerPluginHook(sc, outHeaders)
 
-	h.forwardAndRecord(sc, outReq, &snap)
+	h.forwardAndRecord(sc, outHeaders, &snap)
 }
 
-// initStreamContext creates a streamContext from an h2Request, converting to
-// gohttp.Request for subsystem compatibility. Returns nil if conversion fails.
+// initStreamContext creates a streamContext from an h2Request using hpack
+// native types. Returns nil if the request is invalid.
 func (h *Handler) initStreamContext(
 	ctx context.Context,
 	w h2ResponseWriter,
@@ -410,9 +407,8 @@ func (h *Handler) initStreamContext(
 	tlsMeta tlsMetadata,
 	logger *slog.Logger,
 ) *streamContext {
-	goReq, err := h2RequestToGoHTTP(ctx, h2req)
-	if err != nil {
-		logger.Error("HTTP/2 failed to convert h2Request to gohttp.Request", "error", err)
+	if h2req.Method == "" {
+		logger.Error("HTTP/2 h2Request missing method")
 		w.WriteHeaders(httputil.StatusBadRequest, nil)
 		return nil
 	}
@@ -421,7 +417,6 @@ func (h *Handler) initStreamContext(
 		ctx:                   ctx,
 		w:                     w,
 		h2req:                 h2req,
-		req:                   goReq,
 		connID:                connID,
 		clientAddr:            clientAddr,
 		connectAuthority:      connectAuthority,
@@ -436,51 +431,53 @@ func (h *Handler) initStreamContext(
 // forwardAndRecord performs upstream forwarding, response processing, output
 // filtering, and flow recording. Extracted from handleStream to reduce
 // cyclomatic complexity.
-func (h *Handler) forwardAndRecord(sc *streamContext, outReq *gohttp.Request, snap *requestSnapshot) {
-	isGRPC := h.grpcHandler != nil && isGRPCContentType(sc.req.Header.Get("Content-Type"))
+func (h *Handler) forwardAndRecord(sc *streamContext, outHeaders []hpack.HeaderField, snap *requestSnapshot) {
+	ct := hpackGetHeader(sc.h2req.AllHeaders, "content-type")
+	isGRPC := h.grpcHandler != nil && isGRPCContentType(ct)
 
 	var sendResult *sendRecordResult
 	if !isGRPC {
 		sendResult = h.recordSendWithVariant(sc.ctx, sc.srp, snap, sc.logger)
 	}
 
-	fwd, ok := h.forwardUpstream(sc, outReq, sendResult)
+	fwd, ok := h.forwardUpstream(sc, outHeaders, sendResult)
 	if !ok {
 		return
 	}
 
-	fwd.resp.Header, fwd.respBody = h.applyResponseTransform(fwd.resp, fwd.respBody)
+	fwd.h2resp.Headers, fwd.h2resp.Body = h.applyResponseTransform(fwd.h2resp)
 
-	respSnap := snapshotResponse(fwd.resp.StatusCode, fwd.resp.Header, fwd.respBody)
+	respSnap := snapshotH2Response(fwd.h2resp)
 
-	resp, fullRespBody, ok := h.handleResponseIntercept(sc, fwd.resp, fwd.respBody)
+	resp, ok := h.handleResponseIntercept(sc, fwd.h2resp)
 	if !ok {
 		return
 	}
 
-	resp, fullRespBody = h.runResponsePluginHooks(sc, resp, fullRespBody)
+	resp = h.runResponsePluginHooks(sc, resp)
 
 	// Save unmasked body and trailers for recording before output filter
 	// masks them. Deep copy to guard against future FilterOutput
 	// implementations that may modify the underlying data in place (S-2).
-	rawRespBody := make([]byte, len(fullRespBody))
-	copy(rawRespBody, fullRespBody)
-	rawTrailers := cloneHeaders(resp.Trailer)
+	rawRespBody := make([]byte, len(resp.Body))
+	copy(rawRespBody, resp.Body)
+	rawTrailers := cloneHpackHeaders(resp.Trailers)
 
 	// Output filter: mask sensitive data in response body, headers, and
 	// trailers before sending to client. Raw (unmasked) data is preserved
 	// in Flow Store. Trailers (e.g. grpc-message) may contain PII.
-	maskedRespHeaders := httpHeaderToRawHeaders(resp.Header)
-	fullRespBody, maskedRespHeaders = h.ApplyOutputFilter(fullRespBody, maskedRespHeaders, sc.logger)
-	resp.Header = rawHeadersToHTTPHeader(maskedRespHeaders)
-	if len(resp.Trailer) > 0 {
-		resp.Trailer = rawHeadersToHTTPHeader(h.ApplyOutputFilterHeaders(httpHeaderToRawHeaders(resp.Trailer), sc.logger))
+	maskedRespHeaders := hpackToRawHeaders(resp.Headers)
+	resp.Body, maskedRespHeaders = h.ApplyOutputFilter(resp.Body, maskedRespHeaders, sc.logger)
+	resp.Headers = rawHeadersToHpack(maskedRespHeaders)
+	if len(resp.Trailers) > 0 {
+		maskedTrailers := h.ApplyOutputFilterHeaders(hpackToRawHeaders(resp.Trailers), sc.logger)
+		resp.Trailers = rawHeadersToHpack(maskedTrailers)
 	}
 
-	writeResponseToClient(sc, resp, fullRespBody)
+	writeH2ResponseToClient(sc, resp)
 
 	duration := time.Since(sc.start)
-	tlsCertSubject := extractTLSCertSubject(resp)
+	tlsCertSubject := fwd.tlsCertSubject
 
 	h.recordStreamResponse(sc, isGRPC, sendResult, resp, rawRespBody, rawTrailers, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs, fwd.respRawFrames)
 
@@ -489,7 +486,7 @@ func (h *Handler) forwardAndRecord(sc *streamContext, outReq *gohttp.Request, sn
 		logProtocol = "grpc"
 	}
 	sc.logger.Info(logProtocol+" request",
-		"method", sc.req.Method,
+		"method", sc.h2req.Method,
 		"url", sc.reqURL.String(),
 		"status", resp.StatusCode,
 		"duration_ms", duration.Milliseconds())
@@ -497,14 +494,14 @@ func (h *Handler) forwardAndRecord(sc *streamContext, outReq *gohttp.Request, sn
 
 // readAndTruncateBody reads the full request body and truncates for recording.
 func (h *Handler) readAndTruncateBody(sc *streamContext) {
-	if sc.req.Body != nil {
-		fullBody, err := io.ReadAll(sc.req.Body)
+	if sc.h2req.Body != nil {
+		fullBody, err := io.ReadAll(sc.h2req.Body)
 		if err != nil {
 			sc.logger.Warn("HTTP/2 failed to read request body", "error", err)
 		}
-		sc.req.Body.Close()
+		sc.h2req.Body.Close()
 		sc.reqBody = fullBody
-		sc.req.Body = io.NopCloser(bytes.NewReader(fullBody))
+		sc.h2req.Body = io.NopCloser(bytes.NewReader(fullBody))
 	}
 	sc.reqTruncated = len(sc.reqBody) > int(config.MaxBodySize)
 }
@@ -519,27 +516,37 @@ func (h *Handler) resolveSchemeAndHost(sc *streamContext) {
 		scheme = "https"
 	}
 	sc.flowScheme = scheme
-	host := sc.req.Host
+
+	host := sc.h2req.Authority
+	if host == "" {
+		host = hpackGetHeader(sc.h2req.AllHeaders, "host")
+	}
 	if host == "" && sc.connectAuthority != "" {
 		host = sc.connectAuthority
 	}
-	if sc.req.URL.Host == "" {
-		sc.req.URL.Host = host
+
+	// Build the URL from h2req pseudo-headers.
+	reqURL := h2RequestURL(sc.h2req)
+	if reqURL.Host == "" {
+		reqURL.Host = host
 	}
-	if sc.req.URL.Scheme == "" || sc.connectAuthority != "" {
-		sc.req.URL.Scheme = scheme
+	if reqURL.Scheme == "" || sc.connectAuthority != "" {
+		reqURL.Scheme = scheme
 	}
+
 	// TCP forwarding: override host with the actual upstream target.
-	// When a forwarding target is set, the client connected to a local port
-	// (e.g. localhost:50051) and the real upstream is in the context.
 	if target, ok := proxy.ForwardTargetFromContext(sc.ctx); ok {
-		sc.req.URL.Host = target
-		sc.req.Host = target
-		if sc.req.URL.Scheme == "" {
-			sc.req.URL.Scheme = scheme
+		reqURL.Host = target
+		sc.h2req.Authority = target
+		if reqURL.Scheme == "" {
+			reqURL.Scheme = scheme
 		}
 	}
-	sc.reqURL = cloneURL(sc.req.URL)
+
+	// Update h2req scheme to match resolved scheme.
+	sc.h2req.Scheme = reqURL.Scheme
+
+	sc.reqURL = cloneURL(reqURL)
 }
 
 // buildStreamRecordParams builds the initial send record params and connection info.
@@ -562,8 +569,10 @@ func (h *Handler) buildStreamRecordParams(sc *streamContext) {
 		scheme:       sc.flowScheme,
 		start:        sc.start,
 		connInfo:     sc.connInfo,
-		req:          sc.req,
+		method:       sc.h2req.Method,
 		reqURL:       sc.reqURL,
+		host:         sc.h2req.Authority,
+		headers:      sc.h2req.AllHeaders,
 		reqBody:      recordBody,
 		reqTruncated: sc.reqTruncated,
 		rawFrames:    sc.reqRawFrames,
@@ -575,20 +584,20 @@ func (h *Handler) checkTargetScope(sc *streamContext) bool {
 	if h.TargetScope == nil || !h.TargetScope.HasRules() {
 		return false
 	}
-	allowed, reason := h.TargetScope.CheckURL(sc.req.URL)
+	allowed, reason := h.TargetScope.CheckURL(sc.reqURL)
 	if allowed {
 		return false
 	}
-	writeScopeBlockResponse(sc.w, sc.req.URL.Hostname(), reason)
+	writeScopeBlockResponse(sc.w, sc.reqURL.Hostname(), reason)
 	sc.logger.Info("HTTP/2 request blocked by target scope",
-		"host", sc.req.URL.Host, "reason", reason)
+		"host", sc.reqURL.Host, "reason", reason)
 	h.recordBlocked(sc.ctx, sc.srp, "target_scope", nil, nil, sc.logger)
 	return true
 }
 
 // checkSafetyFilter enforces safety filter rules. Returns true if the request was blocked.
 func (h *Handler) checkSafetyFilter(sc *streamContext) bool {
-	violation := h.CheckSafetyFilter(sc.reqBody, sc.req.URL.String(), httpHeaderToRawHeaders(sc.req.Header))
+	violation := h.CheckSafetyFilter(sc.reqBody, sc.reqURL.String(), hpackToRawHeaders(sc.h2req.AllHeaders))
 	if violation == nil {
 		return false
 	}
@@ -633,13 +642,13 @@ func (h *Handler) checkRateLimit(sc *streamContext) bool {
 	if h.RateLimiter == nil || !h.RateLimiter.HasLimits() {
 		return false
 	}
-	denial := h.RateLimiter.Check(sc.req.URL.Hostname())
+	denial := h.RateLimiter.Check(sc.reqURL.Hostname())
 	if denial == nil {
 		return false
 	}
 	writeRateLimitResponse(sc.w)
 	sc.logger.Info("HTTP/2 request blocked by rate limit",
-		"host", sc.req.URL.Host)
+		"host", sc.reqURL.Host)
 	h.recordBlocked(sc.ctx, sc.srp, "rate_limit", nil, denial.Tags(), sc.logger)
 	return true
 }
@@ -693,29 +702,17 @@ func (h *Handler) runClientPluginHook(sc *streamContext) bool {
 	var terminated bool
 	sc.h2req, sc.reqBody, terminated = h.dispatchOnReceiveFromClient(sc.ctx, sc.w, sc.h2req, sc.reqBody, pluginConnInfo, txCtx, sc.reqRawFrames, sc.logger)
 	if !terminated && h.pluginEngine != nil {
-		// Re-derive gohttp.Request from h2req after plugin modification.
-		// Preserve URL scheme and host from sc.req which were set by
-		// resolveSchemeAndHost (these are not part of h2req fields).
-		goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
-		if err != nil {
-			sc.logger.Error("HTTP/2 failed to convert h2Request after plugin hook", "error", err)
-			writeErrorResponse(sc.w, httputil.StatusBadRequest)
-			sc.pluginConnInfo = pluginConnInfo
-			sc.txCtx = txCtx
-			return true
+		// After plugin modification, update reqURL from h2req fields.
+		newURL := h2RequestURL(sc.h2req)
+		// Preserve scheme and host from resolved values.
+		if newURL.Scheme == "" {
+			newURL.Scheme = sc.reqURL.Scheme
 		}
-		goReq.URL.Scheme = sc.req.URL.Scheme
-		if goReq.URL.Host == "" {
-			goReq.URL.Host = sc.req.URL.Host
+		if newURL.Host == "" {
+			newURL.Host = sc.reqURL.Host
 		}
-		if goReq.Host == "" {
-			goReq.Host = sc.req.Host
-		}
-		sc.req = goReq
+		sc.reqURL = newURL
 	}
-	// Store txCtx and pluginConnInfo on the context for later hooks — we
-	// piggyback on the streamContext's context value.  For simplicity we
-	// store them as unexported fields (added below).
 	sc.pluginConnInfo = pluginConnInfo
 	sc.txCtx = txCtx
 	return terminated
@@ -730,38 +727,24 @@ func (h *Handler) refreshRecordParams(sc *streamContext) {
 	} else {
 		sc.srp.reqBody = sc.reqBody
 	}
-	sc.reqURL = cloneURL(sc.req.URL)
-	sc.srp.req = sc.req
+	sc.srp.method = sc.h2req.Method
+	sc.srp.host = sc.h2req.Authority
+	sc.srp.headers = sc.h2req.AllHeaders
 	sc.srp.reqURL = sc.reqURL
 }
 
-// buildOutboundRequest creates the outbound HTTP request for the upstream server.
-// Returns false if the request could not be built.
-func (h *Handler) buildOutboundRequest(sc *streamContext) (*gohttp.Request, bool) {
-	outURL := cloneURL(sc.req.URL)
-	outReq, err := gohttp.NewRequestWithContext(sc.ctx, sc.req.Method, outURL.String(), io.NopCloser(bytes.NewReader(sc.reqBody)))
-	if err != nil {
-		sc.logger.Error("HTTP/2 failed to build upstream request", "error", err)
-		h.recordOutReqError(sc.ctx, sc.srp, err, sc.logger)
-		writeErrorResponse(sc.w, httputil.StatusBadGateway)
-		return nil, false
-	}
-	// Explicitly set ContentLength since io.NopCloser hides the size from
-	// gohttp.NewRequestWithContext's automatic detection.
-	outReq.ContentLength = int64(len(sc.reqBody))
-	for key, vals := range sc.req.Header {
-		outReq.Header[key] = vals
-	}
-	removeHTTP2HopByHop(outReq.Header)
-	return outReq, true
+// buildOutboundHeaders creates the outbound HTTP/2 HPACK headers for the
+// upstream server, including pseudo-headers and filtered hop-by-hop headers.
+func (h *Handler) buildOutboundHeaders(sc *streamContext) []hpack.HeaderField {
+	return buildH2HeadersFromH2Req(sc.h2req)
 }
 
 // handleRequestIntercept processes request interception. Returns the (possibly
-// modified) outbound request and false if the request was dropped/blocked.
-func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Request, snap *requestSnapshot) (*gohttp.Request, bool) {
-	action, intercepted := h.interceptRequest(sc.ctx, sc.req, sc.srp.reqBody, sc.reqRawFrames, sc.logger)
+// modified) outbound headers and false if the request was dropped/blocked.
+func (h *Handler) handleRequestIntercept(sc *streamContext, outHeaders []hpack.HeaderField, snap *requestSnapshot) ([]hpack.HeaderField, bool) {
+	action, intercepted := h.interceptRequest(sc.ctx, sc.h2req, sc.srp.reqBody, sc.reqRawFrames, sc.logger)
 	if !intercepted {
-		return outReq, true
+		return outHeaders, true
 	}
 
 	// Raw mode: the action contains raw bytes to forward directly.
@@ -769,18 +752,15 @@ func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Reque
 		sc.interceptRawAction = &action
 		switch action.Type {
 		case intercept.ActionRelease:
-			// Raw release: forward original raw frames as-is to upstream.
-			// The raw bytes are the original captured frames.
 			sc.interceptRawAction.RawOverride = joinRawFrames(sc.reqRawFrames)
-			return outReq, true
+			return outHeaders, true
 		case intercept.ActionModifyAndForward:
-			// Raw modify_and_forward: forward the edited raw bytes.
-			return outReq, true
+			return outHeaders, true
 		case intercept.ActionDrop:
 			h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
 			writeErrorResponse(sc.w, httputil.StatusBadGateway)
 			sc.logger.Info("intercepted HTTP/2 request dropped (raw mode)",
-				"method", sc.req.Method, "url", sc.reqURL.String())
+				"method", sc.h2req.Method, "url", sc.reqURL.String())
 			return nil, false
 		default:
 			sc.logger.Error("HTTP/2 raw intercept: unknown action type",
@@ -795,139 +775,134 @@ func (h *Handler) handleRequestIntercept(sc *streamContext, outReq *gohttp.Reque
 		h.recordInterceptDrop(sc.ctx, sc.srp, sc.logger)
 		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		sc.logger.Info("intercepted HTTP/2 request dropped",
-			"method", sc.req.Method, "url", sc.reqURL.String())
+			"method", sc.h2req.Method, "url", sc.reqURL.String())
 		return nil, false
 	case intercept.ActionModifyAndForward:
-		return h.applyRequestInterceptMods(sc, outReq, action)
+		return h.applyRequestInterceptMods(sc, outHeaders, action)
 	default:
-		return outReq, true
+		return outHeaders, true
 	}
 }
 
 // applyRequestInterceptMods applies intercept modifications to the outbound
-// request, including re-checking target scope after URL override.
-func (h *Handler) applyRequestInterceptMods(sc *streamContext, outReq *gohttp.Request, action intercept.InterceptAction) (*gohttp.Request, bool) {
-	var modErr error
-	outReq, modErr = applyInterceptModifications(outReq, action, sc.reqBody)
+// headers, including re-checking target scope after URL override.
+func (h *Handler) applyRequestInterceptMods(sc *streamContext, outHeaders []hpack.HeaderField, action intercept.InterceptAction) ([]hpack.HeaderField, bool) {
+	modHeaders, modBody, modURL, modErr := applyInterceptModifications(sc.h2req, action, sc.reqBody)
 	if modErr != nil {
 		sc.logger.Error("HTTP/2 intercept modification failed", "error", modErr)
 		writeErrorResponse(sc.w, httputil.StatusBadRequest)
 		return nil, false
 	}
-	if action.OverrideURL != "" && h.TargetScope != nil && h.TargetScope.HasRules() {
-		if allowed, reason := h.TargetScope.CheckURL(outReq.URL); !allowed {
-			writeScopeBlockResponse(sc.w, outReq.URL.Hostname(), reason)
-			sc.logger.Warn("HTTP/2 intercept override_url blocked by target scope",
-				"url", outReq.URL.String(), "reason", reason)
-			return nil, false
+	if modURL != nil {
+		if h.TargetScope != nil && h.TargetScope.HasRules() {
+			if allowed, reason := h.TargetScope.CheckURL(modURL); !allowed {
+				writeScopeBlockResponse(sc.w, modURL.Hostname(), reason)
+				sc.logger.Warn("HTTP/2 intercept override_url blocked by target scope",
+					"url", modURL.String(), "reason", reason)
+				return nil, false
+			}
 		}
+		sc.reqURL = modURL
+		sc.srp.reqURL = modURL
+		// Update h2req authority from modified URL.
+		sc.h2req.Authority = modURL.Host
 	}
 	if action.OverrideBody != nil {
-		sc.srp.reqBody = []byte(*action.OverrideBody)
+		sc.reqBody = modBody
+		sc.srp.reqBody = modBody
 	}
-	sc.srp.req = outReq
-	return outReq, true
+	// Update h2req with modified method/headers.
+	sc.h2req.AllHeaders = modHeaders
+	sc.h2req.Method = hpackGetPseudo(modHeaders, ":method")
+	sc.srp.method = sc.h2req.Method
+	sc.srp.headers = modHeaders
+	// Rebuild outbound headers from modified h2req.
+	return buildH2HeadersFromH2Req(sc.h2req), true
 }
 
 // applyRequestTransform applies auto-transform rules to the outbound request
 // headers and body. If no transform pipeline is configured, this is a no-op.
-// The method mirrors the HTTP/1.x applyTransform pattern: it modifies the
-// outbound request's headers, body, and content length in place, and updates
-// the streamContext's reqBody and srp for recording.
-func (h *Handler) applyRequestTransform(sc *streamContext, outReq *gohttp.Request) {
+// The outHeaders are modified in place (rebuilt from transformed RawHeaders).
+func (h *Handler) applyRequestTransform(sc *streamContext, outHeaders *[]hpack.HeaderField) {
 	if h.transformPipeline == nil {
 		return
 	}
-	// Use sc.srp.reqBody as input (reflects intercept overrides).
-	rh := httpHeaderToRawHeaders(outReq.Header)
-	rh, sc.reqBody = h.transformPipeline.TransformRequest(outReq.Method, outReq.URL, rh, sc.srp.reqBody)
-	outReq.Header = rawHeadersToHTTPHeader(rh)
-	outReq.Body = io.NopCloser(bytes.NewReader(sc.reqBody))
-	outReq.ContentLength = int64(len(sc.reqBody))
+	rh := hpackToRawHeaders(*outHeaders)
+	rh, sc.reqBody = h.transformPipeline.TransformRequest(sc.h2req.Method, sc.reqURL, rh, sc.srp.reqBody)
+	// Rebuild outbound hpack headers from transformed RawHeaders, preserving
+	// pseudo-headers from the original outHeaders.
+	var pseudos []hpack.HeaderField
+	for _, hf := range *outHeaders {
+		if strings.HasPrefix(hf.Name, ":") {
+			pseudos = append(pseudos, hf)
+		}
+	}
+	rebuilt := make([]hpack.HeaderField, 0, len(pseudos)+len(rh))
+	rebuilt = append(rebuilt, pseudos...)
+	rebuilt = append(rebuilt, rawHeadersToHpack(rh)...)
+	*outHeaders = rebuilt
 	sc.srp.reqBody = sc.reqBody
-	sc.srp.req = outReq // Ensure recording reflects transform changes.
+	sc.srp.headers = sc.h2req.AllHeaders
 }
 
 // applyResponseTransform applies auto-transform rules to the upstream response
 // headers and body. If no transform pipeline is configured, the original
-// headers and body are returned unchanged. This mirrors the HTTP/1.x
-// readResponseBody pattern where response transforms are applied immediately
-// after reading the response body.
-func (h *Handler) applyResponseTransform(resp *gohttp.Response, body []byte) (gohttp.Header, []byte) {
+// headers and body are returned unchanged.
+func (h *Handler) applyResponseTransform(resp *h2Response) ([]hpack.HeaderField, []byte) {
 	if h.transformPipeline == nil {
-		return resp.Header, body
+		return resp.Headers, resp.Body
 	}
-	rh, newBody := h.transformPipeline.TransformResponse(resp.StatusCode, httpHeaderToRawHeaders(resp.Header), body)
-	return rawHeadersToHTTPHeader(rh), newBody
+	rh, newBody := h.transformPipeline.TransformResponse(resp.StatusCode, hpackToRawHeaders(resp.Headers), resp.Body)
+	return rawHeadersToHpack(rh), newBody
 }
 
 // runServerPluginHook dispatches the on_before_send_to_server hook.
-func (h *Handler) runServerPluginHook(sc *streamContext, outReq *gohttp.Request) *gohttp.Request {
+// Returns the (possibly updated) outbound headers.
+func (h *Handler) runServerPluginHook(sc *streamContext, outHeaders []hpack.HeaderField) []hpack.HeaderField {
 	var body []byte
 	sc.h2req, body = h.dispatchOnBeforeSendToServer(sc.ctx, sc.h2req, sc.reqBody, sc.pluginConnInfo, sc.txCtx, sc.reqRawFrames, sc.logger)
 	if body != nil {
-		outReq.Body = io.NopCloser(bytes.NewReader(body))
-		outReq.ContentLength = int64(len(body))
 		sc.reqBody = body
 	}
-	// When plugin engine is active, re-derive the outbound gohttp.Request
-	// from the (possibly modified) h2req.
+	// When plugin engine is active, rebuild outbound headers from h2req.
 	if h.pluginEngine != nil {
-		goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
-		if err != nil {
-			sc.logger.Warn("HTTP/2 failed to convert h2Request after server plugin hook", "error", err)
-			return outReq
-		}
-		// Carry over the body from the stream context.
-		goReq.Body = io.NopCloser(bytes.NewReader(sc.reqBody))
-		goReq.ContentLength = int64(len(sc.reqBody))
-		// Preserve URL scheme and host from the outbound request.
-		goReq.URL.Scheme = outReq.URL.Scheme
-		if goReq.URL.Host == "" {
-			goReq.URL.Host = outReq.URL.Host
-		}
-		if goReq.Host == "" {
-			goReq.Host = outReq.Host
-		}
-		return goReq
+		return buildH2HeadersFromH2Req(sc.h2req)
 	}
-	return outReq
+	return outHeaders
 }
 
 // forwardUpstream sends the request to the upstream server and reads the response.
 // Returns false if the upstream request failed.
 // forwardUpstreamResult holds the result of forwarding a request upstream.
 type forwardUpstreamResult struct {
-	resp       *gohttp.Response
-	serverAddr string
-	respBody   []byte
-	sendMs     *int64
-	waitMs     *int64
-	receiveMs  *int64
+	h2resp         *h2Response
+	serverAddr     string
+	tlsCertSubject string
+	sendMs         *int64
+	waitMs         *int64
+	receiveMs      *int64
 	// respRawFrames holds the raw HTTP/2 frame bytes from the upstream response.
 	// Populated when the custom frame-engine Transport is used. Nil when the
 	// standard net/http Transport is used.
 	respRawFrames [][]byte
 }
 
-func (h *Handler) forwardUpstream(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
+func (h *Handler) forwardUpstream(sc *streamContext, outHeaders []hpack.HeaderField, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
 	// gRPC requests are handled by tryHandleGRPCStream → handleGRPCStream
 	// using ConnPool + h2Transport.RoundTripStream (USK-520). They never
 	// reach this path.
-	return h.forwardUpstreamConnPool(sc, outReq, sendResult)
+	return h.forwardUpstreamConnPool(sc, outHeaders, sendResult)
 }
 
 // forwardUpstreamConnPool forwards the request via ConnPool + ALPN routing.
 // This is the new unary path that replaces roundTripWithTrace for non-gRPC
 // HTTP/2 requests.
-func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
+func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outHeaders []hpack.HeaderField, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
 	sendStart := time.Now()
 
-	// Use url.URL.Hostname()/Port() for correct IPv6 bracket handling.
-	// strings.Contains(host, ":") would always match IPv6 literals like [::1].
-	hostname := outReq.URL.Hostname()
-	port := outReq.URL.Port()
-	useTLS := outReq.URL.Scheme == "https"
+	hostname := sc.reqURL.Hostname()
+	port := sc.reqURL.Port()
+	useTLS := sc.reqURL.Scheme == "https"
 	if port == "" {
 		if useTLS {
 			port = "443"
@@ -940,7 +915,7 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 	// Non-TLS upstreams cannot negotiate ALPN, so ConnPool.Get would always
 	// fall back to the legacy path after a redundant dial. Short-circuit here.
 	if !useTLS {
-		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
+		return h.forwardUpstreamLegacy(sc, outHeaders, sendResult)
 	}
 
 	h.tlsMu.RLock()
@@ -948,7 +923,7 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 	h.tlsMu.RUnlock()
 	if err != nil {
 		sc.logger.Error("HTTP/2 upstream connection failed",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
+			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
 		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return nil, false
@@ -958,35 +933,20 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 
 	switch cr.ALPN {
 	case "h2":
-		// forwardH2 → RoundTripOnConn takes ownership of cr.Conn and closes
-		// it before returning; the caller must NOT close cr.Conn after this call.
-		result, err = h.forwardH2(sc.ctx, cr.Conn, outReq)
+		result, err = h.forwardH2(sc.ctx, cr.Conn, outHeaders, sc.reqBody)
 	default:
-		// For non-h2 connections, close the ConnPool connection and fall back
-		// to the legacy gohttp.Transport path which handles HTTP/1.1 properly
-		// (chunked encoding, connection reuse, etc.).
-		//
-		// Known trade-off: this causes a double TLS handshake — once in
-		// ConnPool (to discover ALPN) and again in gohttp.Transport. This is
-		// acceptable because ConnPool intentionally has no pooling (YAGNI) and
-		// the non-h2 fallback is not the primary path. If this becomes a
-		// bottleneck, adding ALPN-aware connection reuse to ConnPool would be
-		// the correct fix (not caching here).
 		cr.Conn.Close()
-		return h.forwardUpstreamLegacy(sc, outReq, sendResult)
+		return h.forwardUpstreamLegacy(sc, outHeaders, sendResult)
 	}
 	if err != nil {
 		sc.logger.Error("HTTP/2 upstream request failed",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err, "alpn", cr.ALPN)
+			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err, "alpn", cr.ALPN)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
 		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return nil, false
 	}
 
 	receiveEnd := time.Now()
-	// For the ConnPool path we don't have httptrace hooks. Compute a
-	// simplified timing: send includes connect + request, receive is the
-	// remainder. Wait is unavailable (nil).
 	totalMs := receiveEnd.Sub(sendStart).Milliseconds()
 	connectMs := cr.ConnectDuration.Milliseconds()
 	sendVal := connectMs
@@ -1004,12 +964,8 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outReq *gohttp.Requ
 }
 
 // forwardH2 forwards a request via the HTTP/2 frame engine on a pre-established
-// h2 connection. It converts the outbound gohttp.Request to hpack headers and
-// uses RoundTripOnConn.
-func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.Request) (*forwardUpstreamResult, error) {
-	// Build hpack headers from the gohttp.Request.
-	headers := buildH2HeadersFromGoHTTP(outReq)
-
+// h2 connection using hpack native types directly.
+func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outHeaders []hpack.HeaderField, body []byte) (*forwardUpstreamResult, error) {
 	h.tlsMu.RLock()
 	transport := h.h2Transport
 	h.tlsMu.RUnlock()
@@ -1017,24 +973,24 @@ func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.R
 		transport = &Transport{Logger: h.Logger}
 	}
 
-	h2Result, err := transport.RoundTripOnConn(ctx, conn, headers, outReq.Body)
+	h2Result, err := transport.RoundTripOnConn(ctx, conn, outHeaders, io.NopCloser(bytes.NewReader(body)))
 	if err != nil {
 		return nil, fmt.Errorf("h2 round trip: %w", err)
 	}
 
-	// Convert h2 result to gohttp.Response for downstream compatibility.
-	resp := h2ResultToGoHTTPResponse(h2Result)
-
-	fullRespBody, readErr := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
-	if readErr != nil {
-		return nil, fmt.Errorf("read h2 response body: %w", readErr)
+	var fullRespBody []byte
+	if h2Result.Body != nil {
+		fullRespBody, err = io.ReadAll(io.LimitReader(h2Result.Body, config.MaxBodySize))
+		if err != nil {
+			return nil, fmt.Errorf("read h2 response body: %w", err)
+		}
 	}
-	resp.Body.Close()
+
+	h2resp := h2ResultToH2Response(h2Result, fullRespBody)
 
 	return &forwardUpstreamResult{
-		resp:          resp,
+		h2resp:        h2resp,
 		serverAddr:    conn.RemoteAddr().String(),
-		respBody:      fullRespBody,
 		respRawFrames: h2Result.RawFrames,
 	}, nil
 }
@@ -1042,14 +998,36 @@ func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outReq *gohttp.R
 // forwardUpstreamLegacy uses the gohttp.Transport for forwarding.
 // Used as a fallback for non-TLS upstreams (no ALPN negotiation possible)
 // and non-h2 ALPN results (HTTP/1.1 fallback) from forwardUpstreamConnPool.
-func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outReq *gohttp.Request, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
+// This is the only path that converts to gohttp.Request at the boundary.
+func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outHeaders []hpack.HeaderField, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
+	// Build gohttp.Request from outHeaders at the legacy transport boundary.
+	// outHeaders include pseudo-headers + regular headers after all transforms.
+	outReq := &gohttp.Request{
+		Method:        hpackGetPseudo(outHeaders, ":method"),
+		URL:           cloneURL(sc.reqURL),
+		Host:          sc.reqURL.Host,
+		Header:        make(gohttp.Header),
+		Body:          io.NopCloser(bytes.NewReader(sc.reqBody)),
+		ContentLength: int64(len(sc.reqBody)),
+		Proto:         "HTTP/2.0",
+		ProtoMajor:    2,
+	}
+	outReq = outReq.WithContext(sc.ctx)
+	for _, hf := range outHeaders {
+		if strings.HasPrefix(hf.Name, ":") || strings.EqualFold(hf.Name, "host") {
+			continue
+		}
+		outReq.Header.Add(hf.Name, hf.Value)
+	}
+	removeHTTP2HopByHop(outReq.Header)
+
 	sendStart := time.Now()
 	h.tlsMu.RLock()
 	resp, serverAddr, timing, err := h.roundTripWithTrace(outReq)
 	h.tlsMu.RUnlock()
 	if err != nil {
 		sc.logger.Error("HTTP/2 upstream request failed",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "error", err)
+			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
 		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
 		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		return nil, false
@@ -1064,22 +1042,41 @@ func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outReq *gohttp.Reques
 
 	sMs, wMs, rMs := httputil.ComputeTiming(sendStart, timing, receiveEnd)
 
+	// Extract TLS cert subject from legacy response.
+	var tlsCertSubject string
+	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		tlsCertSubject = resp.TLS.PeerCertificates[0].Subject.String()
+	}
+
+	// Convert response headers from gohttp to hpack (no canonicalization loss
+	// since HTTP/1.1 upstream headers were already canonicalized by net/http).
+	respHeaders := goHTTPHeaderToHpack(resp.Header)
+	var respTrailers []hpack.HeaderField
+	if len(resp.Trailer) > 0 {
+		respTrailers = goHTTPHeaderToHpack(resp.Trailer)
+	}
+
 	return &forwardUpstreamResult{
-		resp:       resp,
-		serverAddr: serverAddr,
-		respBody:   fullRespBody,
-		sendMs:     sMs,
-		waitMs:     wMs,
-		receiveMs:  rMs,
+		h2resp: &h2Response{
+			StatusCode: resp.StatusCode,
+			Headers:    respHeaders,
+			Trailers:   respTrailers,
+			Body:       fullRespBody,
+		},
+		serverAddr:     serverAddr,
+		tlsCertSubject: tlsCertSubject,
+		sendMs:         sMs,
+		waitMs:         wMs,
+		receiveMs:      rMs,
 	}, true
 }
 
 // handleResponseIntercept processes response interception.
 // Returns false if the response was dropped.
-func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Response, fullRespBody []byte) (*gohttp.Response, []byte, bool) {
-	action, intercepted := h.interceptResponse(sc.ctx, sc.req, resp, fullRespBody, sc.logger)
+func (h *Handler) handleResponseIntercept(sc *streamContext, resp *h2Response) (*h2Response, bool) {
+	action, intercepted := h.interceptResponse(sc.ctx, sc.h2req, resp, sc.logger)
 	if !intercepted {
-		return resp, fullRespBody, true
+		return resp, true
 	}
 
 	// Propagate AutoContentLength flag to the write path.
@@ -1089,63 +1086,53 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *gohttp.Respon
 	case intercept.ActionDrop:
 		writeErrorResponse(sc.w, httputil.StatusBadGateway)
 		sc.logger.Info("intercepted HTTP/2 response dropped",
-			"method", sc.req.Method, "url", sc.reqURL.String(), "status", resp.StatusCode)
-		return nil, nil, false
+			"method", sc.h2req.Method, "url", sc.reqURL.String(), "status", resp.StatusCode)
+		return nil, false
 	case intercept.ActionModifyAndForward:
-		var modErr error
-		resp, fullRespBody, modErr = applyResponseModifications(resp, action, fullRespBody)
+		modResp, modErr := applyResponseModifications(resp, action)
 		if modErr != nil {
 			sc.logger.Error("HTTP/2 response intercept modification failed", "error", modErr)
 			writeErrorResponse(sc.w, httputil.StatusBadGateway)
-			return nil, nil, false
+			return nil, false
 		}
-		return resp, fullRespBody, true
+		return modResp, true
 	default:
-		return resp, fullRespBody, true
+		return resp, true
 	}
 }
 
 // runResponsePluginHooks dispatches the on_receive_from_server and
-// on_before_send_to_client hooks.
-func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *gohttp.Response, fullRespBody []byte) (*gohttp.Response, []byte) {
-	resp, fullRespBody = h.dispatchOnReceiveFromServer(sc.ctx, resp, fullRespBody, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
-	resp, fullRespBody = h.dispatchOnBeforeSendToClient(sc.ctx, resp, fullRespBody, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
-	return resp, fullRespBody
+// on_before_send_to_client hooks using hpack native types.
+func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *h2Response) *h2Response {
+	resp = h.dispatchOnReceiveFromServerH2(sc.ctx, resp, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
+	resp = h.dispatchOnBeforeSendToClientH2(sc.ctx, resp, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
+	return resp
 }
 
-// writeResponseToClient writes the HTTP response headers, body, and trailers
-// to the client using h2ResponseWriter for direct HPACK encoding.
+// writeH2ResponseToClient writes the HTTP/2 response headers, body, and
+// trailers to the client using h2ResponseWriter with hpack native types.
 //
 // When sc.respAutoContentLength is true (default), Content-Length is
 // recalculated to match the actual body. When false (intercept with flag
 // disabled), Content-Length is preserved as-is to allow intentional CL
 // mismatches for pentest scenarios.
-func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte) {
+func writeH2ResponseToClient(sc *streamContext, resp *h2Response) {
 	// Remove HTTP/1.1 hop-by-hop headers from the upstream response before
-	// writing to the HTTP/2 client. These headers are invalid in HTTP/2
-	// (RFC 9113 §8.2.2) and cause PROTOCOL_ERROR when the upstream is
-	// HTTP/1.1 (e.g., when ALPN negotiation falls back to http/1.1).
-	removeHTTP2HopByHop(resp.Header)
+	// writing to the HTTP/2 client.
+	respHeaders := removeHpackHopByHop(resp.Headers)
 
 	// RFC 9110 §6.4.1: 1xx, 204, 205, and 304 responses must not contain a body.
-	// Strip Content-Length and suppress DATA frames for these statuses.
-	// This RFC-mandated behavior is always applied regardless of the flag.
 	noBody := isNoBodyStatus(resp.StatusCode)
+	body := resp.Body
 	if noBody {
-		resp.Header.Del("Content-Length")
+		respHeaders = hpackDelHeader(respHeaders, "content-length")
 		body = nil
 	} else if sc.respAutoContentLength {
-		// Default: recalculate Content-Length to match the actual body bytes.
+		respHeaders = hpackDelHeader(respHeaders, "content-length")
 		if len(body) > 0 {
-			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-		} else {
-			resp.Header.Del("Content-Length")
+			respHeaders = append(respHeaders, hpack.HeaderField{Name: "content-length", Value: strconv.Itoa(len(body))})
 		}
 	}
-	// When !sc.respAutoContentLength && !noBody: preserve headers as-is.
-
-	// Convert response headers to hpack fields.
-	respHeaders := goHTTPHeaderToHpack(resp.Header)
 
 	if err := sc.w.WriteHeaders(resp.StatusCode, respHeaders); err != nil {
 		sc.logger.Debug("HTTP/2 failed to write response headers", "error", err)
@@ -1158,26 +1145,15 @@ func writeResponseToClient(sc *streamContext, resp *gohttp.Response, body []byte
 		}
 	}
 
-	// Write trailers if present.
-	if len(resp.Trailer) > 0 {
-		trailerFields := goHTTPHeaderToHpack(resp.Trailer)
-		if err := sc.w.WriteTrailers(trailerFields); err != nil {
+	if len(resp.Trailers) > 0 {
+		if err := sc.w.WriteTrailers(resp.Trailers); err != nil {
 			sc.logger.Debug("HTTP/2 failed to write response trailers", "error", err)
 		}
 	}
 }
 
-// extractTLSCertSubject returns the upstream server's TLS certificate subject,
-// or an empty string if not available.
-func extractTLSCertSubject(resp *gohttp.Response) string {
-	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-		return resp.TLS.PeerCertificates[0].Subject.String()
-	}
-	return ""
-}
-
 // recordStreamResponse records the receive phase for HTTP/2 or gRPC flows.
-func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *gohttp.Response, fullRespBody []byte, rawTrailers gohttp.Header, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64, respRawFrames [][]byte) {
+func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *h2Response, fullRespBody []byte, rawTrailers []hpack.HeaderField, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64, respRawFrames [][]byte) {
 	if isGRPC {
 		h.recordGRPCFlow(sc, resp, fullRespBody, rawTrailers, serverAddr, duration, tlsCertSubject)
 	} else {
@@ -1186,7 +1162,8 @@ func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResul
 			duration:             duration,
 			serverAddr:           serverAddr,
 			tlsServerCertSubject: tlsCertSubject,
-			resp:                 resp,
+			statusCode:           resp.StatusCode,
+			respHeaders:          resp.Headers,
 			respBody:             fullRespBody,
 			sendMs:               sendMs,
 			waitMs:               waitMs,
@@ -1197,25 +1174,22 @@ func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResul
 }
 
 // recordGRPCFlow records a gRPC session via the gRPC handler.
-func (h *Handler) recordGRPCFlow(sc *streamContext, resp *gohttp.Response, fullRespBody []byte, rawTrailers gohttp.Header, serverAddr string, duration time.Duration, tlsCertSubject string) {
-	if !h.shouldCapture(sc.req.Method, sc.reqURL) {
+func (h *Handler) recordGRPCFlow(sc *streamContext, resp *h2Response, fullRespBody []byte, rawTrailers []hpack.HeaderField, serverAddr string, duration time.Duration, tlsCertSubject string) {
+	if !h.shouldCapture(sc.h2req.Method, sc.reqURL) {
 		return
 	}
 	var trailers map[string][]string
 	if rawTrailers != nil {
-		trailers = make(map[string][]string, len(rawTrailers))
-		for k, vals := range rawTrailers {
-			trailers[k] = vals
-		}
+		trailers = hpackToHeaderMap(rawTrailers)
 	}
 	info := &protogrpc.StreamInfo{
 		ConnID:               sc.connID,
 		ClientAddr:           sc.clientAddr,
 		ServerAddr:           serverAddr,
-		Method:               sc.req.Method,
+		Method:               sc.h2req.Method,
 		URL:                  sc.reqURL,
-		RequestHeaders:       sc.req.Header,
-		ResponseHeaders:      resp.Header,
+		RequestHeaders:       hpackToHeaderMap(sc.h2req.AllHeaders),
+		ResponseHeaders:      hpackToHeaderMap(resp.Headers),
 		Trailers:             trailers,
 		RequestBody:          sc.reqBody,
 		ResponseBody:         fullRespBody,
@@ -1233,20 +1207,18 @@ func (h *Handler) recordGRPCFlow(sc *streamContext, resp *gohttp.Response, fullR
 	}
 }
 
-// cloneHeaders creates a deep copy of an http.Header map. Returns nil if the
-// input is nil. Each value slice is independently copied so that mutations to
-// the returned header do not affect the original.
-func cloneHeaders(h gohttp.Header) gohttp.Header {
-	if h == nil {
-		return nil
+// removeHTTP2HopByHop removes HTTP/2 hop-by-hop and connection-specific
+// headers that should not be forwarded to the upstream server.
+// This function operates on gohttp.Header for the legacy transport path only.
+func removeHTTP2HopByHop(header gohttp.Header) {
+	header.Del("Connection")
+	header.Del("Keep-Alive")
+	header.Del("Proxy-Connection")
+	header.Del("Transfer-Encoding")
+	header.Del("Upgrade")
+	if te := header.Get("Te"); te != "" && !strings.EqualFold(te, "trailers") {
+		header.Del("Te")
 	}
-	clone := make(gohttp.Header, len(h))
-	for k, vals := range h {
-		cp := make([]string, len(vals))
-		copy(cp, vals)
-		clone[k] = cp
-	}
-	return clone
 }
 
 // cloneURL creates a shallow copy of a URL suitable for recording/forwarding.
@@ -1310,25 +1282,28 @@ func (h *Handler) connLogger(ctx context.Context) *slog.Logger {
 // rawFrames are the raw HTTP/2 frame bytes for this request. They are
 // atomically attached to the enqueued item via EnqueueOpts so that AI agents
 // can inspect and edit them in raw mode.
-func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, body []byte, rawFrames [][]byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+func (h *Handler) interceptRequest(ctx context.Context, req *h2Request, body []byte, rawFrames [][]byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, req.URL, httpHeaderToRawHeaders(req.Header))
+	reqURL := h2RequestURL(req)
+	rh := hpackToRawHeaders(req.AllHeaders)
+
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, reqURL, rh)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
 
-	logger.Info("HTTP/2 request intercepted", "method", req.Method, "url", req.URL.String(), "matched_rules", matchedRules)
+	logger.Info("HTTP/2 request intercepted", "method", req.Method, "url", reqURL.String(), "matched_rules", matchedRules)
 
 	var opts []intercept.EnqueueOpts
 	if joined := joinRawFrames(rawFrames); len(joined) > 0 {
 		opts = append(opts, intercept.EnqueueOpts{RawBytes: joined})
 	}
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, req.URL, httpHeaderToRawHeaders(req.Header), body, matchedRules, opts...)
-	defer h.InterceptQueue.Remove(id) // ensure cleanup on timeout/cancel
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, reqURL, rh, body, matchedRules, opts...)
+	defer h.InterceptQueue.Remove(id)
 
 	timeout := h.InterceptQueue.Timeout()
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
@@ -1338,10 +1313,8 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 	case action := <-actionCh:
 		return action, true
 	case <-timeoutCtx.Done():
-		// Timeout or context cancellation.
 		behavior := h.InterceptQueue.TimeoutBehaviorValue()
 		if ctx.Err() != nil {
-			// Proxy shutting down — drop.
 			logger.Info("intercepted HTTP/2 request cancelled (proxy shutdown)", "id", id)
 			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
 		}
@@ -1350,50 +1323,61 @@ func (h *Handler) interceptRequest(ctx context.Context, req *gohttp.Request, bod
 		case intercept.TimeoutAutoDrop:
 			return intercept.InterceptAction{Type: intercept.ActionDrop}, true
 		default:
-			// auto_release or unrecognized → release.
 			return intercept.InterceptAction{Type: intercept.ActionRelease}, true
 		}
 	}
 }
 
 // applyInterceptModifications applies the modifications from a modify_and_forward
-// action to the HTTP/2 request. It converts to RawRequest, applies modifications
-// via the shared httputil package, and converts back without using bridge functions.
-func applyInterceptModifications(req *gohttp.Request, action intercept.InterceptAction, originalBody []byte) (*gohttp.Request, error) {
-	rawReq := goHTTPRequestToRaw(req, originalBody)
+// action to the HTTP/2 request using hpack native types. It converts to
+// RawRequest for the httputil modification layer, then converts back to hpack.
+// Returns the modified AllHeaders (with pseudo-headers), modified body, and
+// the parsed URL override (nil if no URL override).
+func applyInterceptModifications(req *h2Request, action intercept.InterceptAction, originalBody []byte) ([]hpack.HeaderField, []byte, *url.URL, error) {
+	rawReq := h2RequestToRaw(req, originalBody)
 	modRaw, modBody, modURL, err := httputil.ApplyRequestModifications(rawReq, originalBody, action)
 	if err != nil {
-		return req, err
+		return req.AllHeaders, originalBody, nil, err
 	}
-	modReq := rawRequestToGoHTTP(modRaw, modBody)
+	// Determine the authority and scheme for the modified request.
+	scheme := req.Scheme
+	authority := req.Authority
+	path := req.Path
+	method := modRaw.Method
 	if modURL != nil {
-		modReq.URL = modURL
+		authority = modURL.Host
+		scheme = modURL.Scheme
+		path = modURL.RequestURI()
 	}
-	return modReq, nil
+	// Build hpack headers from modified RawHeaders.
+	modHeaders := rawHeadersToHpackWithPseudo(method, scheme, authority, path, modRaw.Headers)
+	return modHeaders, modBody, modURL, nil
 }
 
 // interceptResponse checks if the response matches any intercept rules and,
 // if so, enqueues it for AI agent review. It blocks until the agent responds
 // or the timeout expires. Returns the action and true if intercepted, or a
 // zero-value action and false if not intercepted.
-func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, resp *gohttp.Response, body []byte, logger *slog.Logger) (intercept.InterceptAction, bool) {
+func (h *Handler) interceptResponse(ctx context.Context, req *h2Request, resp *h2Response, logger *slog.Logger) (intercept.InterceptAction, bool) {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, httpHeaderToRawHeaders(resp.Header))
+	rh := hpackToRawHeaders(resp.Headers)
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, rh)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
 
+	reqURL := h2RequestURL(req)
 	logger.Info("HTTP/2 response intercepted",
 		"method", req.Method,
-		"url", req.URL.String(),
+		"url", reqURL.String(),
 		"status", resp.StatusCode,
 		"matched_rules", matchedRules)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, req.URL, resp.StatusCode, httpHeaderToRawHeaders(resp.Header), body, matchedRules,
+		req.Method, reqURL, resp.StatusCode, rh, resp.Body, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 
@@ -1421,16 +1405,20 @@ func (h *Handler) interceptResponse(ctx context.Context, req *gohttp.Request, re
 }
 
 // applyResponseModifications applies the modifications from a modify_and_forward
-// action to the HTTP/2 response. It converts to RawResponse, applies modifications
-// via the shared httputil package, and converts back without using bridge functions.
-func applyResponseModifications(resp *gohttp.Response, action intercept.InterceptAction, body []byte) (*gohttp.Response, []byte, error) {
-	rawResp := goHTTPResponseToRaw(resp, body)
-	modRaw, modBody, err := httputil.ApplyResponseModifications(rawResp, action, body)
+// action to the HTTP/2 response using hpack native types. It converts to
+// RawResponse for the httputil modification layer, then converts back to hpack.
+func applyResponseModifications(resp *h2Response, action intercept.InterceptAction) (*h2Response, error) {
+	rawResp := h2ResponseToRaw(resp.StatusCode, resp.Headers, resp.Body)
+	modRaw, modBody, err := httputil.ApplyResponseModifications(rawResp, action, resp.Body)
 	if err != nil {
-		return resp, body, err
+		return resp, err
 	}
-	modResp := rawResponseToGoHTTP(modRaw, modBody)
-	return modResp, modBody, nil
+	return &h2Response{
+		StatusCode: modRaw.StatusCode,
+		Headers:    rawHeadersToHpack(modRaw.Headers),
+		Trailers:   resp.Trailers,
+		Body:       modBody,
+	}, nil
 }
 
 // isGRPCContentType reports whether the Content-Type indicates a gRPC request.
@@ -1440,21 +1428,6 @@ func isGRPCContentType(ct string) bool {
 		ct = strings.TrimSpace(ct[:idx])
 	}
 	return ct == "application/grpc" || strings.HasPrefix(ct, "application/grpc+")
-}
-
-// removeHTTP2HopByHop removes HTTP/2 hop-by-hop and connection-specific
-// headers that should not be forwarded to the upstream server.
-func removeHTTP2HopByHop(header gohttp.Header) {
-	header.Del("Connection")
-	header.Del("Keep-Alive")
-	header.Del("Proxy-Connection")
-	header.Del("Transfer-Encoding")
-	header.Del("Upgrade")
-	// RFC 7540 §8.1.2.2: TE is a hop-by-hop header. The only allowed value
-	// in HTTP/2 is "trailers"; remove TE unless it is exactly "trailers".
-	if te := header.Get("Te"); te != "" && !strings.EqualFold(te, "trailers") {
-		header.Del("Te")
-	}
 }
 
 // isNoBodyStatus returns true for HTTP status codes that must not include a
