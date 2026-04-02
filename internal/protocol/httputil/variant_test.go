@@ -14,7 +14,16 @@ import (
 
 // h2r is a test helper that converts gohttp.Header to parser.RawHeaders.
 func h2r(h gohttp.Header) parser.RawHeaders {
-	return HTTPHeaderToRawHeaders(h)
+	if h == nil {
+		return nil
+	}
+	var rh parser.RawHeaders
+	for name, vals := range h {
+		for _, v := range vals {
+			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+		}
+	}
+	return rh
 }
 
 // mockWriter is a minimal VariantRecordWriter for testing.

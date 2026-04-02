@@ -6,8 +6,34 @@ import (
 	"net/http"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
+
+// httpHeaderToRawHeaders converts net/http.Header (map[string][]string) to
+// parser.RawHeaders. Header name casing is preserved as-is.
+func httpHeaderToRawHeaders(h http.Header) parser.RawHeaders {
+	if h == nil {
+		return nil
+	}
+	var rh parser.RawHeaders
+	for name, vals := range h {
+		for _, v := range vals {
+			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+		}
+	}
+	return rh
+}
+
+// rawHeadersToHTTPHeader converts parser.RawHeaders to net/http.Header.
+func rawHeadersToHTTPHeader(rh parser.RawHeaders) http.Header {
+	if rh == nil {
+		return make(http.Header)
+	}
+	h := make(http.Header, len(rh))
+	for _, hdr := range rh {
+		h.Add(hdr.Name, hdr.Value)
+	}
+	return h
+}
 
 // filterOutputBody applies the SafetyFilter output masking to the given body data.
 // If no safety engine is configured, it returns the body unchanged.
@@ -30,13 +56,13 @@ func (s *Server) filterOutputHeaders(headers http.Header) http.Header {
 	if s.deps.safetyEngine == nil {
 		return headers
 	}
-	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(httputil.HTTPHeaderToRawHeaders(headers))
+	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(httpHeaderToRawHeaders(headers))
 	if len(matches) > 0 {
 		slog.Debug("SafetyFilter output masking applied to headers",
 			"matches", len(matches),
 		)
 	}
-	return httputil.RawHeadersToHTTPHeader(filtered)
+	return rawHeadersToHTTPHeader(filtered)
 }
 
 // filterOutputRawHeaders applies the SafetyFilter output masking to parser.RawHeaders.

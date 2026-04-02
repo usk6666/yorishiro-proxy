@@ -863,7 +863,7 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *parser.Raw
 		Timestamp:     start,
 		Method:        req.Method,
 		URL:           reqURL,
-		Headers:       httputil.RawHeadersToHTTPHeader(req.Headers),
+		Headers:       rawHeadersToMap(req.Headers),
 		Body:          reqBody,
 		RawBytes:      rawRequest,
 		BodyTruncated: reqTruncated,

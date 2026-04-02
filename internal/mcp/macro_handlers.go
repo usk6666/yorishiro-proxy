@@ -16,7 +16,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // macroParams holds parameters for macro-related execute actions.
@@ -519,7 +518,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		// the resend handler), so we must explicitly validate the outbound
 		// request against the safety engine here. This mirrors the check in
 		// handleResendAction / checkInterceptSafety for other MCP tools.
-		if v := s.checkSafetyInput(req.Body, httpReq.URL.String(), httputil.HTTPHeaderToRawHeaders(httpReq.Header)); v != nil {
+		if v := s.checkSafetyInput(req.Body, httpReq.URL.String(), httpHeaderToRawHeaders(httpReq.Header)); v != nil {
 			return nil, fmt.Errorf("%s", safetyViolationError(v))
 		}
 
