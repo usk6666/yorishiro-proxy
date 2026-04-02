@@ -7,7 +7,6 @@ import (
 	"io"
 	gohttp "net/http"
 	"net/url"
-	"sort"
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
@@ -230,8 +229,6 @@ func goHTTPHeaderToHpack(h gohttp.Header) []hpack.HeaderField {
 	for name := range h {
 		keys = append(keys, name)
 	}
-	sort.Strings(keys)
-
 	var fields []hpack.HeaderField
 	for _, name := range keys {
 		for _, v := range h[name] {
