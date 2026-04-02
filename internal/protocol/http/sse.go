@@ -17,7 +17,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -609,7 +608,7 @@ func (h *Handler) recordSSEReceive(ctx context.Context, sendResult *sendRecordRe
 		Direction:  "receive",
 		Timestamp:  start,
 		StatusCode: fwd.resp.StatusCode,
-		Headers:    httputil.RawHeadersToHTTPHeader(fwd.resp.Headers),
+		Headers:    rawHeadersToMap(fwd.resp.Headers),
 		Metadata:   map[string]string{"sse_type": "headers"},
 	}
 	if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {

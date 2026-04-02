@@ -15,7 +15,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // maxResponseSize is the maximum response body size (1 MB) to prevent OOM.
@@ -313,7 +312,7 @@ func (e *Engine) executeFuzzCase(
 		if data.URL != nil {
 			rawURL = data.URL.String()
 		}
-		if err := safetyInputChecker(data.Body, rawURL, httputil.HTTPHeaderToRawHeaders(http.Header(data.Headers))); err != nil {
+		if err := safetyInputChecker(data.Body, rawURL, mapToRawHeaders(data.Headers)); err != nil {
 			result.Error = fmt.Sprintf("safety filter: %s", err.Error())
 			return result
 		}
@@ -682,4 +681,19 @@ func ResolvePayloads(payloadSets map[string]PayloadSet, wordlistDir string) (map
 		resolved[name] = payloads
 	}
 	return resolved, nil
+}
+
+// mapToRawHeaders converts map[string][]string to parser.RawHeaders without
+// going through net/http.Header. Header name casing is preserved as-is.
+func mapToRawHeaders(m map[string][]string) parser.RawHeaders {
+	if m == nil {
+		return nil
+	}
+	var rh parser.RawHeaders
+	for name, vals := range m {
+		for _, v := range vals {
+			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+		}
+	}
+	return rh
 }

@@ -16,7 +16,6 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
@@ -1322,7 +1321,7 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 				entry.URL = item.URL.String()
 			}
 			// Convert RawHeaders to map for JSON output.
-			entry.Headers = map[string][]string(httputil.RawHeadersToHTTPHeader(item.Headers))
+			entry.Headers = map[string][]string(rawHeadersToHTTPHeader(item.Headers))
 		}
 
 		entries = append(entries, entry)

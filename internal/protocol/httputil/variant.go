@@ -11,6 +11,19 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
+// rawHeadersToMap converts parser.RawHeaders to map[string][]string without
+// going through net/http.Header. Header name casing is preserved as-is.
+func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
+	if rh == nil {
+		return make(map[string][]string)
+	}
+	m := make(map[string][]string, len(rh))
+	for _, h := range rh {
+		m[h.Name] = append(m[h.Name], h.Value)
+	}
+	return m
+}
+
 // VariantRecordWriter is the subset of flow.FlowWriter needed by variant
 // recording helpers. Defining a minimal interface here avoids importing the
 // full proxy package and keeps the dependency graph clean.
@@ -122,7 +135,7 @@ func recordSingleReceive(
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
 		StatusCode:    p.RespStatusCode,
-		Headers:       RawHeadersToHTTPHeader(RecordingHeadersRaw(p.RespHeaders, decompressed, len(body))),
+		Headers:       rawHeadersToMap(RecordingHeadersRaw(p.RespHeaders, decompressed, len(body))),
 		Body:          body,
 		RawBytes:      p.RawResponse,
 		BodyTruncated: truncated,
@@ -155,7 +168,7 @@ func recordOriginalReceive(
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
 		StatusCode:    snap.StatusCode,
-		Headers:       RawHeadersToHTTPHeader(RecordingHeadersRaw(snap.Headers, decompressed, len(body))),
+		Headers:       rawHeadersToMap(RecordingHeadersRaw(snap.Headers, decompressed, len(body))),
 		Body:          body,
 		RawBytes:      p.RawResponse,
 		BodyTruncated: truncated,
@@ -184,7 +197,7 @@ func recordModifiedReceive(
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
 		StatusCode:    p.RespStatusCode,
-		Headers:       RawHeadersToHTTPHeader(RecordingHeadersRaw(p.RespHeaders, decompressed, len(body))),
+		Headers:       rawHeadersToMap(RecordingHeadersRaw(p.RespHeaders, decompressed, len(body))),
 		Body:          body,
 		BodyTruncated: truncated,
 		Metadata:      map[string]string{"variant": "modified"},

@@ -7,19 +7,33 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // httpHeaderToRawHeaders converts net/http.Header to parser.RawHeaders.
-// Bridge for subsystems (intercept, recording, plugin hooks) that still use net/http types.
+// Header name casing is preserved as-is.
 func httpHeaderToRawHeaders(h gohttp.Header) parser.RawHeaders {
-	return httputil.HTTPHeaderToRawHeaders(h)
+	if h == nil {
+		return nil
+	}
+	var rh parser.RawHeaders
+	for name, vals := range h {
+		for _, v := range vals {
+			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+		}
+	}
+	return rh
 }
 
 // rawHeadersToHTTPHeader converts parser.RawHeaders back to net/http.Header.
-// Bridge for subsystems (intercept, recording, plugin hooks) that still use net/http types.
 func rawHeadersToHTTPHeader(rh parser.RawHeaders) gohttp.Header {
-	return httputil.RawHeadersToHTTPHeader(rh)
+	if rh == nil {
+		return make(gohttp.Header)
+	}
+	h := make(gohttp.Header, len(rh))
+	for _, hdr := range rh {
+		h.Add(hdr.Name, hdr.Value)
+	}
+	return h
 }
 
 // hpackGetHeader returns the first value for the given header name from hpack

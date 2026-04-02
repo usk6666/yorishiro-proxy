@@ -12,7 +12,6 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -365,7 +364,7 @@ func TestOutputFilter_InterceptQueue_MasksBody(t *testing.T) {
 	queue.Enqueue(
 		"POST",
 		u,
-		httputil.HTTPHeaderToRawHeaders(http.Header{
+		httpHeaderToRawHeaders(http.Header{
 			"Content-Type": {"application/json"},
 			"X-Api-Key":    {"sk-interceptedkey12345"},
 		}),
@@ -467,7 +466,7 @@ func TestOutputFilter_InterceptRelease_MasksBody(t *testing.T) {
 	id, actionCh := queue.Enqueue(
 		"POST",
 		u,
-		httputil.HTTPHeaderToRawHeaders(http.Header{
+		httpHeaderToRawHeaders(http.Header{
 			"Content-Type": {"application/json"},
 			"X-Api-Key":    {"sk-interceptedkey12345"},
 		}),
@@ -540,7 +539,7 @@ func TestOutputFilter_InterceptDrop_MasksBody(t *testing.T) {
 		"GET",
 		nil,
 		200,
-		httputil.HTTPHeaderToRawHeaders(http.Header{
+		httpHeaderToRawHeaders(http.Header{
 			"Content-Type": {"application/json"},
 			"X-Token":      {"sk-responseapikey12345"},
 		}),
@@ -610,7 +609,7 @@ func TestOutputFilter_InterceptModifyAndForward_MasksBody(t *testing.T) {
 	id, actionCh := queue.Enqueue(
 		"POST",
 		u,
-		httputil.HTTPHeaderToRawHeaders(http.Header{
+		httpHeaderToRawHeaders(http.Header{
 			"Content-Type":  {"application/json"},
 			"Authorization": {"Bearer sk-secretapikey123456"},
 		}),
