@@ -199,6 +199,11 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 
 	removeHopByHopHeadersRaw(&req.Headers)
 
+	// gRPC-Web detection in plaintext CONNECT tunnel (after scope/safety checks).
+	if h.isGRPCWebRequest(req.Headers) {
+		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, logger)
+	}
+
 	sp := sendRecordParams{
 		connID:       connID,
 		clientAddr:   clientAddr,
@@ -524,6 +529,11 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	}
 
 	removeHopByHopHeadersRaw(&req.Headers)
+
+	// gRPC-Web detection in HTTPS CONNECT tunnel (after scope/safety checks).
+	if h.isGRPCWebRequest(req.Headers) {
+		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, true, extractTLSState(conn), h.connLogger(ctx))
+	}
 
 	// Build plugin ConnInfo.
 	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}

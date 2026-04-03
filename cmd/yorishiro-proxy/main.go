@@ -541,8 +541,9 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	grpcHandler := protogrpc.NewHandler(store, logger)
 	http2Handler.SetGRPCHandler(grpcHandler)
 
-	// Build gRPC-Web handler and attach to the HTTP/2 handler for gRPC-Web-specific recording.
+	// Build gRPC-Web handler and attach to both HTTP/1.x and HTTP/2 handlers.
 	grpcWebHandler := protogrpcweb.NewHandler(store, logger)
+	httpHandler.SetGRPCWebHandler(grpcWebHandler)
 	http2Handler.SetGRPCWebHandler(grpcWebHandler)
 
 	// Link the HTTP/2 handler to the HTTP handler for h2 ALPN delegation.
