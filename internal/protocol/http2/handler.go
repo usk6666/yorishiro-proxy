@@ -23,6 +23,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
@@ -65,6 +66,11 @@ type Handler struct {
 	// grpcHandler processes gRPC flow recording when Content-Type: application/grpc
 	// is detected. If nil, gRPC streams are recorded as plain HTTP/2.
 	grpcHandler *protogrpc.Handler
+
+	// grpcWebHandler processes gRPC-Web flow recording when Content-Type:
+	// application/grpc-web or application/grpc-web-text is detected.
+	// If nil, gRPC-Web streams are recorded as plain HTTP/2.
+	grpcWebHandler *grpcweb.Handler
 
 	// pluginEngine dispatches Starlark plugin hooks during HTTP/2 stream processing.
 	// If nil, no plugin hooks are invoked.
@@ -179,6 +185,13 @@ func (h *Handler) SetGRPCHandler(gh *protogrpc.Handler) {
 	h.grpcHandler = gh
 }
 
+// SetGRPCWebHandler sets the gRPC-Web handler used for gRPC-Web-specific flow recording.
+// When set, streams with Content-Type: application/grpc-web or application/grpc-web-text
+// are recorded as gRPC-Web sessions instead of plain HTTP/2.
+func (h *Handler) SetGRPCWebHandler(gwh *grpcweb.Handler) {
+	h.grpcWebHandler = gwh
+}
+
 // SetPluginEngine sets the plugin engine used to dispatch hook events
 // during HTTP/2 stream processing.
 func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
@@ -237,6 +250,9 @@ type tlsMetadata struct {
 	Version     string
 	CipherSuite string
 	ALPN        string
+	// State holds the raw tls.ConnectionState for handlers (e.g. gRPC-Web)
+	// that require the full TLS state rather than decomposed string fields.
+	State *tls.ConnectionState
 }
 
 // HandleH2 processes an h2 (TLS) HTTP/2 connection after ALPN negotiation.
@@ -247,10 +263,12 @@ func (h *Handler) HandleH2(ctx context.Context, tlsConn *tls.Conn, connectAuthor
 	logger := h.connLogger(ctx)
 	logger.Info("HTTP/2 h2 connection", "authority", connectAuthority)
 
+	cs := tlsConn.ConnectionState()
 	tlsMeta := tlsMetadata{
 		Version:     tlsVersion,
 		CipherSuite: tlsCipher,
 		ALPN:        tlsALPN,
+		State:       &cs,
 	}
 	return h.serveHTTP2(ctx, tlsConn, connectAuthority, tlsMeta)
 }
@@ -438,9 +456,10 @@ func (h *Handler) initStreamContext(
 func (h *Handler) forwardAndRecord(sc *streamContext, outHeaders []hpack.HeaderField, snap *requestSnapshot) {
 	ct := hpackGetHeader(sc.h2req.AllHeaders, "content-type")
 	isGRPC := h.grpcHandler != nil && isGRPCContentType(ct)
+	isGRPCWeb := h.grpcWebHandler != nil && grpcweb.IsGRPCWebContentType(ct)
 
 	var sendResult *sendRecordResult
-	if !isGRPC {
+	if !isGRPC && !isGRPCWeb {
 		sendResult = h.recordSendWithVariant(sc.ctx, sc.srp, snap, sc.logger)
 	}
 
@@ -483,11 +502,13 @@ func (h *Handler) forwardAndRecord(sc *streamContext, outHeaders []hpack.HeaderF
 	duration := time.Since(sc.start)
 	tlsCertSubject := fwd.tlsCertSubject
 
-	h.recordStreamResponse(sc, isGRPC, sendResult, resp, rawRespBody, rawTrailers, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs, fwd.respRawFrames)
+	h.recordStreamResponse(sc, isGRPC, isGRPCWeb, sendResult, resp, rawRespBody, rawTrailers, fwd.serverAddr, duration, tlsCertSubject, &respSnap, fwd.sendMs, fwd.waitMs, fwd.receiveMs, fwd.respRawFrames)
 
 	logProtocol := "http/2"
 	if isGRPC {
 		logProtocol = "grpc"
+	} else if isGRPCWeb {
+		logProtocol = "grpc-web"
 	}
 	sc.logger.Info(logProtocol+" request",
 		"method", sc.h2req.Method,
@@ -1134,10 +1155,12 @@ func writeH2ResponseToClient(sc *streamContext, resp *h2Response) {
 	}
 }
 
-// recordStreamResponse records the receive phase for HTTP/2 or gRPC flows.
-func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC bool, sendResult *sendRecordResult, resp *h2Response, fullRespBody []byte, rawTrailers []hpack.HeaderField, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64, respRawFrames [][]byte) {
+// recordStreamResponse records the receive phase for HTTP/2, gRPC, or gRPC-Web flows.
+func (h *Handler) recordStreamResponse(sc *streamContext, isGRPC, isGRPCWeb bool, sendResult *sendRecordResult, resp *h2Response, fullRespBody []byte, rawTrailers []hpack.HeaderField, serverAddr string, duration time.Duration, tlsCertSubject string, respSnap *responseSnapshot, sendMs, waitMs, receiveMs *int64, respRawFrames [][]byte) {
 	if isGRPC {
 		h.recordGRPCFlow(sc, resp, fullRespBody, rawTrailers, serverAddr, duration, tlsCertSubject)
+	} else if isGRPCWeb {
+		h.recordGRPCWebFlow(sc, resp, fullRespBody, serverAddr, duration, tlsCertSubject)
 	} else {
 		h.recordReceiveWithVariant(sc.ctx, sendResult, receiveRecordParams{
 			start:                sc.start,
@@ -1186,6 +1209,33 @@ func (h *Handler) recordGRPCFlow(sc *streamContext, resp *h2Response, fullRespBo
 	}
 	if err := h.grpcHandler.RecordSession(sc.ctx, info); err != nil {
 		sc.logger.Error("gRPC flow recording failed", "error", err)
+	}
+}
+
+// recordGRPCWebFlow records a gRPC-Web session via the gRPC-Web handler.
+func (h *Handler) recordGRPCWebFlow(sc *streamContext, resp *h2Response, fullRespBody []byte, serverAddr string, duration time.Duration, tlsCertSubject string) {
+	if !h.shouldCapture(sc.h2req.Method, sc.reqURL) {
+		return
+	}
+
+	info := &grpcweb.StreamInfo{
+		ConnID:          sc.connID,
+		ClientAddr:      sc.clientAddr,
+		ServerAddr:      serverAddr,
+		RequestHeaders:  hpackToRawHeaders(sc.h2req.AllHeaders),
+		ResponseHeaders: hpackToRawHeaders(resp.Headers),
+		RequestBody:     sc.reqBody,
+		ResponseBody:    fullRespBody,
+		TLS:             sc.tlsMeta.State,
+		Start:           sc.start,
+		Duration:        duration,
+		StatusCode:      resp.StatusCode,
+		Method:          sc.h2req.Method,
+		URL:             sc.reqURL,
+		Scheme:          sc.flowScheme,
+	}
+	if err := h.grpcWebHandler.RecordSession(sc.ctx, info); err != nil {
+		sc.logger.Error("gRPC-Web flow recording failed", "error", err)
 	}
 }
 
