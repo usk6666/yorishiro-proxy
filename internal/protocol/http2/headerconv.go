@@ -43,6 +43,47 @@ func hpackToRawHeaders(fields []hpack.HeaderField) parser.RawHeaders {
 	return rh
 }
 
+// hpackToRawHeadersWithHost converts hpack header fields to parser.RawHeaders,
+// skipping pseudo-headers and inserting a Host header derived from the :authority
+// pseudo-header or the provided host value. HTTP/2 hop-by-hop headers
+// (Connection, Keep-Alive, Proxy-Connection, Transfer-Encoding, Upgrade) are
+// also removed since they are not valid in HTTP/1.1 proxied requests converted
+// from HTTP/2.
+func hpackToRawHeadersWithHost(fields []hpack.HeaderField, host string) parser.RawHeaders {
+	var rh parser.RawHeaders
+	// Add Host header first, as HTTP/1.1 convention expects it early.
+	if host != "" {
+		rh = append(rh, parser.RawHeader{Name: "Host", Value: host})
+	}
+	for _, hf := range fields {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
+		}
+		// Skip HTTP/2 hop-by-hop headers that should not be forwarded to HTTP/1.1.
+		switch strings.ToLower(hf.Name) {
+		case "host", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade":
+			continue
+		case "te":
+			if !strings.EqualFold(hf.Value, "trailers") {
+				continue
+			}
+		}
+		rh = append(rh, parser.RawHeader{Name: hf.Name, Value: hf.Value})
+	}
+	return rh
+}
+
+// rawHeadersToHpackLower converts parser.RawHeaders to hpack header fields,
+// lowercasing header names per RFC 9113 (HTTP/2 headers must be lowercase).
+// Used when converting HTTP/1.1 response headers for relay to an HTTP/2 client.
+func rawHeadersToHpackLower(rh parser.RawHeaders) []hpack.HeaderField {
+	fields := make([]hpack.HeaderField, 0, len(rh))
+	for _, h := range rh {
+		fields = append(fields, hpack.HeaderField{Name: strings.ToLower(h.Name), Value: h.Value})
+	}
+	return fields
+}
+
 // rawHeadersToHpack converts parser.RawHeaders to hpack header fields.
 // No pseudo-headers are added; call buildPseudoHeaders separately if needed.
 func rawHeadersToHpack(rh parser.RawHeaders) []hpack.HeaderField {
@@ -98,6 +139,19 @@ func hpackDelHeader(fields []hpack.HeaderField, name string) []hpack.HeaderField
 		}
 	}
 	return result
+}
+
+// setRawHeader replaces the first occurrence of name (case-insensitive) with
+// the given value, or appends a new header if none exists. Returns the
+// modified slice.
+func setRawHeader(rh parser.RawHeaders, name, value string) parser.RawHeaders {
+	for i, h := range rh {
+		if strings.EqualFold(h.Name, name) {
+			rh[i].Value = value
+			return rh
+		}
+	}
+	return append(rh, parser.RawHeader{Name: name, Value: value})
 }
 
 // cloneHpackHeaders creates a deep copy of an hpack header field slice.

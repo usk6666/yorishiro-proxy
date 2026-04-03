@@ -49,12 +49,6 @@ func TestSetTLSTransport_RoutesUpstreamTLS(t *testing.T) {
 	}
 	handler.SetTLSTransport(mock)
 
-	// Configure the gohttp.Transport for the non-h2 fallback path.
-	// The mock TLSTransport wraps StandardTransport which defaults to
-	// http/1.1 ALPN, so ConnPool routes to forwardUpstreamLegacy which
-	// uses gohttp.Transport.
-	handler.Transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-
 	addr, cancel := startH2CProxyListener(t, handler,
 		"test-utls", "127.0.0.1:55555",
 		upstream.Listener.Addr().String(),
@@ -121,8 +115,6 @@ func TestSetTLSTransport_FlowRecording(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
 	handler.SetTLSTransport(&httputil.StandardTransport{InsecureSkipVerify: true})
-	// Configure gohttp.Transport for the non-h2 fallback path.
-	handler.Transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	addr, cancel := startH2CProxyListener(t, handler,
 		"test-utls-rec", "127.0.0.1:55556",
@@ -242,8 +234,6 @@ func TestSetTLSTransport_GRPCContentType(t *testing.T) {
 		inner: &httputil.StandardTransport{InsecureSkipVerify: true},
 	}
 	handler.SetTLSTransport(mock)
-	// Configure gohttp.Transport for the non-h2 fallback path.
-	handler.Transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	addr, cancel := startH2CProxyListener(t, handler,
 		"test-grpc-utls", "127.0.0.1:55558",

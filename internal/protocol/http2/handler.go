@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	gohttp "net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -54,7 +54,8 @@ type Handler struct {
 	tlsMu sync.RWMutex
 
 	// connPool manages upstream connections for the unary HTTP/2 path using
-	// ConnPool + ALPN routing instead of gohttp.Transport.
+	// ConnPool + ALPN routing. Routes to h2Transport for h2 ALPN and
+	// H1Transport for non-h2 ALPN (including non-TLS).
 	connPool *httputil.ConnPool
 
 	// h2Transport is the custom HTTP/2 frame-engine transport used for raw mode
@@ -84,9 +85,6 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 		HandlerBase: proxy.HandlerBase{
 			Store:  store,
 			Logger: logger,
-			Transport: &gohttp.Transport{
-				ForceAttemptHTTP2: true,
-			},
 		},
 		connPool: &httputil.ConnPool{
 			// Leave TLSTransport nil so that ConnPool's effectiveTLSTransport()
@@ -108,8 +106,8 @@ func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
 // The ConnPool's TLSTransport is updated directly and is used to establish
 // upstream TLS connections, including ALPN negotiation (e.g. h2 vs. http/1.1).
 // HTTP/2 upstream connections negotiated via ALPN are handled by h2Transport;
-// HTTP/1.1 upstream requests on the unary path currently fall back to the
-// legacy net/http path and do not reuse the ConnPool-established TLS connection.
+// HTTP/1.1 upstream connections are handled by H1Transport on the
+// ConnPool-established connection.
 //
 // If t is nil, the default crypto/tls behavior is restored.
 //
@@ -121,12 +119,14 @@ func (h *Handler) SetTLSTransport(t httputil.TLSTransport) {
 	h.connPool.TLSTransport = t
 }
 
-// SetInsecureSkipVerify overrides HandlerBase.SetInsecureSkipVerify to also
-// update the ConnPool's default TLSTransport for the unary HTTP/2 path.
-// When skip is true, the ConnPool's StandardTransport is configured with
-// InsecureSkipVerify=true so that upstream certificate verification is disabled.
+// SetInsecureSkipVerify configures whether the handler skips TLS certificate
+// verification when connecting to upstream servers via the ConnPool.
+// The HTTP/2 handler does not use HandlerBase.Transport (gohttp.Transport);
+// it only configures the ConnPool's TLSTransport.
 func (h *Handler) SetInsecureSkipVerify(skip bool) {
-	h.HandlerBase.SetInsecureSkipVerify(skip)
+	if skip {
+		h.Logger.Warn("upstream TLS certificate verification is disabled — connections to upstream servers will not verify certificates")
+	}
 	h.tlsMu.Lock()
 	defer h.tlsMu.Unlock()
 	if st, ok := h.connPool.TLSTransport.(*httputil.StandardTransport); ok {
@@ -140,10 +140,14 @@ func (h *Handler) SetInsecureSkipVerify(skip bool) {
 	}
 }
 
-// SetUpstreamProxy overrides HandlerBase.SetUpstreamProxy to also update the
-// ConnPool's upstream proxy for the unary HTTP/2 path.
+// SetUpstreamProxy configures the upstream proxy for the HTTP/2 handler.
+// The HTTP/2 handler does not use HandlerBase.Transport (gohttp.Transport);
+// it only configures the ConnPool's UpstreamProxy.
 func (h *Handler) SetUpstreamProxy(proxyURL *url.URL) {
-	h.HandlerBase.SetUpstreamProxy(proxyURL)
+	h.UpstreamMu.Lock()
+	h.UpstreamProxy = proxyURL
+	h.UpstreamMu.Unlock()
+
 	h.tlsMu.Lock()
 	defer h.tlsMu.Unlock()
 	h.connPool.UpstreamProxy = proxyURL
@@ -882,8 +886,8 @@ type forwardUpstreamResult struct {
 	waitMs         *int64
 	receiveMs      *int64
 	// respRawFrames holds the raw HTTP/2 frame bytes from the upstream response.
-	// Populated when the custom frame-engine Transport is used. Nil when the
-	// standard net/http Transport is used.
+	// Populated when the custom frame-engine Transport is used (h2 ALPN path).
+	// Nil when H1Transport is used (non-h2 fallback).
 	respRawFrames [][]byte
 }
 
@@ -895,8 +899,8 @@ func (h *Handler) forwardUpstream(sc *streamContext, outHeaders []hpack.HeaderFi
 }
 
 // forwardUpstreamConnPool forwards the request via ConnPool + ALPN routing.
-// This is the new unary path that replaces roundTripWithTrace for non-gRPC
-// HTTP/2 requests.
+// Handles both h2 (via h2Transport) and non-h2 (via H1Transport) upstream
+// connections, as well as non-TLS (plaintext) upstreams.
 func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outHeaders []hpack.HeaderField, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
 	sendStart := time.Now()
 
@@ -911,12 +915,6 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outHeaders []hpack.
 		}
 	}
 	addr := net.JoinHostPort(hostname, port)
-
-	// Non-TLS upstreams cannot negotiate ALPN, so ConnPool.Get would always
-	// fall back to the legacy path after a redundant dial. Short-circuit here.
-	if !useTLS {
-		return h.forwardUpstreamLegacy(sc, outHeaders, sendResult)
-	}
 
 	h.tlsMu.RLock()
 	cr, err := h.connPool.Get(sc.ctx, addr, useTLS, hostname)
@@ -935,8 +933,9 @@ func (h *Handler) forwardUpstreamConnPool(sc *streamContext, outHeaders []hpack.
 	case "h2":
 		result, err = h.forwardH2(sc.ctx, cr.Conn, outHeaders, sc.reqBody)
 	default:
-		cr.Conn.Close()
-		return h.forwardUpstreamLegacy(sc, outHeaders, sendResult)
+		// Non-h2 ALPN (including non-TLS plain connections with empty ALPN):
+		// forward as HTTP/1.1 via H1Transport on the pre-established connection.
+		result, err = h.forwardH1WithConn(cr.Conn, sc, outHeaders)
 	}
 	if err != nil {
 		sc.logger.Error("HTTP/2 upstream request failed",
@@ -995,80 +994,63 @@ func (h *Handler) forwardH2(ctx context.Context, conn net.Conn, outHeaders []hpa
 	}, nil
 }
 
-// forwardUpstreamLegacy uses the gohttp.Transport for forwarding.
-// Used as a fallback for non-TLS upstreams (no ALPN negotiation possible)
-// and non-h2 ALPN results (HTTP/1.1 fallback) from forwardUpstreamConnPool.
-// This is the only path that converts to gohttp.Request at the boundary.
-func (h *Handler) forwardUpstreamLegacy(sc *streamContext, outHeaders []hpack.HeaderField, sendResult *sendRecordResult) (*forwardUpstreamResult, bool) {
-	// Build gohttp.Request from outHeaders at the legacy transport boundary.
-	// outHeaders include pseudo-headers + regular headers after all transforms.
-	outReq := &gohttp.Request{
-		Method:        hpackGetPseudo(outHeaders, ":method"),
-		URL:           cloneURL(sc.reqURL),
-		Host:          sc.reqURL.Host,
-		Header:        make(gohttp.Header),
-		Body:          io.NopCloser(bytes.NewReader(sc.reqBody)),
-		ContentLength: int64(len(sc.reqBody)),
-		Proto:         "HTTP/2.0",
-		ProtoMajor:    2,
+// forwardH1WithConn forwards a request via H1Transport on a pre-established
+// connection. Converts hpack headers to parser.RawRequest, sends via
+// H1Transport.RoundTripOnConn, and converts the parser.RawResponse back to
+// h2Response. Used for non-h2 ALPN (HTTP/1.1 fallback) and non-TLS upstreams.
+func (h *Handler) forwardH1WithConn(conn net.Conn, sc *streamContext, outHeaders []hpack.HeaderField) (*forwardUpstreamResult, error) {
+	defer conn.Close()
+
+	// Build parser.RawRequest from hpack headers.
+	method := hpackGetPseudo(outHeaders, ":method")
+	reqHeaders := hpackToRawHeadersWithHost(outHeaders, sc.reqURL.Host)
+	// Ensure Content-Length matches the actual body (transforms may have
+	// changed the body without updating the header).
+	if len(sc.reqBody) > 0 {
+		reqHeaders = setRawHeader(reqHeaders, "content-length", strconv.Itoa(len(sc.reqBody)))
 	}
-	outReq = outReq.WithContext(sc.ctx)
-	for _, hf := range outHeaders {
-		if strings.HasPrefix(hf.Name, ":") || strings.EqualFold(hf.Name, "host") {
-			continue
-		}
-		outReq.Header.Add(hf.Name, hf.Value)
+	rawReq := &parser.RawRequest{
+		Method:     method,
+		RequestURI: sc.reqURL.RequestURI(),
+		Proto:      "HTTP/1.1",
+		Headers:    reqHeaders,
+		Body:       io.NopCloser(bytes.NewReader(sc.reqBody)),
 	}
-	removeHTTP2HopByHop(outReq.Header)
 
 	sendStart := time.Now()
-	h.tlsMu.RLock()
-	resp, serverAddr, timing, err := h.roundTripWithTrace(outReq)
-	h.tlsMu.RUnlock()
+	transport := &httputil.H1Transport{}
+	rtResult, err := transport.RoundTripOnConn(sc.ctx, conn, rawReq)
 	if err != nil {
-		sc.logger.Error("HTTP/2 upstream request failed",
-			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
-		h.recordSendError(sc.ctx, sendResult, sc.start, err, sc.logger)
-		writeErrorResponse(sc.w, httputil.StatusBadGateway)
-		return nil, false
+		return nil, fmt.Errorf("h1 round trip: %w", err)
 	}
-	defer resp.Body.Close()
 
-	fullRespBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
-	if err != nil {
-		sc.logger.Warn("HTTP/2 failed to read response body", "error", err)
+	// Read the full response body.
+	var fullRespBody []byte
+	if rtResult.Response.Body != nil {
+		fullRespBody, err = io.ReadAll(io.LimitReader(rtResult.Response.Body, config.MaxBodySize))
+		if err != nil {
+			return nil, fmt.Errorf("read h1 response body: %w", err)
+		}
 	}
 	receiveEnd := time.Now()
 
-	sMs, wMs, rMs := httputil.ComputeTiming(sendStart, timing, receiveEnd)
+	// Convert response headers from RawHeaders to hpack, lowercasing names
+	// per RFC 9113 (HTTP/2 headers must be lowercase).
+	respHeaders := rawHeadersToHpackLower(rtResult.Response.Headers)
 
-	// Extract TLS cert subject from legacy response.
-	var tlsCertSubject string
-	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-		tlsCertSubject = resp.TLS.PeerCertificates[0].Subject.String()
-	}
-
-	// Convert response headers from gohttp to hpack (no canonicalization loss
-	// since HTTP/1.1 upstream headers were already canonicalized by net/http).
-	respHeaders := goHTTPHeaderToHpack(resp.Header)
-	var respTrailers []hpack.HeaderField
-	if len(resp.Trailer) > 0 {
-		respTrailers = goHTTPHeaderToHpack(resp.Trailer)
-	}
+	sMs, wMs, rMs := httputil.ComputeTiming(sendStart, rtResult.Timing, receiveEnd)
 
 	return &forwardUpstreamResult{
 		h2resp: &h2Response{
-			StatusCode: resp.StatusCode,
+			StatusCode: rtResult.Response.StatusCode,
 			Headers:    respHeaders,
-			Trailers:   respTrailers,
 			Body:       fullRespBody,
 		},
-		serverAddr:     serverAddr,
-		tlsCertSubject: tlsCertSubject,
-		sendMs:         sMs,
-		waitMs:         wMs,
-		receiveMs:      rMs,
-	}, true
+		serverAddr: rtResult.ServerAddr,
+		sendMs:     sMs,
+		waitMs:     wMs,
+		receiveMs:  rMs,
+	}, nil
 }
 
 // handleResponseIntercept processes response interception.
@@ -1207,20 +1189,6 @@ func (h *Handler) recordGRPCFlow(sc *streamContext, resp *h2Response, fullRespBo
 	}
 }
 
-// removeHTTP2HopByHop removes HTTP/2 hop-by-hop and connection-specific
-// headers that should not be forwarded to the upstream server.
-// This function operates on gohttp.Header for the legacy transport path only.
-func removeHTTP2HopByHop(header gohttp.Header) {
-	header.Del("Connection")
-	header.Del("Keep-Alive")
-	header.Del("Proxy-Connection")
-	header.Del("Transfer-Encoding")
-	header.Del("Upgrade")
-	if te := header.Get("Te"); te != "" && !strings.EqualFold(te, "trailers") {
-		header.Del("Te")
-	}
-}
-
 // cloneURL creates a shallow copy of a URL suitable for recording/forwarding.
 func cloneURL(u *url.URL) *url.URL {
 	return &url.URL{
@@ -1230,36 +1198,6 @@ func cloneURL(u *url.URL) *url.URL {
 		RawQuery: u.RawQuery,
 		Fragment: u.Fragment,
 	}
-}
-
-// roundTripWithTrace wraps transport.RoundTrip with an httptrace hook to
-// capture the remote address of the TCP connection used for the request
-// and per-phase timing data (send, wait, receive).
-func (h *Handler) roundTripWithTrace(req *gohttp.Request) (*gohttp.Response, string, *httputil.RoundTripTiming, error) {
-	var serverAddr string
-	timing := &httputil.RoundTripTiming{}
-	trace := &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			if info.Conn != nil {
-				serverAddr = info.Conn.RemoteAddr().String()
-			}
-		},
-		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			timing.SetWroteRequest(time.Now())
-		},
-		GotFirstResponseByte: func() {
-			timing.SetGotFirstByte(time.Now())
-		},
-	}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-
-	// Hold a read lock while accessing transport.Proxy via RoundTrip to
-	// prevent a data race with concurrent SetUpstreamProxy writes.
-	h.UpstreamMu.RLock()
-	resp, err := h.Transport.RoundTrip(req)
-	h.UpstreamMu.RUnlock()
-
-	return resp, serverAddr, timing, err
 }
 
 // shouldCapture checks the capture scope to determine whether a request
