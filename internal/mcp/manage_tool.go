@@ -35,7 +35,7 @@ type manageParams struct {
 	// delete_flows parameters
 	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"delete flows older than this many days"`
 	Confirm       bool   `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
-	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)"`
+	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, gRPC-Web, TCP)"`
 
 	// export_flows parameters
 	Format        string        `json:"format,omitempty" jsonschema:"export format: jsonl (default) or har (HTTP Archive 1.2)"`

@@ -29,7 +29,7 @@
         },
         "protocol": {
           "type": "string",
-          "description": "Protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP)."
+          "description": "Protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, gRPC-Web, TCP)."
         },
         "format": {
           "type": "string",
