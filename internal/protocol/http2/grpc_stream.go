@@ -981,8 +981,12 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 // header slice. Header names are lowercased per HTTP/2 spec.
 func applyGRPCInterceptHeaderModsHpack(headers []hpack.HeaderField, action intercept.InterceptAction) []hpack.HeaderField {
 	// Override: replace the first matching header value, or add if not found.
+	// Pseudo-headers (names starting with ":") are skipped to prevent injection.
 	for k, v := range action.OverrideHeaders {
 		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
 		found := false
 		for i, hf := range headers {
 			if strings.EqualFold(hf.Name, lower) && !strings.HasPrefix(hf.Name, ":") {
@@ -995,12 +999,20 @@ func applyGRPCInterceptHeaderModsHpack(headers []hpack.HeaderField, action inter
 			headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
 		}
 	}
-	// Add: append new header fields.
+	// Add: append new header fields. Pseudo-headers are skipped.
 	for k, v := range action.AddHeaders {
-		headers = append(headers, hpack.HeaderField{Name: strings.ToLower(k), Value: v})
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
+		headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
 	}
 	// Remove: delete all matching header fields (case-insensitive).
+	// Pseudo-headers are skipped.
 	for _, k := range action.RemoveHeaders {
+		if strings.HasPrefix(strings.ToLower(k), ":") {
+			continue
+		}
 		headers = hpackDelHeader(headers, k)
 	}
 	return headers
@@ -1341,8 +1353,12 @@ func (h *Handler) writeGRPCInterceptedResponseH2(sc *streamContext, state *grpcS
 // an intercept action to hpack response headers. Returns the modified slice.
 func applyGRPCResponseInterceptHeaderModsHpack(headers []hpack.HeaderField, action intercept.InterceptAction) []hpack.HeaderField {
 	// Override: replace the first matching header value, or add if not found.
+	// Pseudo-headers (names starting with ":") are skipped to prevent injection.
 	for k, v := range action.OverrideResponseHeaders {
 		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
 		found := false
 		for i, hf := range headers {
 			if strings.EqualFold(hf.Name, lower) && !strings.HasPrefix(hf.Name, ":") {
@@ -1355,12 +1371,20 @@ func applyGRPCResponseInterceptHeaderModsHpack(headers []hpack.HeaderField, acti
 			headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
 		}
 	}
-	// Add: append new header fields.
+	// Add: append new header fields. Pseudo-headers are skipped.
 	for k, v := range action.AddResponseHeaders {
-		headers = append(headers, hpack.HeaderField{Name: strings.ToLower(k), Value: v})
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
+		headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
 	}
 	// Remove: delete all matching header fields (case-insensitive).
+	// Pseudo-headers are skipped.
 	for _, k := range action.RemoveResponseHeaders {
+		if strings.HasPrefix(strings.ToLower(k), ":") {
+			continue
+		}
 		headers = hpackDelHeader(headers, k)
 	}
 	return headers
