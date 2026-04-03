@@ -24,7 +24,7 @@
       "properties": {
         "protocol": {
           "type": "string",
-          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP).",
+          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, gRPC-Web, TCP).",
           "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"]
         },
         "scheme": {
