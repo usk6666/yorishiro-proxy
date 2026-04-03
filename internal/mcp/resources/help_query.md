@@ -15,7 +15,7 @@ Fuzz job ID. Required for `fuzz_results` resource.
 
 ### filter (object, optional)
 Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
-- **protocol** (string): Protocol filter for flows (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"TCP"`, `"SOCKS5+HTTPS"`, `"SOCKS5+HTTP"`).
+- **protocol** (string): Protocol filter for flows (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"gRPC-Web"`, `"TCP"`, `"SOCKS5+HTTPS"`, `"SOCKS5+HTTP"`).
 - **scheme** (string): URL scheme / transport filter for flows (e.g. `"https"`, `"http"`, `"wss"`, `"ws"`, `"tcp"`). Use to find TLS flows: `"https"` returns HTTP/1.x, HTTP/2, gRPC flows over TLS. WebSocket over TLS uses `"wss"`, not `"https"`.
 - **method** (string): HTTP method filter for flows (e.g. `"GET"`, `"POST"`).
 - **url_pattern** (string): URL substring match for flows (e.g. `"/api/"`).
