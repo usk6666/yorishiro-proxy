@@ -149,13 +149,6 @@ func (h *Handler) handlePlaintextCONNECT(ctx context.Context, conn net.Conn, con
 			return h.handleWebSocket(ctx, conn, req, reqURL)
 		}
 
-		// gRPC-Web detection in plaintext CONNECT tunnel.
-		if h.isGRPCWebRequest(req.Headers) {
-			bodyResult := readAndCaptureBody(req, h.connLogger(ctx))
-			removeHopByHopHeadersRaw(&req.Headers)
-			return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, h.connLogger(ctx))
-		}
-
 		if err := h.handlePlaintextCONNECTRequest(ctx, conn, connectAuthority, req, reqURL); err != nil {
 			return err
 		}
@@ -205,6 +198,11 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 	}
 
 	removeHopByHopHeadersRaw(&req.Headers)
+
+	// gRPC-Web detection in plaintext CONNECT tunnel (after scope/safety checks).
+	if h.isGRPCWebRequest(req.Headers) {
+		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, logger)
+	}
 
 	sp := sendRecordParams{
 		connID:       connID,
@@ -471,11 +469,6 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 		logAnomalyWarnings(h.Logger, req.Anomalies, req.Method, req.RequestURI)
 		tlsConn.SetReadDeadline(time.Time{})
 
-		// gRPC-Web detection: check Content-Type before HTTPS flow recording.
-		if h.isGRPCWebRequest(req.Headers) {
-			return h.handleGRPCWebHTTPS(ctx, tlsConn, connectHost, req)
-		}
-
 		if err := h.handleHTTPSRequest(ctx, tlsConn, connectHost, req, tlsMeta); err != nil {
 			return err
 		}
@@ -536,6 +529,11 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	}
 
 	removeHopByHopHeadersRaw(&req.Headers)
+
+	// gRPC-Web detection in HTTPS CONNECT tunnel (after scope/safety checks).
+	if h.isGRPCWebRequest(req.Headers) {
+		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, true, extractTLSState(conn), h.connLogger(ctx))
+	}
 
 	// Build plugin ConnInfo.
 	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}

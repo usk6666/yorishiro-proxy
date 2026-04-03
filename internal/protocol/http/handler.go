@@ -372,14 +372,6 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 		return h.handleWebSocket(ctx, conn, req, reqURL)
 	}
 
-	// gRPC-Web detection: check Content-Type before normal HTTP flow recording.
-	// gRPC-Web requests are forwarded as-is and recorded via the gRPC-Web handler.
-	if h.isGRPCWebRequest(req.Headers) {
-		bodyResult := readAndCaptureBody(req, logger)
-		removeHopByHopHeadersRaw(&req.Headers)
-		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, logger)
-	}
-
 	bodyResult := readAndCaptureBody(req, logger)
 
 	// Safety filter enforcement.
@@ -395,6 +387,12 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	}
 
 	removeHopByHopHeadersRaw(&req.Headers)
+
+	// gRPC-Web detection: after safety filter and hop-by-hop removal.
+	// gRPC-Web requests are forwarded as-is and recorded via the gRPC-Web handler.
+	if h.isGRPCWebRequest(req.Headers) {
+		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, logger)
+	}
 
 	// Build plugin ConnInfo for hook data.
 	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}

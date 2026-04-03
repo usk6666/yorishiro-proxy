@@ -16,45 +16,13 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
-// handleGRPCWebHTTPS handles a gRPC-Web request received over HTTPS (inside a
-// CONNECT tunnel). It builds the HTTPS URL, reads the body, strips hop-by-hop
-// headers, extracts TLS state, and delegates to handleGRPCWeb.
-func (h *Handler) handleGRPCWebHTTPS(ctx context.Context, conn net.Conn, connectHost string, req *parser.RawRequest) error {
-	logger := h.connLogger(ctx)
-
-	// Build HTTPS URL (same logic as handleHTTPSRequest).
-	effectiveHost := h.resolveEffectiveHost(ctx, connectHost, req)
-	reqURL := buildHTTPSURL(req, effectiveHost)
-
-	bodyResult := readAndCaptureBody(req, logger)
-	removeHopByHopHeadersRaw(&req.Headers)
-
-	// Extract TLS state for gRPC-Web recording.
-	var tlsState *tls.ConnectionState
+// extractTLSState returns the TLS connection state if conn is a *tls.Conn, nil otherwise.
+func extractTLSState(conn net.Conn) *tls.ConnectionState {
 	if tlsConn, ok := conn.(*tls.Conn); ok {
 		state := tlsConn.ConnectionState()
-		tlsState = &state
+		return &state
 	}
-
-	return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, true, tlsState, logger)
-}
-
-// buildHTTPSURL constructs an HTTPS URL from the request and effective host.
-func buildHTTPSURL(req *parser.RawRequest, effectiveHost string) *url.URL {
-	reqURL := &url.URL{
-		Scheme: "https",
-		Host:   effectiveHost,
-		Path:   "/",
-	}
-	if u, err := url.ParseRequestURI(req.RequestURI); err == nil {
-		reqURL.Path = u.Path
-		reqURL.RawQuery = u.RawQuery
-		reqURL.Fragment = u.Fragment
-	}
-	if reqURL.Host == "" {
-		reqURL.Host = effectiveHost
-	}
-	return reqURL
+	return nil
 }
 
 // isGRPCWebRequest reports whether the request has a gRPC-Web Content-Type
@@ -126,7 +94,7 @@ func (h *Handler) handleGRPCWeb(ctx context.Context, conn net.Conn, req *parser.
 		logger.Error("gRPC-Web flow recording failed", "error", err)
 	}
 
-	logger.Info("grpc-web request",
+	logger.Debug("grpc-web request",
 		"method", req.Method,
 		"url", reqURL.String(),
 		"status", fwd.resp.StatusCode,
