@@ -15,7 +15,7 @@ func buildProtocolSummary(protocol, sessionType string, msgs []*flow.Message) ma
 		return buildWebSocketSummary(msgs)
 	case "HTTP/2":
 		return buildHTTP2Summary(sessionType, msgs)
-	case "gRPC":
+	case "gRPC", "gRPC-Web":
 		return buildGRPCSummary(msgs)
 	case "TCP":
 		return buildTCPSummary(msgs)
