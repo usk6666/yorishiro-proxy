@@ -149,6 +149,13 @@ func (h *Handler) handlePlaintextCONNECT(ctx context.Context, conn net.Conn, con
 			return h.handleWebSocket(ctx, conn, req, reqURL)
 		}
 
+		// gRPC-Web detection in plaintext CONNECT tunnel.
+		if h.isGRPCWebRequest(req.Headers) {
+			bodyResult := readAndCaptureBody(req, h.connLogger(ctx))
+			removeHopByHopHeadersRaw(&req.Headers)
+			return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, h.connLogger(ctx))
+		}
+
 		if err := h.handlePlaintextCONNECTRequest(ctx, conn, connectAuthority, req, reqURL); err != nil {
 			return err
 		}
@@ -463,6 +470,11 @@ func (h *Handler) httpsLoop(ctx context.Context, tlsConn *tls.Conn, connectHost 
 
 		logAnomalyWarnings(h.Logger, req.Anomalies, req.Method, req.RequestURI)
 		tlsConn.SetReadDeadline(time.Time{})
+
+		// gRPC-Web detection: check Content-Type before HTTPS flow recording.
+		if h.isGRPCWebRequest(req.Headers) {
+			return h.handleGRPCWebHTTPS(ctx, tlsConn, connectHost, req)
+		}
 
 		if err := h.handleHTTPSRequest(ctx, tlsConn, connectHost, req, tlsMeta); err != nil {
 			return err

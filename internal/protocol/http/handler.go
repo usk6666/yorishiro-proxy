@@ -18,6 +18,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -72,6 +73,7 @@ type Handler struct {
 	passthrough       *proxy.PassthroughList
 	transformPipeline *rules.Pipeline
 	h2Handler         H2Handler
+	grpcWebHandler    *grpcweb.Handler
 	pluginEngine      *plugin.Engine
 	tlsTransport      httputil.TLSTransport
 	detector          *fingerprint.Detector
@@ -136,6 +138,14 @@ func (h *Handler) TransformPipeline() *rules.Pipeline {
 // negotiates "h2" during the TLS handshake in a CONNECT tunnel.
 func (h *Handler) SetH2Handler(handler H2Handler) {
 	h.h2Handler = handler
+}
+
+// SetGRPCWebHandler sets the gRPC-Web handler used for gRPC-Web-specific
+// flow recording. When set, requests with Content-Type: application/grpc-web*
+// are forwarded as-is and recorded as gRPC-Web sessions with parsed
+// service/method metadata instead of plain HTTP/1.x flows.
+func (h *Handler) SetGRPCWebHandler(handler *grpcweb.Handler) {
+	h.grpcWebHandler = handler
 }
 
 // SetPluginEngine sets the plugin engine used to dispatch hook events
@@ -360,6 +370,14 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	// WebSocket upgrade: check using raw headers.
 	if isWebSocketUpgradeRaw(req.Headers) {
 		return h.handleWebSocket(ctx, conn, req, reqURL)
+	}
+
+	// gRPC-Web detection: check Content-Type before normal HTTP flow recording.
+	// gRPC-Web requests are forwarded as-is and recorded via the gRPC-Web handler.
+	if h.isGRPCWebRequest(req.Headers) {
+		bodyResult := readAndCaptureBody(req, logger)
+		removeHopByHopHeadersRaw(&req.Headers)
+		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, logger)
 	}
 
 	bodyResult := readAndCaptureBody(req, logger)
