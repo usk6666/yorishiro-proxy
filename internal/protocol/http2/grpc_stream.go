@@ -8,8 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
-	"net/textproto"
 	"net/url"
 	"strings"
 	"sync"
@@ -20,31 +18,10 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
-
-// ensureGoHTTPReq lazily builds sc.req from h2req if not already built.
-// This is needed by the gRPC intercept path which manipulates sc.req.Body,
-// sc.req.Header, etc. The unary HTTP/2 path does NOT call this.
-func ensureGoHTTPReq(sc *streamContext) error {
-	if sc.req != nil {
-		return nil
-	}
-	goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
-	if err != nil {
-		return err
-	}
-	// Sync URL from resolved reqURL.
-	if sc.reqURL != nil {
-		goReq.URL = cloneURL(sc.reqURL)
-		goReq.Host = sc.reqURL.Host
-	}
-	sc.req = goReq
-	return nil
-}
 
 // grpcStreamState holds the mutable state accumulated during gRPC stream
 // processing. It is passed between the sub-methods of handleGRPCStream.
@@ -704,22 +681,6 @@ func (h *Handler) finalizeGRPCStream(sc *streamContext, state *grpcStreamState, 
 // grpcTrailerKeyList is the canonical list of gRPC trailer header keys.
 var grpcTrailerKeyList = []string{"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"}
 
-// isGRPCTrailersOnly detects a gRPC Trailers-Only response. Per the gRPC
-// HTTP/2 spec, a Trailers-Only response is a single HEADERS frame containing
-// both response headers and trailers (including grpc-status) with END_STREAM.
-//
-// Go's http2.Transport maps this into resp.Header containing grpc-status and
-// resp.Trailer being empty, because there is no separate trailing HEADERS frame.
-func isGRPCTrailersOnly(resp *gohttp.Response) bool {
-	if len(resp.Trailer) > 0 {
-		return false
-	}
-	// Check if Grpc-Status is present in resp.Header (case-insensitive via
-	// Go's canonical header key format).
-	_, ok := resp.Header["Grpc-Status"]
-	return ok
-}
-
 // isGRPCTrailerKey reports whether the header key is a gRPC trailer key
 // (case-insensitive comparison).
 func isGRPCTrailerKey(key string) bool {
@@ -749,14 +710,6 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 	}
 
 	h.resolveSchemeAndHost(sc)
-
-	// Build gohttp.Request lazily for gRPC intercept path which still needs it
-	// for Body management and header Set/Add/Del operations.
-	if err := ensureGoHTTPReq(sc); err != nil {
-		sc.logger.Error("HTTP/2 gRPC: failed to build gohttp request", "error", err)
-		writeErrorResponse(sc.w, httputil.StatusBadRequest)
-		return true
-	}
 
 	if h.checkTargetScope(sc) {
 		return true
@@ -796,10 +749,6 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 func (h *Handler) handleGRPCIntercept(sc *streamContext, matchedRules []string) bool {
 	body, jsonBody, frame, ok := h.bufferGRPCUnaryBody(sc)
 	if !ok {
-		// bufferGRPCUnaryBody restores sc.req.Body on failure. Sync to
-		// sc.h2req.Body so the streaming path (which reads from h2req)
-		// picks up the restored body.
-		sc.h2req.Body = sc.req.Body
 		return false
 	}
 
@@ -817,7 +766,7 @@ func (h *Handler) handleGRPCIntercept(sc *streamContext, matchedRules []string) 
 // if the body is a valid unary request. On failure, the request body is restored
 // and false is returned.
 func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody string, frame protobuf.Frame, ok bool) {
-	reqBody := io.LimitReader(sc.req.Body, intercept.MaxRawBytesSize+1)
+	reqBody := io.LimitReader(sc.h2req.Body, intercept.MaxRawBytesSize+1)
 
 	// Step 1: Read the 5-byte gRPC frame header.
 	var header [5]byte
@@ -825,14 +774,14 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 	if err != nil {
 		sc.logger.Debug("gRPC intercept: failed to read frame header", "error", err)
 		// Restore any partial data + remaining body for streaming fallback.
-		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:n]), sc.req.Body))
+		sc.h2req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:n]), sc.h2req.Body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
 	compressed := header[0]
 	if compressed > 1 {
 		sc.logger.Debug("gRPC intercept: invalid compressed flag", "flag", compressed)
-		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		sc.h2req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.h2req.Body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
@@ -840,7 +789,7 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 	if msgLen > config.MaxGRPCMessageSize {
 		sc.logger.Warn("gRPC intercept: frame payload too large, releasing",
 			"msg_len", msgLen, "max", config.MaxGRPCMessageSize)
-		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		sc.h2req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.h2req.Body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
@@ -849,7 +798,7 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 	if totalFrameSize > intercept.MaxRawBytesSize {
 		sc.logger.Warn("gRPC intercept: request body too large, releasing",
 			"body_len", totalFrameSize, "max", intercept.MaxRawBytesSize)
-		sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.req.Body))
+		sc.h2req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(header[:]), sc.h2req.Body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
@@ -864,7 +813,7 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 			var read []byte
 			read = append(read, header[:]...)
 			read = append(read, payload[:pn]...)
-			sc.req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(read), sc.req.Body))
+			sc.h2req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(read), sc.h2req.Body))
 			return nil, "", protobuf.Frame{}, false
 		}
 	}
@@ -896,15 +845,15 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 		case <-time.After(100 * time.Millisecond):
 			// Timeout — likely a streaming RPC. Restore body and fall back.
 			sc.logger.Warn("gRPC streaming intercept modify_and_forward not supported, releasing",
-				"method", sc.req.Method, "url", sc.reqURL.String())
-			sc.req.Body = io.NopCloser(io.MultiReader(
+				"method", sc.h2req.Method, "url", sc.reqURL.String())
+			sc.h2req.Body = io.NopCloser(io.MultiReader(
 				bytes.NewReader(firstFrame),
-				sc.req.Body,
+				sc.h2req.Body,
 			))
 			return nil, "", protobuf.Frame{}, false
 		case <-sc.ctx.Done():
 			sc.logger.Debug("gRPC intercept: context cancelled during unary detection")
-			sc.req.Body = io.NopCloser(bytes.NewReader(firstFrame))
+			sc.h2req.Body = io.NopCloser(bytes.NewReader(firstFrame))
 			return nil, "", protobuf.Frame{}, false
 		}
 	}
@@ -916,11 +865,11 @@ func (h *Handler) bufferGRPCUnaryBody(sc *streamContext) (body []byte, jsonBody 
 		Payload:    payload,
 	}
 
-	grpcEncoding := sc.req.Header.Get("Grpc-Encoding")
+	grpcEncoding := hpackGetHeader(sc.h2req.AllHeaders, "grpc-encoding")
 	jsonBody, _, decodeErr := decodeGRPCPayload(frame.Payload, frame.Compressed != 0, grpcEncoding)
 	if decodeErr != nil {
 		sc.logger.Debug("gRPC intercept: protobuf decode failed, releasing", "error", decodeErr)
-		sc.req.Body = io.NopCloser(bytes.NewReader(body))
+		sc.h2req.Body = io.NopCloser(bytes.NewReader(body))
 		return nil, "", protobuf.Frame{}, false
 	}
 
@@ -1001,64 +950,72 @@ func (h *Handler) applyGRPCInterceptAction(sc *streamContext, action intercept.I
 		if action.IsRawMode() {
 			sc.logger.Warn("gRPC intercept raw mode not supported, releasing",
 				"method", sc.h2req.Method, "url", sc.reqURL.String())
-			sc.req.Body = io.NopCloser(bytes.NewReader(body))
-			sc.h2req.Body = sc.req.Body
+			sc.h2req.Body = io.NopCloser(bytes.NewReader(body))
 			return false
 		}
 		if action.OverrideBody != nil {
-			sc.req.Body = io.NopCloser(bytes.NewReader([]byte(*action.OverrideBody)))
+			sc.h2req.Body = io.NopCloser(bytes.NewReader([]byte(*action.OverrideBody)))
 		} else {
-			sc.req.Body = io.NopCloser(bytes.NewReader(body))
+			sc.h2req.Body = io.NopCloser(bytes.NewReader(body))
 		}
-		h.applyGRPCInterceptHeaderMods(sc, action)
-		// Sync modifications back to h2req so the streaming upstream path
-		// (which reads from sc.h2req) picks up the changes.
-		sc.h2req.Body = sc.req.Body
-		// Sync pseudo-headers if intercept changed Host or URL.
-		if host := sc.req.Host; host != "" {
-			sc.h2req.Authority = host
-		} else if host := sc.req.Header.Get("Host"); host != "" {
-			sc.h2req.Authority = host
+		// Apply header modifications directly to hpack headers.
+		sc.h2req.AllHeaders = applyGRPCInterceptHeaderModsHpack(sc.h2req.AllHeaders, action)
+		// Sync pseudo-header convenience fields from modified AllHeaders.
+		if authority := hpackGetPseudo(sc.h2req.AllHeaders, ":authority"); authority != "" {
+			sc.h2req.Authority = authority
 		}
-		if sc.req.URL != nil {
-			sc.h2req.Path = sc.req.URL.RequestURI()
+		if path := hpackGetPseudo(sc.h2req.AllHeaders, ":path"); path != "" {
+			sc.h2req.Path = path
 		}
-		// Rebuild AllHeaders: update pseudo-header values from h2req fields,
-		// then replace non-pseudo headers from gohttp.Header.
-		sc.h2req.AllHeaders = syncH2ReqHeaders(sc.h2req, sc.req.Header)
 		return false
 
 	default:
-		// Release: restore original body and sync to h2req.
-		sc.req.Body = io.NopCloser(bytes.NewReader(body))
-		sc.h2req.Body = sc.req.Body
+		// Release: restore original body.
+		sc.h2req.Body = io.NopCloser(bytes.NewReader(body))
 		return false
 	}
 }
 
-// applyGRPCInterceptHeaderMods applies header modifications from an intercept
-// action to the gRPC request. Only header-level modifications are applied here;
-// body modifications are handled by the caller.
-func (h *Handler) applyGRPCInterceptHeaderMods(sc *streamContext, action intercept.InterceptAction) {
+// applyGRPCInterceptHeaderModsHpack applies header modifications from an
+// intercept action directly to hpack header fields. Returns the modified
+// header slice. Header names are lowercased per HTTP/2 spec.
+func applyGRPCInterceptHeaderModsHpack(headers []hpack.HeaderField, action intercept.InterceptAction) []hpack.HeaderField {
+	// Override: replace the first matching header value, or add if not found.
+	// Pseudo-headers (names starting with ":") are skipped to prevent injection.
 	for k, v := range action.OverrideHeaders {
-		sc.req.Header.Set(k, v)
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
+		found := false
+		for i, hf := range headers {
+			if strings.EqualFold(hf.Name, lower) && !strings.HasPrefix(hf.Name, ":") {
+				headers[i] = hpack.HeaderField{Name: lower, Value: v}
+				found = true
+				break
+			}
+		}
+		if !found {
+			headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
+		}
 	}
+	// Add: append new header fields. Pseudo-headers are skipped.
 	for k, v := range action.AddHeaders {
-		sc.req.Header.Add(k, v)
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
+		headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
 	}
+	// Remove: delete all matching header fields (case-insensitive).
+	// Pseudo-headers are skipped.
 	for _, k := range action.RemoveHeaders {
-		sc.req.Header.Del(k)
+		if strings.HasPrefix(strings.ToLower(k), ":") {
+			continue
+		}
+		headers = hpackDelHeader(headers, k)
 	}
-}
-
-// writeGRPCStatus writes a gRPC error response with the given status code
-// and message. This is used when subsystems block a gRPC stream.
-// The message is percent-encoded per the gRPC specification for grpc-message.
-func writeGRPCStatus(w gohttp.ResponseWriter, httpStatus int, grpcStatus int, message string) {
-	w.Header().Set("Content-Type", "application/grpc")
-	w.Header().Set("Grpc-Status", fmt.Sprintf("%d", grpcStatus))
-	w.Header().Set("Grpc-Message", percentEncodeGRPCMessage(message))
-	w.WriteHeader(httpStatus)
+	return headers
 }
 
 // writeGRPCStatusH2 writes a gRPC error response using h2ResponseWriter
@@ -1124,29 +1081,6 @@ func (h *Handler) applyOutputFilterHpackTrailers(trailers []hpack.HeaderField, l
 	return result
 }
 
-// syncH2ReqHeaders rebuilds AllHeaders from the h2req's pseudo-header fields
-// and the modified gohttp.Header. This ensures both pseudo-headers and regular
-// headers in AllHeaders reflect intercept modifications.
-func syncH2ReqHeaders(req *h2Request, goHeaders gohttp.Header) []hpack.HeaderField {
-	// Rebuild pseudo-headers from the h2req convenience fields.
-	var result []hpack.HeaderField
-	if req.Method != "" {
-		result = append(result, hpack.HeaderField{Name: ":method", Value: req.Method})
-	}
-	if req.Scheme != "" {
-		result = append(result, hpack.HeaderField{Name: ":scheme", Value: req.Scheme})
-	}
-	if req.Authority != "" {
-		result = append(result, hpack.HeaderField{Name: ":authority", Value: req.Authority})
-	}
-	if req.Path != "" {
-		result = append(result, hpack.HeaderField{Name: ":path", Value: req.Path})
-	}
-	// Append non-pseudo headers from gohttp.Header (intercept-modified).
-	result = append(result, goHTTPHeaderToHpack(goHeaders)...)
-	return result
-}
-
 // percentEncodeGRPCMessage percent-encodes a gRPC status message per the
 // gRPC wire format specification. Only unreserved characters (RFC 3986)
 // and space are passed through; all others are percent-encoded.
@@ -1166,42 +1100,11 @@ func percentEncodeGRPCMessage(msg string) string {
 	return buf.String()
 }
 
-// handleGRPCResponseIntercept checks whether the gRPC response matches
-// intercept rules and, if so, buffers the unary response body + trailers
-// for AI agent review. This function takes a gohttp.Response for
-// compatibility with the intercept API and tests.
-func (h *Handler) handleGRPCResponseIntercept(sc *streamContext, state *grpcStreamState, resp *gohttp.Response) bool {
-	if h.InterceptEngine == nil || h.InterceptQueue == nil {
-		return false
-	}
-
-	if isGRPCTrailersOnly(resp) {
-		return false
-	}
-
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, httpHeaderToRawHeaders(resp.Header))
-	if len(matchedRules) == 0 {
-		return false
-	}
-
-	body, jsonBody, frame, trailers, ok := h.bufferGRPCUnaryResponseBody(sc, resp)
-	if !ok {
-		return false
-	}
-
-	action := h.enqueueGRPCResponseIntercept(sc, resp, body, jsonBody, frame, trailers, matchedRules)
-	h.applyGRPCResponseInterceptActionH2(sc, state, resp, nil, action, body, trailers)
-	return true
-}
-
 // handleGRPCResponseInterceptH2 checks whether the gRPC response from
 // StreamRoundTripResult matches intercept rules and, if so, buffers the
 // unary response body + trailers for AI agent review. Returns true if the
 // response was fully handled (intercepted), false if the normal streaming
 // path should continue.
-//
-// This function bridges to the gohttp-based intercept API by converting
-// the StreamRoundTripResult headers to gohttp.Response temporarily.
 func (h *Handler) handleGRPCResponseInterceptH2(sc *streamContext, state *grpcStreamState, result *StreamRoundTripResult) bool {
 	if h.InterceptEngine == nil || h.InterceptQueue == nil {
 		return false
@@ -1220,35 +1123,19 @@ func (h *Handler) handleGRPCResponseInterceptH2(sc *streamContext, state *grpcSt
 	}
 
 	// Buffer the response body for intercept processing.
-	// Convert to gohttp.Response temporarily for the intercept API.
-	resp := streamResultToGoHTTPResponse(result)
-
-	body, jsonBody, frame, _, ok := h.bufferGRPCUnaryResponseBody(sc, resp)
+	body, jsonBody, frame, ok := h.bufferGRPCUnaryResponseBodyH2(sc, result)
 	if !ok {
-		// Not a unary response or decode failed — fall back to streaming path.
-		// Restore the body on the result for the streaming path.
-		result.Body = resp.Body
 		return false
 	}
 
-	// After body is fully consumed by bufferGRPCUnaryResponseBody, trailers
-	// become available via result.Trailers(). Populate resp.Trailer so that
-	// the intercept enqueue/apply logic has access to them.
+	// After body is fully consumed, trailers become available via result.Trailers().
+	var trailers []hpack.HeaderField
 	if hpackTrailers, err := result.Trailers(); err == nil {
-		for _, hf := range hpackTrailers {
-			if strings.HasPrefix(hf.Name, ":") {
-				continue
-			}
-			resp.Trailer.Set(textproto.CanonicalMIMEHeaderKey(hf.Name), hf.Value)
-		}
+		trailers = cloneHpackHeaders(hpackTrailers)
 	}
 
-	// Clone trailers from resp.Trailer so enqueue/apply see the final trailers,
-	// including grpc-status/grpc-message populated from result.Trailers() above.
-	trailers := resp.Trailer.Clone()
-
-	action := h.enqueueGRPCResponseIntercept(sc, resp, body, jsonBody, frame, trailers, matchedRules)
-	h.applyGRPCResponseInterceptActionH2(sc, state, resp, result, action, body, trailers)
+	action := h.enqueueGRPCResponseInterceptH2(sc, result, body, jsonBody, frame, trailers, matchedRules)
+	h.applyGRPCResponseInterceptActionH2(sc, state, result.StatusCode, result.Headers, action, body, trailers)
 	return true
 }
 
@@ -1264,75 +1151,53 @@ func isGRPCTrailersOnlyH2(result *StreamRoundTripResult) bool {
 	return false
 }
 
-// streamResultToGoHTTPResponse converts a StreamRoundTripResult to a
-// gohttp.Response for compatibility with the intercept API.
-func streamResultToGoHTTPResponse(result *StreamRoundTripResult) *gohttp.Response {
-	resp := &gohttp.Response{
-		StatusCode: result.StatusCode,
-		Status:     httputil.FormatStatus(result.StatusCode),
-		Proto:      "HTTP/2.0",
-		ProtoMajor: 2,
-		ProtoMinor: 0,
-		Header:     hpackToGoHTTPHeader(result.Headers),
-		Body:       result.Body,
-		Trailer:    make(gohttp.Header),
-	}
-	return resp
-}
-
-// bufferGRPCUnaryResponseBody reads the response body and validates it as
-// a gRPC unary response (single DATA frame). It reads the entire body to
-// populate resp.Trailer, then checks for a single frame.
-//
-// Returns the raw body bytes, decoded JSON, the single frame, trailers,
-// and true if the body is a valid unary response. On failure, the response
+// bufferGRPCUnaryResponseBodyH2 reads the response body from a
+// StreamRoundTripResult and validates it as a gRPC unary response (single
+// DATA frame). Returns the raw body bytes, decoded JSON, the single frame,
+// and true if the body is a valid unary response. On failure, the result
 // body is replaced with unread data and false is returned.
-func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Response) (body []byte, jsonBody string, frame protobuf.Frame, trailers gohttp.Header, ok bool) {
-	origBody := resp.Body
+func (h *Handler) bufferGRPCUnaryResponseBodyH2(sc *streamContext, result *StreamRoundTripResult) (body []byte, jsonBody string, frame protobuf.Frame, ok bool) {
+	origBody := result.Body
 
 	fullBody, err := io.ReadAll(io.LimitReader(origBody, intercept.MaxRawBytesSize+1))
 	if err != nil {
 		sc.logger.Debug("gRPC response intercept: failed to read body", "error", err)
-		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(fullBody), origBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(io.MultiReader(bytes.NewReader(fullBody), origBody))
+		return nil, "", protobuf.Frame{}, false
 	}
 
 	if len(fullBody) > intercept.MaxRawBytesSize {
 		sc.logger.Warn("gRPC response intercept: body too large, releasing",
 			"body_len", len(fullBody), "max", intercept.MaxRawBytesSize)
-		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(fullBody), origBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(io.MultiReader(bytes.NewReader(fullBody), origBody))
+		return nil, "", protobuf.Frame{}, false
 	}
-
-	// After reading to EOF, resp.Trailer may be populated by Go's http2.Transport.
-	// For StreamRoundTripResult, trailers are accessed via Trailers() after body EOF.
-	trailers = cloneHeaders(resp.Trailer)
 
 	if len(fullBody) == 0 {
 		sc.logger.Debug("gRPC response intercept: empty body, skipping")
-		return nil, "", protobuf.Frame{}, nil, false
+		return nil, "", protobuf.Frame{}, false
 	}
 
 	if len(fullBody) < 5 {
 		sc.logger.Debug("gRPC response intercept: body too short for frame header",
 			"len", len(fullBody))
-		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, false
 	}
 
 	compressed := fullBody[0]
 	if compressed > 1 {
 		sc.logger.Debug("gRPC response intercept: invalid compressed flag", "flag", compressed)
-		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, false
 	}
 
 	msgLen := binary.BigEndian.Uint32(fullBody[1:5])
 	if msgLen > config.MaxGRPCMessageSize {
 		sc.logger.Warn("gRPC response intercept: frame payload too large, releasing",
 			"msg_len", msgLen, "max", config.MaxGRPCMessageSize)
-		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, false
 	}
 
 	expectedLen := 5 + int(msgLen)
@@ -1341,15 +1206,15 @@ func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Re
 		sc.logger.Info("gRPC streaming response intercept not supported, releasing",
 			"method", sc.h2req.Method, "url", sc.reqURL.String(),
 			"body_len", len(fullBody), "first_frame_len", expectedLen)
-		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, false
 	}
 
 	if len(fullBody) < expectedLen {
 		sc.logger.Debug("gRPC response intercept: incomplete frame",
 			"body_len", len(fullBody), "expected", expectedLen)
-		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, false
 	}
 
 	payload := fullBody[5:expectedLen]
@@ -1358,42 +1223,43 @@ func (h *Handler) bufferGRPCUnaryResponseBody(sc *streamContext, resp *gohttp.Re
 		Payload:    payload,
 	}
 
-	respEncoding := resp.Header.Get("Grpc-Encoding")
+	respEncoding := hpackGetHeader(result.Headers, "grpc-encoding")
 	jsonBody, _, decodeErr := decodeGRPCPayload(frame.Payload, frame.Compressed != 0, respEncoding)
 	if decodeErr != nil {
 		sc.logger.Debug("gRPC response intercept: protobuf decode failed, releasing", "error", decodeErr)
-		resp.Body = io.NopCloser(bytes.NewReader(fullBody))
-		return nil, "", protobuf.Frame{}, nil, false
+		result.Body = io.NopCloser(bytes.NewReader(fullBody))
+		return nil, "", protobuf.Frame{}, false
 	}
 
-	return fullBody, jsonBody, frame, trailers, true
+	return fullBody, jsonBody, frame, true
 }
 
-// enqueueGRPCResponseIntercept enqueues the decoded gRPC unary response for
-// AI agent review and waits for the agent's action (or timeout).
-func (h *Handler) enqueueGRPCResponseIntercept(sc *streamContext, resp *gohttp.Response, body []byte, jsonBody string, frame protobuf.Frame, trailers gohttp.Header, matchedRules []string) intercept.InterceptAction {
+// enqueueGRPCResponseInterceptH2 enqueues the decoded gRPC unary response for
+// AI agent review and waits for the agent's action (or timeout). Uses hpack
+// native types throughout.
+func (h *Handler) enqueueGRPCResponseInterceptH2(sc *streamContext, result *StreamRoundTripResult, body []byte, jsonBody string, frame protobuf.Frame, trailers []hpack.HeaderField, matchedRules []string) intercept.InterceptAction {
 	sc.logger.Info("gRPC unary response intercepted",
 		"method", sc.h2req.Method, "url", sc.reqURL.String(),
-		"status", resp.StatusCode, "matched_rules", matchedRules)
+		"status", result.StatusCode, "matched_rules", matchedRules)
 
 	opts := intercept.EnqueueOpts{
 		RawBytes: body,
-		Metadata: h.buildGRPCResponseInterceptMetadata(sc, resp, frame, trailers),
+		Metadata: buildGRPCResponseInterceptMetadataH2(result.Headers, frame, trailers),
 	}
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		sc.h2req.Method, sc.reqURL, resp.StatusCode, hpackToRawHeaders(goHTTPHeaderToHpack(resp.Header)), []byte(jsonBody), matchedRules, opts,
+		sc.h2req.Method, sc.reqURL, result.StatusCode, hpackToRawHeaders(result.Headers), []byte(jsonBody), matchedRules, opts,
 	)
 	defer h.InterceptQueue.Remove(id)
 
 	return h.waitGRPCInterceptAction(sc, id, actionCh)
 }
 
-// buildGRPCResponseInterceptMetadata returns gRPC-specific metadata for
-// attaching to an enqueued response intercept item.
-func (h *Handler) buildGRPCResponseInterceptMetadata(sc *streamContext, resp *gohttp.Response, frame protobuf.Frame, trailers gohttp.Header) map[string]string {
-	contentType := resp.Header.Get("Content-Type")
-	respEncoding := resp.Header.Get("Grpc-Encoding")
+// buildGRPCResponseInterceptMetadataH2 returns gRPC-specific metadata for
+// attaching to an enqueued response intercept item. Uses hpack native types.
+func buildGRPCResponseInterceptMetadataH2(respHeaders []hpack.HeaderField, frame protobuf.Frame, trailers []hpack.HeaderField) map[string]string {
+	contentType := hpackGetHeader(respHeaders, "content-type")
+	respEncoding := hpackGetHeader(respHeaders, "grpc-encoding")
 	compressed := "false"
 	if frame.Compressed != 0 {
 		compressed = "true"
@@ -1405,10 +1271,11 @@ func (h *Handler) buildGRPCResponseInterceptMetadata(sc *streamContext, resp *go
 		"original_frames":   "1",
 	}
 
-	for key, vals := range trailers {
-		if len(vals) > 0 {
-			metadata["trailer_"+strings.ToLower(key)] = vals[0]
+	for _, hf := range trailers {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
 		}
+		metadata["trailer_"+strings.ToLower(hf.Name)] = hf.Value
 	}
 
 	return metadata
@@ -1417,7 +1284,7 @@ func (h *Handler) buildGRPCResponseInterceptMetadata(sc *streamContext, resp *go
 // applyGRPCResponseInterceptActionH2 applies the AI agent's action to the
 // gRPC response. It writes the (possibly modified) response through
 // subsystems and sends it to the client using h2ResponseWriter.
-func (h *Handler) applyGRPCResponseInterceptActionH2(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, result *StreamRoundTripResult, action intercept.InterceptAction, body []byte, trailers gohttp.Header) {
+func (h *Handler) applyGRPCResponseInterceptActionH2(sc *streamContext, state *grpcStreamState, statusCode int, respHeaders []hpack.HeaderField, action intercept.InterceptAction, body []byte, trailers []hpack.HeaderField) {
 	switch action.Type {
 	case intercept.ActionDrop:
 		writeGRPCStatusH2(sc.w, 10, "intercepted response dropped", sc.logger) // ABORTED
@@ -1433,23 +1300,21 @@ func (h *Handler) applyGRPCResponseInterceptActionH2(sc *streamContext, state *g
 			if action.OverrideResponseBody != nil {
 				body = []byte(*action.OverrideResponseBody)
 			}
-			h.applyGRPCResponseInterceptHeaderMods(resp, action)
+			respHeaders = applyGRPCResponseInterceptHeaderModsHpack(respHeaders, action)
 		}
 	}
 
 	// Pass through subsystems and write to client.
-	body, resp, trailers = h.runGRPCResponseSubsystems(sc, state, resp, body, trailers)
-	_, maskedRespHeaders := h.ApplyOutputFilter(nil, httpHeaderToRawHeaders(resp.Header), sc.logger)
-	resp.Header = rawHeadersToHTTPHeader(maskedRespHeaders)
-	h.writeGRPCInterceptedResponseH2(sc, state, resp, body, trailers)
+	body, respHeaders, trailers = h.runGRPCResponseSubsystemsH2(sc, state, statusCode, respHeaders, body, trailers)
+	_, maskedRespHeaders := h.ApplyOutputFilter(nil, hpackToRawHeaders(respHeaders), sc.logger)
+	respHeaders = rawHeadersToHpack(maskedRespHeaders)
+	h.writeGRPCInterceptedResponseH2(sc, state, statusCode, respHeaders, body, trailers)
 }
 
 // writeGRPCInterceptedResponseH2 writes a buffered gRPC response (from intercept)
-// to the client using h2ResponseWriter.
-func (h *Handler) writeGRPCInterceptedResponseH2(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, body []byte, trailers gohttp.Header) {
-	// Convert gohttp.Header to hpack for response headers.
-	respHpack := goHTTPHeaderToHpack(resp.Header)
-	h.writeGRPCResponseHeadersH2(sc, resp.StatusCode, respHpack)
+// to the client using h2ResponseWriter with hpack native types.
+func (h *Handler) writeGRPCInterceptedResponseH2(sc *streamContext, state *grpcStreamState, statusCode int, respHeaders []hpack.HeaderField, body []byte, trailers []hpack.HeaderField) {
+	h.writeGRPCResponseHeadersH2(sc, statusCode, respHeaders)
 
 	if len(body) > 0 {
 		if err := sc.w.WriteData(body); err != nil {
@@ -1465,145 +1330,102 @@ func (h *Handler) writeGRPCInterceptedResponseH2(sc *streamContext, state *grpcS
 
 	// Apply output filter to trailers before writing.
 	if len(trailers) > 0 {
-		trailers = rawHeadersToHTTPHeader(h.ApplyOutputFilterHeaders(httpHeaderToRawHeaders(trailers), sc.logger))
+		filteredRH := h.ApplyOutputFilterHeaders(hpackToRawHeaders(trailers), sc.logger)
+		trailers = rawHeadersToHpack(filteredRH)
 	}
 
-	// Write trailers using h2ResponseWriter.
-	var hpackTrailers []hpack.HeaderField
-	for key, vals := range trailers {
-		for _, val := range vals {
-			hpackTrailers = append(hpackTrailers, hpack.HeaderField{
-				Name:  strings.ToLower(key),
-				Value: val,
-			})
-		}
-	}
-	if len(hpackTrailers) == 0 {
-		// Trailers-Only fallback: extract gRPC trailer keys from resp.Header.
-		for _, key := range grpcTrailerKeyList {
-			if vals, ok := resp.Header[key]; ok {
-				for _, val := range vals {
-					hpackTrailers = append(hpackTrailers, hpack.HeaderField{
-						Name:  strings.ToLower(key),
-						Value: val,
-					})
-				}
+	if len(trailers) == 0 {
+		// Trailers-Only fallback: extract gRPC trailer keys from response headers.
+		for _, hf := range respHeaders {
+			if isGRPCTrailerKey(hf.Name) {
+				trailers = append(trailers, hf)
 			}
 		}
 	}
-	if len(hpackTrailers) > 0 {
-		if err := sc.w.WriteTrailers(hpackTrailers); err != nil {
+	if len(trailers) > 0 {
+		if err := sc.w.WriteTrailers(trailers); err != nil {
 			sc.logger.Debug("gRPC failed to write intercepted trailers", "error", err)
 		}
 	}
 }
 
-// applyGRPCResponseInterceptHeaderMods applies header modifications from
-// an intercept action to the gRPC response.
-func (h *Handler) applyGRPCResponseInterceptHeaderMods(resp *gohttp.Response, action intercept.InterceptAction) {
+// applyGRPCResponseInterceptHeaderModsHpack applies header modifications from
+// an intercept action to hpack response headers. Returns the modified slice.
+func applyGRPCResponseInterceptHeaderModsHpack(headers []hpack.HeaderField, action intercept.InterceptAction) []hpack.HeaderField {
+	// Override: replace the first matching header value, or add if not found.
+	// Pseudo-headers (names starting with ":") are skipped to prevent injection.
 	for k, v := range action.OverrideResponseHeaders {
-		resp.Header.Set(k, v)
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
+		found := false
+		for i, hf := range headers {
+			if strings.EqualFold(hf.Name, lower) && !strings.HasPrefix(hf.Name, ":") {
+				headers[i] = hpack.HeaderField{Name: lower, Value: v}
+				found = true
+				break
+			}
+		}
+		if !found {
+			headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
+		}
 	}
+	// Add: append new header fields. Pseudo-headers are skipped.
 	for k, v := range action.AddResponseHeaders {
-		resp.Header.Add(k, v)
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, ":") {
+			continue
+		}
+		headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
 	}
+	// Remove: delete all matching header fields (case-insensitive).
+	// Pseudo-headers are skipped.
 	for _, k := range action.RemoveResponseHeaders {
-		resp.Header.Del(k)
+		if strings.HasPrefix(strings.ToLower(k), ":") {
+			continue
+		}
+		headers = hpackDelHeader(headers, k)
 	}
+	return headers
 }
 
-// runGRPCResponseSubsystems passes the buffered gRPC response body through
-// the response-side subsystem pipeline for a single frame. Used after
-// response intercept when the body has been fully buffered.
-func (h *Handler) runGRPCResponseSubsystems(sc *streamContext, state *grpcStreamState, resp *gohttp.Response, body []byte, trailers gohttp.Header) ([]byte, *gohttp.Response, gohttp.Header) {
+// runGRPCResponseSubsystemsH2 passes the buffered gRPC response body through
+// the response-side subsystem pipeline for a single frame using hpack native
+// types. Used after response intercept when the body has been fully buffered.
+func (h *Handler) runGRPCResponseSubsystemsH2(sc *streamContext, state *grpcStreamState, statusCode int, respHeaders []hpack.HeaderField, body []byte, trailers []hpack.HeaderField) ([]byte, []hpack.HeaderField, []hpack.HeaderField) {
 	hasSubsystems := h.SafetyEngine != nil || h.pluginEngine != nil || h.transformPipeline != nil
 	if !hasSubsystems || len(body) < 5 {
-		return body, resp, trailers
+		return body, respHeaders, trailers
 	}
 
 	compressed := body[0]
 	msgLen := binary.BigEndian.Uint32(body[1:5])
 	expectedLen := 5 + int(msgLen)
 	if len(body) < expectedLen {
-		return body, resp, trailers
+		return body, respHeaders, trailers
 	}
 	payload := body[5:expectedLen]
 
-	respEncoding := resp.Header.Get("Grpc-Encoding")
+	respEncoding := hpackGetHeader(respHeaders, "grpc-encoding")
 
 	state.txCtxMu.Lock()
-	wireBytes, blocked := h.processGRPCResponseFrame(
+	wireBytes, blocked := h.processGRPCResponseFrameH2(
 		sc, body, compressed != 0, payload,
-		respEncoding, resp, state.pluginConnInfo, state.txCtx)
+		respEncoding, statusCode, respHeaders,
+		state.pluginConnInfo, state.txCtx)
 	state.txCtxMu.Unlock()
 
 	if blocked {
 		state.mu.Lock()
 		state.respBlocked = true
 		state.mu.Unlock()
-		return nil, resp, gohttp.Header{
-			"Grpc-Status":  {"13"},
-			"Grpc-Message": {percentEncodeGRPCMessage("response blocked by output filter")},
+		blockedTrailers := []hpack.HeaderField{
+			{Name: "grpc-status", Value: "13"},
+			{Name: "grpc-message", Value: percentEncodeGRPCMessage("response blocked by output filter")},
 		}
+		return nil, respHeaders, blockedTrailers
 	}
 
-	return wireBytes, resp, trailers
-}
-
-// httpHeaderToRawHeaders converts gohttp.Header to parser.RawHeaders for
-// the gRPC intercept path which still uses gohttp types internally.
-// Header name casing is preserved as-is.
-func httpHeaderToRawHeaders(h gohttp.Header) parser.RawHeaders {
-	if h == nil {
-		return nil
-	}
-	var rh parser.RawHeaders
-	for name, vals := range h {
-		for _, v := range vals {
-			rh = append(rh, parser.RawHeader{Name: name, Value: v})
-		}
-	}
-	return rh
-}
-
-// rawHeadersToHTTPHeader converts parser.RawHeaders back to gohttp.Header
-// for the gRPC intercept path. Uses Add() which canonicalizes header names.
-// This is acceptable in the gRPC path where headers come from the gohttp
-// response and are already canonicalized.
-func rawHeadersToHTTPHeader(rh parser.RawHeaders) gohttp.Header {
-	if rh == nil {
-		return make(gohttp.Header)
-	}
-	h := make(gohttp.Header, len(rh))
-	for _, hdr := range rh {
-		h.Add(hdr.Name, hdr.Value)
-	}
-	return h
-}
-
-// hpackToGoHTTPHeader converts hpack header fields to gohttp.Header for
-// the gRPC intercept path. Uses Add() which canonicalizes header names.
-func hpackToGoHTTPHeader(fields []hpack.HeaderField) gohttp.Header {
-	h := make(gohttp.Header)
-	for _, hf := range fields {
-		if strings.HasPrefix(hf.Name, ":") {
-			continue
-		}
-		h.Add(hf.Name, hf.Value)
-	}
-	return h
-}
-
-// cloneHeaders creates a deep copy of a gohttp.Header map for the gRPC path.
-func cloneHeaders(h gohttp.Header) gohttp.Header {
-	if h == nil {
-		return nil
-	}
-	clone := make(gohttp.Header, len(h))
-	for k, vals := range h {
-		cp := make([]string, len(vals))
-		copy(cp, vals)
-		clone[k] = cp
-	}
-	return clone
+	return wireBytes, respHeaders, trailers
 }

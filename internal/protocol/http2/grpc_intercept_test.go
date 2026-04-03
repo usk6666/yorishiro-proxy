@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	gohttp "net/http"
 	"net/http/httptest"
 	"net/url"
 	"sync"
@@ -51,14 +50,6 @@ func buildGRPCStreamBody(t *testing.T, payloads ...[]byte) []byte {
 func makeGRPCStreamContext(t *testing.T, body []byte, endStreamCh chan struct{}) (*streamContext, *httptest.ResponseRecorder) {
 	t.Helper()
 	reqURL, _ := url.Parse("https://example.com/test.Service/Method")
-	req := &gohttp.Request{
-		Method: "POST",
-		URL:    reqURL,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc+proto"},
-		},
-		Body: io.NopCloser(bytes.NewReader(body)),
-	}
 	h2req := &h2Request{
 		AllHeaders: []hpack.HeaderField{
 			{Name: ":method", Value: "POST"},
@@ -81,7 +72,6 @@ func makeGRPCStreamContext(t *testing.T, body []byte, endStreamCh chan struct{})
 	}
 	return &streamContext{
 		ctx:    ctx,
-		req:    req,
 		h2req:  h2req,
 		reqURL: reqURL,
 		w:      w,
@@ -124,8 +114,8 @@ func TestHandleGRPCIntercept_UnaryDrop(t *testing.T) {
 		t.Error("expected drop to be handled (return true)")
 	}
 	// Should have written gRPC status.
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 }
 
@@ -161,8 +151,8 @@ func TestHandleGRPCIntercept_UnaryRelease(t *testing.T) {
 		t.Error("expected release to not be handled (return false to continue)")
 	}
 
-	// Body should be restored.
-	restoredBody, err := io.ReadAll(sc.req.Body)
+	// Body should be restored on h2req.
+	restoredBody, err := io.ReadAll(sc.h2req.Body)
 	if err != nil {
 		t.Fatalf("read restored body: %v", err)
 	}
@@ -228,8 +218,8 @@ func TestHandleGRPCIntercept_UnaryModifyAndForward(t *testing.T) {
 		t.Error("expected modify_and_forward to not be handled (continue to streaming path)")
 	}
 
-	// Body should be replaced with the modified frame bytes.
-	resultBody, err := io.ReadAll(sc.req.Body)
+	// Body should be replaced with the modified frame bytes on h2req.
+	resultBody, err := io.ReadAll(sc.h2req.Body)
 	if err != nil {
 		t.Fatalf("read modified body: %v", err)
 	}
@@ -260,9 +250,9 @@ func TestHandleGRPCIntercept_StreamingFallback(t *testing.T) {
 		t.Error("expected streaming fallback to not be handled (return false)")
 	}
 
-	// Body should be restored for streaming path. The first frame's bytes
-	// are prepended back, and the remaining body (second frame) follows.
-	restoredBody, err := io.ReadAll(sc.req.Body)
+	// Body should be restored for streaming path on h2req.
+	// The first frame's bytes are prepended back, and the remaining body follows.
+	restoredBody, err := io.ReadAll(sc.h2req.Body)
 	if err != nil {
 		t.Fatalf("read restored body: %v", err)
 	}
@@ -316,8 +306,8 @@ func TestHandleGRPCIntercept_TimeoutAutoDrop(t *testing.T) {
 	if !handled {
 		t.Error("expected auto-drop timeout to be handled (return true)")
 	}
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 }
 
@@ -403,14 +393,6 @@ func makeGRPCResponseInterceptContext(t *testing.T) (*Handler, *streamContext, *
 	handler.SetInterceptQueue(queue)
 
 	reqURL, _ := url.Parse("https://example.com/test.Service/Method")
-	req := &gohttp.Request{
-		Method: "POST",
-		URL:    reqURL,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc+proto"},
-		},
-		Body: gohttp.NoBody,
-	}
 	rec := httptest.NewRecorder()
 	w := &goHTTPWriterAdapter{ResponseWriter: rec}
 	h2req := &h2Request{
@@ -428,7 +410,6 @@ func makeGRPCResponseInterceptContext(t *testing.T) (*Handler, *streamContext, *
 	}
 	sc := &streamContext{
 		ctx:    context.Background(),
-		req:    req,
 		h2req:  h2req,
 		reqURL: reqURL,
 		w:      w,
@@ -438,29 +419,65 @@ func makeGRPCResponseInterceptContext(t *testing.T) (*Handler, *streamContext, *
 	return handler, sc, rec, queue
 }
 
-// makeGRPCResponse creates an *http.Response with a gRPC body and trailers.
-func makeGRPCResponse(t *testing.T, pbPayload []byte, grpcStatus string) *gohttp.Response {
+// makeGRPCStreamResult creates a *StreamRoundTripResult with a gRPC body and
+// trailers for testing the hpack-native response intercept path.
+// The body is wrapped in a streamBodyWithMarkDone that calls markBodyDone
+// on the result when EOF is reached, matching real StreamRoundTripResult behavior.
+func makeGRPCStreamResult(t *testing.T, pbPayload []byte, grpcStatus string) *StreamRoundTripResult {
 	t.Helper()
 	body := buildGRPCUnaryBody(t, pbPayload)
-	return &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc+proto"},
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers: []hpack.HeaderField{
+			{Name: "content-type", Value: "application/grpc+proto"},
 		},
-		Body:    io.NopCloser(bytes.NewReader(body)),
-		Trailer: gohttp.Header{"Grpc-Status": {grpcStatus}},
 	}
+	trailers := []hpack.HeaderField{
+		{Name: "grpc-status", Value: grpcStatus},
+	}
+	result.Body = &streamBodyWithMarkDone{
+		Reader:   bytes.NewReader(body),
+		result:   result,
+		trailers: trailers,
+	}
+	return result
 }
 
-func TestBufferGRPCUnaryResponseBody_Valid(t *testing.T) {
+// streamBodyWithMarkDone wraps a reader and calls markBodyDone on the
+// StreamRoundTripResult when EOF is reached, simulating the real transport.
+type streamBodyWithMarkDone struct {
+	*bytes.Reader
+	result   *StreamRoundTripResult
+	trailers []hpack.HeaderField
+	eofSent  bool
+}
+
+func (s *streamBodyWithMarkDone) Read(p []byte) (int, error) {
+	n, err := s.Reader.Read(p)
+	if err == io.EOF && !s.eofSent {
+		s.eofSent = true
+		s.result.markBodyDone(s.trailers)
+	}
+	return n, err
+}
+
+func (s *streamBodyWithMarkDone) Close() error {
+	if !s.eofSent {
+		s.eofSent = true
+		s.result.markBodyDone(s.trailers)
+	}
+	return nil
+}
+
+func TestBufferGRPCUnaryResponseBodyH2_Valid(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
-	body, jsonBody, frame, trailers, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	body, jsonBody, frame, ok := handler.bufferGRPCUnaryResponseBodyH2(sc, result)
 	if !ok {
-		t.Fatal("expected bufferGRPCUnaryResponseBody to return ok=true")
+		t.Fatal("expected bufferGRPCUnaryResponseBodyH2 to return ok=true")
 	}
 	if len(body) == 0 {
 		t.Error("expected non-empty body")
@@ -474,32 +491,28 @@ func TestBufferGRPCUnaryResponseBody_Valid(t *testing.T) {
 	if !bytes.Equal(frame.Payload, pbPayload) {
 		t.Errorf("payload mismatch: got %q, want %q", frame.Payload, pbPayload)
 	}
-	if trailers.Get("Grpc-Status") != "0" {
-		t.Errorf("trailers Grpc-Status = %q, want %q", trailers.Get("Grpc-Status"), "0")
-	}
 }
 
-func TestBufferGRPCUnaryResponseBody_Streaming(t *testing.T) {
+func TestBufferGRPCUnaryResponseBodyH2_Streaming(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
 	multiFrameBody := buildGRPCStreamBody(t, pbPayload, pbPayload)
-	resp := &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc+proto"},
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers: []hpack.HeaderField{
+			{Name: "content-type", Value: "application/grpc+proto"},
 		},
-		Body:    io.NopCloser(bytes.NewReader(multiFrameBody)),
-		Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+		Body: io.NopCloser(bytes.NewReader(multiFrameBody)),
 	}
 
-	_, _, _, _, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	_, _, _, ok := handler.bufferGRPCUnaryResponseBodyH2(sc, result)
 	if ok {
-		t.Error("expected bufferGRPCUnaryResponseBody to return ok=false for streaming response")
+		t.Error("expected bufferGRPCUnaryResponseBodyH2 to return ok=false for streaming response")
 	}
 
 	// Body should be restored for streaming fallback.
-	restoredBody, err := io.ReadAll(resp.Body)
+	restoredBody, err := io.ReadAll(result.Body)
 	if err != nil {
 		t.Fatalf("read restored body: %v", err)
 	}
@@ -508,43 +521,41 @@ func TestBufferGRPCUnaryResponseBody_Streaming(t *testing.T) {
 	}
 }
 
-func TestBufferGRPCUnaryResponseBody_EmptyBody(t *testing.T) {
+func TestBufferGRPCUnaryResponseBodyH2_EmptyBody(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 
-	resp := &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc"},
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers: []hpack.HeaderField{
+			{Name: "content-type", Value: "application/grpc"},
 		},
-		Body:    io.NopCloser(bytes.NewReader(nil)),
-		Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+		Body: io.NopCloser(bytes.NewReader(nil)),
 	}
 
-	_, _, _, _, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	_, _, _, ok := handler.bufferGRPCUnaryResponseBodyH2(sc, result)
 	if ok {
-		t.Error("expected bufferGRPCUnaryResponseBody to return ok=false for empty body")
+		t.Error("expected bufferGRPCUnaryResponseBodyH2 to return ok=false for empty body")
 	}
 }
 
-func TestBufferGRPCUnaryResponseBody_ShortBody(t *testing.T) {
+func TestBufferGRPCUnaryResponseBodyH2_ShortBody(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 
-	resp := &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc"},
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers: []hpack.HeaderField{
+			{Name: "content-type", Value: "application/grpc"},
 		},
-		Body:    io.NopCloser(bytes.NewReader([]byte{0x00, 0x01})), // Too short for frame header
-		Trailer: gohttp.Header{},
+		Body: io.NopCloser(bytes.NewReader([]byte{0x00, 0x01})), // Too short for frame header
 	}
 
-	_, _, _, _, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	_, _, _, ok := handler.bufferGRPCUnaryResponseBodyH2(sc, result)
 	if ok {
-		t.Error("expected bufferGRPCUnaryResponseBody to return ok=false for short body")
+		t.Error("expected bufferGRPCUnaryResponseBodyH2 to return ok=false for short body")
 	}
 }
 
-func TestHandleGRPCResponseIntercept_NoEngine(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_NoEngine(t *testing.T) {
 	handler := NewHandler(nil, testutil.DiscardLogger())
 	// No InterceptEngine set.
 	sc := &streamContext{
@@ -552,18 +563,19 @@ func TestHandleGRPCResponseIntercept_NoEngine(t *testing.T) {
 		logger: testutil.DiscardLogger(),
 	}
 	state := &grpcStreamState{}
-	resp := &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header:     gohttp.Header{},
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers:    []hpack.HeaderField{},
+		Body:       io.NopCloser(bytes.NewReader(nil)),
 	}
 
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if handled {
 		t.Error("expected false when no InterceptEngine is set")
 	}
 }
 
-func TestHandleGRPCResponseIntercept_TrailersOnly(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_TrailersOnly(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 
 	// Add a response rule so matching would normally trigger.
@@ -578,24 +590,23 @@ func TestHandleGRPCResponseIntercept_TrailersOnly(t *testing.T) {
 		respFrameBuf: protogrpc.NewFrameBuffer(nil),
 	}
 
-	// Trailers-Only response: Grpc-Status in Header, empty Trailer.
-	resp := &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc"},
-			"Grpc-Status":  []string{"5"},
+	// Trailers-Only response: grpc-status in initial HEADERS.
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers: []hpack.HeaderField{
+			{Name: "content-type", Value: "application/grpc"},
+			{Name: "grpc-status", Value: "5"},
 		},
-		Trailer: gohttp.Header{},
-		Body:    io.NopCloser(bytes.NewReader(nil)),
+		Body: io.NopCloser(bytes.NewReader(nil)),
 	}
 
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if handled {
 		t.Error("expected false for Trailers-Only response")
 	}
 }
 
-func TestHandleGRPCResponseIntercept_NoMatchedRules(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_NoMatchedRules(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 	// No rules added — MatchResponseRules will return empty.
 
@@ -605,15 +616,15 @@ func TestHandleGRPCResponseIntercept_NoMatchedRules(t *testing.T) {
 	}
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if handled {
 		t.Error("expected false when no response rules match")
 	}
 }
 
-func TestHandleGRPCResponseIntercept_Drop(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_Drop(t *testing.T) {
 	handler, sc, w, queue := makeGRPCResponseInterceptContext(t)
 
 	handler.InterceptEngine.AddRule(intercept.Rule{
@@ -625,7 +636,7 @@ func TestHandleGRPCResponseIntercept_Drop(t *testing.T) {
 	state := handler.initGRPCStreamState(sc)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
 	go func() {
 		for i := 0; i < 100; i++ {
@@ -639,16 +650,16 @@ func TestHandleGRPCResponseIntercept_Drop(t *testing.T) {
 		t.Error("timed out waiting for intercept item")
 	}()
 
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if !handled {
 		t.Error("expected true when response is dropped")
 	}
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 }
 
-func TestHandleGRPCResponseIntercept_Release(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_Release(t *testing.T) {
 	handler, sc, w, queue := makeGRPCResponseInterceptContext(t)
 
 	handler.InterceptEngine.AddRule(intercept.Rule{
@@ -660,7 +671,7 @@ func TestHandleGRPCResponseIntercept_Release(t *testing.T) {
 	state := handler.initGRPCStreamState(sc)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
 	go func() {
 		for i := 0; i < 100; i++ {
@@ -674,12 +685,12 @@ func TestHandleGRPCResponseIntercept_Release(t *testing.T) {
 		t.Error("timed out waiting for intercept item")
 	}()
 
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if !handled {
 		t.Error("expected true when response intercept handles the response (even for release)")
 	}
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 
 	// Verify the response body was written to the client.
@@ -689,7 +700,7 @@ func TestHandleGRPCResponseIntercept_Release(t *testing.T) {
 	}
 }
 
-func TestHandleGRPCResponseIntercept_ModifyAndForward(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_ModifyAndForward(t *testing.T) {
 	handler, sc, w, queue := makeGRPCResponseInterceptContext(t)
 
 	handler.InterceptEngine.AddRule(intercept.Rule{
@@ -701,7 +712,7 @@ func TestHandleGRPCResponseIntercept_ModifyAndForward(t *testing.T) {
 	state := handler.initGRPCStreamState(sc)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
 	// The override body should be the re-encoded gRPC frame bytes (as string).
 	modifiedJSON := `{"0001:0000:String": "World"}`
@@ -747,12 +758,12 @@ func TestHandleGRPCResponseIntercept_ModifyAndForward(t *testing.T) {
 		t.Error("timed out waiting for intercept item")
 	}()
 
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if !handled {
 		t.Error("expected true when response is modified and forwarded")
 	}
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 
 	// Verify the modified body was written to the client.
@@ -762,7 +773,7 @@ func TestHandleGRPCResponseIntercept_ModifyAndForward(t *testing.T) {
 	}
 }
 
-func TestHandleGRPCResponseIntercept_RawModeRejected(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_RawModeRejected(t *testing.T) {
 	handler, sc, w, queue := makeGRPCResponseInterceptContext(t)
 
 	handler.InterceptEngine.AddRule(intercept.Rule{
@@ -774,7 +785,7 @@ func TestHandleGRPCResponseIntercept_RawModeRejected(t *testing.T) {
 	state := handler.initGRPCStreamState(sc)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
 	go func() {
 		for i := 0; i < 100; i++ {
@@ -791,12 +802,12 @@ func TestHandleGRPCResponseIntercept_RawModeRejected(t *testing.T) {
 		t.Error("timed out waiting for intercept item")
 	}()
 
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if !handled {
 		t.Error("expected true (raw mode falls back to release, still handled)")
 	}
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 
 	// Even with raw mode rejected, original body should be forwarded.
@@ -806,7 +817,7 @@ func TestHandleGRPCResponseIntercept_RawModeRejected(t *testing.T) {
 	}
 }
 
-func TestHandleGRPCResponseIntercept_TimeoutAutoRelease(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_TimeoutAutoRelease(t *testing.T) {
 	handler, sc, w, _ := makeGRPCResponseInterceptContext(t)
 
 	handler.InterceptEngine.AddRule(intercept.Rule{
@@ -820,15 +831,15 @@ func TestHandleGRPCResponseIntercept_TimeoutAutoRelease(t *testing.T) {
 	state := handler.initGRPCStreamState(sc)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
 	// Do not respond — let it timeout.
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if !handled {
 		t.Error("expected true (auto-release still handles the response)")
 	}
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 
 	// Body should be forwarded after auto-release.
@@ -838,7 +849,7 @@ func TestHandleGRPCResponseIntercept_TimeoutAutoRelease(t *testing.T) {
 	}
 }
 
-func TestHandleGRPCResponseIntercept_TimeoutAutoDrop(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_TimeoutAutoDrop(t *testing.T) {
 	handler, sc, w, _ := makeGRPCResponseInterceptContext(t)
 
 	handler.InterceptEngine.AddRule(intercept.Rule{
@@ -852,40 +863,39 @@ func TestHandleGRPCResponseIntercept_TimeoutAutoDrop(t *testing.T) {
 	state := handler.initGRPCStreamState(sc)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
 	// Do not respond — let it timeout.
-	handled := handler.handleGRPCResponseIntercept(sc, state, resp)
+	handled := handler.handleGRPCResponseInterceptH2(sc, state, result)
 	if !handled {
 		t.Error("expected true (auto-drop handles the response)")
 	}
-	if w.Code != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, gohttp.StatusOK)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want %d", w.Code, 200)
 	}
 }
 
-func TestBufferGRPCUnaryResponseBody_MaxRawBytesSize(t *testing.T) {
+func TestBufferGRPCUnaryResponseBodyH2_MaxRawBytesSize(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 
 	// Create a payload that exceeds MaxRawBytesSize when wrapped in a gRPC frame.
 	// The gRPC frame header is 5 bytes, so we need payload > MaxRawBytesSize - 5.
 	oversizedPayload := make([]byte, intercept.MaxRawBytesSize)
-	resp := &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc+proto"},
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers: []hpack.HeaderField{
+			{Name: "content-type", Value: "application/grpc+proto"},
 		},
-		Body:    io.NopCloser(bytes.NewReader(buildGRPCUnaryBody(t, oversizedPayload))),
-		Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+		Body: io.NopCloser(bytes.NewReader(buildGRPCUnaryBody(t, oversizedPayload))),
 	}
 
-	_, _, _, _, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	_, _, _, ok := handler.bufferGRPCUnaryResponseBodyH2(sc, result)
 	if ok {
-		t.Error("expected bufferGRPCUnaryResponseBody to return ok=false for oversized body")
+		t.Error("expected bufferGRPCUnaryResponseBodyH2 to return ok=false for oversized body")
 	}
 
 	// Body should be restored for streaming fallback.
-	restoredBody, err := io.ReadAll(resp.Body)
+	restoredBody, err := io.ReadAll(result.Body)
 	if err != nil {
 		t.Fatalf("read restored body: %v", err)
 	}
@@ -896,7 +906,7 @@ func TestBufferGRPCUnaryResponseBody_MaxRawBytesSize(t *testing.T) {
 	}
 }
 
-func TestBufferGRPCUnaryResponseBody_MaxGRPCMessageSize(t *testing.T) {
+func TestBufferGRPCUnaryResponseBodyH2_MaxGRPCMessageSize(t *testing.T) {
 	handler, sc, _, _ := makeGRPCResponseInterceptContext(t)
 
 	// Create a body with a gRPC frame header declaring a message length
@@ -911,22 +921,21 @@ func TestBufferGRPCUnaryResponseBody_MaxGRPCMessageSize(t *testing.T) {
 	header[3] = byte(oversize >> 8)
 	header[4] = byte(oversize)
 
-	resp := &gohttp.Response{
-		StatusCode: gohttp.StatusOK,
-		Header: gohttp.Header{
-			"Content-Type": []string{"application/grpc+proto"},
+	result := &StreamRoundTripResult{
+		StatusCode: 200,
+		Headers: []hpack.HeaderField{
+			{Name: "content-type", Value: "application/grpc+proto"},
 		},
-		Body:    io.NopCloser(bytes.NewReader(header[:])),
-		Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+		Body: io.NopCloser(bytes.NewReader(header[:])),
 	}
 
-	_, _, _, _, ok := handler.bufferGRPCUnaryResponseBody(sc, resp)
+	_, _, _, ok := handler.bufferGRPCUnaryResponseBodyH2(sc, result)
 	if ok {
-		t.Error("expected bufferGRPCUnaryResponseBody to return ok=false for oversized gRPC message")
+		t.Error("expected bufferGRPCUnaryResponseBodyH2 to return ok=false for oversized gRPC message")
 	}
 
 	// Body should be restored.
-	restoredBody, err := io.ReadAll(resp.Body)
+	restoredBody, err := io.ReadAll(result.Body)
 	if err != nil {
 		t.Fatalf("read restored body: %v", err)
 	}
@@ -935,7 +944,7 @@ func TestBufferGRPCUnaryResponseBody_MaxGRPCMessageSize(t *testing.T) {
 	}
 }
 
-func TestHandleGRPCResponseIntercept_BodyDecodeJSON(t *testing.T) {
+func TestHandleGRPCResponseInterceptH2_BodyDecodeJSON(t *testing.T) {
 	handler, sc, _, queue := makeGRPCResponseInterceptContext(t)
 
 	handler.InterceptEngine.AddRule(intercept.Rule{
@@ -947,7 +956,7 @@ func TestHandleGRPCResponseIntercept_BodyDecodeJSON(t *testing.T) {
 	state := handler.initGRPCStreamState(sc)
 
 	pbPayload := []byte{0x0a, 0x05, 'H', 'e', 'l', 'l', 'o'}
-	resp := makeGRPCResponse(t, pbPayload, "0")
+	result := makeGRPCStreamResult(t, pbPayload, "0")
 
 	var heldBody []byte
 	var heldMetadata map[string]string
@@ -973,7 +982,7 @@ func TestHandleGRPCResponseIntercept_BodyDecodeJSON(t *testing.T) {
 		t.Error("timed out waiting for intercept item")
 	}()
 
-	handler.handleGRPCResponseIntercept(sc, state, resp)
+	handler.handleGRPCResponseInterceptH2(sc, state, result)
 
 	mu.Lock()
 	defer mu.Unlock()
