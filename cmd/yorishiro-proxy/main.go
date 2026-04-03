@@ -28,7 +28,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
+	protogrpcweb "github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	protohttp2 "github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
@@ -541,9 +541,10 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	grpcHandler := protogrpc.NewHandler(store, logger)
 	http2Handler.SetGRPCHandler(grpcHandler)
 
-	// Build gRPC-Web handler and attach to the HTTP/1.x handler for gRPC-Web-specific recording.
-	grpcWebHandler := grpcweb.NewHandler(store, logger)
+	// Build gRPC-Web handler and attach to both HTTP/1.x and HTTP/2 handlers.
+	grpcWebHandler := protogrpcweb.NewHandler(store, logger)
 	httpHandler.SetGRPCWebHandler(grpcWebHandler)
+	http2Handler.SetGRPCWebHandler(grpcWebHandler)
 
 	// Link the HTTP/2 handler to the HTTP handler for h2 ALPN delegation.
 	httpHandler.SetH2Handler(http2Handler)

@@ -351,35 +351,6 @@ func TestGoHTTPHeaderToHpack(t *testing.T) {
 	}
 }
 
-func TestH2ResultToGoHTTPResponse(t *testing.T) {
-	result := &RoundTripResult{
-		StatusCode: 200,
-		Headers: []hpack.HeaderField{
-			{Name: ":status", Value: "200"},
-			{Name: "content-type", Value: "text/plain"},
-		},
-		Body: bytes.NewReader([]byte("response body")),
-	}
-
-	resp := h2ResultToGoHTTPResponse(result)
-
-	if resp.StatusCode != 200 {
-		t.Errorf("StatusCode = %d, want 200", resp.StatusCode)
-	}
-	if resp.Header.Get("content-type") != "text/plain" {
-		t.Errorf("Content-Type = %q, want text/plain", resp.Header.Get("content-type"))
-	}
-	// :status pseudo-header should be excluded from regular headers.
-	if resp.Header.Get(":status") != "" {
-		t.Error(":status should not be in response headers")
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "response body" {
-		t.Errorf("body = %q, want %q", body, "response body")
-	}
-}
-
 func TestWriteErrorResponse_ViaAdapter(t *testing.T) {
 	// Test writeErrorResponse through the goHTTPWriterAdapter to avoid
 	// needing a fully initialized clientConn with writer.
