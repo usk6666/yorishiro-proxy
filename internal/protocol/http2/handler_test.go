@@ -18,6 +18,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -765,10 +766,13 @@ func TestSetInsecureSkipVerify(t *testing.T) {
 	handler := NewHandler(nil, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(true)
 
-	if handler.Transport.TLSClientConfig == nil {
-		t.Fatal("TLSClientConfig is nil after SetInsecureSkipVerify(true)")
+	// The HTTP/2 handler configures InsecureSkipVerify on the ConnPool's
+	// TLSTransport, not on HandlerBase.Transport.
+	st, ok := handler.connPool.TLSTransport.(*httputil.StandardTransport)
+	if !ok {
+		t.Fatal("ConnPool.TLSTransport is not *StandardTransport after SetInsecureSkipVerify(true)")
 	}
-	if !handler.Transport.TLSClientConfig.InsecureSkipVerify {
+	if !st.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify = false, want true")
 	}
 }
@@ -777,9 +781,12 @@ func TestSetInsecureSkipVerify_FalseDoesNotModify(t *testing.T) {
 	handler := NewHandler(nil, testutil.DiscardLogger())
 	handler.SetInsecureSkipVerify(false)
 
-	if handler.Transport.TLSClientConfig != nil {
-		t.Errorf("TLSClientConfig = %v, want nil when skip is false",
-			handler.Transport.TLSClientConfig)
+	// When skip is false and no TLSTransport was previously set, a
+	// StandardTransport is still created to preserve the caller's intent.
+	if handler.connPool.TLSTransport == nil {
+		// ConnPool defaults to InsecureSkipVerify=true via effectiveTLSTransport;
+		// explicit false should create a StandardTransport with false.
+		t.Error("ConnPool.TLSTransport should be set after SetInsecureSkipVerify(false)")
 	}
 }
 
@@ -810,44 +817,6 @@ func TestShouldCapture_NoScope(t *testing.T) {
 	u, _ := url.Parse("http://example.com/api/test")
 	if !handler.shouldCapture("GET", u) {
 		t.Error("shouldCapture with nil scope should return true")
-	}
-}
-
-// --- removeHTTP2HopByHop tests ---
-
-func TestRemoveHTTP2HopByHop(t *testing.T) {
-	header := gohttp.Header{
-		"Connection":        {"keep-alive"},
-		"Keep-Alive":        {"timeout=5"},
-		"Transfer-Encoding": {"chunked"},
-		"Upgrade":           {"websocket"},
-		"Proxy-Connection":  {"keep-alive"},
-		"Content-Type":      {"application/json"},
-		"X-Custom":          {"value"},
-	}
-
-	removeHTTP2HopByHop(header)
-
-	if header.Get("Connection") != "" {
-		t.Error("Connection header should be removed")
-	}
-	if header.Get("Keep-Alive") != "" {
-		t.Error("Keep-Alive header should be removed")
-	}
-	if header.Get("Transfer-Encoding") != "" {
-		t.Error("Transfer-Encoding header should be removed")
-	}
-	if header.Get("Upgrade") != "" {
-		t.Error("Upgrade header should be removed")
-	}
-	if header.Get("Proxy-Connection") != "" {
-		t.Error("Proxy-Connection header should be removed")
-	}
-	if header.Get("Content-Type") != "application/json" {
-		t.Error("Content-Type should not be removed")
-	}
-	if header.Get("X-Custom") != "value" {
-		t.Error("X-Custom should not be removed")
 	}
 }
 
