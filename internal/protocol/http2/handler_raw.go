@@ -2,11 +2,11 @@ package http2
 
 import (
 	"io"
+	"net"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
@@ -43,19 +43,20 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 	// Record the send phase with variant support for raw mode.
 	sendResult := h.recordRawSend(sc, rawBytes, isModified)
 
-	// Forward raw frames to upstream using the custom HTTP/2 transport.
-	// Build a minimal gohttp.Request for the legacy SendRawFrames API.
-	goReq, err := h2RequestToGoHTTP(sc.ctx, sc.h2req)
-	if err != nil {
-		sc.logger.Error("HTTP/2 raw forward: failed to build gohttp request", "error", err)
-		writeErrorResponse(sc.w, httputil.StatusBadGateway)
-		return
+	// Derive host:port from the request URL for the transport.
+	hostname := sc.reqURL.Hostname()
+	port := sc.reqURL.Port()
+	if port == "" {
+		if sc.reqURL.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
 	}
-	goReq.URL = cloneURL(sc.reqURL)
-	goReq.Host = sc.reqURL.Host
+	hostPort := net.JoinHostPort(hostname, port)
 
 	sendStart := time.Now()
-	result, err := h.h2Transport.SendRawFrames(sc.ctx, goReq, rawBytes)
+	result, err := h.h2Transport.SendRawFrames(sc.ctx, hostPort, rawBytes)
 	if err != nil {
 		sc.logger.Error("HTTP/2 raw forward upstream failed",
 			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
@@ -64,12 +65,15 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 		return
 	}
 
-	resp := result.Response
-	fullRespBody, readErr := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodySize))
-	if readErr != nil {
-		sc.logger.Warn("HTTP/2 raw forward: failed to read response body", "error", readErr)
+	// Read the response body from the native result.
+	var fullRespBody []byte
+	if result.Body != nil {
+		var readErr error
+		fullRespBody, readErr = io.ReadAll(io.LimitReader(result.Body, config.MaxBodySize))
+		if readErr != nil {
+			sc.logger.Warn("HTTP/2 raw forward: failed to read response body", "error", readErr)
+		}
 	}
-	resp.Body.Close()
 	receiveEnd := time.Now()
 
 	// Compute approximate timing.
@@ -77,14 +81,11 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 	wMs := sMs // approximation: no TTFB separation for custom transport
 	rMs := int64(0)
 
-	// Convert legacy response to h2Response for writeH2ResponseToClient.
-	respHeaders := goHTTPHeaderToHpack(resp.Header)
-	var respTrailers []hpack.HeaderField
-	if len(resp.Trailer) > 0 {
-		respTrailers = goHTTPHeaderToHpack(resp.Trailer)
-	}
+	// Build h2Response from native result fields.
+	respHeaders := result.Headers
+	respTrailers := result.Trailers
 	h2resp := &h2Response{
-		StatusCode: resp.StatusCode,
+		StatusCode: result.StatusCode,
 		Headers:    respHeaders,
 		Trailers:   respTrailers,
 		Body:       fullRespBody,
@@ -99,7 +100,7 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 		start:       sc.start,
 		duration:    duration,
 		serverAddr:  result.ServerAddr,
-		statusCode:  resp.StatusCode,
+		statusCode:  result.StatusCode,
 		respHeaders: respHeaders,
 		respBody:    fullRespBody,
 		sendMs:      &sMs,
@@ -111,7 +112,7 @@ func (h *Handler) handleRawForward(sc *streamContext, snap *requestSnapshot) {
 	sc.logger.Info("http/2 raw forward request",
 		"method", sc.h2req.Method,
 		"url", sc.reqURL.String(),
-		"status", resp.StatusCode,
+		"status", result.StatusCode,
 		"raw_modified", isModified,
 		"duration_ms", duration.Milliseconds())
 }
