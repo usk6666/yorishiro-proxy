@@ -4,11 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	gohttp "net/http"
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -172,62 +170,6 @@ func applyGRPCPluginHook(
 	return jsonBody, "", false
 }
 
-// applyGRPCResponsePluginHook dispatches a response-side plugin hook with
-// the gRPC frame's JSON body.
-func applyGRPCResponsePluginHook(
-	sc *streamContext,
-	engine *plugin.Engine,
-	hookName plugin.Hook,
-	jsonBody string,
-	resp *gohttp.Response,
-	connInfo *plugin.ConnInfo,
-	txCtx map[string]any,
-	logger *slog.Logger,
-) (resultJSON string, modified bool) {
-	if engine == nil {
-		return jsonBody, false
-	}
-
-	respHeaders := make(map[string]any)
-	if resp != nil {
-		respHeaders = headersToPluginMap(resp.Header)
-	}
-
-	data := map[string]any{
-		"method":      scMethod(sc),
-		"url":         sc.reqURL.String(),
-		"status_code": 0,
-		"headers":     respHeaders,
-		"body":        jsonBody,
-		"protocol":    "grpc",
-	}
-	if resp != nil {
-		data["status_code"] = resp.StatusCode
-	}
-	if connInfo != nil {
-		data["conn_info"] = connInfo.ToMap()
-	}
-	plugin.InjectTxCtx(data, txCtx)
-
-	result, err := engine.Dispatch(sc.ctx, hookName, data)
-	if err != nil {
-		logger.Warn("gRPC plugin hook error", "hook", hookName, "error", err)
-		return jsonBody, false
-	}
-	plugin.ExtractTxCtx(result, txCtx)
-	if result == nil || result.Data == nil {
-		return jsonBody, false
-	}
-
-	if newBody, ok := result.Data["body"]; ok {
-		if s, ok := newBody.(string); ok && s != jsonBody {
-			return s, true
-		}
-	}
-
-	return jsonBody, false
-}
-
 // applyGRPCAutoTransform applies auto-transform rules to a gRPC frame's
 // JSON body for request direction. Returns the (possibly modified) JSON body.
 func applyGRPCAutoTransform(pipeline *rules.Pipeline, sc *streamContext, jsonBody string) (string, bool) {
@@ -235,23 +177,6 @@ func applyGRPCAutoTransform(pipeline *rules.Pipeline, sc *streamContext, jsonBod
 		return jsonBody, false
 	}
 	_, body := pipeline.TransformRequest(scMethod(sc), sc.reqURL, hpackToRawHeaders(scHeaders(sc)), []byte(jsonBody))
-	newJSON := string(body)
-	return newJSON, newJSON != jsonBody
-}
-
-// applyGRPCAutoTransformResponse applies auto-transform rules to a gRPC
-// frame's JSON body for response direction.
-func applyGRPCAutoTransformResponse(pipeline *rules.Pipeline, statusCode int, headers gohttp.Header, jsonBody string) (string, bool) {
-	if pipeline == nil || pipeline.Len() == 0 {
-		return jsonBody, false
-	}
-	var rh parser.RawHeaders
-	for name, vals := range headers {
-		for _, v := range vals {
-			rh = append(rh, parser.RawHeader{Name: name, Value: v})
-		}
-	}
-	_, body := pipeline.TransformResponse(statusCode, rh, []byte(jsonBody))
 	newJSON := string(body)
 	return newJSON, newJSON != jsonBody
 }
@@ -265,19 +190,6 @@ func applyGRPCAutoTransformResponseHpack(pipeline *rules.Pipeline, statusCode in
 	_, body := pipeline.TransformResponse(statusCode, hpackToRawHeaders(headers), []byte(jsonBody))
 	newJSON := string(body)
 	return newJSON, newJSON != jsonBody
-}
-
-// headersToPluginMap converts http.Header to the map format expected by plugins.
-func headersToPluginMap(h gohttp.Header) map[string]any {
-	m := make(map[string]any, len(h))
-	for k, vals := range h {
-		list := make([]any, len(vals))
-		for i, v := range vals {
-			list[i] = v
-		}
-		m[k] = list
-	}
-	return m
 }
 
 // processGRPCRequestFrame processes a single gRPC request frame through
@@ -374,99 +286,10 @@ func (h *Handler) processGRPCRequestFrame(
 	return rebuildGRPCFrame(compressed, newPayload), false
 }
 
-// processGRPCResponseFrame processes a single gRPC response frame through
-// all response-side subsystems: plugin hooks (on_receive_from_server,
-// on_before_send_to_client), auto-transform, and output filter.
-// Returns the wire bytes to forward to the client, and whether the
-// stream should be terminated (output filter block).
-func (h *Handler) processGRPCResponseFrame(
-	sc *streamContext,
-	raw []byte,
-	compressed bool,
-	payload []byte,
-	encoding string,
-	resp *gohttp.Response,
-	connInfo *plugin.ConnInfo,
-	txCtx map[string]any,
-) (wireBytes []byte, blocked bool) {
-	// Attempt protobuf decode.
-	jsonStr, _, decodeErr := decodeGRPCPayload(payload, compressed, encoding)
-	if decodeErr != nil {
-		sc.logger.Debug("gRPC response frame decode failed, skipping subsystems",
-			"error", decodeErr)
-		return raw, false
-	}
-
-	currentJSON := jsonStr
-	modified := false
-
-	// 1. Plugin: on_receive_from_server.
-	newJSON, changed := applyGRPCResponsePluginHook(
-		sc, h.pluginEngine, plugin.HookOnReceiveFromServer,
-		currentJSON, resp, connInfo, txCtx, sc.logger)
-	if changed {
-		currentJSON = newJSON
-		modified = true
-	}
-
-	// 2. Auto-transform (response direction).
-	if h.transformPipeline != nil {
-		statusCode := 0
-		var respHeaders gohttp.Header
-		if resp != nil {
-			statusCode = resp.StatusCode
-			respHeaders = resp.Header
-		}
-		transformedJSON, tChanged := applyGRPCAutoTransformResponse(
-			h.transformPipeline, statusCode, respHeaders, currentJSON)
-		if tChanged {
-			currentJSON = transformedJSON
-			modified = true
-		}
-	}
-
-	// 3. Output filter.
-	if h.SafetyEngine != nil {
-		filtered, isMasked, isBlocked := applyGRPCOutputFilter(h.SafetyEngine, currentJSON, sc.logger)
-		if isBlocked {
-			sc.logger.Warn("gRPC response frame blocked by output filter")
-			return nil, true
-		}
-		if isMasked {
-			currentJSON = filtered
-			modified = true
-		}
-	}
-
-	// 4. Plugin: on_before_send_to_client.
-	newJSON, changed = applyGRPCResponsePluginHook(
-		sc, h.pluginEngine, plugin.HookOnBeforeSendToClient,
-		currentJSON, resp, connInfo, txCtx, sc.logger)
-	if changed {
-		currentJSON = newJSON
-		modified = true
-	}
-
-	// If no modification, forward original bytes.
-	if !modified {
-		return raw, false
-	}
-
-	// Re-encode modified JSON back to protobuf frame.
-	newPayload, err := encodeGRPCPayload(currentJSON, compressed, encoding)
-	if err != nil {
-		sc.logger.Warn("gRPC response frame re-encode failed, forwarding original",
-			"error", err)
-		return raw, false
-	}
-
-	return rebuildGRPCFrame(compressed, newPayload), false
-}
-
 // processGRPCResponseFrameH2 processes a single gRPC response frame through
-// all response-side subsystems using hpack native types instead of
-// gohttp.Response. Returns the wire bytes to forward to the client, and
-// whether the stream should be terminated (output filter block).
+// all response-side subsystems using hpack native types. Returns the wire
+// bytes to forward to the client, and whether the stream should be terminated
+// (output filter block).
 func (h *Handler) processGRPCResponseFrameH2(
 	sc *streamContext,
 	raw []byte,
