@@ -11,6 +11,7 @@ import (
 	"time"
 
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -362,52 +363,45 @@ func TestHandleGRPCStream_MultipleRequestFrames(t *testing.T) {
 	}
 }
 
-// TestIsGRPCTrailersOnly verifies detection of gRPC Trailers-Only responses.
-func TestIsGRPCTrailersOnly(t *testing.T) {
+// TestIsGRPCTrailersOnlyH2 verifies detection of gRPC Trailers-Only responses
+// using hpack native StreamRoundTripResult.
+func TestIsGRPCTrailersOnlyH2(t *testing.T) {
 	tests := []struct {
-		name string
-		resp *gohttp.Response
-		want bool
+		name    string
+		headers []hpack.HeaderField
+		want    bool
 	}{
 		{
-			name: "trailers-only: grpc-status in header, empty trailer",
-			resp: &gohttp.Response{
-				Header:  gohttp.Header{"Grpc-Status": {"0"}, "Content-Type": {"application/grpc"}},
-				Trailer: gohttp.Header{},
+			name: "trailers-only: grpc-status in headers",
+			headers: []hpack.HeaderField{
+				{Name: "content-type", Value: "application/grpc"},
+				{Name: "grpc-status", Value: "0"},
 			},
 			want: true,
 		},
 		{
-			name: "trailers-only: grpc-status in header, nil trailer",
-			resp: &gohttp.Response{
-				Header:  gohttp.Header{"Grpc-Status": {"0"}},
-				Trailer: nil,
-			},
-			want: true,
-		},
-		{
-			name: "normal response: grpc-status in trailer",
-			resp: &gohttp.Response{
-				Header:  gohttp.Header{"Content-Type": {"application/grpc"}},
-				Trailer: gohttp.Header{"Grpc-Status": {"0"}},
+			name: "normal response: no grpc-status in headers",
+			headers: []hpack.HeaderField{
+				{Name: "content-type", Value: "application/grpc"},
 			},
 			want: false,
 		},
 		{
-			name: "no grpc-status at all",
-			resp: &gohttp.Response{
-				Header:  gohttp.Header{"Content-Type": {"application/grpc"}},
-				Trailer: gohttp.Header{},
-			},
-			want: false,
+			name:    "empty headers",
+			headers: nil,
+			want:    false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isGRPCTrailersOnly(tt.resp)
+			result := &StreamRoundTripResult{
+				StatusCode: 200,
+				Headers:    tt.headers,
+			}
+			got := isGRPCTrailersOnlyH2(result)
 			if got != tt.want {
-				t.Errorf("isGRPCTrailersOnly() = %v, want %v", got, tt.want)
+				t.Errorf("isGRPCTrailersOnlyH2() = %v, want %v", got, tt.want)
 			}
 		})
 	}

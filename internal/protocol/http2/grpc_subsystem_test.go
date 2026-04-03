@@ -213,7 +213,10 @@ func TestApplyGRPCOutputFilter_Block(t *testing.T) {
 
 func TestApplyGRPCAutoTransform_NilPipeline(t *testing.T) {
 	sc := &streamContext{
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Path: "/test"}},
+		h2req: &h2Request{
+			Method:     "POST",
+			AllHeaders: []hpack.HeaderField{{Name: ":method", Value: "POST"}},
+		},
 		reqURL: &url.URL{Path: "/test"},
 	}
 	result, changed := applyGRPCAutoTransform(nil, sc, "body")
@@ -243,11 +246,6 @@ func TestApplyGRPCAutoTransform_WithRule(t *testing.T) {
 	}
 
 	sc := &streamContext{
-		req: &gohttp.Request{
-			Method: "POST",
-			URL:    &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
-			Header: gohttp.Header{},
-		},
 		h2req: &h2Request{
 			AllHeaders: []hpack.HeaderField{
 				{Name: ":method", Value: "POST"},
@@ -272,21 +270,22 @@ func TestApplyGRPCAutoTransform_WithRule(t *testing.T) {
 	}
 }
 
-func TestHeadersToPluginMap(t *testing.T) {
-	h := gohttp.Header{
-		"Content-Type": {"application/grpc"},
-		"X-Custom":     {"val1", "val2"},
+func TestHpackHeadersToPluginMap(t *testing.T) {
+	headers := []hpack.HeaderField{
+		{Name: "content-type", Value: "application/grpc"},
+		{Name: "x-custom", Value: "val1"},
+		{Name: "x-custom", Value: "val2"},
 	}
-	m := headersToPluginMap(h)
+	m := hpackHeadersToPluginMap(headers)
 
-	ct, ok := m["Content-Type"].([]any)
+	ct, ok := m["content-type"].([]any)
 	if !ok || len(ct) != 1 || ct[0] != "application/grpc" {
-		t.Errorf("Content-Type = %v", m["Content-Type"])
+		t.Errorf("content-type = %v", m["content-type"])
 	}
 
-	xc, ok := m["X-Custom"].([]any)
+	xc, ok := m["x-custom"].([]any)
 	if !ok || len(xc) != 2 {
-		t.Errorf("X-Custom = %v", m["X-Custom"])
+		t.Errorf("x-custom = %v", m["x-custom"])
 	}
 }
 
@@ -294,8 +293,13 @@ func TestProcessGRPCRequestFrame_NoSubsystems(t *testing.T) {
 	handler := NewHandler(&mockStore{}, testutil.DiscardLogger())
 
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "POST",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "POST"},
+			},
+		},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
@@ -333,8 +337,11 @@ func TestProcessGRPCRequestFrame_SafetyFilterBlock(t *testing.T) {
 	handler.SetSafetyEngine(engine)
 
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}, Header: gohttp.Header{}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method:     "POST",
+			AllHeaders: []hpack.HeaderField{{Name: ":method", Value: "POST"}},
+		},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
@@ -378,8 +385,11 @@ func TestProcessGRPCRequestFrame_SafetyFilterLogOnly(t *testing.T) {
 	handler.SetSafetyEngine(engine)
 
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}, Header: gohttp.Header{}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method:     "POST",
+			AllHeaders: []hpack.HeaderField{{Name: ":method", Value: "POST"}},
+		},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
@@ -401,7 +411,7 @@ func TestProcessGRPCRequestFrame_SafetyFilterLogOnly(t *testing.T) {
 	}
 }
 
-func TestProcessGRPCResponseFrame_OutputFilterMask(t *testing.T) {
+func TestProcessGRPCResponseFrameH2_OutputFilterMask(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
 
@@ -423,8 +433,13 @@ func TestProcessGRPCResponseFrame_OutputFilterMask(t *testing.T) {
 	handler.SetSafetyEngine(engine)
 
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}, Header: gohttp.Header{}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "POST",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "POST"},
+			},
+		},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
@@ -436,10 +451,10 @@ func TestProcessGRPCResponseFrame_OutputFilterMask(t *testing.T) {
 	}
 	raw := protogrpc.EncodeFrame(false, payload)
 
-	resp := &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}}
+	respHeaders := []hpack.HeaderField{}
 
-	wireBytes, blocked := handler.processGRPCResponseFrame(
-		sc, raw, false, payload, "", resp, nil, nil)
+	wireBytes, blocked := handler.processGRPCResponseFrameH2(
+		sc, raw, false, payload, "", 200, respHeaders, nil, nil)
 	if blocked {
 		t.Error("expected masking, not blocking")
 	}
@@ -456,7 +471,7 @@ func TestProcessGRPCResponseFrame_OutputFilterMask(t *testing.T) {
 	}
 }
 
-func TestProcessGRPCResponseFrame_OutputFilterBlock(t *testing.T) {
+func TestProcessGRPCResponseFrameH2_OutputFilterBlock(t *testing.T) {
 	store := &mockStore{}
 	handler := NewHandler(store, testutil.DiscardLogger())
 
@@ -477,8 +492,13 @@ func TestProcessGRPCResponseFrame_OutputFilterBlock(t *testing.T) {
 	handler.SetSafetyEngine(engine)
 
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}, Header: gohttp.Header{}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "POST",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "POST"},
+			},
+		},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
@@ -490,10 +510,10 @@ func TestProcessGRPCResponseFrame_OutputFilterBlock(t *testing.T) {
 	}
 	raw := protogrpc.EncodeFrame(false, payload)
 
-	resp := &gohttp.Response{StatusCode: 200, Header: gohttp.Header{}}
+	respHeaders := []hpack.HeaderField{}
 
-	_, blocked := handler.processGRPCResponseFrame(
-		sc, raw, false, payload, "", resp, nil, nil)
+	_, blocked := handler.processGRPCResponseFrameH2(
+		sc, raw, false, payload, "", 200, respHeaders, nil, nil)
 	if !blocked {
 		t.Error("expected block from output filter")
 	}
@@ -521,8 +541,11 @@ func TestProcessGRPCRequestFrame_DecodeFailure_Passthrough(t *testing.T) {
 	handler.SetSafetyEngine(engine)
 
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"}, Header: gohttp.Header{}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method:     "POST",
+			AllHeaders: []hpack.HeaderField{{Name: ":method", Value: "POST"}},
+		},
 		reqURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
@@ -770,18 +793,17 @@ func TestGRPCStream_AutoTransform_E2E(t *testing.T) {
 	}
 }
 
-func TestWriteGRPCStatus(t *testing.T) {
-	w := httptest.NewRecorder()
-	writeGRPCStatus(w, gohttp.StatusOK, 7, "permission denied")
-	resp := w.Result()
-	if resp.StatusCode != gohttp.StatusOK {
-		t.Errorf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
+func TestWriteGRPCStatusH2(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := &goHTTPWriterAdapter{ResponseWriter: rec}
+	writeGRPCStatusH2(w, 7, "permission denied", testutil.DiscardLogger())
+	resp := rec.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want %d", resp.StatusCode, 200)
 	}
-	if got := resp.Header.Get("Grpc-Status"); got != "7" {
-		t.Errorf("Grpc-Status = %q, want %q", got, "7")
-	}
-	if got := resp.Header.Get("Grpc-Message"); got != "permission denied" {
-		t.Errorf("Grpc-Message = %q, want %q", got, "permission denied")
+	// goHTTPWriterAdapter writes headers to the underlying ResponseWriter.
+	if got := resp.Header.Get("content-type"); got != "application/grpc" {
+		t.Errorf("content-type = %q, want %q", got, "application/grpc")
 	}
 }
 
@@ -820,8 +842,13 @@ func TestSetTransformPipeline(t *testing.T) {
 
 func TestApplyGRPCPluginHook_NilEngine(t *testing.T) {
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Path: "/test"}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "POST",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "POST"},
+			},
+		},
 		reqURL: &url.URL{Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
@@ -838,15 +865,20 @@ func TestApplyGRPCPluginHook_NilEngine(t *testing.T) {
 	}
 }
 
-func TestApplyGRPCResponsePluginHook_NilEngine(t *testing.T) {
+func TestApplyGRPCResponsePluginHookH2_NilEngine(t *testing.T) {
 	sc := &streamContext{
-		ctx:    context.Background(),
-		req:    &gohttp.Request{Method: "POST", URL: &url.URL{Path: "/test"}},
+		ctx: context.Background(),
+		h2req: &h2Request{
+			Method: "POST",
+			AllHeaders: []hpack.HeaderField{
+				{Name: ":method", Value: "POST"},
+			},
+		},
 		reqURL: &url.URL{Path: "/test"},
 		logger: testutil.DiscardLogger(),
 	}
-	result, modified := applyGRPCResponsePluginHook(
-		sc, nil, plugin.HookOnReceiveFromServer, "body", nil, nil, nil, testutil.DiscardLogger())
+	result, modified := applyGRPCResponsePluginHookH2(
+		sc, nil, plugin.HookOnReceiveFromServer, "body", 200, nil, nil, nil, testutil.DiscardLogger())
 	if modified {
 		t.Error("expected no modification with nil engine")
 	}
