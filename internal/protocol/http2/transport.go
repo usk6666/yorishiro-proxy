@@ -9,10 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
-	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,49 +51,19 @@ type connPool struct {
 
 // RoundTripResult holds the result of an HTTP/2 round trip.
 type RoundTripResult struct {
-	// Response is the parsed HTTP response.
-	Response *gohttp.Response
+	// StatusCode is the HTTP status code from the :status pseudo-header.
+	StatusCode int
+	// Headers contains the decoded response HPACK header fields (including
+	// pseudo-headers).
+	Headers []hpack.HeaderField
+	// Trailers contains the decoded response trailer header fields.
+	Trailers []hpack.HeaderField
+	// Body is a reader over the response DATA frame payloads.
+	Body io.Reader
 	// ServerAddr is the remote address of the upstream server.
 	ServerAddr string
 	// RawFrames contains the raw response frame bytes for L4 recording.
 	RawFrames [][]byte
-
-	// StatusCode is the HTTP status code from the :status pseudo-header.
-	// Set by RoundTripOnConn; RoundTrip also populates Response.StatusCode.
-	StatusCode int
-	// Headers contains the decoded response HPACK header fields (including
-	// pseudo-headers). Set by RoundTripOnConn to avoid lossy net/http.Header
-	// conversion.
-	Headers []hpack.HeaderField
-	// Body is a reader over the response DATA frame payloads.
-	// Set by RoundTripOnConn.
-	Body io.Reader
-}
-
-// RoundTrip sends an HTTP request to the upstream server using the custom
-// HTTP/2 frame engine and returns the response.
-func (t *Transport) RoundTrip(ctx context.Context, req *gohttp.Request) (*RoundTripResult, error) {
-	host := req.URL.Host
-	if !strings.Contains(host, ":") {
-		if req.URL.Scheme == "https" {
-			host += ":443"
-		} else {
-			host += ":80"
-		}
-	}
-
-	tc, err := t.getOrDialConn(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("transport round trip: %w", err)
-	}
-
-	result, err := tc.roundTrip(ctx, req)
-	if err != nil {
-		// Remove broken connections from pool.
-		t.removeConn(host, tc)
-		return nil, fmt.Errorf("transport round trip: %w", err)
-	}
-	return result, nil
 }
 
 // SendRawFrames writes pre-formed HTTP/2 frame bytes to the upstream server
@@ -107,30 +74,23 @@ func (t *Transport) RoundTrip(ctx context.Context, req *gohttp.Request) (*RoundT
 // ID and rewriting stream IDs in the raw frames. The response is read via the
 // normal frame read loop.
 //
+// hostPort must be in "host:port" format (e.g. "example.com:443").
+//
 // HPACK note: Since raw bytes may contain HEADERS frames with HPACK-encoded
 // header blocks, the upstream HPACK decoder state may become inconsistent with
 // the encoder state used by the client. The transport's HPACK encoder is NOT
 // used for raw frames — they are forwarded as-is. This is intentional: raw
 // mode is a diagnostic tool where the operator accepts responsibility for
 // protocol-level consequences.
-func (t *Transport) SendRawFrames(ctx context.Context, req *gohttp.Request, rawBytes []byte) (*RoundTripResult, error) {
-	host := req.URL.Host
-	if !strings.Contains(host, ":") {
-		if req.URL.Scheme == "https" {
-			host += ":443"
-		} else {
-			host += ":80"
-		}
-	}
-
-	tc, err := t.getOrDialConn(ctx, host)
+func (t *Transport) SendRawFrames(ctx context.Context, hostPort string, rawBytes []byte) (*RoundTripResult, error) {
+	tc, err := t.getOrDialConn(ctx, hostPort)
 	if err != nil {
 		return nil, fmt.Errorf("transport send raw frames: %w", err)
 	}
 
 	result, err := tc.sendRawFrames(ctx, rawBytes)
 	if err != nil {
-		t.removeConn(host, tc)
+		t.removeConn(hostPort, tc)
 		return nil, fmt.Errorf("transport send raw frames: %w", err)
 	}
 	return result, nil
@@ -511,66 +471,6 @@ func (tc *transportConn) allocStreamID() uint32 {
 	}
 }
 
-// roundTrip sends a request and waits for the response on this connection.
-func (tc *transportConn) roundTrip(ctx context.Context, req *gohttp.Request) (*RoundTripResult, error) {
-	if tc.conn.IsClosed() {
-		return nil, fmt.Errorf("connection closed")
-	}
-
-	// Check for GOAWAY.
-	if received, _, _ := tc.conn.GoAwayReceived(); received {
-		return nil, fmt.Errorf("connection received GOAWAY")
-	}
-
-	streamID := tc.allocStreamID()
-
-	ss := &streamState{
-		done:        make(chan streamResult, 1),
-		headersDone: make(chan struct{}),
-	}
-
-	tc.streamsMu.Lock()
-	tc.streams[streamID] = ss
-	tc.streamsMu.Unlock()
-
-	defer func() {
-		tc.streamsMu.Lock()
-		delete(tc.streams, streamID)
-		tc.streamsMu.Unlock()
-	}()
-
-	// Transition to open state.
-	tc.conn.Streams().Transition(streamID, EventSendHeaders) //nolint:errcheck
-
-	// Send request.
-	if err := tc.sendRequest(ctx, streamID, req); err != nil {
-		return nil, fmt.Errorf("send request on stream %d: %w", streamID, err)
-	}
-
-	// Wait for response.
-	select {
-	case <-ctx.Done():
-		tc.sendReset(streamID, ErrCodeCancel)
-		return nil, ctx.Err()
-	case result := <-ss.done:
-		if result.err != nil {
-			return nil, result.err
-		}
-	}
-
-	// Build response.
-	resp, err := tc.buildResponse(req, ss)
-	if err != nil {
-		return nil, fmt.Errorf("build response for stream %d: %w", streamID, err)
-	}
-
-	return &RoundTripResult{
-		Response:   resp,
-		ServerAddr: tc.netConn.RemoteAddr().String(),
-		RawFrames:  ss.rawFrames,
-	}, nil
-}
-
 // roundTripRaw sends an HTTP/2 request using raw HPACK header fields and an
 // optional body reader, returning the response as raw header fields and body
 // data without converting through net/http types.
@@ -679,97 +579,6 @@ func (tc *transportConn) sendRequestRaw(ctx context.Context, streamID uint32, he
 	}
 
 	return nil
-}
-
-// sendRequest serializes and sends the HTTP request as HTTP/2 frames.
-func (tc *transportConn) sendRequest(ctx context.Context, streamID uint32, req *gohttp.Request) error {
-	headers := tc.buildRequestHeaders(req)
-	fragment := tc.encodeHeaders(headers)
-
-	// Read request body if present.
-	var body []byte
-	if req.Body != nil {
-		defer req.Body.Close()
-		var err error
-		body, err = io.ReadAll(req.Body)
-		if err != nil {
-			return fmt.Errorf("read request body: %w", err)
-		}
-	}
-
-	endStream := len(body) == 0
-
-	// Send HEADERS frame(s) under writeMu.
-	tc.writeMu.Lock()
-	err := tc.writeHeaderFrames(streamID, endStream, fragment)
-	tc.writeMu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	// Send DATA frame(s) if there's a body. writeDataFrames acquires
-	// writeMu per-chunk so that flow control waits do not block other writes.
-	if len(body) > 0 {
-		if err := tc.writeDataFrames(ctx, streamID, body); err != nil {
-			return err
-		}
-		// Transition to half-closed (local) after sending END_STREAM.
-		tc.conn.Streams().Transition(streamID, EventSendEndStream) //nolint:errcheck
-	} else {
-		// END_STREAM was sent with HEADERS.
-		tc.conn.Streams().Transition(streamID, EventSendEndStream) //nolint:errcheck
-	}
-
-	return nil
-}
-
-// buildRequestHeaders converts an HTTP request into HPACK header fields.
-func (tc *transportConn) buildRequestHeaders(req *gohttp.Request) []hpack.HeaderField {
-	path := req.URL.RequestURI()
-	if path == "" {
-		path = "/"
-	}
-
-	scheme := req.URL.Scheme
-	if scheme == "" {
-		scheme = "https"
-	}
-
-	authority := req.URL.Host
-	if authority == "" {
-		authority = req.Host
-	}
-
-	headers := []hpack.HeaderField{
-		{Name: ":method", Value: req.Method},
-		{Name: ":scheme", Value: scheme},
-		{Name: ":authority", Value: authority},
-		{Name: ":path", Value: path},
-	}
-
-	for name, values := range req.Header {
-		lower := strings.ToLower(name)
-		// Skip hop-by-hop and HTTP/2 forbidden headers.
-		if lower == "host" {
-			continue
-		}
-		if isHopByHopHeader(lower) {
-			// te: trailers is allowed in HTTP/2 (RFC 9113 Section 8.2.2) and required for gRPC.
-			if lower == "te" {
-				for _, v := range values {
-					if strings.EqualFold(v, "trailers") {
-						headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
-					}
-				}
-			}
-			continue
-		}
-		for _, v := range values {
-			headers = append(headers, hpack.HeaderField{Name: lower, Value: v})
-		}
-	}
-
-	return headers
 }
 
 // isHopByHopHeader reports whether the header is an HTTP/1 hop-by-hop header
@@ -948,14 +757,27 @@ func (tc *transportConn) sendRawFrames(ctx context.Context, rawBytes []byte) (*R
 		}
 	}
 
-	// Build response.
-	resp, err := tc.buildResponse(&gohttp.Request{URL: &url.URL{}}, ss)
-	if err != nil {
-		return nil, fmt.Errorf("build response for raw stream %d: %w", streamID, err)
+	// Extract status code from response headers.
+	var statusCode int
+	for _, hf := range ss.headers {
+		if hf.Name == ":status" {
+			code, err := strconv.Atoi(hf.Value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid :status %q in raw stream %d: %w", hf.Value, streamID, err)
+			}
+			statusCode = code
+			break
+		}
+	}
+	if statusCode == 0 {
+		return nil, fmt.Errorf("no :status pseudo-header in response for raw stream %d", streamID)
 	}
 
 	return &RoundTripResult{
-		Response:   resp,
+		StatusCode: statusCode,
+		Headers:    ss.headers,
+		Trailers:   ss.trailers,
+		Body:       bytes.NewReader(ss.data),
 		ServerAddr: tc.netConn.RemoteAddr().String(),
 		RawFrames:  ss.rawFrames,
 	}, nil
@@ -1329,58 +1151,4 @@ func (tc *transportConn) close() {
 		tc.conn.Close()
 		tc.netConn.Close()
 	})
-}
-
-// buildResponse converts stream state into an *http.Response.
-func (tc *transportConn) buildResponse(req *gohttp.Request, ss *streamState) (*gohttp.Response, error) {
-	// Create a shallow copy of the request so we don't mutate the caller's req.URL.
-	reqCopy := *req
-	urlCopy := *req.URL
-	reqCopy.URL = &urlCopy
-
-	resp := &gohttp.Response{
-		Request: &reqCopy,
-		Header:  make(gohttp.Header),
-		Trailer: make(gohttp.Header),
-	}
-
-	for _, hf := range ss.headers {
-		if hf.Name == ":status" {
-			code, err := strconv.Atoi(hf.Value)
-			if err != nil {
-				return nil, fmt.Errorf("invalid :status %q: %w", hf.Value, err)
-			}
-			resp.StatusCode = code
-			resp.Status = httputil.FormatStatus(code)
-			continue
-		}
-		if strings.HasPrefix(hf.Name, ":") {
-			// Skip other pseudo-headers.
-			continue
-		}
-		resp.Header.Add(hf.Name, hf.Value)
-	}
-
-	if resp.StatusCode == 0 {
-		return nil, fmt.Errorf("no :status pseudo-header in response")
-	}
-
-	for _, hf := range ss.trailers {
-		if strings.HasPrefix(hf.Name, ":") {
-			continue
-		}
-		resp.Trailer.Add(hf.Name, hf.Value)
-	}
-
-	resp.Body = io.NopCloser(bytes.NewReader(ss.data))
-	resp.ContentLength = int64(len(ss.data))
-	resp.Proto = "HTTP/2.0"
-	resp.ProtoMajor = 2
-
-	// Extract TLS state.
-	if tlsState, ok := httputil.TLSConnectionState(tc.netConn); ok {
-		resp.TLS = &tlsState
-	}
-
-	return resp, nil
 }
