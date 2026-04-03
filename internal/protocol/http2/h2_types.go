@@ -458,35 +458,6 @@ func buildH2HeadersFromGoHTTP(req *gohttp.Request) []hpack.HeaderField {
 	return headers
 }
 
-// h2ResultToGoHTTPResponse converts an HTTP/2 RoundTripResult to a
-// *gohttp.Response for the legacy transport path and gRPC subsystem.
-// Data path code should use h2Response directly.
-func h2ResultToGoHTTPResponse(r *RoundTripResult) *gohttp.Response {
-	resp := &gohttp.Response{
-		StatusCode: r.StatusCode,
-		Status:     httputil.FormatStatus(r.StatusCode),
-		Proto:      "HTTP/2.0",
-		ProtoMajor: 2,
-		ProtoMinor: 0,
-		Header:     make(gohttp.Header),
-	}
-
-	for _, hf := range r.Headers {
-		if strings.HasPrefix(hf.Name, ":") {
-			continue
-		}
-		resp.Header.Add(hf.Name, hf.Value)
-	}
-
-	if r.Body != nil {
-		resp.Body = io.NopCloser(r.Body)
-	} else {
-		resp.Body = io.NopCloser(bytes.NewReader(nil))
-	}
-
-	return resp
-}
-
 // h2ResultToH2Response converts an HTTP/2 RoundTripResult to an h2Response
 // with hpack native types (no gohttp conversion).
 func h2ResultToH2Response(r *RoundTripResult, body []byte) *h2Response {

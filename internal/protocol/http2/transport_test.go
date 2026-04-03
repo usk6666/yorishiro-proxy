@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	gohttp "net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -294,25 +293,35 @@ func TestTransportConn_HandshakeAndRoundTrip(t *testing.T) {
 		}, []byte("world"))
 	}()
 
-	req, _ := gohttp.NewRequestWithContext(ctx, "POST", "https://example.com:443/api/test",
-		io.NopCloser(bytes.NewReader([]byte("hello"))))
-	req.Header.Set("Content-Type", "application/json")
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com:443"},
+		{Name: ":path", Value: "/api/test"},
+		{Name: "content-type", Value: "application/json"},
+	}
 
-	result, err := tc.roundTrip(ctx, req)
+	result, err := tc.roundTripRaw(ctx, headers, bytes.NewReader([]byte("hello")))
 	if err != nil {
-		t.Fatalf("roundTrip: %v", err)
+		t.Fatalf("roundTripRaw: %v", err)
 	}
 	wg.Wait()
 
-	if result.Response.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", result.Response.StatusCode)
+	if result.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", result.StatusCode)
 	}
-	respBody, _ := io.ReadAll(result.Response.Body)
+	respBody, _ := io.ReadAll(result.Body)
 	if string(respBody) != "world" {
 		t.Errorf("response body = %q, want world", respBody)
 	}
-	if ct := result.Response.Header.Get("Content-Type"); ct != "text/plain" {
-		t.Errorf("Content-Type = %q, want text/plain", ct)
+	var foundCT bool
+	for _, hf := range result.Headers {
+		if hf.Name == "content-type" && hf.Value == "text/plain" {
+			foundCT = true
+		}
+	}
+	if !foundCT {
+		t.Error("content-type: text/plain not found in response headers")
 	}
 	if result.ServerAddr == "" {
 		t.Error("ServerAddr is empty")
@@ -370,16 +379,21 @@ func TestTransportConn_EmptyBody(t *testing.T) {
 		server.sendResponse(t, streamID, 204, nil, nil)
 	}()
 
-	req, _ := gohttp.NewRequestWithContext(ctx, "GET", "https://example.com/health", nil)
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/health"},
+	}
 
-	result, err := tc.roundTrip(ctx, req)
+	result, err := tc.roundTripRaw(ctx, headers, nil)
 	if err != nil {
-		t.Fatalf("roundTrip: %v", err)
+		t.Fatalf("roundTripRaw: %v", err)
 	}
 	wg.Wait()
 
-	if result.Response.StatusCode != 204 {
-		t.Errorf("status = %d, want 204", result.Response.StatusCode)
+	if result.StatusCode != 204 {
+		t.Errorf("status = %d, want 204", result.StatusCode)
 	}
 
 	tc.close()
@@ -418,8 +432,13 @@ func TestTransportConn_GoAway(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// New requests should fail due to GOAWAY.
-	req, _ := gohttp.NewRequestWithContext(ctx, "GET", "https://example.com/test", nil)
-	_, err := tc.roundTrip(ctx, req)
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/test"},
+	}
+	_, err := tc.roundTripRaw(ctx, headers, nil)
 	if err == nil {
 		t.Fatal("expected error after GOAWAY, got nil")
 	}
@@ -464,8 +483,13 @@ func TestTransportConn_RSTStream(t *testing.T) {
 		}
 	}()
 
-	req, _ := gohttp.NewRequestWithContext(ctx, "GET", "https://example.com/test", nil)
-	_, err := tc.roundTrip(ctx, req)
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/test"},
+	}
+	_, err := tc.roundTripRaw(ctx, headers, nil)
 	wg.Wait()
 
 	if err == nil {
@@ -569,8 +593,13 @@ func TestTransportConn_ContextCancellation(t *testing.T) {
 	reqCtx, reqCancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer reqCancel()
 
-	req, _ := gohttp.NewRequestWithContext(reqCtx, "GET", "https://example.com/slow", nil)
-	_, err := tc.roundTrip(reqCtx, req)
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/slow"},
+	}
+	_, err := tc.roundTripRaw(reqCtx, headers, nil)
 	wg.Wait()
 
 	if err == nil {
@@ -581,80 +610,6 @@ func TestTransportConn_ContextCancellation(t *testing.T) {
 	}
 
 	tc.close()
-}
-
-func TestBuildRequestHeaders(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tc := newTransportConn(nil, logger)
-
-	tests := []struct {
-		name       string
-		req        *gohttp.Request
-		wantMethod string
-		wantScheme string
-		wantAuth   string
-		wantPath   string
-	}{
-		{
-			name: "basic GET",
-			req: func() *gohttp.Request {
-				r, _ := gohttp.NewRequest("GET", "https://example.com/path?q=1", nil)
-				return r
-			}(),
-			wantMethod: "GET",
-			wantScheme: "https",
-			wantAuth:   "example.com",
-			wantPath:   "/path?q=1",
-		},
-		{
-			name: "POST with host",
-			req: func() *gohttp.Request {
-				r, _ := gohttp.NewRequest("POST", "http://api.example.com:8080/v2", nil)
-				return r
-			}(),
-			wantMethod: "POST",
-			wantScheme: "http",
-			wantAuth:   "api.example.com:8080",
-			wantPath:   "/v2",
-		},
-		{
-			name: "empty path defaults to /",
-			req: func() *gohttp.Request {
-				r, _ := gohttp.NewRequest("GET", "https://example.com", nil)
-				return r
-			}(),
-			wantMethod: "GET",
-			wantScheme: "https",
-			wantAuth:   "example.com",
-			wantPath:   "/",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			headers := tc.buildRequestHeaders(tt.req)
-
-			got := make(map[string]string)
-			for _, hf := range headers {
-				if strings.HasPrefix(hf.Name, ":") {
-					got[hf.Name] = hf.Value
-				}
-			}
-
-			if got[":method"] != tt.wantMethod {
-				t.Errorf(":method = %q, want %q", got[":method"], tt.wantMethod)
-			}
-			if got[":scheme"] != tt.wantScheme {
-				t.Errorf(":scheme = %q, want %q", got[":scheme"], tt.wantScheme)
-			}
-			if got[":authority"] != tt.wantAuth {
-				t.Errorf(":authority = %q, want %q", got[":authority"], tt.wantAuth)
-			}
-			if got[":path"] != tt.wantPath {
-				t.Errorf(":path = %q, want %q", got[":path"], tt.wantPath)
-			}
-		})
-	}
 }
 
 func TestIsHopByHopHeader(t *testing.T) {
@@ -680,86 +635,6 @@ func TestIsHopByHopHeader(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestBuildRequestHeaders_TETrailersAllowed(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tc := newTransportConn(nil, logger)
-
-	// te: trailers should be preserved (required for gRPC in HTTP/2).
-	req, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
-	req.Header.Set("Te", "trailers")
-	req.Header.Set("Content-Type", "application/grpc")
-
-	headers := tc.buildRequestHeaders(req)
-
-	var foundTE, foundCT bool
-	for _, hf := range headers {
-		if hf.Name == "te" && hf.Value == "trailers" {
-			foundTE = true
-		}
-		if hf.Name == "content-type" && hf.Value == "application/grpc" {
-			foundCT = true
-		}
-	}
-
-	if !foundTE {
-		t.Error("te: trailers header should be preserved in HTTP/2")
-	}
-	if !foundCT {
-		t.Error("content-type header should be preserved")
-	}
-
-	// te: gzip should be dropped (not allowed in HTTP/2).
-	req2, _ := gohttp.NewRequest("POST", "https://example.com/api", nil)
-	req2.Header.Set("Te", "gzip")
-
-	headers2 := tc.buildRequestHeaders(req2)
-	for _, hf := range headers2 {
-		if hf.Name == "te" {
-			t.Errorf("te: %s should be dropped in HTTP/2", hf.Value)
-		}
-	}
-}
-
-func TestSendRequest_BodyCloseOnError(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tc := newTransportConn(nil, logger)
-
-	closed := false
-	body := &errorReadCloser{
-		readErr: io.ErrUnexpectedEOF,
-		onClose: func() { closed = true },
-	}
-
-	req, _ := gohttp.NewRequest("POST", "https://example.com/api", body)
-
-	ctx := context.Background()
-	err := tc.sendRequest(ctx, 1, req)
-	if err == nil {
-		t.Fatal("expected error from broken body reader")
-	}
-
-	if !closed {
-		t.Error("req.Body should be closed even when ReadAll fails")
-	}
-}
-
-// errorReadCloser is a test helper that returns an error on Read.
-type errorReadCloser struct {
-	readErr error
-	onClose func()
-}
-
-func (e *errorReadCloser) Read([]byte) (int, error) {
-	return 0, e.readErr
-}
-
-func (e *errorReadCloser) Close() error {
-	if e.onClose != nil {
-		e.onClose()
-	}
-	return nil
 }
 
 func TestTransportConn_LargeBodyFlowControl(t *testing.T) {
@@ -849,17 +724,21 @@ func TestTransportConn_LargeBodyFlowControl(t *testing.T) {
 		server.sendResponse(t, streamID, 200, nil, []byte("ok"))
 	}()
 
-	req, _ := gohttp.NewRequestWithContext(ctx, "POST", "https://example.com/upload",
-		io.NopCloser(bytes.NewReader(bodyData)))
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/upload"},
+	}
 
-	result, err := tc.roundTrip(ctx, req)
+	result, err := tc.roundTripRaw(ctx, headers, bytes.NewReader(bodyData))
 	if err != nil {
-		t.Fatalf("roundTrip with large body: %v", err)
+		t.Fatalf("roundTripRaw with large body: %v", err)
 	}
 	wg.Wait()
 
-	if result.Response.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", result.Response.StatusCode)
+	if result.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", result.StatusCode)
 	}
 }
 
@@ -915,19 +794,24 @@ func TestTransportConn_ConnectionReuse(t *testing.T) {
 			server.sendResponse(t, streamID, 200, nil, []byte("ok"))
 		}()
 
-		req, _ := gohttp.NewRequestWithContext(ctx, "GET", "https://example.com/test", nil)
-		result, err := tc.roundTrip(ctx, req)
+		headers := []hpack.HeaderField{
+			{Name: ":method", Value: "GET"},
+			{Name: ":scheme", Value: "https"},
+			{Name: ":authority", Value: "example.com"},
+			{Name: ":path", Value: "/test"},
+		}
+		result, err := tc.roundTripRaw(ctx, headers, nil)
 		if err != nil {
-			t.Fatalf("roundTrip #%d: %v", i+1, err)
+			t.Fatalf("roundTripRaw #%d: %v", i+1, err)
 		}
 		wg.Wait()
 
-		if result.Response.StatusCode != 200 {
-			t.Errorf("roundTrip #%d: status = %d, want 200", i+1, result.Response.StatusCode)
+		if result.StatusCode != 200 {
+			t.Errorf("roundTripRaw #%d: status = %d, want 200", i+1, result.StatusCode)
 		}
-		body, _ := io.ReadAll(result.Response.Body)
+		body, _ := io.ReadAll(result.Body)
 		if string(body) != "ok" {
-			t.Errorf("roundTrip #%d: body = %q, want ok", i+1, body)
+			t.Errorf("roundTripRaw #%d: body = %q, want ok", i+1, body)
 		}
 	}
 
@@ -971,17 +855,21 @@ func TestTransportConn_FlowControl(t *testing.T) {
 		server.sendResponse(t, streamID, 200, nil, []byte("received"))
 	}()
 
-	req, _ := gohttp.NewRequestWithContext(ctx, "POST", "https://example.com/upload",
-		io.NopCloser(bytes.NewReader(bodyData)))
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "example.com"},
+		{Name: ":path", Value: "/upload"},
+	}
 
-	result, err := tc.roundTrip(ctx, req)
+	result, err := tc.roundTripRaw(ctx, headers, bytes.NewReader(bodyData))
 	if err != nil {
-		t.Fatalf("roundTrip: %v", err)
+		t.Fatalf("roundTripRaw: %v", err)
 	}
 	wg.Wait()
 
-	if result.Response.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", result.Response.StatusCode)
+	if result.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", result.StatusCode)
 	}
 
 	tc.close()
