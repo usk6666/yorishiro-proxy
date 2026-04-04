@@ -19,6 +19,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
@@ -177,7 +178,7 @@ func (s *Server) registerResend() {
 		Name: "resend",
 		Description: "Resend and replay recorded proxy requests with optional mutations, or compare two flows. " +
 			"Available actions: " +
-			"'resend' resends a recorded HTTP/HTTP2/WebSocket request with optional mutation (method/URL/header/body overrides, body patches, dry-run). " +
+			"'resend' resends a recorded HTTP/HTTP2/gRPC-Web/WebSocket request with optional mutation (method/URL/header/body overrides, body patches, dry-run). " +
 			"For WebSocket flows, use message_sequence to specify which message to resend as a raw TCP frame; " +
 			"'resend_raw' resends raw bytes from a recorded flow over TCP/TLS with optional byte-level patches (offset overwrite, binary/text find-replace, override_raw_base64 full replacement, dry-run); " +
 			"'tcp_replay' replays a Raw TCP flow by sending all 'send' messages sequentially to the target; " +
@@ -423,11 +424,18 @@ func (s *Server) loadResendSendData(ctx context.Context, fl *flow.Flow, params r
 		return nil, nil, fmt.Errorf("body_patches is not yet supported for gRPC flows")
 	}
 
+	// Reject body_patches for gRPC-Web flows: protobuf decode/re-encode is not yet supported.
+	if isGRPCWebFlow(fl.Protocol) && len(params.BodyPatches) > 0 {
+		return nil, nil, fmt.Errorf("body_patches is not yet supported for gRPC-Web flows")
+	}
+
 	// For gRPC flows, reconstruct the request body from data frame messages
 	// (sequence 1+), since sequence 0 is the header-only message.
 	var originalBody []byte
 	if isGRPCFlow(fl.Protocol) && len(sendMsgs) > 1 {
 		originalBody = buildGRPCRequestBody(sendMsgs[1:])
+	} else if isGRPCWebFlow(fl.Protocol) {
+		originalBody = buildGRPCWebRequestBody(sendMsgs)
 	} else {
 		originalBody = sendMsg.Body
 	}
@@ -441,10 +449,13 @@ func (s *Server) loadResendSendData(ctx context.Context, fl *flow.Flow, params r
 }
 
 // checkResendProtocolSupport returns an error if the flow's protocol/type combination
-// is not supported for resend. Currently gRPC streaming flows are unsupported.
+// is not supported for resend. Currently gRPC and gRPC-Web streaming flows are unsupported.
 func checkResendProtocolSupport(fl *flow.Flow) error {
 	if isGRPCFlow(fl.Protocol) && fl.FlowType != "unary" {
 		return fmt.Errorf("resending gRPC streaming flows (type: %s) is not yet supported; only unary gRPC flows can be resent", fl.FlowType)
+	}
+	if isGRPCWebFlow(fl.Protocol) && fl.FlowType != "unary" {
+		return fmt.Errorf("resending gRPC-Web streaming flows (type: %s) is not yet supported; only unary gRPC-Web flows can be resent", fl.FlowType)
 	}
 	return nil
 }
@@ -704,59 +715,71 @@ func (s *Server) recordResendFlowRaw(ctx context.Context, prep *resendPrepared, 
 		return fmt.Errorf("save resend receive message: %w", err)
 	}
 
-	// For gRPC flows, record trailers from the response headers.
-	// Structured resend uses the H1 transport path, so gRPC trailers
-	// (grpc-status, grpc-message) arrive as regular HTTP/1.x trailing headers
-	// merged into the response headers. Detect them to build a separate
-	// trailers message for format compatibility with native gRPC flows.
-	if isGRPCFlow(prep.flow.Protocol) {
-		grpcStatus := resp.Headers.Get("Grpc-Status")
-		grpcMessage := resp.Headers.Get("Grpc-Message")
-		if grpcStatus != "" {
-			trailerMeta := map[string]string{
-				"grpc_type": "trailers",
-			}
-			if prep.url != nil {
-				parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
-				if len(parts) == 2 {
-					trailerMeta["service"] = parts[0]
-					trailerMeta["method"] = parts[1]
-				}
-			}
-			trailerMeta["grpc_status"] = grpcStatus
-			if grpcMessage != "" {
-				trailerMeta["grpc_message"] = grpcMessage
-			}
-			// Build trailer headers from response trailer fields.
-			var trailerHeaders parser.RawHeaders
-			for _, h := range resp.Headers {
-				lower := strings.ToLower(h.Name)
-				if lower == "grpc-status" || lower == "grpc-message" || lower == "grpc-status-details-bin" {
-					trailerHeaders = append(trailerHeaders, h)
-				}
-			}
-			trailerMsg := &flow.Message{
-				FlowID:     newFl.ID,
-				Sequence:   newRecvMsg.Sequence + 1,
-				Direction:  "receive",
-				Timestamp:  start.Add(duration),
-				StatusCode: resp.StatusCode,
-				Headers:    rawHeadersToMultiMap(trailerHeaders),
-				Metadata:   trailerMeta,
-			}
-			if err := s.deps.store.AppendMessage(ctx, trailerMsg); err != nil {
-				return fmt.Errorf("save resend gRPC trailers message: %w", err)
-			}
+	// For gRPC and gRPC-Web flows, record trailers from the response headers.
+	if isGRPCFlow(prep.flow.Protocol) || isGRPCWebFlow(prep.flow.Protocol) {
+		if err := s.recordResendGRPCTrailers(ctx, prep, resp, newFl, newRecvMsg, start, duration); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
+// recordResendGRPCTrailers extracts gRPC trailers from the response headers
+// and saves them as a separate message. Structured resend uses the H1 transport
+// path, so gRPC trailers (grpc-status, grpc-message) arrive as regular
+// HTTP/1.x trailing headers merged into the response headers.
+func (s *Server) recordResendGRPCTrailers(ctx context.Context, prep *resendPrepared, resp *parser.RawResponse, newFl *flow.Flow, recvMsg *flow.Message, start time.Time, duration time.Duration) error {
+	grpcStatus := resp.Headers.Get("Grpc-Status")
+	if grpcStatus == "" {
+		return nil
+	}
+
+	trailerMeta := map[string]string{
+		"grpc_type": "trailers",
+	}
+	if prep.url != nil {
+		parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
+		if len(parts) == 2 {
+			trailerMeta["service"] = parts[0]
+			trailerMeta["method"] = parts[1]
+		}
+	}
+	trailerMeta["grpc_status"] = grpcStatus
+	if grpcMessage := resp.Headers.Get("Grpc-Message"); grpcMessage != "" {
+		trailerMeta["grpc_message"] = grpcMessage
+	}
+
+	// Build trailer headers from response trailer fields.
+	var trailerHeaders parser.RawHeaders
+	for _, h := range resp.Headers {
+		lower := strings.ToLower(h.Name)
+		if lower == "grpc-status" || lower == "grpc-message" || lower == "grpc-status-details-bin" {
+			trailerHeaders = append(trailerHeaders, h)
+		}
+	}
+
+	trailerMsg := &flow.Message{
+		FlowID:     newFl.ID,
+		Sequence:   recvMsg.Sequence + 1,
+		Direction:  "receive",
+		Timestamp:  start.Add(duration),
+		StatusCode: resp.StatusCode,
+		Headers:    rawHeadersToMultiMap(trailerHeaders),
+		Metadata:   trailerMeta,
+	}
+	return s.deps.store.AppendMessage(ctx, trailerMsg)
+}
+
 // isGRPCFlow reports whether the protocol string indicates a gRPC flow,
 // including SOCKS5-tunneled gRPC flows.
 func isGRPCFlow(protocol string) bool {
 	return protocol == "gRPC" || protocol == "SOCKS5+gRPC"
+}
+
+// isGRPCWebFlow reports whether the protocol string indicates a gRPC-Web flow.
+func isGRPCWebFlow(protocol string) bool {
+	return protocol == "gRPC-Web"
 }
 
 // --- Resend helper functions ---
@@ -772,6 +795,38 @@ func buildGRPCRequestBody(dataMessages []*flow.Message) []byte {
 		}
 		compressed := msg.Metadata["compressed"] == "true"
 		frame := protogrpc.EncodeFrame(compressed, msg.Body)
+		buf.Write(frame)
+	}
+	return buf.Bytes()
+}
+
+// buildGRPCWebRequestBody reconstructs the gRPC-Web request body from recorded
+// messages. gRPC-Web records the first send message with the full request body
+// as RawBytes, and each frame's payload in Body. The RawBytes represent the
+// wire-observed data (possibly base64-encoded), so we use it directly.
+//
+// If there are multiple data frames with Body content, we re-encode them into
+// gRPC-Web binary frames. The Content-Type header determines the wire encoding
+// at send time (handled by the caller or UpstreamRouter).
+func buildGRPCWebRequestBody(sendMsgs []*flow.Message) []byte {
+	if len(sendMsgs) == 0 {
+		return nil
+	}
+
+	// If the first message has RawBytes, that's the wire-observed request body.
+	// Use it directly for resend — this preserves the original encoding (binary or base64).
+	if len(sendMsgs[0].RawBytes) > 0 {
+		return sendMsgs[0].RawBytes
+	}
+
+	// Fall back: re-encode frames from Body fields.
+	var buf bytes.Buffer
+	for _, msg := range sendMsgs {
+		if len(msg.Body) == 0 {
+			continue
+		}
+		compressed := msg.Metadata != nil && msg.Metadata["compressed"] == "true"
+		frame := grpcweb.EncodeFrame(false, compressed, msg.Body)
 		buf.Write(frame)
 	}
 	return buf.Bytes()

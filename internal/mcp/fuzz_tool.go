@@ -124,11 +124,8 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		return nil, nil, err
 	}
 
-	// gRPC flows use length-prefixed protobuf frames; byte-offset fuzzing would
-	// corrupt the frame header and produce invalid messages. Reject early until
-	// frame-aware mutation is implemented.
-	if templateFlow.Protocol == "gRPC" {
-		return nil, nil, fmt.Errorf("fuzzing gRPC flows is not yet supported: gRPC uses length-prefixed protobuf frames that require frame-aware mutation")
+	if err := checkFuzzProtocolSupport(templateFlow); err != nil {
+		return nil, nil, err
 	}
 
 	templateSendMsgs, err := s.loadFuzzTemplateSendMessages(ctx, templateFlow.ID)
@@ -387,4 +384,22 @@ func (s *Server) handleFuzzCancelAction(params fuzzParams) (*gomcp.CallToolResul
 		Action: "fuzz_cancel",
 		Status: string(ctrl.Status()),
 	}, nil
+}
+
+// checkFuzzProtocolSupport returns an error if the flow's protocol is not
+// supported for fuzzing.
+func checkFuzzProtocolSupport(fl *flow.Flow) error {
+	// gRPC flows use length-prefixed protobuf frames; byte-offset fuzzing would
+	// corrupt the frame header and produce invalid messages. Reject early until
+	// frame-aware mutation is implemented.
+	if fl.Protocol == "gRPC" {
+		return fmt.Errorf("fuzzing gRPC flows is not yet supported: gRPC uses length-prefixed protobuf frames that require frame-aware mutation")
+	}
+
+	// gRPC-Web streaming flows are not supported for fuzzing (same limitation as resend).
+	if fl.Protocol == "gRPC-Web" && fl.FlowType != "unary" {
+		return fmt.Errorf("fuzzing gRPC-Web streaming flows (type: %s) is not yet supported; only unary gRPC-Web flows can be fuzzed", fl.FlowType)
+	}
+
+	return nil
 }

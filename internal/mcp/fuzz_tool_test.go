@@ -211,3 +211,75 @@ func TestHandleFuzzStart_AllowsHTTPFlow(t *testing.T) {
 		t.Errorf("expected 'fuzz runner is not initialized' error, got: %s", err.Error())
 	}
 }
+
+func TestHandleFuzzStart_GRPCWebUnaryAllowed(t *testing.T) {
+	t.Parallel()
+
+	store := &fuzzTestStore{
+		flow: &flow.Flow{
+			ID:       "flow-grpcweb-1",
+			Protocol: "gRPC-Web",
+			FlowType: "unary",
+		},
+		messages: []*flow.Message{},
+	}
+
+	// Server with store but no fuzzRunner — should pass protocol checks
+	// and fail at "fuzz runner is not initialized".
+	srv := &Server{deps: &deps{store: store}}
+
+	params := fuzzParams{
+		FlowID:     "flow-grpcweb-1",
+		AttackType: "sequential",
+		Positions: []fuzzer.Position{
+			{ID: "pos-0", Location: "body_regex"},
+		},
+	}
+
+	_, _, err := srv.handleFuzzStart(context.Background(), params)
+	if err == nil {
+		t.Fatal("expected error (fuzz runner not initialized), got nil")
+	}
+
+	// The error should NOT be a protocol rejection error.
+	if strings.Contains(err.Error(), "gRPC-Web streaming") || strings.Contains(err.Error(), "gRPC flows is not yet supported") {
+		t.Errorf("unary gRPC-Web flow should not be rejected, got: %s", err.Error())
+	}
+
+	// Should reach the "fuzz runner is not initialized" check.
+	if !strings.Contains(err.Error(), "fuzz runner is not initialized") {
+		t.Errorf("expected 'fuzz runner is not initialized' error, got: %s", err.Error())
+	}
+}
+
+func TestHandleFuzzStart_GRPCWebStreamingRejected(t *testing.T) {
+	t.Parallel()
+
+	store := &fuzzTestStore{
+		flow: &flow.Flow{
+			ID:       "flow-grpcweb-stream-1",
+			Protocol: "gRPC-Web",
+			FlowType: "server-streaming",
+		},
+		messages: []*flow.Message{},
+	}
+
+	srv := &Server{deps: &deps{store: store}}
+
+	params := fuzzParams{
+		FlowID:     "flow-grpcweb-stream-1",
+		AttackType: "sequential",
+		Positions: []fuzzer.Position{
+			{ID: "pos-0", Location: "body_regex"},
+		},
+	}
+
+	_, _, err := srv.handleFuzzStart(context.Background(), params)
+	if err == nil {
+		t.Fatal("expected error for streaming gRPC-Web flow, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "gRPC-Web streaming flows") {
+		t.Errorf("error = %q, want to contain 'gRPC-Web streaming flows'", err.Error())
+	}
+}
