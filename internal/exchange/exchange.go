@@ -153,24 +153,40 @@ func (e *Exchange) Clone() *Exchange {
 	return c
 }
 
-// HeaderValue returns the value of the first header matching name
-// (case-insensitive). It returns an empty string if no match is found.
-func (e *Exchange) HeaderValue(name string) string {
-	return headerValue(e.Headers, name)
+// GetHeaders returns the current Headers slice. Use with SetHeaders to
+// read-modify-write the full header list.
+func (e *Exchange) GetHeaders() []KeyValue {
+	return e.Headers
 }
 
-// SetHeader updates the first header matching name (case-insensitive) to value.
-// If no matching header exists, it appends a new entry.
-func (e *Exchange) SetHeader(name, value string) {
-	e.Headers = setHeader(e.Headers, name, value)
+// HeaderValues returns the values of all headers matching name
+// (case-insensitive). Returns nil if no match is found. Useful for headers
+// that may appear multiple times (e.g. Set-Cookie, or duplicate headers
+// intentionally crafted for pentesting).
+func (e *Exchange) HeaderValues(name string) []string {
+	return headerValues(e.Headers, name)
 }
 
-// AddHeader appends a header entry to the end of Headers.
-func (e *Exchange) AddHeader(name, value string) {
-	e.Headers = append(e.Headers, KeyValue{Name: name, Value: value})
+// SetHeaders replaces the entire Headers slice. The caller has full control
+// over order, casing, and duplicates — all of which are valid in pentesting
+// scenarios (e.g. duplicate Host for header injection, duplicate
+// Content-Length for request smuggling).
+func (e *Exchange) SetHeaders(headers []KeyValue) {
+	e.Headers = headers
 }
 
-// DelHeader removes all headers matching name (case-insensitive).
-func (e *Exchange) DelHeader(name string) {
-	e.Headers = delHeader(e.Headers, name)
+// GetTrailers returns the current Trailers slice.
+func (e *Exchange) GetTrailers() []KeyValue {
+	return e.Trailers
+}
+
+// TrailerValues returns the values of all trailers matching name
+// (case-insensitive). Returns nil if no match is found.
+func (e *Exchange) TrailerValues(name string) []string {
+	return headerValues(e.Trailers, name)
+}
+
+// SetTrailers replaces the entire Trailers slice.
+func (e *Exchange) SetTrailers(trailers []KeyValue) {
+	e.Trailers = trailers
 }
