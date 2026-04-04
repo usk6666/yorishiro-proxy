@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 )
 
 // EncoderFunc is a function that transforms a string value.
@@ -24,7 +24,7 @@ func GetEncoder(name string) EncoderFunc {
 	// Handle base64_decode as a special case: it maps to codec base64's Decode.
 	if name == "base64_decode" {
 		return func(s string) (string, error) {
-			return codec.Decode(s, []string{"base64"})
+			return encoding.Decode(s, []string{"base64"})
 		}
 	}
 
@@ -34,7 +34,7 @@ func GetEncoder(name string) EncoderFunc {
 		codecName = alias
 	}
 
-	c, ok := codec.DefaultRegistry().Get(codecName)
+	c, ok := encoding.DefaultRegistry().Get(codecName)
 	if !ok {
 		return nil
 	}

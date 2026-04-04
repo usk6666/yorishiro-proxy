@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 	"github.com/usk6666/yorishiro-proxy/internal/payload"
 )
 
@@ -30,7 +30,7 @@ type PayloadSet struct {
 	// Format is the format string for sequence type (e.g., "user%04d").
 	Format string `json:"format,omitempty"`
 	// Encoding is an optional chain of codec names to apply to each generated payload.
-	// Codecs are applied in order using codec.Encode (e.g., ["url_encode_query", "base64"]).
+	// Codecs are applied in order using encoding.Encode (e.g., ["url_encode_query", "base64"]).
 	Encoding []string `json:"encoding,omitempty"`
 	// Charset is the character set for charset type (e.g., "abc" or "0123456789").
 	Charset string `json:"charset,omitempty"`
@@ -136,7 +136,7 @@ func (ps *PayloadSet) validateEncoding() error {
 	if len(ps.Encoding) > maxEncodingChainLen {
 		return fmt.Errorf("encoding chain length %d exceeds maximum of %d", len(ps.Encoding), maxEncodingChainLen)
 	}
-	reg := codec.DefaultRegistry()
+	reg := encoding.DefaultRegistry()
 	for _, name := range ps.Encoding {
 		if _, ok := reg.Get(name); !ok {
 			return fmt.Errorf("unknown encoding codec %q; available codecs: %s", name, strings.Join(reg.List(), ", "))
@@ -213,7 +213,7 @@ func (ps *PayloadSet) generateNullByteInjection() ([]string, error) {
 func applyEncoding(payloads []string, encodingChain []string) ([]string, error) {
 	encoded := make([]string, 0, len(payloads))
 	for _, p := range payloads {
-		enc, err := codec.Encode(p, encodingChain)
+		enc, err := encoding.Encode(p, encodingChain)
 		if err != nil {
 			return nil, fmt.Errorf("encode payload %q: %w", p, err)
 		}

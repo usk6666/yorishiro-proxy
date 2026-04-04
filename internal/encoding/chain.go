@@ -1,4 +1,4 @@
-package codec
+package encoding
 
 // Chain provides a fluent interface for applying multiple codecs in sequence.
 type Chain struct {

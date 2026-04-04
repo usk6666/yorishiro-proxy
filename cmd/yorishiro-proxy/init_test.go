@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 )
 
 // testLogger returns a quiet logger for test use.
@@ -569,7 +569,7 @@ def decode(s):
     return encode(s)
 `)
 
-	codecCfgs := []codec.CodecPluginConfig{{Path: pluginPath}}
+	codecCfgs := []encoding.CodecPluginConfig{{Path: pluginPath}}
 	raw, err := json.Marshal(codecCfgs)
 	if err != nil {
 		t.Fatalf("marshal codec configs: %v", err)
@@ -587,7 +587,7 @@ def decode(s):
 	}
 
 	// Verify the codec was registered.
-	reg := codec.DefaultRegistry()
+	reg := encoding.DefaultRegistry()
 	if _, ok := reg.Get("rot13-test"); !ok {
 		t.Error("expected rot13-test codec to be registered")
 	}
@@ -607,7 +607,7 @@ func TestLoadCodecPlugins_InvalidJSON(t *testing.T) {
 
 func TestLoadCodecPlugins_NonexistentPath(t *testing.T) {
 	logger := testLogger(t)
-	codecCfgs := []codec.CodecPluginConfig{{Path: "/nonexistent/plugin.star"}}
+	codecCfgs := []encoding.CodecPluginConfig{{Path: "/nonexistent/plugin.star"}}
 	raw, err := json.Marshal(codecCfgs)
 	if err != nil {
 		t.Fatalf("marshal codec configs: %v", err)
@@ -634,7 +634,7 @@ def encode(s):
     return s.upper()
 `)
 
-	codecCfgs := []codec.CodecPluginConfig{{Path: dir}}
+	codecCfgs := []encoding.CodecPluginConfig{{Path: dir}}
 	raw, err := json.Marshal(codecCfgs)
 	if err != nil {
 		t.Fatalf("marshal codec configs: %v", err)
@@ -651,7 +651,7 @@ def encode(s):
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	reg := codec.DefaultRegistry()
+	reg := encoding.DefaultRegistry()
 	if _, ok := reg.Get("upper2-test"); !ok {
 		t.Error("expected upper2-test codec to be registered from directory")
 	}
