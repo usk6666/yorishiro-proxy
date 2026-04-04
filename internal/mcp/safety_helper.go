@@ -42,21 +42,6 @@ func (s *Server) filterOutputKVHeaders(headers []exchange.KeyValue) http.Header 
 	return rawHeadersToHTTPHeader(filtered)
 }
 
-// httpHeaderToRawHeaders converts net/http.Header (map[string][]string) to
-// parser.RawHeaders. Header name casing is preserved as-is.
-func httpHeaderToRawHeaders(h http.Header) parser.RawHeaders {
-	if h == nil {
-		return nil
-	}
-	var rh parser.RawHeaders
-	for name, vals := range h {
-		for _, v := range vals {
-			rh = append(rh, parser.RawHeader{Name: name, Value: v})
-		}
-	}
-	return rh
-}
-
 // httpHeaderToKeyValues converts net/http.Header (map[string][]string) to
 // []exchange.KeyValue. Header name casing is preserved as-is.
 func httpHeaderToKeyValues(h http.Header) []exchange.KeyValue {
