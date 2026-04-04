@@ -283,156 +283,32 @@ Agent(
 
 **Review Gate Prompt Content:**
 
-The prompt passed to the Agent should include:
+The prompt passed to the Agent should instruct it to execute the `/review-gate` flow.
+Read `.claude/skills/review-gate/SKILL.md` and include its full content in the prompt,
+along with:
 - PR number, branch name, Issue ID
 - Product context, security context
-- Content of Code Review and Security Review agent templates (`.claude/agents/code-reviewer.md`, `.claude/agents/security-reviewer.md`)
-- Fixer agent template (`.claude/agents/fixer.md`) content
-- The following complete review gate flow steps (including Copilot review integration)
+- Content of agent templates (`.claude/agents/code-reviewer.md`, `.claude/agents/security-reviewer.md`, `.claude/agents/fixer.md`)
 
-**Flow executed by the Review Gate Agent:**
+> **Single Source of Truth**: The review gate flow is defined in `/review-gate` SKILL.md.
+> Do not duplicate the flow steps here. Always read the SKILL.md at prompt construction time
+> to ensure the latest version is used.
 
-**Step 0: Request Copilot Review**
+**Expected Output Format:**
 
-Request GitHub Copilot code review immediately so it runs in parallel with Claude reviews:
-
-```bash
-gh pr edit <PR number> --add-reviewer @copilot
-```
-
-On success, record `copilot_requested = true` and `copilot_request_time`.
-If the command fails (Copilot not available), log a warning and initialize defaults:
-
-```
-copilot_requested = false
-copilot_findings = []
-copilot_review = "UNAVAILABLE"
-```
-
-Continue without Copilot review.
-
-**Step A: Initial Review (Parallel)**
-
-Launch 2 Task tools in parallel in the same message:
-
-```
-Agent(description="Code review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Code Review prompt>)
-Agent(description="Security review PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Security Review prompt>)
-```
-
-Placeholder construction:
-- `{{PRODUCT_CONTEXT}}` → Product context
-- `{{SECURITY_CONTEXT}}` → yorishiro-proxy threat model (MITM proxy, CA key holding, MCP commands)
-- `{{ISSUE_ID}}`, `{{ISSUE_DESCRIPTION}}` → Issue information
-- `{{PR_NUMBER}}`, `{{PR_TITLE}}`, `{{CHANGED_FILES}}` → PR information
-
-**Step A.5: Wait for Copilot Review**
-
-> Skip if `copilot_requested == false`.
-
-1. Calculate elapsed time since `copilot_request_time`
-2. If less than 5 minutes have elapsed, sleep until the 5-minute mark
-3. Poll for Copilot review submission:
-
-```bash
-gh api repos/{owner}/{repo}/pulls/<PR number>/reviews \
-  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer")] | length'
-```
-
-- If result > 0: Collect Copilot comments → proceed to Step B
-- If result == 0: Wait 1 minute and retry, up to 4 additional attempts (5 total polling attempts at approximately 5, 6, 7, 8, 9 minutes; max ~10 minutes from `copilot_request_time`)
-- If no Copilot review after 5 polling attempts: Log warning, set `copilot_findings = []` and `copilot_review = "TIMED_OUT"`, proceed without Copilot findings
-
-Collect Copilot comments:
-
-```bash
-gh api repos/{owner}/{repo}/pulls/<PR number>/comments \
-  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer") | {path: .path, line: .line, body: .body}]'
-```
-
-Format as `COPILOT_FINDINGS` with severity inferred from comment content (security→HIGH, bug→MEDIUM, style→LOW).
-
-**Step B: MITM Compatibility Triage + Aggregate Verdict**
-
-Before aggregating, apply MITM Compatibility Triage to **all findings** (Claude + Copilot).
-Reject findings that conflict with MITM proxy design principles (header deduplication,
-Host=URL enforcement, canonicalization, reordering, `net/http` type usage in data path).
-See the detailed triage rules in `/review-gate` SKILL.md Phase 3-3.5.
-Remove `REJECTED_MITM` findings from the lists passed to the Fixer; include them in the final report.
-
-Extract `VERDICT:` and `FINDINGS:` from each Claude agent's output, plus Copilot findings:
-- Both `APPROVED` with no findings and no Copilot findings (after triage) → Review complete for this PR
-- Both `APPROVED` but LOW or higher findings (or Copilot findings) remain after triage → Step C-1 (Fix only, no re-review)
-- Either `CHANGES_REQUESTED` → Step C-2 (Fix + re-review)
-
-**Step C-1: Fix Only (APPROVED_WITH_FINDINGS)**
-
-If APPROVED but LOW or higher findings exist (including Copilot findings), launch Fixer once and skip re-review.
-
-```
-Agent(description="Fix LOW findings PR #<N>", subagent_type="general-purpose", isolation="worktree", prompt=<Fixer prompt>)
-```
-
-- `{{CODE_REVIEW_FINDINGS}}` → Code Review findings (all findings if present, "None" if not)
-- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review findings (all findings if present, "None" if not)
-- `{{COPILOT_REVIEW_FINDINGS}}` → Copilot Review findings (formatted from Step A.5, "None" if not available)
-- `{{BRANCH_NAME}}` → PR head branch name
-
-After Fix, re-request Copilot review if `copilot_requested == true`:
-
-```bash
-gh pr edit <PR number> --add-reviewer @copilot
-```
-
-Review gate complete after Fix (do not wait for Copilot re-review in the fix-only path).
-
-**Step C-2: Fix Cycle (Max 2 Rounds, CHANGES_REQUESTED)**
-
-Launch with Fixer Agent template from `.claude/agents/fixer.md` with replaced placeholders:
-
-```
-Agent(description="Fix review findings PR #<N> round <R>", subagent_type="general-purpose", isolation="worktree", prompt=<Fixer prompt>)
-```
-
-- `{{CODE_REVIEW_FINDINGS}}` → Code Review findings (all findings including LOW if present, "None" if not)
-- `{{SECURITY_REVIEW_FINDINGS}}` → Security Review findings (all findings including LOW if present, "None" if not)
-- `{{COPILOT_REVIEW_FINDINGS}}` → Copilot Review findings (formatted from Step A.5, "None" if not available)
-- `{{BRANCH_NAME}}` → PR head branch name
-
-After Fix:
-1. Re-run only the Claude reviews that were `CHANGES_REQUESTED`
-2. Re-request Copilot review if `copilot_requested == true`:
-   ```bash
-   gh pr edit <PR number> --add-reviewer @copilot
-   ```
-3. Wait for Copilot review (same polling as Step A.5) and collect new findings
-4. Include new Copilot findings in the next round's input
-
-If not resolved after 2 rounds, report as `ESCALATED`.
-
-**Step D: Report Results**
-
-The Review Gate Agent returns the final result in the following format:
+The Review Gate Agent must return results in this format:
 
 ```
 REVIEW_GATE_RESULT:
   pr_number: <N>
   code_review: APPROVED | CHANGES_REQUESTED
   security_review: APPROVED | CHANGES_REQUESTED
-  copilot_review: AVAILABLE | UNAVAILABLE | TIMED_OUT
-  copilot_findings_initial: <N>     # number of Copilot comments in the initial review
-  copilot_findings_remaining: <N>   # number of Copilot comments in the latest re-review (0 if no re-review or unavailable)
   final_verdict: APPROVED | ESCALATED
   fix_rounds: 0 | 1 | 2
   low_fix_only: true | false
   unresolved_findings: [...]
   agent_ids: [<all sub-agent IDs launched>]
 ```
-
-> **`copilot_findings_remaining`**: Determined by counting Copilot comments in the latest
-> re-review round. If a re-review was performed and Copilot returned fewer comments,
-> the difference represents fixed findings. If no re-review occurred, set to the same
-> value as `copilot_findings_initial`.
 
 #### 2.5-3. Collect Review Results
 
@@ -455,9 +331,6 @@ Record each PR's review result in the following format for aggregation in Phase 
 pr_review_results[PR number] = {
   code_review: APPROVED | CHANGES_REQUESTED,
   security_review: APPROVED | CHANGES_REQUESTED,
-  copilot_review: AVAILABLE | UNAVAILABLE | TIMED_OUT,
-  copilot_findings_initial: N,
-  copilot_findings_remaining: N,
   final_verdict: APPROVED | ESCALATED,
   fix_rounds: 0 | 1 | 2,
   low_fix_only: true | false,
@@ -500,16 +373,16 @@ After all batches complete, aggregate results by milestone:
 ### Milestone: M2 — MCP Interface v2
 
 #### Batch 1
-| Issue | Title | Status | PR | Tests | Code Review | Security Review | Copilot | Fix Rounds |
+| Issue | Title | Status | PR | Tests | Code Review | Security Review | Fix Rounds |
 |-------|-------|--------|----|-------|-------------|----------------|---------|------------|
-| USK-XX | ... | Success | #4 | 8 passed | APPROVED | APPROVED | 2/2 fixed | 0 |
-| USK-YY | ... | Success | #5 | 12 passed | APPROVED | Fix→APPROVED | 1/1 fixed | 1 |
+| USK-XX | ... | Success | #4 | 8 passed | APPROVED | APPROVED | 0 |
+| USK-YY | ... | Success | #5 | 12 passed | APPROVED | Fix→APPROVED | 1 |
 
 #### Batch 2
-| Issue | Title | Status | PR | Tests | Code Review | Security Review | Copilot | Fix Rounds |
+| Issue | Title | Status | PR | Tests | Code Review | Security Review | Fix Rounds |
 |-------|-------|--------|----|-------|-------------|----------------|---------|------------|
-| USK-AA | ... | Success | #6 | 5 passed | APPROVED | APPROVED | N/A | 0 |
-| USK-BB | ... | Failed | — | 2 failed | — | — | — | — |
+| USK-AA | ... | Success | #6 | 5 passed | APPROVED | APPROVED | 0 |
+| USK-BB | ... | Failed | — | 2 failed | — | — | — |
 
 ### Failed Issues
 - **USK-BB**: ... — Test failure
