@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 )
 
 // Direction specifies whether a rule applies to requests, responses, or both.
@@ -190,7 +190,7 @@ func compileRule(r Rule) (*compiledRule, error) {
 // matchesRequest evaluates whether the compiled rule matches the given
 // HTTP method, URL, and headers. Only applicable conditions are checked;
 // empty conditions match everything.
-func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers parser.RawHeaders) bool {
+func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers []exchange.KeyValue) bool {
 	if !cr.matchesHost(u, headers) {
 		return false
 	}
@@ -208,7 +208,7 @@ func (cr *compiledRule) matchesRequest(method string, u *url.URL, headers parser
 
 // matchesHost checks whether the request host matches the compiled host pattern.
 // For HTTPS MITM (CONNECT tunnel), u.Host may be empty; falls back to the Host header.
-func (cr *compiledRule) matchesHost(u *url.URL, headers parser.RawHeaders) bool {
+func (cr *compiledRule) matchesHost(u *url.URL, headers []exchange.KeyValue) bool {
 	if cr.hostPatternRe == nil {
 		return true
 	}
@@ -217,7 +217,7 @@ func (cr *compiledRule) matchesHost(u *url.URL, headers parser.RawHeaders) bool 
 		host = u.Hostname()
 	}
 	if host == "" && headers != nil {
-		host = extractHostname(headers.Get("Host"))
+		host = extractHostname(kvGet(headers, "Host"))
 	}
 	return cr.hostPatternRe.MatchString(host)
 }
@@ -248,7 +248,7 @@ func (cr *compiledRule) matchesMethod(method string) bool {
 }
 
 // matchesHeaders checks whether the request headers match all compiled header patterns.
-func (cr *compiledRule) matchesHeaders(headers parser.RawHeaders) bool {
+func (cr *compiledRule) matchesHeaders(headers []exchange.KeyValue) bool {
 	if len(cr.headerMatchRes) == 0 {
 		return true
 	}
@@ -256,7 +256,7 @@ func (cr *compiledRule) matchesHeaders(headers parser.RawHeaders) bool {
 		return false
 	}
 	for canonicalName, re := range cr.headerMatchRes {
-		val := headers.Get(canonicalName)
+		val := kvGet(headers, canonicalName)
 		if !re.MatchString(val) {
 			return false
 		}
@@ -267,7 +267,7 @@ func (cr *compiledRule) matchesHeaders(headers parser.RawHeaders) bool {
 // matchesResponse evaluates whether the compiled rule matches the given
 // response status code and headers. Host pattern, path pattern, and method
 // conditions are not applicable to responses and are ignored.
-func (cr *compiledRule) matchesResponse(statusCode int, headers parser.RawHeaders) bool {
+func (cr *compiledRule) matchesResponse(statusCode int, headers []exchange.KeyValue) bool {
 	// For response matching, host_pattern, path_pattern, and methods are not applicable.
 	// Only header_match applies.
 	if len(cr.headerMatchRes) > 0 {
@@ -275,7 +275,7 @@ func (cr *compiledRule) matchesResponse(statusCode int, headers parser.RawHeader
 			return false
 		}
 		for canonicalName, re := range cr.headerMatchRes {
-			val := headers.Get(canonicalName)
+			val := kvGet(headers, canonicalName)
 			if !re.MatchString(val) {
 				return false
 			}
@@ -284,6 +284,17 @@ func (cr *compiledRule) matchesResponse(statusCode int, headers parser.RawHeader
 
 	_ = statusCode // reserved for future use
 	return true
+}
+
+// kvGet returns the value of the first entry in kv whose name matches name
+// (case-insensitive). Returns empty string if not found.
+func kvGet(kv []exchange.KeyValue, name string) string {
+	for _, h := range kv {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value
+		}
+	}
+	return ""
 }
 
 // isWebSocketRule returns true if the rule has any WebSocket-specific conditions.

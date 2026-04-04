@@ -1276,9 +1276,9 @@ func (h *Handler) interceptRequest(ctx context.Context, req *h2Request, body []b
 	}
 
 	reqURL := h2RequestURL(req)
-	rh := hpackToRawHeaders(req.AllHeaders)
+	kv := hpackToKV(req.AllHeaders)
 
-	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, reqURL, rh)
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, reqURL, kv)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -1290,7 +1290,7 @@ func (h *Handler) interceptRequest(ctx context.Context, req *h2Request, body []b
 		opts = append(opts, intercept.EnqueueOpts{RawBytes: joined})
 	}
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, reqURL, rh, body, matchedRules, opts...)
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, reqURL, kv, body, matchedRules, opts...)
 	defer h.InterceptQueue.Remove(id)
 
 	timeout := h.InterceptQueue.Timeout()
@@ -1351,8 +1351,8 @@ func (h *Handler) interceptResponse(ctx context.Context, req *h2Request, resp *h
 		return intercept.InterceptAction{}, false
 	}
 
-	rh := hpackToRawHeaders(resp.Headers)
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, rh)
+	kv := hpackToKV(resp.Headers)
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, kv)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -1365,7 +1365,7 @@ func (h *Handler) interceptResponse(ctx context.Context, req *h2Request, resp *h
 		"matched_rules", matchedRules)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, reqURL, resp.StatusCode, rh, resp.Body, matchedRules,
+		req.Method, reqURL, resp.StatusCode, kv, resp.Body, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 

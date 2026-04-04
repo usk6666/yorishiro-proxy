@@ -3,9 +3,23 @@ package http2
 import (
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 )
+
+// hpackToKV converts hpack header fields to []exchange.KeyValue for the
+// intercept engine/queue API, skipping pseudo-headers.
+func hpackToKV(fields []hpack.HeaderField) []exchange.KeyValue {
+	var kv []exchange.KeyValue
+	for _, hf := range fields {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
+		}
+		kv = append(kv, exchange.KeyValue{Name: hf.Name, Value: hf.Value})
+	}
+	return kv
+}
 
 // hpackGetPseudo returns the value of the first pseudo-header with the given
 // name (e.g., ":method") from hpack fields. Returns "" if not found.

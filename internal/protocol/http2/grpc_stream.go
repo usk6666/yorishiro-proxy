@@ -720,7 +720,7 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 
 	// Intercept check for gRPC requests.
 	if h.InterceptEngine != nil && h.InterceptQueue != nil {
-		matchedRules := h.InterceptEngine.MatchRequestRules(sc.h2req.Method, sc.reqURL, hpackToRawHeaders(sc.h2req.AllHeaders))
+		matchedRules := h.InterceptEngine.MatchRequestRules(sc.h2req.Method, sc.reqURL, hpackToKV(sc.h2req.AllHeaders))
 		if len(matchedRules) > 0 {
 			handled := h.handleGRPCIntercept(sc, matchedRules)
 			if handled {
@@ -887,7 +887,7 @@ func (h *Handler) enqueueGRPCIntercept(sc *streamContext, body []byte, jsonBody 
 		Metadata: h.buildGRPCInterceptMetadata(sc, frame),
 	}
 
-	id, actionCh := h.InterceptQueue.Enqueue(sc.h2req.Method, sc.reqURL, hpackToRawHeaders(sc.h2req.AllHeaders), []byte(jsonBody), matchedRules, opts)
+	id, actionCh := h.InterceptQueue.Enqueue(sc.h2req.Method, sc.reqURL, hpackToKV(sc.h2req.AllHeaders), []byte(jsonBody), matchedRules, opts)
 	defer h.InterceptQueue.Remove(id)
 
 	return h.waitGRPCInterceptAction(sc, id, actionCh)
@@ -1116,8 +1116,8 @@ func (h *Handler) handleGRPCResponseInterceptH2(sc *streamContext, state *grpcSt
 		return false
 	}
 
-	respHeaders := hpackToRawHeaders(result.Headers)
-	matchedRules := h.InterceptEngine.MatchResponseRules(result.StatusCode, respHeaders)
+	respKV := hpackToKV(result.Headers)
+	matchedRules := h.InterceptEngine.MatchResponseRules(result.StatusCode, respKV)
 	if len(matchedRules) == 0 {
 		return false
 	}
@@ -1248,7 +1248,7 @@ func (h *Handler) enqueueGRPCResponseInterceptH2(sc *streamContext, result *Stre
 	}
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		sc.h2req.Method, sc.reqURL, result.StatusCode, hpackToRawHeaders(result.Headers), []byte(jsonBody), matchedRules, opts,
+		sc.h2req.Method, sc.reqURL, result.StatusCode, hpackToKV(result.Headers), []byte(jsonBody), matchedRules, opts,
 	)
 	defer h.InterceptQueue.Remove(id)
 
