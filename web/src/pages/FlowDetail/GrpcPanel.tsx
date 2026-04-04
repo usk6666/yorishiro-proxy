@@ -405,12 +405,14 @@ export function GrpcPanel({ flow }: GrpcPanelProps) {
   const method = summary.method ?? "";
   const grpcStatus = summary.grpc_status ?? "";
   const grpcStatusName = summary.grpc_status_name ?? "";
+  const isGrpcWeb = flow.protocol === "gRPC-Web";
+  const panelTitle = isGrpcWeb ? "gRPC-Web Details" : "gRPC Details";
 
   return (
     <div className="sd-grpc-panel">
-      {/* gRPC Overview header */}
+      {/* gRPC / gRPC-Web Overview header */}
       <div className="sd-grpc-overview">
-        <h2 className="sd-section-title">gRPC Details</h2>
+        <h2 className="sd-section-title">{panelTitle}</h2>
 
         <div className="sd-grpc-overview-content">
           {/* Service / Method */}
@@ -439,6 +441,22 @@ export function GrpcPanel({ flow }: GrpcPanelProps) {
               <div className="sd-meta-item">
                 <span className="sd-meta-label">Status Name</span>
                 <span className="sd-meta-value">{grpcStatusName}</span>
+              </div>
+            )}
+
+            {/* gRPC-Web encoding variant (binary / base64) */}
+            {isGrpcWeb && summary.encoding && (
+              <div className="sd-meta-item">
+                <span className="sd-meta-label">Encoding</span>
+                <Badge variant="default">{summary.encoding}</Badge>
+              </div>
+            )}
+
+            {/* gRPC-Web embedded trailers indicator */}
+            {isGrpcWeb && summary.embedded_trailers === "true" && (
+              <div className="sd-meta-item">
+                <span className="sd-meta-label">Trailers</span>
+                <Badge variant="info">Embedded</Badge>
               </div>
             )}
           </div>
