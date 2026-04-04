@@ -103,6 +103,7 @@ function protocolVariant(
     case "HTTP/2":
       return "info";
     case "gRPC":
+    case "gRPC-Web":
       return "warning";
     case "TCP":
       return "danger";
@@ -165,9 +166,9 @@ function isStreamingFlow(flow: FlowDetailResult): boolean {
   return flow.flow_type !== "unary";
 }
 
-/** Whether a flow is a gRPC flow. */
+/** Whether a flow is a gRPC or gRPC-Web flow. */
 function isGrpcFlow(flow: FlowDetailResult): boolean {
-  return flow.protocol === "gRPC";
+  return flow.protocol === "gRPC" || flow.protocol === "gRPC-Web";
 }
 
 /** Whether a flow has a response (error/drop flows may not have one). */

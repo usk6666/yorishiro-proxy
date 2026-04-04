@@ -29,7 +29,7 @@ function useDebounce<T>(value: T, delay: number): T {
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"] as const;
+const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"] as const;
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] as const;
 const FLOW_STATES = ["active", "complete", "error"] as const;
 const SCHEMES = ["https", "http", "wss", "ws", "tcp"] as const;
@@ -73,6 +73,7 @@ function protocolVariant(protocol: string): "default" | "success" | "warning" | 
     case "HTTP/2":
       return "info";
     case "gRPC":
+    case "gRPC-Web":
       return "warning";
     case "TCP":
       return "danger";
@@ -531,7 +532,7 @@ export function FlowsPage() {
         <div className="flows-header-info">
           <h1 className="page-title">Flows</h1>
           <p className="page-description">
-            Captured HTTP/HTTPS, WebSocket, gRPC, and TCP flows.
+            Captured HTTP/HTTPS, WebSocket, gRPC, gRPC-Web, and TCP flows.
           </p>
           {total > 0 && (
             <span className="flows-total">{total} total flows</span>

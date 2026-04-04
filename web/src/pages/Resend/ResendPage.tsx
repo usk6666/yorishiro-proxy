@@ -106,10 +106,10 @@ function isTcpFlow(flow: FlowDetailResult): boolean {
   return proto === "tcp" || proto === "raw";
 }
 
-/** Check if a flow is HTTP/2 or gRPC (no raw bytes stored). */
+/** Check if a flow is HTTP/2, gRPC, or gRPC-Web (no raw bytes stored). */
 function isHttp2Flow(flow: FlowDetailResult): boolean {
   const proto = (flow.protocol || "").toLowerCase();
-  return proto === "http/2" || proto === "h2" || proto === "grpc";
+  return proto === "http/2" || proto === "h2" || proto === "grpc" || proto === "grpc-web";
 }
 
 /**
@@ -127,7 +127,7 @@ function decodeRawRequest(base64Data: string): string | null {
 
 /**
  * Reconstruct an HTTP/1.1 raw message from parsed flow data.
- * Used for HTTP/2 and gRPC flows that don't store raw bytes.
+ * Used for HTTP/2, gRPC, and gRPC-Web flows that don't store raw bytes.
  *
  * Format:
  *   {Method} {RequestURI} HTTP/1.1\r\n
