@@ -18,8 +18,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
@@ -739,14 +739,14 @@ func loadCodecPlugins(proxyCfg *config.ProxyConfig, logger *slog.Logger) error {
 	if proxyCfg == nil || len(proxyCfg.CodecPlugins) == 0 {
 		return nil
 	}
-	var codecConfigs []codec.CodecPluginConfig
+	var codecConfigs []encoding.CodecPluginConfig
 	if err := json.Unmarshal(proxyCfg.CodecPlugins, &codecConfigs); err != nil {
 		return fmt.Errorf("parse codec plugin configs: %w", err)
 	}
 	logWarn := func(msg string, args ...any) {
 		logger.Warn(msg, args...)
 	}
-	n, err := codec.LoadCodecPlugins(codec.DefaultRegistry(), codecConfigs, logWarn)
+	n, err := encoding.LoadCodecPlugins(encoding.DefaultRegistry(), codecConfigs, logWarn)
 	if err != nil {
 		return fmt.Errorf("load codec plugins: %w", err)
 	}

@@ -417,7 +417,7 @@ type testError struct{ msg string }
 func (e *testError) Error() string { return e.msg }
 
 func TestPipelineWithCodecIntegration(t *testing.T) {
-	// Demonstrates that Pipeline can use codec.Registry.Encode as the EncodeFunc.
+	// Demonstrates that Pipeline can use encoding.Registry.Encode as the EncodeFunc.
 	// This is a unit test that uses a mock encode function simulating codec behavior.
 	gen := &RangeGenerator{Start: 1, End: 3, Step: 1}
 	mockBase64 := func(s string) (string, error) {

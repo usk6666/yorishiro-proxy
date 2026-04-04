@@ -3,7 +3,7 @@ package plugin
 import (
 	"fmt"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
@@ -20,7 +20,7 @@ import (
 //	original = codec.decode(result, ["url_encode_query", "base64"])
 //	names = codec.list()
 func newCodecModule() *starlarkstruct.Module {
-	r := codec.DefaultRegistry()
+	r := encoding.DefaultRegistry()
 
 	members := starlark.StringDict{
 		"encode": starlark.NewBuiltin("codec.encode", codecChainEncode),
@@ -42,7 +42,7 @@ func newCodecModule() *starlarkstruct.Module {
 }
 
 // makeCodecEncode returns a Starlark builtin that encodes a string using the named codec.
-func makeCodecEncode(r *codec.Registry, name string) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
+func makeCodecEncode(r *encoding.Registry, name string) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
 	return func(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var s starlark.String
 		if err := starlark.UnpackPositionalArgs(fn.Name(), args, kwargs, 1, &s); err != nil {
@@ -61,7 +61,7 @@ func makeCodecEncode(r *codec.Registry, name string) func(*starlark.Thread, *sta
 }
 
 // makeCodecDecode returns a Starlark builtin that decodes a string using the named codec.
-func makeCodecDecode(r *codec.Registry, name string) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
+func makeCodecDecode(r *encoding.Registry, name string) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
 	return func(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var s starlark.String
 		if err := starlark.UnpackPositionalArgs(fn.Name(), args, kwargs, 1, &s); err != nil {
@@ -92,7 +92,7 @@ func codecChainEncode(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tu
 		return nil, err
 	}
 
-	result, err := codec.DefaultRegistry().Encode(string(value), names)
+	result, err := encoding.DefaultRegistry().Encode(string(value), names)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
 	}
@@ -112,7 +112,7 @@ func codecChainDecode(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tu
 		return nil, err
 	}
 
-	result, err := codec.DefaultRegistry().Decode(string(value), names)
+	result, err := encoding.DefaultRegistry().Decode(string(value), names)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
 	}
@@ -124,7 +124,7 @@ func codecList(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kw
 	if err := starlark.UnpackPositionalArgs(fn.Name(), args, kwargs, 0); err != nil {
 		return nil, err
 	}
-	names := codec.DefaultRegistry().List()
+	names := encoding.DefaultRegistry().List()
 	elems := make([]starlark.Value, len(names))
 	for i, n := range names {
 		elems[i] = starlark.String(n)
