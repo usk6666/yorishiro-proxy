@@ -30,6 +30,7 @@ TCP Listener (Layer 4)
 | HTTP/1.x | YES | YES (parser built-in) | Independent engine in M32; net/http removed |
 | HTTP/2 | YES | YES (frame codec) | Custom frame engine implemented in M26 |
 | gRPC | YES | YES (via HTTP/2) | |
+| gRPC-Web | YES | YES (via HTTP/1.x or HTTP/2) | M33; binary + base64 wire formats |
 | WebSocket | YES | YES (per frame) | |
 | Raw TCP | N/A | YES (byte stream) | |
 | SOCKS5 | N/A | N/A (excluded as transport layer itself) | Apply raw bytes/L7 to protocol delegated after handshake/tunnel |
@@ -70,6 +71,7 @@ internal/
       handler.go           # HTTP forward proxy handler
       connect.go           # CONNECT tunnel, HTTPS MITM
       parser/              # HTTP/1.x parser (RawRequest, RawResponse, Anomaly)
+    grpcweb/               # gRPC-Web frame parsing, handler, request builder
     httputil/              # HTTP common utilities (TLS transport, per-host TLS config, timing)
   safety/                  # SafetyFilter engine (Input Filter + Output Filter)
     engine.go              # Rule compilation, CheckInput, FilterOutput
