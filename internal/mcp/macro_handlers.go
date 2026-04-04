@@ -518,7 +518,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		// the resend handler), so we must explicitly validate the outbound
 		// request against the safety engine here. This mirrors the check in
 		// handleResendAction / checkInterceptSafety for other MCP tools.
-		if v := s.checkSafetyInput(req.Body, httpReq.URL.String(), httpHeaderToRawHeaders(httpReq.Header)); v != nil {
+		if v := s.checkSafetyInput(req.Body, httpReq.URL.String(), httpHeaderToKeyValues(httpReq.Header)); v != nil {
 			return nil, fmt.Errorf("%s", safetyViolationError(v))
 		}
 

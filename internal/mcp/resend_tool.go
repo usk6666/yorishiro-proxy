@@ -303,7 +303,7 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 
 	// SafetyFilter input check: block destructive payloads before sending.
 	// Skipped for dry-run since no actual request is sent.
-	if v := s.checkSafetyInput(prep.body, prep.url.String(), prep.headers); v != nil {
+	if v := s.checkSafetyInput(prep.body, prep.url.String(), rawHeadersToKeyValues(prep.headers)); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
