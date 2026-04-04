@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // maxResponseSize is the maximum response body size (1 MB) to prevent OOM.
@@ -277,7 +277,7 @@ func (e *Engine) executeFuzzCase(
 	fuzzID string,
 	doerOverride HTTPDoer,
 	targetScopeChecker func(u *url.URL) error,
-	safetyInputChecker func(body []byte, rawURL string, headers parser.RawHeaders) error,
+	safetyInputChecker func(body []byte, rawURL string, headers []exchange.KeyValue) error,
 ) *flow.FuzzResult {
 	result := &flow.FuzzResult{
 		FuzzID:   fuzzID,
@@ -312,7 +312,7 @@ func (e *Engine) executeFuzzCase(
 		if data.URL != nil {
 			rawURL = data.URL.String()
 		}
-		if err := safetyInputChecker(data.Body, rawURL, mapToRawHeaders(data.Headers)); err != nil {
+		if err := safetyInputChecker(data.Body, rawURL, mapToKeyValues(data.Headers)); err != nil {
 			result.Error = fmt.Sprintf("safety filter: %s", err.Error())
 			return result
 		}
@@ -501,7 +501,7 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	hookState *HookState,
 	doerOverride HTTPDoer,
 	targetScopeChecker func(u *url.URL) error,
-	safetyInputChecker func(body []byte, rawURL string, headers parser.RawHeaders) error,
+	safetyInputChecker func(body []byte, rawURL string, headers []exchange.KeyValue) error,
 ) *flow.FuzzResult {
 	if hooks == nil {
 		return e.executeFuzzCase(ctx, baseData, positions, fc, protocol, timeout, fuzzID, doerOverride, targetScopeChecker, safetyInputChecker)
@@ -683,17 +683,17 @@ func ResolvePayloads(payloadSets map[string]PayloadSet, wordlistDir string) (map
 	return resolved, nil
 }
 
-// mapToRawHeaders converts map[string][]string to parser.RawHeaders without
+// mapToKeyValues converts map[string][]string to []exchange.KeyValue without
 // going through net/http.Header. Header name casing is preserved as-is.
-func mapToRawHeaders(m map[string][]string) parser.RawHeaders {
+func mapToKeyValues(m map[string][]string) []exchange.KeyValue {
 	if m == nil {
 		return nil
 	}
-	var rh parser.RawHeaders
+	var kvs []exchange.KeyValue
 	for name, vals := range m {
 		for _, v := range vals {
-			rh = append(rh, parser.RawHeader{Name: name, Value: v})
+			kvs = append(kvs, exchange.KeyValue{Name: name, Value: v})
 		}
 	}
-	return rh
+	return kvs
 }

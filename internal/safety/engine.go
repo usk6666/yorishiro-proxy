@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 )
 
 // Config describes the rules to load into an Engine.
@@ -243,7 +243,7 @@ func expandCustom(rc RuleConfig, index int) ([]Rule, error) {
 
 // CheckInput evaluates all input rules against the given request components.
 // It returns the first violation found, or nil if no rules matched.
-func (e *Engine) CheckInput(body []byte, rawURL string, headers parser.RawHeaders) *InputViolation {
+func (e *Engine) CheckInput(body []byte, rawURL string, headers []exchange.KeyValue) *InputViolation {
 	for i := range e.inputRules {
 		r := &e.inputRules[i]
 		for _, target := range r.Targets {
@@ -269,7 +269,7 @@ func (e *Engine) CheckInput(body []byte, rawURL string, headers parser.RawHeader
 
 // matchTarget checks a compiled pattern against the specified target data.
 // headerName is used with TargetHeader to restrict matching to a specific header.
-func matchTarget(re *regexp.Regexp, target Target, body []byte, rawURL string, headers parser.RawHeaders, headerName string) (bool, string) {
+func matchTarget(re *regexp.Regexp, target Target, body []byte, rawURL string, headers []exchange.KeyValue, headerName string) (bool, string) {
 	switch target {
 	case TargetBody:
 		return matchBody(re, body)
@@ -317,7 +317,7 @@ func matchQuery(re *regexp.Regexp, rawURL string) (bool, string) {
 }
 
 // matchHeaderValues checks the pattern against each header value individually.
-func matchHeaderValues(re *regexp.Regexp, headers parser.RawHeaders) (bool, string) {
+func matchHeaderValues(re *regexp.Regexp, headers []exchange.KeyValue) (bool, string) {
 	for _, h := range headers {
 		if m := re.FindString(h.Value); m != "" {
 			return true, m
@@ -327,8 +327,8 @@ func matchHeaderValues(re *regexp.Regexp, headers parser.RawHeaders) (bool, stri
 }
 
 // matchNamedHeaderValues checks the pattern against values of a specific header.
-func matchNamedHeaderValues(re *regexp.Regexp, headers parser.RawHeaders, name string) (bool, string) {
-	values := headers.Values(name)
+func matchNamedHeaderValues(re *regexp.Regexp, headers []exchange.KeyValue, name string) (bool, string) {
+	values := keyValueValues(headers, name)
 	for _, v := range values {
 		if matched, fragment := matchString(re, v); matched {
 			return true, fragment
@@ -341,7 +341,7 @@ func matchNamedHeaderValues(re *regexp.Regexp, headers parser.RawHeaders, name s
 // pattern. Sorting ensures deterministic matching order for testability.
 // Header values are grouped by name in a single pass to avoid repeated
 // linear scans via Values().
-func matchAllHeaders(re *regexp.Regexp, headers parser.RawHeaders) (bool, string) {
+func matchAllHeaders(re *regexp.Regexp, headers []exchange.KeyValue) (bool, string) {
 	// Group values by header name in a single pass.
 	grouped := make(map[string][]string, len(headers))
 	for _, h := range headers {
@@ -474,9 +474,9 @@ func replaceValidated(r *Rule, data *[]byte) int {
 
 // FilterOutputHeaders applies output rules with TargetHeader or TargetHeaders
 // to HTTP headers. It returns the (possibly modified) headers and any matches.
-func (e *Engine) FilterOutputHeaders(headers parser.RawHeaders) (parser.RawHeaders, []OutputMatch) {
+func (e *Engine) FilterOutputHeaders(headers []exchange.KeyValue) ([]exchange.KeyValue, []OutputMatch) {
 	var matches []OutputMatch
-	modified := headers.Clone()
+	modified := cloneKeyValues(headers)
 
 	for i := range e.outputRules {
 		r := &e.outputRules[i]
@@ -512,7 +512,7 @@ func (e *Engine) FilterOutputHeaders(headers parser.RawHeaders) (parser.RawHeade
 // the total match count. If filterName is non-empty, only the named header is
 // checked; otherwise all headers are checked. When the rule has a Validator,
 // only matches for which Validator returns true are counted and replaced.
-func applyRuleToHeaders(r *Rule, headers *parser.RawHeaders, filterName string) int {
+func applyRuleToHeaders(r *Rule, headers *[]exchange.KeyValue, filterName string) int {
 	totalCount := 0
 	for i, h := range *headers {
 		if filterName != "" && !strings.EqualFold(h.Name, filterName) {
@@ -528,7 +528,6 @@ func applyRuleToHeaders(r *Rule, headers *parser.RawHeaders, filterName string) 
 			totalCount += len(locs)
 			if r.Action == ActionMask {
 				(*headers)[i].Value = r.Pattern.ReplaceAllString(v, r.Replacement)
-				(*headers)[i].RawValue = ""
 			}
 		} else {
 			// Slow path: validate each match.
@@ -539,7 +538,6 @@ func applyRuleToHeaders(r *Rule, headers *parser.RawHeaders, filterName string) 
 			totalCount += count
 			if r.Action == ActionMask {
 				(*headers)[i].Value = replaced
-				(*headers)[i].RawValue = ""
 			}
 		}
 	}
@@ -600,4 +598,25 @@ func (e *Engine) InputRules() []Rule {
 // inspection and testing only.
 func (e *Engine) OutputRules() []Rule {
 	return e.outputRules
+}
+
+// cloneKeyValues returns a shallow copy of a []exchange.KeyValue slice.
+func cloneKeyValues(kvs []exchange.KeyValue) []exchange.KeyValue {
+	if kvs == nil {
+		return nil
+	}
+	c := make([]exchange.KeyValue, len(kvs))
+	copy(c, kvs)
+	return c
+}
+
+// keyValueValues returns all values for headers matching name (case-insensitive).
+func keyValueValues(kvs []exchange.KeyValue, name string) []string {
+	var vals []string
+	for _, kv := range kvs {
+		if strings.EqualFold(kv.Name, name) {
+			vals = append(vals, kv.Value)
+		}
+	}
+	return vals
 }

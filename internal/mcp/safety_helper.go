@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
@@ -21,6 +22,57 @@ func httpHeaderToRawHeaders(h http.Header) parser.RawHeaders {
 		}
 	}
 	return rh
+}
+
+// httpHeaderToKeyValues converts net/http.Header (map[string][]string) to
+// []exchange.KeyValue. Header name casing is preserved as-is.
+func httpHeaderToKeyValues(h http.Header) []exchange.KeyValue {
+	if h == nil {
+		return nil
+	}
+	var kvs []exchange.KeyValue
+	for name, vals := range h {
+		for _, v := range vals {
+			kvs = append(kvs, exchange.KeyValue{Name: name, Value: v})
+		}
+	}
+	return kvs
+}
+
+// rawHeadersToKeyValues converts parser.RawHeaders to []exchange.KeyValue.
+func rawHeadersToKeyValues(rh parser.RawHeaders) []exchange.KeyValue {
+	if rh == nil {
+		return nil
+	}
+	kvs := make([]exchange.KeyValue, len(rh))
+	for i, h := range rh {
+		kvs[i] = exchange.KeyValue{Name: h.Name, Value: h.Value}
+	}
+	return kvs
+}
+
+// keyValuesToRawHeaders converts []exchange.KeyValue to parser.RawHeaders.
+func keyValuesToRawHeaders(kvs []exchange.KeyValue) parser.RawHeaders {
+	if kvs == nil {
+		return nil
+	}
+	rh := make(parser.RawHeaders, len(kvs))
+	for i, kv := range kvs {
+		rh[i] = parser.RawHeader{Name: kv.Name, Value: kv.Value}
+	}
+	return rh
+}
+
+// keyValuesToHTTPHeader converts []exchange.KeyValue to net/http.Header.
+func keyValuesToHTTPHeader(kvs []exchange.KeyValue) http.Header {
+	if kvs == nil {
+		return make(http.Header)
+	}
+	h := make(http.Header, len(kvs))
+	for _, kv := range kvs {
+		h.Add(kv.Name, kv.Value)
+	}
+	return h
 }
 
 // rawHeadersToHTTPHeader converts parser.RawHeaders to net/http.Header.
@@ -56,13 +108,13 @@ func (s *Server) filterOutputHeaders(headers http.Header) http.Header {
 	if s.deps.safetyEngine == nil {
 		return headers
 	}
-	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(httpHeaderToRawHeaders(headers))
+	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(httpHeaderToKeyValues(headers))
 	if len(matches) > 0 {
 		slog.Debug("SafetyFilter output masking applied to headers",
 			"matches", len(matches),
 		)
 	}
-	return rawHeadersToHTTPHeader(filtered)
+	return keyValuesToHTTPHeader(filtered)
 }
 
 // filterOutputRawHeaders applies the SafetyFilter output masking to parser.RawHeaders.
@@ -71,13 +123,13 @@ func (s *Server) filterOutputRawHeaders(headers parser.RawHeaders) parser.RawHea
 	if s.deps.safetyEngine == nil {
 		return headers
 	}
-	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(headers)
+	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(rawHeadersToKeyValues(headers))
 	if len(matches) > 0 {
 		slog.Debug("SafetyFilter output masking applied to headers",
 			"matches", len(matches),
 		)
 	}
-	return filtered
+	return keyValuesToRawHeaders(filtered)
 }
 
 // filterOutputMessages applies SafetyFilter output masking to query message entries.

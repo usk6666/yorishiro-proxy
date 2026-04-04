@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
@@ -138,7 +139,7 @@ func (b *HandlerBase) CheckSafetyFilter(body []byte, rawURL string, headers pars
 	if b.SafetyEngine == nil {
 		return nil
 	}
-	return b.SafetyEngine.CheckInput(body, rawURL, headers)
+	return b.SafetyEngine.CheckInput(body, rawURL, RawHeadersToKeyValues(headers))
 }
 
 // SafetyFilterAction looks up the action for the matched safety rule.
@@ -237,7 +238,7 @@ func (b *HandlerBase) ApplyOutputFilter(body []byte, headers parser.RawHeaders, 
 	}
 
 	bodyResult := b.SafetyEngine.FilterOutput(body)
-	maskedHeaders, headerMatches := b.SafetyEngine.FilterOutputHeaders(headers)
+	maskedKVs, headerMatches := b.SafetyEngine.FilterOutputHeaders(RawHeadersToKeyValues(headers))
 
 	// Log matches for observability.
 	for _, m := range bodyResult.Matches {
@@ -249,7 +250,7 @@ func (b *HandlerBase) ApplyOutputFilter(body []byte, headers parser.RawHeaders, 
 			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
 	}
 
-	return bodyResult.Data, maskedHeaders
+	return bodyResult.Data, KeyValuesToRawHeaders(maskedKVs)
 }
 
 // ApplyOutputFilterHeaders applies the safety engine's output filter to HTTP
@@ -261,12 +262,12 @@ func (b *HandlerBase) ApplyOutputFilterHeaders(headers parser.RawHeaders, logger
 		return headers
 	}
 
-	masked, matches := b.SafetyEngine.FilterOutputHeaders(headers)
+	maskedKVs, matches := b.SafetyEngine.FilterOutputHeaders(RawHeadersToKeyValues(headers))
 	for _, m := range matches {
 		logger.Info("output filter matched trailer",
 			"rule_id", m.RuleID, "count", m.Count, "action", m.Action.String())
 	}
-	return masked
+	return KeyValuesToRawHeaders(maskedKVs)
 }
 
 // ConnLogger returns the connection-scoped logger from context,
@@ -282,4 +283,32 @@ func TruncateForLog(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// RawHeadersToKeyValues converts parser.RawHeaders to []exchange.KeyValue.
+// This bridges existing protocol-specific code to the protocol-agnostic
+// safety engine API.
+func RawHeadersToKeyValues(rh parser.RawHeaders) []exchange.KeyValue {
+	if rh == nil {
+		return nil
+	}
+	kvs := make([]exchange.KeyValue, len(rh))
+	for i, h := range rh {
+		kvs[i] = exchange.KeyValue{Name: h.Name, Value: h.Value}
+	}
+	return kvs
+}
+
+// KeyValuesToRawHeaders converts []exchange.KeyValue to parser.RawHeaders.
+// This bridges the protocol-agnostic safety engine API back to
+// protocol-specific types.
+func KeyValuesToRawHeaders(kvs []exchange.KeyValue) parser.RawHeaders {
+	if kvs == nil {
+		return nil
+	}
+	rh := make(parser.RawHeaders, len(kvs))
+	for i, kv := range kvs {
+		rh[i] = parser.RawHeader{Name: kv.Name, Value: kv.Value}
+	}
+	return rh
 }

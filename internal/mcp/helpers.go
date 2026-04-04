@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -291,7 +291,7 @@ func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http
 // checkSafetyInput validates request data against the safety filter engine.
 // Returns nil if no safety engine is configured or if the input passes.
 // Returns an InputViolation if the input is blocked.
-func (s *Server) checkSafetyInput(body []byte, rawURL string, headers parser.RawHeaders) *safety.InputViolation {
+func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []exchange.KeyValue) *safety.InputViolation {
 	if s.deps.safetyEngine == nil {
 		return nil
 	}

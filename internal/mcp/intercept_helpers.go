@@ -137,7 +137,7 @@ func (s *Server) checkInterceptSafety(params interceptParams) error {
 			headers.Add(k, v)
 		}
 	}
-	if v := s.deps.safetyEngine.CheckInput(body, params.OverrideURL, httpHeaderToRawHeaders(headers)); v != nil {
+	if v := s.deps.safetyEngine.CheckInput(body, params.OverrideURL, httpHeaderToKeyValues(headers)); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil
