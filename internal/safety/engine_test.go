@@ -1,10 +1,21 @@
 package safety
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 )
+
+// kvGet returns the value of the first header matching name (case-insensitive).
+func kvGet(kvs []exchange.KeyValue, name string) string {
+	for _, kv := range kvs {
+		if strings.EqualFold(kv.Name, name) {
+			return kv.Value
+		}
+	}
+	return ""
+}
 
 func TestNewEngine_EmptyConfig(t *testing.T) {
 	e, err := NewEngine(Config{})
@@ -255,8 +266,7 @@ func TestCheckInput_HeaderMatch(t *testing.T) {
 		},
 	})
 
-	var h parser.RawHeaders
-	h.Set("X-Custom", "this is evil")
+	h := []exchange.KeyValue{{Name: "X-Custom", Value: "this is evil"}}
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
 		t.Fatal("expected violation for header match")
@@ -273,8 +283,7 @@ func TestCheckInput_HeadersMatch(t *testing.T) {
 		},
 	})
 
-	var h parser.RawHeaders
-	h.Set("X-Secret", "token123")
+	h := []exchange.KeyValue{{Name: "X-Secret", Value: "token123"}}
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
 		t.Fatal("expected violation for headers match")
@@ -414,14 +423,13 @@ func TestFilterOutputHeaders_Mask(t *testing.T) {
 		},
 	})
 
-	var h parser.RawHeaders
-	h.Set("Authorization", "Bearer abc123")
+	h := []exchange.KeyValue{{Name: "Authorization", Value: "Bearer abc123"}}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(matches))
 	}
-	if result.Get("Authorization") != "Bearer [REDACTED]" {
-		t.Errorf("Authorization = %q, want %q", result.Get("Authorization"), "Bearer [REDACTED]")
+	if kvGet(result, "Authorization") != "Bearer [REDACTED]" {
+		t.Errorf("Authorization = %q, want %q", kvGet(result, "Authorization"), "Bearer [REDACTED]")
 	}
 }
 
@@ -438,12 +446,11 @@ func TestFilterOutputHeaders_NoModifyOriginal(t *testing.T) {
 		},
 	})
 
-	var h parser.RawHeaders
-	h.Set("X-Data", "secret")
+	h := []exchange.KeyValue{{Name: "X-Data", Value: "secret"}}
 	_, _ = e.FilterOutputHeaders(h)
 	// Original should be unchanged.
-	if h.Get("X-Data") != "secret" {
-		t.Errorf("original header modified: got %q", h.Get("X-Data"))
+	if kvGet(h, "X-Data") != "secret" {
+		t.Errorf("original header modified: got %q", kvGet(h, "X-Data"))
 	}
 }
 
@@ -545,8 +552,7 @@ func TestCheckInput_HeaderColonTarget_SpecificHeader(t *testing.T) {
 	})
 
 	// Should match when the specific header contains the pattern.
-	var h parser.RawHeaders
-	h.Set("Location", "http://evil.com")
+	h := []exchange.KeyValue{{Name: "Location", Value: "http://evil.com"}}
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
 		t.Fatal("expected violation for Location header match")
@@ -556,8 +562,7 @@ func TestCheckInput_HeaderColonTarget_SpecificHeader(t *testing.T) {
 	}
 
 	// Should NOT match when a different header contains the pattern.
-	var h2 parser.RawHeaders
-	h2.Set("X-Other", "evil-value")
+	h2 := []exchange.KeyValue{{Name: "X-Other", Value: "evil-value"}}
 	v2 := e.CheckInput(nil, "", h2)
 	if v2 != nil {
 		t.Errorf("expected nil for non-Location header, got %+v", v2)
@@ -577,7 +582,7 @@ func TestFilterOutputHeaders_SpecificHeader(t *testing.T) {
 		},
 	})
 
-	h := parser.RawHeaders{
+	h := []exchange.KeyValue{
 		{Name: "Location", Value: "http://evil.com"},
 		{Name: "X-Other", Value: "also evil"},
 	}
@@ -586,12 +591,12 @@ func TestFilterOutputHeaders_SpecificHeader(t *testing.T) {
 		t.Fatalf("expected 1 match, got %d", len(matches))
 	}
 	// Location should be masked.
-	if result.Get("Location") != "http://[SAFE].com" {
-		t.Errorf("Location = %q, want %q", result.Get("Location"), "http://[SAFE].com")
+	if kvGet(result, "Location") != "http://[SAFE].com" {
+		t.Errorf("Location = %q, want %q", kvGet(result, "Location"), "http://[SAFE].com")
 	}
 	// X-Other should NOT be masked (rule targets only Location).
-	if result.Get("X-Other") != "also evil" {
-		t.Errorf("X-Other = %q, want %q", result.Get("X-Other"), "also evil")
+	if kvGet(result, "X-Other") != "also evil" {
+		t.Errorf("X-Other = %q, want %q", kvGet(result, "X-Other"), "also evil")
 	}
 }
 
@@ -893,8 +898,7 @@ func TestFilterOutputHeaders_ValidatorAccepts(t *testing.T) {
 		return match[0] == '1'
 	}
 
-	var h parser.RawHeaders
-	h.Set("X-Data", "id=1234 code=5678")
+	h := []exchange.KeyValue{{Name: "X-Data", Value: "id=1234 code=5678"}}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(matches))
@@ -902,7 +906,7 @@ func TestFilterOutputHeaders_ValidatorAccepts(t *testing.T) {
 	if matches[0].Count != 1 {
 		t.Errorf("count = %d, want 1", matches[0].Count)
 	}
-	got := result.Get("X-Data")
+	got := kvGet(result, "X-Data")
 	want := "id=**** code=5678"
 	if got != want {
 		t.Errorf("X-Data = %q, want %q", got, want)
@@ -928,14 +932,13 @@ func TestFilterOutputHeaders_ValidatorRejectsAll(t *testing.T) {
 		return false
 	}
 
-	var h parser.RawHeaders
-	h.Set("X-Val", "abc 123")
+	h := []exchange.KeyValue{{Name: "X-Val", Value: "abc 123"}}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 0 {
 		t.Errorf("expected 0 matches, got %d", len(matches))
 	}
-	if result.Get("X-Val") != "abc 123" {
-		t.Errorf("header should be unchanged, got %q", result.Get("X-Val"))
+	if kvGet(result, "X-Val") != "abc 123" {
+		t.Errorf("header should be unchanged, got %q", kvGet(result, "X-Val"))
 	}
 }
 
@@ -959,7 +962,7 @@ func TestFilterOutputHeaders_ValidatorSpecificHeader(t *testing.T) {
 		return len(match) > 6 && match[6] == '1'
 	}
 
-	h := parser.RawHeaders{
+	h := []exchange.KeyValue{
 		{Name: "X-Token", Value: "secret1 secret2"},
 		{Name: "X-Other", Value: "secret1"},
 	}
@@ -970,12 +973,12 @@ func TestFilterOutputHeaders_ValidatorSpecificHeader(t *testing.T) {
 	if matches[0].Count != 1 {
 		t.Errorf("count = %d, want 1", matches[0].Count)
 	}
-	if result.Get("X-Token") != "[REDACTED] secret2" {
-		t.Errorf("X-Token = %q, want %q", result.Get("X-Token"), "[REDACTED] secret2")
+	if kvGet(result, "X-Token") != "[REDACTED] secret2" {
+		t.Errorf("X-Token = %q, want %q", kvGet(result, "X-Token"), "[REDACTED] secret2")
 	}
 	// X-Other should be untouched (rule targets only X-Token).
-	if result.Get("X-Other") != "secret1" {
-		t.Errorf("X-Other = %q, want %q", result.Get("X-Other"), "secret1")
+	if kvGet(result, "X-Other") != "secret1" {
+		t.Errorf("X-Other = %q, want %q", kvGet(result, "X-Other"), "secret1")
 	}
 }
 

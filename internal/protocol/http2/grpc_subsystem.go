@@ -64,7 +64,7 @@ func applyGRPCSafetyFilter(engine *safety.Engine, jsonBody string, rawURL string
 	if engine == nil {
 		return nil
 	}
-	return engine.CheckInput([]byte(jsonBody), rawURL, hpackToRawHeaders(headers))
+	return engine.CheckInput([]byte(jsonBody), rawURL, hpackToKeyValues(headers))
 }
 
 // scMethod returns the request method from h2req.

@@ -3,7 +3,7 @@ package fuzzer
 import (
 	"context"
 	"fmt"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"net/url"
 	"strings"
 	"testing"
@@ -13,7 +13,7 @@ import (
 func TestExecuteFuzzCase_SafetyInputChecker_Blocks(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	checker := func(body []byte, rawURL string, headers parser.RawHeaders) error {
+	checker := func(body []byte, rawURL string, headers []exchange.KeyValue) error {
 		if strings.Contains(string(body), "DROP TABLE") {
 			return fmt.Errorf("blocked: destructive SQL")
 		}
@@ -53,7 +53,7 @@ func TestExecuteFuzzCase_SafetyInputChecker_AllowsSafe(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	checkerCalled := false
-	checker := func(body []byte, rawURL string, headers parser.RawHeaders) error {
+	checker := func(body []byte, rawURL string, headers []exchange.KeyValue) error {
 		checkerCalled = true
 		return nil
 	}
@@ -114,7 +114,7 @@ func TestExecuteFuzzCase_SafetyInputChecker_NilPassesThrough(t *testing.T) {
 func TestExecuteFuzzCaseWithHooks_SafetyInputChecker_Blocks(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
-	checker := func(body []byte, rawURL string, headers parser.RawHeaders) error {
+	checker := func(body []byte, rawURL string, headers []exchange.KeyValue) error {
 		if strings.Contains(string(body), "DROP TABLE") {
 			return fmt.Errorf("blocked: destructive SQL")
 		}
@@ -153,7 +153,7 @@ func TestExecuteFuzzCase_SafetyInputChecker_AfterPositionApplication(t *testing.
 	testURL, _ := url.Parse("http://example.com/api")
 
 	var checkedBody string
-	checker := func(body []byte, rawURL string, headers parser.RawHeaders) error {
+	checker := func(body []byte, rawURL string, headers []exchange.KeyValue) error {
 		checkedBody = string(body)
 		if strings.Contains(string(body), "DROP TABLE") {
 			return fmt.Errorf("blocked: destructive SQL")

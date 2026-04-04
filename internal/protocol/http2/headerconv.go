@@ -3,6 +3,7 @@ package http2
 import (
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 )
@@ -152,6 +153,19 @@ func setRawHeader(rh parser.RawHeaders, name, value string) parser.RawHeaders {
 		}
 	}
 	return append(rh, parser.RawHeader{Name: name, Value: value})
+}
+
+// hpackToKeyValues converts hpack header fields to []exchange.KeyValue,
+// skipping pseudo-headers. This is used by the safety engine API.
+func hpackToKeyValues(fields []hpack.HeaderField) []exchange.KeyValue {
+	var kvs []exchange.KeyValue
+	for _, hf := range fields {
+		if strings.HasPrefix(hf.Name, ":") {
+			continue
+		}
+		kvs = append(kvs, exchange.KeyValue{Name: hf.Name, Value: hf.Value})
+	}
+	return kvs
 }
 
 // cloneHpackHeaders creates a deep copy of an hpack header field slice.
