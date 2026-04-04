@@ -1818,3 +1818,267 @@ func TestSafeCheckRedirect(t *testing.T) {
 		})
 	}
 }
+
+// --- gRPC-Web Resend tests ---
+
+func TestResend_GRPCWeb_Success(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+
+	// Server that responds with gRPC-Web style response.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc-web")
+		w.Header().Set("Grpc-Status", "0")
+		w.Header().Set("Grpc-Message", "OK")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("grpc-web-response"))
+	}))
+	t.Cleanup(server.Close)
+
+	u, _ := url.Parse(server.URL + "/test.Svc/DoStuff")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "gRPC-Web",
+			FlowType:  "unary",
+			Timestamp: time.Now(),
+			Duration:  50 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/grpc-web"}},
+			Body:      []byte("grpc-web-body"),
+			RawBytes:  []byte("grpc-web-body"),
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/grpc-web"}},
+			Body:       []byte("grpc-web-resp"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out resendActionResult
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(textContent.Text), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if out.NewFlowID == "" {
+		t.Error("NewFlowID is empty")
+	}
+	if out.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", out.StatusCode)
+	}
+
+	// Verify trailers were recorded.
+	msgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "receive"})
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+
+	var trailerMsg *flow.Message
+	for _, msg := range msgs {
+		if msg.Metadata != nil && msg.Metadata["grpc_type"] == "trailers" {
+			trailerMsg = msg
+			break
+		}
+	}
+	if trailerMsg == nil {
+		t.Fatal("no trailers message recorded for gRPC-Web resend")
+	}
+	if trailerMsg.Metadata["grpc_status"] != "0" {
+		t.Errorf("trailer grpc_status = %q, want 0", trailerMsg.Metadata["grpc_status"])
+	}
+}
+
+func TestResend_GRPCWeb_BodyPatchesRejected(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/test.Svc/Method")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "gRPC-Web",
+			FlowType:  "unary",
+			Timestamp: time.Now(),
+			Duration:  50 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/grpc-web"}},
+			Body:      []byte("grpc-web-frame"),
+			RawBytes:  []byte("grpc-web-frame"),
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/grpc-web"}},
+			Body:       []byte("resp"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+			"body_patches": []map[string]any{
+				{"regex": "old", "replace": "new"},
+			},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for body_patches on gRPC-Web flow")
+	}
+
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(textContent.Text, "body_patches is not yet supported for gRPC-Web") {
+		t.Errorf("error = %q, want to contain 'body_patches is not yet supported for gRPC-Web'", textContent.Text)
+	}
+}
+
+func TestResend_GRPCWeb_StreamingRejected(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	echoServer := newEchoServer(t)
+
+	u, _ := url.Parse(echoServer.URL + "/test.Svc/Method")
+	entry := saveTestEntry(t, store,
+		&flow.Flow{
+			Protocol:  "gRPC-Web",
+			FlowType:  "server-streaming",
+			Timestamp: time.Now(),
+			Duration:  50 * time.Millisecond,
+		},
+		&flow.Message{
+			Sequence:  0,
+			Direction: "send",
+			Timestamp: time.Now(),
+			Method:    "POST",
+			URL:       u,
+			Headers:   map[string][]string{"Content-Type": {"application/grpc-web"}},
+			Body:      []byte("frame"),
+			RawBytes:  []byte("frame"),
+		},
+		&flow.Message{
+			Sequence:   1,
+			Direction:  "receive",
+			Timestamp:  time.Now(),
+			StatusCode: 200,
+			Headers:    map[string][]string{"Content-Type": {"application/grpc-web"}},
+			Body:       []byte("resp"),
+		},
+	)
+
+	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
+
+	result := executeCallTool(t, cs, map[string]any{
+		"action": "resend",
+		"params": map[string]any{
+			"flow_id": entry.Session.ID,
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for streaming gRPC-Web flow")
+	}
+
+	textContent := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(textContent.Text, "gRPC-Web streaming flows") {
+		t.Errorf("error = %q, want to contain 'gRPC-Web streaming flows'", textContent.Text)
+	}
+}
+
+func TestIsGRPCWebFlow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		protocol string
+		want     bool
+	}{
+		{"gRPC-Web", true},
+		{"gRPC", false},
+		{"HTTP/1.x", false},
+		{"HTTP/2", false},
+		{"WebSocket", false},
+	}
+	for _, tt := range tests {
+		if got := isGRPCWebFlow(tt.protocol); got != tt.want {
+			t.Errorf("isGRPCWebFlow(%q) = %v, want %v", tt.protocol, got, tt.want)
+		}
+	}
+}
+
+func TestBuildGRPCWebRequestBody_FromRawBytes(t *testing.T) {
+	t.Parallel()
+
+	rawData := []byte("original-wire-data")
+	msgs := []*flow.Message{
+		{
+			Sequence:  0,
+			Direction: "send",
+			Body:      []byte("decoded-frame"),
+			RawBytes:  rawData,
+		},
+	}
+
+	got := buildGRPCWebRequestBody(msgs)
+	if string(got) != string(rawData) {
+		t.Errorf("buildGRPCWebRequestBody = %q, want %q (should use RawBytes)", got, rawData)
+	}
+}
+
+func TestBuildGRPCWebRequestBody_FallbackToBody(t *testing.T) {
+	t.Parallel()
+
+	msgs := []*flow.Message{
+		{
+			Sequence:  0,
+			Direction: "send",
+			Body:      []byte("frame-payload"),
+		},
+	}
+
+	got := buildGRPCWebRequestBody(msgs)
+	// Should produce gRPC-Web encoded frames.
+	if len(got) == 0 {
+		t.Error("buildGRPCWebRequestBody returned empty body")
+	}
+	// Verify it's a valid frame (5-byte header + payload).
+	if len(got) < 5 {
+		t.Fatalf("body too short: %d bytes", len(got))
+	}
+}
+
+func TestBuildGRPCWebRequestBody_Empty(t *testing.T) {
+	t.Parallel()
+
+	got := buildGRPCWebRequestBody(nil)
+	if got != nil {
+		t.Errorf("buildGRPCWebRequestBody(nil) = %v, want nil", got)
+	}
+}
