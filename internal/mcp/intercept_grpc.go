@@ -3,7 +3,7 @@ package mcp
 import (
 	"fmt"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec/protobuf"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
 

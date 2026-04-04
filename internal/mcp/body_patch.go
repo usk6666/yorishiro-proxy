@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 )
 
 // BodyPatch represents a single body modification operation.
@@ -46,7 +46,7 @@ func validateBodyPatch(bp BodyPatch) error {
 		if len(bp.Encoding) > maxEncodingChainLen {
 			return fmt.Errorf("encoding chain length %d exceeds maximum of %d", len(bp.Encoding), maxEncodingChainLen)
 		}
-		reg := codec.DefaultRegistry()
+		reg := encoding.DefaultRegistry()
 		for _, name := range bp.Encoding {
 			if _, ok := reg.Get(name); !ok {
 				return fmt.Errorf("unknown encoding codec %q; available codecs: %s", name, strings.Join(reg.List(), ", "))
@@ -180,7 +180,7 @@ func encodePatchValue(p BodyPatch) (BodyPatch, error) {
 	if p.JSONPath != "" {
 		// Only encode string values for JSON path patches.
 		if strVal, ok := p.Value.(string); ok {
-			encoded, err := codec.Encode(strVal, p.Encoding)
+			encoded, err := encoding.Encode(strVal, p.Encoding)
 			if err != nil {
 				return p, fmt.Errorf("encode json_path value: %w", err)
 			}
@@ -188,7 +188,7 @@ func encodePatchValue(p BodyPatch) (BodyPatch, error) {
 		}
 	} else {
 		// Encode the replace string for regex patches.
-		encoded, err := codec.Encode(p.Replace, p.Encoding)
+		encoded, err := encoding.Encode(p.Replace, p.Encoding)
 		if err != nil {
 			return p, fmt.Errorf("encode regex replace: %w", err)
 		}

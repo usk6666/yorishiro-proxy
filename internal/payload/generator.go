@@ -295,7 +295,7 @@ func (p *Pipeline) Generate() ([]string, error) {
 
 // NewPipeline creates a Pipeline that generates payloads and optionally encodes them.
 // If encodeFunc is nil, no encoding is applied. The encodeFunc should typically be
-// a closure over codec.Registry.Encode.
+// a closure over encoding.Registry.Encode.
 func NewPipeline(gen Generator, encodeFunc func(string) (string, error)) *Pipeline {
 	return &Pipeline{
 		Generator:  gen,

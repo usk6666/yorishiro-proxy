@@ -523,8 +523,8 @@ type ProxyConfig struct {
 	// and registered with the codec registry alongside built-in codecs.
 	//
 	// json.RawMessage is used intentionally to avoid a dependency from the
-	// config package to the codec package. The raw JSON is decoded into
-	// []codec.CodecPluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
+	// config package to the encoding package. The raw JSON is decoded into
+	// []encoding.CodecPluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
 	CodecPlugins json.RawMessage `json:"codec_plugins,omitempty"`
 
 	// SafetyFilter configures the SafetyFilter engine for blocking or logging

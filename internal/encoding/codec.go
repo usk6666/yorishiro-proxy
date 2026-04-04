@@ -1,6 +1,6 @@
 // Package codec provides bidirectional string encoding/decoding transformations.
 // It is designed to be shared across macro, fuzzer, resender, and plugin consumers.
-package codec
+package encoding
 
 import (
 	"fmt"
