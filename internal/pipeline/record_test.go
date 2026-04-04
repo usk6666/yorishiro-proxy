@@ -428,6 +428,7 @@ func TestRecordStep_ReceiveVariantRecording(t *testing.T) {
 func TestExchangeModified_AllFields(t *testing.T) {
 	base := &exchange.Exchange{
 		Headers:  []exchange.KeyValue{{Name: "A", Value: "1"}},
+		Trailers: []exchange.KeyValue{{Name: "T", Value: "1"}},
 		Body:     []byte("body"),
 		RawBytes: []byte("raw"),
 	}
@@ -460,6 +461,20 @@ func TestExchangeModified_AllFields(t *testing.T) {
 			name: "header added",
 			modify: func(e *exchange.Exchange) {
 				e.Headers = append(e.Headers, exchange.KeyValue{Name: "B", Value: "2"})
+			},
+			wantMod: true,
+		},
+		{
+			name: "trailer changed",
+			modify: func(e *exchange.Exchange) {
+				e.Trailers[0].Value = "2"
+			},
+			wantMod: true,
+		},
+		{
+			name: "trailer added",
+			modify: func(e *exchange.Exchange) {
+				e.Trailers = append(e.Trailers, exchange.KeyValue{Name: "T2", Value: "v"})
 			},
 			wantMod: true,
 		},

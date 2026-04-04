@@ -11,14 +11,9 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
-// FlowWriter is the consumer-side interface for flow persistence.
-// It mirrors the subset of flow.Store that RecordStep needs, following Go's
-// convention of defining interfaces on the consumer side.
-type FlowWriter interface {
-	SaveFlow(ctx context.Context, f *flow.Flow) error
-	UpdateFlow(ctx context.Context, id string, update flow.FlowUpdate) error
-	AppendMessage(ctx context.Context, msg *flow.Message) error
-}
+// FlowWriter is the consumer-side alias for flow persistence.
+// It reuses flow.FlowWriter to avoid maintaining a duplicate interface.
+type FlowWriter = flow.FlowWriter
 
 // RecordStep records Exchange data to the Flow Store. It runs last in the
 // Pipeline (after all transformations) and never modifies the Exchange.
@@ -118,7 +113,7 @@ func (s *RecordStep) recordReceive(ctx context.Context, ex *exchange.Exchange) {
 
 	update := flow.FlowUpdate{
 		State:    "complete",
-		Duration: time.Since(time.Now()), // placeholder; real duration comes from Session
+		Duration: 0, // placeholder; real duration comes from Session
 	}
 	if err := s.store.UpdateFlow(ctx, ex.FlowID, update); err != nil {
 		s.logger.Error("record step: flow update failed",
@@ -132,7 +127,10 @@ func (s *RecordStep) recordReceive(ctx context.Context, ex *exchange.Exchange) {
 // modified (current) Exchange as separate messages with variant metadata.
 func (s *RecordStep) recordVariantMessages(ctx context.Context, snap, current *exchange.Exchange, flowID, direction string) {
 	origMsg := exchangeToMessage(snap, flowID, current.Sequence, direction)
-	origMsg.Metadata = map[string]string{"variant": "original"}
+	if origMsg.Metadata == nil {
+		origMsg.Metadata = make(map[string]string, 1)
+	}
+	origMsg.Metadata["variant"] = "original"
 	if err := s.store.AppendMessage(ctx, origMsg); err != nil {
 		s.logger.Error("record step: original variant save failed",
 			"flow_id", flowID,
@@ -141,7 +139,10 @@ func (s *RecordStep) recordVariantMessages(ctx context.Context, snap, current *e
 	}
 
 	modMsg := exchangeToMessage(current, flowID, current.Sequence+1, direction)
-	modMsg.Metadata = map[string]string{"variant": "modified"}
+	if modMsg.Metadata == nil {
+		modMsg.Metadata = make(map[string]string, 1)
+	}
+	modMsg.Metadata["variant"] = "modified"
 	if err := s.store.AppendMessage(ctx, modMsg); err != nil {
 		s.logger.Error("record step: modified variant save failed",
 			"flow_id", flowID,
@@ -193,9 +194,12 @@ func exchangeToMessage(ex *exchange.Exchange, flowID string, sequence int, direc
 }
 
 // exchangeModified reports whether the current Exchange differs from the
-// snapshot in Headers, Body, or RawBytes.
+// snapshot in Headers, Trailers, Body, or RawBytes.
 func exchangeModified(snap, current *exchange.Exchange) bool {
 	if !headersEqual(snap.Headers, current.Headers) {
+		return true
+	}
+	if !headersEqual(snap.Trailers, current.Trailers) {
 		return true
 	}
 	if !bytes.Equal(snap.Body, current.Body) {
