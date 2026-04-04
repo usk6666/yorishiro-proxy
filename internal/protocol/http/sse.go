@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
@@ -323,16 +324,16 @@ func (h *Handler) applySSEEventIntercept(ctx context.Context, event *SSEEvent, f
 		return event, false
 	}
 
-	var matchHeaders parser.RawHeaders
-	matchHeaders = append(matchHeaders, parser.RawHeader{Name: "Content-Type", Value: "text/event-stream"})
+	var matchHeaders []exchange.KeyValue
+	matchHeaders = append(matchHeaders, exchange.KeyValue{Name: "Content-Type", Value: "text/event-stream"})
 	if event.EventType != "" {
-		matchHeaders = append(matchHeaders, parser.RawHeader{Name: "X-SSE-Event", Value: event.EventType})
+		matchHeaders = append(matchHeaders, exchange.KeyValue{Name: "X-SSE-Event", Value: event.EventType})
 	}
 	if event.ID != "" {
-		matchHeaders = append(matchHeaders, parser.RawHeader{Name: "X-SSE-Id", Value: event.ID})
+		matchHeaders = append(matchHeaders, exchange.KeyValue{Name: "X-SSE-Id", Value: event.ID})
 	}
 	if event.Retry != "" {
-		matchHeaders = append(matchHeaders, parser.RawHeader{Name: "X-SSE-Retry", Value: event.Retry})
+		matchHeaders = append(matchHeaders, exchange.KeyValue{Name: "X-SSE-Retry", Value: event.Retry})
 	}
 
 	matchedRules := h.InterceptEngine.MatchResponseRules(200, matchHeaders)
@@ -524,7 +525,8 @@ func (h *Handler) applySSEIntercept(ctx context.Context, conn net.Conn, req *par
 		return false
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Headers)
+	kvHeaders := rawHeadersToKV(resp.Headers)
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, kvHeaders)
 	if len(matchedRules) == 0 {
 		return false
 	}
@@ -534,7 +536,7 @@ func (h *Handler) applySSEIntercept(ctx context.Context, conn net.Conn, req *par
 		"status", resp.StatusCode, "matched_rules", matchedRules)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, reqURL, resp.StatusCode, resp.Headers, nil, matchedRules,
+		req.Method, reqURL, resp.StatusCode, kvHeaders, nil, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 

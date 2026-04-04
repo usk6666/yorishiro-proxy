@@ -202,8 +202,7 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 			result.URL = item.URL.String()
 		}
 		// Apply output filter to headers.
-		filteredRH := s.filterOutputRawHeaders(item.Headers)
-		filteredHeaders := rawHeadersToHTTPHeader(filteredRH)
+		filteredHeaders := s.filterOutputKVHeaders(item.Headers)
 		headers := make(map[string][]string)
 		for k, vs := range filteredHeaders {
 			headers[k] = vs

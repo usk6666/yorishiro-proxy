@@ -9,6 +9,39 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
+// kvToRawHeaders converts []exchange.KeyValue to parser.RawHeaders.
+func kvToRawHeaders(kv []exchange.KeyValue) parser.RawHeaders {
+	if kv == nil {
+		return nil
+	}
+	rh := make(parser.RawHeaders, len(kv))
+	for i, h := range kv {
+		rh[i] = parser.RawHeader{Name: h.Name, Value: h.Value}
+	}
+	return rh
+}
+
+// kvToHTTPHeader converts []exchange.KeyValue to net/http.Header.
+func kvToHTTPHeader(kv []exchange.KeyValue) http.Header {
+	if kv == nil {
+		return make(http.Header)
+	}
+	h := make(http.Header, len(kv))
+	for _, hdr := range kv {
+		h.Add(hdr.Name, hdr.Value)
+	}
+	return h
+}
+
+// filterOutputKVHeaders applies SafetyFilter output masking to []exchange.KeyValue headers
+// by converting through parser.RawHeaders. If no safety engine is configured, returns the
+// headers converted to HTTP headers unchanged.
+func (s *Server) filterOutputKVHeaders(headers []exchange.KeyValue) http.Header {
+	rh := kvToRawHeaders(headers)
+	filtered := s.filterOutputRawHeaders(rh)
+	return rawHeadersToHTTPHeader(filtered)
+}
+
 // httpHeaderToRawHeaders converts net/http.Header (map[string][]string) to
 // parser.RawHeaders. Header name casing is preserved as-is.
 func httpHeaderToRawHeaders(h http.Header) parser.RawHeaders {

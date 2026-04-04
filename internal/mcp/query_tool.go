@@ -1320,8 +1320,8 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 			if item.URL != nil {
 				entry.URL = item.URL.String()
 			}
-			// Convert RawHeaders to map for JSON output.
-			entry.Headers = map[string][]string(rawHeadersToHTTPHeader(item.Headers))
+			// Convert KeyValue headers to map for JSON output.
+			entry.Headers = map[string][]string(kvToHTTPHeader(item.Headers))
 		}
 
 		entries = append(entries, entry)

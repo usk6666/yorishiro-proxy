@@ -35,7 +35,7 @@ func BenchmarkMatchesRequest(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				engine.MatchesRequest("GET", u, h2r(headers))
+				engine.MatchesRequest("GET", u, h2kv(headers))
 			}
 		})
 	}
@@ -70,7 +70,7 @@ func BenchmarkMatchesRequest_Hit(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				engine.MatchesRequest("GET", u, h2r(headers))
+				engine.MatchesRequest("GET", u, h2kv(headers))
 			}
 		})
 	}
@@ -106,7 +106,7 @@ func BenchmarkMatchesRequest_WithHeaderMatch(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		engine.MatchesRequest("POST", u, h2r(headers))
+		engine.MatchesRequest("POST", u, h2kv(headers))
 	}
 }
 
@@ -144,7 +144,7 @@ func BenchmarkMatchesRequest_DisabledRules(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		engine.MatchesRequest("GET", u, h2r(headers))
+		engine.MatchesRequest("GET", u, h2kv(headers))
 	}
 }
 
@@ -171,6 +171,6 @@ func BenchmarkMatchRequestRules(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		engine.MatchRequestRules("GET", u, h2r(headers))
+		engine.MatchRequestRules("GET", u, h2kv(headers))
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 )
 
 // Engine manages intercept rules and evaluates them against HTTP requests
@@ -134,7 +134,7 @@ func (e *Engine) SetRules(rules []Rule) error {
 // MatchesRequest evaluates all enabled rules against the given request parameters.
 // Returns true if any enabled rule with direction "request" or "both" matches
 // (OR logic across rules).
-func (e *Engine) MatchesRequest(method string, u *url.URL, headers parser.RawHeaders) bool {
+func (e *Engine) MatchesRequest(method string, u *url.URL, headers []exchange.KeyValue) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -163,7 +163,7 @@ func (e *Engine) MatchesRequest(method string, u *url.URL, headers parser.RawHea
 // MatchesResponse evaluates all enabled rules against the given response parameters.
 // Returns true if any enabled rule with direction "response" or "both" matches
 // (OR logic across rules).
-func (e *Engine) MatchesResponse(statusCode int, headers parser.RawHeaders) bool {
+func (e *Engine) MatchesResponse(statusCode int, headers []exchange.KeyValue) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -190,7 +190,7 @@ func (e *Engine) MatchesResponse(statusCode int, headers parser.RawHeaders) bool
 
 // MatchRequestRules returns the IDs of all enabled rules that match the given request.
 // This is useful for identifying which specific rules triggered an intercept.
-func (e *Engine) MatchRequestRules(method string, u *url.URL, headers parser.RawHeaders) []string {
+func (e *Engine) MatchRequestRules(method string, u *url.URL, headers []exchange.KeyValue) []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -220,7 +220,7 @@ func (e *Engine) MatchRequestRules(method string, u *url.URL, headers parser.Raw
 }
 
 // MatchResponseRules returns the IDs of all enabled rules that match the given response.
-func (e *Engine) MatchResponseRules(statusCode int, headers parser.RawHeaders) []string {
+func (e *Engine) MatchResponseRules(statusCode int, headers []exchange.KeyValue) []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 

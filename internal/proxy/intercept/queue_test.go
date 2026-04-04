@@ -31,7 +31,7 @@ func TestQueue_EnqueueAndGet(t *testing.T) {
 	body := []byte(`{"key":"value"}`)
 	matchedRules := []string{"rule-1", "rule-2"}
 
-	id, actionCh := q.Enqueue("POST", u, h2r(headers), body, matchedRules)
+	id, actionCh := q.Enqueue("POST", u, h2kv(headers), body, matchedRules)
 
 	if id == "" {
 		t.Fatal("Enqueue returned empty ID")
@@ -56,8 +56,8 @@ func TestQueue_EnqueueAndGet(t *testing.T) {
 	if item.URL.String() != u.String() {
 		t.Errorf("expected URL %q, got %q", u.String(), item.URL.String())
 	}
-	if item.Headers.Get("Content-Type") != "application/json" {
-		t.Errorf("expected Content-Type header, got %q", item.Headers.Get("Content-Type"))
+	if kvGetTest(item.Headers, "Content-Type") != "application/json" {
+		t.Errorf("expected Content-Type header, got %q", kvGetTest(item.Headers, "Content-Type"))
 	}
 	if string(item.Body) != `{"key":"value"}` {
 		t.Errorf("expected body %q, got %q", `{"key":"value"}`, string(item.Body))
@@ -74,7 +74,7 @@ func TestQueue_EnqueueDeepCopies(t *testing.T) {
 	body := []byte("original")
 	rules := []string{"rule-1"}
 
-	id, _ := q.Enqueue("GET", u, h2r(headers), body, rules)
+	id, _ := q.Enqueue("GET", u, h2kv(headers), body, rules)
 
 	// Modify originals after enqueue.
 	headers.Set("X-Test", "modified")
@@ -88,8 +88,8 @@ func TestQueue_EnqueueDeepCopies(t *testing.T) {
 	}
 
 	// Verify the enqueued item has the original values.
-	if item.Headers.Get("X-Test") != "original" {
-		t.Errorf("headers should be deep-copied, got %q", item.Headers.Get("X-Test"))
+	if kvGetTest(item.Headers, "X-Test") != "original" {
+		t.Errorf("headers should be deep-copied, got %q", kvGetTest(item.Headers, "X-Test"))
 	}
 	if string(item.Body) != "original" {
 		t.Errorf("body should be deep-copied, got %q", string(item.Body))
