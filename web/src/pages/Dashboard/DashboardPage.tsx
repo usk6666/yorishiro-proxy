@@ -21,7 +21,7 @@ import "./DashboardPage.css";
 
 const POLL_INTERVAL = 5000;
 
-const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "TCP"] as const;
+const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP"] as const;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,6 +59,7 @@ function protocolVariant(protocol: string): "default" | "success" | "warning" | 
     case "WebSocket": return "info";
     case "HTTP/2": return "info";
     case "gRPC": return "warning";
+    case "gRPC-Web": return "warning";
     case "TCP": return "danger";
     default: return "default";
   }
@@ -109,6 +110,11 @@ export function DashboardPage() {
     pollInterval: POLL_INTERVAL,
     limit: 0,
     filter: { protocol: "gRPC" },
+  });
+  const { data: grpcWebFlows } = useQuery("flows", {
+    pollInterval: POLL_INTERVAL,
+    limit: 0,
+    filter: { protocol: "gRPC-Web" },
   });
   const { data: tcpFlows } = useQuery("flows", {
     pollInterval: POLL_INTERVAL,
@@ -235,6 +241,7 @@ export function DashboardPage() {
     "WebSocket": wsFlows,
     "HTTP/2": h2Flows,
     "gRPC": grpcFlows,
+    "gRPC-Web": grpcWebFlows,
     "TCP": tcpFlows,
   };
   for (const proto of PROTOCOLS) {

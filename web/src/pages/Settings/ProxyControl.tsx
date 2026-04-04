@@ -13,6 +13,7 @@ const ALL_PROTOCOLS = [
   "WebSocket",
   "HTTP/2",
   "gRPC",
+  "gRPC-Web",
   "TCP",
 ] as const;
 

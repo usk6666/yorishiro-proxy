@@ -84,7 +84,7 @@ export function MessageList({
 }: MessageListProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  const isGrpc = protocol === "gRPC";
+  const isGrpc = protocol === "gRPC" || protocol === "gRPC-Web";
 
   // Pagination info
   const totalPages = Math.max(1, Math.ceil(total / limit));
