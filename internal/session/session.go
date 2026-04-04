@@ -128,12 +128,20 @@ func upstreamToClient(
 	// Wait for upstream to be established, goroutine 1 to exit, or context
 	// cancellation. If goroutine 1 exits without establishing upstream
 	// (e.g., all Exchanges were dropped), we return immediately.
+	//
+	// Priority select: check uh.ready first (non-blocking) to avoid the Go
+	// select random-choice problem when both uh.ready and uh.done are closed
+	// simultaneously (goroutine 1 closes ready then done in quick succession).
 	select {
 	case <-uh.ready:
-	case <-uh.done:
-		return nil
-	case <-ctx.Done():
-		return nil
+	default:
+		select {
+		case <-uh.ready:
+		case <-uh.done:
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
 	}
 
 	for {

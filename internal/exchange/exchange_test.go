@@ -170,160 +170,160 @@ func TestClone_OpaqueShallowCopy(t *testing.T) {
 	}
 }
 
-func TestHeaderValue(t *testing.T) {
-	e := &Exchange{
-		Headers: []KeyValue{
-			{Name: "Content-Type", Value: "application/json"},
-			{Name: "X-Custom", Value: "first"},
-			{Name: "x-custom", Value: "second"},
-		},
+func TestGetHeaders(t *testing.T) {
+	headers := []KeyValue{
+		{Name: "Host", Value: "aaa"},
+		{Name: "Host", Value: "bbb"},
+		{Name: "Accept", Value: "*/*"},
 	}
+	e := &Exchange{Headers: headers}
 
-	tests := []struct {
-		name string
-		want string
-	}{
-		{"Content-Type", "application/json"},
-		{"content-type", "application/json"},
-		{"CONTENT-TYPE", "application/json"},
-		{"X-Custom", "first"}, // returns first match
-		{"x-custom", "first"}, // case-insensitive, returns first
-		{"X-Missing", ""},     // not found
-		{"", ""},              // empty name
+	got := e.GetHeaders()
+	if len(got) != 3 {
+		t.Fatalf("GetHeaders() len = %d, want 3", len(got))
 	}
-	for _, tt := range tests {
-		if got := e.HeaderValue(tt.name); got != tt.want {
-			t.Errorf("HeaderValue(%q) = %q, want %q", tt.name, got, tt.want)
-		}
+	if got[0].Name != "Host" || got[0].Value != "aaa" {
+		t.Errorf("GetHeaders()[0] = {%q, %q}, want {Host, aaa}", got[0].Name, got[0].Value)
+	}
+	if got[1].Name != "Host" || got[1].Value != "bbb" {
+		t.Errorf("GetHeaders()[1] = {%q, %q}, want {Host, bbb}", got[1].Name, got[1].Value)
 	}
 }
 
-func TestHeaderValue_EmptyHeaders(t *testing.T) {
+func TestGetHeaders_Nil(t *testing.T) {
 	e := &Exchange{}
-	if got := e.HeaderValue("anything"); got != "" {
-		t.Errorf("HeaderValue on empty Headers = %q, want %q", got, "")
+	if got := e.GetHeaders(); got != nil {
+		t.Errorf("GetHeaders() on nil = %v, want nil", got)
 	}
 }
 
-func TestSetHeader_Update(t *testing.T) {
-	e := &Exchange{
-		Headers: []KeyValue{
-			{Name: "Content-Type", Value: "text/plain"},
-			{Name: "Accept", Value: "*/*"},
-		},
-	}
-
-	e.SetHeader("content-type", "application/json")
-
-	if len(e.Headers) != 2 {
-		t.Fatalf("expected 2 headers, got %d", len(e.Headers))
-	}
-	// Preserves original casing of the name
-	if e.Headers[0].Name != "Content-Type" {
-		t.Errorf("SetHeader should preserve original name casing, got %q", e.Headers[0].Name)
-	}
-	if e.Headers[0].Value != "application/json" {
-		t.Errorf("SetHeader value = %q, want %q", e.Headers[0].Value, "application/json")
-	}
-}
-
-func TestSetHeader_Append(t *testing.T) {
-	e := &Exchange{
-		Headers: []KeyValue{
-			{Name: "Accept", Value: "*/*"},
-		},
-	}
-
-	e.SetHeader("X-New", "value")
-
-	if len(e.Headers) != 2 {
-		t.Fatalf("expected 2 headers, got %d", len(e.Headers))
-	}
-	if e.Headers[1].Name != "X-New" || e.Headers[1].Value != "value" {
-		t.Errorf("SetHeader append: got {%q, %q}, want {%q, %q}",
-			e.Headers[1].Name, e.Headers[1].Value, "X-New", "value")
-	}
-}
-
-func TestSetHeader_EmptyHeaders(t *testing.T) {
-	e := &Exchange{}
-	e.SetHeader("X-New", "value")
-
-	if len(e.Headers) != 1 {
-		t.Fatalf("expected 1 header, got %d", len(e.Headers))
-	}
-	if e.Headers[0].Name != "X-New" || e.Headers[0].Value != "value" {
-		t.Errorf("SetHeader on nil Headers: got {%q, %q}", e.Headers[0].Name, e.Headers[0].Value)
-	}
-}
-
-func TestAddHeader(t *testing.T) {
-	e := &Exchange{
-		Headers: []KeyValue{
-			{Name: "Set-Cookie", Value: "a=1"},
-		},
-	}
-
-	e.AddHeader("Set-Cookie", "b=2")
-
-	if len(e.Headers) != 2 {
-		t.Fatalf("expected 2 headers, got %d", len(e.Headers))
-	}
-	if e.Headers[0].Value != "a=1" {
-		t.Errorf("first Set-Cookie = %q, want %q", e.Headers[0].Value, "a=1")
-	}
-	if e.Headers[1].Value != "b=2" {
-		t.Errorf("second Set-Cookie = %q, want %q", e.Headers[1].Value, "b=2")
-	}
-}
-
-func TestAddHeader_NilHeaders(t *testing.T) {
-	e := &Exchange{}
-	e.AddHeader("X-First", "value")
-
-	if len(e.Headers) != 1 {
-		t.Fatalf("expected 1 header, got %d", len(e.Headers))
-	}
-}
-
-func TestDelHeader(t *testing.T) {
+func TestHeaderValues(t *testing.T) {
 	e := &Exchange{
 		Headers: []KeyValue{
 			{Name: "Set-Cookie", Value: "a=1"},
 			{Name: "Content-Type", Value: "text/plain"},
 			{Name: "set-cookie", Value: "b=2"},
+			{Name: "SET-COOKIE", Value: "c=3"},
 		},
 	}
 
-	e.DelHeader("Set-Cookie")
-
-	if len(e.Headers) != 1 {
-		t.Fatalf("expected 1 header after delete, got %d", len(e.Headers))
+	got := e.HeaderValues("Set-Cookie")
+	want := []string{"a=1", "b=2", "c=3"}
+	if len(got) != len(want) {
+		t.Fatalf("HeaderValues() len = %d, want %d", len(got), len(want))
 	}
-	if e.Headers[0].Name != "Content-Type" {
-		t.Errorf("remaining header = %q, want %q", e.Headers[0].Name, "Content-Type")
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("HeaderValues()[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
-func TestDelHeader_NotFound(t *testing.T) {
+func TestHeaderValues_NotFound(t *testing.T) {
+	e := &Exchange{
+		Headers: []KeyValue{{Name: "Accept", Value: "*/*"}},
+	}
+	if got := e.HeaderValues("X-Missing"); got != nil {
+		t.Errorf("HeaderValues(missing) = %v, want nil", got)
+	}
+}
+
+func TestHeaderValues_EmptyHeaders(t *testing.T) {
+	e := &Exchange{}
+	if got := e.HeaderValues("anything"); got != nil {
+		t.Errorf("HeaderValues on empty = %v, want nil", got)
+	}
+}
+
+func TestSetHeaders_Replace(t *testing.T) {
 	e := &Exchange{
 		Headers: []KeyValue{
-			{Name: "Accept", Value: "*/*"},
+			{Name: "Content-Type", Value: "text/plain"},
 		},
 	}
 
-	e.DelHeader("X-Missing")
+	e.SetHeaders([]KeyValue{
+		{Name: "Host", Value: "aaa"},
+		{Name: "Host", Value: "bbb"},
+		{Name: "Accept", Value: "*/*"},
+	})
 
-	if len(e.Headers) != 1 {
-		t.Fatalf("expected 1 header (unchanged), got %d", len(e.Headers))
+	if len(e.Headers) != 3 {
+		t.Fatalf("expected 3 headers, got %d", len(e.Headers))
+	}
+	// Duplicate Host headers coexist
+	if e.Headers[0].Name != "Host" || e.Headers[0].Value != "aaa" {
+		t.Errorf("headers[0] = {%q, %q}, want {Host, aaa}", e.Headers[0].Name, e.Headers[0].Value)
+	}
+	if e.Headers[1].Name != "Host" || e.Headers[1].Value != "bbb" {
+		t.Errorf("headers[1] = {%q, %q}, want {Host, bbb}", e.Headers[1].Name, e.Headers[1].Value)
 	}
 }
 
-func TestDelHeader_EmptyHeaders(t *testing.T) {
-	e := &Exchange{}
-	e.DelHeader("anything") // should not panic
+func TestSetHeaders_Nil(t *testing.T) {
+	e := &Exchange{
+		Headers: []KeyValue{{Name: "X", Value: "1"}},
+	}
+	e.SetHeaders(nil)
 	if e.Headers != nil {
-		t.Errorf("DelHeader on nil Headers should remain nil, got %v", e.Headers)
+		t.Errorf("SetHeaders(nil) should clear headers, got %v", e.Headers)
+	}
+}
+
+func TestGetTrailers(t *testing.T) {
+	trailers := []KeyValue{
+		{Name: "grpc-status", Value: "0"},
+		{Name: "grpc-message", Value: "OK"},
+	}
+	e := &Exchange{Trailers: trailers}
+
+	got := e.GetTrailers()
+	if len(got) != 2 {
+		t.Fatalf("GetTrailers() len = %d, want 2", len(got))
+	}
+	if got[0].Name != "grpc-status" || got[1].Name != "grpc-message" {
+		t.Errorf("GetTrailers() = %v", got)
+	}
+}
+
+func TestGetTrailers_Nil(t *testing.T) {
+	e := &Exchange{}
+	if got := e.GetTrailers(); got != nil {
+		t.Errorf("GetTrailers() on nil = %v, want nil", got)
+	}
+}
+
+func TestTrailerValues(t *testing.T) {
+	e := &Exchange{
+		Trailers: []KeyValue{
+			{Name: "grpc-status", Value: "0"},
+			{Name: "Grpc-Status", Value: "14"},
+		},
+	}
+	got := e.TrailerValues("grpc-status")
+	if len(got) != 2 || got[0] != "0" || got[1] != "14" {
+		t.Errorf("TrailerValues() = %v, want [0, 14]", got)
+	}
+}
+
+func TestTrailerValues_NotFound(t *testing.T) {
+	e := &Exchange{Trailers: []KeyValue{{Name: "grpc-status", Value: "0"}}}
+	if got := e.TrailerValues("x-missing"); got != nil {
+		t.Errorf("TrailerValues(missing) = %v, want nil", got)
+	}
+}
+
+func TestSetTrailers(t *testing.T) {
+	e := &Exchange{Trailers: []KeyValue{{Name: "old", Value: "val"}}}
+	e.SetTrailers([]KeyValue{
+		{Name: "grpc-status", Value: "0"},
+		{Name: "grpc-message", Value: "OK"},
+	})
+	if len(e.Trailers) != 2 {
+		t.Fatalf("SetTrailers len = %d, want 2", len(e.Trailers))
+	}
+	if e.Trailers[0].Name != "grpc-status" {
+		t.Errorf("Trailers[0] = %v", e.Trailers[0])
 	}
 }
 
