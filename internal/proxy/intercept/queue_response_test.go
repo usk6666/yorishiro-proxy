@@ -14,7 +14,7 @@ func TestQueue_EnqueueResponse(t *testing.T) {
 	body := []byte("<html>hello</html>")
 	matchedRules := []string{"rule-resp-1"}
 
-	id, actionCh := q.EnqueueResponse("GET", reqURL, 200, h2r(headers), body, matchedRules)
+	id, actionCh := q.EnqueueResponse("GET", reqURL, 200, h2kv(headers), body, matchedRules)
 
 	if id == "" {
 		t.Fatal("EnqueueResponse returned empty ID")
@@ -42,8 +42,8 @@ func TestQueue_EnqueueResponse(t *testing.T) {
 	if item.StatusCode != 200 {
 		t.Errorf("expected status code 200, got %d", item.StatusCode)
 	}
-	if item.Headers.Get("Content-Type") != "text/html" {
-		t.Errorf("expected Content-Type text/html, got %q", item.Headers.Get("Content-Type"))
+	if kvGetTest(item.Headers, "Content-Type") != "text/html" {
+		t.Errorf("expected Content-Type text/html, got %q", kvGetTest(item.Headers, "Content-Type"))
 	}
 	if string(item.Body) != "<html>hello</html>" {
 		t.Errorf("expected body %q, got %q", "<html>hello</html>", string(item.Body))
@@ -60,7 +60,7 @@ func TestQueue_EnqueueResponse_DeepCopies(t *testing.T) {
 	body := []byte("original")
 	rules := []string{"rule-1"}
 
-	id, _ := q.EnqueueResponse("GET", reqURL, 200, h2r(headers), body, rules)
+	id, _ := q.EnqueueResponse("GET", reqURL, 200, h2kv(headers), body, rules)
 
 	// Modify originals after enqueue.
 	headers.Set("X-Test", "modified")
@@ -73,8 +73,8 @@ func TestQueue_EnqueueResponse_DeepCopies(t *testing.T) {
 		t.Fatalf("Get returned error: %v", err)
 	}
 
-	if item.Headers.Get("X-Test") != "original" {
-		t.Errorf("headers should be deep-copied, got %q", item.Headers.Get("X-Test"))
+	if kvGetTest(item.Headers, "X-Test") != "original" {
+		t.Errorf("headers should be deep-copied, got %q", kvGetTest(item.Headers, "X-Test"))
 	}
 	if string(item.Body) != "original" {
 		t.Errorf("body should be deep-copied, got %q", string(item.Body))

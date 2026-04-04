@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 )
 
 // ActionType specifies the action to take on an intercepted request.
@@ -139,7 +139,7 @@ type InterceptedRequest struct {
 	// URL is the request URL.
 	URL *url.URL
 	// Headers are the request headers (phase=request) or response headers (phase=response).
-	Headers parser.RawHeaders
+	Headers []exchange.KeyValue
 	// Body is the request body (phase=request) or response body (phase=response).
 	Body []byte
 	// StatusCode is the HTTP status code (only set for phase=response).
@@ -292,7 +292,7 @@ type EnqueueOpts struct {
 // An optional EnqueueOpts may be provided to atomically attach RawBytes
 // and/or Metadata at enqueue time, avoiding the race window that exists
 // when using SetRawBytes/SetMetadata after Enqueue.
-func (q *Queue) Enqueue(method string, u *url.URL, headers parser.RawHeaders, body []byte, matchedRules []string, opts ...EnqueueOpts) (string, <-chan InterceptAction) {
+func (q *Queue) Enqueue(method string, u *url.URL, headers []exchange.KeyValue, body []byte, matchedRules []string, opts ...EnqueueOpts) (string, <-chan InterceptAction) {
 	id := uuid.New().String()
 	actionCh := make(chan InterceptAction, 1)
 
@@ -314,7 +314,11 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers parser.RawHeaders, bo
 	}
 
 	// Deep-copy headers.
-	headersCopy := headers.Clone()
+	var headersCopy []exchange.KeyValue
+	if len(headers) > 0 {
+		headersCopy = make([]exchange.KeyValue, len(headers))
+		copy(headersCopy, headers)
+	}
 
 	// Copy body.
 	var bodyCopy []byte
@@ -378,7 +382,7 @@ func (q *Queue) Enqueue(method string, u *url.URL, headers parser.RawHeaders, bo
 //
 // If the queue has reached its maxItems limit, the response is immediately
 // auto-released.
-func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, headers parser.RawHeaders, body []byte, matchedRules []string, opts ...EnqueueOpts) (string, <-chan InterceptAction) {
+func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, headers []exchange.KeyValue, body []byte, matchedRules []string, opts ...EnqueueOpts) (string, <-chan InterceptAction) {
 	id := uuid.New().String()
 	actionCh := make(chan InterceptAction, 1)
 
@@ -399,7 +403,11 @@ func (q *Queue) EnqueueResponse(method string, reqURL *url.URL, statusCode int, 
 	}
 
 	// Deep-copy headers.
-	headersCopy := headers.Clone()
+	var headersCopy []exchange.KeyValue
+	if len(headers) > 0 {
+		headersCopy = make([]exchange.KeyValue, len(headers))
+		copy(headersCopy, headers)
+	}
 
 	// Copy body.
 	var bodyCopy []byte
@@ -560,7 +568,8 @@ func (q *Queue) List() []*InterceptedRequest {
 			}
 		}
 		if item.Headers != nil {
-			cp.Headers = item.Headers.Clone()
+			cp.Headers = make([]exchange.KeyValue, len(item.Headers))
+			copy(cp.Headers, item.Headers)
 		}
 		// RawBytes, Body, MatchedRules are append-only or read-only after
 		// enqueue, so shallow copies are safe.

@@ -11,11 +11,25 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 )
+
+// rawHeadersToKV converts parser.RawHeaders to []exchange.KeyValue for the
+// intercept engine/queue API.
+func rawHeadersToKV(rh parser.RawHeaders) []exchange.KeyValue {
+	if rh == nil {
+		return nil
+	}
+	kv := make([]exchange.KeyValue, len(rh))
+	for i, h := range rh {
+		kv[i] = exchange.KeyValue{Name: h.Name, Value: h.Value}
+	}
+	return kv
+}
 
 // interceptResult holds the outcome of applyIntercept. When raw mode is
 // selected (IsRaw == true), the caller must bypass UpstreamRouter and
@@ -137,7 +151,8 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *pars
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, reqURL, req.Headers)
+	kvHeaders := rawHeadersToKV(req.Headers)
+	matchedRules := h.InterceptEngine.MatchRequestRules(req.Method, reqURL, kvHeaders)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -149,7 +164,7 @@ func (h *Handler) interceptRequest(ctx context.Context, conn net.Conn, req *pars
 		opts = append(opts, intercept.EnqueueOpts{RawBytes: rawBytes})
 	}
 
-	id, actionCh := h.InterceptQueue.Enqueue(req.Method, reqURL, req.Headers, body, matchedRules, opts...)
+	id, actionCh := h.InterceptQueue.Enqueue(req.Method, reqURL, kvHeaders, body, matchedRules, opts...)
 	defer h.InterceptQueue.Remove(id)
 
 	timeout := h.InterceptQueue.Timeout()
@@ -181,7 +196,8 @@ func (h *Handler) interceptResponse(ctx context.Context, req *parser.RawRequest,
 		return intercept.InterceptAction{}, false
 	}
 
-	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, resp.Headers)
+	kvHeaders := rawHeadersToKV(resp.Headers)
+	matchedRules := h.InterceptEngine.MatchResponseRules(resp.StatusCode, kvHeaders)
 	if len(matchedRules) == 0 {
 		return intercept.InterceptAction{}, false
 	}
@@ -193,7 +209,7 @@ func (h *Handler) interceptResponse(ctx context.Context, req *parser.RawRequest,
 		"matched_rules", matchedRules)
 
 	id, actionCh := h.InterceptQueue.EnqueueResponse(
-		req.Method, reqURL, resp.StatusCode, resp.Headers, body, matchedRules,
+		req.Method, reqURL, resp.StatusCode, kvHeaders, body, matchedRules,
 	)
 	defer h.InterceptQueue.Remove(id)
 
