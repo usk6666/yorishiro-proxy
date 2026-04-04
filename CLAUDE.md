@@ -5,6 +5,11 @@ Operates as an MCP (Model Context Protocol) server, providing traffic intercepti
 
 **Status**: OSS (Apache License 2.0) · Under active development
 
+## Architecture Rewrite (M36-M44)
+
+> **Active rewrite in progress.** The codebase is being restructured from handler-per-protocol to Codec + Pipeline + Session architecture.
+> **Before working on any M36-M44 Issue, read [`docs/architecture-rewrite.md`](docs/architecture-rewrite.md)** — it contains all design decisions, implementation FAQ, and rationale that are not repeated in individual Issue descriptions.
+
 ## Architecture
 
 ### Principle: L7-first, L4-capable
