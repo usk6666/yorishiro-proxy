@@ -716,52 +716,59 @@ func (s *Server) recordResendFlowRaw(ctx context.Context, prep *resendPrepared, 
 	}
 
 	// For gRPC and gRPC-Web flows, record trailers from the response headers.
-	// Structured resend uses the H1 transport path, so gRPC trailers
-	// (grpc-status, grpc-message) arrive as regular HTTP/1.x trailing headers
-	// merged into the response headers. Detect them to build a separate
-	// trailers message for format compatibility with native gRPC flows.
 	if isGRPCFlow(prep.flow.Protocol) || isGRPCWebFlow(prep.flow.Protocol) {
-		grpcStatus := resp.Headers.Get("Grpc-Status")
-		grpcMessage := resp.Headers.Get("Grpc-Message")
-		if grpcStatus != "" {
-			trailerMeta := map[string]string{
-				"grpc_type": "trailers",
-			}
-			if prep.url != nil {
-				parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
-				if len(parts) == 2 {
-					trailerMeta["service"] = parts[0]
-					trailerMeta["method"] = parts[1]
-				}
-			}
-			trailerMeta["grpc_status"] = grpcStatus
-			if grpcMessage != "" {
-				trailerMeta["grpc_message"] = grpcMessage
-			}
-			// Build trailer headers from response trailer fields.
-			var trailerHeaders parser.RawHeaders
-			for _, h := range resp.Headers {
-				lower := strings.ToLower(h.Name)
-				if lower == "grpc-status" || lower == "grpc-message" || lower == "grpc-status-details-bin" {
-					trailerHeaders = append(trailerHeaders, h)
-				}
-			}
-			trailerMsg := &flow.Message{
-				FlowID:     newFl.ID,
-				Sequence:   newRecvMsg.Sequence + 1,
-				Direction:  "receive",
-				Timestamp:  start.Add(duration),
-				StatusCode: resp.StatusCode,
-				Headers:    rawHeadersToMultiMap(trailerHeaders),
-				Metadata:   trailerMeta,
-			}
-			if err := s.deps.store.AppendMessage(ctx, trailerMsg); err != nil {
-				return fmt.Errorf("save resend gRPC trailers message: %w", err)
-			}
+		if err := s.recordResendGRPCTrailers(ctx, prep, resp, newFl, newRecvMsg, start, duration); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// recordResendGRPCTrailers extracts gRPC trailers from the response headers
+// and saves them as a separate message. Structured resend uses the H1 transport
+// path, so gRPC trailers (grpc-status, grpc-message) arrive as regular
+// HTTP/1.x trailing headers merged into the response headers.
+func (s *Server) recordResendGRPCTrailers(ctx context.Context, prep *resendPrepared, resp *parser.RawResponse, newFl *flow.Flow, recvMsg *flow.Message, start time.Time, duration time.Duration) error {
+	grpcStatus := resp.Headers.Get("Grpc-Status")
+	if grpcStatus == "" {
+		return nil
+	}
+
+	trailerMeta := map[string]string{
+		"grpc_type": "trailers",
+	}
+	if prep.url != nil {
+		parts := strings.SplitN(strings.TrimPrefix(prep.url.Path, "/"), "/", 2)
+		if len(parts) == 2 {
+			trailerMeta["service"] = parts[0]
+			trailerMeta["method"] = parts[1]
+		}
+	}
+	trailerMeta["grpc_status"] = grpcStatus
+	if grpcMessage := resp.Headers.Get("Grpc-Message"); grpcMessage != "" {
+		trailerMeta["grpc_message"] = grpcMessage
+	}
+
+	// Build trailer headers from response trailer fields.
+	var trailerHeaders parser.RawHeaders
+	for _, h := range resp.Headers {
+		lower := strings.ToLower(h.Name)
+		if lower == "grpc-status" || lower == "grpc-message" || lower == "grpc-status-details-bin" {
+			trailerHeaders = append(trailerHeaders, h)
+		}
+	}
+
+	trailerMsg := &flow.Message{
+		FlowID:     newFl.ID,
+		Sequence:   recvMsg.Sequence + 1,
+		Direction:  "receive",
+		Timestamp:  start.Add(duration),
+		StatusCode: resp.StatusCode,
+		Headers:    rawHeadersToMultiMap(trailerHeaders),
+		Metadata:   trailerMeta,
+	}
+	return s.deps.store.AppendMessage(ctx, trailerMsg)
 }
 
 // isGRPCFlow reports whether the protocol string indicates a gRPC flow,
