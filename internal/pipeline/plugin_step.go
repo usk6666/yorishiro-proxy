@@ -140,11 +140,13 @@ func exchangeToMap(ex *exchange.Exchange) map[string]any {
 	// Expose protocol as a string.
 	m["protocol"] = string(ex.Protocol)
 
-	// Expose selected Metadata keys.
+	// Expose selected Metadata keys. Keys are prefixed with "meta_" to avoid
+	// colliding with top-level Exchange fields (e.g., Metadata["method"] is the
+	// gRPC method name, distinct from the HTTP method in m["method"]).
 	if ex.Metadata != nil {
 		for _, key := range []string{"service", "method", "grpc_status", "ws_opcode"} {
 			if v, ok := ex.Metadata[key]; ok {
-				m[key] = v
+				m["meta_"+key] = v
 			}
 		}
 	}

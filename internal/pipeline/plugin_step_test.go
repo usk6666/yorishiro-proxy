@@ -130,6 +130,7 @@ func TestExchangeToMap_NilURL(t *testing.T) {
 func TestExchangeToMap_Metadata(t *testing.T) {
 	ex := &exchange.Exchange{
 		Direction: exchange.Send,
+		Method:    "POST",
 		Protocol:  exchange.GRPC,
 		Metadata: map[string]any{
 			"service":    "greeter.Greeter",
@@ -140,11 +141,17 @@ func TestExchangeToMap_Metadata(t *testing.T) {
 
 	m := exchangeToMap(ex)
 
-	if m["service"] != "greeter.Greeter" {
-		t.Errorf("service = %v, want greeter.Greeter", m["service"])
+	// Metadata keys are prefixed with "meta_" to avoid collision with
+	// top-level Exchange fields.
+	if m["meta_service"] != "greeter.Greeter" {
+		t.Errorf("meta_service = %v, want greeter.Greeter", m["meta_service"])
 	}
-	if m["method"] != "SayHello" {
-		t.Errorf("method metadata = %v, want SayHello", m["method"])
+	if m["meta_method"] != "SayHello" {
+		t.Errorf("meta_method = %v, want SayHello", m["meta_method"])
+	}
+	// Top-level method must remain the HTTP method, not the gRPC method.
+	if m["method"] != "POST" {
+		t.Errorf("method = %v, want POST (HTTP method must not be overwritten by metadata)", m["method"])
 	}
 	if _, ok := m["irrelevant"]; ok {
 		t.Error("irrelevant metadata key should not be exposed")
