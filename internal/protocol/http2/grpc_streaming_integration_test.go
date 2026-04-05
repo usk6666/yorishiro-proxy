@@ -390,7 +390,7 @@ func TestIntegration_GRPC_ClientStreaming(t *testing.T) {
 
 	// Verify flow recording: should be "stream" type (multiple req, single resp).
 	flows := pollGRPCFlows(t, ctx, store, 1)
-	fl := flows[0]
+	_ = flows[0]
 }
 
 func TestIntegration_GRPC_BidirectionalStreaming(t *testing.T) {
@@ -700,7 +700,7 @@ func TestIntegration_GRPC_ProgressiveRecording_ActiveThenComplete(t *testing.T) 
 	io.ReadAll(res.resp.Body)
 
 	// Verify flow transitions to "complete".
-	completedFlow := pollFlowState(t, ctx, store, activeFlow.ID, "complete")
+	_ = pollFlowState(t, ctx, store, activeFlow.ID, "complete")
 
 	// Verify messages were recorded.
 	msgs, err := store.GetFlows(ctx, activeFlow.ID, flow.FlowListOptions{})
