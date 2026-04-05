@@ -118,14 +118,15 @@ func (h *Handler) applyTransform(req *parser.RawRequest, reqURL *url.URL, record
 		return recordReqBody
 	}
 	origLen := len(recordReqBody)
-	rh := req.Headers
-	rh, recordReqBody = h.transformPipeline.TransformRequest(req.Method, reqURL, rh, recordReqBody)
+	kv := rawHeadersToKeyValues(req.Headers)
+	kv, recordReqBody = h.transformPipeline.TransformRequest(req.Method, reqURL, kv, recordReqBody)
 
 	// When the body size changes (e.g., replace_body) and the request carried
 	// a Content-Length header, update it so the upstream receives the correct
 	// value. Without this, the upstream will either hang waiting for more
 	// bytes or discard trailing data. Only update when Content-Length was
 	// already present to avoid adding it to chunked-encoded requests.
+	rh := keyValuesToRawHeaders(kv)
 	if len(recordReqBody) != origLen && rh.Get("Content-Length") != "" {
 		rh.Del("Content-Length")
 		rh.Set("Content-Length", fmt.Sprintf("%d", len(recordReqBody)))

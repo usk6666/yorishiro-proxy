@@ -227,7 +227,7 @@ func TestCleaner_StartStop_Lifecycle(t *testing.T) {
 	cleaner.Start(ctx)
 
 	// Wait for the initial cleanup to take effect.
-	var remaining []*flow.Flow
+	var remaining []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(50 * time.Millisecond)
 		var err error

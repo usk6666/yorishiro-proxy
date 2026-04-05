@@ -7,7 +7,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 )
 
 // Pipeline manages auto-transform rules and applies them to HTTP requests
@@ -155,7 +155,7 @@ func (p *Pipeline) Clear() {
 // TransformRequest applies all matching enabled request rules to the given
 // request headers and body, returning the potentially modified headers and body.
 // Rules are applied in priority order (lower priority values first).
-func (p *Pipeline) TransformRequest(method string, u *url.URL, headers parser.RawHeaders, body []byte) (parser.RawHeaders, []byte) {
+func (p *Pipeline) TransformRequest(method string, u *url.URL, headers []exchange.KeyValue, body []byte) ([]exchange.KeyValue, []byte) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -184,7 +184,7 @@ func (p *Pipeline) TransformRequest(method string, u *url.URL, headers parser.Ra
 // TransformResponse applies all matching enabled response rules to the given
 // response headers and body, returning the potentially modified headers and body.
 // Rules are applied in priority order (lower priority values first).
-func (p *Pipeline) TransformResponse(statusCode int, headers parser.RawHeaders, body []byte) (parser.RawHeaders, []byte) {
+func (p *Pipeline) TransformResponse(statusCode int, headers []exchange.KeyValue, body []byte) ([]exchange.KeyValue, []byte) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -211,15 +211,15 @@ func (p *Pipeline) TransformResponse(statusCode int, headers parser.RawHeaders, 
 }
 
 // applyAction applies a single rule's action to the headers and body.
-func applyAction(cr *compiledRule, headers parser.RawHeaders, body []byte) (parser.RawHeaders, []byte) {
+func applyAction(cr *compiledRule, headers []exchange.KeyValue, body []byte) ([]exchange.KeyValue, []byte) {
 	switch cr.rule.Action.Type {
 	case ActionAddHeader:
-		headers = append(headers, parser.RawHeader{Name: cr.rule.Action.Header, Value: cr.rule.Action.Value})
+		headers = append(headers, exchange.KeyValue{Name: cr.rule.Action.Header, Value: cr.rule.Action.Value})
 	case ActionSetHeader:
-		headers.Del(cr.rule.Action.Header)
-		headers.Set(cr.rule.Action.Header, cr.rule.Action.Value)
+		headers = exchange.HeaderDel(headers, cr.rule.Action.Header)
+		headers = exchange.HeaderSet(headers, cr.rule.Action.Header, cr.rule.Action.Value)
 	case ActionRemoveHeader:
-		headers.Del(cr.rule.Action.Header)
+		headers = exchange.HeaderDel(headers, cr.rule.Action.Header)
 	case ActionReplaceBody:
 		if cr.bodyPatternRe != nil && len(body) > 0 {
 			body = cr.bodyPatternRe.ReplaceAll(body, []byte(cr.rule.Action.Value))

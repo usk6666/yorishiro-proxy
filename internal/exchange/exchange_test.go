@@ -43,7 +43,8 @@ func TestProtocol_String(t *testing.T) {
 
 func TestClone_DeepCopy(t *testing.T) {
 	orig := &Exchange{
-		StreamID:  "flow-1",
+		StreamID:  "stream-1",
+		FlowID:    "flow-1",
 		Sequence:  0,
 		Direction: Send,
 		Method:    "POST",
@@ -70,6 +71,9 @@ func TestClone_DeepCopy(t *testing.T) {
 	// Verify values match
 	if cloned.StreamID != orig.StreamID {
 		t.Errorf("StreamID mismatch: got %q, want %q", cloned.StreamID, orig.StreamID)
+	}
+	if cloned.FlowID != orig.FlowID {
+		t.Errorf("FlowID mismatch: got %q, want %q", cloned.FlowID, orig.FlowID)
 	}
 	if cloned.Sequence != orig.Sequence {
 		t.Errorf("Sequence mismatch: got %d, want %d", cloned.Sequence, orig.Sequence)
@@ -128,7 +132,8 @@ func TestClone_Nil(t *testing.T) {
 
 func TestClone_NilFields(t *testing.T) {
 	orig := &Exchange{
-		StreamID: "flow-2",
+		StreamID: "stream-2",
+		FlowID:   "flow-2",
 		Protocol: TCP,
 	}
 	cloned := orig.Clone()
@@ -324,6 +329,27 @@ func TestSetTrailers(t *testing.T) {
 	}
 	if e.Trailers[0].Name != "grpc-status" {
 		t.Errorf("Trailers[0] = %v", e.Trailers[0])
+	}
+}
+
+func TestClone_StreamIDCopied(t *testing.T) {
+	orig := &Exchange{
+		StreamID: "stream-abc",
+		FlowID:   "flow-abc",
+	}
+	cloned := orig.Clone()
+
+	if cloned.StreamID != "stream-abc" {
+		t.Errorf("StreamID = %q, want %q", cloned.StreamID, "stream-abc")
+	}
+	if cloned.FlowID != "flow-abc" {
+		t.Errorf("FlowID = %q, want %q", cloned.FlowID, "flow-abc")
+	}
+
+	// StreamID is a string (value type), so mutation of orig should not affect clone
+	orig.StreamID = "stream-modified"
+	if cloned.StreamID != "stream-abc" {
+		t.Error("Clone StreamID affected by mutating original")
 	}
 }
 
