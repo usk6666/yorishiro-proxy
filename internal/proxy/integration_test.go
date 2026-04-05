@@ -1009,63 +1009,67 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 
 // --- Error Recovery Integration Tests ---
 
-// failingStore is a flow.Store that always returns an error from SaveFlow.
+// failingStore is a flow.Store that always returns an error.
 // It is used to verify that the proxy continues forwarding traffic even when
 // session persistence fails (USK-36 fix).
 type failingStore struct {
 	saveCallCount atomic.Int64
 }
 
-func (s *failingStore) SaveFlow(_ context.Context, _ *flow.Stream) error {
+func (s *failingStore) SaveStream(_ context.Context, _ *flow.Stream) error {
 	s.saveCallCount.Add(1)
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) UpdateFlow(_ context.Context, _ string, _ flow.StreamUpdate) error {
+func (s *failingStore) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) GetFlow(_ context.Context, _ string) (*flow.Stream, error) {
+func (s *failingStore) GetStream(_ context.Context, _ string) (*flow.Stream, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) ListFlows(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
+func (s *failingStore) ListStreams(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) CountFlows(_ context.Context, _ flow.StreamListOptions) (int, error) {
+func (s *failingStore) CountStreams(_ context.Context, _ flow.StreamListOptions) (int, error) {
 	return 0, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) DeleteFlow(_ context.Context, _ string) error {
+func (s *failingStore) DeleteStream(_ context.Context, _ string) error {
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteAllFlows(_ context.Context) (int64, error) {
+func (s *failingStore) DeleteAllStreams(_ context.Context) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteFlowsByProtocol(_ context.Context, _ string) (int64, error) {
+func (s *failingStore) DeleteStreamsByProtocol(_ context.Context, _ string) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+func (s *failingStore) DeleteStreamsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) DeleteExcessFlows(_ context.Context, _ int) (int64, error) {
+func (s *failingStore) DeleteExcessStreams(_ context.Context, _ int) (int64, error) {
 	return 0, errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) AppendMessage(_ context.Context, _ *flow.Flow) error {
+func (s *failingStore) SaveFlow(_ context.Context, _ *flow.Flow) error {
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) GetMessages(_ context.Context, _ string, _ flow.FlowListOptions) ([]*flow.Flow, error) {
+func (s *failingStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) CountMessages(_ context.Context, _ string) (int, error) {
+func (s *failingStore) GetFlows(_ context.Context, _ string, _ flow.FlowListOptions) ([]*flow.Flow, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) CountFlows(_ context.Context, _ string) (int, error) {
 	return 0, errors.New("simulated DB read failure")
 }
 
