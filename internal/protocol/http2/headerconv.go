@@ -190,3 +190,13 @@ func cloneHpackHeaders(fields []hpack.HeaderField) []hpack.HeaderField {
 	copy(clone, fields)
 	return clone
 }
+
+// keyValuesToHpack converts []exchange.KeyValue to hpack header fields.
+// No pseudo-headers are added.
+func keyValuesToHpack(kv []exchange.KeyValue) []hpack.HeaderField {
+	fields := make([]hpack.HeaderField, 0, len(kv))
+	for _, h := range kv {
+		fields = append(fields, hpack.HeaderField{Name: h.Name, Value: h.Value})
+	}
+	return fields
+}
