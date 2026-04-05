@@ -79,7 +79,14 @@ func New(steps ...Step) *Pipeline {
 // than Continue, execution stops immediately and that Step's result is
 // returned. If a Step provides a non-nil Result.Exchange, subsequent Steps
 // receive that Exchange instead of the original.
+//
+// Before executing any Steps, Run clones the Exchange and stores the snapshot
+// in the context. RecordStep uses this snapshot to detect modifications made
+// by preceding Steps and record both original and modified variants.
 func (p *Pipeline) Run(ctx context.Context, ex *exchange.Exchange) (*exchange.Exchange, Action, *exchange.Exchange) {
+	snapshot := ex.Clone()
+	ctx = withSnapshot(ctx, snapshot)
+
 	for _, step := range p.steps {
 		r := step.Process(ctx, ex)
 		if r.Action != Continue {
