@@ -264,7 +264,7 @@ func TestMCPQuery_RawBytes_RawTCP(t *testing.T) {
 	})
 
 	// For TCP bidirectional flows, query messages resource to verify raw bytes.
-	detail := callTool[queryFlowResult](t, env.cs, "query", map[string]any{
+	_ = callTool[queryFlowResult](t, env.cs, "query", map[string]any{
 		"resource": "flow",
 		"id":       flowID,
 	})

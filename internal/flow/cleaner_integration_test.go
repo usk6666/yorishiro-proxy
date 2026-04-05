@@ -306,7 +306,7 @@ func TestCleaner_PeriodicCleanup(t *testing.T) {
 	}
 
 	// Wait for periodic cleanup to reduce to MaxStreams.
-	var remaining []*flow.Flow
+	var remaining []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
 		var err error
