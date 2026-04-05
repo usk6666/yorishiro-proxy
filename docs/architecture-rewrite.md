@@ -260,16 +260,49 @@ func (p *Pipeline) Run(ctx context.Context, ex *exchange.Exchange) (...) {
 
 This keeps variant logic centralized without adding fields to Exchange.
 
-### 4.5 Flow Lifecycle
+### 4.5 Data Model: Stream + Flow
+
+The data model uses two levels of recording:
+
+| Concept | Type | Description |
+|---------|------|-------------|
+| **Stream** | `flow.Stream` | Connection/RPC-level grouping. One per TCP connection, HTTP request-response pair, WebSocket session, or gRPC stream. |
+| **Flow** | `flow.Flow` | Individual directional message within a Stream. One per Send or Receive Exchange. |
+
+**Lifecycle:**
+
+- **Stream creation**: RecordStep creates a Stream on the first Send Exchange (Sequence==0) with state="active".
+- **Flow creation**: RecordStep creates a Flow for every Exchange (Send or Receive), including variant flows when modifications are detected.
+- **Stream state transitions**: Session (not RecordStep) manages state transitions (active -> complete/error) via the OnComplete callback.
+- **Variant recording**: When Pipeline Steps modify an Exchange (detected by comparing with the snapshot stored in context), RecordStep saves both the original and modified variants as separate Flows with variant metadata.
+
+**Identity fields on Exchange:**
+
+| Field | Purpose | Generator |
+|-------|---------|-----------|
+| StreamID | Groups Flows into a Stream | Codec (knows connection/RPC boundaries) |
+| FlowID | Unique ID for a single directional message | Codec (knows protocol message boundaries) |
+| Sequence | Order within the Stream (0-origin) | Codec |
+| Direction | Send (client->server) or Receive (server->client) | Codec |
+
+**MCP tool mapping:**
+
+| MCP resource | Maps to |
+|-------------|---------|
+| `streams` | `flow.Stream` list (query/filter) |
+| `stream` | Single `flow.Stream` + its `flow.Flow` list |
+| `flow` | Single `flow.Flow` detail |
+
+### 4.5.1 Flow Responsibility Table
 
 | Responsibility | Owner |
 |---------------|-------|
-| FlowID generation | Codec (knows protocol message boundaries) |
+| StreamID/FlowID generation | Codec (knows protocol message boundaries) |
 | ConnID injection | Connector (via context) |
-| Flow State transitions (active -> complete) | RecordStep |
-| Flow creation (SaveFlow) | RecordStep on first Send Exchange |
-| Message append (AppendMessage) | RecordStep on each Exchange |
-| Flow completion (UpdateFlow) | RecordStep on EOF or final Receive |
+| Stream creation (SaveStream) | RecordStep on first Send Exchange |
+| Flow creation (SaveFlow) | RecordStep on each Exchange |
+| Variant detection + recording | RecordStep (compares snapshot with current Exchange) |
+| Stream state transitions (active -> complete/error) | Session (OnComplete callback) |
 
 ### 4.6 Send-Only Steps
 

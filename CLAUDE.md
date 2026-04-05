@@ -65,6 +65,9 @@ cmd/yorishiro-proxy/       # Entry point
   client_format.go         # Result formatting (JSON / table output)
   serverjson.go            # server.json multi-instance entry management (used for client auto-discovery)
 internal/
+  exchange/                # Protocol-agnostic message unit (Exchange, Direction, KeyValue)
+  pipeline/                # Pipeline Step chain (Scope→RateLimit→Safety→Plugin→Intercept→Transform→Record)
+  session/                 # RunSession (universal session loop, OnComplete hook)
   mcp/                     # MCP server, tool definitions, handlers
   proxy/
     listener.go            # TCP listener (Layer 4)
@@ -84,7 +87,7 @@ internal/
     preset.go              # Input Filter presets (destructive-sql, destructive-os-command)
     preset_pii.go          # Output Filter PII presets (credit-card, japan-my-number, email, japan-phone)
   plugin/                  # Starlark plugin engine and registry
-  flow/                    # Request/response recording, flow management, HAR export
+  flow/                    # Stream/Flow recording, management, HAR export
   cert/                    # TLS certificate generation, CA management
     ca.go                  # Root CA generation and loading
     issuer.go              # Dynamic server certificate issuance
@@ -122,8 +125,8 @@ When adding new e2e tests (`*_integration_test.go`), verify not just communicati
 but also subsystem integration. Confirm that the following checklist is satisfied.
 
 - [ ] **Communication success**: Data is correctly transmitted/transformed (send request → receive response → validate content)
-- [ ] **Flow recording**: Saved to Store with correct protocol name (`Protocol`), FlowType (`unary` / `bidirectional` / `stream`), and State
-- [ ] **Message content**: Request/response headers and body are correctly recorded via `store.GetMessages(ctx, flowID, opts)`
+- [ ] **Stream recording**: Stream saved to Store with correct protocol name (`Protocol`), State, and Scheme
+- [ ] **Flow recording**: Individual Flows (Send/Receive) correctly recorded with direction, sequence, headers, and body
 - [ ] **State transitions**: Progressive recording works correctly (`State` transitions from `active` → `complete`)
 - [ ] **Plugin hook firing**: The relevant hook is called for the protocol (for plugin-enabled protocols)
 - [ ] **Error paths**: Flow is recorded with `State="error"` on connection failure or timeout
@@ -225,7 +228,7 @@ When splitting Issues for a new protocol with `/project plan`, treat the followi
 This prevents gaps in e2e test coverage. Refer to the "e2e Test Subsystem Verification Checklist" for individual test verification details.
 
 - [ ] e2e test for successful proxy communication (`internal/proxy/*_integration_test.go`)
-- [ ] Flow recording completeness verification (protocol name, FlowType, State transitions, message count)
+- [ ] Stream/Flow recording completeness verification (protocol name, State transitions, Flow count per Stream)
 - [ ] Raw bytes recording completeness verification (frame boundaries, binary data round-trip) — L4-capable principle
 - [ ] Variant recording test (original/modified save on intercept modification)
 - [ ] Progressive recording test (intermediate state verification for streaming protocols)
