@@ -693,9 +693,9 @@ func (h *Handler) readResponseBody(resp *parser.RawResponse, logger *slog.Logger
 	}
 
 	if h.transformPipeline != nil {
-		rh := resp.Headers
-		rh, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, rh, fullBody)
-		resp.Headers = rh
+		kv := rawHeadersToKeyValues(resp.Headers)
+		kv, fullBody = h.transformPipeline.TransformResponse(resp.StatusCode, kv, fullBody)
+		resp.Headers = keyValuesToRawHeaders(kv)
 	}
 
 	return fullBody

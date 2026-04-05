@@ -852,9 +852,9 @@ func (h *Handler) applyRequestTransform(sc *streamContext, outHeaders *[]hpack.H
 	if h.transformPipeline == nil {
 		return
 	}
-	rh := hpackToRawHeaders(*outHeaders)
-	rh, sc.reqBody = h.transformPipeline.TransformRequest(sc.h2req.Method, sc.reqURL, rh, sc.srp.reqBody)
-	// Rebuild outbound hpack headers from transformed RawHeaders, preserving
+	kv := hpackToKeyValues(*outHeaders)
+	kv, sc.reqBody = h.transformPipeline.TransformRequest(sc.h2req.Method, sc.reqURL, kv, sc.srp.reqBody)
+	// Rebuild outbound hpack headers from transformed KeyValues, preserving
 	// pseudo-headers from the original outHeaders.
 	var pseudos []hpack.HeaderField
 	for _, hf := range *outHeaders {
@@ -862,9 +862,9 @@ func (h *Handler) applyRequestTransform(sc *streamContext, outHeaders *[]hpack.H
 			pseudos = append(pseudos, hf)
 		}
 	}
-	rebuilt := make([]hpack.HeaderField, 0, len(pseudos)+len(rh))
+	rebuilt := make([]hpack.HeaderField, 0, len(pseudos)+len(kv))
 	rebuilt = append(rebuilt, pseudos...)
-	rebuilt = append(rebuilt, rawHeadersToHpack(rh)...)
+	rebuilt = append(rebuilt, keyValuesToHpack(kv)...)
 	*outHeaders = rebuilt
 	sc.srp.reqBody = sc.reqBody
 	sc.srp.headers = sc.h2req.AllHeaders
@@ -877,8 +877,8 @@ func (h *Handler) applyResponseTransform(resp *h2Response) ([]hpack.HeaderField,
 	if h.transformPipeline == nil {
 		return resp.Headers, resp.Body
 	}
-	rh, newBody := h.transformPipeline.TransformResponse(resp.StatusCode, hpackToRawHeaders(resp.Headers), resp.Body)
-	return rawHeadersToHpack(rh), newBody
+	kv, newBody := h.transformPipeline.TransformResponse(resp.StatusCode, hpackToKeyValues(resp.Headers), resp.Body)
+	return keyValuesToHpack(kv), newBody
 }
 
 // runServerPluginHook dispatches the on_before_send_to_server hook.

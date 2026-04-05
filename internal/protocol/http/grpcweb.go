@@ -108,7 +108,9 @@ func (h *Handler) handleGRPCWeb(ctx context.Context, conn net.Conn, req *parser.
 
 	// Apply response transform.
 	if h.transformPipeline != nil {
-		fwd.resp.Headers, fullRespBody = h.transformPipeline.TransformResponse(fwd.resp.StatusCode, fwd.resp.Headers, fullRespBody)
+		kv := rawHeadersToKeyValues(fwd.resp.Headers)
+		kv, fullRespBody = h.transformPipeline.TransformResponse(fwd.resp.StatusCode, kv, fullRespBody)
+		fwd.resp.Headers = keyValuesToRawHeaders(kv)
 	}
 
 	// --- Response intercept ---

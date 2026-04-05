@@ -176,7 +176,7 @@ func applyGRPCAutoTransform(pipeline *rules.Pipeline, sc *streamContext, jsonBod
 	if pipeline == nil || pipeline.Len() == 0 {
 		return jsonBody, false
 	}
-	_, body := pipeline.TransformRequest(scMethod(sc), sc.reqURL, hpackToRawHeaders(scHeaders(sc)), []byte(jsonBody))
+	_, body := pipeline.TransformRequest(scMethod(sc), sc.reqURL, hpackToKeyValues(scHeaders(sc)), []byte(jsonBody))
 	newJSON := string(body)
 	return newJSON, newJSON != jsonBody
 }
@@ -187,7 +187,7 @@ func applyGRPCAutoTransformResponseHpack(pipeline *rules.Pipeline, statusCode in
 	if pipeline == nil || pipeline.Len() == 0 {
 		return jsonBody, false
 	}
-	_, body := pipeline.TransformResponse(statusCode, hpackToRawHeaders(headers), []byte(jsonBody))
+	_, body := pipeline.TransformResponse(statusCode, hpackToKeyValues(headers), []byte(jsonBody))
 	newJSON := string(body)
 	return newJSON, newJSON != jsonBody
 }
