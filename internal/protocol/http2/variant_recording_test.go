@@ -127,7 +127,7 @@ func TestRecordSendWithVariant_NoModification_H2(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 1", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -170,7 +170,7 @@ func TestRecordSendWithVariant_BodyModified_H2(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 2", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -227,7 +227,7 @@ func TestRecordSendWithVariant_HeaderModified_H2(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 2", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -333,7 +333,7 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 	}, logger)
 
 	// Verify: 3 messages total with correct sequences.
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(msgs))
 	}
@@ -358,7 +358,7 @@ func TestVariantRecording_FullLifecycle_H2(t *testing.T) {
 	}
 
 	// Flow should be complete.
-	sess, _ := store.GetFlow(ctx, sendResult.flowID)
+	sess, _ := store.GetStream(ctx, sendResult.flowID)
 	if sess.State != "complete" {
 		t.Errorf("state = %q, want %q", sess.State, "complete")
 	}

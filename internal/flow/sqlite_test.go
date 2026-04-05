@@ -38,23 +38,22 @@ func mustParseURL(raw string) *url.URL {
 }
 
 // saveTestSession saves a flow with one send and one receive message.
-func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.Time, method string, reqURL string, statusCode int, reqBody, respBody []byte) *Flow {
+func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.Time, method string, reqURL string, statusCode int, reqBody, respBody []byte) *Stream {
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &Message{
-		FlowID:    fl.ID,
+	sendMsg := &Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -63,12 +62,12 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 		Headers:   map[string][]string{"Host": {"example.com"}},
 		Body:      reqBody,
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &Message{
-		FlowID:     fl.ID,
+	recvMsg := &Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  ts.Add(100 * time.Millisecond),
@@ -76,7 +75,7 @@ func saveTestSession(t *testing.T, store *SQLiteStore, protocol string, ts time.
 		Headers:    map[string][]string{"Content-Type": {"text/html"}},
 		Body:       respBody,
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(receive): %v", err)
 	}
 
@@ -108,31 +107,27 @@ func TestSQLiteStore_SaveAndGetSession(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  150 * time.Millisecond,
 	}
 
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	if fl.ID == "" {
 		t.Fatal("SaveFlow did not assign ID")
 	}
 
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
 
 	if got.Protocol != "HTTP/1.x" {
 		t.Errorf("Protocol = %q, want %q", got.Protocol, "HTTP/1.x")
-	}
-	if got.FlowType != "unary" {
-		t.Errorf("FlowType = %q, want %q", got.FlowType, "unary")
 	}
 	if got.State != "complete" {
 		t.Errorf("State = %q, want %q", got.State, "complete")
@@ -147,7 +142,7 @@ func TestSQLiteStore_ConnInfo(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTPS",
 		Timestamp: time.Now().UTC(),
 		ConnInfo: &ConnectionInfo{
@@ -160,11 +155,11 @@ func TestSQLiteStore_ConnInfo(t *testing.T) {
 		},
 	}
 
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -185,13 +180,13 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &Message{
-		FlowID:    fl.ID,
+	sendMsg := &Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -200,15 +195,15 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 		Headers:   map[string][]string{"Content-Type": {"application/json"}},
 		Body:      []byte(`{"key":"value"}`),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 	if sendMsg.ID == "" {
 		t.Fatal("AppendMessage did not assign ID")
 	}
 
-	recvMsg := &Message{
-		FlowID:     fl.ID,
+	recvMsg := &Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -216,11 +211,11 @@ func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 		Headers:    map[string][]string{"Content-Type": {"application/json"}},
 		Body:       []byte(`{"id":"123"}`),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(receive): %v", err)
 	}
 
-	msgs, err := store.GetMessages(ctx, fl.ID, MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -243,18 +238,18 @@ func TestSQLiteStore_FilterByDirection(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveFlow(ctx, fl)
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveStream(ctx, fl)
 
-	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET"})
-	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200})
+	store.SaveFlow(ctx, &Flow{StreamID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET"})
+	store.SaveFlow(ctx, &Flow{StreamID: fl.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200})
 
-	sendMsgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{Direction: "send"})
+	sendMsgs, _ := store.GetFlows(ctx, fl.ID, FlowListOptions{Direction: "send"})
 	if len(sendMsgs) != 1 {
 		t.Errorf("expected 1 send message, got %d", len(sendMsgs))
 	}
 
-	recvMsgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{Direction: "receive"})
+	recvMsgs, _ := store.GetFlows(ctx, fl.ID, FlowListOptions{Direction: "receive"})
 	if len(recvMsgs) != 1 {
 		t.Errorf("expected 1 receive message, got %d", len(recvMsgs))
 	}
@@ -265,12 +260,12 @@ func TestSQLiteStore_CountMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveFlow(ctx, fl)
-	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
-	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC()})
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveStream(ctx, fl)
+	store.SaveFlow(ctx, &Flow{StreamID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	store.SaveFlow(ctx, &Flow{StreamID: fl.ID, Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC()})
 
-	count, err := store.CountMessages(ctx, fl.ID)
+	count, err := store.CountFlows(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("CountMessages: %v", err)
 	}
@@ -284,10 +279,10 @@ func TestSQLiteStore_UpdateSession(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", State: "active", Timestamp: time.Now().UTC()}
-	store.SaveFlow(ctx, fl)
+	fl := &Stream{Protocol: "HTTP/1.x", State: "active", Timestamp: time.Now().UTC()}
+	store.SaveStream(ctx, fl)
 
-	err := store.UpdateFlow(ctx, fl.ID, FlowUpdate{
+	err := store.UpdateStream(ctx, fl.ID, StreamUpdate{
 		State:    "complete",
 		Duration: 500 * time.Millisecond,
 		Tags:     map[string]string{"smuggling": "cl_te"},
@@ -296,7 +291,7 @@ func TestSQLiteStore_UpdateSession(t *testing.T) {
 		t.Fatalf("UpdateFlow: %v", err)
 	}
 
-	got, _ := store.GetFlow(ctx, fl.ID)
+	got, _ := store.GetStream(ctx, fl.ID)
 	if got.State != "complete" {
 		t.Errorf("State = %q, want %q", got.State, "complete")
 	}
@@ -320,25 +315,25 @@ func TestSQLiteStore_ListSessions_Filters(t *testing.T) {
 
 	tests := []struct {
 		name string
-		opts ListOptions
+		opts StreamListOptions
 		want int
 	}{
-		{"no filter", ListOptions{}, 3},
-		{"by protocol HTTP", ListOptions{Protocol: "HTTP/1.x"}, 2},
-		{"by protocol HTTPS", ListOptions{Protocol: "HTTPS"}, 1},
-		{"by method GET", ListOptions{Method: "GET"}, 2},
-		{"by method POST", ListOptions{Method: "POST"}, 1},
-		{"by URL pattern", ListOptions{URLPattern: "api.example"}, 1},
-		{"by status 404", ListOptions{StatusCode: 404}, 1},
-		{"by status 200", ListOptions{StatusCode: 200}, 1},
-		{"by state complete", ListOptions{State: "complete"}, 3},
-		{"by state error", ListOptions{State: "error"}, 0},
-		{"limit", ListOptions{Limit: 1}, 1},
+		{"no filter", StreamListOptions{}, 3},
+		{"by protocol HTTP", StreamListOptions{Protocol: "HTTP/1.x"}, 2},
+		{"by protocol HTTPS", StreamListOptions{Protocol: "HTTPS"}, 1},
+		{"by method GET", StreamListOptions{Method: "GET"}, 2},
+		{"by method POST", StreamListOptions{Method: "POST"}, 1},
+		{"by URL pattern", StreamListOptions{URLPattern: "api.example"}, 1},
+		{"by status 404", StreamListOptions{StatusCode: 404}, 1},
+		{"by status 200", StreamListOptions{StatusCode: 200}, 1},
+		{"by state complete", StreamListOptions{State: "complete"}, 3},
+		{"by state error", StreamListOptions{State: "error"}, 0},
+		{"limit", StreamListOptions{Limit: 1}, 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions, err := store.ListFlows(ctx, tt.opts)
+			sessions, err := store.ListStreams(ctx, tt.opts)
 			if err != nil {
 				t.Fatalf("ListFlows: %v", err)
 			}
@@ -356,33 +351,30 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create sessions with different states.
-	activeSession := &Flow{
+	activeSession := &Stream{
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "active",
 		Timestamp: now,
 	}
-	if err := store.SaveFlow(ctx, activeSession); err != nil {
+	if err := store.SaveStream(ctx, activeSession); err != nil {
 		t.Fatalf("SaveSession(active): %v", err)
 	}
 
-	completeSession := &Flow{
+	completeSession := &Stream{
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: now,
 	}
-	if err := store.SaveFlow(ctx, completeSession); err != nil {
+	if err := store.SaveStream(ctx, completeSession); err != nil {
 		t.Fatalf("SaveSession(complete): %v", err)
 	}
 
-	errorSession := &Flow{
+	errorSession := &Stream{
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "error",
 		Timestamp: now,
 	}
-	if err := store.SaveFlow(ctx, errorSession); err != nil {
+	if err := store.SaveStream(ctx, errorSession); err != nil {
 		t.Fatalf("SaveSession(error): %v", err)
 	}
 
@@ -399,7 +391,7 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions, err := store.ListFlows(ctx, ListOptions{State: tt.state})
+			sessions, err := store.ListStreams(ctx, StreamListOptions{State: tt.state})
 			if err != nil {
 				t.Fatalf("ListSessions: %v", err)
 			}
@@ -407,7 +399,7 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 				t.Errorf("got %d sessions, want %d", len(sessions), tt.want)
 			}
 
-			count, err := store.CountFlows(ctx, ListOptions{State: tt.state})
+			count, err := store.CountStreams(ctx, StreamListOptions{State: tt.state})
 			if err != nil {
 				t.Fatalf("CountSessions: %v", err)
 			}
@@ -427,7 +419,7 @@ func TestSQLiteStore_CountSessions(t *testing.T) {
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/a", 200, nil, nil)
 	saveTestSession(t, store, "HTTP/1.x", now, "POST", "http://example.com/b", 201, nil, nil)
 
-	count, err := store.CountFlows(ctx, ListOptions{Method: "GET"})
+	count, err := store.CountStreams(ctx, StreamListOptions{Method: "GET"})
 	if err != nil {
 		t.Fatalf("CountFlows: %v", err)
 	}
@@ -435,7 +427,7 @@ func TestSQLiteStore_CountSessions(t *testing.T) {
 		t.Errorf("count = %d, want 1", count)
 	}
 
-	total, err := store.CountFlows(ctx, ListOptions{})
+	total, err := store.CountStreams(ctx, StreamListOptions{})
 	if err != nil {
 		t.Fatalf("CountFlows: %v", err)
 	}
@@ -452,23 +444,23 @@ func TestSQLiteStore_DeleteSession_CascadeMessages(t *testing.T) {
 	fl := saveTestSession(t, store, "HTTP/1.x", time.Now().UTC(), "GET", "http://example.com/del", 200, nil, nil)
 
 	// Verify messages exist.
-	count, _ := store.CountMessages(ctx, fl.ID)
+	count, _ := store.CountFlows(ctx, fl.ID)
 	if count != 2 {
 		t.Fatalf("expected 2 messages before delete, got %d", count)
 	}
 
-	if err := store.DeleteFlow(ctx, fl.ID); err != nil {
+	if err := store.DeleteStream(ctx, fl.ID); err != nil {
 		t.Fatalf("DeleteFlow: %v", err)
 	}
 
 	// Flow should be gone.
-	_, err := store.GetFlow(ctx, fl.ID)
+	_, err := store.GetStream(ctx, fl.ID)
 	if err == nil {
 		t.Fatal("expected error for deleted flow, got nil")
 	}
 
 	// Messages should be cascade-deleted.
-	count, _ = store.CountMessages(ctx, fl.ID)
+	count, _ = store.CountFlows(ctx, fl.ID)
 	if count != 0 {
 		t.Errorf("expected 0 messages after cascade delete, got %d", count)
 	}
@@ -483,7 +475,7 @@ func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
 	fl1 := saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
 	fl2 := saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/2", 200, nil, nil)
 
-	n, err := store.DeleteAllFlows(ctx)
+	n, err := store.DeleteAllStreams(ctx)
 	if err != nil {
 		t.Fatalf("DeleteAllFlows: %v", err)
 	}
@@ -491,14 +483,14 @@ func TestSQLiteStore_DeleteAllSessions(t *testing.T) {
 		t.Errorf("deleted %d, want 2", n)
 	}
 
-	remaining, _ := store.ListFlows(ctx, ListOptions{})
+	remaining, _ := store.ListStreams(ctx, StreamListOptions{})
 	if len(remaining) != 0 {
 		t.Errorf("expected 0 remaining, got %d", len(remaining))
 	}
 
 	// Verify messages are cascade-deleted (regression test for BUG-001).
 	for _, id := range []string{fl1.ID, fl2.ID} {
-		count, _ := store.CountMessages(ctx, id)
+		count, _ := store.CountFlows(ctx, id)
 		if count != 0 {
 			t.Errorf("expected 0 messages for flow %s after cascade delete, got %d", id, count)
 		}
@@ -514,7 +506,7 @@ func TestSQLiteStore_DeleteSessionsOlderThan(t *testing.T) {
 	saveTestSession(t, store, "HTTP/1.x", now.Add(-48*time.Hour), "GET", "http://a.com/old", 200, nil, nil)
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/new", 200, nil, nil)
 
-	n, err := store.DeleteFlowsOlderThan(ctx, now.Add(-24*time.Hour))
+	n, err := store.DeleteStreamsOlderThan(ctx, now.Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("DeleteFlowsOlderThan: %v", err)
 	}
@@ -522,7 +514,7 @@ func TestSQLiteStore_DeleteSessionsOlderThan(t *testing.T) {
 		t.Errorf("deleted %d, want 1", n)
 	}
 
-	remaining, _ := store.ListFlows(ctx, ListOptions{})
+	remaining, _ := store.ListStreams(ctx, StreamListOptions{})
 	if len(remaining) != 1 {
 		t.Errorf("expected 1 remaining, got %d", len(remaining))
 	}
@@ -555,14 +547,14 @@ func TestSQLiteStore_DeleteSessionsByProtocol(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n, err := store.DeleteFlowsByProtocol(ctx, tt.protocol)
+			n, err := store.DeleteStreamsByProtocol(ctx, tt.protocol)
 			if err != nil {
 				t.Fatalf("DeleteFlowsByProtocol: %v", err)
 			}
 			if n != tt.wantDeleted {
 				t.Errorf("deleted %d, want %d", n, tt.wantDeleted)
 			}
-			remaining, _ := store.ListFlows(ctx, ListOptions{})
+			remaining, _ := store.ListStreams(ctx, StreamListOptions{})
 			if len(remaining) != tt.wantRemaining {
 				t.Errorf("expected %d remaining, got %d", tt.wantRemaining, len(remaining))
 			}
@@ -578,7 +570,7 @@ func TestSQLiteStore_DeleteSessionsByProtocol_NoMatches(t *testing.T) {
 
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://a.com/1", 200, nil, nil)
 
-	n, err := store.DeleteFlowsByProtocol(ctx, "WebSocket")
+	n, err := store.DeleteStreamsByProtocol(ctx, "WebSocket")
 	if err != nil {
 		t.Fatalf("DeleteFlowsByProtocol: %v", err)
 	}
@@ -586,7 +578,7 @@ func TestSQLiteStore_DeleteSessionsByProtocol_NoMatches(t *testing.T) {
 		t.Errorf("deleted %d, want 0", n)
 	}
 
-	remaining, _ := store.ListFlows(ctx, ListOptions{})
+	remaining, _ := store.ListStreams(ctx, StreamListOptions{})
 	if len(remaining) != 1 {
 		t.Errorf("expected 1 remaining, got %d", len(remaining))
 	}
@@ -601,12 +593,12 @@ func TestSQLiteStore_DeleteSessionsByProtocol_CascadeMessages(t *testing.T) {
 	fl := saveTestSession(t, store, "TCP", now, "GET", "http://a.com/tcp", 200, nil, nil)
 
 	// Verify messages exist before deletion.
-	count, _ := store.CountMessages(ctx, fl.ID)
+	count, _ := store.CountFlows(ctx, fl.ID)
 	if count != 2 {
 		t.Fatalf("expected 2 messages before delete, got %d", count)
 	}
 
-	n, err := store.DeleteFlowsByProtocol(ctx, "TCP")
+	n, err := store.DeleteStreamsByProtocol(ctx, "TCP")
 	if err != nil {
 		t.Fatalf("DeleteFlowsByProtocol: %v", err)
 	}
@@ -615,7 +607,7 @@ func TestSQLiteStore_DeleteSessionsByProtocol_CascadeMessages(t *testing.T) {
 	}
 
 	// Messages should be cascade-deleted.
-	count, _ = store.CountMessages(ctx, fl.ID)
+	count, _ = store.CountFlows(ctx, fl.ID)
 	if count != 0 {
 		t.Errorf("expected 0 messages after cascade delete, got %d", count)
 	}
@@ -631,7 +623,7 @@ func TestSQLiteStore_DeleteExcessSessions(t *testing.T) {
 		saveTestSession(t, store, "HTTP/1.x", now.Add(time.Duration(i)*time.Second), "GET", fmt.Sprintf("http://a.com/%d", i), 200, nil, nil)
 	}
 
-	n, err := store.DeleteExcessFlows(ctx, 2)
+	n, err := store.DeleteExcessStreams(ctx, 2)
 	if err != nil {
 		t.Fatalf("DeleteExcessFlows: %v", err)
 	}
@@ -639,7 +631,7 @@ func TestSQLiteStore_DeleteExcessSessions(t *testing.T) {
 		t.Errorf("deleted %d, want 3", n)
 	}
 
-	remaining, _ := store.ListFlows(ctx, ListOptions{})
+	remaining, _ := store.ListStreams(ctx, StreamListOptions{})
 	if len(remaining) != 2 {
 		t.Errorf("expected 2 remaining, got %d", len(remaining))
 	}
@@ -650,19 +642,19 @@ func TestSQLiteStore_RawBytes(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveFlow(ctx, fl)
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveStream(ctx, fl)
 
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
-	store.AppendMessage(ctx, &Message{
-		FlowID:    fl.ID,
+	store.SaveFlow(ctx, &Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		RawBytes:  rawReq,
 	})
 
-	msgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{Direction: "send"})
+	msgs, _ := store.GetFlows(ctx, fl.ID, FlowListOptions{Direction: "send"})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 send message, got %d", len(msgs))
 	}
@@ -676,13 +668,13 @@ func TestSQLiteStore_SequenceUniqueness(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveFlow(ctx, fl)
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveStream(ctx, fl)
 
-	store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	store.SaveFlow(ctx, &Flow{StreamID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
 
 	// Duplicate sequence should fail.
-	err := store.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
+	err := store.SaveFlow(ctx, &Flow{StreamID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()})
 	if err == nil {
 		t.Fatal("expected error for duplicate sequence, got nil")
 	}
@@ -694,8 +686,8 @@ func TestSQLiteStore_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	err := store.SaveFlow(ctx, fl)
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	err := store.SaveStream(ctx, fl)
 	if err == nil {
 		t.Fatal("expected error for cancelled context, got nil")
 	}
@@ -711,11 +703,11 @@ func TestSQLiteStore_ConcurrentSaves(t *testing.T) {
 
 	for i := 0; i < n; i++ {
 		go func(i int) {
-			fl := &Flow{
+			fl := &Stream{
 				Protocol:  "HTTP/1.x",
 				Timestamp: time.Now().UTC(),
 			}
-			errCh <- store.SaveFlow(ctx, fl)
+			errCh <- store.SaveStream(ctx, fl)
 		}(i)
 	}
 
@@ -725,7 +717,7 @@ func TestSQLiteStore_ConcurrentSaves(t *testing.T) {
 		}
 	}
 
-	sessions, _ := store.ListFlows(ctx, ListOptions{})
+	sessions, _ := store.ListStreams(ctx, StreamListOptions{})
 	if len(sessions) != n {
 		t.Errorf("expected %d sessions, got %d", n, len(sessions))
 	}
@@ -740,7 +732,7 @@ func TestSQLiteStore_LIKEWildcardEscape(t *testing.T) {
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/100%25_done", 200, nil, nil)
 	saveTestSession(t, store, "HTTP/1.x", now, "GET", "http://example.com/normal", 200, nil, nil)
 
-	sessions, err := store.ListFlows(ctx, ListOptions{URLPattern: "100%25_done"})
+	sessions, err := store.ListStreams(ctx, StreamListOptions{URLPattern: "100%25_done"})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -761,9 +753,9 @@ func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSQLiteStore(1): %v", err)
 	}
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store1.SaveFlow(ctx, fl)
-	store1.AppendMessage(ctx, &Message{FlowID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: mustParseURL("http://example.com/persist")})
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store1.SaveStream(ctx, fl)
+	store1.SaveFlow(ctx, &Flow{StreamID: fl.ID, Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: mustParseURL("http://example.com/persist")})
 	store1.Close()
 
 	// Reopen and verify.
@@ -773,11 +765,11 @@ func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 	}
 	defer store2.Close()
 
-	sessions, _ := store2.ListFlows(ctx, ListOptions{})
+	sessions, _ := store2.ListStreams(ctx, StreamListOptions{})
 	if len(sessions) != 1 {
 		t.Fatalf("expected 1 session after reopen, got %d", len(sessions))
 	}
-	msgs, _ := store2.GetMessages(ctx, sessions[0].ID, MessageListOptions{})
+	msgs, _ := store2.GetFlows(ctx, sessions[0].ID, FlowListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message after reopen, got %d", len(msgs))
 	}
@@ -840,7 +832,7 @@ func TestSQLiteStore_FutureSchemaVersion(t *testing.T) {
 func TestSQLiteStore_GetNotFound(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	_, err := store.GetFlow(context.Background(), "nonexistent")
+	_, err := store.GetStream(context.Background(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent flow, got nil")
 	}
@@ -860,14 +852,14 @@ func TestSQLiteStore_Tags(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 		Tags:      map[string]string{"key1": "val1", "key2": "val2"},
 	}
-	store.SaveFlow(ctx, fl)
+	store.SaveStream(ctx, fl)
 
-	got, _ := store.GetFlow(ctx, fl.ID)
+	got, _ := store.GetStream(ctx, fl.ID)
 	if got.Tags["key1"] != "val1" {
 		t.Errorf("Tags[key1] = %q, want %q", got.Tags["key1"], "val1")
 	}
@@ -881,11 +873,11 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	store.SaveFlow(ctx, fl)
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	store.SaveStream(ctx, fl)
 
-	store.AppendMessage(ctx, &Message{
-		FlowID:        fl.ID,
+	store.SaveFlow(ctx, &Flow{
+		StreamID:      fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     time.Now().UTC(),
@@ -893,7 +885,7 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 		BodyTruncated: true,
 	})
 
-	msgs, _ := store.GetMessages(ctx, fl.ID, MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, fl.ID, FlowListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -934,16 +926,16 @@ func TestSQLiteStore_BlockedBy_SaveAndGet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fl := &Flow{
+			fl := &Stream{
 				Protocol:  "HTTPS",
 				Timestamp: time.Now().UTC(),
 				BlockedBy: tt.blockedBy,
 			}
-			if err := store.SaveFlow(ctx, fl); err != nil {
+			if err := store.SaveStream(ctx, fl); err != nil {
 				t.Fatalf("SaveFlow: %v", err)
 			}
 
-			got, err := store.GetFlow(ctx, fl.ID)
+			got, err := store.GetStream(ctx, fl.ID)
 			if err != nil {
 				t.Fatalf("GetFlow: %v", err)
 			}
@@ -962,37 +954,37 @@ func TestSQLiteStore_BlockedBy_ListFilter(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Save a normal flow.
-	normalSess := &Flow{
+	normalSess := &Stream{
 		Protocol:  "HTTPS",
 		Timestamp: now,
 	}
-	if err := store.SaveFlow(ctx, normalSess); err != nil {
+	if err := store.SaveStream(ctx, normalSess); err != nil {
 		t.Fatalf("SaveFlow(normal): %v", err)
 	}
 
 	// Save a blocked flow.
-	blockedSess := &Flow{
+	blockedSess := &Stream{
 		Protocol:  "HTTPS",
 		Timestamp: now,
 		BlockedBy: "target_scope",
 	}
-	if err := store.SaveFlow(ctx, blockedSess); err != nil {
+	if err := store.SaveStream(ctx, blockedSess); err != nil {
 		t.Fatalf("SaveFlow(blocked): %v", err)
 	}
 
 	tests := []struct {
 		name string
-		opts ListOptions
+		opts StreamListOptions
 		want int
 	}{
-		{"no filter returns all", ListOptions{}, 2},
-		{"filter by target_scope", ListOptions{BlockedBy: "target_scope"}, 1},
-		{"filter by nonexistent blocker", ListOptions{BlockedBy: "nonexistent"}, 0},
+		{"no filter returns all", StreamListOptions{}, 2},
+		{"filter by target_scope", StreamListOptions{BlockedBy: "target_scope"}, 1},
+		{"filter by nonexistent blocker", StreamListOptions{BlockedBy: "nonexistent"}, 0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions, err := store.ListFlows(ctx, tt.opts)
+			sessions, err := store.ListStreams(ctx, tt.opts)
 			if err != nil {
 				t.Fatalf("ListFlows: %v", err)
 			}
@@ -1011,14 +1003,14 @@ func TestSQLiteStore_BlockedBy_CountFilter(t *testing.T) {
 
 	// Save two normal sessions and one blocked.
 	for i := 0; i < 2; i++ {
-		if err := store.SaveFlow(ctx, &Flow{
+		if err := store.SaveStream(ctx, &Stream{
 			Protocol:  "HTTPS",
 			Timestamp: now,
 		}); err != nil {
 			t.Fatalf("SaveFlow(normal %d): %v", i, err)
 		}
 	}
-	if err := store.SaveFlow(ctx, &Flow{
+	if err := store.SaveStream(ctx, &Stream{
 		Protocol:  "HTTPS",
 		Timestamp: now,
 		BlockedBy: "target_scope",
@@ -1026,7 +1018,7 @@ func TestSQLiteStore_BlockedBy_CountFilter(t *testing.T) {
 		t.Fatalf("SaveFlow(blocked): %v", err)
 	}
 
-	count, err := store.CountFlows(ctx, ListOptions{BlockedBy: "target_scope"})
+	count, err := store.CountStreams(ctx, StreamListOptions{BlockedBy: "target_scope"})
 	if err != nil {
 		t.Fatalf("CountFlows: %v", err)
 	}
@@ -1034,7 +1026,7 @@ func TestSQLiteStore_BlockedBy_CountFilter(t *testing.T) {
 		t.Errorf("count = %d, want 1", count)
 	}
 
-	total, err := store.CountFlows(ctx, ListOptions{})
+	total, err := store.CountStreams(ctx, StreamListOptions{})
 	if err != nil {
 		t.Fatalf("CountFlows: %v", err)
 	}
@@ -1049,15 +1041,15 @@ func TestSQLiteStore_BlockedBy_DefaultEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	// Save a flow without setting BlockedBy — it should default to "".
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -1074,19 +1066,18 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 
 	// A blocked session: has a send message (the request that was attempted)
 	// but no receive message (because it was blocked).
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: now,
 		BlockedBy: "target_scope",
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &Message{
-		FlowID:    fl.ID,
+	sendMsg := &Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: now,
@@ -1094,12 +1085,12 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 		URL:       mustParseURL("https://evil.com/admin"),
 		Headers:   map[string][]string{"Host": {"evil.com"}},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
 	// Retrieve and verify.
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -1107,7 +1098,7 @@ func TestSQLiteStore_BlockedBy_WithMessages(t *testing.T) {
 		t.Errorf("BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
 	}
 
-	msgs, err := store.GetMessages(ctx, fl.ID, MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -1167,7 +1158,7 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	defer store.Close()
 
 	// Verify the old session has empty blocked_by.
-	fl, err := store.GetFlow(ctx, "old-session-id")
+	fl, err := store.GetStream(ctx, "old-session-id")
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -1176,16 +1167,16 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	}
 
 	// Verify we can save a new flow with blocked_by.
-	newSess := &Flow{
+	newSess := &Stream{
 		Protocol:  "HTTPS",
 		Timestamp: time.Now().UTC(),
 		BlockedBy: "target_scope",
 	}
-	if err := store.SaveFlow(ctx, newSess); err != nil {
+	if err := store.SaveStream(ctx, newSess); err != nil {
 		t.Fatalf("SaveFlow(new): %v", err)
 	}
 
-	got, err := store.GetFlow(ctx, newSess.ID)
+	got, err := store.GetStream(ctx, newSess.ID)
 	if err != nil {
 		t.Fatalf("GetFlow(new): %v", err)
 	}
@@ -1204,8 +1195,145 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("schema version = %d, want 6", version)
+	if version != 7 {
+		t.Errorf("schema version = %d, want 7", version)
+	}
+}
+
+// TestSQLiteStore_V7Migration_TableRename verifies the V7 migration that renames
+// flows→streams and messages→flows, drops the flow_type column, and updates
+// foreign key references.
+func TestSQLiteStore_V7Migration_TableRename(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "v7_migrate.db")
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	// Create a V6 database manually with old schema.
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	// Apply V1-V6 migrations manually.
+	for _, ddl := range []string{bootstrapSQL, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6} {
+		if _, err := db.ExecContext(ctx, ddl); err != nil {
+			t.Fatalf("apply schema: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (6)"); err != nil {
+		t.Fatalf("insert version: %v", err)
+	}
+
+	// Insert test data in old schema (flows table = connection-level, messages table = per-message).
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO flows (id, conn_id, protocol, scheme, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"stream-1", "conn-1", "HTTPS", "https", "unary", "complete", ts, 100, "{}", "", "93.184.216.34:443", "", "", "", "", "", nil, nil, nil,
+	); err != nil {
+		t.Fatalf("insert old flow: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO messages (id, flow_id, sequence, direction, timestamp, headers, body, method, url, status_code, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"flow-1", "stream-1", 0, "send", ts, "{}", []byte("hello"), "GET", "https://example.com/", 0, "{}",
+	); err != nil {
+		t.Fatalf("insert old message: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO messages (id, flow_id, sequence, direction, timestamp, headers, body, method, url, status_code, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"flow-2", "stream-1", 1, "receive", ts, "{}", []byte("world"), "", "", 200, "{}",
+	); err != nil {
+		t.Fatalf("insert old message: %v", err)
+	}
+	db.Close()
+
+	// Open with migration — should apply V7 (table rename + flow_type removal).
+	store, err := NewSQLiteStore(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore (V7 migration): %v", err)
+	}
+	defer store.Close()
+
+	// Verify stream is readable via the new schema.
+	st, err := store.GetStream(ctx, "stream-1")
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if st.Protocol != "HTTPS" {
+		t.Errorf("stream protocol = %q, want %q", st.Protocol, "HTTPS")
+	}
+	if st.Scheme != "https" {
+		t.Errorf("stream scheme = %q, want %q", st.Scheme, "https")
+	}
+
+	// Verify flows (formerly messages) are readable.
+	flows, err := store.GetFlows(ctx, "stream-1", FlowListOptions{})
+	if err != nil {
+		t.Fatalf("GetFlows: %v", err)
+	}
+	if len(flows) != 2 {
+		t.Fatalf("got %d flows, want 2", len(flows))
+	}
+	if flows[0].StreamID != "stream-1" {
+		t.Errorf("flow[0].StreamID = %q, want %q", flows[0].StreamID, "stream-1")
+	}
+	if flows[0].Direction != "send" {
+		t.Errorf("flow[0].Direction = %q, want %q", flows[0].Direction, "send")
+	}
+	if flows[1].StatusCode != 200 {
+		t.Errorf("flow[1].StatusCode = %d, want 200", flows[1].StatusCode)
+	}
+
+	// Verify flow_type column is removed (no longer in the schema).
+	checkDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open check db: %v", err)
+	}
+	defer checkDB.Close()
+
+	// flow_type column should not exist in the streams table.
+	rows, err := checkDB.QueryContext(ctx, "PRAGMA table_info(streams)")
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan column: %v", err)
+		}
+		if name == "flow_type" {
+			t.Error("flow_type column still exists in streams table — should have been removed")
+		}
+	}
+
+	// Verify schema version is 7.
+	var version int
+	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if version != 7 {
+		t.Errorf("schema version = %d, want 7", version)
+	}
+
+	// Verify cascade delete still works.
+	if err := store.DeleteStream(ctx, "stream-1"); err != nil {
+		t.Fatalf("DeleteStream: %v", err)
+	}
+	flowsAfter, err := store.GetFlows(ctx, "stream-1", FlowListOptions{})
+	if err != nil {
+		t.Fatalf("GetFlows after delete: %v", err)
+	}
+	if len(flowsAfter) != 0 {
+		t.Errorf("got %d flows after cascade delete, want 0", len(flowsAfter))
 	}
 }
 
@@ -1215,15 +1343,14 @@ func TestGetFlow_PrefixMatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a flow with a known ID.
-	fl := &Flow{
+	fl := &Stream{
 		ID:        "abcdef12-3456-7890-abcd-ef1234567890",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
@@ -1246,18 +1373,18 @@ func TestGetFlow_PrefixMatch(t *testing.T) {
 		{
 			name:    "8-char prefix no match",
 			id:      "xxxxxxxx",
-			wantErr: "flow not found",
+			wantErr: "stream not found",
 		},
 		{
 			name:    "full UUID no match",
 			id:      "00000000-0000-0000-0000-000000000000",
-			wantErr: "flow not found",
+			wantErr: "stream not found",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := store.GetFlow(ctx, tt.id)
+			got, err := store.GetStream(ctx, tt.id)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("GetFlow() error = nil, wantErr %q", tt.wantErr)
@@ -1296,13 +1423,13 @@ func TestValidateFlowID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateFlowID(tt.id)
+			err := ValidateStreamID(tt.id)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidateFlowID(%q) error = %v, wantErr %v", tt.id, err, tt.wantErr)
+				t.Errorf("ValidateStreamID(%q) error = %v, wantErr %v", tt.id, err, tt.wantErr)
 			}
 			if tt.wantErr && err != nil {
-				if !strings.Contains(err.Error(), "invalid flow ID") {
-					t.Errorf("ValidateFlowID(%q) error = %q, want containing 'invalid flow ID'", tt.id, err.Error())
+				if !strings.Contains(err.Error(), "invalid stream ID") {
+					t.Errorf("ValidateStreamID(%q) error = %q, want containing 'invalid stream ID'", tt.id, err.Error())
 				}
 			}
 		})
@@ -1315,43 +1442,41 @@ func TestGetFlow_PrefixMatch_Ambiguous(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two flows that share the same 8-char prefix.
-	fl1 := &Flow{
+	fl1 := &Stream{
 		ID:        "abcdef12-1111-1111-1111-111111111111",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	fl2 := &Flow{
+	fl2 := &Stream{
 		ID:        "abcdef12-2222-2222-2222-222222222222",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl1); err != nil {
+	if err := store.SaveStream(ctx, fl1); err != nil {
 		t.Fatalf("SaveFlow fl1: %v", err)
 	}
-	if err := store.SaveFlow(ctx, fl2); err != nil {
+	if err := store.SaveStream(ctx, fl2); err != nil {
 		t.Fatalf("SaveFlow fl2: %v", err)
 	}
 
 	// 8-char prefix should be ambiguous.
-	_, err := store.GetFlow(ctx, "abcdef12")
+	_, err := store.GetStream(ctx, "abcdef12")
 	if err == nil {
 		t.Fatal("GetFlow() expected ambiguous error, got nil")
 	}
-	if !strings.Contains(err.Error(), "ambiguous flow ID prefix") {
-		t.Errorf("GetFlow() error = %q, want containing 'ambiguous flow ID prefix'", err.Error())
+	if !strings.Contains(err.Error(), "ambiguous stream ID prefix") {
+		t.Errorf("GetFlow() error = %q, want containing 'ambiguous stream ID prefix'", err.Error())
 	}
-	if !strings.Contains(err.Error(), "matched 2 flows") {
-		t.Errorf("GetFlow() error = %q, want containing 'matched 2 flows'", err.Error())
+	if !strings.Contains(err.Error(), "matched 2 streams") {
+		t.Errorf("GetFlow() error = %q, want containing 'matched 2 streams'", err.Error())
 	}
 
 	// Full UUID should still work for each flow.
-	got1, err := store.GetFlow(ctx, fl1.ID)
+	got1, err := store.GetStream(ctx, fl1.ID)
 	if err != nil {
 		t.Fatalf("GetFlow(fl1 full ID): %v", err)
 	}
@@ -1359,7 +1484,7 @@ func TestGetFlow_PrefixMatch_Ambiguous(t *testing.T) {
 		t.Errorf("GetFlow(fl1) ID = %q, want %q", got1.ID, fl1.ID)
 	}
 
-	got2, err := store.GetFlow(ctx, fl2.ID)
+	got2, err := store.GetStream(ctx, fl2.ID)
 	if err != nil {
 		t.Fatalf("GetFlow(fl2 full ID): %v", err)
 	}
@@ -1374,31 +1499,29 @@ func TestGetFlow_PrefixMatch_UniqueAfterAmbiguity(t *testing.T) {
 	ctx := context.Background()
 
 	// Two flows with different 8-char prefixes.
-	fl1 := &Flow{
+	fl1 := &Stream{
 		ID:        "aaaaaaaa-1111-1111-1111-111111111111",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	fl2 := &Flow{
+	fl2 := &Stream{
 		ID:        "bbbbbbbb-2222-2222-2222-222222222222",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl1); err != nil {
+	if err := store.SaveStream(ctx, fl1); err != nil {
 		t.Fatalf("SaveFlow fl1: %v", err)
 	}
-	if err := store.SaveFlow(ctx, fl2); err != nil {
+	if err := store.SaveStream(ctx, fl2); err != nil {
 		t.Fatalf("SaveFlow fl2: %v", err)
 	}
 
 	// Each 8-char prefix should uniquely resolve.
-	got1, err := store.GetFlow(ctx, "aaaaaaaa")
+	got1, err := store.GetStream(ctx, "aaaaaaaa")
 	if err != nil {
 		t.Fatalf("GetFlow(aaaaaaaa): %v", err)
 	}
@@ -1406,7 +1529,7 @@ func TestGetFlow_PrefixMatch_UniqueAfterAmbiguity(t *testing.T) {
 		t.Errorf("GetFlow(aaaaaaaa) ID = %q, want %q", got1.ID, fl1.ID)
 	}
 
-	got2, err := store.GetFlow(ctx, "bbbbbbbb")
+	got2, err := store.GetStream(ctx, "bbbbbbbb")
 	if err != nil {
 		t.Fatalf("GetFlow(bbbbbbbb): %v", err)
 	}
@@ -1446,14 +1569,14 @@ func TestSQLiteStore_HostFilter_BoundaryAnchoring(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			flows, err := store.ListFlows(ctx, ListOptions{Host: tt.host})
+			flows, err := store.ListStreams(ctx, StreamListOptions{Host: tt.host})
 			if err != nil {
 				t.Fatalf("ListFlows(Host=%q): %v", tt.host, err)
 			}
 			if len(flows) != tt.want {
 				var urls []string
 				for _, f := range flows {
-					msgs, _ := store.GetMessages(ctx, f.ID, MessageListOptions{Direction: "send"})
+					msgs, _ := store.GetFlows(ctx, f.ID, FlowListOptions{Direction: "send"})
 					if len(msgs) > 0 && msgs[0].URL != nil {
 						urls = append(urls, msgs[0].URL.String())
 					}
@@ -1473,9 +1596,8 @@ func TestSQLiteStore_FlowTiming_SaveAndGet(t *testing.T) {
 	waitMs := int64(50)
 	receiveMs := int64(30)
 
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  90 * time.Millisecond,
@@ -1483,11 +1605,11 @@ func TestSQLiteStore_FlowTiming_SaveAndGet(t *testing.T) {
 		WaitMs:    &waitMs,
 		ReceiveMs: &receiveMs,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -1509,18 +1631,17 @@ func TestSQLiteStore_FlowTiming_NullByDefault(t *testing.T) {
 	ctx := context.Background()
 
 	// Flow without timing (e.g., Raw TCP or legacy flow).
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "Raw TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  200 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -1542,18 +1663,17 @@ func TestSQLiteStore_FlowTiming_UpdateFlow(t *testing.T) {
 	ctx := context.Background()
 
 	// Create flow without timing (progressive recording: send phase).
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "active",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Verify timing is null initially.
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow (before update): %v", err)
 	}
@@ -1565,18 +1685,18 @@ func TestSQLiteStore_FlowTiming_UpdateFlow(t *testing.T) {
 	sendMs := int64(5)
 	waitMs := int64(120)
 	receiveMs := int64(45)
-	update := FlowUpdate{
+	update := StreamUpdate{
 		State:     "complete",
 		Duration:  170 * time.Millisecond,
 		SendMs:    &sendMs,
 		WaitMs:    &waitMs,
 		ReceiveMs: &receiveMs,
 	}
-	if err := store.UpdateFlow(ctx, fl.ID, update); err != nil {
+	if err := store.UpdateStream(ctx, fl.ID, update); err != nil {
 		t.Fatalf("UpdateFlow: %v", err)
 	}
 
-	got, err = store.GetFlow(ctx, fl.ID)
+	got, err = store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow (after update): %v", err)
 	}
@@ -1600,26 +1720,25 @@ func TestSQLiteStore_FlowTiming_ErrorFlowNullTiming(t *testing.T) {
 	ctx := context.Background()
 
 	// Simulate 502 error: flow created during send phase, then updated to error.
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "active",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Update to error state without timing (upstream failed before response).
-	update := FlowUpdate{
+	update := StreamUpdate{
 		State:    "error",
 		Duration: 50 * time.Millisecond,
 	}
-	if err := store.UpdateFlow(ctx, fl.ID, update); err != nil {
+	if err := store.UpdateStream(ctx, fl.ID, update); err != nil {
 		t.Fatalf("UpdateFlow: %v", err)
 	}
 
-	got, err := store.GetFlow(ctx, fl.ID)
+	got, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -1641,9 +1760,8 @@ func TestSQLiteStore_FlowTiming_ListFlows(t *testing.T) {
 	sendMs := int64(8)
 	waitMs := int64(100)
 	receiveMs := int64(22)
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  130 * time.Millisecond,
@@ -1651,11 +1769,11 @@ func TestSQLiteStore_FlowTiming_ListFlows(t *testing.T) {
 		WaitMs:    &waitMs,
 		ReceiveMs: &receiveMs,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	flows, err := store.ListFlows(ctx, ListOptions{Limit: 10})
+	flows, err := store.ListStreams(ctx, StreamListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -1675,7 +1793,7 @@ func TestSQLiteStore_FlowTiming_ListFlows(t *testing.T) {
 	}
 }
 
-func Test_flowOrderClause(t *testing.T) {
+func Test_streamOrderClause(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
@@ -1689,9 +1807,9 @@ func Test_flowOrderClause(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := flowOrderClause(tt.sortBy)
+			got := streamOrderClause(tt.sortBy)
 			if got != tt.want {
-				t.Errorf("flowOrderClause(%q) = %q, want %q", tt.sortBy, got, tt.want)
+				t.Errorf("streamOrderClause(%q) = %q, want %q", tt.sortBy, got, tt.want)
 			}
 		})
 	}
@@ -1706,20 +1824,19 @@ func Test_ListFlows_SortByDuration(t *testing.T) {
 	// Create 3 flows with different durations: 300ms, 100ms, 200ms.
 	durations := []time.Duration{300 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
 	for i, dur := range durations {
-		fl := &Flow{
+		fl := &Stream{
 			Protocol:  "HTTP/1.x",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: base.Add(time.Duration(i) * time.Second),
 			Duration:  dur,
 		}
-		if err := store.SaveFlow(ctx, fl); err != nil {
+		if err := store.SaveStream(ctx, fl); err != nil {
 			t.Fatalf("SaveFlow: %v", err)
 		}
 	}
 
 	// Default sort (timestamp DESC): order should be flow[2], flow[1], flow[0].
-	defaultFlows, err := store.ListFlows(ctx, ListOptions{})
+	defaultFlows, err := store.ListStreams(ctx, StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows default: %v", err)
 	}
@@ -1732,7 +1849,7 @@ func Test_ListFlows_SortByDuration(t *testing.T) {
 	}
 
 	// Sort by duration_ms DESC: order should be 300ms, 200ms, 100ms.
-	sorted, err := store.ListFlows(ctx, ListOptions{SortBy: "duration_ms"})
+	sorted, err := store.ListStreams(ctx, StreamListOptions{SortBy: "duration_ms"})
 	if err != nil {
 		t.Fatalf("ListFlows sort by duration: %v", err)
 	}
@@ -1756,7 +1873,7 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 	ctx := context.Background()
 
 	// Save flows with different schemes.
-	flows := []*Flow{
+	flows := []*Stream{
 		{Protocol: "HTTPS", Scheme: "https", Timestamp: time.Now()},
 		{Protocol: "HTTP/2", Scheme: "https", Timestamp: time.Now()},
 		{Protocol: "gRPC", Scheme: "https", Timestamp: time.Now()},
@@ -1766,13 +1883,13 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 		{Protocol: "TCP", Scheme: "tcp", Timestamp: time.Now()},
 	}
 	for _, fl := range flows {
-		if err := store.SaveFlow(ctx, fl); err != nil {
+		if err := store.SaveStream(ctx, fl); err != nil {
 			t.Fatalf("save flow: %v", err)
 		}
 	}
 
 	// Test scheme filter: "https" should return 3 flows.
-	httpsFlows, err := store.ListFlows(ctx, ListOptions{Scheme: "https", Limit: 100})
+	httpsFlows, err := store.ListStreams(ctx, StreamListOptions{Scheme: "https", Limit: 100})
 	if err != nil {
 		t.Fatalf("list https flows: %v", err)
 	}
@@ -1786,7 +1903,7 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 	}
 
 	// Test scheme filter: "ws" should return 1 flow.
-	wsFlows, err := store.ListFlows(ctx, ListOptions{Scheme: "ws", Limit: 100})
+	wsFlows, err := store.ListStreams(ctx, StreamListOptions{Scheme: "ws", Limit: 100})
 	if err != nil {
 		t.Fatalf("list ws flows: %v", err)
 	}
@@ -1795,7 +1912,7 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 	}
 
 	// Test combined protocol + scheme filter: protocol="HTTP/2" AND scheme="https".
-	h2TlsFlows, err := store.ListFlows(ctx, ListOptions{Protocol: "HTTP/2", Scheme: "https", Limit: 100})
+	h2TlsFlows, err := store.ListStreams(ctx, StreamListOptions{Protocol: "HTTP/2", Scheme: "https", Limit: 100})
 	if err != nil {
 		t.Fatalf("list h2+https flows: %v", err)
 	}
@@ -1804,7 +1921,7 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 	}
 
 	// Test count with scheme filter.
-	count, err := store.CountFlows(ctx, ListOptions{Scheme: "https"})
+	count, err := store.CountStreams(ctx, StreamListOptions{Scheme: "https"})
 	if err != nil {
 		t.Fatalf("count https flows: %v", err)
 	}
@@ -1813,7 +1930,7 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 	}
 
 	// Verify scheme is persisted and retrieved via GetFlow.
-	got, err := store.GetFlow(ctx, flows[0].ID)
+	got, err := store.GetStream(ctx, flows[0].ID)
 	if err != nil {
 		t.Fatalf("get flow: %v", err)
 	}

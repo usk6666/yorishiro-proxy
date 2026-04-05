@@ -28,7 +28,7 @@ func h2r(h gohttp.Header) parser.RawHeaders {
 
 // mockWriter is a minimal VariantRecordWriter for testing.
 type mockWriter struct {
-	messages  []*flow.Message
+	messages  []*flow.Flow
 	updates   []mockUpdate
 	appendErr error
 	updateErr error
@@ -36,10 +36,10 @@ type mockWriter struct {
 
 type mockUpdate struct {
 	id     string
-	update flow.FlowUpdate
+	update flow.StreamUpdate
 }
 
-func (m *mockWriter) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockWriter) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	if m.appendErr != nil {
 		return m.appendErr
 	}
@@ -47,7 +47,7 @@ func (m *mockWriter) AppendMessage(_ context.Context, msg *flow.Message) error {
 	return nil
 }
 
-func (m *mockWriter) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (m *mockWriter) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	if m.updateErr != nil {
 		return m.updateErr
 	}
@@ -70,7 +70,7 @@ func TestRecordReceiveVariant_NoModification(t *testing.T) {
 	snap := SnapshotResponse(200, headers, body)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:         "f1",
+		StreamID:       "f1",
 		RecvSequence:   1,
 		Start:          time.Now(),
 		Duration:       50 * time.Millisecond,
@@ -105,7 +105,7 @@ func TestRecordReceiveVariant_NilSnap(t *testing.T) {
 	w := &mockWriter{}
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:         "f2",
+		StreamID:       "f2",
 		RecvSequence:   1,
 		Start:          time.Now(),
 		Duration:       50 * time.Millisecond,
@@ -130,7 +130,7 @@ func TestRecordReceiveVariant_StatusModified(t *testing.T) {
 	snap := SnapshotResponse(200, headers, body)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:         "f3",
+		StreamID:       "f3",
 		RecvSequence:   2,
 		Start:          time.Now(),
 		Duration:       100 * time.Millisecond,
@@ -183,7 +183,7 @@ func TestRecordReceiveVariant_BodyModified(t *testing.T) {
 	snap := SnapshotResponse(200, headers, origBody)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:         "f4",
+		StreamID:       "f4",
 		RecvSequence:   1,
 		Start:          time.Now(),
 		Duration:       50 * time.Millisecond,
@@ -214,7 +214,7 @@ func TestRecordReceiveVariant_RawResponseOnOriginalOnly(t *testing.T) {
 	snap := SnapshotResponse(200, headers, origBody)
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:         "f5",
+		StreamID:       "f5",
 		RecvSequence:   1,
 		Start:          time.Now(),
 		Duration:       50 * time.Millisecond,
@@ -240,7 +240,7 @@ func TestRecordReceiveVariant_TLSCertSubject(t *testing.T) {
 	w := &mockWriter{}
 
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:               "f6",
+		StreamID:             "f6",
 		RecvSequence:         1,
 		Start:                time.Now(),
 		Duration:             50 * time.Millisecond,
@@ -265,7 +265,7 @@ func TestRecordReceiveVariant_AppendError(t *testing.T) {
 
 	// Should not panic on append error.
 	RecordReceiveVariant(context.Background(), w, ReceiveVariantParams{
-		FlowID:         "f7",
+		StreamID:       "f7",
 		RecvSequence:   1,
 		Start:          time.Now(),
 		Duration:       50 * time.Millisecond,

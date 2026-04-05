@@ -309,7 +309,7 @@ func TestOutputFilter_Proxy_RawDataPreserved(t *testing.T) {
 
 	// Verify raw data in store is unmasked.
 	ctx := context.Background()
-	flows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+	flows, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestOutputFilter_Proxy_RawDataPreserved(t *testing.T) {
 		t.Fatal("no flows recorded")
 	}
 
-	msgs, err := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, flows[0].ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestOutputFilter_MCP_QueryMessagesMask(t *testing.T) {
 
 	// Verify raw data in store is unmasked (scenario 11).
 	ctx := context.Background()
-	rawMsgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+	rawMsgs, err := store.GetFlows(ctx, flowID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -592,18 +592,17 @@ func TestOutputFilter_MCP_FuzzResultMask(t *testing.T) {
 	// Create a template flow directly.
 	ctx := context.Background()
 	u, _ := url.Parse(fmt.Sprintf("http://%s/api/fuzz", upstreamAddr))
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := mainStore.SaveFlow(ctx, fl); err != nil {
+	if err := mainStore.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := mainStore.AppendMessage(ctx, &flow.Message{
-		FlowID:    fl.ID,
+	if err := mainStore.SaveFlow(ctx, &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now(),
@@ -614,8 +613,8 @@ func TestOutputFilter_MCP_FuzzResultMask(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
-	if err := mainStore.AppendMessage(ctx, &flow.Message{
-		FlowID:     fl.ID,
+	if err := mainStore.SaveFlow(ctx, &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now(),
@@ -685,7 +684,7 @@ func TestOutputFilter_MCP_FuzzResultMask(t *testing.T) {
 	}
 
 	// Query messages for the fuzz result flow — body should be masked.
-	fuzzFlowID := fuzzResults.Results[0].FlowID
+	fuzzFlowID := fuzzResults.Results[0].StreamID
 	if fuzzFlowID == "" {
 		t.Skip("fuzz result has no flow_id, skipping message check")
 	}
@@ -996,7 +995,7 @@ func TestOutputFilter_MCP_RawDataPreserved(t *testing.T) {
 	}
 
 	// Directly read from store — should have raw unmasked data.
-	rawMsgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+	rawMsgs, err := store.GetFlows(ctx, flowID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages from store: %v", err)
 	}

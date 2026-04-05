@@ -153,22 +153,22 @@ func closeWSConn(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 }
 
 // pollWSFlows polls for WebSocket flows and returns them.
-func pollWSFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Flow {
+func pollWSFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Stream {
 	t.Helper()
-	return pollFlows(t, ctx, store, flow.ListOptions{
+	return pollFlows(t, ctx, store, flow.StreamListOptions{
 		Protocol: "WebSocket",
 		Limit:    50,
 	}, wantCount)
 }
 
 // pollFlowState polls until the flow reaches the expected state.
-func pollFlowState(t *testing.T, ctx context.Context, store flow.Store, flowID, wantState string) *flow.Flow {
+func pollFlowState(t *testing.T, ctx context.Context, store flow.Store, flowID, wantState string) *flow.Stream {
 	t.Helper()
-	var fl *flow.Flow
+	var fl *flow.Stream
 	var err error
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		fl, err = store.GetFlow(ctx, flowID)
+		fl, err = store.GetStream(ctx, flowID)
 		if err != nil {
 			t.Fatalf("GetFlow(%s): %v", flowID, err)
 		}
@@ -181,13 +181,13 @@ func pollFlowState(t *testing.T, ctx context.Context, store flow.Store, flowID, 
 }
 
 // pollMessages polls until the expected number of messages appear for a flow.
-func pollMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string, wantCount int) []*flow.Message {
+func pollMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string, wantCount int) []*flow.Flow {
 	t.Helper()
-	var msgs []*flow.Message
+	var msgs []*flow.Flow
 	var err error
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		msgs, err = store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+		msgs, err = store.GetFlows(ctx, flowID, flow.FlowListOptions{})
 		if err != nil {
 			t.Fatalf("GetMessages(%s): %v", flowID, err)
 		}
@@ -238,9 +238,6 @@ func TestIntegration_WebSocket_TextFrameRecording(t *testing.T) {
 	if fl.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "WebSocket")
 	}
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
-	}
 	if fl.Scheme != "ws" {
 		t.Errorf("scheme = %q, want %q", fl.Scheme, "ws")
 	}
@@ -254,10 +251,10 @@ func TestIntegration_WebSocket_TextFrameRecording(t *testing.T) {
 	msgs := pollMessages(t, ctx, env.store, fl.ID, 4)
 
 	// Check upgrade request (sequence 0).
-	var upgradeReqMsg *flow.Message
-	var upgradeRespMsg *flow.Message
-	var sendDataMsgs []*flow.Message
-	var recvDataMsgs []*flow.Message
+	var upgradeReqMsg *flow.Flow
+	var upgradeRespMsg *flow.Flow
+	var sendDataMsgs []*flow.Flow
+	var recvDataMsgs []*flow.Flow
 	for _, m := range msgs {
 		if m.Sequence == 0 && m.Direction == "send" {
 			upgradeReqMsg = m
@@ -352,7 +349,7 @@ func TestIntegration_WebSocket_BinaryFrameRecording(t *testing.T) {
 	msgs := pollMessages(t, ctx, env.store, fl.ID, 4)
 
 	// Find binary data messages.
-	var sendBinary, recvBinary *flow.Message
+	var sendBinary, recvBinary *flow.Flow
 	for _, m := range msgs {
 		if m.Metadata != nil && m.Metadata["opcode"] == "2" {
 			if m.Direction == "send" {
@@ -489,7 +486,7 @@ func TestIntegration_WebSocket_LargeFrame(t *testing.T) {
 	msgs := pollMessages(t, ctx, env.store, fl.ID, 4)
 
 	// Find the binary send message and verify raw bytes are recorded.
-	var sendBinary *flow.Message
+	var sendBinary *flow.Flow
 	for _, m := range msgs {
 		if m.Metadata != nil && m.Metadata["opcode"] == "2" && m.Direction == "send" {
 			sendBinary = m
@@ -556,7 +553,7 @@ func TestIntegration_WebSocket_PingPong(t *testing.T) {
 	// Verify control frames are recorded. Find ping and pong messages.
 	msgs := pollMessages(t, ctx, env.store, fl.ID, 4) // upgrade req/resp + ping + pong + close
 
-	var pingMsg, pongMsg *flow.Message
+	var pingMsg, pongMsg *flow.Flow
 	for _, m := range msgs {
 		if m.Metadata == nil {
 			continue
@@ -619,7 +616,7 @@ func TestIntegration_WebSocket_CloseCodeRecording(t *testing.T) {
 	msgs := pollMessages(t, ctx, env.store, fl.ID, 3)
 
 	// Find close frame messages.
-	var closeMsg *flow.Message
+	var closeMsg *flow.Flow
 	for _, m := range msgs {
 		if m.Metadata != nil && m.Metadata["opcode"] == strconv.Itoa(0x8) && m.Direction == "send" {
 			closeMsg = m
@@ -698,10 +695,10 @@ func TestIntegration_WebSocket_AbnormalDisconnect(t *testing.T) {
 	fl := flows[0]
 
 	// Wait for the flow state to settle.
-	var finalFlow *flow.Flow
+	var finalFlow *flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		finalFlow, _ = env.store.GetFlow(ctx, fl.ID)
+		finalFlow, _ = env.store.GetStream(ctx, fl.ID)
 		if finalFlow != nil && (finalFlow.State == "error" || finalFlow.State == "complete") {
 			break
 		}
@@ -778,7 +775,7 @@ func TestIntegration_WebSocket_ConcurrentConnections(t *testing.T) {
 		if fl.Protocol != "WebSocket" {
 			continue
 		}
-		msgs, err := env.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		msgs, err := env.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if err != nil {
 			t.Fatalf("GetMessages(%s): %v", fl.ID, err)
 		}
@@ -826,9 +823,6 @@ func TestIntegration_WebSocket_FlowAttributes(t *testing.T) {
 	if fl.Protocol != "WebSocket" {
 		t.Errorf("Protocol = %q, want %q", fl.Protocol, "WebSocket")
 	}
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("FlowType = %q, want %q", fl.FlowType, "bidirectional")
-	}
 	if fl.Scheme != "ws" {
 		t.Errorf("Scheme = %q, want %q", fl.Scheme, "ws")
 	}
@@ -843,7 +837,7 @@ func TestIntegration_WebSocket_FlowAttributes(t *testing.T) {
 	}
 
 	// Verify flow is findable by protocol filter.
-	wsFlows, err := env.store.ListFlows(ctx, flow.ListOptions{Protocol: "WebSocket", Limit: 10})
+	wsFlows, err := env.store.ListStreams(ctx, flow.StreamListOptions{Protocol: "WebSocket", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows with protocol filter: %v", err)
 	}
@@ -884,11 +878,11 @@ func TestIntegration_WebSocket_SendReceiveDirection(t *testing.T) {
 	pollFlowState(t, ctx, env.store, fl.ID, "complete")
 
 	// Filter messages by direction.
-	sendMsgs, err := env.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	sendMsgs, err := env.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		t.Fatalf("GetMessages(send): %v", err)
 	}
-	recvMsgs, err := env.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "receive"})
+	recvMsgs, err := env.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages(receive): %v", err)
 	}
@@ -914,7 +908,7 @@ func TestIntegration_WebSocket_SendReceiveDirection(t *testing.T) {
 	}
 
 	// Find the data text messages specifically.
-	var sendText, recvText *flow.Message
+	var sendText, recvText *flow.Flow
 	for _, m := range sendMsgs {
 		if m.Metadata != nil && m.Metadata["opcode"] == "1" {
 			sendText = m

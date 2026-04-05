@@ -483,7 +483,7 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 	}
 
 	// Verify intermediate state: session is active, only send message exists.
-	fl, err := store.GetFlow(ctx, sendResult.flowID)
+	fl, err := store.GetStream(ctx, sendResult.flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 		t.Errorf("after send: state = %q, want %q", fl.State, "active")
 	}
 
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("after send: expected 1 message, got %d", len(msgs))
 	}
@@ -512,7 +512,7 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 	}, logger)
 
 	// Verify final state: session is complete, both messages exist.
-	fl, err = store.GetFlow(ctx, sendResult.flowID)
+	fl, err = store.GetStream(ctx, sendResult.flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -523,13 +523,13 @@ func TestProgressiveRecording_FullLifecycle(t *testing.T) {
 		t.Errorf("after receive: duration = %v, want %v", fl.Duration, duration)
 	}
 
-	msgs, _ = store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ = store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("after receive: expected 2 messages, got %d", len(msgs))
 	}
 
 	// Verify message ordering.
-	var sendMsg, recvMsg *flow.Message
+	var sendMsg, recvMsg *flow.Flow
 	for _, m := range msgs {
 		if m.Direction == "send" {
 			sendMsg = m
@@ -580,7 +580,7 @@ func TestProgressiveRecording_ErrorLifecycle(t *testing.T) {
 	handler.recordSendError(ctx, sendResult, start, upstreamErr, logger)
 
 	// Verify: session is in error state with error tag.
-	fl, err := store.GetFlow(ctx, sendResult.flowID)
+	fl, err := store.GetStream(ctx, sendResult.flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestProgressiveRecording_ErrorLifecycle(t *testing.T) {
 	}
 
 	// Verify: only send message, no receive.
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message (send only), got %d", len(msgs))
 	}

@@ -440,16 +440,16 @@ func initInfra(ctx context.Context, cfg *config.Config) (*infraResult, error) {
 
 	// Start flow cleaner if retention policy is configured.
 	cleanerCfg := flow.CleanerConfig{
-		MaxFlows: cfg.RetentionMaxFlows,
-		MaxAge:   cfg.RetentionMaxAge,
-		Interval: cfg.CleanupInterval,
+		MaxStreams: cfg.RetentionMaxFlows,
+		MaxAge:     cfg.RetentionMaxAge,
+		Interval:   cfg.CleanupInterval,
 	}
 	if cleanerCfg.Enabled() {
 		cleaner := flow.NewCleaner(store, cleanerCfg, logger)
 		cleaner.Start(ctx)
 		cleanerStop = cleaner.Stop
 		logger.Info("flow cleaner started",
-			"max_flows", cleanerCfg.MaxFlows,
+			"max_flows", cleanerCfg.MaxStreams,
 			"max_age", cleanerCfg.MaxAge,
 			"interval", cleanerCfg.Interval)
 	}

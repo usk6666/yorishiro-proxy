@@ -256,12 +256,12 @@ func TestRunMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	step1URL, _ := url.Parse(step1Server.URL + "/api/info")
 
 	// Save flow for step 1.
-	fl1 := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, fl1); err != nil {
+	fl1 := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl1); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    fl1.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  fl1.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -273,12 +273,12 @@ func TestRunMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	}
 
 	// Save flow for step 2 (template URL, will be expanded).
-	fl2 := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, fl2); err != nil {
+	fl2 := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl2); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    fl2.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  fl2.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -400,24 +400,24 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	macroURL, _ := url.Parse(macroServer.URL + "/get-url")
 
 	// Save flows for the 2-step hook macro.
-	fl1 := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, fl1); err != nil {
+	fl1 := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl1); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl1.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl1.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: macroURL,
 		Headers: map[string][]string{},
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	fl2 := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, fl2); err != nil {
+	fl2 := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl2); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl2.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl2.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: macroURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -441,8 +441,8 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	cfg := macroConfig{
 		Steps: []macroStepInput{
 			{
-				ID:     "get-target",
-				FlowID: fl1.ID,
+				ID:       "get-target",
+				StreamID: fl1.ID,
 				Extract: []extractionInput{
 					{
 						Name:       "evil_url",
@@ -454,7 +454,7 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 			},
 			{
 				ID:          "visit-target",
-				FlowID:      fl2.ID,
+				StreamID:    fl2.ID,
 				OverrideURL: "§evil_url§",
 			},
 		},

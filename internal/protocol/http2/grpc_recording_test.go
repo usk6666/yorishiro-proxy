@@ -83,9 +83,6 @@ func TestGRPCProgressiveRecording_Unary(t *testing.T) {
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
-	}
 
 	// Verify messages: should have at least:
 	// 1. Send headers (seq=0)
@@ -186,9 +183,6 @@ func TestGRPCProgressiveRecording_ServerStreaming(t *testing.T) {
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
-	if fl.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
-	}
 
 	// Count server->client frames recorded.
 	flowMsgs := filterMessages(store.messages, fl.ID)
@@ -271,9 +265,6 @@ func TestGRPCProgressiveRecording_BidiStreaming(t *testing.T) {
 	fl := store.flows[0]
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
-	}
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
 	}
 
 	// Count client and server frames.
@@ -637,13 +628,10 @@ func TestGRPCProgressiveRecording_TrailersOnly(t *testing.T) {
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
-	}
 
 	// Find the final trailers message and verify grpc_trailers_only.
 	flowMsgs := filterMessages(store.messages, fl.ID)
-	var trailersMsg *flow.Message
+	var trailersMsg *flow.Flow
 	for _, msg := range flowMsgs {
 		if msg.Metadata != nil && msg.Metadata["grpc_type"] == "trailers" {
 			trailersMsg = msg
@@ -712,10 +700,10 @@ func TestGRPCProgressiveRecording_NormalUnary_NoTrailersOnlyMetadata(t *testing.
 }
 
 // filterMessages returns messages belonging to a specific flow, sorted by sequence.
-func filterMessages(messages []*flow.Message, flowID string) []*flow.Message {
-	var result []*flow.Message
+func filterMessages(messages []*flow.Flow, flowID string) []*flow.Flow {
+	var result []*flow.Flow
 	for _, msg := range messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			result = append(result, msg)
 		}
 	}

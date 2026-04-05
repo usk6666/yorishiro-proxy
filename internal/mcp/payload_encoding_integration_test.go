@@ -190,18 +190,17 @@ func TestM18_Resend_BodyPatchEncoding(t *testing.T) {
 	// Save a template flow with a JSON body containing a token field.
 	ctx := context.Background()
 	u, _ := url.Parse(targetServer.URL + "/api/auth")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -210,7 +209,7 @@ func TestM18_Resend_BodyPatchEncoding(t *testing.T) {
 		Headers:   map[string][]string{"Content-Type": {"application/json"}},
 		Body:      []byte(`{"token":"old_token","user":"test"}`),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 

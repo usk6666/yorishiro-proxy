@@ -138,10 +138,10 @@ func TestIntegration_TCP_Relay(t *testing.T) {
 
 	// Verify flow recording.
 	conn.Close()
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "TCP", Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Protocol: "TCP", Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -151,9 +151,6 @@ func TestIntegration_TCP_Relay(t *testing.T) {
 	}
 	if len(flows) == 0 {
 		t.Fatal("no TCP flows recorded")
-	}
-	if flows[0].FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want bidirectional", flows[0].FlowType)
 	}
 }
 

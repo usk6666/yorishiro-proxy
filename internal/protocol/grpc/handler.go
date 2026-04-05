@@ -18,13 +18,13 @@ import (
 // It is not a standalone ProtocolHandler — it is invoked by the HTTP/2 handler
 // when Content-Type: application/grpc is detected on a stream.
 type Handler struct {
-	store        flow.FlowWriter
+	store        flow.Writer
 	logger       *slog.Logger
 	pluginEngine *plugin.Engine
 }
 
 // NewHandler creates a new gRPC handler with flow recording.
-func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
+func NewHandler(store flow.Writer, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,
@@ -135,9 +135,6 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 		h.logger.Debug("gRPC response frame parse warning", "error", respErr)
 	}
 
-	// Determine session type based on frame counts.
-	sessionType := ClassifyFlowType(len(reqFrames), len(respFrames))
-
 	// Detect trailers-only: no parsed frames AND no response body data.
 	// Using len(respFrames)==0 alone would false-positive when frames exist
 	// but failed to parse (e.g., MaxBodySize truncation, incomplete frames).
@@ -149,11 +146,10 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	grpcEncoding := extractHeader(info.RequestHeaders, "grpc-encoding")
 
 	// Save flow.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    info.ConnID,
 		Protocol:  "gRPC",
 		Scheme:    info.Scheme,
-		FlowType:  sessionType,
 		State:     "complete",
 		Timestamp: info.Start,
 		Duration:  info.Duration,
@@ -167,7 +163,7 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 		},
 	}
 
-	if err := h.store.SaveFlow(ctx, fl); err != nil {
+	if err := h.store.SaveStream(ctx, fl); err != nil {
 		return fmt.Errorf("save grpc session: %w", err)
 	}
 
@@ -182,21 +178,12 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	// Dispatch plugin hooks for response frames (on_receive_from_server).
 	h.dispatchResponseHooks(ctx, logger, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, txCtx)
 
-	// Record messages based on session type.
+	// Record flows: all request frames as send, all response frames as receive.
 	seq := 0
+	seq = h.recordSendMessages(ctx, logger, fl.ID, info, service, method, grpcEncoding, reqFrames, seq)
+	h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq, trailersOnly)
 
-	if sessionType == "unary" {
-		// Unary: one send message (seq=0), one receive message (seq=1).
-		seq = h.recordSendMessages(ctx, logger, fl.ID, info, service, method, grpcEncoding, reqFrames, seq)
-		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq, trailersOnly)
-	} else {
-		// Streaming: record all request frames as send, all response frames as receive.
-		seq = h.recordSendMessages(ctx, logger, fl.ID, info, service, method, grpcEncoding, reqFrames, seq)
-		h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respFrames, seq, trailersOnly)
-	}
-
-	logger.Info("gRPC flow recorded",
-		"flow_type", sessionType,
+	logger.Info("gRPC stream recorded",
 		"grpc_status", grpcStatus,
 		"req_frames", len(reqFrames),
 		"resp_frames", len(respFrames),
@@ -220,8 +207,8 @@ func (h *Handler) recordSendMessages(
 
 	if len(frames) == 0 {
 		// Even with no frames, record the request metadata.
-		msg := &flow.Message{
-			FlowID:    flowID,
+		msg := &flow.Flow{
+			StreamID:  flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -230,15 +217,15 @@ func (h *Handler) recordSendMessages(
 			Headers:   info.RequestHeaders,
 			Metadata:  buildSendMetadata(service, method, grpcEncoding, false),
 		}
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC send message save failed", "sequence", seq, "error", err)
 		}
 		return seq + 1
 	}
 
 	for i, frame := range frames {
-		msg := &flow.Message{
-			FlowID:    flowID,
+		msg := &flow.Flow{
+			StreamID:  flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -260,7 +247,7 @@ func (h *Handler) recordSendMessages(
 			msg.Body = body
 		}
 
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC send message save failed", "sequence", seq, "error", err)
 		}
 		seq++
@@ -290,8 +277,8 @@ func (h *Handler) recordReceiveMessages(
 		if trailersOnly {
 			meta["grpc_trailers_only"] = "true"
 		}
-		msg := &flow.Message{
-			FlowID:     flowID,
+		msg := &flow.Flow{
+			StreamID:   flowID,
 			Sequence:   seq,
 			Direction:  "receive",
 			Timestamp:  info.Start.Add(info.Duration),
@@ -299,7 +286,7 @@ func (h *Handler) recordReceiveMessages(
 			Headers:    mergeHeaders(info.ResponseHeaders, info.Trailers),
 			Metadata:   meta,
 		}
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC receive message save failed", "sequence", seq, "error", err)
 		}
 		return
@@ -307,8 +294,8 @@ func (h *Handler) recordReceiveMessages(
 
 	for i, frame := range frames {
 		isLast := i == len(frames)-1
-		msg := &flow.Message{
-			FlowID:    flowID,
+		msg := &flow.Flow{
+			StreamID:  flowID,
 			Sequence:  seq,
 			Direction: "receive",
 			Timestamp: info.Start.Add(info.Duration),
@@ -341,7 +328,7 @@ func (h *Handler) recordReceiveMessages(
 			msg.Body = body
 		}
 
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC receive message save failed", "sequence", seq, "error", err)
 		}
 		seq++
@@ -531,19 +518,6 @@ func flattenHeaders(headers map[string][]string) map[string]any {
 		}
 	}
 	return result
-}
-
-// ClassifyFlowType determines the gRPC session type based on frame counts.
-func ClassifyFlowType(reqFrames, respFrames int) string {
-	if reqFrames <= 1 && respFrames <= 1 {
-		return "unary"
-	}
-	if reqFrames > 1 && respFrames > 1 {
-		return "bidirectional"
-	}
-	// Client streaming (multiple request frames, single response) or
-	// server streaming (single request, multiple response frames).
-	return "stream"
 }
 
 // buildSendMetadata builds metadata for a gRPC send message.

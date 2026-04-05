@@ -20,9 +20,9 @@ import (
 
 type mockStore struct {
 	mu       sync.Mutex
-	flows    []*flow.Flow
+	flows    []*flow.Stream
 	updates  []sessionUpdateCall
-	messages []*flow.Message
+	messages []*flow.Flow
 
 	saveSessionErr   error
 	updateSessionErr error
@@ -31,10 +31,10 @@ type mockStore struct {
 
 type sessionUpdateCall struct {
 	ID     string
-	Update flow.FlowUpdate
+	Update flow.StreamUpdate
 }
 
-func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *mockStore) SaveStream(_ context.Context, s *flow.Stream) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.saveSessionErr != nil {
@@ -47,7 +47,7 @@ func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	return nil
 }
 
-func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (m *mockStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.updateSessionErr != nil {
@@ -57,19 +57,19 @@ func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpd
 	return nil
 }
 
-func (m *mockStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) {
+func (m *mockStore) GetFlow(_ context.Context, _ string) (*flow.Stream, error) {
 	return nil, nil
 }
 
-func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
+func (m *mockStore) ListFlows(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
 	return nil, nil
 }
 
-func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
+func (m *mockStore) CountStreams(_ context.Context, _ flow.StreamListOptions) (int, error) {
 	return 0, nil
 }
 
-func (m *mockStore) DeleteFlow(_ context.Context, _ string) error {
+func (m *mockStore) DeleteStream(_ context.Context, _ string) error {
 	return nil
 }
 
@@ -89,7 +89,7 @@ func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error
 	return 0, nil
 }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.appendMessageErr != nil {
@@ -99,11 +99,11 @@ func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
+func (m *mockStore) GetFlows(_ context.Context, _ string, _ flow.FlowListOptions) ([]*flow.Flow, error) {
 	return nil, nil
 }
 
-func (m *mockStore) CountMessages(_ context.Context, _ string) (int, error) {
+func (m *mockStore) CountFlows(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
 
@@ -123,10 +123,10 @@ func (m *mockStore) DeleteMacro(_ context.Context, _ string) error {
 	return nil
 }
 
-func (m *mockStore) getFlows() []*flow.Flow {
+func (m *mockStore) getFlows() []*flow.Stream {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*flow.Flow, len(m.flows))
+	out := make([]*flow.Stream, len(m.flows))
 	copy(out, m.flows)
 	return out
 }
@@ -139,10 +139,10 @@ func (m *mockStore) getUpdates() []sessionUpdateCall {
 	return out
 }
 
-func (m *mockStore) getMessages() []*flow.Message {
+func (m *mockStore) getMessages() []*flow.Flow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*flow.Message, len(m.messages))
+	out := make([]*flow.Flow, len(m.messages))
 	copy(out, m.messages)
 	return out
 }
@@ -257,9 +257,6 @@ func TestHandler_Handle_BidirectionalRelay(t *testing.T) {
 	if fl.Protocol != "TCP" {
 		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "TCP")
 	}
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("flow type = %q, want %q", fl.FlowType, "bidirectional")
-	}
 	if fl.ConnID != "test-conn-01" {
 		t.Errorf("flow connID = %q, want %q", fl.ConnID, "test-conn-01")
 	}
@@ -309,8 +306,8 @@ func TestHandler_Handle_BidirectionalRelay(t *testing.T) {
 				t.Errorf("receive message raw_bytes = %q, want %q", msg.RawBytes, testData)
 			}
 		}
-		if msg.FlowID != fl.ID {
-			t.Errorf("message session_id = %q, want %q", msg.FlowID, fl.ID)
+		if msg.StreamID != fl.ID {
+			t.Errorf("message session_id = %q, want %q", msg.StreamID, fl.ID)
 		}
 	}
 	if !hasSend {

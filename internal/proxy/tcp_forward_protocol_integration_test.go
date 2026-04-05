@@ -90,13 +90,13 @@ func startTCPForwardEnv(t *testing.T, ctx context.Context, fwdConfig *config.For
 }
 
 // waitForFlows polls the store until at least minCount flows are recorded or timeout.
-func waitForFlows(t *testing.T, ctx context.Context, store flow.Store, opts flow.ListOptions, minCount int) []*flow.Flow {
+func waitForFlows(t *testing.T, ctx context.Context, store flow.Store, opts flow.StreamListOptions, minCount int) []*flow.Stream {
 	t.Helper()
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	var err error
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, opts)
+		flows, err = store.ListStreams(ctx, opts)
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -109,11 +109,11 @@ func waitForFlows(t *testing.T, ctx context.Context, store flow.Store, opts flow
 }
 
 // waitForFlowState polls until a flow reaches the expected state.
-func waitForFlowState(t *testing.T, ctx context.Context, store flow.Store, opts flow.ListOptions, state string) *flow.Flow {
+func waitForFlowState(t *testing.T, ctx context.Context, store flow.Store, opts flow.StreamListOptions, state string) *flow.Stream {
 	t.Helper()
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err := store.ListFlows(ctx, opts)
+		flows, err := store.ListStreams(ctx, opts)
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -183,21 +183,18 @@ func TestTCPForward_HTTP1x_Auto(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "hello from http upstream")
 	}
 
-	// 2. Flow recording: Protocol, FlowType, State.
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
+	// 2. Flow recording: Protocol, State.
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
 	if fl.Protocol != "HTTP/1.x" {
 		t.Errorf("protocol = %q, want HTTP/1.x", fl.Protocol)
 	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want unary", fl.FlowType)
-	}
 
 	// 3. Message content: headers and body.
-	msgs, err := env.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := env.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
-	var send, recv *flow.Message
+	var send, recv *flow.Flow
 	for _, m := range msgs {
 		switch m.Direction {
 		case "send":
@@ -282,7 +279,7 @@ func TestTCPForward_HTTP1x_Fixed(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "fixed-http")
 	}
 
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
 	if fl.Protocol != "HTTP/1.x" {
 		t.Errorf("protocol = %q, want HTTP/1.x", fl.Protocol)
 	}
@@ -340,17 +337,17 @@ func TestTCPForward_H2C_Auto(t *testing.T) {
 	}
 
 	// 2. Flow recording — HTTP/2 protocol detected.
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
 	if !strings.Contains(fl.Protocol, "HTTP/2") {
 		t.Errorf("protocol = %q, want to contain HTTP/2", fl.Protocol)
 	}
 
 	// 3. Message content.
-	msgs, err := env.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := env.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
-	var send, recv *flow.Message
+	var send, recv *flow.Flow
 	for _, m := range msgs {
 		switch m.Direction {
 		case "send":
@@ -425,7 +422,7 @@ func TestTCPForward_H2C_Fixed(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "fixed-h2c")
 	}
 
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
 	if !strings.Contains(fl.Protocol, "HTTP/2") {
 		t.Errorf("protocol = %q, want to contain HTTP/2", fl.Protocol)
 	}
@@ -480,13 +477,13 @@ func TestTCPForward_H2C_POST(t *testing.T) {
 	}
 
 	// Verify flow recording with message content.
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
-	msgs, err := env.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
+	msgs, err := env.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
-	var send *flow.Message
+	var send *flow.Flow
 	for _, m := range msgs {
 		if m.Direction == "send" {
 			send = m
@@ -588,17 +585,14 @@ func TestTCPForward_Raw_BackwardCompat(t *testing.T) {
 
 	// 2. Flow recording.
 	conn.Close()
-	flows := waitForFlows(t, ctx, store, flow.ListOptions{Protocol: "TCP", Limit: 10}, 1)
+	flows := waitForFlows(t, ctx, store, flow.StreamListOptions{Protocol: "TCP", Limit: 10}, 1)
 	flo := flows[0]
 	if flo.Protocol != "TCP" {
 		t.Errorf("protocol = %q, want TCP", flo.Protocol)
 	}
-	if flo.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want bidirectional", flo.FlowType)
-	}
 
 	// 3. Raw bytes recorded.
-	msgs, err := store.GetMessages(ctx, flo.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, flo.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -677,7 +671,7 @@ func TestTCPForward_Auto_DetectsHTTP1AndH2C(t *testing.T) {
 	resp2.Body.Close()
 
 	// Wait for both flows to be recorded.
-	flows := waitForFlows(t, ctx, env.store, flow.ListOptions{Limit: 20}, 2)
+	flows := waitForFlows(t, ctx, env.store, flow.StreamListOptions{Limit: 20}, 2)
 
 	// Verify that both protocols were detected.
 	protocolSet := make(map[string]bool)
@@ -778,7 +772,7 @@ func TestTCPForward_TLSMITM_HTTP1x(t *testing.T) {
 	}
 
 	// 3. Flow recording.
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
 	if fl.Protocol != "HTTP/1.x" {
 		t.Errorf("protocol = %q, want HTTP/1.x", fl.Protocol)
 	}
@@ -828,7 +822,7 @@ func TestTCPForward_ErrorPath_UpstreamFailure(t *testing.T) {
 
 	// Flow should be recorded — check for either error state or at least recording.
 	time.Sleep(500 * time.Millisecond)
-	flows, err := env.store.ListFlows(ctx, flow.ListOptions{Protocol: "TCP", Limit: 10})
+	flows, err := env.store.ListStreams(ctx, flow.StreamListOptions{Protocol: "TCP", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -884,7 +878,7 @@ func TestTCPForward_StateTransition(t *testing.T) {
 	resp.Body.Close()
 
 	// Flow should reach "complete" state.
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want complete", fl.State)
 	}
@@ -941,9 +935,9 @@ func TestTCPForward_HTTP1x_POST_BodyAndRawBytes(t *testing.T) {
 		t.Errorf("body = %q", body)
 	}
 
-	fl := waitForFlowState(t, ctx, env.store, flow.ListOptions{Limit: 10}, "complete")
+	fl := waitForFlowState(t, ctx, env.store, flow.StreamListOptions{Limit: 10}, "complete")
 
-	msgs, err := env.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := env.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}

@@ -401,21 +401,21 @@ func TestHookState_Initial(t *testing.T) {
 // --- memStore implements the interfaces needed for fuzzer engine tests ---
 
 type memStore struct {
-	flows    map[string]*flow.Flow
-	messages map[string][]*flow.Message
+	flows    map[string]*flow.Stream
+	messages map[string][]*flow.Flow
 	fuzzJobs map[string]*flow.FuzzJob
 	results  []*flow.FuzzResult
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		flows:    make(map[string]*flow.Flow),
-		messages: make(map[string][]*flow.Message),
+		flows:    make(map[string]*flow.Stream),
+		messages: make(map[string][]*flow.Flow),
 		fuzzJobs: make(map[string]*flow.FuzzJob),
 	}
 }
 
-func (m *memStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
+func (m *memStore) GetStream(_ context.Context, id string) (*flow.Stream, error) {
 	s, ok := m.flows[id]
 	if !ok {
 		return nil, fmt.Errorf("flow %s not found", id)
@@ -423,10 +423,10 @@ func (m *memStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
 	return s, nil
 }
 
-func (m *memStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
+func (m *memStore) GetFlows(_ context.Context, flowID string, opts flow.FlowListOptions) ([]*flow.Flow, error) {
 	msgs := m.messages[flowID]
 	if opts.Direction != "" {
-		var filtered []*flow.Message
+		var filtered []*flow.Flow
 		for _, msg := range msgs {
 			if msg.Direction == opts.Direction {
 				filtered = append(filtered, msg)
@@ -437,7 +437,7 @@ func (m *memStore) GetMessages(_ context.Context, flowID string, opts flow.Messa
 	return msgs, nil
 }
 
-func (m *memStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *memStore) SaveStream(_ context.Context, s *flow.Stream) error {
 	if s.ID == "" {
 		s.ID = fmt.Sprintf("sess-%d", len(m.flows)+1)
 	}
@@ -445,8 +445,8 @@ func (m *memStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	return nil
 }
 
-func (m *memStore) AppendMessage(_ context.Context, msg *flow.Message) error {
-	m.messages[msg.FlowID] = append(m.messages[msg.FlowID], msg)
+func (m *memStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
+	m.messages[msg.StreamID] = append(m.messages[msg.StreamID], msg)
 	return nil
 }
 

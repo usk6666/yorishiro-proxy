@@ -204,10 +204,7 @@ def on_receive_from_server(data):
 	if len(store.flows) != 1 {
 		t.Fatalf("flows count = %d, want 1", len(store.flows))
 	}
-	fl := store.flows[0]
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("FlowType = %q, want %q", fl.FlowType, "bidirectional")
-	}
+	_ = store.flows[0]
 
 	// 2 send + 3 receive = 5 messages.
 	if len(store.messages) != 5 {

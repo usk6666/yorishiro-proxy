@@ -70,7 +70,7 @@ func seedFuzzJob(t *testing.T, store flow.FuzzStore, status, tag string) *flow.F
 	ctx := context.Background()
 
 	job := &flow.FuzzJob{
-		FlowID:    "sess-template",
+		StreamID:  "sess-template",
 		Config:    `{"attack_type":"sequential"}`,
 		Status:    status,
 		Tag:       tag,
@@ -96,34 +96,33 @@ func seedFuzzResult(t *testing.T, store *flow.SQLiteStore, fuzzID string, index,
 	ctx := context.Background()
 
 	// Create a result flow with a receive message.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Append receive message with body.
-	msg := &flow.Message{
+	msg := &flow.Flow{
 		ID:         fl.ID + "-recv",
-		FlowID:     fl.ID,
+		StreamID:   fl.ID,
 		Sequence:   0,
 		Direction:  "receive",
 		Timestamp:  time.Now(),
 		StatusCode: statusCode,
 		Body:       []byte(body),
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
 	result := &flow.FuzzResult{
 		FuzzID:         fuzzID,
 		IndexNum:       index,
-		FlowID:         fl.ID,
+		StreamID:       fl.ID,
 		Payloads:       `{"pos-0":"payload-` + fmt.Sprintf("%d", index) + `"}`,
 		StatusCode:     statusCode,
 		ResponseLength: len(body),
@@ -202,8 +201,8 @@ func TestQuery_FuzzJobs_WithData(t *testing.T) {
 		if job.ID == "" {
 			t.Error("job ID is empty")
 		}
-		if job.FlowID != "sess-template" {
-			t.Errorf("flow_id = %q, want sess-template", job.FlowID)
+		if job.StreamID != "sess-template" {
+			t.Errorf("flow_id = %q, want sess-template", job.StreamID)
 		}
 		if job.CreatedAt == "" {
 			t.Error("created_at is empty")
@@ -1131,14 +1130,14 @@ func TestQuery_FuzzResults_ErrorField(t *testing.T) {
 	job := seedFuzzJob(t, store, "completed", "test")
 
 	// Create a result with an error.
-	fl := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	errResult := &flow.FuzzResult{
 		FuzzID:   job.ID,
 		IndexNum: 0,
-		FlowID:   fl.ID,
+		StreamID: fl.ID,
 		Payloads: `{"pos-0":"test"}`,
 		Error:    "connection refused",
 	}

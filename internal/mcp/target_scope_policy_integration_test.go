@@ -896,12 +896,12 @@ func TestPolicyIntegration_ExecuteResendBlockedByPolicy(t *testing.T) {
 	// Create a flow targeting a host not in the policy allow list.
 	u, _ := url.Parse("http://evil.com/api/test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -909,7 +909,7 @@ func TestPolicyIntegration_ExecuteResendBlockedByPolicy(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -948,12 +948,12 @@ func TestPolicyIntegration_ExecuteResendAllowedByPolicy(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -961,7 +961,7 @@ func TestPolicyIntegration_ExecuteResendAllowedByPolicy(t *testing.T) {
 			URL:       serverURL,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1304,13 +1304,13 @@ func TestPolicyIntegration_ExecuteFuzzBlockedByPolicy(t *testing.T) {
 
 	u, _ := url.Parse("http://evil.com/api/test")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			ID:        "fuzz-policy-blocked",
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1318,7 +1318,7 @@ func TestPolicyIntegration_ExecuteFuzzBlockedByPolicy(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Content-Type": {"text/plain"}},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1372,13 +1372,13 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 
 	u, _ := url.Parse("http://evil.com/api/login")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			ID:        "macro-policy-blocked",
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1387,7 +1387,7 @@ func TestPolicyIntegration_ExecuteMacroBlockedByPolicy(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":"admin"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),

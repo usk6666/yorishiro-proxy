@@ -122,18 +122,18 @@ func TestIntegration_HTTPForwardProxy(t *testing.T) {
 	}
 
 	// Poll for session and messages to be persisted.
-	var flows []*flow.Flow
-	var send, recv *flow.Message
+	var flows []*flow.Stream
+	var send, recv *flow.Flow
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
 		if len(flows) != 1 {
 			continue
 		}
-		msgs, mErr := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
+		msgs, mErr := store.GetFlows(ctx, flows[0].ID, flow.FlowListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -596,14 +596,14 @@ func TestIntegration_HTTPForwardProxy_POST(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	flows, err := store.ListFlows(ctx, flow.ListOptions{Method: "POST"})
+	flows, err := store.ListStreams(ctx, flow.StreamListOptions{Method: "POST"})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
 	if len(flows) != 1 {
 		t.Fatalf("expected 1 POST flow, got %d", len(flows))
 	}
-	recvMsgs, err := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{Direction: "receive"})
+	recvMsgs, err := store.GetFlows(ctx, flows[0].ID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -738,18 +738,18 @@ func TestIntegration_LargeBodyBoundary_HTTP(t *testing.T) {
 			}
 
 			// Poll for session and messages to be persisted (large bodies may take longer to save).
-			var flows []*flow.Flow
-			var send, recv *flow.Message
+			var flows []*flow.Stream
+			var send, recv *flow.Flow
 			for i := 0; i < 50; i++ {
 				time.Sleep(100 * time.Millisecond)
-				flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+				flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 				if err != nil {
 					t.Fatalf("ListFlows: %v", err)
 				}
 				if len(flows) != 1 {
 					continue
 				}
-				msgs, err := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
+				msgs, err := store.GetFlows(ctx, flows[0].ID, flow.FlowListOptions{})
 				if err != nil {
 					t.Fatalf("GetMessages: %v", err)
 				}
@@ -892,10 +892,10 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 	wg.Wait()
 
 	// Poll for all sessions and their messages to be persisted.
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: numClients + 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: numClients + 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -905,7 +905,7 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 		// Also verify all sessions have messages.
 		allHaveMessages := true
 		for _, s := range flows {
-			mc, cErr := store.CountMessages(ctx, s.ID)
+			mc, cErr := store.CountFlows(ctx, s.ID)
 			if cErr != nil {
 				t.Fatalf("CountMessages: %v", cErr)
 			}
@@ -930,11 +930,11 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTP/1.x")
 		}
 
-		msgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		msgs, mErr := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
-		var send, recv *flow.Message
+		var send, recv *flow.Flow
 		for _, m := range msgs {
 			switch m.Direction {
 			case "send":
@@ -1009,19 +1009,55 @@ func TestIntegration_ConcurrentClients_HTTP(t *testing.T) {
 
 // --- Error Recovery Integration Tests ---
 
-// failingStore is a flow.Store that always returns an error from SaveFlow.
+// failingStore is a flow.Store that always returns an error.
 // It is used to verify that the proxy continues forwarding traffic even when
 // session persistence fails (USK-36 fix).
 type failingStore struct {
 	saveCallCount atomic.Int64
 }
 
-func (s *failingStore) SaveFlow(_ context.Context, _ *flow.Flow) error {
+func (s *failingStore) SaveStream(_ context.Context, _ *flow.Stream) error {
 	s.saveCallCount.Add(1)
 	return errors.New("simulated DB write failure")
 }
 
-func (s *failingStore) UpdateFlow(_ context.Context, _ string, _ flow.FlowUpdate) error {
+func (s *failingStore) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
+	return errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) GetStream(_ context.Context, _ string) (*flow.Stream, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) ListStreams(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
+	return nil, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) CountStreams(_ context.Context, _ flow.StreamListOptions) (int, error) {
+	return 0, errors.New("simulated DB read failure")
+}
+
+func (s *failingStore) DeleteStream(_ context.Context, _ string) error {
+	return errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) DeleteAllStreams(_ context.Context) (int64, error) {
+	return 0, errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) DeleteStreamsByProtocol(_ context.Context, _ string) (int64, error) {
+	return 0, errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) DeleteStreamsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+	return 0, errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) DeleteExcessStreams(_ context.Context, _ int) (int64, error) {
+	return 0, errors.New("simulated DB write failure")
+}
+
+func (s *failingStore) SaveFlow(_ context.Context, _ *flow.Flow) error {
 	return errors.New("simulated DB write failure")
 }
 
@@ -1029,43 +1065,11 @@ func (s *failingStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) 
 	return nil, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
+func (s *failingStore) GetFlows(_ context.Context, _ string, _ flow.FlowListOptions) ([]*flow.Flow, error) {
 	return nil, errors.New("simulated DB read failure")
 }
 
-func (s *failingStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
-	return 0, errors.New("simulated DB read failure")
-}
-
-func (s *failingStore) DeleteFlow(_ context.Context, _ string) error {
-	return errors.New("simulated DB write failure")
-}
-
-func (s *failingStore) DeleteAllFlows(_ context.Context) (int64, error) {
-	return 0, errors.New("simulated DB write failure")
-}
-
-func (s *failingStore) DeleteFlowsByProtocol(_ context.Context, _ string) (int64, error) {
-	return 0, errors.New("simulated DB write failure")
-}
-
-func (s *failingStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64, error) {
-	return 0, errors.New("simulated DB write failure")
-}
-
-func (s *failingStore) DeleteExcessFlows(_ context.Context, _ int) (int64, error) {
-	return 0, errors.New("simulated DB write failure")
-}
-
-func (s *failingStore) AppendMessage(_ context.Context, _ *flow.Message) error {
-	return errors.New("simulated DB write failure")
-}
-
-func (s *failingStore) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
-	return nil, errors.New("simulated DB read failure")
-}
-
-func (s *failingStore) CountMessages(_ context.Context, _ string) (int, error) {
+func (s *failingStore) CountFlows(_ context.Context, _ string) (int, error) {
 	return 0, errors.New("simulated DB read failure")
 }
 
@@ -1199,7 +1203,7 @@ func TestIntegration_ProxyContinuesOnSessionSaveFailure_MultipleRequests(t *test
 
 	// All SaveFlow calls should have been attempted (and failed).
 	// Because the HTTP handler writes the response to the client before calling
-	// store.SaveFlow(), the last SaveFlow may still be in-flight when the
+	// store.SaveStream(), the last SaveFlow may still be in-flight when the
 	// final client.Get() returns. Poll with a bounded deadline instead of
 	// asserting immediately.
 	deadline := time.After(5 * time.Second)

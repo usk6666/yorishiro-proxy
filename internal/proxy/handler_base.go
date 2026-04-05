@@ -22,7 +22,7 @@ import (
 // setter boilerplate for capture scope, target scope, intercept engine/queue,
 // upstream proxy, and TLS configuration.
 type HandlerBase struct {
-	Store           flow.FlowWriter
+	Store           flow.Writer
 	Transport       *gohttp.Transport
 	Logger          *slog.Logger
 	Scope           *CaptureScope

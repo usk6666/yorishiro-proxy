@@ -132,6 +132,98 @@ ALTER TABLE flows ADD COLUMN scheme TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_flows_scheme ON flows(scheme);
 `
 
+// schemaV7 renames the data model: flows→streams, messages→flows.
+// - Table "flows" is renamed to "streams"
+// - Table "messages" is renamed to "flows"
+// - Column "flow_id" in the new "flows" table is renamed to "stream_id"
+// - Column "flow_type" is dropped from streams (MITM proxy cannot distinguish unary/streaming)
+// - Indexes are recreated for the new table/column names
+//
+// SQLite does not support DROP COLUMN before 3.35.0, so we recreate the streams
+// table without the flow_type column.
+const schemaV7 = `
+-- Step 1: Rename flows → streams_old (temporary)
+ALTER TABLE flows RENAME TO streams_old;
+
+-- Step 2: Recreate streams table WITHOUT flow_type column
+CREATE TABLE streams (
+	id              TEXT PRIMARY KEY,
+	conn_id         TEXT NOT NULL DEFAULT '',
+	protocol        TEXT NOT NULL,
+	state           TEXT NOT NULL DEFAULT 'complete',
+	timestamp       DATETIME NOT NULL,
+	duration_ms     INTEGER NOT NULL DEFAULT 0,
+	tags            TEXT NOT NULL DEFAULT '{}',
+	client_addr     TEXT NOT NULL DEFAULT '',
+	server_addr     TEXT NOT NULL DEFAULT '',
+	tls_version     TEXT NOT NULL DEFAULT '',
+	tls_cipher      TEXT NOT NULL DEFAULT '',
+	tls_alpn        TEXT NOT NULL DEFAULT '',
+	tls_server_cert_subject TEXT NOT NULL DEFAULT '',
+	blocked_by      TEXT NOT NULL DEFAULT '',
+	send_ms         INTEGER,
+	wait_ms         INTEGER,
+	receive_ms      INTEGER,
+	scheme          TEXT NOT NULL DEFAULT ''
+);
+
+-- Step 3: Copy data from streams_old to streams (excluding flow_type)
+INSERT INTO streams (id, conn_id, protocol, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, scheme)
+SELECT id, conn_id, protocol, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, scheme
+FROM streams_old;
+
+-- Step 4: Drop old table
+DROP TABLE streams_old;
+
+-- Step 5: Create indexes for streams
+CREATE INDEX IF NOT EXISTS idx_streams_protocol ON streams(protocol);
+CREATE INDEX IF NOT EXISTS idx_streams_timestamp ON streams(timestamp);
+CREATE INDEX IF NOT EXISTS idx_streams_conn_id ON streams(conn_id);
+CREATE INDEX IF NOT EXISTS idx_streams_state ON streams(state);
+CREATE INDEX IF NOT EXISTS idx_streams_blocked_by ON streams(blocked_by);
+CREATE INDEX IF NOT EXISTS idx_streams_scheme ON streams(scheme);
+
+-- Step 6: Recreate flows table from messages with updated FK and column name
+-- We recreate instead of ALTER TABLE RENAME to fix the FK reference
+-- (old messages.flow_id REFERENCES flows(id) → new flows.stream_id REFERENCES streams(id))
+CREATE TABLE flows (
+	id              TEXT PRIMARY KEY,
+	stream_id       TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+	sequence        INTEGER NOT NULL,
+	direction       TEXT NOT NULL,
+	timestamp       DATETIME NOT NULL,
+	headers         TEXT NOT NULL DEFAULT '{}',
+	body            BLOB,
+	raw_bytes       BLOB,
+	body_truncated  INTEGER NOT NULL DEFAULT 0,
+	method          TEXT NOT NULL DEFAULT '',
+	url             TEXT NOT NULL DEFAULT '',
+	status_code     INTEGER NOT NULL DEFAULT 0,
+	metadata        TEXT NOT NULL DEFAULT '{}',
+	UNIQUE(stream_id, sequence)
+);
+
+-- Step 7: Copy data from messages to flows (renaming flow_id → stream_id)
+INSERT INTO flows (id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
+SELECT id, flow_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata
+FROM messages;
+
+-- Step 8: Drop old messages table
+DROP TABLE messages;
+
+-- Step 9: Create indexes for flows
+CREATE INDEX IF NOT EXISTS idx_flows_stream_id ON flows(stream_id);
+CREATE INDEX IF NOT EXISTS idx_flows_direction ON flows(direction);
+CREATE INDEX IF NOT EXISTS idx_flows_method ON flows(method);
+CREATE INDEX IF NOT EXISTS idx_flows_url ON flows(url);
+CREATE INDEX IF NOT EXISTS idx_flows_status_code ON flows(status_code);
+
+-- Step 10: Update fuzz_jobs and fuzz_results flow_id references
+-- These still reference stream IDs (the old "flow" concept), so rename to stream_id
+ALTER TABLE fuzz_jobs RENAME COLUMN flow_id TO stream_id;
+ALTER TABLE fuzz_results RENAME COLUMN flow_id TO stream_id;
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
 	2: schemaV2,
@@ -139,6 +231,7 @@ var migrations = map[int]string{
 	4: schemaV4,
 	5: schemaV5,
 	6: schemaV6,
+	7: schemaV7,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -161,8 +254,21 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if !ok {
 			continue
 		}
+		// V7 renames tables that are FK targets, so foreign keys must be
+		// temporarily disabled. PRAGMA cannot run inside a transaction, so
+		// we toggle it outside the migration transaction.
+		if v == 7 {
+			if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+				return fmt.Errorf("disable foreign keys for migration v7: %w", err)
+			}
+		}
 		if err := execMigration(ctx, db, v, ddl, current == 0 && v == 1); err != nil {
 			return fmt.Errorf("migration to version %d: %w", v, err)
+		}
+		if v == 7 {
+			if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+				return fmt.Errorf("re-enable foreign keys after migration v7: %w", err)
+			}
 		}
 	}
 

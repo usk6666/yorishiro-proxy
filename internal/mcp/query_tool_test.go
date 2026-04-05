@@ -89,24 +89,23 @@ func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr st
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  150 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        id + "-send",
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -115,13 +114,13 @@ func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr st
 		Headers:   map[string][]string{"Host": {"example.com"}},
 		Body:      []byte("request body"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &flow.Message{
+	recvMsg := &flow.Flow{
 		ID:         id + "-recv",
-		FlowID:     id,
+		StreamID:   id,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -129,7 +128,7 @@ func seedSession(t *testing.T, store flow.Store, id, protocol, method, urlStr st
 		Headers:    map[string][]string{"Content-Type": {"application/json"}},
 		Body:       []byte(`{"ok":true}`),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(recv): %v", err)
 	}
 }
@@ -231,9 +230,6 @@ func TestQuery_Sessions_WithData(t *testing.T) {
 			}
 			if s.MessageCount != 2 {
 				t.Errorf("message_count = %d, want 2", s.MessageCount)
-			}
-			if s.FlowType != "unary" {
-				t.Errorf("flow_type = %q, want unary", s.FlowType)
 			}
 			if s.State != "complete" {
 				t.Errorf("state = %q, want complete", s.State)
@@ -390,9 +386,6 @@ func TestQuery_Session_Success(t *testing.T) {
 	if out.MessageCount != 2 {
 		t.Errorf("message_count = %d, want 2", out.MessageCount)
 	}
-	if out.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want unary", out.FlowType)
-	}
 }
 
 func TestQuery_Session_MissingID(t *testing.T) {
@@ -440,23 +433,22 @@ func TestQuery_Session_NilHeaders_ReturnsEmptyMap(t *testing.T) {
 
 	// Create a flow with only a send message (no receive message),
 	// simulating a gRPC flow interrupted before receiving a response.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "nil-headers",
 		ConnID:    "conn-nil-headers",
 		Protocol:  "gRPC",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	parsedURL, _ := url.Parse("https://example.com/grpc.Service/Method")
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "nil-headers-send",
-		FlowID:    "nil-headers",
+		StreamID:  "nil-headers",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -465,7 +457,7 @@ func TestQuery_Session_NilHeaders_ReturnsEmptyMap(t *testing.T) {
 		Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
 		Body:      []byte("request"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
@@ -500,15 +492,14 @@ func TestQuery_Session_NoMessages_ReturnsEmptyHeaders(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a flow with no messages at all.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "no-msgs",
 		ConnID:    "conn-no-msgs",
 		Protocol:  "HTTP",
-		FlowType:  "unary",
 		State:     "active",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
@@ -586,29 +577,28 @@ func TestQuery_Messages_Pagination(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "sess-many",
 		Protocol:  "HTTPS",
-		FlowType:  "stream",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Create 5 messages.
 	for i := 0; i < 5; i++ {
-		msg := &flow.Message{
+		msg := &flow.Flow{
 			ID:        fmt.Sprintf("msg-%d", i),
-			FlowID:    "sess-many",
+			StreamID:  "sess-many",
 			Sequence:  i,
 			Direction: "send",
 			Timestamp: time.Now().UTC(),
 			Method:    "GET",
 			Body:      []byte(fmt.Sprintf("body-%d", i)),
 		}
-		if err := store.AppendMessage(ctx, msg); err != nil {
+		if err := store.SaveFlow(ctx, msg); err != nil {
 			t.Fatalf("AppendMessage(%d): %v", i, err)
 		}
 	}
@@ -1210,24 +1200,23 @@ func seedBlockedSession(t *testing.T, store flow.Store, id, protocol, method, ur
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  0,
 		BlockedBy: blockedBy,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        id + "-send",
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1235,7 +1224,7 @@ func seedBlockedSession(t *testing.T, store flow.Store, id, protocol, method, ur
 		URL:       parsedURL,
 		Headers:   map[string][]string{"Host": {"evil.com"}},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 }
@@ -1389,23 +1378,22 @@ func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, 
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &flow.Flow{
+	sess := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     state,
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, sess); err != nil {
+	if err := store.SaveStream(ctx, sess); err != nil {
 		t.Fatalf("SaveSession(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        id + "-send",
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1414,14 +1402,14 @@ func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, 
 		Headers:   map[string][]string{"Host": {"example.com"}},
 		Body:      []byte("request body"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
 	if statusCode > 0 {
-		recvMsg := &flow.Message{
+		recvMsg := &flow.Flow{
 			ID:         id + "-recv",
-			FlowID:     id,
+			StreamID:   id,
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now().UTC(),
@@ -1429,7 +1417,7 @@ func seedSessionWithState(t *testing.T, store flow.Store, id, protocol, method, 
 			Headers:    map[string][]string{"Content-Type": {"text/plain"}},
 			Body:       []byte("response body"),
 		}
-		if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		if err := store.SaveFlow(ctx, recvMsg); err != nil {
 			t.Fatalf("AppendMessage(recv): %v", err)
 		}
 	}
@@ -1520,23 +1508,22 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &flow.Flow{
+	sess := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  200 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, sess); err != nil {
+	if err := store.SaveStream(ctx, sess); err != nil {
 		t.Fatalf("SaveSession(%s): %v", id, err)
 	}
 
 	origURL, _ := url.Parse("https://example.com/original")
-	originalSend := &flow.Message{
+	originalSend := &flow.Flow{
 		ID:        id + "-send-orig",
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1546,14 +1533,14 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 		Body:      []byte("original body"),
 		Metadata:  map[string]string{"variant": "original"},
 	}
-	if err := store.AppendMessage(ctx, originalSend); err != nil {
+	if err := store.SaveFlow(ctx, originalSend); err != nil {
 		t.Fatalf("AppendMessage(original send): %v", err)
 	}
 
 	modURL, _ := url.Parse("https://example.com/modified")
-	modifiedSend := &flow.Message{
+	modifiedSend := &flow.Flow{
 		ID:        id + "-send-mod",
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  1,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1563,13 +1550,13 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 		Body:      []byte("modified body"),
 		Metadata:  map[string]string{"variant": "modified"},
 	}
-	if err := store.AppendMessage(ctx, modifiedSend); err != nil {
+	if err := store.SaveFlow(ctx, modifiedSend); err != nil {
 		t.Fatalf("AppendMessage(modified send): %v", err)
 	}
 
-	recvMsg := &flow.Message{
+	recvMsg := &flow.Flow{
 		ID:         id + "-recv",
-		FlowID:     id,
+		StreamID:   id,
 		Sequence:   2,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -1577,7 +1564,7 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 		Headers:    map[string][]string{"Content-Type": {"application/json"}},
 		Body:       []byte(`{"ok":true}`),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(recv): %v", err)
 	}
 }
@@ -1732,23 +1719,22 @@ func seedResponseVariantSession(t *testing.T, store flow.Store, id string) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &flow.Flow{
+	sess := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  200 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, sess); err != nil {
+	if err := store.SaveStream(ctx, sess); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	reqURL, _ := url.Parse("https://example.com/api")
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        id + "-send",
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1757,13 +1743,13 @@ func seedResponseVariantSession(t *testing.T, store flow.Store, id string) {
 		Headers:   map[string][]string{"Host": {"example.com"}},
 		Body:      []byte("request body"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	originalRecv := &flow.Message{
+	originalRecv := &flow.Flow{
 		ID:         id + "-recv-orig",
-		FlowID:     id,
+		StreamID:   id,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -1772,13 +1758,13 @@ func seedResponseVariantSession(t *testing.T, store flow.Store, id string) {
 		Body:       []byte(`{"status":"original"}`),
 		Metadata:   map[string]string{"variant": "original"},
 	}
-	if err := store.AppendMessage(ctx, originalRecv); err != nil {
+	if err := store.SaveFlow(ctx, originalRecv); err != nil {
 		t.Fatalf("AppendMessage(original recv): %v", err)
 	}
 
-	modifiedRecv := &flow.Message{
+	modifiedRecv := &flow.Flow{
 		ID:         id + "-recv-mod",
-		FlowID:     id,
+		StreamID:   id,
 		Sequence:   2,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -1787,7 +1773,7 @@ func seedResponseVariantSession(t *testing.T, store flow.Store, id string) {
 		Body:       []byte(`{"status":"modified"}`),
 		Metadata:   map[string]string{"variant": "modified"},
 	}
-	if err := store.AppendMessage(ctx, modifiedRecv); err != nil {
+	if err := store.SaveFlow(ctx, modifiedRecv); err != nil {
 		t.Fatalf("AppendMessage(modified recv): %v", err)
 	}
 }
@@ -1891,24 +1877,23 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 	t.Helper()
 	ctx := context.Background()
 
-	sess := &flow.Flow{
+	sess := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  200 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, sess); err != nil {
+	if err := store.SaveStream(ctx, sess); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	reqURL, _ := url.Parse("https://example.com/api")
 
 	// Original send (variant=original)
-	if err := store.AppendMessage(ctx, &flow.Message{
-		ID: id + "-send-orig", FlowID: id, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		ID: id + "-send-orig", StreamID: id, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: reqURL,
 		Headers:  map[string][]string{"Host": {"example.com"}},
 		Body:     []byte("orig-req-body"),
@@ -1919,8 +1904,8 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 
 	// Modified send (variant=modified)
 	modURL, _ := url.Parse("https://example.com/api-mod")
-	if err := store.AppendMessage(ctx, &flow.Message{
-		ID: id + "-send-mod", FlowID: id, Sequence: 1, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		ID: id + "-send-mod", StreamID: id, Sequence: 1, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: modURL,
 		Headers:  map[string][]string{"Host": {"example.com"}},
 		Body:     []byte("mod-req-body"),
@@ -1930,8 +1915,8 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 	}
 
 	// Original receive (variant=original)
-	if err := store.AppendMessage(ctx, &flow.Message{
-		ID: id + "-recv-orig", FlowID: id, Sequence: 2, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		ID: id + "-recv-orig", StreamID: id, Sequence: 2, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200,
 		Headers:  map[string][]string{"Content-Type": {"application/json"}},
 		Body:     []byte(`{"r":"orig"}`),
@@ -1941,8 +1926,8 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 	}
 
 	// Modified receive (variant=modified)
-	if err := store.AppendMessage(ctx, &flow.Message{
-		ID: id + "-recv-mod", FlowID: id, Sequence: 3, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		ID: id + "-recv-mod", StreamID: id, Sequence: 3, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 401,
 		Headers:  map[string][]string{"Content-Type": {"text/plain"}},
 		Body:     []byte("Unauthorized"),
@@ -2021,21 +2006,20 @@ func TestQuery_Sessions_FilterByConnID(t *testing.T) {
 		{"flow-a2", "conn-alpha"},
 		{"flow-b1", "conn-beta"},
 	} {
-		fl := &flow.Flow{
+		fl := &flow.Stream{
 			ID:        tc.id,
 			ConnID:    tc.connID,
 			Protocol:  "HTTPS",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now().UTC(),
 			Duration:  100 * time.Millisecond,
 		}
-		if err := store.SaveFlow(ctx, fl); err != nil {
+		if err := store.SaveStream(ctx, fl); err != nil {
 			t.Fatalf("SaveFlow(%s): %v", tc.id, err)
 		}
 		parsedURL, _ := url.Parse("https://example.com/api")
-		if err := store.AppendMessage(ctx, &flow.Message{
-			ID: tc.id + "-send", FlowID: tc.id, Sequence: 0, Direction: "send",
+		if err := store.SaveFlow(ctx, &flow.Flow{
+			ID: tc.id + "-send", StreamID: tc.id, Sequence: 0, Direction: "send",
 			Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
 		}); err != nil {
 			t.Fatalf("AppendMessage: %v", err)
@@ -2098,11 +2082,10 @@ func seedFlowWithHost(t *testing.T, store flow.Store, id, serverAddr, urlStr str
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -2112,20 +2095,20 @@ func seedFlowWithHost(t *testing.T, store flow.Store, id, serverAddr, urlStr str
 			ServerAddr: serverAddr,
 		}
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
-	if err := store.AppendMessage(ctx, &flow.Message{
-		ID: id + "-send", FlowID: id, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		ID: id + "-send", StreamID: id, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
 		Headers: map[string][]string{"Host": {parsedURL.Hostname()}},
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		ID: id + "-recv", FlowID: id, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		ID: id + "-recv", StreamID: id, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200,
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
@@ -2191,22 +2174,21 @@ func TestQuery_Sessions_FilterByConnIDAndHost(t *testing.T) {
 		{"flow-c2", "conn-shared", "other.com:443", "https://other.com/b"},
 		{"flow-c3", "conn-other", "example.com:443", "https://example.com/c"},
 	} {
-		fl := &flow.Flow{
+		fl := &flow.Stream{
 			ID:        tc.id,
 			ConnID:    tc.connID,
 			Protocol:  "HTTPS",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now().UTC(),
 			Duration:  100 * time.Millisecond,
 			ConnInfo:  &flow.ConnectionInfo{ServerAddr: tc.serverAddr},
 		}
-		if err := store.SaveFlow(ctx, fl); err != nil {
+		if err := store.SaveStream(ctx, fl); err != nil {
 			t.Fatalf("SaveFlow(%s): %v", tc.id, err)
 		}
 		parsedURL, _ := url.Parse(tc.urlStr)
-		if err := store.AppendMessage(ctx, &flow.Message{
-			ID: tc.id + "-send", FlowID: tc.id, Sequence: 0, Direction: "send",
+		if err := store.SaveFlow(ctx, &flow.Flow{
+			ID: tc.id + "-send", StreamID: tc.id, Sequence: 0, Direction: "send",
 			Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
 		}); err != nil {
 			t.Fatalf("AppendMessage: %v", err)
@@ -2328,11 +2310,10 @@ func TestQuery_FlowDetail_Anomalies(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a flow with smuggling tags.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "flow-anomaly-1",
 		ConnID:    "conn-anomaly",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -2341,12 +2322,12 @@ func TestQuery_FlowDetail_Anomalies(t *testing.T) {
 			"smuggling:warnings":       "CL and TE both present",
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	parsedURL, _ := url.Parse("http://example.com/test")
-	sendMsg := &flow.Message{
-		FlowID:    "flow-anomaly-1",
+	sendMsg := &flow.Flow{
+		StreamID:  "flow-anomaly-1",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -2354,18 +2335,18 @@ func TestQuery_FlowDetail_Anomalies(t *testing.T) {
 		URL:       parsedURL,
 		Headers:   map[string][]string{"Host": {"example.com"}},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	recvMsg := &flow.Message{
-		FlowID:     "flow-anomaly-1",
+	recvMsg := &flow.Flow{
+		StreamID:   "flow-anomaly-1",
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
 		StatusCode: 200,
 		Headers:    map[string][]string{"Content-Type": {"text/plain"}},
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -2402,11 +2383,10 @@ func TestQuery_FlowsList_Anomalies(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a flow with smuggling tags.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "flow-anomaly-list",
 		ConnID:    "conn-anomaly-list",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
@@ -2416,12 +2396,12 @@ func TestQuery_FlowsList_Anomalies(t *testing.T) {
 			"smuggling:warnings":     "multiple anomalies",
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	parsedURL, _ := url.Parse("http://example.com/list")
-	sendMsg := &flow.Message{
-		FlowID:    "flow-anomaly-list",
+	sendMsg := &flow.Flow{
+		StreamID:  "flow-anomaly-list",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -2429,7 +2409,7 @@ func TestQuery_FlowsList_Anomalies(t *testing.T) {
 		URL:       parsedURL,
 		Headers:   map[string][]string{"Host": {"example.com"}},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 

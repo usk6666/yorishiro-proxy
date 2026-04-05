@@ -16,10 +16,10 @@ import (
 
 // grpcProgressiveRecorder manages progressive (frame-by-frame) recording
 // for a gRPC stream. It creates the flow on first use, appends each frame
-// as a separate flow.Message, and updates the flow to "complete" on
+// as a separate flow.Flow, and updates the flow to "complete" on
 // stream termination.
 type grpcProgressiveRecorder struct {
-	store  flow.FlowWriter
+	store  flow.Writer
 	logger *slog.Logger
 
 	// flowID is set after initFlow. Empty means recording is disabled
@@ -86,11 +86,10 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	protocol := proxy.SOCKS5Protocol(ctx, "gRPC")
 	tags := proxy.MergeSOCKS5Tags(ctx, nil)
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    sc.connID,
 		Protocol:  protocol,
 		Scheme:    sc.flowScheme,
-		FlowType:  "unary", // Updated to stream/bidirectional on completion.
 		State:     "active",
 		Timestamp: sc.start,
 		Tags:      tags,
@@ -101,7 +100,7 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 			TLSALPN:    sc.tlsMeta.ALPN,
 		},
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		sc.logger.Error("gRPC progressive flow save failed",
 			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
 		return rec
@@ -110,8 +109,8 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	rec.flowID = fl.ID
 
 	// Record the initial send message with request headers.
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: sc.start,
@@ -127,7 +126,7 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	if rec.grpcEncoding != "" {
 		sendMsg.Metadata["grpc_encoding"] = rec.grpcEncoding
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		sc.logger.Error("gRPC progressive send headers save failed", "error", err)
 	}
 	rec.seq.Store(1) // Next sequence after the initial send message.
@@ -135,7 +134,7 @@ func (h *Handler) initGRPCFlow(ctx context.Context, sc *streamContext) *grpcProg
 	return rec
 }
 
-// recordFrame records a single gRPC frame as a flow.Message.
+// recordFrame records a single gRPC frame as a flow.Flow.
 // direction is "client_to_server" or "server_to_client".
 // This is called from the FrameBuffer callbacks.
 func (r *grpcProgressiveRecorder) recordFrame(ctx context.Context, frame *protogrpc.Frame, direction string) {
@@ -181,8 +180,8 @@ func (r *grpcProgressiveRecorder) recordFrame(ctx context.Context, frame *protog
 		truncated = true
 	}
 
-	msg := &flow.Message{
-		FlowID:        r.flowID,
+	msg := &flow.Flow{
+		StreamID:      r.flowID,
 		Sequence:      seq,
 		Direction:     msgDirection,
 		Timestamp:     time.Now(),
@@ -191,7 +190,7 @@ func (r *grpcProgressiveRecorder) recordFrame(ctx context.Context, frame *protog
 		Metadata:      metadata,
 	}
 
-	if err := r.store.AppendMessage(ctx, msg); err != nil {
+	if err := r.store.SaveFlow(ctx, msg); err != nil {
 		r.logger.Error("gRPC progressive frame save failed",
 			"flow_id", r.flowID,
 			"sequence", seq,
@@ -213,8 +212,6 @@ func (r *grpcProgressiveRecorder) completeFlowH2(
 	if r.flowID == "" || r.store == nil {
 		return
 	}
-
-	flowType := protogrpc.ClassifyFlowType(reqFrameCount, respFrameCount)
 
 	// Extract trailers from StreamRoundTripResult.
 	var hpackTrailers []hpack.HeaderField
@@ -259,14 +256,13 @@ func (r *grpcProgressiveRecorder) completeFlowH2(
 		serverAddr = result.ServerAddr
 	}
 
-	update := flow.FlowUpdate{
+	update := flow.StreamUpdate{
 		State:      "complete",
-		FlowType:   flowType,
 		Duration:   duration,
 		Tags:       tags,
 		ServerAddr: serverAddr,
 	}
-	if err := r.store.UpdateFlow(ctx, r.flowID, update); err != nil {
+	if err := r.store.UpdateStream(ctx, r.flowID, update); err != nil {
 		r.logger.Error("gRPC progressive flow completion failed",
 			"flow_id", r.flowID,
 			"error", err,
@@ -303,8 +299,8 @@ func (r *grpcProgressiveRecorder) recordTrailersMessageH2(
 	totalMessages := int(r.messageCount.Load())
 	finalMeta["message_count"] = strconv.Itoa(totalMessages)
 
-	finalMsg := &flow.Message{
-		FlowID:    r.flowID,
+	finalMsg := &flow.Flow{
+		StreamID:  r.flowID,
 		Sequence:  finalSeq,
 		Direction: "receive",
 		Timestamp: time.Now(),
@@ -316,7 +312,7 @@ func (r *grpcProgressiveRecorder) recordTrailersMessageH2(
 			finalMsg.Headers = hpackToHeaderMap(trailers)
 		}
 	}
-	if err := r.store.AppendMessage(ctx, finalMsg); err != nil {
+	if err := r.store.SaveFlow(ctx, finalMsg); err != nil {
 		r.logger.Error("gRPC progressive trailers save failed",
 			"flow_id", r.flowID,
 			"error", err,

@@ -32,9 +32,8 @@ func TestMCPQuery_RawBytes_HTTP1x(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -100,7 +99,6 @@ func TestMCPQuery_RawBytes_HTTP2(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
-		FlowType: "unary",
 		Duration: 15 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: "192.168.1.10:12345",
@@ -108,7 +106,7 @@ func TestMCPQuery_RawBytes_HTTP2(t *testing.T) {
 			TLSVersion: "TLS 1.3",
 			TLSALPN:    "h2",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -175,12 +173,11 @@ func TestMCPQuery_RawBytes_gRPC(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
-		FlowType: "unary",
 		Duration: 8 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			TLSALPN: "h2",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -249,9 +246,8 @@ func TestMCPQuery_RawBytes_RawTCP(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP",
-		FlowType: "bidirectional",
 		Duration: 20 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -268,15 +264,12 @@ func TestMCPQuery_RawBytes_RawTCP(t *testing.T) {
 	})
 
 	// For TCP bidirectional flows, query messages resource to verify raw bytes.
-	detail := callTool[queryFlowResult](t, env.cs, "query", map[string]any{
+	_ = callTool[queryFlowResult](t, env.cs, "query", map[string]any{
 		"resource": "flow",
 		"id":       flowID,
 	})
 
 	// TCP flows use message_preview for bidirectional flows.
-	if detail.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want bidirectional", detail.FlowType)
-	}
 
 	// Query individual messages to verify raw bytes are accessible.
 	msgResult := callTool[queryMessagesResult](t, env.cs, "query", map[string]any{
@@ -342,9 +335,8 @@ func TestMCPQuery_RawBytes_WireFormatIntegrity(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 5 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -417,9 +409,8 @@ func TestMCPQuery_Variant_RequestModification(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 12 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -500,9 +491,8 @@ func TestMCPQuery_Variant_ResponseModification(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -566,9 +556,8 @@ func TestMCPQuery_Variant_MessagesResourceDistinguishable(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 8 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -662,9 +651,8 @@ func TestMCPQuery_Variant_NoModification_NoOriginalFields(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 5 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -717,9 +705,8 @@ func TestMCPQuery_Variant_RawInterceptMode(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",

@@ -87,27 +87,27 @@ func setupTestSessionWithStore(t *testing.T, ca *cert.CA, store flow.Store) *gom
 
 // testEntry is a convenience struct for creating test sessions with send/receive messages.
 type testEntry struct {
-	Session *flow.Flow
-	Send    *flow.Message
-	Receive *flow.Message
+	Session *flow.Stream
+	Send    *flow.Flow
+	Receive *flow.Flow
 }
 
 // saveTestEntry saves a flow with send and receive messages and returns a testEntry.
-func saveTestEntry(t *testing.T, store flow.Store, fl *flow.Flow, send *flow.Message, recv *flow.Message) *testEntry {
+func saveTestEntry(t *testing.T, store flow.Store, fl *flow.Stream, send *flow.Flow, recv *flow.Flow) *testEntry {
 	t.Helper()
 	ctx := context.Background()
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	if send != nil {
-		send.FlowID = fl.ID
-		if err := store.AppendMessage(ctx, send); err != nil {
+		send.StreamID = fl.ID
+		if err := store.SaveFlow(ctx, send); err != nil {
 			t.Fatalf("AppendMessage(send): %v", err)
 		}
 	}
 	if recv != nil {
-		recv.FlowID = fl.ID
-		if err := store.AppendMessage(ctx, recv); err != nil {
+		recv.StreamID = fl.ID
+		if err := store.SaveFlow(ctx, recv); err != nil {
 			t.Fatalf("AppendMessage(recv): %v", err)
 		}
 	}

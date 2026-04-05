@@ -97,7 +97,7 @@ func TestHandleUpgrade_DeflateCompressedTextFrame(t *testing.T) {
 
 	// Verify that the stored message body is the decompressed plaintext.
 	messages := store.Messages()
-	var sendMsg *flow.Message
+	var sendMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && msg.Body != nil && string(msg.Body) == original {
 			sendMsg = msg
@@ -186,7 +186,7 @@ func TestHandleUpgrade_DeflateCompressedServerFrame(t *testing.T) {
 
 	// Verify stored message is decompressed.
 	messages := store.Messages()
-	var recvMsg *flow.Message
+	var recvMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "receive" && msg.Body != nil && string(msg.Body) == original {
 			recvMsg = msg
@@ -262,7 +262,7 @@ func TestHandleUpgrade_NoDeflate_RSV1NotSet(t *testing.T) {
 
 	// Verify: message stored as plain text, no "compressed" metadata.
 	messages := store.Messages()
-	var sendMsg *flow.Message
+	var sendMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && string(msg.Body) == "plain text" {
 			sendMsg = msg
@@ -341,7 +341,7 @@ func TestHandleUpgrade_DeflateCompressedBinaryFrame(t *testing.T) {
 
 	// Verify stored as decompressed raw bytes (binary opcode).
 	messages := store.Messages()
-	var binaryMsg *flow.Message
+	var binaryMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && msg.RawBytes != nil && bytes.Equal(msg.RawBytes, original) {
 			binaryMsg = msg

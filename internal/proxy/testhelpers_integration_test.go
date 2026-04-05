@@ -13,13 +13,13 @@ import (
 )
 
 // pollFlows polls the store until the expected number of flows appear or timeout.
-func pollFlows(t *testing.T, ctx context.Context, store flow.Store, opts flow.ListOptions, wantCount int) []*flow.Flow {
+func pollFlows(t *testing.T, ctx context.Context, store flow.Store, opts flow.StreamListOptions, wantCount int) []*flow.Stream {
 	t.Helper()
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	var err error
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, opts)
+		flows, err = store.ListStreams(ctx, opts)
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -32,9 +32,9 @@ func pollFlows(t *testing.T, ctx context.Context, store flow.Store, opts flow.Li
 }
 
 // getFlowMessages retrieves send and receive messages for a flow (single attempt).
-func getFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
+func getFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Flow) {
 	t.Helper()
-	msgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, flowID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -54,7 +54,7 @@ func getFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID
 }
 
 // pollFlowMessages polls until both send and receive messages appear for a flow.
-func pollFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
+func pollFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Flow) {
 	t.Helper()
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)

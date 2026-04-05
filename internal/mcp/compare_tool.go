@@ -83,11 +83,11 @@ func (s *Server) handleCompare(ctx context.Context, params compareParams) (*gomc
 		return nil, nil, fmt.Errorf("flow_id_b is required for compare action")
 	}
 
-	flowA, err := s.deps.store.GetFlow(ctx, params.FlowIDA)
+	flowA, err := s.deps.store.GetStream(ctx, params.FlowIDA)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow A (%s): %w", params.FlowIDA, err)
 	}
-	flowB, err := s.deps.store.GetFlow(ctx, params.FlowIDB)
+	flowB, err := s.deps.store.GetStream(ctx, params.FlowIDB)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow B (%s): %w", params.FlowIDB, err)
 	}
@@ -114,8 +114,8 @@ func (s *Server) handleCompare(ctx context.Context, params compareParams) (*gomc
 }
 
 // getLastReceiveMessage retrieves the last receive message for a flow.
-func getLastReceiveMessage(ctx context.Context, store flow.FlowReader, flowID string) (*flow.Message, error) {
-	msgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{Direction: "receive"})
+func getLastReceiveMessage(ctx context.Context, store flow.Reader, flowID string) (*flow.Flow, error) {
+	msgs, err := store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		return nil, fmt.Errorf("get receive messages: %w", err)
 	}
@@ -127,7 +127,7 @@ func getLastReceiveMessage(ctx context.Context, store flow.FlowReader, flowID st
 }
 
 // buildCompareResult constructs the structured comparison result.
-func buildCompareResult(flowA, flowB *flow.Flow, recvA, recvB *flow.Message) *compareResult {
+func buildCompareResult(flowA, flowB *flow.Stream, recvA, recvB *flow.Flow) *compareResult {
 	result := &compareResult{}
 
 	// Status code comparison.
@@ -228,7 +228,7 @@ func firstHeaderValue(vals []string) string {
 }
 
 // buildBodyDiff constructs the body diff section of the compare result.
-func buildBodyDiff(recvA, recvB *flow.Message) *bodyDiff {
+func buildBodyDiff(recvA, recvB *flow.Flow) *bodyDiff {
 	contentType := detectResponseContentType(recvA, recvB)
 	identical := bytes.Equal(recvA.Body, recvB.Body)
 
@@ -247,7 +247,7 @@ func buildBodyDiff(recvA, recvB *flow.Message) *bodyDiff {
 
 // detectResponseContentType returns the Content-Type from the responses.
 // Prefers the Content-Type from response A; falls back to B.
-func detectResponseContentType(recvA, recvB *flow.Message) string {
+func detectResponseContentType(recvA, recvB *flow.Flow) string {
 	ct := firstHeaderValue(getHeaderValues(recvA.Headers, "Content-Type"))
 	if ct == "" {
 		ct = firstHeaderValue(getHeaderValues(recvB.Headers, "Content-Type"))

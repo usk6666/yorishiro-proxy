@@ -26,7 +26,7 @@ import (
 // It is not a ProtocolHandler — it is invoked from the HTTP handler when
 // an Upgrade: websocket request is detected.
 type Handler struct {
-	store           flow.FlowWriter
+	store           flow.Writer
 	logger          *slog.Logger
 	pluginEngine    *plugin.Engine
 	safetyEngine    *safety.Engine
@@ -35,7 +35,7 @@ type Handler struct {
 }
 
 // NewHandler creates a new WebSocket relay handler.
-func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
+func NewHandler(store flow.Writer, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,
@@ -97,7 +97,7 @@ func parseUpgradeURL(req *parser.RawRequest) *url.URL {
 
 // rawHeadersToMap converts parser.RawHeaders to map[string][]string without
 // importing net/http. This preserves wire-observed header name casing and order
-// within each name, matching the flow.Message.Headers type.
+// within each name, matching the flow.Flow.Headers type.
 func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
 	if rh == nil {
 		return make(map[string][]string)
@@ -128,18 +128,17 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 	start := time.Now()
 
 	// Create the WebSocket flow record.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    connID,
 		Protocol:  "WebSocket",
 		Scheme:    wsScheme(upgradeReq, connInfo),
-		FlowType:  "bidirectional",
 		State:     "active",
 		Timestamp: start,
 		ConnInfo:  connInfo,
 	}
 
 	if h.store != nil {
-		if err := h.store.SaveFlow(ctx, fl); err != nil {
+		if err := h.store.SaveStream(ctx, fl); err != nil {
 			h.logger.Error("websocket flow save failed", "error", err)
 			return fmt.Errorf("save websocket flow: %w", err)
 		}
@@ -192,7 +191,7 @@ func (h *Handler) HandleUpgrade(ctx context.Context, clientConn net.Conn, upstre
 		if err != nil && ctx.Err() == nil && !closeReceived {
 			state = "error"
 		}
-		if updateErr := h.store.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{
+		if updateErr := h.store.UpdateStream(ctx, fl.ID, flow.StreamUpdate{
 			State:    state,
 			Duration: duration,
 		}); updateErr != nil {
@@ -217,8 +216,8 @@ func (h *Handler) recordUpgradeRequest(ctx context.Context, flowID string, req *
 		return
 	}
 
-	msg := &flow.Message{
-		FlowID:    flowID,
+	msg := &flow.Flow{
+		StreamID:  flowID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -226,7 +225,7 @@ func (h *Handler) recordUpgradeRequest(ctx context.Context, flowID string, req *
 		URL:       reqURL,
 		Headers:   rawHeadersToMap(req.Headers),
 	}
-	if err := h.store.AppendMessage(ctx, msg); err != nil {
+	if err := h.store.SaveFlow(ctx, msg); err != nil {
 		h.logger.Error("websocket upgrade request message save failed",
 			"flow_id", flowID, "error", err)
 	}
@@ -240,15 +239,15 @@ func (h *Handler) recordUpgradeResponse(ctx context.Context, flowID string, resp
 		return
 	}
 
-	msg := &flow.Message{
-		FlowID:     flowID,
+	msg := &flow.Flow{
+		StreamID:   flowID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start,
 		StatusCode: resp.StatusCode,
 		Headers:    rawHeadersToMap(resp.Headers),
 	}
-	if err := h.store.AppendMessage(ctx, msg); err != nil {
+	if err := h.store.SaveFlow(ctx, msg); err != nil {
 		h.logger.Error("websocket upgrade response message save failed",
 			"flow_id", flowID, "error", err)
 	}
@@ -956,8 +955,8 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 		metadata["safety_matched_on"] = safetyMeta.matchedOn
 	}
 
-	msg := &flow.Message{
-		FlowID:    flowID,
+	msg := &flow.Flow{
+		StreamID:  flowID,
 		Sequence:  msgSeq,
 		Direction: direction,
 		Timestamp: time.Now(),
@@ -976,7 +975,7 @@ func (h *Handler) recordDataMessage(ctx context.Context, opcode byte, payload []
 		msg.RawBytes = recordPayload
 	}
 
-	if err := h.store.AppendMessage(ctx, msg); err != nil {
+	if err := h.store.SaveFlow(ctx, msg); err != nil {
 		h.logger.Error("websocket message save failed",
 			"flow_id", flowID,
 			"direction", direction,
@@ -995,8 +994,8 @@ func (h *Handler) recordControlFrame(ctx context.Context, frame *Frame, flowID, 
 
 	msgSeq := int(seq.Add(1) - 1)
 
-	msg := &flow.Message{
-		FlowID:    flowID,
+	msg := &flow.Flow{
+		StreamID:  flowID,
 		Sequence:  msgSeq,
 		Direction: direction,
 		Timestamp: time.Now(),
@@ -1013,7 +1012,7 @@ func (h *Handler) recordControlFrame(ctx context.Context, frame *Frame, flowID, 
 		copy(msg.RawBytes, frame.Payload)
 	}
 
-	if err := h.store.AppendMessage(ctx, msg); err != nil {
+	if err := h.store.SaveFlow(ctx, msg); err != nil {
 		h.logger.Error("websocket control frame save failed",
 			"flow_id", flowID,
 			"direction", direction,

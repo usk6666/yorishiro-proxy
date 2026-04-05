@@ -249,10 +249,10 @@ func TestIntegration_WebSocket_EchoRelay(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -424,10 +424,10 @@ func TestIntegration_WebSocket_WSS_EchoRelay(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}

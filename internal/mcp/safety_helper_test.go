@@ -121,12 +121,12 @@ func TestOutputFilter_QueryMessages_MasksBody(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/api")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Method:    "GET",
@@ -134,7 +134,7 @@ func TestOutputFilter_QueryMessages_MasksBody(t *testing.T) {
 			Timestamp: time.Now(),
 			Body:      []byte("request body"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			StatusCode: 200,
@@ -189,12 +189,12 @@ func TestOutputFilter_QueryMessages_RawDataPreserved(t *testing.T) {
 	u, _ := url.Parse("http://example.com/api")
 	originalBody := `{"email":"admin@secret.com"}`
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Method:    "GET",
@@ -202,7 +202,7 @@ func TestOutputFilter_QueryMessages_RawDataPreserved(t *testing.T) {
 			Timestamp: time.Now(),
 			Body:      []byte("request body"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			StatusCode: 200,
@@ -215,7 +215,7 @@ func TestOutputFilter_QueryMessages_RawDataPreserved(t *testing.T) {
 	_ = setupTestSessionWithOutputFilter(t, store, nil, engine)
 
 	// Verify raw data in store is unchanged.
-	msgs, err := store.GetMessages(context.Background(), entry.Session.ID, flow.MessageListOptions{Direction: "receive"})
+	msgs, err := store.GetFlows(context.Background(), entry.Session.ID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -242,12 +242,12 @@ func TestOutputFilter_Resend_MasksResponseBody(t *testing.T) {
 
 	u, _ := url.Parse(srv.URL + "/api")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Method:    "GET",
@@ -257,7 +257,7 @@ func TestOutputFilter_Resend_MasksResponseBody(t *testing.T) {
 			},
 			Timestamp: time.Now(),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			StatusCode: 200,
@@ -270,7 +270,7 @@ func TestOutputFilter_Resend_MasksResponseBody(t *testing.T) {
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "resend",
-		Arguments: outputMustMarshalArgs(t, resendInput{Action: "resend", Params: resendParams{FlowID: entry.Session.ID}}),
+		Arguments: outputMustMarshalArgs(t, resendInput{Action: "resend", Params: resendParams{StreamID: entry.Session.ID}}),
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -311,12 +311,12 @@ func TestOutputFilter_Resend_RawDataPreservedInStore(t *testing.T) {
 
 	u, _ := url.Parse(srv.URL + "/api")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Method:    "GET",
@@ -326,7 +326,7 @@ func TestOutputFilter_Resend_RawDataPreservedInStore(t *testing.T) {
 			},
 			Timestamp: time.Now(),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			StatusCode: 200,
@@ -339,7 +339,7 @@ func TestOutputFilter_Resend_RawDataPreservedInStore(t *testing.T) {
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name:      "resend",
-		Arguments: outputMustMarshalArgs(t, resendInput{Action: "resend", Params: resendParams{FlowID: entry.Session.ID}}),
+		Arguments: outputMustMarshalArgs(t, resendInput{Action: "resend", Params: resendParams{StreamID: entry.Session.ID}}),
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -356,7 +356,7 @@ func TestOutputFilter_Resend_RawDataPreservedInStore(t *testing.T) {
 	}
 
 	// Verify the raw data in the store is unchanged.
-	msgs, err := store.GetMessages(context.Background(), resendResult.NewFlowID, flow.MessageListOptions{Direction: "receive"})
+	msgs, err := store.GetFlows(context.Background(), resendResult.NewFlowID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -741,19 +741,19 @@ func TestOutputFilter_NoEngine_PassesThrough(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/api")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Method:    "GET",
 			URL:       u,
 			Timestamp: time.Now(),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			StatusCode: 200,

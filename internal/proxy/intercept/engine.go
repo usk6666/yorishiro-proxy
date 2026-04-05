@@ -362,7 +362,7 @@ func cloneRule(r Rule) Rule {
 			HostPattern:       r.Conditions.HostPattern,
 			PathPattern:       r.Conditions.PathPattern,
 			UpgradeURLPattern: r.Conditions.UpgradeURLPattern,
-			FlowID:            r.Conditions.FlowID,
+			StreamID:          r.Conditions.StreamID,
 		},
 	}
 	if len(r.Conditions.Methods) > 0 {

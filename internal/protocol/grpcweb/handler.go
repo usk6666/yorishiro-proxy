@@ -20,13 +20,13 @@ import (
 // It is not a standalone ProtocolHandler — it is invoked by the HTTP handler
 // when a gRPC-Web Content-Type is detected on a request.
 type Handler struct {
-	store        flow.FlowWriter
+	store        flow.Writer
 	logger       *slog.Logger
 	pluginEngine *plugin.Engine
 }
 
 // NewHandler creates a new gRPC-Web handler with flow recording.
-func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
+func NewHandler(store flow.Writer, logger *slog.Logger) *Handler {
 	return &Handler{
 		store:  store,
 		logger: logger,
@@ -120,7 +120,6 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	}
 
 	// Determine session type based on data frame counts.
-	sessionType := grpc.ClassifyFlowType(len(reqResult.DataFrames), len(respResult.DataFrames))
 
 	// Detect trailers-only: no data frames AND no response body.
 	trailersOnly := len(respResult.DataFrames) == 0 && len(info.ResponseBody) == 0
@@ -134,11 +133,10 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	tlsVersion, tlsCipher, tlsALPN, tlsCertSubject := extractTLSInfo(info.TLS)
 
 	// Save flow.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    info.ConnID,
 		Protocol:  "gRPC-Web",
 		Scheme:    info.Scheme,
-		FlowType:  sessionType,
 		State:     "complete",
 		Timestamp: info.Start,
 		Duration:  info.Duration,
@@ -152,7 +150,7 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 		},
 	}
 
-	if err := h.store.SaveFlow(ctx, fl); err != nil {
+	if err := h.store.SaveStream(ctx, fl); err != nil {
 		return fmt.Errorf("save grpc-web session: %w", err)
 	}
 
@@ -171,7 +169,6 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	h.recordReceiveMessages(ctx, logger, fl.ID, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respResult, seq, trailersOnly)
 
 	logger.Info("gRPC-Web flow recorded",
-		"flow_type", sessionType,
 		"grpc_status", grpcStatus,
 		"req_frames", len(reqResult.DataFrames),
 		"resp_frames", len(respResult.DataFrames),
@@ -197,8 +194,8 @@ func (h *Handler) recordSendMessages(
 
 	if len(frames) == 0 {
 		// Even with no frames, record the request metadata.
-		msg := &flow.Message{
-			FlowID:    flowID,
+		msg := &flow.Flow{
+			StreamID:  flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -208,15 +205,15 @@ func (h *Handler) recordSendMessages(
 			RawBytes:  info.RequestBody,
 			Metadata:  buildSendMetadata(service, method, grpcEncoding, false),
 		}
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC-Web send message save failed", "sequence", seq, "error", err)
 		}
 		return seq + 1
 	}
 
 	for i, frame := range frames {
-		msg := &flow.Message{
-			FlowID:    flowID,
+		msg := &flow.Flow{
+			StreamID:  flowID,
 			Sequence:  seq,
 			Direction: "send",
 			Timestamp: info.Start,
@@ -239,7 +236,7 @@ func (h *Handler) recordSendMessages(
 			msg.Body = body
 		}
 
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC-Web send message save failed", "sequence", seq, "error", err)
 		}
 		seq++
@@ -277,8 +274,8 @@ func (h *Handler) recordReceiveMessages(
 		if trailersOnly {
 			meta["grpc_trailers_only"] = "true"
 		}
-		msg := &flow.Message{
-			FlowID:     flowID,
+		msg := &flow.Flow{
+			StreamID:   flowID,
 			Sequence:   seq,
 			Direction:  "receive",
 			Timestamp:  info.Start.Add(info.Duration),
@@ -287,7 +284,7 @@ func (h *Handler) recordReceiveMessages(
 			RawBytes:   info.ResponseBody,
 			Metadata:   meta,
 		}
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC-Web receive message save failed", "sequence", seq, "error", err)
 		}
 		return
@@ -295,8 +292,8 @@ func (h *Handler) recordReceiveMessages(
 
 	for i, frame := range frames {
 		isLast := i == len(frames)-1
-		msg := &flow.Message{
-			FlowID:    flowID,
+		msg := &flow.Flow{
+			StreamID:  flowID,
 			Sequence:  seq,
 			Direction: "receive",
 			Timestamp: info.Start.Add(info.Duration),
@@ -329,7 +326,7 @@ func (h *Handler) recordReceiveMessages(
 			msg.Body = body
 		}
 
-		if err := h.store.AppendMessage(ctx, msg); err != nil {
+		if err := h.store.SaveFlow(ctx, msg); err != nil {
 			logger.Error("gRPC-Web receive message save failed", "sequence", seq, "error", err)
 		}
 		seq++
@@ -558,7 +555,7 @@ func extractGRPCWebMessage(trailers map[string]string, headers parser.RawHeaders
 }
 
 // rawHeadersToMap converts parser.RawHeaders to map[string][]string for
-// storage in flow.Message. Header names preserve their original wire casing.
+// storage in flow.Flow. Header names preserve their original wire casing.
 func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
 	if rh == nil {
 		return make(map[string][]string)

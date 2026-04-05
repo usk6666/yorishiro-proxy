@@ -164,8 +164,8 @@ func TestClone_OpaqueShallowCopy(t *testing.T) {
 	}
 	data := &codecData{FrameID: 42}
 	orig := &Exchange{
-		FlowID: "flow-3",
-		Opaque: data,
+		StreamID: "flow-3",
+		Opaque:   data,
 	}
 	cloned := orig.Clone()
 
@@ -355,8 +355,8 @@ func TestClone_StreamIDCopied(t *testing.T) {
 
 func TestClone_URLWithUserInfo(t *testing.T) {
 	orig := &Exchange{
-		FlowID: "flow-url",
-		URL:    &url.URL{Scheme: "https", Host: "example.com", User: url.UserPassword("user", "pass")},
+		StreamID: "flow-url",
+		URL:      &url.URL{Scheme: "https", Host: "example.com", User: url.UserPassword("user", "pass")},
 	}
 	cloned := orig.Clone()
 

@@ -129,8 +129,8 @@ type executeInterceptResult struct {
 	Opcode string `json:"opcode,omitempty"`
 	// Direction is the frame direction: "client_to_server" or "server_to_client".
 	Direction string `json:"direction,omitempty"`
-	// FlowID is the WebSocket flow ID this frame belongs to.
-	FlowID string `json:"flow_id,omitempty"`
+	// StreamID is the WebSocket flow ID this frame belongs to.
+	StreamID string `json:"flow_id,omitempty"`
 	// UpgradeURL is the URL from the original WebSocket upgrade request.
 	UpgradeURL string `json:"upgrade_url,omitempty"`
 	// Sequence is the frame sequence number within the WebSocket connection.
@@ -191,7 +191,7 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 		result.Protocol = "websocket"
 		result.Opcode = wsOpcodeNameFromInt(item.WSOpcode)
 		result.Direction = item.WSDirection
-		result.FlowID = item.WSFlowID
+		result.StreamID = item.WSFlowID
 		result.UpgradeURL = item.WSUpgradeURL
 		result.Sequence = item.WSSequence
 	} else {

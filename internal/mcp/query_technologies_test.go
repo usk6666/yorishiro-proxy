@@ -20,25 +20,24 @@ func seedFlowWithTechnologies(t *testing.T, store flow.Store, id, protocol, meth
 		tags["technologies"] = techJSON
 	}
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  150 * time.Millisecond,
 		Tags:      tags,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
 	parsedURL, _ := url.Parse(urlStr)
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        id + "-send",
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -47,13 +46,13 @@ func seedFlowWithTechnologies(t *testing.T, store flow.Store, id, protocol, meth
 		Headers:   map[string][]string{"Host": {parsedURL.Hostname()}},
 		Body:      []byte("request body"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &flow.Message{
+	recvMsg := &flow.Flow{
 		ID:         id + "-recv",
-		FlowID:     id,
+		StreamID:   id,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -61,7 +60,7 @@ func seedFlowWithTechnologies(t *testing.T, store flow.Store, id, protocol, meth
 		Headers:    map[string][]string{"Content-Type": {"text/html"}},
 		Body:       []byte("<html></html>"),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(recv): %v", err)
 	}
 }

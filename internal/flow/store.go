@@ -19,59 +19,82 @@ type MacroRecord struct {
 	UpdatedAt time.Time
 }
 
-// FlowReader provides read-only access to flows and messages.
+// StreamReader provides read-only access to streams.
+type StreamReader interface {
+	// GetStream retrieves a stream by ID.
+	GetStream(ctx context.Context, id string) (*Stream, error)
+
+	// ListStreams returns streams matching the given filter options.
+	ListStreams(ctx context.Context, opts StreamListOptions) ([]*Stream, error)
+
+	// CountStreams returns the total number of streams matching the given
+	// filter options. Unlike ListStreams, it ignores Limit and Offset.
+	CountStreams(ctx context.Context, opts StreamListOptions) (int, error)
+}
+
+// FlowReader provides read-only access to flows.
 type FlowReader interface {
 	// GetFlow retrieves a flow by ID.
 	GetFlow(ctx context.Context, id string) (*Flow, error)
 
-	// ListFlows returns flows matching the given filter options.
-	ListFlows(ctx context.Context, opts ListOptions) ([]*Flow, error)
+	// GetFlows retrieves flows for a stream, optionally filtered.
+	GetFlows(ctx context.Context, streamID string, opts FlowListOptions) ([]*Flow, error)
 
-	// CountFlows returns the total number of flows matching the given
-	// filter options. Unlike ListFlows, it ignores Limit and Offset.
-	CountFlows(ctx context.Context, opts ListOptions) (int, error)
-
-	// GetMessages retrieves messages for a flow, optionally filtered.
-	GetMessages(ctx context.Context, flowID string, opts MessageListOptions) ([]*Message, error)
-
-	// CountMessages returns the number of messages for a flow.
-	CountMessages(ctx context.Context, flowID string) (int, error)
+	// CountFlows returns the number of flows for a stream.
+	CountFlows(ctx context.Context, streamID string) (int, error)
 }
 
-// FlowWriter provides write access for creating and updating flows and messages.
+// StreamWriter provides write access for creating and updating streams.
+type StreamWriter interface {
+	// SaveStream persists a new stream.
+	SaveStream(ctx context.Context, s *Stream) error
+
+	// UpdateStream applies partial updates to an existing stream.
+	UpdateStream(ctx context.Context, id string, update StreamUpdate) error
+}
+
+// FlowWriter provides write access for creating flows.
 type FlowWriter interface {
-	// SaveFlow persists a new flow.
-	SaveFlow(ctx context.Context, s *Flow) error
-
-	// UpdateFlow applies partial updates to an existing flow.
-	UpdateFlow(ctx context.Context, id string, update FlowUpdate) error
-
-	// AppendMessage persists a new message associated with a flow.
-	AppendMessage(ctx context.Context, msg *Message) error
+	// SaveFlow persists a new flow associated with a stream.
+	SaveFlow(ctx context.Context, f *Flow) error
 }
 
-// FlowDeleter provides deletion operations for flows.
-type FlowDeleter interface {
-	// DeleteFlow removes a flow and its associated messages by ID.
-	DeleteFlow(ctx context.Context, id string) error
+// Reader combines StreamReader and FlowReader for callers that need to
+// read both streams and their associated flows.
+type Reader interface {
+	StreamReader
+	FlowReader
+}
 
-	// DeleteAllFlows removes all flows and messages, returning the
-	// number of deleted flows.
-	DeleteAllFlows(ctx context.Context) (int64, error)
+// Writer combines StreamWriter and FlowWriter for callers that need to
+// write both streams and their associated flows.
+type Writer interface {
+	StreamWriter
+	FlowWriter
+}
 
-	// DeleteFlowsByProtocol removes flows matching the given protocol,
-	// returning the number of deleted flows.
-	// Associated messages are cascade-deleted.
-	DeleteFlowsByProtocol(ctx context.Context, protocol string) (int64, error)
+// StreamDeleter provides deletion operations for streams.
+type StreamDeleter interface {
+	// DeleteStream removes a stream and its associated flows by ID.
+	DeleteStream(ctx context.Context, id string) error
 
-	// DeleteFlowsOlderThan removes flows with timestamps before the
-	// given cutoff, returning the number of deleted flows.
-	// Associated messages are cascade-deleted.
-	DeleteFlowsOlderThan(ctx context.Context, before time.Time) (int64, error)
+	// DeleteAllStreams removes all streams and flows, returning the
+	// number of deleted streams.
+	DeleteAllStreams(ctx context.Context) (int64, error)
 
-	// DeleteExcessFlows removes the oldest flows exceeding maxCount,
-	// keeping only the most recent maxCount flows.
-	DeleteExcessFlows(ctx context.Context, maxCount int) (int64, error)
+	// DeleteStreamsByProtocol removes streams matching the given protocol,
+	// returning the number of deleted streams.
+	// Associated flows are cascade-deleted.
+	DeleteStreamsByProtocol(ctx context.Context, protocol string) (int64, error)
+
+	// DeleteStreamsOlderThan removes streams with timestamps before the
+	// given cutoff, returning the number of deleted streams.
+	// Associated flows are cascade-deleted.
+	DeleteStreamsOlderThan(ctx context.Context, before time.Time) (int64, error)
+
+	// DeleteExcessStreams removes the oldest streams exceeding maxCount,
+	// keeping only the most recent maxCount streams.
+	DeleteExcessStreams(ctx context.Context, maxCount int) (int64, error)
 }
 
 // MacroStore provides CRUD operations for macro definitions.
@@ -89,58 +112,60 @@ type MacroStore interface {
 	DeleteMacro(ctx context.Context, name string) error
 }
 
-// Store defines the composite interface for flow, message, and macro persistence.
+// Store defines the composite interface for stream, flow, and macro persistence.
 // It combines all sub-interfaces for backward compatibility. Callers that only
 // need a subset of operations should accept the narrower interface instead.
 type Store interface {
+	StreamReader
 	FlowReader
+	StreamWriter
 	FlowWriter
-	FlowDeleter
+	StreamDeleter
 	MacroStore
 }
 
-// ListOptions configures flow listing behavior.
-type ListOptions struct {
-	// Protocol filters flows by protocol (e.g. "HTTP/1.x").
+// StreamListOptions configures stream listing behavior.
+type StreamListOptions struct {
+	// Protocol filters streams by protocol (e.g. "HTTP/1.x").
 	Protocol string
-	// Scheme filters flows by URL scheme / transport indicator
+	// Scheme filters streams by URL scheme / transport indicator
 	// (e.g. "https", "http", "wss", "ws", "tcp").
 	Scheme string
-	// Method filters flows that have a send message with this HTTP method.
+	// Method filters streams that have a send flow with this HTTP method.
 	Method string
-	// URLPattern filters flows that have a send message with a URL
+	// URLPattern filters streams that have a send flow with a URL
 	// containing this substring.
 	URLPattern string
-	// StatusCode filters flows that have a receive message with this
+	// StatusCode filters streams that have a receive flow with this
 	// HTTP response status code.
 	StatusCode int
-	// BlockedBy filters flows by their blocked_by value.
-	// When set, only flows with a matching blocked_by value are returned.
+	// BlockedBy filters streams by their blocked_by value.
+	// When set, only streams with a matching blocked_by value are returned.
 	BlockedBy string
-	// State filters flows by their lifecycle state
+	// State filters streams by their lifecycle state
 	// ("active", "complete", or "error").
 	State string
-	// Technology filters flows whose tags contain a technology detection
+	// Technology filters streams whose tags contain a technology detection
 	// matching this name (case-insensitive substring match on the
 	// JSON-encoded "technologies" tag value).
 	Technology string
-	// ConnID filters flows by connection ID (exact match).
+	// ConnID filters streams by connection ID (exact match).
 	ConnID string
-	// Host filters flows by host. Matches against the server_addr column
-	// or the host portion of the URL in send messages.
+	// Host filters streams by host. Matches against the server_addr column
+	// or the host portion of the URL in send flows.
 	Host string
 	// SortBy specifies the field to sort results by.
 	// Valid values: "timestamp", "duration_ms".
 	// Default (empty): "timestamp".
 	SortBy string
-	// Limit is the maximum number of flows to return.
+	// Limit is the maximum number of streams to return.
 	Limit int
-	// Offset is the number of flows to skip for pagination.
+	// Offset is the number of streams to skip for pagination.
 	Offset int
 }
 
-// MessageListOptions configures message listing behavior.
-type MessageListOptions struct {
-	// Direction filters messages by direction ("send" or "receive").
+// FlowListOptions configures flow listing behavior.
+type FlowListOptions struct {
+	// Direction filters flows by direction ("send" or "receive").
 	Direction string
 }

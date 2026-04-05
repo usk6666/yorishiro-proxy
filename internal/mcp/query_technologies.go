@@ -40,11 +40,11 @@ func (s *Server) handleQueryTechnologies(ctx context.Context, input queryInput) 
 	}
 
 	// Fetch all complete flows (no pagination needed for aggregation).
-	opts := flow.ListOptions{
+	opts := flow.StreamListOptions{
 		State: "complete",
 		Limit: maxListLimit,
 	}
-	flowList, err := s.deps.store.ListFlows(ctx, opts)
+	flowList, err := s.deps.store.ListStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list flows: %w", err)
 	}
@@ -60,7 +60,7 @@ func (s *Server) handleQueryTechnologies(ctx context.Context, input queryInput) 
 
 // aggregateTechnologies collects unique technologies per host from the given flows.
 // Key: host, Value: map of "name|category" -> technologyEntry (dedup by name+category, keep best version).
-func (s *Server) aggregateTechnologies(ctx context.Context, flowList []*flow.Flow) map[string]map[string]technologyEntry {
+func (s *Server) aggregateTechnologies(ctx context.Context, flowList []*flow.Stream) map[string]map[string]technologyEntry {
 	hostMap := make(map[string]map[string]technologyEntry)
 
 	for _, fl := range flowList {
@@ -79,7 +79,7 @@ func (s *Server) aggregateTechnologies(ctx context.Context, flowList []*flow.Flo
 
 // extractFlowTechnologies parses technology detections from a flow's tags
 // and resolves the associated host. Returns nil detections or empty host on failure.
-func (s *Server) extractFlowTechnologies(ctx context.Context, fl *flow.Flow) ([]fingerprint.Detection, string) {
+func (s *Server) extractFlowTechnologies(ctx context.Context, fl *flow.Stream) ([]fingerprint.Detection, string) {
 	techJSON, ok := fl.Tags["technologies"]
 	if !ok || techJSON == "" {
 		return nil, ""
@@ -140,8 +140,8 @@ func buildSortedHosts(hostMap map[string]map[string]technologyEntry) []hostTechn
 }
 
 // extractHostFromFlow retrieves the host from the first send message of a flow.
-func extractHostFromFlow(ctx context.Context, s *Server, fl *flow.Flow) string {
-	msgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+func extractHostFromFlow(ctx context.Context, s *Server, fl *flow.Stream) string {
+	msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil || len(msgs) == 0 {
 		return ""
 	}

@@ -251,9 +251,9 @@ func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[st
 	start := time.Now()
 
 	// Fetch the template request from the recorded flow.
-	baseReq, err := e.flowFetcher.GetFlowRequest(stepCtx, step.FlowID)
+	baseReq, err := e.flowFetcher.GetFlowRequest(stepCtx, step.StreamID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetch flow %q: %w", step.FlowID, err)
+		return nil, nil, fmt.Errorf("fetch flow %q: %w", step.StreamID, err)
 	}
 
 	// Build the request with overrides and template expansion.
@@ -416,7 +416,7 @@ func validateStep(step *Step, index int, seenIDs map[string]bool) error {
 	}
 	seenIDs[step.ID] = true
 
-	if step.FlowID == "" {
+	if step.StreamID == "" {
 		return fmt.Errorf("step %q has no session_id", step.ID)
 	}
 

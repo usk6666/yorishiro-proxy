@@ -57,8 +57,8 @@ func TestQueryInterceptQueue_WebSocketFrame(t *testing.T) {
 	if entry.Direction != "client_to_server" {
 		t.Errorf("expected direction client_to_server, got %q", entry.Direction)
 	}
-	if entry.FlowID != "flow-abc" {
-		t.Errorf("expected flow_id flow-abc, got %q", entry.FlowID)
+	if entry.StreamID != "flow-abc" {
+		t.Errorf("expected flow_id flow-abc, got %q", entry.StreamID)
 	}
 	if entry.UpgradeURL != "wss://example.com/ws/chat" {
 		t.Errorf("expected upgrade_url wss://example.com/ws/chat, got %q", entry.UpgradeURL)
@@ -227,8 +227,8 @@ func TestExecuteRelease_WebSocketFrame(t *testing.T) {
 	if result.Direction != "client_to_server" {
 		t.Errorf("expected direction client_to_server, got %q", result.Direction)
 	}
-	if result.FlowID != "flow-rel" {
-		t.Errorf("expected flow_id flow-rel, got %q", result.FlowID)
+	if result.StreamID != "flow-rel" {
+		t.Errorf("expected flow_id flow-rel, got %q", result.StreamID)
 	}
 	if result.Action != "release" {
 		t.Errorf("expected action release, got %q", result.Action)
@@ -389,8 +389,8 @@ func TestBuildInterceptResult_WebSocketFrame(t *testing.T) {
 	if result.Direction != "client_to_server" {
 		t.Errorf("expected direction client_to_server, got %q", result.Direction)
 	}
-	if result.FlowID != "flow-build" {
-		t.Errorf("expected flow_id flow-build, got %q", result.FlowID)
+	if result.StreamID != "flow-build" {
+		t.Errorf("expected flow_id flow-build, got %q", result.StreamID)
 	}
 	if result.UpgradeURL != "wss://example.com/ws" {
 		t.Errorf("expected upgrade_url wss://example.com/ws, got %q", result.UpgradeURL)

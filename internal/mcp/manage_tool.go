@@ -29,8 +29,8 @@ type manageInput struct {
 // manageParams holds the union of all manage action-specific parameters.
 // Only the fields relevant to the specified action are used.
 type manageParams struct {
-	// FlowID is used by delete_flows (single deletion).
-	FlowID string `json:"flow_id,omitempty" jsonschema:"flow ID for single deletion"`
+	// StreamID is used by delete_flows (single deletion).
+	StreamID string `json:"flow_id,omitempty" jsonschema:"flow ID for single deletion"`
 
 	// delete_flows parameters
 	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"delete flows older than this many days"`
@@ -134,7 +134,7 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with age-based deletion")
 		}
 		cutoff := time.Now().UTC().AddDate(0, 0, -days)
-		n, err := s.deps.store.DeleteFlowsOlderThan(ctx, cutoff)
+		n, err := s.deps.store.DeleteStreamsOlderThan(ctx, cutoff)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete old flows: %w", err)
 		}
@@ -144,12 +144,12 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 		}, nil
 	}
 
-	if params.FlowID != "" {
-		fl, err := s.deps.store.GetFlow(ctx, params.FlowID)
+	if params.StreamID != "" {
+		fl, err := s.deps.store.GetStream(ctx, params.StreamID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("flow not found: %s", params.FlowID)
+			return nil, nil, fmt.Errorf("flow not found: %s", params.StreamID)
 		}
-		if err := s.deps.store.DeleteFlow(ctx, fl.ID); err != nil {
+		if err := s.deps.store.DeleteStream(ctx, fl.ID); err != nil {
 			return nil, nil, fmt.Errorf("delete flow: %w", err)
 		}
 		return nil, &executeDeleteFlowsResult{DeletedCount: 1}, nil
@@ -159,7 +159,7 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 		if !params.Confirm {
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with protocol-based deletion")
 		}
-		n, err := s.deps.store.DeleteFlowsByProtocol(ctx, params.Protocol)
+		n, err := s.deps.store.DeleteStreamsByProtocol(ctx, params.Protocol)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete flows by protocol: %w", err)
 		}
@@ -167,7 +167,7 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 	}
 
 	if params.Confirm {
-		n, err := s.deps.store.DeleteAllFlows(ctx)
+		n, err := s.deps.store.DeleteAllStreams(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete all flows: %w", err)
 		}
@@ -393,7 +393,7 @@ func writeToFileAtomic(outputPath string, writeFn func(f *os.File) (int, error))
 // exportFlowsToFile exports flows to a file at the given output path.
 func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
 	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
-		count, err := flow.ExportFlows(ctx, s.deps.store, f, opts)
+		count, err := flow.ExportStreams(ctx, s.deps.store, f, opts)
 		if err != nil {
 			return 0, fmt.Errorf("export flows: %w", err)
 		}
@@ -414,7 +414,7 @@ func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format strin
 func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
 	opts.MaxFlows = maxInlineExportFlows
 	var buf bytes.Buffer
-	n, err := flow.ExportFlows(ctx, s.deps.store, &buf, opts)
+	n, err := flow.ExportStreams(ctx, s.deps.store, &buf, opts)
 	if err != nil {
 		return nil, fmt.Errorf("export flows: %w", err)
 	}
@@ -491,7 +491,7 @@ func (s *Server) handleManageImportFlows(ctx context.Context, params manageParam
 	}
 	defer f.Close()
 
-	result, err := flow.ImportFlows(ctx, s.deps.store, f, flow.ImportOptions{
+	result, err := flow.ImportStreams(ctx, s.deps.store, f, flow.ImportOptions{
 		OnConflict:       conflict,
 		MaxScannerBuffer: config.MaxImportScannerBuffer,
 		ValidateIDs:      true,

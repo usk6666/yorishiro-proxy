@@ -28,11 +28,11 @@ func headerGet(h map[string][]string, name string) string {
 // mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
 	mu       sync.Mutex
-	flows    []*flow.Flow
-	messages []*flow.Message
+	flows    []*flow.Stream
+	messages []*flow.Flow
 }
 
-func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *mockStore) SaveStream(_ context.Context, s *flow.Stream) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s.ID == "" {
@@ -42,7 +42,7 @@ func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	return nil
 }
 
-func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (m *mockStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.flows {
@@ -62,7 +62,7 @@ func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpd
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
+func (m *mockStore) GetStream(_ context.Context, id string) (*flow.Stream, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.flows {
@@ -73,21 +73,21 @@ func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
 	return nil, fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
+func (m *mockStore) ListFlows(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*flow.Flow, len(m.flows))
+	result := make([]*flow.Stream, len(m.flows))
 	copy(result, m.flows)
 	return result, nil
 }
 
-func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
+func (m *mockStore) CountStreams(_ context.Context, _ flow.StreamListOptions) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.flows), nil
 }
 
-func (m *mockStore) DeleteFlow(_ context.Context, id string) error { return nil }
+func (m *mockStore) DeleteStream(_ context.Context, id string) error { return nil }
 
 func (m *mockStore) DeleteAllFlows(_ context.Context) (int64, error) { return 0, nil }
 
@@ -101,19 +101,19 @@ func (m *mockStore) DeleteFlowsOlderThan(_ context.Context, _ time.Time) (int64,
 
 func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error) { return 0, nil }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
+func (m *mockStore) GetFlows(_ context.Context, flowID string, opts flow.FlowListOptions) ([]*flow.Flow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var result []*flow.Message
+	var result []*flow.Flow
 	for _, msg := range m.messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			if opts.Direction != "" && msg.Direction != opts.Direction {
 				continue
 			}
@@ -123,12 +123,12 @@ func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.Mess
 	return result, nil
 }
 
-func (m *mockStore) CountMessages(_ context.Context, flowID string) (int, error) {
+func (m *mockStore) CountFlows(_ context.Context, flowID string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
 	for _, msg := range m.messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			count++
 		}
 	}
@@ -142,18 +142,18 @@ func (m *mockStore) GetMacro(_ context.Context, _ string) (*flow.MacroRecord, er
 func (m *mockStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) { return nil, nil }
 func (m *mockStore) DeleteMacro(_ context.Context, _ string) error             { return nil }
 
-func (m *mockStore) Flows() []*flow.Flow {
+func (m *mockStore) Flows() []*flow.Stream {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*flow.Flow, len(m.flows))
+	result := make([]*flow.Stream, len(m.flows))
 	copy(result, m.flows)
 	return result
 }
 
-func (m *mockStore) Messages() []*flow.Message {
+func (m *mockStore) Messages() []*flow.Flow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*flow.Message, len(m.messages))
+	result := make([]*flow.Flow, len(m.messages))
 	copy(result, m.messages)
 	return result
 }
@@ -265,9 +265,6 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 	if fl.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "WebSocket")
 	}
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
-	}
 
 	// Verify messages were recorded.
 	messages := store.Messages()
@@ -276,7 +273,7 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 	}
 
 	// Check first message (send: "hello").
-	var sendMsg *flow.Message
+	var sendMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && string(msg.Body) == "hello" {
 			sendMsg = msg
@@ -291,7 +288,7 @@ func TestHandleUpgrade_BasicTextRelay(t *testing.T) {
 	}
 
 	// Check receive message ("world").
-	var recvMsg *flow.Message
+	var recvMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "receive" && string(msg.Body) == "world" {
 			recvMsg = msg
@@ -364,7 +361,7 @@ func TestHandleUpgrade_BinaryFrame(t *testing.T) {
 
 	// Check that binary frame was stored as raw_bytes.
 	messages := store.Messages()
-	var binaryMsg *flow.Message
+	var binaryMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && msg.RawBytes != nil {
 			binaryMsg = msg
@@ -464,7 +461,7 @@ func TestHandleUpgrade_PingPongRelay(t *testing.T) {
 
 	// Verify ping and pong were recorded.
 	messages := store.Messages()
-	var pingMsg, pongMsg *flow.Message
+	var pingMsg, pongMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Metadata["opcode"] == "9" {
 			pingMsg = msg
@@ -557,7 +554,7 @@ func TestHandleUpgrade_FragmentedMessage(t *testing.T) {
 
 	// Check that the fragmented message was assembled and stored as one message.
 	messages := store.Messages()
-	var assembledMsg *flow.Message
+	var assembledMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && string(msg.Body) == "Hello World" {
 			assembledMsg = msg
@@ -1108,7 +1105,7 @@ func TestHandleUpgrade_UpgradeRequestResponseRecorded(t *testing.T) {
 	messages := store.Messages()
 
 	// Find the upgrade request message (sequence=0, direction="send").
-	var upgradeReqMsg *flow.Message
+	var upgradeReqMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Sequence == 0 && msg.Direction == "send" {
 			upgradeReqMsg = msg
@@ -1135,7 +1132,7 @@ func TestHandleUpgrade_UpgradeRequestResponseRecorded(t *testing.T) {
 	}
 
 	// Find the upgrade response message (sequence=1, direction="receive").
-	var upgradeRespMsg *flow.Message
+	var upgradeRespMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Sequence == 1 && msg.Direction == "receive" {
 			upgradeRespMsg = msg

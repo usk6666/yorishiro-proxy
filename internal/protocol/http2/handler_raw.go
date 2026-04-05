@@ -148,17 +148,16 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 	protocol := proxy.SOCKS5Protocol(sc.ctx, "HTTP/2")
 	tags := proxy.MergeSOCKS5Tags(sc.ctx, nil)
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    sc.connID,
 		Protocol:  protocol,
 		Scheme:    sc.flowScheme,
-		FlowType:  "unary",
 		State:     "active",
 		Timestamp: sc.start,
 		Tags:      tags,
 		ConnInfo:  sc.connInfo,
 	}
-	if err := h.Store.SaveFlow(sc.ctx, fl); err != nil {
+	if err := h.Store.SaveStream(sc.ctx, fl); err != nil {
 		sc.logger.Error("HTTP/2 raw forward: flow save failed",
 			"method", sc.h2req.Method, "url", sc.reqURL.String(), "error", err)
 		return nil
@@ -168,8 +167,8 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 
 	// Sequence 0: original (wire-observed raw frames).
 	origMeta := buildFrameMetadata(sc.reqRawFrames, map[string]string{"variant": "original"})
-	originalMsg := &flow.Message{
-		FlowID:        fl.ID,
+	originalMsg := &flow.Flow{
+		StreamID:      fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     sc.start,
@@ -181,14 +180,14 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 		BodyTruncated: sc.srp.reqTruncated,
 		Metadata:      origMeta,
 	}
-	if err := h.Store.AppendMessage(sc.ctx, originalMsg); err != nil {
+	if err := h.Store.SaveFlow(sc.ctx, originalMsg); err != nil {
 		sc.logger.Error("HTTP/2 raw forward: original send save failed", "error", err)
 	}
 
 	// Sequence 1: modified (edited raw bytes).
 	modMeta := map[string]string{"variant": "modified"}
-	modifiedMsg := &flow.Message{
-		FlowID:        fl.ID,
+	modifiedMsg := &flow.Flow{
+		StreamID:      fl.ID,
 		Sequence:      1,
 		Direction:     "send",
 		Timestamp:     sc.start,
@@ -200,7 +199,7 @@ func (h *Handler) recordRawSend(sc *streamContext, rawBytes []byte, isModified b
 		BodyTruncated: sc.srp.reqTruncated,
 		Metadata:      modMeta,
 	}
-	if err := h.Store.AppendMessage(sc.ctx, modifiedMsg); err != nil {
+	if err := h.Store.SaveFlow(sc.ctx, modifiedMsg); err != nil {
 		sc.logger.Error("HTTP/2 raw forward: modified send save failed", "error", err)
 	}
 

@@ -22,7 +22,7 @@ import (
 // It acts as a fallback handler: Detect always returns true, so it must be
 // registered last in the protocol detector.
 type Handler struct {
-	store        flow.FlowWriter
+	store        flow.Writer
 	forwards     map[string]*config.ForwardConfig // listen port -> forward config
 	logger       *slog.Logger
 	pluginEngine *plugin.Engine
@@ -33,7 +33,7 @@ type Handler struct {
 //
 // forwards maps local listen ports to forward configurations.
 // Connections arriving on a port without a mapping are closed immediately.
-func NewHandler(store flow.FlowWriter, forwards map[string]*config.ForwardConfig, logger *slog.Logger) *Handler {
+func NewHandler(store flow.Writer, forwards map[string]*config.ForwardConfig, logger *slog.Logger) *Handler {
 	if forwards == nil {
 		forwards = make(map[string]*config.ForwardConfig)
 	}
@@ -102,11 +102,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 
 	// Create flow record before dialing so that connection failures are recorded.
 	start := time.Now()
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    connID,
 		Protocol:  "TCP",
 		Scheme:    "tcp",
-		FlowType:  "bidirectional",
 		State:     "active",
 		Timestamp: start,
 		ConnInfo: &flow.ConnectionInfo{
@@ -116,7 +115,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	}
 
 	if h.store != nil {
-		if err := h.store.SaveFlow(ctx, fl); err != nil {
+		if err := h.store.SaveStream(ctx, fl); err != nil {
 			logger.Error("TCP flow save failed", "error", err)
 			// Continue even if recording fails.
 		}
@@ -145,7 +144,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 	// Run bidirectional relay with recording.
 	relayErr := RunRelay(ctx, conn, upstream, RelayConfig{
 		Store:        h.store,
-		FlowID:       fl.ID,
+		StreamID:     fl.ID,
 		Logger:       logger,
 		PluginEngine: h.pluginEngine,
 		ConnInfo:     pluginConnInfo,
@@ -159,7 +158,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 		if relayErr != nil && ctx.Err() == nil {
 			state = "error"
 		}
-		if err := h.store.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{
+		if err := h.store.UpdateStream(ctx, fl.ID, flow.StreamUpdate{
 			State:    state,
 			Duration: duration,
 		}); err != nil {
@@ -209,7 +208,7 @@ func (h *Handler) recordFlowError(ctx context.Context, flowID string, start time
 		return
 	}
 	duration := time.Since(start)
-	if err := h.store.UpdateFlow(ctx, flowID, flow.FlowUpdate{
+	if err := h.store.UpdateStream(ctx, flowID, flow.StreamUpdate{
 		State:    "error",
 		Duration: duration,
 	}); err != nil {

@@ -70,7 +70,7 @@ func TestFlowTiming_HTTPSTimingRecorded(t *testing.T) {
 	resp.Body.Close()
 
 	// Wait for flow to be persisted.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 	fl := flows[0]
 
 	// Verify timing fields are populated.
@@ -139,7 +139,7 @@ func TestFlowTiming_ConsistencyCheck(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 	fl := flows[0]
 
 	// Verify timing values are present and consistent.
@@ -237,7 +237,7 @@ func TestFlowTiming_HTTPTimingRecorded(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	// HTTP flows should also have timing.
@@ -293,7 +293,7 @@ func TestFlowTiming_InHAR(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 	fl := flows[0]
 
 	// Verify flow has timing data.

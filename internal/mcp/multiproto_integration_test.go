@@ -20,21 +20,20 @@ func seedMultiProtoSession(t *testing.T, store flow.Store, opts multiProtoSessio
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  opts.Protocol,
-		FlowType:  opts.FlowType,
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  opts.Duration,
 		ConnInfo:  opts.ConnInfo,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	for _, msg := range opts.Messages {
-		msg.FlowID = fl.ID
-		if err := store.AppendMessage(ctx, msg); err != nil {
+		msg.StreamID = fl.ID
+		if err := store.SaveFlow(ctx, msg); err != nil {
 			t.Fatalf("AppendMessage(seq=%d): %v", msg.Sequence, err)
 		}
 	}
@@ -45,10 +44,9 @@ func seedMultiProtoSession(t *testing.T, store flow.Store, opts multiProtoSessio
 // multiProtoSessionOpts configures a flow for multi-protocol integration tests.
 type multiProtoSessionOpts struct {
 	Protocol string
-	FlowType string
 	Duration time.Duration
 	ConnInfo *flow.ConnectionInfo
-	Messages []*flow.Message
+	Messages []*flow.Flow
 }
 
 // --- Test: HTTP/2 Session Recording and Query ---
@@ -59,7 +57,6 @@ func TestMultiProto_HTTP2_SessionRecordingAndQuery(t *testing.T) {
 	reqURL, _ := url.Parse("https://api.example.com/v2/users")
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
-		FlowType: "unary",
 		Duration: 50 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr:           "192.168.1.100:54321",
@@ -69,7 +66,7 @@ func TestMultiProto_HTTP2_SessionRecordingAndQuery(t *testing.T) {
 			TLSALPN:              "h2",
 			TLSServerCertSubject: "CN=api.example.com",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -104,9 +101,6 @@ func TestMultiProto_HTTP2_SessionRecordingAndQuery(t *testing.T) {
 	entry := listResult.Flows[0]
 	if entry.Protocol != "HTTP/2" {
 		t.Errorf("protocol = %q, want HTTP/2", entry.Protocol)
-	}
-	if entry.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want unary", entry.FlowType)
 	}
 	if entry.Method != "GET" {
 		t.Errorf("method = %q, want GET", entry.Method)
@@ -162,13 +156,12 @@ func TestMultiProto_HTTP2_H2C_SessionRecordingAndQuery(t *testing.T) {
 	reqURL, _ := url.Parse("http://internal-service:8080/health")
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
-		FlowType: "unary",
 		Duration: 30 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: "127.0.0.1:54321",
 			ServerAddr: "127.0.0.1:8080",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -212,14 +205,13 @@ func TestMultiProto_WebSocket_SessionRecordingAndQuery(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
-		FlowType: "bidirectional",
 		Duration: 2 * time.Second,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: "192.168.1.100:54321",
 			ServerAddr: "ws.example.com:443",
 			TLSVersion: "TLS 1.3",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -270,9 +262,6 @@ func TestMultiProto_WebSocket_SessionRecordingAndQuery(t *testing.T) {
 	if entry.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want WebSocket", entry.Protocol)
 	}
-	if entry.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want bidirectional", entry.FlowType)
-	}
 	if entry.MessageCount != 5 {
 		t.Errorf("message_count = %d, want 5", entry.MessageCount)
 	}
@@ -293,9 +282,6 @@ func TestMultiProto_WebSocket_SessionRecordingAndQuery(t *testing.T) {
 		"resource": "flow",
 		"id":       flowID,
 	})
-	if detail.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want bidirectional", detail.FlowType)
-	}
 	if detail.MessagePreview == nil {
 		t.Fatal("message_preview should not be nil for bidirectional session")
 	}
@@ -342,9 +328,8 @@ func TestMultiProto_WebSocket_BinaryFrame(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
-		FlowType: "bidirectional",
 		Duration: 100 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -375,7 +360,6 @@ func TestMultiProto_GRPC_UnarySessionRecordingAndQuery(t *testing.T) {
 	reqURL, _ := url.Parse("https://api.example.com/pkg.UserService/GetUser")
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
-		FlowType: "unary",
 		Duration: 25 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr:           "192.168.1.100:54321",
@@ -385,7 +369,7 @@ func TestMultiProto_GRPC_UnarySessionRecordingAndQuery(t *testing.T) {
 			TLSALPN:              "h2",
 			TLSServerCertSubject: "CN=api.example.com",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -501,9 +485,8 @@ func TestMultiProto_GRPC_StreamingSession(t *testing.T) {
 	reqURL, _ := url.Parse("https://api.example.com/pkg.StreamService/Subscribe")
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
-		FlowType: "stream",
 		Duration: 500 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -536,9 +519,6 @@ func TestMultiProto_GRPC_StreamingSession(t *testing.T) {
 		"resource": "flow",
 		"id":       flowID,
 	})
-	if detail.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want stream", detail.FlowType)
-	}
 	if detail.MessagePreview == nil {
 		t.Fatal("message_preview should not be nil for streaming session")
 	}
@@ -557,13 +537,12 @@ func TestMultiProto_TCP_SessionRecordingAndQuery(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP",
-		FlowType: "bidirectional",
 		Duration: 1 * time.Second,
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: "192.168.1.100:54321",
 			ServerAddr: "db.example.com:3306",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -595,9 +574,6 @@ func TestMultiProto_TCP_SessionRecordingAndQuery(t *testing.T) {
 	entry := listResult.Flows[0]
 	if entry.Protocol != "TCP" {
 		t.Errorf("protocol = %q, want TCP", entry.Protocol)
-	}
-	if entry.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want bidirectional", entry.FlowType)
 	}
 
 	// Verify TCP protocol summary: send_bytes / receive_bytes.
@@ -654,9 +630,8 @@ func TestMultiProto_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 	reqURL1, _ := url.Parse("http://example.com/api")
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
-		FlowType: "unary",
 		Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: reqURL1},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200},
 		},
@@ -664,9 +639,8 @@ func TestMultiProto_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
-		FlowType: "unary",
 		Duration: 20 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(),
 				Metadata: map[string]string{"service": "TestService", "method": "Call"},
@@ -680,18 +654,16 @@ func TestMultiProto_Query_ProtocolFilter_CrossProtocol(t *testing.T) {
 
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
-		FlowType: "bidirectional",
 		Duration: 100 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("ws-msg"), Metadata: map[string]string{"opcode": "1"}},
 		},
 	})
 
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP",
-		FlowType: "bidirectional",
 		Duration: 200 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("tcp-data")},
 		},
 	})
@@ -858,9 +830,8 @@ func TestMultiProto_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 	httpURL, _ := url.Parse("http://example.com/api/data")
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/1.x",
-		FlowType: "unary",
 		Duration: 50 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: httpURL, Headers: map[string][]string{"Host": {"example.com"}}},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200, Body: []byte("http-response")},
 		},
@@ -869,12 +840,11 @@ func TestMultiProto_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 	h2URL, _ := url.Parse("https://api.example.com/v2/resource")
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "HTTP/2",
-		FlowType: "unary",
 		Duration: 30 * time.Millisecond,
 		ConnInfo: &flow.ConnectionInfo{
 			TLSALPN: "h2",
 		},
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "POST", URL: h2URL},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 201, Body: []byte(`{"id":"new"}`)},
 		},
@@ -882,9 +852,8 @@ func TestMultiProto_ProtocolMixed_MultipleProtocolsSameStore(t *testing.T) {
 
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
-		FlowType: "bidirectional",
 		Duration: 2 * time.Second,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("ws-hello"), Metadata: map[string]string{"opcode": "1"}},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), Body: []byte("ws-world"), Metadata: map[string]string{"opcode": "1"}},
 		},
@@ -955,26 +924,25 @@ func TestMultiProto_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a TCP flow with a send message.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "original:1234"},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("GET / HTTP/1.1\r\nHost: test\r\n\r\n"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -1013,7 +981,7 @@ func TestMultiProto_Execute_TCPReplay_WithRealEchoServer(t *testing.T) {
 	}
 
 	// Verify the new flow is recorded in the store.
-	newFl, err := store.GetFlow(ctx, out.NewFlowID)
+	newFl, err := store.GetStream(ctx, out.NewFlowID)
 	if err != nil {
 		t.Fatalf("get new flow: %v", err)
 	}
@@ -1030,13 +998,12 @@ func TestMultiProto_Execute_TCPReplay_ProtocolMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a non-TCP flow.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
@@ -1060,20 +1027,20 @@ func TestMultiProto_Execute_DeleteFlows_MixedProtocols(t *testing.T) {
 
 	// Seed sessions for different protocols.
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-		Protocol: "HTTP/2", FlowType: "unary", Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()}},
+		Protocol: "HTTP/2", Duration: 10 * time.Millisecond,
+		Messages: []*flow.Flow{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()}},
 	})
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-		Protocol: "gRPC", FlowType: "unary", Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()}},
+		Protocol: "gRPC", Duration: 10 * time.Millisecond,
+		Messages: []*flow.Flow{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC()}},
 	})
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-		Protocol: "WebSocket", FlowType: "bidirectional", Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Metadata: map[string]string{"opcode": "1"}}},
+		Protocol: "WebSocket", Duration: 10 * time.Millisecond,
+		Messages: []*flow.Flow{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Metadata: map[string]string{"opcode": "1"}}},
 	})
 	seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-		Protocol: "TCP", FlowType: "bidirectional", Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("data")}},
+		Protocol: "TCP", Duration: 10 * time.Millisecond,
+		Messages: []*flow.Flow{{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("data")}},
 	})
 
 	// Verify 4 sessions.
@@ -1110,13 +1077,13 @@ func TestMultiProto_Session_MessagePreview_LargeStreamingSession(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Create a WebSocket flow with 20 messages.
-	msgs := make([]*flow.Message, 20)
+	msgs := make([]*flow.Flow, 20)
 	for i := 0; i < 20; i++ {
 		dir := "send"
 		if i%2 == 1 {
 			dir = "receive"
 		}
-		msgs[i] = &flow.Message{
+		msgs[i] = &flow.Flow{
 			Sequence:  i,
 			Direction: dir,
 			Timestamp: time.Now().UTC(),
@@ -1127,7 +1094,6 @@ func TestMultiProto_Session_MessagePreview_LargeStreamingSession(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "WebSocket",
-		FlowType: "bidirectional",
 		Duration: 5 * time.Second,
 		Messages: msgs,
 	})
@@ -1159,9 +1125,8 @@ func TestMultiProto_GRPC_ErrorStatusRecording(t *testing.T) {
 	reqURL, _ := url.Parse("https://api.example.com/pkg.AuthService/Authenticate")
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "gRPC",
-		FlowType: "unary",
 		Duration: 15 * time.Millisecond,
-		Messages: []*flow.Message{
+		Messages: []*flow.Flow{
 			{
 				Sequence:  0,
 				Direction: "send",
@@ -1217,8 +1182,8 @@ func TestMultiProto_Execute_DeleteSingleSession_ByProtocol(t *testing.T) {
 	// Seed an HTTP/2 and a gRPC flow.
 	h2URL, _ := url.Parse("https://example.com/api")
 	h2ID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-		Protocol: "HTTP/2", FlowType: "unary", Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{
+		Protocol: "HTTP/2", Duration: 10 * time.Millisecond,
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: h2URL},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200},
 		},
@@ -1226,8 +1191,8 @@ func TestMultiProto_Execute_DeleteSingleSession_ByProtocol(t *testing.T) {
 
 	grpcURL, _ := url.Parse("https://example.com/pkg.Svc/Method")
 	grpcID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-		Protocol: "gRPC", FlowType: "unary", Duration: 10 * time.Millisecond,
-		Messages: []*flow.Message{
+		Protocol: "gRPC", Duration: 10 * time.Millisecond,
+		Messages: []*flow.Flow{
 			{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "POST", URL: grpcURL, Metadata: map[string]string{"service": "pkg.Svc", "method": "Method"}},
 			{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200, Metadata: map[string]string{"grpc_status": "0"}},
 		},
@@ -1268,22 +1233,22 @@ func TestMultiProto_Query_SessionsPagination_MixedProtocols(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		reqURL, _ := url.Parse(fmt.Sprintf("https://example.com/api/h2-%d", i))
 		seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-			Protocol: "HTTP/2", FlowType: "unary", Duration: 10 * time.Millisecond,
-			Messages: []*flow.Message{
+			Protocol: "HTTP/2", Duration: 10 * time.Millisecond,
+			Messages: []*flow.Flow{
 				{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Method: "GET", URL: reqURL},
 				{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), StatusCode: 200},
 			},
 		})
 		seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-			Protocol: "gRPC", FlowType: "unary", Duration: 10 * time.Millisecond,
-			Messages: []*flow.Message{
+			Protocol: "gRPC", Duration: 10 * time.Millisecond,
+			Messages: []*flow.Flow{
 				{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Metadata: map[string]string{"service": "Svc", "method": "M"}},
 				{Sequence: 1, Direction: "receive", Timestamp: time.Now().UTC(), Metadata: map[string]string{"grpc_status": "0"}},
 			},
 		})
 		seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
-			Protocol: "WebSocket", FlowType: "bidirectional", Duration: 100 * time.Millisecond,
-			Messages: []*flow.Message{
+			Protocol: "WebSocket", Duration: 100 * time.Millisecond,
+			Messages: []*flow.Flow{
 				{Sequence: 0, Direction: "send", Timestamp: time.Now().UTC(), Body: []byte("ws"), Metadata: map[string]string{"opcode": "1"}},
 			},
 		})
@@ -1336,13 +1301,13 @@ func TestMultiProto_Query_MessagesPagination_StreamingSession(t *testing.T) {
 	env := setupIntegrationEnv(t)
 
 	// Create a TCP flow with 8 messages.
-	msgs := make([]*flow.Message, 8)
+	msgs := make([]*flow.Flow, 8)
 	for i := 0; i < 8; i++ {
 		dir := "send"
 		if i%2 == 1 {
 			dir = "receive"
 		}
-		msgs[i] = &flow.Message{
+		msgs[i] = &flow.Flow{
 			Sequence:  i,
 			Direction: dir,
 			Timestamp: time.Now().UTC(),
@@ -1352,7 +1317,6 @@ func TestMultiProto_Query_MessagesPagination_StreamingSession(t *testing.T) {
 
 	flowID := seedMultiProtoSession(t, env.store, multiProtoSessionOpts{
 		Protocol: "TCP",
-		FlowType: "bidirectional",
 		Duration: 500 * time.Millisecond,
 		Messages: msgs,
 	})

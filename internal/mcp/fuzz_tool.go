@@ -27,8 +27,8 @@ type fuzzInput struct {
 // fuzzParams holds the union of all fuzz action-specific parameters.
 // Only the fields relevant to the specified action are used.
 type fuzzParams struct {
-	// FlowID is the template flow for fuzz action.
-	FlowID string `json:"flow_id,omitempty" jsonschema:"template flow ID for fuzz"`
+	// StreamID is the template flow for fuzz action.
+	StreamID string `json:"flow_id,omitempty" jsonschema:"template flow ID for fuzz"`
 
 	// fuzz parameters
 	AttackType  string                       `json:"attack_type,omitempty" jsonschema:"fuzz attack type: sequential or parallel"`
@@ -78,7 +78,7 @@ func (s *Server) handleFuzzTool(ctx context.Context, _ *gomcp.CallToolRequest, i
 	slog.DebugContext(ctx, "MCP tool invoked",
 		"tool", "fuzz",
 		"action", input.Action,
-		"flow_id", input.Params.FlowID,
+		"flow_id", input.Params.StreamID,
 		"fuzz_id", input.Params.FuzzID,
 	)
 	defer func() {
@@ -119,7 +119,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 	}
 
 	// Load template flow first for protocol check, then load messages.
-	templateFlow, err := s.loadFuzzTemplateFlow(ctx, params.FlowID)
+	templateFlow, err := s.loadFuzzTemplateFlow(ctx, params.StreamID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -184,7 +184,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 
 // validateFuzzParams validates the required parameters for starting a fuzz job.
 func validateFuzzParams(params fuzzParams) error {
-	if params.FlowID == "" {
+	if params.StreamID == "" {
 		return fmt.Errorf("flow_id is required for fuzz action")
 	}
 	if params.AttackType == "" {
@@ -205,11 +205,11 @@ func validateFuzzParams(params fuzzParams) error {
 // loadFuzzTemplateFlow loads the template flow from the store.
 // This is called before protocol checks so unsupported protocols can be
 // rejected without loading messages.
-func (s *Server) loadFuzzTemplateFlow(ctx context.Context, flowID string) (*flow.Flow, error) {
+func (s *Server) loadFuzzTemplateFlow(ctx context.Context, flowID string) (*flow.Stream, error) {
 	if s.deps.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
-	fl, err := s.deps.store.GetFlow(ctx, flowID)
+	fl, err := s.deps.store.GetStream(ctx, flowID)
 	if err != nil {
 		return nil, fmt.Errorf("get template flow: %w", err)
 	}
@@ -217,8 +217,8 @@ func (s *Server) loadFuzzTemplateFlow(ctx context.Context, flowID string) (*flow
 }
 
 // loadFuzzTemplateSendMessages loads the send-direction messages for the given flow.
-func (s *Server) loadFuzzTemplateSendMessages(ctx context.Context, flowID string) ([]*flow.Message, error) {
-	sendMsgs, err := s.deps.store.GetMessages(ctx, flowID, flow.MessageListOptions{Direction: "send"})
+func (s *Server) loadFuzzTemplateSendMessages(ctx context.Context, flowID string) ([]*flow.Flow, error) {
+	sendMsgs, err := s.deps.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -227,7 +227,7 @@ func (s *Server) loadFuzzTemplateSendMessages(ctx context.Context, flowID string
 
 // checkFuzzTargetScopeWithData enforces the target scope on pre-loaded template data.
 // If no target scope is configured, this is a no-op.
-func (s *Server) checkFuzzTargetScopeWithData(_ *flow.Flow, sendMsgs []*flow.Message) error {
+func (s *Server) checkFuzzTargetScopeWithData(_ *flow.Stream, sendMsgs []*flow.Flow) error {
 	if s.deps.targetScope == nil || !s.deps.targetScope.HasRules() {
 		return nil
 	}
@@ -241,7 +241,7 @@ func (s *Server) checkFuzzTargetScopeWithData(_ *flow.Flow, sendMsgs []*flow.Mes
 
 // checkFuzzSafetyInputWithData validates pre-loaded template send messages against
 // the safety filter engine. If no safety engine is configured, this is a no-op.
-func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Message) error {
+func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Flow) error {
 	if s.deps.safetyEngine == nil {
 		return nil
 	}
@@ -264,7 +264,7 @@ func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Message) error {
 func buildFuzzConfig(params fuzzParams) fuzzer.RunConfig {
 	cfg := fuzzer.RunConfig{
 		Config: fuzzer.Config{
-			FlowID:      params.FlowID,
+			StreamID:    params.StreamID,
 			AttackType:  params.AttackType,
 			Positions:   params.Positions,
 			PayloadSets: params.PayloadSets,
@@ -388,17 +388,12 @@ func (s *Server) handleFuzzCancelAction(params fuzzParams) (*gomcp.CallToolResul
 
 // checkFuzzProtocolSupport returns an error if the flow's protocol is not
 // supported for fuzzing.
-func checkFuzzProtocolSupport(fl *flow.Flow) error {
+func checkFuzzProtocolSupport(fl *flow.Stream) error {
 	// gRPC flows use length-prefixed protobuf frames; byte-offset fuzzing would
 	// corrupt the frame header and produce invalid messages. Reject early until
 	// frame-aware mutation is implemented.
 	if fl.Protocol == "gRPC" {
 		return fmt.Errorf("fuzzing gRPC flows is not yet supported: gRPC uses length-prefixed protobuf frames that require frame-aware mutation")
-	}
-
-	// gRPC-Web streaming flows are not supported for fuzzing (same limitation as resend).
-	if fl.Protocol == "gRPC-Web" && fl.FlowType != "unary" {
-		return fmt.Errorf("fuzzing gRPC-Web streaming flows (type: %s) is not yet supported; only unary gRPC-Web flows can be fuzzed", fl.FlowType)
 	}
 
 	return nil

@@ -22,8 +22,8 @@ const maxResponseSize = 1 << 20
 
 // Config holds the configuration for a fuzz job.
 type Config struct {
-	// FlowID is the template flow to fuzz.
-	FlowID string `json:"flow_id"`
+	// StreamID is the template flow to fuzz.
+	StreamID string `json:"flow_id"`
 	// AttackType is the fuzzing strategy: sequential or parallel.
 	AttackType string `json:"attack_type"`
 	// Positions defines where to inject payloads.
@@ -38,7 +38,7 @@ type Config struct {
 
 // Validate checks that a Config is well-formed.
 func (c *Config) Validate() error {
-	if c.FlowID == "" {
+	if c.StreamID == "" {
 		return fmt.Errorf("flow_id is required")
 	}
 	if c.AttackType == "" {
@@ -81,16 +81,16 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// FlowFetcher retrieves flow data needed by the fuzz engine.
+// FlowFetcher retrieves stream and flow data needed by the fuzz engine.
 type FlowFetcher interface {
-	GetFlow(ctx context.Context, id string) (*flow.Flow, error)
-	GetMessages(ctx context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error)
+	GetStream(ctx context.Context, id string) (*flow.Stream, error)
+	GetFlows(ctx context.Context, streamID string, opts flow.FlowListOptions) ([]*flow.Flow, error)
 }
 
-// FlowRecorder persists new flows and messages created during fuzzing.
+// FlowRecorder persists new streams and flows created during fuzzing.
 type FlowRecorder interface {
-	SaveFlow(ctx context.Context, s *flow.Flow) error
-	AppendMessage(ctx context.Context, msg *flow.Message) error
+	SaveStream(ctx context.Context, s *flow.Stream) error
+	SaveFlow(ctx context.Context, f *flow.Flow) error
 }
 
 // FuzzJobStore persists fuzz job and result data.
@@ -143,22 +143,22 @@ type Result struct {
 
 // setupRun validates the config, fetches the template flow, resolves payloads,
 // creates the iterator, and persists the job to the DB.
-func (e *Engine) setupRun(ctx context.Context, cfg Config) (*flow.Flow, *RequestData, Iterator, *flow.FuzzJob, error) {
+func (e *Engine) setupRun(ctx context.Context, cfg Config) (*flow.Stream, *RequestData, Iterator, *flow.FuzzJob, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("invalid fuzz config: %w", err)
 	}
 
-	fl, err := e.flowFetcher.GetFlow(ctx, cfg.FlowID)
+	fl, err := e.flowFetcher.GetStream(ctx, cfg.StreamID)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("get template flow: %w", err)
 	}
 
-	sendMsgs, err := e.flowFetcher.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	sendMsgs, err := e.flowFetcher.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, nil, nil, nil, fmt.Errorf("template flow %s has no send messages", cfg.FlowID)
+		return nil, nil, nil, nil, fmt.Errorf("template flow %s has no send messages", cfg.StreamID)
 	}
 
 	baseData := BuildRequestData(sendMsgs[0])
@@ -181,7 +181,7 @@ func (e *Engine) setupRun(ctx context.Context, cfg Config) (*flow.Flow, *Request
 	now := time.Now()
 	job := &flow.FuzzJob{
 		ID:        uuid.New().String(),
-		FlowID:    cfg.FlowID,
+		StreamID:  cfg.StreamID,
 		Config:    string(configJSON),
 		Status:    "running",
 		Tag:       cfg.Tag,
@@ -431,23 +431,22 @@ func (e *Engine) recordFuzzFlow(ctx context.Context, data *RequestData, resp *fu
 	if data.URL != nil && data.URL.Scheme == "https" {
 		scheme = "https"
 	}
-	newFl := &flow.Flow{
+	newFl := &flow.Stream{
 		Protocol:  protocol,
 		Scheme:    scheme,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: resp.start,
 		Duration:  resp.duration,
 		Tags:      map[string]string{"fuzz_id": fuzzID},
 	}
 
-	if err := e.flowRecorder.SaveFlow(ctx, newFl); err != nil {
+	if err := e.flowRecorder.SaveStream(ctx, newFl); err != nil {
 		result.Error = fmt.Sprintf("save flow: %s", err.Error())
 		return
 	}
 
-	newSendMsg := &flow.Message{
-		FlowID:    newFl.ID,
+	newSendMsg := &flow.Flow{
+		StreamID:  newFl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: resp.start,
@@ -456,14 +455,14 @@ func (e *Engine) recordFuzzFlow(ctx context.Context, data *RequestData, resp *fu
 		Headers:   resp.reqHeaders,
 		Body:      data.Body,
 	}
-	if err := e.flowRecorder.AppendMessage(ctx, newSendMsg); err != nil {
+	if err := e.flowRecorder.SaveFlow(ctx, newSendMsg); err != nil {
 		result.Error = fmt.Sprintf("save send message: %s", err.Error())
-		result.FlowID = newFl.ID
+		result.StreamID = newFl.ID
 		return
 	}
 
-	newRecvMsg := &flow.Message{
-		FlowID:     newFl.ID,
+	newRecvMsg := &flow.Flow{
+		StreamID:   newFl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  resp.start.Add(resp.duration),
@@ -471,13 +470,13 @@ func (e *Engine) recordFuzzFlow(ctx context.Context, data *RequestData, resp *fu
 		Headers:    resp.headers,
 		Body:       resp.body,
 	}
-	if err := e.flowRecorder.AppendMessage(ctx, newRecvMsg); err != nil {
+	if err := e.flowRecorder.SaveFlow(ctx, newRecvMsg); err != nil {
 		result.Error = fmt.Sprintf("save receive message: %s", err.Error())
-		result.FlowID = newFl.ID
+		result.StreamID = newFl.ID
 		return
 	}
 
-	result.FlowID = newFl.ID
+	result.StreamID = newFl.ID
 	result.StatusCode = resp.statusCode
 	result.ResponseLength = len(resp.body)
 	result.DurationMs = int(resp.duration.Milliseconds())
@@ -545,7 +544,7 @@ func (e *Engine) executeFuzzCaseWithHooks(
 	// values produced by pre_send (e.g., auth_session for logout).
 	if result.Error == "" && result.StatusCode != 0 {
 		// Retrieve the response body from the recorded flow for the hook.
-		respBody := e.fetchResponseBody(ctx, result.FlowID)
+		respBody := e.fetchResponseBody(ctx, result.StreamID)
 		hookState.Mu.Lock()
 		postErr := hooks.PostSend(ctx, hookState, result.StatusCode, respBody, kvStore)
 		hookState.Mu.Unlock()
@@ -646,7 +645,7 @@ func (e *Engine) fetchResponseBody(ctx context.Context, flowID string) []byte {
 	if flowID == "" {
 		return nil
 	}
-	msgs, err := e.flowFetcher.GetMessages(ctx, flowID, flow.MessageListOptions{Direction: "receive"})
+	msgs, err := e.flowFetcher.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil || len(msgs) == 0 {
 		return nil
 	}
@@ -654,7 +653,7 @@ func (e *Engine) fetchResponseBody(ctx context.Context, flowID string) []byte {
 }
 
 // BuildRequestData extracts mutable request data from a flow's send message.
-func BuildRequestData(sendMsg *flow.Message) *RequestData {
+func BuildRequestData(sendMsg *flow.Flow) *RequestData {
 	data := &RequestData{
 		Method: sendMsg.Method,
 		Body:   sendMsg.Body,

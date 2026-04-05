@@ -50,7 +50,7 @@ type DispatchConfig struct {
 
 	// FlowWriter records raw TCP flows. If nil, flow recording is skipped
 	// for the raw TCP relay path.
-	FlowWriter flow.FlowWriter
+	FlowWriter flow.Writer
 
 	// PluginEngine dispatches per-chunk plugin hooks for the raw TCP relay
 	// path. If nil, plugin hooks are skipped.
@@ -179,11 +179,10 @@ func relayRawTCP(ctx context.Context, clientConn, upstreamConn net.Conn, target 
 
 	// Create flow record.
 	start := time.Now()
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    connID,
 		Protocol:  "SOCKS5+TCP",
 		Scheme:    "tcp",
-		FlowType:  "bidirectional",
 		State:     "active",
 		Timestamp: start,
 		Tags:      tags,
@@ -193,7 +192,7 @@ func relayRawTCP(ctx context.Context, clientConn, upstreamConn net.Conn, target 
 		},
 	}
 
-	if err := cfg.FlowWriter.SaveFlow(ctx, fl); err != nil {
+	if err := cfg.FlowWriter.SaveStream(ctx, fl); err != nil {
 		logger.Error("socks5 raw TCP flow save failed", "error", err)
 		// Continue relaying even if recording fails.
 	}
@@ -210,7 +209,7 @@ func relayRawTCP(ctx context.Context, clientConn, upstreamConn net.Conn, target 
 	// Run the recording relay.
 	relayErr := prototcp.RunRelay(ctx, clientConn, upstreamConn, prototcp.RelayConfig{
 		Store:        cfg.FlowWriter,
-		FlowID:       fl.ID,
+		StreamID:     fl.ID,
 		Logger:       logger,
 		PluginEngine: cfg.PluginEngine,
 		ConnInfo:     pluginConnInfo,
@@ -223,7 +222,7 @@ func relayRawTCP(ctx context.Context, clientConn, upstreamConn net.Conn, target 
 	if relayErr != nil && ctx.Err() == nil {
 		state = "error"
 	}
-	if err := cfg.FlowWriter.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{
+	if err := cfg.FlowWriter.UpdateStream(ctx, fl.ID, flow.StreamUpdate{
 		State:    state,
 		Duration: duration,
 	}); err != nil {

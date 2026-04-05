@@ -9,32 +9,32 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-// fakeFlowWriter is a test double that records all calls to SaveFlow,
-// UpdateFlow, and AppendMessage.
+// fakeFlowWriter is a test double that records all calls to SaveStream,
+// UpdateStream, and SaveFlow.
 type fakeFlowWriter struct {
-	savedFlows  []*flow.Flow
-	updatedIDs  []string
-	updates     []flow.FlowUpdate
-	messages    []*flow.Message
-	saveFlowErr error
+	savedStreams  []*flow.Stream
+	updatedIDs    []string
+	updates       []flow.StreamUpdate
+	savedFlows    []*flow.Flow
+	saveStreamErr error
 }
 
-func (f *fakeFlowWriter) SaveFlow(_ context.Context, fl *flow.Flow) error {
-	if f.saveFlowErr != nil {
-		return f.saveFlowErr
+func (f *fakeFlowWriter) SaveStream(_ context.Context, s *flow.Stream) error {
+	if f.saveStreamErr != nil {
+		return f.saveStreamErr
 	}
-	f.savedFlows = append(f.savedFlows, fl)
+	f.savedStreams = append(f.savedStreams, s)
 	return nil
 }
 
-func (f *fakeFlowWriter) UpdateFlow(_ context.Context, id string, u flow.FlowUpdate) error {
+func (f *fakeFlowWriter) UpdateStream(_ context.Context, id string, u flow.StreamUpdate) error {
 	f.updatedIDs = append(f.updatedIDs, id)
 	f.updates = append(f.updates, u)
 	return nil
 }
 
-func (f *fakeFlowWriter) AppendMessage(_ context.Context, msg *flow.Message) error {
-	f.messages = append(f.messages, msg)
+func (f *fakeFlowWriter) SaveFlow(_ context.Context, fl *flow.Flow) error {
+	f.savedFlows = append(f.savedFlows, fl)
 	return nil
 }
 
@@ -43,6 +43,7 @@ func TestRecordStep_SendCreatesFlowAndMessage(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
 		Direction: exchange.Send,
@@ -66,44 +67,44 @@ func TestRecordStep_SendCreatesFlowAndMessage(t *testing.T) {
 		t.Fatal("RecordStep must not modify Exchange")
 	}
 
-	if len(store.savedFlows) != 1 {
-		t.Fatalf("expected 1 saved flow, got %d", len(store.savedFlows))
+	if len(store.savedStreams) != 1 {
+		t.Fatalf("expected 1 saved stream, got %d", len(store.savedStreams))
 	}
-	fl := store.savedFlows[0]
-	if fl.ID != "flow-1" {
-		t.Errorf("flow ID = %q, want %q", fl.ID, "flow-1")
+	st := store.savedStreams[0]
+	if st.ID != "stream-1" {
+		t.Errorf("stream ID = %q, want %q", st.ID, "stream-1")
 	}
-	if fl.Protocol != "HTTP/1.x" {
-		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTP/1.x")
+	if st.Protocol != "HTTP/1.x" {
+		t.Errorf("stream protocol = %q, want %q", st.Protocol, "HTTP/1.x")
 	}
-	if fl.State != "active" {
-		t.Errorf("flow state = %q, want %q", fl.State, "active")
+	if st.State != "active" {
+		t.Errorf("stream state = %q, want %q", st.State, "active")
 	}
-	if fl.Scheme != "https" {
-		t.Errorf("flow scheme = %q, want %q", fl.Scheme, "https")
+	if st.Scheme != "https" {
+		t.Errorf("stream scheme = %q, want %q", st.Scheme, "https")
 	}
 
-	if len(store.messages) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(store.messages))
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
 	}
-	msg := store.messages[0]
-	if msg.FlowID != "flow-1" {
-		t.Errorf("message flow ID = %q, want %q", msg.FlowID, "flow-1")
+	fl := store.savedFlows[0]
+	if fl.StreamID != "stream-1" {
+		t.Errorf("flow stream ID = %q, want %q", fl.StreamID, "stream-1")
 	}
-	if msg.Direction != "send" {
-		t.Errorf("message direction = %q, want %q", msg.Direction, "send")
+	if fl.Direction != "send" {
+		t.Errorf("flow direction = %q, want %q", fl.Direction, "send")
 	}
-	if msg.Method != "GET" {
-		t.Errorf("message method = %q, want %q", msg.Method, "GET")
+	if fl.Method != "GET" {
+		t.Errorf("flow method = %q, want %q", fl.Method, "GET")
 	}
-	if msg.Headers["Host"][0] != "example.com" {
-		t.Errorf("message Host header = %q, want %q", msg.Headers["Host"][0], "example.com")
+	if fl.Headers["Host"][0] != "example.com" {
+		t.Errorf("flow Host header = %q, want %q", fl.Headers["Host"][0], "example.com")
 	}
-	if string(msg.Body) != "request body" {
-		t.Errorf("message body = %q, want %q", msg.Body, "request body")
+	if string(fl.Body) != "request body" {
+		t.Errorf("flow body = %q, want %q", fl.Body, "request body")
 	}
-	if string(msg.RawBytes) != "GET / HTTP/1.1\r\nHost: example.com\r\n\r\nrequest body" {
-		t.Errorf("message raw bytes mismatch")
+	if string(fl.RawBytes) != "GET / HTTP/1.1\r\nHost: example.com\r\n\r\nrequest body" {
+		t.Errorf("flow raw bytes mismatch")
 	}
 }
 
@@ -112,6 +113,7 @@ func TestRecordStep_ReceiveAppendsMessageAndCompletes(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  1,
 		Direction: exchange.Receive,
@@ -130,25 +132,25 @@ func TestRecordStep_ReceiveAppendsMessageAndCompletes(t *testing.T) {
 		t.Fatalf("expected Continue, got %v", r.Action)
 	}
 
-	if len(store.messages) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(store.messages))
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
 	}
-	msg := store.messages[0]
-	if msg.Direction != "receive" {
-		t.Errorf("message direction = %q, want %q", msg.Direction, "receive")
+	fl := store.savedFlows[0]
+	if fl.Direction != "receive" {
+		t.Errorf("flow direction = %q, want %q", fl.Direction, "receive")
 	}
-	if msg.StatusCode != 200 {
-		t.Errorf("status code = %d, want %d", msg.StatusCode, 200)
+	if fl.StatusCode != 200 {
+		t.Errorf("status code = %d, want %d", fl.StatusCode, 200)
 	}
 
 	if len(store.updatedIDs) != 1 {
-		t.Fatalf("expected 1 flow update, got %d", len(store.updatedIDs))
+		t.Fatalf("expected 1 stream update, got %d", len(store.updatedIDs))
 	}
-	if store.updatedIDs[0] != "flow-1" {
-		t.Errorf("updated flow ID = %q, want %q", store.updatedIDs[0], "flow-1")
+	if store.updatedIDs[0] != "stream-1" {
+		t.Errorf("updated stream ID = %q, want %q", store.updatedIDs[0], "stream-1")
 	}
 	if store.updates[0].State != "complete" {
-		t.Errorf("flow update state = %q, want %q", store.updates[0].State, "complete")
+		t.Errorf("stream update state = %q, want %q", store.updates[0].State, "complete")
 	}
 }
 
@@ -157,6 +159,7 @@ func TestRecordStep_VariantRecordedOnHeaderChange(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	original := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
 		Direction: exchange.Send,
@@ -183,28 +186,28 @@ func TestRecordStep_VariantRecordedOnHeaderChange(t *testing.T) {
 		t.Fatalf("expected Continue, got %v", r.Action)
 	}
 
-	// SaveFlow + 2 variant messages (original + modified).
-	if len(store.savedFlows) != 1 {
-		t.Fatalf("expected 1 saved flow, got %d", len(store.savedFlows))
+	// SaveStream + 2 variant flows (original + modified).
+	if len(store.savedStreams) != 1 {
+		t.Fatalf("expected 1 saved stream, got %d", len(store.savedStreams))
 	}
-	if len(store.messages) != 2 {
-		t.Fatalf("expected 2 messages (original + modified), got %d", len(store.messages))
-	}
-
-	origMsg := store.messages[0]
-	if origMsg.Metadata["variant"] != "original" {
-		t.Errorf("first message variant = %q, want %q", origMsg.Metadata["variant"], "original")
-	}
-	if origMsg.Headers["X-Original"] == nil {
-		t.Error("original message should have X-Original header")
+	if len(store.savedFlows) != 2 {
+		t.Fatalf("expected 2 flows (original + modified), got %d", len(store.savedFlows))
 	}
 
-	modMsg := store.messages[1]
-	if modMsg.Metadata["variant"] != "modified" {
-		t.Errorf("second message variant = %q, want %q", modMsg.Metadata["variant"], "modified")
+	origFlow := store.savedFlows[0]
+	if origFlow.Metadata["variant"] != "original" {
+		t.Errorf("first flow variant = %q, want %q", origFlow.Metadata["variant"], "original")
 	}
-	if modMsg.Headers["X-Modified"] == nil {
-		t.Error("modified message should have X-Modified header")
+	if origFlow.Headers["X-Original"] == nil {
+		t.Error("original flow should have X-Original header")
+	}
+
+	modFlow := store.savedFlows[1]
+	if modFlow.Metadata["variant"] != "modified" {
+		t.Errorf("second flow variant = %q, want %q", modFlow.Metadata["variant"], "modified")
+	}
+	if modFlow.Headers["X-Modified"] == nil {
+		t.Error("modified flow should have X-Modified header")
 	}
 }
 
@@ -213,6 +216,7 @@ func TestRecordStep_NoVariantWhenUnchanged(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
 		Direction: exchange.Send,
@@ -230,12 +234,12 @@ func TestRecordStep_NoVariantWhenUnchanged(t *testing.T) {
 
 	step.Process(ctx, ex)
 
-	// Should produce exactly 1 message (no variant).
-	if len(store.messages) != 1 {
-		t.Fatalf("expected 1 message (no variant), got %d", len(store.messages))
+	// Should produce exactly 1 flow (no variant).
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow (no variant), got %d", len(store.savedFlows))
 	}
-	if store.messages[0].Metadata != nil {
-		t.Errorf("message should have no variant metadata, got %v", store.messages[0].Metadata)
+	if store.savedFlows[0].Metadata != nil {
+		t.Errorf("flow should have no variant metadata, got %v", store.savedFlows[0].Metadata)
 	}
 }
 
@@ -243,6 +247,7 @@ func TestRecordStep_NilStoreReturnsImmediately(t *testing.T) {
 	step := NewRecordStep(nil, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Direction: exchange.Send,
 	}
@@ -258,6 +263,7 @@ func TestRecordStep_NilBodyPassthrough(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
 		Direction: exchange.Send,
@@ -272,11 +278,11 @@ func TestRecordStep_NilBodyPassthrough(t *testing.T) {
 	ctx := context.Background()
 	step.Process(ctx, ex)
 
-	if len(store.messages) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(store.messages))
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
 	}
-	if store.messages[0].Body != nil {
-		t.Errorf("message body should be nil for passthrough, got %v", store.messages[0].Body)
+	if store.savedFlows[0].Body != nil {
+		t.Errorf("flow body should be nil for passthrough, got %v", store.savedFlows[0].Body)
 	}
 }
 
@@ -285,6 +291,7 @@ func TestRecordStep_VariantOnBodyChange(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
 		Direction: exchange.Send,
@@ -301,14 +308,14 @@ func TestRecordStep_VariantOnBodyChange(t *testing.T) {
 
 	step.Process(ctx, ex)
 
-	if len(store.messages) != 2 {
-		t.Fatalf("expected 2 messages (variant), got %d", len(store.messages))
+	if len(store.savedFlows) != 2 {
+		t.Fatalf("expected 2 flows (variant), got %d", len(store.savedFlows))
 	}
-	if string(store.messages[0].Body) != "original" {
-		t.Errorf("original body = %q, want %q", store.messages[0].Body, "original")
+	if string(store.savedFlows[0].Body) != "original" {
+		t.Errorf("original body = %q, want %q", store.savedFlows[0].Body, "original")
 	}
-	if string(store.messages[1].Body) != "modified" {
-		t.Errorf("modified body = %q, want %q", store.messages[1].Body, "modified")
+	if string(store.savedFlows[1].Body) != "modified" {
+		t.Errorf("modified body = %q, want %q", store.savedFlows[1].Body, "modified")
 	}
 }
 
@@ -317,6 +324,7 @@ func TestRecordStep_VariantOnRawBytesChange(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
 		Direction: exchange.Send,
@@ -332,14 +340,14 @@ func TestRecordStep_VariantOnRawBytesChange(t *testing.T) {
 
 	step.Process(ctx, ex)
 
-	if len(store.messages) != 2 {
-		t.Fatalf("expected 2 messages (variant), got %d", len(store.messages))
+	if len(store.savedFlows) != 2 {
+		t.Fatalf("expected 2 flows (variant), got %d", len(store.savedFlows))
 	}
-	if string(store.messages[0].RawBytes) != "original raw" {
-		t.Errorf("original raw = %q, want %q", store.messages[0].RawBytes, "original raw")
+	if string(store.savedFlows[0].RawBytes) != "original raw" {
+		t.Errorf("original raw = %q, want %q", store.savedFlows[0].RawBytes, "original raw")
 	}
-	if string(store.messages[1].RawBytes) != "modified raw" {
-		t.Errorf("modified raw = %q, want %q", store.messages[1].RawBytes, "modified raw")
+	if string(store.savedFlows[1].RawBytes) != "modified raw" {
+		t.Errorf("modified raw = %q, want %q", store.savedFlows[1].RawBytes, "modified raw")
 	}
 }
 
@@ -388,6 +396,7 @@ func TestRecordStep_ReceiveVariantRecording(t *testing.T) {
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  1,
 		Direction: exchange.Receive,
@@ -407,21 +416,21 @@ func TestRecordStep_ReceiveVariantRecording(t *testing.T) {
 
 	step.Process(ctx, ex)
 
-	// 2 messages (variant) + 1 flow update.
-	if len(store.messages) != 2 {
-		t.Fatalf("expected 2 messages (variant), got %d", len(store.messages))
+	// 2 flows (variant) + 1 stream update.
+	if len(store.savedFlows) != 2 {
+		t.Fatalf("expected 2 flows (variant), got %d", len(store.savedFlows))
 	}
-	if store.messages[0].Metadata["variant"] != "original" {
-		t.Errorf("first message variant = %q, want %q", store.messages[0].Metadata["variant"], "original")
+	if store.savedFlows[0].Metadata["variant"] != "original" {
+		t.Errorf("first flow variant = %q, want %q", store.savedFlows[0].Metadata["variant"], "original")
 	}
-	if store.messages[1].Metadata["variant"] != "modified" {
-		t.Errorf("second message variant = %q, want %q", store.messages[1].Metadata["variant"], "modified")
+	if store.savedFlows[1].Metadata["variant"] != "modified" {
+		t.Errorf("second flow variant = %q, want %q", store.savedFlows[1].Metadata["variant"], "modified")
 	}
 	if len(store.updatedIDs) != 1 {
-		t.Fatalf("expected 1 flow update, got %d", len(store.updatedIDs))
+		t.Fatalf("expected 1 stream update, got %d", len(store.updatedIDs))
 	}
 	if store.updates[0].State != "complete" {
-		t.Errorf("flow update state = %q, want %q", store.updates[0].State, "complete")
+		t.Errorf("stream update state = %q, want %q", store.updates[0].State, "complete")
 	}
 }
 

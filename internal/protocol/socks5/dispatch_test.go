@@ -611,17 +611,17 @@ func TestNewPostHandshakeDispatch_InvalidTarget_TLS(t *testing.T) {
 
 type dispatchMockStore struct {
 	mu       sync.Mutex
-	flows    []*flow.Flow
+	flows    []*flow.Stream
 	updates  []dispatchFlowUpdate
-	messages []*flow.Message
+	messages []*flow.Flow
 }
 
 type dispatchFlowUpdate struct {
 	ID     string
-	Update flow.FlowUpdate
+	Update flow.StreamUpdate
 }
 
-func (m *dispatchMockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *dispatchMockStore) SaveStream(_ context.Context, s *flow.Stream) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s.ID == "" {
@@ -632,24 +632,24 @@ func (m *dispatchMockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	return nil
 }
 
-func (m *dispatchMockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (m *dispatchMockStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.updates = append(m.updates, dispatchFlowUpdate{ID: id, Update: update})
 	return nil
 }
 
-func (m *dispatchMockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *dispatchMockStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *dispatchMockStore) getFlows() []*flow.Flow {
+func (m *dispatchMockStore) getFlows() []*flow.Stream {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*flow.Flow, len(m.flows))
+	out := make([]*flow.Stream, len(m.flows))
 	copy(out, m.flows)
 	return out
 }
@@ -662,10 +662,10 @@ func (m *dispatchMockStore) getUpdates() []dispatchFlowUpdate {
 	return out
 }
 
-func (m *dispatchMockStore) getMessages() []*flow.Message {
+func (m *dispatchMockStore) getMessages() []*flow.Flow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*flow.Message, len(m.messages))
+	out := make([]*flow.Flow, len(m.messages))
 	copy(out, m.messages)
 	return out
 }
@@ -733,9 +733,6 @@ func TestNewPostHandshakeDispatch_RawTCPRelay_FlowRecording(t *testing.T) {
 	fl := flows[0]
 	if fl.Protocol != "SOCKS5+TCP" {
 		t.Errorf("expected protocol SOCKS5+TCP, got %q", fl.Protocol)
-	}
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("expected flow type bidirectional, got %q", fl.FlowType)
 	}
 	if fl.ConnInfo == nil || fl.ConnInfo.ServerAddr != "db.example.com:5432" {
 		t.Errorf("expected server addr db.example.com:5432, got %v", fl.ConnInfo)

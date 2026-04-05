@@ -128,28 +128,27 @@ func makeExportTestSession(t *testing.T, store flow.Store, id string) {
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	msg := &flow.Message{
+	msg := &flow.Flow{
 		ID:        "msg-" + id,
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
 		Method:    "GET",
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 }
@@ -260,7 +259,7 @@ func TestImportFlowsAction_SymlinkRejected(t *testing.T) {
 
 	dir := t.TempDir()
 	realFile := filepath.Join(dir, "data.jsonl")
-	if err := os.WriteFile(realFile, []byte(`{"flow":{"id":"s","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`), 0600); err != nil {
+	if err := os.WriteFile(realFile, []byte(`{"stream":{"id":"s","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	symlinkPath := filepath.Join(dir, "link.jsonl")
@@ -330,7 +329,7 @@ func TestImportFlowsAction_ValidUUIDRequired(t *testing.T) {
 	dir := t.TempDir()
 	dataFile := filepath.Join(dir, "invalid-ids.jsonl")
 	// Non-UUID flow IDs should be rejected when MCP handler enables validation
-	if err := os.WriteFile(dataFile, []byte(`{"flow":{"id":"not-uuid","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`), 0600); err != nil {
+	if err := os.WriteFile(dataFile, []byte(`{"stream":{"id":"not-uuid","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -378,10 +377,9 @@ func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID,
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        sessID,
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  250 * time.Millisecond,
@@ -399,13 +397,13 @@ func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID,
 			TLSServerCertSubject: "CN=example.com",
 		}
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        sendMsgID,
-		FlowID:    sessID,
+		StreamID:  sessID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -415,13 +413,13 @@ func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID,
 		RawBytes:  []byte("POST /api/login HTTP/1.1\r\nHost: example.com\r\n\r\n"),
 		Metadata:  map[string]string{"source": "resend"},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &flow.Message{
+	recvMsg := &flow.Flow{
 		ID:         recvMsgID,
-		FlowID:     sessID,
+		StreamID:   sessID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  ts.Add(250 * time.Millisecond),
@@ -430,7 +428,7 @@ func makeRealisticTestSession(t *testing.T, store flow.Store, sessID, sendMsgID,
 		Body:       []byte(`{"ok":true,"token":"secret123"}`),
 		RawBytes:   []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(recv): %v", err)
 	}
 }
@@ -535,7 +533,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	if importRes.Errors != 0 {
 		t.Errorf("expected 0 errors, got %d", importRes.Errors)
 		for _, e := range importRes.ErrorDetails {
-			t.Errorf("  line %d (flow %s): %s", e.Line, e.FlowID, e.Reason)
+			t.Errorf("  line %d (flow %s): %s", e.Line, e.StreamID, e.Reason)
 		}
 	}
 	if importRes.Imported != 3 {

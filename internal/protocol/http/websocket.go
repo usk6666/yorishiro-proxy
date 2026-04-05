@@ -262,25 +262,24 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 	duration := time.Since(p.start)
 	tags := map[string]string{"error": upstreamErr.Error()}
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    p.connID,
 		Protocol:  "WebSocket",
 		Scheme:    p.scheme,
-		FlowType:  "bidirectional",
 		State:     "error",
 		Timestamp: p.start,
 		Duration:  duration,
 		Tags:      tags,
 		ConnInfo:  p.connInfo,
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		logger.Error("websocket error flow save failed",
 			"method", p.req.Method, "url", p.reqURL.String(), "error", err)
 		return
 	}
 
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: p.start,
@@ -288,7 +287,7 @@ func (h *Handler) recordWebSocketError(ctx context.Context, p wsErrorRecordParam
 		URL:       p.reqURL,
 		Headers:   rawHeadersToMap(p.req.Headers),
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("websocket error send message save failed", "error", err)
 	}
 }

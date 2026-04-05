@@ -155,13 +155,13 @@ func newGRPCWebStore(t *testing.T, ctx context.Context) *flow.SQLiteStore {
 }
 
 // pollGRPCWebFlows polls the store until the expected number of gRPC-Web flows appear.
-func pollGRPCWebFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Flow {
+func pollGRPCWebFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Stream {
 	t.Helper()
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	var err error
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "gRPC-Web", Limit: 100})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Protocol: "gRPC-Web", Limit: 100})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -174,13 +174,13 @@ func pollGRPCWebFlows(t *testing.T, ctx context.Context, store flow.Store, wantC
 }
 
 // pollGRPCWebFlowMessages polls until at least one send and one receive message appear.
-func pollGRPCWebFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) []*flow.Message {
+func pollGRPCWebFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) []*flow.Flow {
 	t.Helper()
-	var allMsgs []*flow.Message
+	var allMsgs []*flow.Flow
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
 		var err error
-		allMsgs, err = store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+		allMsgs, err = store.GetFlows(ctx, flowID, flow.FlowListOptions{})
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
 		}
@@ -303,9 +303,6 @@ func TestIntegration_GRPCWeb_H1_Binary(t *testing.T) {
 	if fl.Protocol != "gRPC-Web" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "gRPC-Web")
 	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
-	}
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
@@ -316,7 +313,7 @@ func TestIntegration_GRPCWeb_H1_Binary(t *testing.T) {
 		t.Fatalf("expected at least 2 messages, got %d", len(msgs))
 	}
 
-	var sendMsg, recvMsg *flow.Message
+	var sendMsg, recvMsg *flow.Flow
 	for _, m := range msgs {
 		if m.Direction == "send" && sendMsg == nil {
 			sendMsg = m
@@ -442,16 +439,13 @@ func TestIntegration_GRPCWeb_H1_Base64(t *testing.T) {
 	if fl.Protocol != "gRPC-Web" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "gRPC-Web")
 	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
-	}
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
 
 	// Verify messages.
 	msgs := pollGRPCWebFlowMessages(t, ctx, store, fl.ID)
-	var sendMsg, recvMsg *flow.Message
+	var sendMsg, recvMsg *flow.Flow
 	for _, m := range msgs {
 		if m.Direction == "send" && sendMsg == nil {
 			sendMsg = m
@@ -569,7 +563,7 @@ func TestIntegration_GRPCWeb_HTTPS_Binary(t *testing.T) {
 
 	// Verify messages.
 	msgs := pollGRPCWebFlowMessages(t, ctx, store, fl.ID)
-	var sendMsg *flow.Message
+	var sendMsg *flow.Flow
 	for _, m := range msgs {
 		if m.Direction == "send" {
 			sendMsg = m
@@ -662,7 +656,7 @@ func TestIntegration_GRPCWeb_HTTPS_Base64(t *testing.T) {
 
 	// Verify messages with base64 raw bytes.
 	msgs := pollGRPCWebFlowMessages(t, ctx, store, fl.ID)
-	var sendMsg *flow.Message
+	var sendMsg *flow.Flow
 	for _, m := range msgs {
 		if m.Direction == "send" {
 			sendMsg = m
@@ -738,9 +732,6 @@ func TestIntegration_GRPCWeb_ServerStreaming(t *testing.T) {
 	fl := flows[0]
 	if fl.Protocol != "gRPC-Web" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "gRPC-Web")
-	}
-	if fl.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
 	}
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
@@ -931,7 +922,7 @@ func TestIntegration_GRPCWeb_MCPQuery(t *testing.T) {
 	fl := flows[0]
 
 	// Verify the flow is retrievable by protocol filter (simulates MCP query tool).
-	filteredFlows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "gRPC-Web", Limit: 10})
+	filteredFlows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "gRPC-Web", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows with protocol filter: %v", err)
 	}
@@ -943,7 +934,7 @@ func TestIntegration_GRPCWeb_MCPQuery(t *testing.T) {
 	}
 
 	// Verify other protocol filters don't return this flow.
-	httpFlows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10})
+	httpFlows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows HTTP/1.x filter: %v", err)
 	}
@@ -954,7 +945,7 @@ func TestIntegration_GRPCWeb_MCPQuery(t *testing.T) {
 	}
 
 	// Verify flow details are retrievable (simulates MCP query with resource: "flow").
-	msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages for flow detail: %v", err)
 	}
@@ -1024,7 +1015,7 @@ func TestIntegration_GRPCWeb_RawBytesIntegrity(t *testing.T) {
 	// Collect raw bytes from both flows.
 	var binSendRaw, b64SendRaw []byte
 	for _, fl := range flows {
-		msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		msgs, err := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
 		}

@@ -36,7 +36,7 @@ func isHTTP2Protocol(protocol string) bool {
 // connection. It inspects the flow's ConnInfo for TLS metadata. When ConnInfo is
 // nil (e.g., resend-created flows without connection info) or has no TLS fields,
 // it falls back to checking the Protocol field ("HTTPS" implies TLS).
-func inferFlowUseTLS(fl *flow.Flow) bool {
+func inferFlowUseTLS(fl *flow.Stream) bool {
 	if fl.ConnInfo != nil {
 		if fl.ConnInfo.TLSVersion != "" || fl.ConnInfo.TLSALPN == "h2" {
 			return true
@@ -60,7 +60,7 @@ func inferFlowUseTLS(fl *flow.Flow) bool {
 //
 // Response frames are read until the server sends END_STREAM or the connection
 // is closed/timed out.
-func (s *Server) buildAndSendRawH2(ctx context.Context, fl *flow.Flow, params resendParams, targetAddr string, rawBytes []byte) ([]byte, time.Time, time.Duration, error) {
+func (s *Server) buildAndSendRawH2(ctx context.Context, fl *flow.Stream, params resendParams, targetAddr string, rawBytes []byte) ([]byte, time.Time, time.Duration, error) {
 	timeout := defaultReplayTimeout
 	if params.TimeoutMs != nil && *params.TimeoutMs > 0 {
 		timeout = time.Duration(*params.TimeoutMs) * time.Millisecond

@@ -708,7 +708,7 @@ func TestRawForward_VariantRecording(t *testing.T) {
 	}
 
 	// Collect send and receive messages separately.
-	var sendMsgs, recvMsgs []*flow.Message
+	var sendMsgs, recvMsgs []*flow.Flow
 	for _, msg := range store.messages {
 		switch msg.Direction {
 		case "send":

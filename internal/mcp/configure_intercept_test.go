@@ -587,7 +587,7 @@ func TestInterceptHelpers_WebSocketRoundTrip(t *testing.T) {
 		Direction: "request",
 		Conditions: interceptConditionsInput{
 			UpgradeURLPattern: "/ws/chat.*",
-			FlowID:            "flow-123",
+			StreamID:          "flow-123",
 		},
 	}
 
@@ -596,8 +596,8 @@ func TestInterceptHelpers_WebSocketRoundTrip(t *testing.T) {
 	if rule.Conditions.UpgradeURLPattern != "/ws/chat.*" {
 		t.Errorf("UpgradeURLPattern = %q, want %q", rule.Conditions.UpgradeURLPattern, "/ws/chat.*")
 	}
-	if rule.Conditions.FlowID != "flow-123" {
-		t.Errorf("FlowID = %q, want %q", rule.Conditions.FlowID, "flow-123")
+	if rule.Conditions.StreamID != "flow-123" {
+		t.Errorf("StreamID = %q, want %q", rule.Conditions.StreamID, "flow-123")
 	}
 
 	output := fromInterceptRule(rule)
@@ -605,8 +605,8 @@ func TestInterceptHelpers_WebSocketRoundTrip(t *testing.T) {
 	if output.Conditions.UpgradeURLPattern != "/ws/chat.*" {
 		t.Errorf("output UpgradeURLPattern = %q, want %q", output.Conditions.UpgradeURLPattern, "/ws/chat.*")
 	}
-	if output.Conditions.FlowID != "flow-123" {
-		t.Errorf("output FlowID = %q, want %q", output.Conditions.FlowID, "flow-123")
+	if output.Conditions.StreamID != "flow-123" {
+		t.Errorf("output StreamID = %q, want %q", output.Conditions.StreamID, "flow-123")
 	}
 }
 

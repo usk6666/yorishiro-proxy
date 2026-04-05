@@ -36,12 +36,12 @@ func TestM3_Macro_DefineAndRunWithExtract(t *testing.T) {
 
 	// Save the template flow for the macro step.
 	tokenURL, _ := url.Parse(tokenServer.URL + "/auth/login")
-	fl := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: tokenURL,
 		Headers: map[string][]string{"Content-Type": {"application/json"}},
 		Body:    []byte(`{"username":"admin","password":"§password§"}`),
@@ -141,12 +141,12 @@ func TestM3_Macro_StepGuard_When(t *testing.T) {
 
 	// Save login flow.
 	loginURL, _ := url.Parse(loginServer.URL + "/login")
-	loginSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, loginSess); err != nil {
+	loginSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, loginSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: loginSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: loginSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
 		Headers: map[string][]string{"Content-Type": {"application/json"}},
 		Body:    []byte(`{"user":"admin"}`),
@@ -156,12 +156,12 @@ func TestM3_Macro_StepGuard_When(t *testing.T) {
 
 	// Save MFA flow.
 	mfaURL, _ := url.Parse(mfaServer.URL + "/mfa")
-	mfaSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, mfaSess); err != nil {
+	mfaSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, mfaSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: mfaSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: mfaSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: mfaURL,
 		Headers: map[string][]string{"Content-Type": {"application/json"}},
 		Body:    []byte(`{"code":"123456"}`),
@@ -256,12 +256,12 @@ func TestM3_Macro_StepGuard_Skipped(t *testing.T) {
 	ctx := context.Background()
 
 	loginURL, _ := url.Parse(loginServer.URL + "/login")
-	loginSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, loginSess); err != nil {
+	loginSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, loginSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: loginSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: loginSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -269,12 +269,12 @@ func TestM3_Macro_StepGuard_Skipped(t *testing.T) {
 	}
 
 	mfaURL, _ := url.Parse(mfaServer.URL + "/mfa")
-	mfaSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, mfaSess); err != nil {
+	mfaSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, mfaSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: mfaSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: mfaSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: mfaURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -349,12 +349,12 @@ func TestM3_Hook_ResendPreSendTemplateExpansion(t *testing.T) {
 
 	// Save token flow.
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+	tokenSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, tokenSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: tokenSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: tokenSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -363,12 +363,12 @@ func TestM3_Hook_ResendPreSendTemplateExpansion(t *testing.T) {
 
 	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api/data")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -454,12 +454,12 @@ func TestM3_Hook_PostReceiveOnStatus(t *testing.T) {
 
 	// Save macro step flow.
 	macroURL, _ := url.Parse(macroServer.URL + "/log")
-	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, macroSess); err != nil {
+	macroSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, macroSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("log"),
@@ -469,12 +469,12 @@ func TestM3_Hook_PostReceiveOnStatus(t *testing.T) {
 
 	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api/secure")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -634,12 +634,12 @@ func TestM3_Macro_VarsOverrideRuntime(t *testing.T) {
 
 	ctx := context.Background()
 	u, _ := url.Parse(echoServer.URL + "/api")
-	fl := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: u,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("data"),

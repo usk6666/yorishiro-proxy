@@ -30,10 +30,9 @@ func BenchmarkSaveSession(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		fl := &Flow{
+		fl := &Stream{
 			ConnID:    fmt.Sprintf("conn-%d", i),
 			Protocol:  "HTTP/1.x",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
@@ -42,7 +41,7 @@ func BenchmarkSaveSession(b *testing.B) {
 				ServerAddr: "93.184.216.34:443",
 			},
 		}
-		if err := store.SaveFlow(ctx, fl); err != nil {
+		if err := store.SaveStream(ctx, fl); err != nil {
 			b.Fatalf("SaveFlow: %v", err)
 		}
 	}
@@ -53,15 +52,14 @@ func BenchmarkAppendMessage(b *testing.B) {
 	ctx := context.Background()
 
 	// Create a parent flow.
-	fl := &Flow{
+	fl := &Stream{
 		ConnID:    "bench-conn",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		b.Fatalf("SaveFlow: %v", err)
 	}
 
@@ -70,8 +68,8 @@ func BenchmarkAppendMessage(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		msg := &Message{
-			FlowID:    fl.ID,
+		msg := &Flow{
+			StreamID:  fl.ID,
 			Sequence:  i,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -80,7 +78,7 @@ func BenchmarkAppendMessage(b *testing.B) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      body,
 		}
-		if err := store.AppendMessage(ctx, msg); err != nil {
+		if err := store.SaveFlow(ctx, msg); err != nil {
 			b.Fatalf("AppendMessage: %v", err)
 		}
 	}
@@ -95,24 +93,23 @@ func BenchmarkListSessions(b *testing.B) {
 
 			// Pre-populate sessions.
 			for i := 0; i < n; i++ {
-				fl := &Flow{
+				fl := &Stream{
 					ConnID:    fmt.Sprintf("conn-%d", i),
 					Protocol:  "HTTP/1.x",
-					FlowType:  "unary",
 					State:     "complete",
 					Timestamp: time.Now(),
 					Duration:  time.Duration(i) * time.Millisecond,
 				}
-				if err := store.SaveFlow(ctx, fl); err != nil {
+				if err := store.SaveStream(ctx, fl); err != nil {
 					b.Fatalf("SaveFlow: %v", err)
 				}
 			}
 
-			opts := ListOptions{Limit: 50}
+			opts := StreamListOptions{Limit: 50}
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := store.ListFlows(ctx, opts); err != nil {
+				if _, err := store.ListStreams(ctx, opts); err != nil {
 					b.Fatalf("ListFlows: %v", err)
 				}
 			}
@@ -126,21 +123,20 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 
 	// Pre-populate 100 flows with messages.
 	for i := 0; i < 100; i++ {
-		fl := &Flow{
+		fl := &Stream{
 			ConnID:    fmt.Sprintf("conn-%d", i),
 			Protocol:  "HTTP/1.x",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now(),
 			Duration:  time.Duration(i) * time.Millisecond,
 		}
-		if err := store.SaveFlow(ctx, fl); err != nil {
+		if err := store.SaveStream(ctx, fl); err != nil {
 			b.Fatalf("SaveFlow: %v", err)
 		}
 
 		u, _ := url.Parse(fmt.Sprintf("https://example.com/api/v1/resource/%d", i))
-		sendMsg := &Message{
-			FlowID:    fl.ID,
+		sendMsg := &Flow{
+			StreamID:  fl.ID,
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -148,12 +144,12 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"application/json"}},
 		}
-		if err := store.AppendMessage(ctx, sendMsg); err != nil {
+		if err := store.SaveFlow(ctx, sendMsg); err != nil {
 			b.Fatalf("AppendMessage: %v", err)
 		}
 
-		recvMsg := &Message{
-			FlowID:     fl.ID,
+		recvMsg := &Flow{
+			StreamID:   fl.ID,
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -161,27 +157,27 @@ func BenchmarkListSessions_WithFilter(b *testing.B) {
 			Headers:    map[string][]string{"Content-Type": {"application/json"}},
 			Body:       []byte(`{"ok":true}`),
 		}
-		if err := store.AppendMessage(ctx, recvMsg); err != nil {
+		if err := store.SaveFlow(ctx, recvMsg); err != nil {
 			b.Fatalf("AppendMessage: %v", err)
 		}
 	}
 
 	cases := []struct {
 		name string
-		opts ListOptions
+		opts StreamListOptions
 	}{
-		{"NoFilter", ListOptions{Limit: 50}},
-		{"ByMethod", ListOptions{Method: "GET", Limit: 50}},
-		{"ByURL", ListOptions{URLPattern: "resource", Limit: 50}},
-		{"ByStatus", ListOptions{StatusCode: 200, Limit: 50}},
-		{"Combined", ListOptions{Method: "GET", URLPattern: "resource", StatusCode: 200, Limit: 50}},
+		{"NoFilter", StreamListOptions{Limit: 50}},
+		{"ByMethod", StreamListOptions{Method: "GET", Limit: 50}},
+		{"ByURL", StreamListOptions{URLPattern: "resource", Limit: 50}},
+		{"ByStatus", StreamListOptions{StatusCode: 200, Limit: 50}},
+		{"Combined", StreamListOptions{Method: "GET", URLPattern: "resource", StatusCode: 200, Limit: 50}},
 	}
 
 	b.ResetTimer()
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				if _, err := store.ListFlows(ctx, tc.opts); err != nil {
+				if _, err := store.ListStreams(ctx, tc.opts); err != nil {
 					b.Fatalf("ListFlows: %v", err)
 				}
 			}
@@ -194,10 +190,9 @@ func BenchmarkGetSession(b *testing.B) {
 	ctx := context.Background()
 
 	// Create a flow to look up.
-	fl := &Flow{
+	fl := &Stream{
 		ConnID:    "bench-get",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now(),
 		Duration:  50 * time.Millisecond,
@@ -208,13 +203,13 @@ func BenchmarkGetSession(b *testing.B) {
 			TLSCipher:  "TLS_AES_128_GCM_SHA256",
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		b.Fatalf("SaveFlow: %v", err)
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := store.GetFlow(ctx, fl.ID); err != nil {
+		if _, err := store.GetStream(ctx, fl.ID); err != nil {
 			b.Fatalf("GetFlow: %v", err)
 		}
 	}

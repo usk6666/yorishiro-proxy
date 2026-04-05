@@ -333,13 +333,13 @@ func TestIntegration_DataIntegrity_GRPC_ProtobufPayload(t *testing.T) {
 	}
 
 	// Verify recorded messages contain the protobuf payload.
-	msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
 	// Find the send message with body content.
-	var sendWithBody *flow.Message
+	var sendWithBody *flow.Flow
 	for _, m := range msgs {
 		if m.Direction == "send" && len(m.Body) > 0 {
 			sendWithBody = m
@@ -499,16 +499,16 @@ func TestIntegration_DataIntegrity_HTTP1_BinaryBody(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	var flows []*flow.Flow
-	var send, recv *flow.Message
+	var flows []*flow.Stream
+	var send, recv *flow.Flow
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
 		if len(flows) >= 1 {
-			msgs, mErr := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
+			msgs, mErr := store.GetFlows(ctx, flows[0].ID, flow.FlowListOptions{})
 			if mErr != nil {
 				t.Fatalf("GetMessages: %v", mErr)
 			}
@@ -633,10 +633,10 @@ func TestIntegration_DataIntegrity_HTTPS_BinaryBody(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
