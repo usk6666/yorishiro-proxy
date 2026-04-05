@@ -14,8 +14,8 @@ import (
 type FuzzJob struct {
 	// ID is the unique identifier of the fuzz job.
 	ID string
-	// FlowID is the template flow used for fuzzing.
-	FlowID string
+	// StreamID is the template stream used for fuzzing.
+	StreamID string
 	// Config is the JSON-encoded job configuration (positions, payload sets, etc.).
 	Config string
 	// Status is the current job status: "running", "paused", "completed", "cancelled", "error".
@@ -42,8 +42,8 @@ type FuzzResult struct {
 	FuzzID string
 	// IndexNum is the 0-based iteration index within the job.
 	IndexNum int
-	// FlowID is the ID of the flow recorded for this iteration.
-	FlowID string
+	// StreamID is the ID of the stream recorded for this iteration.
+	StreamID string
 	// Payloads is the JSON-encoded map of position ID to payload value.
 	Payloads string
 	// StatusCode is the HTTP response status code (may be 0 on error).
@@ -131,10 +131,10 @@ func (s *SQLiteStore) SaveFuzzJob(ctx context.Context, job *FuzzJob) error {
 			completedAt = &t
 		}
 		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO fuzz_jobs (id, flow_id, config, status, tag, created_at, completed_at, total, completed_count, error_count)
+			`INSERT INTO fuzz_jobs (id, stream_id, config, status, tag, created_at, completed_at, total, completed_count, error_count)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			job.ID,
-			job.FlowID,
+			job.StreamID,
 			job.Config,
 			job.Status,
 			job.Tag,
@@ -193,7 +193,7 @@ func (s *SQLiteStore) UpdateFuzzJobStatus(ctx context.Context, id string, status
 // GetFuzzJob retrieves a fuzz job by ID.
 func (s *SQLiteStore) GetFuzzJob(ctx context.Context, id string) (*FuzzJob, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, flow_id, config, status, tag, created_at, completed_at, total, completed_count, error_count FROM fuzz_jobs WHERE id = ?`, id)
+		`SELECT id, stream_id, config, status, tag, created_at, completed_at, total, completed_count, error_count FROM fuzz_jobs WHERE id = ?`, id)
 	return scanFuzzJob(row)
 }
 
@@ -208,12 +208,12 @@ func (s *SQLiteStore) SaveFuzzResult(ctx context.Context, result *FuzzResult) er
 			errStr = &result.Error
 		}
 		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO fuzz_results (id, fuzz_id, index_num, flow_id, payloads, status_code, response_length, duration_ms, error)
+			`INSERT INTO fuzz_results (id, fuzz_id, index_num, stream_id, payloads, status_code, response_length, duration_ms, error)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			result.ID,
 			result.FuzzID,
 			result.IndexNum,
-			result.FlowID,
+			result.StreamID,
 			result.Payloads,
 			result.StatusCode,
 			result.ResponseLength,
@@ -248,8 +248,8 @@ func fuzzResultWhereClause(fuzzID string, opts FuzzResultListOptions) (string, [
 		// Join with messages table to filter by response body content.
 		// Use CAST to convert BLOB body to TEXT for substring matching.
 		where += ` AND EXISTS (
-			SELECT 1 FROM messages m
-			WHERE m.flow_id = fuzz_results.flow_id
+			SELECT 1 FROM flows m
+			WHERE m.stream_id = fuzz_results.stream_id
 			  AND m.direction = 'receive'
 			  AND INSTR(CAST(m.body AS TEXT), ?) > 0
 		)`
@@ -280,7 +280,7 @@ func fuzzResultOrderClause(sortBy string) string {
 // ListFuzzResults retrieves results for a fuzz job with optional filtering.
 func (s *SQLiteStore) ListFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) ([]*FuzzResult, error) {
 	where, args := fuzzResultWhereClause(fuzzID, opts)
-	query := `SELECT id, fuzz_id, index_num, flow_id, payloads, status_code, response_length, duration_ms, error FROM fuzz_results` + where
+	query := `SELECT id, fuzz_id, index_num, stream_id, payloads, status_code, response_length, duration_ms, error FROM fuzz_results` + where
 	query += fuzzResultOrderClause(opts.SortBy)
 
 	if opts.Limit > 0 {
@@ -322,7 +322,7 @@ func (s *SQLiteStore) CountFuzzResults(ctx context.Context, fuzzID string, opts 
 
 // ListFuzzJobs retrieves fuzz jobs with optional filtering and pagination.
 func (s *SQLiteStore) ListFuzzJobs(ctx context.Context, opts FuzzJobListOptions) ([]*FuzzJob, error) {
-	query := `SELECT id, flow_id, config, status, tag, created_at, completed_at, total, completed_count, error_count FROM fuzz_jobs WHERE 1=1`
+	query := `SELECT id, stream_id, config, status, tag, created_at, completed_at, total, completed_count, error_count FROM fuzz_jobs WHERE 1=1`
 	args := []interface{}{}
 
 	if opts.Status != "" {
@@ -391,7 +391,7 @@ func scanFuzzJob(row scannable) (*FuzzJob, error) {
 
 	err := row.Scan(
 		&job.ID,
-		&job.FlowID,
+		&job.StreamID,
 		&job.Config,
 		&job.Status,
 		&job.Tag,
@@ -435,7 +435,7 @@ func scanFuzzResult(row scannable) (*FuzzResult, error) {
 		&result.ID,
 		&result.FuzzID,
 		&result.IndexNum,
-		&result.FlowID,
+		&result.StreamID,
 		&result.Payloads,
 		&result.StatusCode,
 		&result.ResponseLength,

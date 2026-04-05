@@ -46,16 +46,16 @@ func TestCompare_Success_DifferentResponses(t *testing.T) {
 
 	// Flow A: 200 OK with JSON body
 	entryA := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  45 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence: 0, Direction: "send", Timestamp: time.Now(),
 			Method: "GET", URL: u,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence: 1, Direction: "receive", Timestamp: time.Now(),
 			StatusCode: 200,
 			Headers: map[string][]string{
@@ -69,16 +69,16 @@ func TestCompare_Success_DifferentResponses(t *testing.T) {
 
 	// Flow B: 403 Forbidden with JSON body (different keys)
 	entryB := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  5012 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence: 0, Direction: "send", Timestamp: time.Now(),
 			Method: "GET", URL: u,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence: 1, Direction: "receive", Timestamp: time.Now(),
 			StatusCode: 403,
 			Headers: map[string][]string{
@@ -193,14 +193,14 @@ func TestCompare_Success_IdenticalResponses(t *testing.T) {
 	headers := map[string][]string{"Content-Type": {"application/json"}}
 
 	entryA := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Headers: headers, Body: body},
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Headers: headers, Body: body},
 	)
 	entryB := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Headers: headers, Body: body},
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Headers: headers, Body: body},
 	)
 
 	cs := setupTestSession(t, nil, store)
@@ -244,9 +244,9 @@ func TestCompare_HTMLResponse_NoJSONDiff(t *testing.T) {
 	u, _ := url.Parse("http://example.com/page")
 
 	entryA := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTPS", Timestamp: time.Now(), Duration: 100 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{
+		&flow.Stream{Protocol: "HTTPS", Timestamp: time.Now(), Duration: 100 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{
 			Sequence: 1, Direction: "receive", Timestamp: time.Now(),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Type": {"text/html"}},
@@ -254,9 +254,9 @@ func TestCompare_HTMLResponse_NoJSONDiff(t *testing.T) {
 		},
 	)
 	entryB := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTPS", Timestamp: time.Now(), Duration: 200 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{
+		&flow.Stream{Protocol: "HTTPS", Timestamp: time.Now(), Duration: 200 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{
 			Sequence: 1, Direction: "receive", Timestamp: time.Now(),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Type": {"text/html"}},
@@ -329,9 +329,9 @@ func TestCompare_NonexistentFlow(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Body: []byte("ok")},
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Body: []byte("ok")},
 	)
 
 	cs := setupTestSession(t, nil, store)
@@ -376,15 +376,15 @@ func TestCompare_FlowWithNoReceiveMessage(t *testing.T) {
 
 	// Flow with only a send message (no receive)
 	entryNoRecv := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
 		nil, // no receive message
 	)
 
 	entryNormal := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Body: []byte("ok")},
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 50 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 200, Body: []byte("ok")},
 	)
 
 	cs := setupTestSession(t, nil, store)
@@ -424,14 +424,14 @@ func TestCompare_EmptyBodies(t *testing.T) {
 	u, _ := url.Parse("http://example.com/empty")
 
 	entryA := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 204, Body: nil},
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 204, Body: nil},
 	)
 	entryB := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 204, Body: nil},
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{Sequence: 1, Direction: "receive", Timestamp: time.Now(), StatusCode: 204, Body: nil},
 	)
 
 	cs := setupTestSession(t, nil, store)
@@ -460,9 +460,9 @@ func TestCompare_JSONWithCharsetContentType(t *testing.T) {
 	u, _ := url.Parse("http://example.com/api")
 
 	entryA := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{
 			Sequence: 1, Direction: "receive", Timestamp: time.Now(),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Type": {"application/json; charset=utf-8"}},
@@ -470,9 +470,9 @@ func TestCompare_JSONWithCharsetContentType(t *testing.T) {
 		},
 	)
 	entryB := saveTestEntry(t, store,
-		&flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
-		&flow.Message{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
-		&flow.Message{
+		&flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now(), Duration: 10 * time.Millisecond},
+		&flow.Flow{Sequence: 0, Direction: "send", Timestamp: time.Now(), Method: "GET", URL: u},
+		&flow.Flow{
 			Sequence: 1, Direction: "receive", Timestamp: time.Now(),
 			StatusCode: 200,
 			Headers:    map[string][]string{"Content-Type": {"application/json; charset=utf-8"}},

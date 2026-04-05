@@ -23,12 +23,12 @@ func TestExecute_Resend_Success(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -37,7 +37,7 @@ func TestExecute_Resend_Success(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"key":"value"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -86,12 +86,12 @@ func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -100,7 +100,7 @@ func TestExecute_Resend_ResendRaw_DeprecatedAlias(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -133,12 +133,12 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/header-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -150,7 +150,7 @@ func TestExecute_Resend_HeaderMutationOrder(t *testing.T) {
 				"X-Keep":     {"kept-value"},
 			},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -231,12 +231,12 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/body-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -245,7 +245,7 @@ func TestExecute_Resend_OverrideBody(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"original":"body"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -287,12 +287,12 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/body-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -301,7 +301,7 @@ func TestExecute_Resend_OverrideBodyBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			Body:      []byte("original"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -347,12 +347,12 @@ func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/body-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -361,7 +361,7 @@ func TestExecute_Resend_OverrideBodyBase64_Invalid(t *testing.T) {
 			Headers:   map[string][]string{},
 			Body:      []byte("original"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -393,12 +393,12 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/priority-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -407,7 +407,7 @@ func TestExecute_Resend_BodyPatches_OverrideBodyTakesPriority(t *testing.T) {
 			Headers:   map[string][]string{},
 			Body:      []byte(`{"name":"original"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -454,12 +454,12 @@ func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/patch-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -468,7 +468,7 @@ func TestExecute_Resend_BodyPatches_JSONPath(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":{"name":"original","role":"viewer"}}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -522,12 +522,12 @@ func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/regex-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -536,7 +536,7 @@ func TestExecute_Resend_BodyPatches_Regex(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/x-www-form-urlencoded"}},
 			Body:      []byte("csrf_token=abc123&name=test&role=user"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -584,12 +584,12 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/dry-run")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -597,7 +597,7 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -650,7 +650,7 @@ func TestExecute_Resend_DryRun(t *testing.T) {
 	}
 
 	// Verify no new flow was created (dry-run should NOT record).
-	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	sessions, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -669,12 +669,12 @@ func TestExecute_Resend_Tag(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/tag-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -682,7 +682,7 @@ func TestExecute_Resend_Tag(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -716,7 +716,7 @@ func TestExecute_Resend_Tag(t *testing.T) {
 	}
 
 	// Verify the tag was stored on the flow.
-	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
+	newFl, err := store.GetStream(context.Background(), out.NewFlowID)
 	if err != nil {
 		t.Fatalf("get new flow: %v", err)
 	}
@@ -734,12 +734,12 @@ func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/host-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -747,7 +747,7 @@ func TestExecute_Resend_OverrideHost_Invalid(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -996,12 +996,12 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/actual-send")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1010,7 +1010,7 @@ func TestExecute_Resend_WithBodyPatches_ActuallySent(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":"original"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1071,12 +1071,12 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/remove-headers-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1087,7 +1087,7 @@ func TestExecute_Resend_RemoveHeaders_SuppressesGoDefaults(t *testing.T) {
 				"Accept":     {"*/*"},
 			},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1149,12 +1149,12 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/remove-headers-dryrun")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1165,7 +1165,7 @@ func TestExecute_Resend_RemoveHeaders_DryRun(t *testing.T) {
 				"Accept":     {"*/*"},
 			},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1317,12 +1317,12 @@ func TestExecute_Resend_DuplicateHeaders_ArrayFormat(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/dup-header-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1330,7 +1330,7 @@ func TestExecute_Resend_DuplicateHeaders_ArrayFormat(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1381,12 +1381,12 @@ func TestExecute_Resend_LegacyMapFormat_BackwardCompat(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/legacy-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1394,7 +1394,7 @@ func TestExecute_Resend_LegacyMapFormat_BackwardCompat(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1459,12 +1459,12 @@ func TestExecute_Resend_HostHeaderOverride_SetsReqHost(t *testing.T) {
 
 	u, _ := url.Parse(server.URL + "/host-test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1472,7 +1472,7 @@ func TestExecute_Resend_HostHeaderOverride_SetsReqHost(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Host": {u.Host}},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),

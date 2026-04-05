@@ -22,12 +22,12 @@ import (
 func TestInferFlowUseTLS(t *testing.T) {
 	tests := []struct {
 		name string
-		fl   *flow.Flow
+		fl   *flow.Stream
 		want bool
 	}{
 		{
 			name: "HTTP/2 with TLS version in ConnInfo",
-			fl: &flow.Flow{
+			fl: &flow.Stream{
 				Protocol: "HTTP/2",
 				ConnInfo: &flow.ConnectionInfo{TLSVersion: "TLS 1.3", TLSALPN: "h2"},
 			},
@@ -35,7 +35,7 @@ func TestInferFlowUseTLS(t *testing.T) {
 		},
 		{
 			name: "HTTP/2 with ALPN h2 only",
-			fl: &flow.Flow{
+			fl: &flow.Stream{
 				Protocol: "HTTP/2",
 				ConnInfo: &flow.ConnectionInfo{TLSALPN: "h2"},
 			},
@@ -43,7 +43,7 @@ func TestInferFlowUseTLS(t *testing.T) {
 		},
 		{
 			name: "HTTP/2 h2c with empty ConnInfo TLS fields",
-			fl: &flow.Flow{
+			fl: &flow.Stream{
 				Protocol: "HTTP/2",
 				ConnInfo: &flow.ConnectionInfo{ClientAddr: "127.0.0.1:12345", ServerAddr: "127.0.0.1:8080"},
 			},
@@ -51,22 +51,22 @@ func TestInferFlowUseTLS(t *testing.T) {
 		},
 		{
 			name: "HTTP/2 without ConnInfo falls back to protocol",
-			fl:   &flow.Flow{Protocol: "HTTP/2"},
+			fl:   &flow.Stream{Protocol: "HTTP/2"},
 			want: false,
 		},
 		{
 			name: "HTTPS without ConnInfo falls back to protocol",
-			fl:   &flow.Flow{Protocol: "HTTPS"},
+			fl:   &flow.Stream{Protocol: "HTTPS"},
 			want: true,
 		},
 		{
 			name: "gRPC without ConnInfo",
-			fl:   &flow.Flow{Protocol: "gRPC"},
+			fl:   &flow.Stream{Protocol: "gRPC"},
 			want: false,
 		},
 		{
 			name: "gRPC with TLS ConnInfo",
-			fl: &flow.Flow{
+			fl: &flow.Stream{
 				Protocol: "gRPC",
 				ConnInfo: &flow.ConnectionInfo{TLSVersion: "TLS 1.3"},
 			},
@@ -74,7 +74,7 @@ func TestInferFlowUseTLS(t *testing.T) {
 		},
 		{
 			name: "HTTP/1.x without ConnInfo",
-			fl:   &flow.Flow{Protocol: "HTTP/1.x"},
+			fl:   &flow.Stream{Protocol: "HTTP/1.x"},
 			want: false,
 		},
 	}
@@ -880,18 +880,17 @@ func TestResendRawH2_ViaServer(t *testing.T) {
 	ctx := context.Background()
 
 	parsedURL, _ := url.Parse("https://" + echoAddr + "/test")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -899,7 +898,7 @@ func TestResendRawH2_ViaServer(t *testing.T) {
 		URL:       parsedURL,
 		RawBytes:  rawBytes,
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -1000,18 +999,17 @@ func TestResendRawH2_DryRun(t *testing.T) {
 	}
 
 	parsedURL, _ := url.Parse("https://example.com/")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1019,7 +1017,7 @@ func TestResendRawH2_DryRun(t *testing.T) {
 		URL:       parsedURL,
 		RawBytes:  rawBuf.Bytes(),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -1109,18 +1107,17 @@ func TestResendRawH2_WithPatches(t *testing.T) {
 	originalRaw := rawBuf.Bytes()
 
 	parsedURL, _ := url.Parse("https://example.com/original")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1128,7 +1125,7 @@ func TestResendRawH2_WithPatches(t *testing.T) {
 		URL:       parsedURL,
 		RawBytes:  originalRaw,
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -1235,18 +1232,17 @@ func TestResendRawH2_GRPCProtocol(t *testing.T) {
 	}
 
 	parsedURL, _ := url.Parse("https://" + echoAddr + "/grpc.Service/Method")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "gRPC",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1254,7 +1250,7 @@ func TestResendRawH2_GRPCProtocol(t *testing.T) {
 		URL:       parsedURL,
 		RawBytes:  rawBuf.Bytes(),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -1343,17 +1339,16 @@ func TestResendRawH2_OverrideRawBase64(t *testing.T) {
 	}
 
 	parsedURL, _ := url.Parse("https://example.com/old")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1361,7 +1356,7 @@ func TestResendRawH2_OverrideRawBase64(t *testing.T) {
 		URL:       parsedURL,
 		RawBytes:  rawBuf.Bytes(),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -1472,9 +1467,8 @@ func TestResendRawH2_H2CInferTLS(t *testing.T) {
 	rawBytes := rawBuf.Bytes()
 
 	parsedURL, _ := url.Parse("http://" + echoAddr + "/h2c-test")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -1484,11 +1478,11 @@ func TestResendRawH2_H2CInferTLS(t *testing.T) {
 			ServerAddr: echoAddr,
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1496,7 +1490,7 @@ func TestResendRawH2_H2CInferTLS(t *testing.T) {
 		URL:       parsedURL,
 		RawBytes:  rawBytes,
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 

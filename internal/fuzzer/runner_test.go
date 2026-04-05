@@ -79,12 +79,12 @@ func (m *threadSafeMockFuzzJobStore) getJobs() []*flow.FuzzJob {
 // threadSafeMockFlowRecorder is a thread-safe version of mockFlowRecorder.
 type threadSafeMockFlowRecorder struct {
 	mu       sync.Mutex
-	flows    []*flow.Flow
-	messages []*flow.Message
+	flows    []*flow.Stream
+	messages []*flow.Flow
 	saveErr  error
 }
 
-func (m *threadSafeMockFlowRecorder) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *threadSafeMockFlowRecorder) SaveStream(_ context.Context, s *flow.Stream) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.saveErr != nil {
@@ -97,7 +97,7 @@ func (m *threadSafeMockFlowRecorder) SaveFlow(_ context.Context, s *flow.Flow) e
 	return nil
 }
 
-func (m *threadSafeMockFlowRecorder) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *threadSafeMockFlowRecorder) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
@@ -143,13 +143,13 @@ func newTestRunner(t *testing.T) (*Runner, *threadSafeMockFuzzJobStore, *threadS
 	testURL, _ := url.Parse("http://example.com/api?key=val")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -181,7 +181,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "valid config",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					StreamID:   "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -195,7 +195,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative concurrency",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					StreamID:   "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -210,7 +210,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "concurrency exceeds max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					StreamID:   "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -225,7 +225,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "concurrency at max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					StreamID:   "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -239,7 +239,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative rate limit",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					StreamID:   "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -254,7 +254,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative delay",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:     "sess-1",
+					StreamID:   "sess-1",
 					AttackType: "sequential",
 					Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{
@@ -269,7 +269,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "negative timeout_ms",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:      "sess-1",
+					StreamID:    "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -282,7 +282,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "timeout_ms exceeds max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:      "sess-1",
+					StreamID:    "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -295,7 +295,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "timeout_ms at max",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:      "sess-1",
+					StreamID:    "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -307,7 +307,7 @@ func TestRunConfig_Validate(t *testing.T) {
 			name: "timeout_ms zero is valid",
 			cfg: RunConfig{
 				Config: Config{
-					FlowID:      "sess-1",
+					StreamID:    "sess-1",
 					AttackType:  "sequential",
 					Positions:   []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 					PayloadSets: map[string]PayloadSet{"s": {Type: "wordlist", Values: []string{"a"}}},
@@ -332,7 +332,7 @@ func TestRunner_Start_AsyncReturn(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -366,7 +366,7 @@ func TestRunner_Start_CompletesAsync(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -435,7 +435,7 @@ func TestRunner_Start_SessionNotFound(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "nonexistent",
+			StreamID:   "nonexistent",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -454,13 +454,13 @@ func TestRunner_PauseResumeCancel(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -487,7 +487,7 @@ func TestRunner_PauseResumeCancel(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -552,7 +552,7 @@ func TestRunner_Concurrency(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{
@@ -598,13 +598,13 @@ func TestRunner_StopOnStatusCode(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -632,7 +632,7 @@ func TestRunner_StopOnStatusCode(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -684,13 +684,13 @@ func TestRunner_StopOnErrorCount(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -712,7 +712,7 @@ func TestRunner_StopOnErrorCount(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -758,13 +758,13 @@ func TestRunner_MaxRetries(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -786,7 +786,7 @@ func TestRunner_MaxRetries(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -829,13 +829,13 @@ func TestRunner_UpdateJobProgress_ReflectsControllerStatus(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -854,9 +854,9 @@ func TestRunner_UpdateJobProgress_ReflectsControllerStatus(t *testing.T) {
 
 	// Create a job and a controller.
 	job := &flow.FuzzJob{
-		ID:     "test-job-1",
-		FlowID: "template-1",
-		Status: "running",
+		ID:       "test-job-1",
+		StreamID: "template-1",
+		Status:   "running",
 	}
 	if err := fuzzStore.SaveFuzzJob(context.Background(), job); err != nil {
 		t.Fatalf("SaveFuzzJob() error = %v", err)
@@ -900,13 +900,13 @@ func TestRunner_PausedStatusReflectedInDB(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -931,7 +931,7 @@ func TestRunner_PausedStatusReflectedInDB(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"}},
 			PayloadSets: map[string]PayloadSet{
@@ -1008,7 +1008,7 @@ func TestRunner_DefaultConcurrency(t *testing.T) {
 
 	cfg := RunConfig{
 		Config: Config{
-			FlowID:     "template-1",
+			StreamID:   "template-1",
 			AttackType: "sequential",
 			Positions:  []Position{{ID: "pos-0", Location: "header", Name: "Authorization", PayloadSet: "tokens"}},
 			PayloadSets: map[string]PayloadSet{

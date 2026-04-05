@@ -182,7 +182,7 @@ func TestIntegration_TLSPassthrough_RelayWithoutMITM(t *testing.T) {
 
 	// Verify NO flow was recorded (passthrough skips flow recording).
 	time.Sleep(200 * time.Millisecond)
-	entries, err := store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+	entries, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("List sessions: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 
 	// Verify session WAS recorded (non-passthrough gets MITM'd).
 	time.Sleep(200 * time.Millisecond)
-	entries, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
+	entries, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
 		t.Fatalf("List sessions: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestIntegration_TLSPassthrough_NonPassthroughStillMITM(t *testing.T) {
 	if fl.Protocol != "HTTPS" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
-	recvMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "receive"})
+	recvMsgs, mErr := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "receive"})
 	if mErr != nil {
 		t.Fatalf("GetMessages: %v", mErr)
 	}
@@ -395,7 +395,7 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	entries, err := store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+	entries, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestIntegration_TLSPassthrough_DynamicAddRemove(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Flow count should still be 1 (passthrough doesn't record).
-	entries, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+	entries, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

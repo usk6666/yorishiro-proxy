@@ -401,19 +401,18 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 	ctx := context.Background()
 
 	// Save a flow that the macro step will reference.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -422,7 +421,7 @@ func TestExecute_RunMacro_Success(t *testing.T) {
 		Headers:   map[string][]string{"Content-Type": {"application/json"}},
 		Body:      []byte(`{"user":"admin"}`),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -505,15 +504,15 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -522,7 +521,7 @@ func TestExecute_RunMacro_WithVarsOverride(t *testing.T) {
 		Headers:   map[string][]string{"Content-Type": {"text/plain"}},
 		Body:      []byte("hello"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -578,15 +577,15 @@ func TestExecute_RunMacro_TimeoutOverride(t *testing.T) {
 	u, _ := url.Parse(slowServer.URL + "/api/slow")
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -594,7 +593,7 @@ func TestExecute_RunMacro_TimeoutOverride(t *testing.T) {
 		URL:       u,
 		Headers:   map[string][]string{},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -666,15 +665,15 @@ func TestExecute_RunMacro_TimeoutOverrideZeroUsesDefinition(t *testing.T) {
 	u, _ := url.Parse(slowServer.URL + "/api/test")
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -682,7 +681,7 @@ func TestExecute_RunMacro_TimeoutOverrideZeroUsesDefinition(t *testing.T) {
 		URL:       u,
 		Headers:   map[string][]string{},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -945,18 +944,17 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 
 	// Save a template flow for step1.
 	u1, _ := url.Parse(echoServer.URL + "/api/step1")
-	sess1 := &flow.Flow{
+	sess1 := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, sess1); err != nil {
+	if err := store.SaveStream(ctx, sess1); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    sess1.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  sess1.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -969,18 +967,17 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 
 	// Save a template flow for step2.
 	u2, _ := url.Parse(echoServer.URL + "/api/step2")
-	sess2 := &flow.Flow{
+	sess2 := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, sess2); err != nil {
+	if err := store.SaveStream(ctx, sess2); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    sess2.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  sess2.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -1016,7 +1013,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	}
 
 	// Count sessions before running the macro.
-	beforeSessions, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	beforeSessions, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows before: %v", err)
 	}
@@ -1044,7 +1041,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	}
 
 	// After running, there should be 2 new flows (one per step).
-	afterFlows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	afterFlows, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows after: %v", err)
 	}
@@ -1054,7 +1051,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	}
 
 	// Find the macro-recorded flows by checking tags.
-	var macroFlows []*flow.Flow
+	var macroFlows []*flow.Stream
 	for _, s := range afterFlows {
 		if s.Tags != nil && s.Tags["macro"] == "record-test" {
 			macroFlows = append(macroFlows, s)
@@ -1070,9 +1067,6 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 		if ms.Protocol != "HTTP/1.x" {
 			t.Errorf("flow %s: Protocol = %q, want HTTP/1.x", ms.ID, ms.Protocol)
 		}
-		if ms.FlowType != "unary" {
-			t.Errorf("flow %s: FlowType = %q, want unary", ms.ID, ms.FlowType)
-		}
 		if ms.State != "complete" {
 			t.Errorf("flow %s: State = %q, want complete", ms.ID, ms.State)
 		}
@@ -1086,7 +1080,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 		stepIDs[stepID] = true
 
 		// Check send message exists.
-		sendMsgs, err := store.GetMessages(ctx, ms.ID, flow.MessageListOptions{Direction: "send"})
+		sendMsgs, err := store.GetFlows(ctx, ms.ID, flow.FlowListOptions{Direction: "send"})
 		if err != nil {
 			t.Errorf("GetMessages(send) for flow %s: %v", ms.ID, err)
 			continue
@@ -1103,7 +1097,7 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 		}
 
 		// Check receive message exists.
-		recvMsgs, err := store.GetMessages(ctx, ms.ID, flow.MessageListOptions{Direction: "receive"})
+		recvMsgs, err := store.GetFlows(ctx, ms.ID, flow.FlowListOptions{Direction: "receive"})
 		if err != nil {
 			t.Errorf("GetMessages(receive) for flow %s: %v", ms.ID, err)
 			continue
@@ -1146,12 +1140,12 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	ctx := context.Background()
 
 	loginURL, _ := url.Parse(loginServer.URL + "/login")
-	loginSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, loginSess); err != nil {
+	loginSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, loginSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: loginSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: loginSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1159,12 +1153,12 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	}
 
 	mfaURL, _ := url.Parse(mfaServer.URL + "/mfa")
-	mfaSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, mfaSess); err != nil {
+	mfaSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, mfaSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: mfaSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: mfaSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: mfaURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1212,11 +1206,11 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	}
 
 	// Only the executed step should create a macro session (not the skipped one).
-	allFlows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	allFlows, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
-	var macroFlows []*flow.Flow
+	var macroFlows []*flow.Stream
 	for _, s := range allFlows {
 		if s.Tags != nil && s.Tags["macro"] == "skip-test" {
 			macroFlows = append(macroFlows, s)
@@ -1254,12 +1248,12 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 
 	// Save token flow.
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+	tokenSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, tokenSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: tokenSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: tokenSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1268,12 +1262,12 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 
 	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api/data")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1305,7 +1299,7 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 	})
 
 	// Count sessions before resend.
-	beforeSessions, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	beforeSessions, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -1329,12 +1323,12 @@ func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
 	}
 
 	// Check that the hook macro step was recorded as a flow.
-	afterFlows, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	afterFlows, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
 
-	var hookFlows []*flow.Flow
+	var hookFlows []*flow.Stream
 	for _, s := range afterFlows {
 		if s.Tags != nil && s.Tags["macro"] == "hook-macro" {
 			hookFlows = append(hookFlows, s)

@@ -107,25 +107,25 @@ type HARWebSocketMessage struct {
 	Data   string  `json:"data"`
 }
 
-// ExportHAR exports flows matching the filter to a HAR JSON file.
-// It uses streaming JSON encoding to handle large flow sets efficiently.
+// ExportHAR exports streams matching the filter to a HAR JSON file.
+// It uses streaming JSON encoding to handle large stream sets efficiently.
 // Returns the number of entries exported.
-func ExportHAR(ctx context.Context, store FlowReader, w io.Writer, opts ExportOptions, creatorVersion string) (int, error) {
-	listOpts := ListOptions{
+func ExportHAR(ctx context.Context, store Store, w io.Writer, opts ExportOptions, creatorVersion string) (int, error) {
+	listOpts := StreamListOptions{
 		Protocol:   opts.Filter.Protocol,
 		URLPattern: opts.Filter.URLPattern,
 	}
 
-	flows, err := store.ListFlows(ctx, listOpts)
+	streams, err := store.ListStreams(ctx, listOpts)
 	if err != nil {
-		return 0, fmt.Errorf("list flows for HAR export: %w", err)
+		return 0, fmt.Errorf("list streams for HAR export: %w", err)
 	}
 
 	if creatorVersion == "" {
 		creatorVersion = "dev"
 	}
 
-	entries, exported, err := buildHAREntries(ctx, store, flows, opts)
+	entries, exported, err := buildHAREntries(ctx, store, streams, opts)
 	if err != nil {
 		return exported, err
 	}
@@ -151,15 +151,15 @@ func ExportHAR(ctx context.Context, store FlowReader, w io.Writer, opts ExportOp
 	return exported, nil
 }
 
-// buildHAREntries iterates over flows, applies filters, and converts each
-// eligible flow to a HAR entry. Returns the entries, the count of exported
-// flows, and any error encountered.
-func buildHAREntries(ctx context.Context, store FlowReader, flows []*Flow, opts ExportOptions) ([]*HAREntry, int, error) {
+// buildHAREntries iterates over streams, applies filters, and converts each
+// eligible stream to a HAR entry. Returns the entries, the count of exported
+// streams, and any error encountered.
+func buildHAREntries(ctx context.Context, store Store, streams []*Stream, opts ExportOptions) ([]*HAREntry, int, error) {
 	// Initialize as empty slice so JSON serialization produces [] not null.
 	entries := make([]*HAREntry, 0)
 	exported := 0
 
-	for _, fl := range flows {
+	for _, st := range streams {
 		if err := ctx.Err(); err != nil {
 			return entries, exported, err
 		}
@@ -168,16 +168,16 @@ func buildHAREntries(ctx context.Context, store FlowReader, flows []*Flow, opts 
 			break
 		}
 
-		if !harFlowIncluded(fl, opts.Filter) {
+		if !harStreamIncluded(st, opts.Filter) {
 			continue
 		}
 
-		messages, err := store.GetMessages(ctx, fl.ID, MessageListOptions{})
+		flows, err := store.GetFlows(ctx, st.ID, FlowListOptions{})
 		if err != nil {
-			return entries, exported, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
+			return entries, exported, fmt.Errorf("get flows for stream %s: %w", st.ID, err)
 		}
 
-		entry := convertFlowToHAREntry(fl, messages, opts.IncludeBodies)
+		entry := convertStreamToHAREntry(st, flows, opts.IncludeBodies)
 		if entry != nil {
 			entries = append(entries, entry)
 			exported++
@@ -187,95 +187,95 @@ func buildHAREntries(ctx context.Context, store FlowReader, flows []*Flow, opts 
 	return entries, exported, nil
 }
 
-// harFlowIncluded returns true if the flow passes HAR-specific filters.
-func harFlowIncluded(fl *Flow, filter ExportFilter) bool {
+// harStreamIncluded returns true if the stream passes HAR-specific filters.
+func harStreamIncluded(st *Stream, filter ExportFilter) bool {
 	// Skip Raw TCP and gRPC binary frames per spec.
-	if fl.Protocol == "TCP" || fl.Protocol == "gRPC" {
+	if st.Protocol == "TCP" || st.Protocol == "gRPC" {
 		return false
 	}
-	if filter.TimeAfter != nil && fl.Timestamp.Before(*filter.TimeAfter) {
+	if filter.TimeAfter != nil && st.Timestamp.Before(*filter.TimeAfter) {
 		return false
 	}
-	if filter.TimeBefore != nil && fl.Timestamp.After(*filter.TimeBefore) {
+	if filter.TimeBefore != nil && st.Timestamp.After(*filter.TimeBefore) {
 		return false
 	}
 	return true
 }
 
-// convertFlowToHAREntry dispatches flow-to-HAR conversion based on protocol.
-func convertFlowToHAREntry(fl *Flow, messages []*Message, includeBodies bool) *HAREntry {
-	if fl.Protocol == "WebSocket" {
-		return flowToHARWebSocket(fl, messages)
+// convertStreamToHAREntry dispatches stream-to-HAR conversion based on protocol.
+func convertStreamToHAREntry(st *Stream, flows []*Flow, includeBodies bool) *HAREntry {
+	if st.Protocol == "WebSocket" {
+		return streamToHARWebSocket(st, flows)
 	}
-	return flowToHAREntry(fl, messages, includeBodies)
+	return streamToHAREntry(st, flows, includeBodies)
 }
 
-// flowToHAREntry converts a Flow and its messages to a HAR entry.
-// Returns nil if the flow cannot be converted (e.g., missing request message).
-func flowToHAREntry(fl *Flow, messages []*Message, includeBodies bool) *HAREntry {
-	var reqMsg, respMsg *Message
-	for _, m := range messages {
-		switch m.Direction {
+// streamToHAREntry converts a Stream and its flows to a HAR entry.
+// Returns nil if the stream cannot be converted (e.g., missing request flow).
+func streamToHAREntry(st *Stream, flows []*Flow, includeBodies bool) *HAREntry {
+	var reqFlow, respFlow *Flow
+	for _, f := range flows {
+		switch f.Direction {
 		case "send":
-			if reqMsg == nil {
-				reqMsg = m
+			if reqFlow == nil {
+				reqFlow = f
 			}
 		case "receive":
-			if respMsg == nil {
-				respMsg = m
+			if respFlow == nil {
+				respFlow = f
 			}
 		}
 	}
 
-	if reqMsg == nil {
+	if reqFlow == nil {
 		return nil
 	}
 
 	entry := &HAREntry{
-		StartedDateTime: fl.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
-		Time:            float64(fl.Duration.Milliseconds()),
-		Request:         buildHARRequest(reqMsg, fl.Protocol, includeBodies),
-		Response:        buildHARResponse(respMsg, fl.Protocol, includeBodies),
-		Timings:         buildHARTimings(fl),
+		StartedDateTime: st.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
+		Time:            float64(st.Duration.Milliseconds()),
+		Request:         buildHARRequest(reqFlow, st.Protocol, includeBodies),
+		Response:        buildHARResponse(respFlow, st.Protocol, includeBodies),
+		Timings:         buildHARTimings(st),
 	}
 
-	if fl.ConnInfo != nil {
-		entry.ServerIPAddress = extractIP(fl.ConnInfo.ServerAddr)
-		entry.Connection = fl.ConnID
+	if st.ConnInfo != nil {
+		entry.ServerIPAddress = extractIP(st.ConnInfo.ServerAddr)
+		entry.Connection = st.ConnID
 	}
 
 	return entry
 }
 
-// flowToHARWebSocket converts a WebSocket flow to a HAR entry with
+// streamToHARWebSocket converts a WebSocket stream to a HAR entry with
 // the _webSocketMessages custom field.
-func flowToHARWebSocket(fl *Flow, messages []*Message) *HAREntry {
+func streamToHARWebSocket(st *Stream, flows []*Flow) *HAREntry {
 	// Find the initial HTTP upgrade request/response.
-	var reqMsg, respMsg *Message
+	var reqFlow, respFlow *Flow
 	var wsMessages []*HARWebSocketMessage
 
-	for _, m := range messages {
-		switch m.Direction {
+	for _, f := range flows {
+		switch f.Direction {
 		case "send":
-			if reqMsg == nil && m.Method != "" {
-				reqMsg = m
+			if reqFlow == nil && f.Method != "" {
+				reqFlow = f
 			} else {
 				wsMessages = append(wsMessages, &HARWebSocketMessage{
 					Type:   "send",
-					Time:   float64(m.Timestamp.UnixMilli()) / 1000.0,
-					Opcode: parseOpcode(m.Metadata),
-					Data:   wsMessageData(m),
+					Time:   float64(f.Timestamp.UnixMilli()) / 1000.0,
+					Opcode: parseOpcode(f.Metadata),
+					Data:   wsFlowData(f),
 				})
 			}
 		case "receive":
-			if respMsg == nil && m.StatusCode != 0 {
-				respMsg = m
+			if respFlow == nil && f.StatusCode != 0 {
+				respFlow = f
 			} else {
 				wsMessages = append(wsMessages, &HARWebSocketMessage{
 					Type:   "receive",
-					Time:   float64(m.Timestamp.UnixMilli()) / 1000.0,
-					Opcode: parseOpcode(m.Metadata),
-					Data:   wsMessageData(m),
+					Time:   float64(f.Timestamp.UnixMilli()) / 1000.0,
+					Opcode: parseOpcode(f.Metadata),
+					Data:   wsFlowData(f),
 				})
 			}
 		}
@@ -283,25 +283,25 @@ func flowToHARWebSocket(fl *Flow, messages []*Message) *HAREntry {
 
 	// Build the entry from the upgrade request if available.
 	entry := &HAREntry{
-		StartedDateTime:   fl.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
-		Time:              float64(fl.Duration.Milliseconds()),
-		Request:           buildHARRequest(reqMsg, fl.Protocol, false),
-		Response:          buildHARResponse(respMsg, fl.Protocol, false),
-		Timings:           buildHARTimings(fl),
+		StartedDateTime:   st.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
+		Time:              float64(st.Duration.Milliseconds()),
+		Request:           buildHARRequest(reqFlow, st.Protocol, false),
+		Response:          buildHARResponse(respFlow, st.Protocol, false),
+		Timings:           buildHARTimings(st),
 		WebSocketMessages: wsMessages,
 	}
 
-	if fl.ConnInfo != nil {
-		entry.ServerIPAddress = extractIP(fl.ConnInfo.ServerAddr)
-		entry.Connection = fl.ConnID
+	if st.ConnInfo != nil {
+		entry.ServerIPAddress = extractIP(st.ConnInfo.ServerAddr)
+		entry.Connection = st.ConnID
 	}
 
 	return entry
 }
 
-// buildHARRequest constructs a HARRequest from a send message.
-func buildHARRequest(msg *Message, protocol string, includeBodies bool) *HARRequest {
-	if msg == nil {
+// buildHARRequest constructs a HARRequest from a send flow.
+func buildHARRequest(f *Flow, protocol string, includeBodies bool) *HARRequest {
+	if f == nil {
 		return &HARRequest{
 			Method:      "GET",
 			URL:         "",
@@ -315,15 +315,15 @@ func buildHARRequest(msg *Message, protocol string, includeBodies bool) *HARRequ
 
 	reqURL := ""
 	var queryParams []*HARNameValue
-	if msg.URL != nil {
-		reqURL = msg.URL.String()
-		queryParams = urlQueryToHAR(msg.URL.Query())
+	if f.URL != nil {
+		reqURL = f.URL.String()
+		queryParams = urlQueryToHAR(f.URL.Query())
 	}
 	if queryParams == nil {
 		queryParams = []*HARNameValue{}
 	}
 
-	method := msg.Method
+	method := f.Method
 	if method == "" {
 		method = "GET"
 	}
@@ -332,29 +332,29 @@ func buildHARRequest(msg *Message, protocol string, includeBodies bool) *HARRequ
 		Method:      method,
 		URL:         reqURL,
 		HTTPVersion: protocolToHTTPVersion(protocol),
-		Headers:     headersToHAR(msg.Headers),
+		Headers:     headersToHAR(f.Headers),
 		QueryString: queryParams,
 		HeadersSize: -1,
-		BodySize:    int64(len(msg.Body)),
+		BodySize:    int64(len(f.Body)),
 	}
 
-	if includeBodies && len(msg.Body) > 0 {
+	if includeBodies && len(f.Body) > 0 {
 		mimeType := "application/octet-stream"
-		if ct := headerValue(msg.Headers, "Content-Type"); ct != "" {
+		if ct := headerValue(f.Headers, "Content-Type"); ct != "" {
 			mimeType = ct
 		}
 		req.PostData = &HARPostData{
 			MimeType: mimeType,
-			Text:     bodyToText(msg.Body),
+			Text:     bodyToText(f.Body),
 		}
 	}
 
 	return req
 }
 
-// buildHARResponse constructs a HARResponse from a receive message.
-func buildHARResponse(msg *Message, protocol string, includeBodies bool) *HARResponse {
-	if msg == nil {
+// buildHARResponse constructs a HARResponse from a receive flow.
+func buildHARResponse(f *Flow, protocol string, includeBodies bool) *HARResponse {
+	if f == nil {
 		return &HARResponse{
 			Status:      0,
 			StatusText:  "",
@@ -370,30 +370,30 @@ func buildHARResponse(msg *Message, protocol string, includeBodies bool) *HARRes
 	}
 
 	resp := &HARResponse{
-		Status:      msg.StatusCode,
-		StatusText:  statusText(msg.StatusCode),
+		Status:      f.StatusCode,
+		StatusText:  statusText(f.StatusCode),
 		HTTPVersion: protocolToHTTPVersion(protocol),
-		Headers:     headersToHAR(msg.Headers),
+		Headers:     headersToHAR(f.Headers),
 		HeadersSize: -1,
-		BodySize:    int64(len(msg.Body)),
+		BodySize:    int64(len(f.Body)),
 	}
 
 	mimeType := "application/octet-stream"
-	if ct := headerValue(msg.Headers, "Content-Type"); ct != "" {
+	if ct := headerValue(f.Headers, "Content-Type"); ct != "" {
 		mimeType = ct
 	}
 
 	content := &HARContent{
-		Size:     int64(len(msg.Body)),
+		Size:     int64(len(f.Body)),
 		MimeType: mimeType,
 	}
 
-	if includeBodies && len(msg.Body) > 0 {
-		if isBinaryContent(mimeType, msg.Body) {
-			content.Text = base64.StdEncoding.EncodeToString(msg.Body)
+	if includeBodies && len(f.Body) > 0 {
+		if isBinaryContent(mimeType, f.Body) {
+			content.Text = base64.StdEncoding.EncodeToString(f.Body)
 			content.Encoding = "base64"
 		} else {
-			content.Text = string(msg.Body)
+			content.Text = string(f.Body)
 		}
 	}
 
@@ -401,21 +401,21 @@ func buildHARResponse(msg *Message, protocol string, includeBodies bool) *HARRes
 	return resp
 }
 
-// buildHARTimings constructs HAR timings from flow timing data.
-func buildHARTimings(fl *Flow) *HARTimings {
+// buildHARTimings constructs HAR timings from stream timing data.
+func buildHARTimings(st *Stream) *HARTimings {
 	t := &HARTimings{
 		Send:    -1,
 		Wait:    -1,
 		Receive: -1,
 	}
-	if fl.SendMs != nil {
-		t.Send = float64(*fl.SendMs)
+	if st.SendMs != nil {
+		t.Send = float64(*st.SendMs)
 	}
-	if fl.WaitMs != nil {
-		t.Wait = float64(*fl.WaitMs)
+	if st.WaitMs != nil {
+		t.Wait = float64(*st.WaitMs)
 	}
-	if fl.ReceiveMs != nil {
-		t.Receive = float64(*fl.ReceiveMs)
+	if st.ReceiveMs != nil {
+		t.Receive = float64(*st.ReceiveMs)
 	}
 	return t
 }
@@ -576,7 +576,7 @@ func extractIP(addr string) string {
 	return addr
 }
 
-// parseOpcode extracts the WebSocket opcode from message metadata.
+// parseOpcode extracts the WebSocket opcode from flow metadata.
 func parseOpcode(metadata map[string]string) int {
 	if metadata == nil {
 		return 0
@@ -589,16 +589,16 @@ func parseOpcode(metadata map[string]string) int {
 	return 0
 }
 
-// wsMessageData returns the WebSocket message data as a string.
+// wsFlowData returns the WebSocket flow data as a string.
 // Binary data is base64-encoded.
-func wsMessageData(m *Message) string {
-	if len(m.Body) == 0 {
+func wsFlowData(f *Flow) string {
+	if len(f.Body) == 0 {
 		return ""
 	}
-	if utf8.Valid(m.Body) {
-		return string(m.Body)
+	if utf8.Valid(f.Body) {
+		return string(f.Body)
 	}
-	return base64.StdEncoding.EncodeToString(m.Body)
+	return base64.StdEncoding.EncodeToString(f.Body)
 }
 
 // bodyToText converts a request body to text for HAR postData.

@@ -112,12 +112,12 @@ func TestExecute_Replay_Success(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
 			Duration:  250 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
@@ -126,7 +126,7 @@ func TestExecute_Replay_Success(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}, "X-Custom": {"original"}},
 			Body:      []byte(`{"key":"value"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
@@ -183,12 +183,9 @@ func TestExecute_Replay_Success(t *testing.T) {
 	}
 
 	// Verify the replay was recorded as a new flow.
-	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
+	newFl, err := store.GetStream(context.Background(), out.NewFlowID)
 	if err != nil {
 		t.Fatalf("get new flow: %v", err)
-	}
-	if newFl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want unary", newFl.FlowType)
 	}
 	if newFl.State != "complete" {
 		t.Errorf("state = %q, want complete", newFl.State)
@@ -202,12 +199,12 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/original")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -215,7 +212,7 @@ func TestExecute_Replay_AllOverrides(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -321,12 +318,12 @@ func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -334,7 +331,7 @@ func TestExecute_Replay_InvalidOverrideURL(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -376,13 +373,13 @@ func TestExecute_Replay_NoSendMessages(t *testing.T) {
 	store := newTestStore(t)
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
 		nil, // no send message
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -405,69 +402,9 @@ func TestExecute_Replay_NoSendMessages(t *testing.T) {
 	}
 }
 
-func TestExecute_Replay_GRPCStreamingUnsupported(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		flowType string
-	}{
-		{"server_streaming", "stream"},
-		{"bidirectional", "bidirectional"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := newTestStore(t)
-
-			u, _ := url.Parse("http://localhost:50051/test.Service/Method")
-			entry := saveTestEntry(t, store,
-				&flow.Flow{
-					Protocol:  "gRPC",
-					FlowType:  tt.flowType,
-					Timestamp: time.Now(),
-					Duration:  100 * time.Millisecond,
-				},
-				&flow.Message{
-					Sequence:  0,
-					Direction: "send",
-					Timestamp: time.Now(),
-					Method:    "POST",
-					URL:       u,
-					Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
-					Body:      []byte("grpc-frame"),
-				},
-				&flow.Message{
-					Sequence:   1,
-					Direction:  "receive",
-					Timestamp:  time.Now(),
-					StatusCode: 200,
-					Headers:    map[string][]string{"Content-Type": {"application/grpc"}},
-					Body:       []byte("grpc-response"),
-				},
-			)
-
-			cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
-
-			result := executeCallTool(t, cs, map[string]any{
-				"action": "replay",
-				"params": map[string]any{
-					"flow_id": entry.Session.ID,
-				},
-			})
-			if !result.IsError {
-				t.Fatal("expected error for gRPC streaming flow")
-			}
-
-			textContent := result.Content[0].(*gomcp.TextContent)
-			if !strings.Contains(textContent.Text, "not yet supported") {
-				t.Errorf("error message should mention 'not yet supported', got: %s", textContent.Text)
-			}
-			if !strings.Contains(textContent.Text, tt.flowType) {
-				t.Errorf("error message should mention flow type %q, got: %s", tt.flowType, textContent.Text)
-			}
-		})
-	}
-}
+// TestExecute_Replay_GRPCStreamingUnsupported was removed: FlowType is abolished
+// in the data model rewrite (USK-577). The MITM proxy cannot distinguish unary
+// from streaming gRPC, so the rejection check no longer applies.
 
 func TestExecute_Replay_GRPCUnaryAllowed(t *testing.T) {
 	t.Parallel()
@@ -476,13 +413,12 @@ func TestExecute_Replay_GRPCUnaryAllowed(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/test.Service/Method")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "gRPC",
-			FlowType:  "unary",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -491,7 +427,7 @@ func TestExecute_Replay_GRPCUnaryAllowed(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
 			Body:      []byte("grpc-frame"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -523,20 +459,19 @@ func TestExecute_Replay_GRPCDataFrameBody(t *testing.T) {
 
 	// Create a gRPC flow with sequence 0 = headers (empty body),
 	// sequence 1+ = data frame messages with protobuf payloads.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "gRPC",
-		FlowType:  "unary",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
 	}
 	ctx := context.Background()
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Sequence 0: header message (no body, as in real gRPC recording)
-	headerMsg := &flow.Message{
-		FlowID:    fl.ID,
+	headerMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now(),
@@ -544,26 +479,26 @@ func TestExecute_Replay_GRPCDataFrameBody(t *testing.T) {
 		URL:       u,
 		Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
 	}
-	if err := store.AppendMessage(ctx, headerMsg); err != nil {
+	if err := store.SaveFlow(ctx, headerMsg); err != nil {
 		t.Fatalf("AppendMessage(header): %v", err)
 	}
 
 	// Sequence 1: data frame message with protobuf payload
 	payload := []byte("test-protobuf-payload")
-	dataMsg := &flow.Message{
-		FlowID:    fl.ID,
+	dataMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  1,
 		Direction: "send",
 		Timestamp: time.Now(),
 		Body:      payload,
 	}
-	if err := store.AppendMessage(ctx, dataMsg); err != nil {
+	if err := store.SaveFlow(ctx, dataMsg); err != nil {
 		t.Fatalf("AppendMessage(data): %v", err)
 	}
 
 	// Sequence 2: receive message
-	recvMsg := &flow.Message{
-		FlowID:     fl.ID,
+	recvMsg := &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   2,
 		Direction:  "receive",
 		Timestamp:  time.Now(),
@@ -571,7 +506,7 @@ func TestExecute_Replay_GRPCDataFrameBody(t *testing.T) {
 		Headers:    map[string][]string{"Content-Type": {"application/grpc"}},
 		Body:       []byte("grpc-response"),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(recv): %v", err)
 	}
 
@@ -629,13 +564,12 @@ func TestExecute_Replay_GRPCTrailersRecorded(t *testing.T) {
 
 	u, _ := url.Parse(server.URL + "/test.Service/Method")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "gRPC",
-			FlowType:  "unary",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -644,7 +578,7 @@ func TestExecute_Replay_GRPCTrailersRecorded(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
 			Body:      []byte("grpc-frame"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -673,12 +607,12 @@ func TestExecute_Replay_GRPCTrailersRecorded(t *testing.T) {
 	}
 
 	// Verify that a trailers message was recorded as sequence 2.
-	msgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "receive"})
+	msgs, err := store.GetFlows(context.Background(), out.NewFlowID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
-	var trailerMsg *flow.Message
+	var trailerMsg *flow.Flow
 	for _, msg := range msgs {
 		if msg.Metadata != nil && msg.Metadata["grpc_type"] == "trailers" {
 			trailerMsg = msg
@@ -713,13 +647,12 @@ func TestExecute_Replay_GRPCBodyPatchesRejected(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/test.Service/Method")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "gRPC",
-			FlowType:  "unary",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -728,7 +661,7 @@ func TestExecute_Replay_GRPCBodyPatchesRejected(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
 			Body:      []byte("grpc-frame"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -773,12 +706,12 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/raw-test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -787,7 +720,7 @@ func TestExecute_ReplayRaw_Success(t *testing.T) {
 			Headers:   map[string][]string{"Host": {"example.com"}, "X-Custom": {"preserved"}},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -842,12 +775,12 @@ func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/no-raw")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -855,7 +788,7 @@ func TestExecute_ReplayRaw_NoRawBytes(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -936,12 +869,12 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -950,7 +883,7 @@ func TestExecute_ReplayRaw_InferTargetFromURL(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -994,12 +927,12 @@ func TestExecute_DeleteFlows_ByID(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/api/test")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1007,7 +940,7 @@ func TestExecute_DeleteFlows_ByID(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1037,7 +970,7 @@ func TestExecute_DeleteFlows_ByID(t *testing.T) {
 	}
 
 	// Verify the flow was actually deleted.
-	_, err := store.GetFlow(context.Background(), entry.Session.ID)
+	_, err := store.GetStream(context.Background(), entry.Session.ID)
 	if err == nil {
 		t.Error("expected error when getting deleted flow")
 	}
@@ -1052,12 +985,12 @@ func TestExecute_DeleteFlows_All(t *testing.T) {
 	u, _ := url.Parse("http://example.com/api/test")
 	for i := 0; i < 3; i++ {
 		saveTestEntry(t, store,
-			&flow.Flow{
+			&flow.Stream{
 				Protocol:  "HTTP/1.x",
 				Timestamp: time.Now(),
 				Duration:  100 * time.Millisecond,
 			},
-			&flow.Message{
+			&flow.Flow{
 				Sequence:  0,
 				Direction: "send",
 				Timestamp: time.Now(),
@@ -1065,7 +998,7 @@ func TestExecute_DeleteFlows_All(t *testing.T) {
 				URL:       u,
 				Headers:   map[string][]string{},
 			},
-			&flow.Message{
+			&flow.Flow{
 				Sequence:   1,
 				Direction:  "receive",
 				Timestamp:  time.Now(),
@@ -1096,7 +1029,7 @@ func TestExecute_DeleteFlows_All(t *testing.T) {
 	}
 
 	// Verify all sessions were deleted.
-	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	remaining, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -1116,18 +1049,18 @@ func TestExecute_DeleteFlows_OlderThanDays(t *testing.T) {
 
 	// Insert old session (5 days ago).
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: now.Add(-120 * time.Hour),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: now.Add(-120 * time.Hour),
 			Method:    "GET",
 			URL:       u,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  now.Add(-120 * time.Hour),
@@ -1137,18 +1070,18 @@ func TestExecute_DeleteFlows_OlderThanDays(t *testing.T) {
 
 	// Insert recent session (1 hour ago).
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: now.Add(-1 * time.Hour),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: now.Add(-1 * time.Hour),
 			Method:    "GET",
 			URL:       u,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  now.Add(-1 * time.Hour),
@@ -1180,7 +1113,7 @@ func TestExecute_DeleteFlows_OlderThanDays(t *testing.T) {
 	}
 
 	// Verify only the recent session remains.
-	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	remaining, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -1329,12 +1262,12 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 	// Create sessions with different protocols.
 	for i := 0; i < 2; i++ {
 		saveTestEntry(t, store,
-			&flow.Flow{
+			&flow.Stream{
 				Protocol:  "HTTP/1.x",
 				Timestamp: time.Now(),
 				Duration:  100 * time.Millisecond,
 			},
-			&flow.Message{
+			&flow.Flow{
 				Sequence:  0,
 				Direction: "send",
 				Timestamp: time.Now(),
@@ -1342,7 +1275,7 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 				URL:       u,
 				Headers:   map[string][]string{},
 			},
-			&flow.Message{
+			&flow.Flow{
 				Sequence:   1,
 				Direction:  "receive",
 				Timestamp:  time.Now(),
@@ -1353,12 +1286,12 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 		)
 	}
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "TCP",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1366,7 +1299,7 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1376,12 +1309,12 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 		},
 	)
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "WebSocket",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1389,7 +1322,7 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1420,7 +1353,7 @@ func TestExecute_DeleteFlows_ByProtocol(t *testing.T) {
 	}
 
 	// Verify only TCP sessions were deleted, others remain.
-	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	remaining, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -1465,12 +1398,12 @@ func TestExecute_DeleteFlows_ByProtocol_NoMatches(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/api/test")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1478,7 +1411,7 @@ func TestExecute_DeleteFlows_ByProtocol_NoMatches(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1509,7 +1442,7 @@ func TestExecute_DeleteFlows_ByProtocol_NoMatches(t *testing.T) {
 	}
 
 	// Verify no sessions were deleted.
-	remaining, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	remaining, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -1526,18 +1459,18 @@ func TestExecute_DeleteFlows_NothingToDelete(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/recent")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now().UTC(),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now().UTC(),
 			Method:    "GET",
 			URL:       u,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now().UTC(),
@@ -1837,13 +1770,12 @@ func TestResend_GRPCWeb_Success(t *testing.T) {
 
 	u, _ := url.Parse(server.URL + "/test.Svc/DoStuff")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "gRPC-Web",
-			FlowType:  "unary",
 			Timestamp: time.Now(),
 			Duration:  50 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1853,7 +1785,7 @@ func TestResend_GRPCWeb_Success(t *testing.T) {
 			Body:      []byte("grpc-web-body"),
 			RawBytes:  []byte("grpc-web-body"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1889,12 +1821,12 @@ func TestResend_GRPCWeb_Success(t *testing.T) {
 	}
 
 	// Verify trailers were recorded.
-	msgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "receive"})
+	msgs, err := store.GetFlows(context.Background(), out.NewFlowID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
-	var trailerMsg *flow.Message
+	var trailerMsg *flow.Flow
 	for _, msg := range msgs {
 		if msg.Metadata != nil && msg.Metadata["grpc_type"] == "trailers" {
 			trailerMsg = msg
@@ -1916,13 +1848,12 @@ func TestResend_GRPCWeb_BodyPatchesRejected(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/test.Svc/Method")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "gRPC-Web",
-			FlowType:  "unary",
 			Timestamp: time.Now(),
 			Duration:  50 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1932,7 +1863,7 @@ func TestResend_GRPCWeb_BodyPatchesRejected(t *testing.T) {
 			Body:      []byte("grpc-web-frame"),
 			RawBytes:  []byte("grpc-web-frame"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1963,56 +1894,9 @@ func TestResend_GRPCWeb_BodyPatchesRejected(t *testing.T) {
 	}
 }
 
-func TestResend_GRPCWeb_StreamingRejected(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	echoServer := newEchoServer(t)
-
-	u, _ := url.Parse(echoServer.URL + "/test.Svc/Method")
-	entry := saveTestEntry(t, store,
-		&flow.Flow{
-			Protocol:  "gRPC-Web",
-			FlowType:  "server-streaming",
-			Timestamp: time.Now(),
-			Duration:  50 * time.Millisecond,
-		},
-		&flow.Message{
-			Sequence:  0,
-			Direction: "send",
-			Timestamp: time.Now(),
-			Method:    "POST",
-			URL:       u,
-			Headers:   map[string][]string{"Content-Type": {"application/grpc-web"}},
-			Body:      []byte("frame"),
-			RawBytes:  []byte("frame"),
-		},
-		&flow.Message{
-			Sequence:   1,
-			Direction:  "receive",
-			Timestamp:  time.Now(),
-			StatusCode: 200,
-			Headers:    map[string][]string{"Content-Type": {"application/grpc-web"}},
-			Body:       []byte("resp"),
-		},
-	)
-
-	cs := setupTestSessionWithExecuteDoer(t, store, newPermissiveClient())
-
-	result := executeCallTool(t, cs, map[string]any{
-		"action": "resend",
-		"params": map[string]any{
-			"flow_id": entry.Session.ID,
-		},
-	})
-	if !result.IsError {
-		t.Fatal("expected error for streaming gRPC-Web flow")
-	}
-
-	textContent := result.Content[0].(*gomcp.TextContent)
-	if !strings.Contains(textContent.Text, "gRPC-Web streaming flows") {
-		t.Errorf("error = %q, want to contain 'gRPC-Web streaming flows'", textContent.Text)
-	}
-}
+// TestResend_GRPCWeb_StreamingRejected was removed: FlowType is abolished
+// in the data model rewrite (USK-577). The MITM proxy cannot distinguish
+// unary from streaming gRPC-Web, so the rejection check no longer applies.
 
 func TestIsGRPCWebFlow(t *testing.T) {
 	t.Parallel()
@@ -2037,7 +1921,7 @@ func TestBuildGRPCWebRequestBody_FromRawBytes(t *testing.T) {
 	t.Parallel()
 
 	rawData := []byte("original-wire-data")
-	msgs := []*flow.Message{
+	msgs := []*flow.Flow{
 		{
 			Sequence:  0,
 			Direction: "send",
@@ -2055,7 +1939,7 @@ func TestBuildGRPCWebRequestBody_FromRawBytes(t *testing.T) {
 func TestBuildGRPCWebRequestBody_FallbackToBody(t *testing.T) {
 	t.Parallel()
 
-	msgs := []*flow.Message{
+	msgs := []*flow.Flow{
 		{
 			Sequence:  0,
 			Direction: "send",

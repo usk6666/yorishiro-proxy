@@ -257,9 +257,6 @@ func TestFrameEngine_GRPCUnary(t *testing.T) {
 	if store.flows[0].State != "complete" {
 		t.Errorf("state = %q, want %q", store.flows[0].State, "complete")
 	}
-	if store.flows[0].FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", store.flows[0].FlowType, "unary")
-	}
 }
 
 // TestFrameEngine_GRPCServerStreaming verifies server streaming gRPC RPCs
@@ -318,9 +315,6 @@ func TestFrameEngine_GRPCServerStreaming(t *testing.T) {
 	fl := store.flows[0]
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
-	}
-	if fl.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
 	}
 
 	// Verify progressive recording captured all server frames.
@@ -466,9 +460,6 @@ func TestFrameEngine_GRPCBidiStreaming(t *testing.T) {
 		t.Fatal("expected at least one flow to be recorded")
 	}
 	fl := store.flows[0]
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
-	}
 
 	// Count client and server frames.
 	flowMsgs := filterMessages(store.messages, fl.ID)

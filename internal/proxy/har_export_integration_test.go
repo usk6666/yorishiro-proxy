@@ -65,7 +65,7 @@ func TestHARExport_BasicHTTPS(t *testing.T) {
 	resp.Body.Close()
 
 	// Wait for flow to persist.
-	pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 
 	// Export as HAR.
 	var buf bytes.Buffer
@@ -166,50 +166,48 @@ func TestHARExport_FilterByProtocol(t *testing.T) {
 	defer store.Close()
 
 	// Create flows of different protocols directly in the store.
-	httpsFlow := &flow.Flow{
+	httpsFlow := &flow.Stream{
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, httpsFlow); err != nil {
+	if err := store.SaveStream(ctx, httpsFlow); err != nil {
 		t.Fatalf("SaveFlow HTTPS: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: httpsFlow.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: httpsFlow.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET",
 		URL: mustParseURL("https://example.com/https"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: httpsFlow.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: httpsFlow.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200,
 		Body: []byte("https-body"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	httpFlow := &flow.Flow{
+	httpFlow := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, httpFlow); err != nil {
+	if err := store.SaveStream(ctx, httpFlow); err != nil {
 		t.Fatalf("SaveFlow HTTP: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: httpFlow.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: httpFlow.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST",
 		URL: mustParseURL("http://example.com/http"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: httpFlow.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: httpFlow.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 201,
 		Body: []byte("http-body"),
 	}); err != nil {
@@ -255,25 +253,24 @@ func TestHARExport_BinaryBodyBase64(t *testing.T) {
 
 	// Create a flow with binary response body.
 	binaryBody := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a} // PNG header
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  10 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET",
 		URL: mustParseURL("https://example.com/image.png"),
 	}); err != nil {
 		t.Fatalf("AppendMessage send: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200,
 		Headers: map[string][]string{"Content-Type": {"image/png"}},
 		Body:    binaryBody,
@@ -322,20 +319,19 @@ func TestHARExport_WebSocketMessages(t *testing.T) {
 	defer store.Close()
 
 	// Create a WebSocket flow with upgrade request/response and data messages.
-	wsFlow := &flow.Flow{
+	wsFlow := &flow.Stream{
 		Protocol:  "WebSocket",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  500 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, wsFlow); err != nil {
+	if err := store.SaveStream(ctx, wsFlow); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Upgrade request.
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: wsFlow.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: wsFlow.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET",
 		URL:     mustParseURL("wss://example.com/ws"),
 		Headers: map[string][]string{"Upgrade": {"websocket"}},
@@ -344,8 +340,8 @@ func TestHARExport_WebSocketMessages(t *testing.T) {
 	}
 
 	// Upgrade response.
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: wsFlow.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: wsFlow.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 101,
 		Headers: map[string][]string{"Upgrade": {"websocket"}},
 	}); err != nil {
@@ -353,8 +349,8 @@ func TestHARExport_WebSocketMessages(t *testing.T) {
 	}
 
 	// Data messages.
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: wsFlow.ID, Sequence: 2, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: wsFlow.ID, Sequence: 2, Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("hello"),
 		Metadata:  map[string]string{"opcode": "1"},
@@ -362,8 +358,8 @@ func TestHARExport_WebSocketMessages(t *testing.T) {
 		t.Fatalf("AppendMessage ws send: %v", err)
 	}
 
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: wsFlow.ID, Sequence: 3, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: wsFlow.ID, Sequence: 3, Direction: "receive",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("world"),
 		Metadata:  map[string]string{"opcode": "1"},

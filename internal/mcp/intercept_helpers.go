@@ -41,9 +41,9 @@ type interceptConditionsInput struct {
 	// Exclusive to WebSocket intercept rules; must not be combined with HTTP conditions.
 	UpgradeURLPattern string `json:"upgrade_url_pattern,omitempty" jsonschema:"regex pattern for WebSocket upgrade URL matching"`
 
-	// FlowID specifies a particular WebSocket flow ID to intercept.
+	// StreamID specifies a particular WebSocket flow ID to intercept.
 	// Exclusive to WebSocket intercept rules; must not be combined with HTTP conditions.
-	FlowID string `json:"flow_id,omitempty" jsonschema:"WebSocket flow ID to intercept"`
+	StreamID string `json:"flow_id,omitempty" jsonschema:"WebSocket flow ID to intercept"`
 }
 
 // interceptRuleOutput is the JSON representation of an intercept rule for MCP tool output.
@@ -61,7 +61,7 @@ type interceptConditionsOutput struct {
 	Methods           []string          `json:"methods,omitempty"`
 	HeaderMatch       map[string]string `json:"header_match,omitempty"`
 	UpgradeURLPattern string            `json:"upgrade_url_pattern,omitempty"`
-	FlowID            string            `json:"flow_id,omitempty"`
+	StreamID          string            `json:"flow_id,omitempty"`
 }
 
 // toInterceptRule converts an MCP input rule to an intercept.Rule.
@@ -76,7 +76,7 @@ func toInterceptRule(input interceptRuleInput) intercept.Rule {
 			Methods:           input.Conditions.Methods,
 			HeaderMatch:       input.Conditions.HeaderMatch,
 			UpgradeURLPattern: input.Conditions.UpgradeURLPattern,
-			FlowID:            input.Conditions.FlowID,
+			StreamID:          input.Conditions.StreamID,
 		},
 	}
 }
@@ -93,7 +93,7 @@ func fromInterceptRule(r intercept.Rule) interceptRuleOutput {
 			Methods:           r.Conditions.Methods,
 			HeaderMatch:       r.Conditions.HeaderMatch,
 			UpgradeURLPattern: r.Conditions.UpgradeURLPattern,
-			FlowID:            r.Conditions.FlowID,
+			StreamID:          r.Conditions.StreamID,
 		},
 	}
 }

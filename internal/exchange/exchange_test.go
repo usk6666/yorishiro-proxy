@@ -43,7 +43,7 @@ func TestProtocol_String(t *testing.T) {
 
 func TestClone_DeepCopy(t *testing.T) {
 	orig := &Exchange{
-		FlowID:    "flow-1",
+		StreamID:  "flow-1",
 		Sequence:  0,
 		Direction: Send,
 		Method:    "POST",
@@ -68,8 +68,8 @@ func TestClone_DeepCopy(t *testing.T) {
 	cloned := orig.Clone()
 
 	// Verify values match
-	if cloned.FlowID != orig.FlowID {
-		t.Errorf("FlowID mismatch: got %q, want %q", cloned.FlowID, orig.FlowID)
+	if cloned.StreamID != orig.StreamID {
+		t.Errorf("StreamID mismatch: got %q, want %q", cloned.StreamID, orig.StreamID)
 	}
 	if cloned.Sequence != orig.Sequence {
 		t.Errorf("Sequence mismatch: got %d, want %d", cloned.Sequence, orig.Sequence)
@@ -128,7 +128,7 @@ func TestClone_Nil(t *testing.T) {
 
 func TestClone_NilFields(t *testing.T) {
 	orig := &Exchange{
-		FlowID:   "flow-2",
+		StreamID: "flow-2",
 		Protocol: TCP,
 	}
 	cloned := orig.Clone()
@@ -159,8 +159,8 @@ func TestClone_OpaqueShallowCopy(t *testing.T) {
 	}
 	data := &codecData{FrameID: 42}
 	orig := &Exchange{
-		FlowID: "flow-3",
-		Opaque: data,
+		StreamID: "flow-3",
+		Opaque:   data,
 	}
 	cloned := orig.Clone()
 
@@ -329,8 +329,8 @@ func TestSetTrailers(t *testing.T) {
 
 func TestClone_URLWithUserInfo(t *testing.T) {
 	orig := &Exchange{
-		FlowID: "flow-url",
-		URL:    &url.URL{Scheme: "https", Host: "example.com", User: url.UserPassword("user", "pass")},
+		StreamID: "flow-url",
+		URL:      &url.URL{Scheme: "https", Host: "example.com", User: url.UserPassword("user", "pass")},
 	}
 	cloned := orig.Clone()
 

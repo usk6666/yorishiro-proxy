@@ -153,18 +153,18 @@ func TestIntegration_HTTPSGET(t *testing.T) {
 	}
 
 	// Poll for session and messages to be persisted.
-	var flows []*flow.Flow
-	var send, recv *flow.Message
+	var flows []*flow.Stream
+	var send, recv *flow.Flow
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
 		if len(flows) != 1 {
 			continue
 		}
-		msgs, mErr := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
+		msgs, mErr := store.GetFlows(ctx, flows[0].ID, flow.FlowListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -273,18 +273,18 @@ func TestIntegration_HTTPSPOST(t *testing.T) {
 	}
 
 	// Poll for session and messages to be persisted.
-	var flows []*flow.Flow
-	var send, recv *flow.Message
+	var flows []*flow.Stream
+	var send, recv *flow.Flow
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Method: "POST", Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Method: "POST", Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
 		if len(flows) != 1 {
 			continue
 		}
-		msgs, mErr := store.GetMessages(ctx, flows[0].ID, flow.MessageListOptions{})
+		msgs, mErr := store.GetFlows(ctx, flows[0].ID, flow.FlowListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -381,7 +381,7 @@ func TestIntegration_HTTPSSessionRecording(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify detailed flow recording.
-	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
+	flows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -396,11 +396,11 @@ func TestIntegration_HTTPSSessionRecording(t *testing.T) {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTPS")
 	}
 
-	msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
-	var send, recv *flow.Message
+	var send, recv *flow.Flow
 	for _, m := range msgs {
 		switch m.Direction {
 		case "send":
@@ -519,7 +519,7 @@ func TestIntegration_HTTPSKeepAlive(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Verify all 3 flows were recorded.
-	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
+	flows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestIntegration_HTTPSKeepAlive(t *testing.T) {
 		if fl.Protocol != "HTTPS" {
 			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 		}
-		sendMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+		sendMsgs, mErr := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -636,7 +636,7 @@ func TestIntegration_HTTPSMultipleHosts(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify both flows were recorded with different hosts.
-	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
+	flows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -650,7 +650,7 @@ func TestIntegration_HTTPSMultipleHosts(t *testing.T) {
 		if fl.Protocol != "HTTPS" {
 			t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTPS")
 		}
-		sendMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+		sendMsgs, mErr := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
@@ -794,18 +794,18 @@ func TestIntegration_LargeBodyBoundary_HTTPS(t *testing.T) {
 			}
 
 			// Poll for session and messages to be persisted (large bodies may take longer to save).
-			var httpsFlows []*flow.Flow
-			var send, recv *flow.Message
+			var httpsFlows []*flow.Stream
+			var send, recv *flow.Flow
 			for i := 0; i < 50; i++ {
 				time.Sleep(100 * time.Millisecond)
-				httpsFlows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: 10})
+				httpsFlows, err = store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10})
 				if err != nil {
 					t.Fatalf("ListFlows: %v", err)
 				}
 				if len(httpsFlows) != 1 {
 					continue
 				}
-				allMsgs, mErr := store.GetMessages(ctx, httpsFlows[0].ID, flow.MessageListOptions{})
+				allMsgs, mErr := store.GetFlows(ctx, httpsFlows[0].ID, flow.FlowListOptions{})
 				if mErr != nil {
 					t.Fatalf("GetMessages: %v", mErr)
 				}
@@ -961,7 +961,7 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify all flows were recorded.
-	flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTPS", Limit: numClients + 10})
+	flows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTPS", Limit: numClients + 10})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -976,11 +976,11 @@ func TestIntegration_ConcurrentClients_HTTPS(t *testing.T) {
 			t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
 		}
 
-		allMsgs, mErr := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		allMsgs, mErr := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if mErr != nil {
 			t.Fatalf("GetMessages: %v", mErr)
 		}
-		var send, recv *flow.Message
+		var send, recv *flow.Flow
 		for _, m := range allMsgs {
 			switch m.Direction {
 			case "send":

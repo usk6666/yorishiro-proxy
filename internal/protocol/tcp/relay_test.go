@@ -16,31 +16,31 @@ import (
 // relayMockStore is a minimal FlowWriter mock for relay tests.
 type relayMockStore struct {
 	mu       sync.Mutex
-	messages []*flow.Message
+	messages []*flow.Flow
 }
 
-func (m *relayMockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *relayMockStore) SaveStream(_ context.Context, s *flow.Stream) error {
 	if s.ID == "" {
 		s.ID = "test-flow-id"
 	}
 	return nil
 }
 
-func (m *relayMockStore) UpdateFlow(_ context.Context, _ string, _ flow.FlowUpdate) error {
+func (m *relayMockStore) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
 	return nil
 }
 
-func (m *relayMockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *relayMockStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *relayMockStore) getMessages() []*flow.Message {
+func (m *relayMockStore) getMessages() []*flow.Flow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*flow.Message, len(m.messages))
+	out := make([]*flow.Flow, len(m.messages))
 	copy(out, m.messages)
 	return out
 }
@@ -57,10 +57,10 @@ func TestRunRelay_RecordsMessages(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunRelay(ctx, clientEnd, upstreamConn, RelayConfig{
-			Store:  store,
-			FlowID: "flow-1",
-			Logger: testutil.DiscardLogger(),
-			Target: "db.example.com:5432",
+			Store:    store,
+			StreamID: "flow-1",
+			Logger:   testutil.DiscardLogger(),
+			Target:   "db.example.com:5432",
 		})
 	}()
 
@@ -105,8 +105,8 @@ func TestRunRelay_RecordsMessages(t *testing.T) {
 	// Check that we have both directions.
 	var hasSend, hasReceive bool
 	for _, msg := range msgs {
-		if msg.FlowID != "flow-1" {
-			t.Errorf("message has wrong flow ID: %q", msg.FlowID)
+		if msg.StreamID != "flow-1" {
+			t.Errorf("message has wrong flow ID: %q", msg.StreamID)
 		}
 		if msg.Direction == "send" {
 			hasSend = true
@@ -133,9 +133,9 @@ func TestRunRelay_NilStore(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunRelay(ctx, clientEnd, upstreamConn, RelayConfig{
-			Store:  nil,
-			FlowID: "",
-			Logger: testutil.DiscardLogger(),
+			Store:    nil,
+			StreamID: "",
+			Logger:   testutil.DiscardLogger(),
 		})
 	}()
 
@@ -169,9 +169,9 @@ func TestRunRelay_ContextCancellation(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunRelay(ctx, clientEnd, upstreamConn, RelayConfig{
-			Store:  store,
-			FlowID: "flow-cancel",
-			Logger: testutil.DiscardLogger(),
+			Store:    store,
+			StreamID: "flow-cancel",
+			Logger:   testutil.DiscardLogger(),
 		})
 	}()
 
@@ -204,10 +204,10 @@ func TestRunRelay_ConfigFieldsUsed(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunRelay(ctx, clientEnd, upstreamConn, RelayConfig{
-			Store:  store,
-			FlowID: "custom-flow-id",
-			Logger: testutil.DiscardLogger(),
-			Target: "192.168.1.100:9999",
+			Store:    store,
+			StreamID: "custom-flow-id",
+			Logger:   testutil.DiscardLogger(),
+			Target:   "192.168.1.100:9999",
 		})
 	}()
 
@@ -226,8 +226,8 @@ func TestRunRelay_ConfigFieldsUsed(t *testing.T) {
 		t.Fatal("expected messages to be recorded")
 	}
 	for _, msg := range msgs {
-		if msg.FlowID != "custom-flow-id" {
-			t.Errorf("expected flow ID %q, got %q", "custom-flow-id", msg.FlowID)
+		if msg.StreamID != "custom-flow-id" {
+			t.Errorf("expected flow ID %q, got %q", "custom-flow-id", msg.StreamID)
 		}
 		if msg.Metadata["chunk_size"] != fmt.Sprintf("%d", len("data")) {
 			// Only check send direction.

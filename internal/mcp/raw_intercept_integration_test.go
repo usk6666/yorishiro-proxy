@@ -358,9 +358,8 @@ func TestE2E_InterceptRawRelease_HTTP2(t *testing.T) {
 	rawBytes := rawBuf.Bytes()
 
 	parsedURL, _ := url.Parse("http://" + echoAddr + "/h2-raw-release")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -369,11 +368,11 @@ func TestE2E_InterceptRawRelease_HTTP2(t *testing.T) {
 			ServerAddr: echoAddr,
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    fl.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -383,8 +382,8 @@ func TestE2E_InterceptRawRelease_HTTP2(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:     fl.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -456,7 +455,7 @@ func TestE2E_InterceptRawRelease_HTTP2(t *testing.T) {
 	}
 
 	// Verify the new flow was recorded with send raw bytes matching original.
-	newSendMsgs, err := store.GetMessages(ctx, rawResult.NewFlowID, flow.MessageListOptions{Direction: "send"})
+	newSendMsgs, err := store.GetFlows(ctx, rawResult.NewFlowID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -493,9 +492,8 @@ func TestE2E_InterceptRawModifyAndForward_HTTP2(t *testing.T) {
 	}
 
 	parsedURL, _ := url.Parse("http://" + echoAddr + "/original")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -504,11 +502,11 @@ func TestE2E_InterceptRawModifyAndForward_HTTP2(t *testing.T) {
 			ServerAddr: echoAddr,
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    fl.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -518,8 +516,8 @@ func TestE2E_InterceptRawModifyAndForward_HTTP2(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:     fl.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -598,7 +596,7 @@ func TestE2E_InterceptRawModifyAndForward_HTTP2(t *testing.T) {
 	}
 
 	// Verify the recorded send message has the override bytes.
-	newSendMsgs, err := store.GetMessages(ctx, rawResult.NewFlowID, flow.MessageListOptions{Direction: "send"})
+	newSendMsgs, err := store.GetFlows(ctx, rawResult.NewFlowID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -638,9 +636,8 @@ func TestE2E_ResendRawH2(t *testing.T) {
 	rawBytes := rawBuf.Bytes()
 
 	parsedURL, _ := url.Parse("http://" + echoAddr + "/resend-raw-h2")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -649,18 +646,18 @@ func TestE2E_ResendRawH2(t *testing.T) {
 			ServerAddr: echoAddr,
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
 		RawBytes: rawBytes,
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200, Body: []byte("ok"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
@@ -719,7 +716,7 @@ func TestE2E_ResendRawH2(t *testing.T) {
 	}
 
 	// Verify new flow was recorded.
-	newFl, err := store.GetFlow(ctx, rawResult.NewFlowID)
+	newFl, err := store.GetStream(ctx, rawResult.NewFlowID)
 	if err != nil {
 		t.Fatalf("get new flow: %v", err)
 	}
@@ -731,7 +728,7 @@ func TestE2E_ResendRawH2(t *testing.T) {
 	}
 
 	// Verify send and receive messages exist.
-	sendMsgs, err := store.GetMessages(ctx, rawResult.NewFlowID, flow.MessageListOptions{Direction: "send"})
+	sendMsgs, err := store.GetFlows(ctx, rawResult.NewFlowID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		t.Fatalf("GetMessages send: %v", err)
 	}
@@ -742,7 +739,7 @@ func TestE2E_ResendRawH2(t *testing.T) {
 		t.Error("send raw bytes should not be empty")
 	}
 
-	recvMsgs, err := store.GetMessages(ctx, rawResult.NewFlowID, flow.MessageListOptions{Direction: "receive"})
+	recvMsgs, err := store.GetFlows(ctx, rawResult.NewFlowID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages recv: %v", err)
 	}
@@ -780,9 +777,8 @@ func TestE2E_ResendRawH2_WithPatches(t *testing.T) {
 	originalRaw := rawBuf.Bytes()
 
 	parsedURL, _ := url.Parse("http://" + echoAddr + "/original-path")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -791,18 +787,18 @@ func TestE2E_ResendRawH2_WithPatches(t *testing.T) {
 			ServerAddr: echoAddr,
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: parsedURL,
 		RawBytes: originalRaw,
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200, Body: []byte("ok"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
@@ -996,7 +992,7 @@ func TestE2E_ResendRawH2_WithPatches(t *testing.T) {
 		}
 
 		// Verify the patched send bytes were recorded.
-		sendMsgs, err := store.GetMessages(ctx, rawResult.NewFlowID, flow.MessageListOptions{Direction: "send"})
+		sendMsgs, err := store.GetFlows(ctx, rawResult.NewFlowID, flow.FlowListOptions{Direction: "send"})
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
 		}

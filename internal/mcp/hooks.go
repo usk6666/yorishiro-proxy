@@ -382,7 +382,7 @@ func checkMacroStepsTargetScopeDeps(ctx context.Context, d *deps, steps []macroS
 				}
 			}
 		}
-		sendMsgs, msgErr := d.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
+		sendMsgs, msgErr := d.store.GetFlows(ctx, step.StreamID, flow.FlowListOptions{Direction: "send"})
 		if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 			if step.OverrideURL == "" {
 				if scopeErr := checkTargetScopeURLHelper(d.targetScope, sendMsgs[0].URL); scopeErr != nil {
@@ -493,16 +493,15 @@ func recordMacroStepSessionDeps(
 	if httpReq.URL != nil && httpReq.URL.Scheme == "https" {
 		scheme = "https"
 	}
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Scheme:    scheme,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
 		Duration:  duration,
 		Tags:      tags,
 	}
-	if err := d.store.SaveFlow(ctx, fl); err != nil {
+	if err := d.store.SaveStream(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -515,8 +514,8 @@ func recordMacroStepSessionDeps(
 
 	parsedURL := httpReq.URL
 
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -525,7 +524,7 @@ func recordMacroStepSessionDeps(
 		Headers:   recordedHeaders,
 		Body:      req.Body,
 	}
-	if err := d.store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := d.store.SaveFlow(ctx, sendMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step send message",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -536,8 +535,8 @@ func recordMacroStepSessionDeps(
 		respHeaders[key] = values
 	}
 
-	recvMsg := &flow.Message{
-		FlowID:     fl.ID,
+	recvMsg := &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),
@@ -545,7 +544,7 @@ func recordMacroStepSessionDeps(
 		Headers:    respHeaders,
 		Body:       respBody,
 	}
-	if err := d.store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := d.store.SaveFlow(ctx, recvMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step receive message",
 			"macro", macroName, "step", req.StepID, "error", err)
 	}

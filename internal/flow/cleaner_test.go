@@ -27,23 +27,23 @@ func saveCleanerSession(t *testing.T, store *SQLiteStore, ts time.Time, reqURL s
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: ts,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	msg := &Message{
-		FlowID:    fl.ID,
+	msg := &Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
 		Method:    "GET",
 		URL:       mustParseURL(reqURL),
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 }
@@ -67,7 +67,7 @@ func TestCleaner_RunOnce_MaxAge(t *testing.T) {
 		t.Errorf("RunOnce deleted %d, want 1", n)
 	}
 
-	remaining, err := store.ListFlows(ctx, ListOptions{})
+	remaining, err := store.ListStreams(ctx, StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestCleaner_RunOnce_MaxAge(t *testing.T) {
 func TestCleaner_RunOnce_MaxSessions(t *testing.T) {
 	t.Parallel()
 	cleaner, store := newTestCleaner(t, CleanerConfig{
-		MaxFlows: 2,
+		MaxStreams: 2,
 	})
 	ctx := context.Background()
 
@@ -96,7 +96,7 @@ func TestCleaner_RunOnce_MaxSessions(t *testing.T) {
 		t.Errorf("RunOnce deleted %d, want 3", n)
 	}
 
-	remaining, err := store.ListFlows(ctx, ListOptions{})
+	remaining, err := store.ListStreams(ctx, StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -124,8 +124,8 @@ func TestCleaner_RunOnce_Disabled(t *testing.T) {
 func TestCleaner_Start_RunsAtStartup(t *testing.T) {
 	t.Parallel()
 	cleaner, store := newTestCleaner(t, CleanerConfig{
-		MaxFlows: 1,
-		Interval: time.Hour,
+		MaxStreams: 1,
+		Interval:   time.Hour,
 	})
 	ctx := context.Background()
 
@@ -138,7 +138,7 @@ func TestCleaner_Start_RunsAtStartup(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cleaner.Stop()
 
-	remaining, err := store.ListFlows(ctx, ListOptions{})
+	remaining, err := store.ListStreams(ctx, StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestCleaner_Start_Periodic(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	cleaner.Stop()
 
-	remaining, err := store.ListFlows(ctx, ListOptions{})
+	remaining, err := store.ListStreams(ctx, StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -178,9 +178,9 @@ func TestCleanerConfig_Enabled(t *testing.T) {
 		want   bool
 	}{
 		{"both zero", CleanerConfig{}, false},
-		{"max sessions only", CleanerConfig{MaxFlows: 100}, true},
+		{"max sessions only", CleanerConfig{MaxStreams: 100}, true},
 		{"max age only", CleanerConfig{MaxAge: time.Hour}, true},
-		{"both set", CleanerConfig{MaxFlows: 100, MaxAge: time.Hour}, true},
+		{"both set", CleanerConfig{MaxStreams: 100, MaxAge: time.Hour}, true},
 	}
 
 	for _, tt := range tests {

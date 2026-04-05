@@ -81,23 +81,22 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		return nil
 	}
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    p.connID,
 		Protocol:  p.protocol,
 		Scheme:    p.scheme,
-		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
 		Tags:      p.tags,
 		ConnInfo:  p.connInfo,
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		logger.Error("flow save failed", "method", p.req.Method, "url", reqURL.String(), "error", err)
 		return nil
 	}
 
-	sendMsg := &flow.Message{
-		FlowID:        fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:      fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -108,7 +107,7 @@ func (h *Handler) recordSend(ctx context.Context, p sendRecordParams, logger *sl
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("send message save failed", "error", err)
 	}
 
@@ -133,17 +132,16 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	// Detect whether modification occurred.
 	modified := p.rawVariant || (snap != nil && requestModified(*snap, p.req.Headers, p.reqBody))
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    p.connID,
 		Protocol:  p.protocol,
 		Scheme:    p.scheme,
-		FlowType:  "unary",
 		State:     "active",
 		Timestamp: p.start,
 		Tags:      p.tags,
 		ConnInfo:  p.connInfo,
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		logger.Error("flow save failed", "method", p.req.Method, "url", reqURL.String(), "error", err)
 		return nil
 	}
@@ -169,8 +167,8 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		}
 
 		// Record the original (unmodified) request as sequence 0.
-		originalMsg := &flow.Message{
-			FlowID:        fl.ID,
+		originalMsg := &flow.Flow{
+			StreamID:      fl.ID,
 			Sequence:      0,
 			Direction:     "send",
 			Timestamp:     p.start,
@@ -182,13 +180,13 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "original"},
 		}
-		if err := h.Store.AppendMessage(ctx, originalMsg); err != nil {
+		if err := h.Store.SaveFlow(ctx, originalMsg); err != nil {
 			logger.Error("original send message save failed", "error", err)
 		}
 
 		// Record the modified request as sequence 1.
-		modifiedMsg := &flow.Message{
-			FlowID:        fl.ID,
+		modifiedMsg := &flow.Flow{
+			StreamID:      fl.ID,
 			Sequence:      1,
 			Direction:     "send",
 			Timestamp:     p.start,
@@ -200,7 +198,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 			BodyTruncated: p.reqTruncated,
 			Metadata:      map[string]string{"variant": "modified"},
 		}
-		if err := h.Store.AppendMessage(ctx, modifiedMsg); err != nil {
+		if err := h.Store.SaveFlow(ctx, modifiedMsg); err != nil {
 			logger.Error("modified send message save failed", "error", err)
 		}
 
@@ -208,8 +206,8 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 	}
 
 	// No modification: single send message without variant metadata.
-	sendMsg := &flow.Message{
-		FlowID:        fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:      fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -220,7 +218,7 @@ func (h *Handler) recordSendWithVariant(ctx context.Context, p sendRecordParams,
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("send message save failed", "error", err)
 	}
 
@@ -273,7 +271,7 @@ func (h *Handler) recordReceiveWithVariant(ctx context.Context, sendResult *send
 	tags := httputil.MergeTechnologyTags(sendResult.tags, h.detector, p.resp.Headers, p.respBody)
 
 	httputil.RecordReceiveVariant(ctx, h.Store, httputil.ReceiveVariantParams{
-		FlowID:               sendResult.flowID,
+		StreamID:             sendResult.flowID,
 		RecvSequence:         sendResult.recvSequence,
 		Start:                p.start,
 		Duration:             p.duration,
@@ -302,12 +300,12 @@ func (h *Handler) recordSendError(ctx context.Context, sendResult *sendRecordRes
 		tags[k] = v
 	}
 	tags["error"] = upstreamErr.Error()
-	update := flow.FlowUpdate{
+	update := flow.StreamUpdate{
 		State:    "error",
 		Duration: duration,
 		Tags:     tags,
 	}
-	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+	if err := h.Store.UpdateStream(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("flow error update failed", "error", err)
 	}
 }
@@ -328,11 +326,10 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 	}
 
 	duration := time.Since(p.start)
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    p.connID,
 		Protocol:  p.protocol,
 		Scheme:    p.scheme,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: p.start,
 		Duration:  duration,
@@ -340,13 +337,13 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		BlockedBy: "intercept_drop",
 		ConnInfo:  p.connInfo,
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		logger.Error("intercept drop flow save failed", "method", p.req.Method, "url", reqURL.String(), "error", err)
 		return
 	}
 
-	sendMsg := &flow.Message{
-		FlowID:        fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:      fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     p.start,
@@ -357,7 +354,7 @@ func (h *Handler) recordInterceptDrop(ctx context.Context, p sendRecordParams, l
 		RawBytes:      p.rawRequest,
 		BodyTruncated: p.reqTruncated,
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("intercept drop send message save failed", "error", err)
 	}
 }

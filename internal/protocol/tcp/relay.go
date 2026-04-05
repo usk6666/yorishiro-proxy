@@ -21,9 +21,9 @@ const relayBufSize = 32 * 1024
 // RelayConfig holds the parameters for RunRelay.
 type RelayConfig struct {
 	// Store is the flow writer for recording messages. May be nil to skip recording.
-	Store flow.FlowWriter
-	// FlowID is the ID of the flow to record messages against.
-	FlowID string
+	Store flow.Writer
+	// StreamID is the ID of the flow to record messages against.
+	StreamID string
 	// Logger is the structured logger.
 	Logger *slog.Logger
 	// PluginEngine dispatches per-chunk hooks. May be nil to skip hooks.
@@ -41,7 +41,7 @@ type RelayConfig struct {
 func RunRelay(ctx context.Context, client, upstream net.Conn, cfg RelayConfig) error {
 	r := &relay{
 		store:        cfg.Store,
-		flowID:       cfg.FlowID,
+		flowID:       cfg.StreamID,
 		logger:       cfg.Logger,
 		pluginEngine: cfg.PluginEngine,
 		connInfo:     cfg.ConnInfo,
@@ -53,7 +53,7 @@ func RunRelay(ctx context.Context, client, upstream net.Conn, cfg RelayConfig) e
 // relay copies data bidirectionally between a client and an upstream
 // connection, recording each chunk as a message in the flow store.
 type relay struct {
-	store        flow.FlowWriter
+	store        flow.Writer
 	flowID       string
 	logger       *slog.Logger
 	pluginEngine *plugin.Engine
@@ -290,8 +290,8 @@ func (r *relay) record(ctx context.Context, direction string, data []byte) {
 	raw := make([]byte, len(data))
 	copy(raw, data)
 
-	msg := &flow.Message{
-		FlowID:    r.flowID,
+	msg := &flow.Flow{
+		StreamID:  r.flowID,
 		Sequence:  seq,
 		Direction: direction,
 		Timestamp: time.Now(),
@@ -301,7 +301,7 @@ func (r *relay) record(ctx context.Context, direction string, data []byte) {
 		},
 	}
 
-	if err := r.store.AppendMessage(ctx, msg); err != nil {
+	if err := r.store.SaveFlow(ctx, msg); err != nil {
 		r.logger.Error("TCP message record failed",
 			"flow_id", r.flowID,
 			"seq", seq,

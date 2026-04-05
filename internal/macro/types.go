@@ -96,8 +96,8 @@ type Macro struct {
 type Step struct {
 	// ID is a unique identifier for this step within the macro.
 	ID string
-	// FlowID references the recorded flow to use as a template.
-	FlowID string
+	// StreamID references the recorded flow to use as a template.
+	StreamID string
 	// OverrideMethod overrides the HTTP method. Empty means use the original.
 	OverrideMethod string
 	// OverrideURL overrides the request URL. Empty means use the original.

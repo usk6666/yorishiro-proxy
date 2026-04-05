@@ -73,12 +73,12 @@ func TestSafetyFilter_Resend_BlocksDestructiveBody(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/api")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -87,7 +87,7 @@ func TestSafetyFilter_Resend_BlocksDestructiveBody(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"query":"SELECT 1"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -97,7 +97,7 @@ func TestSafetyFilter_Resend_BlocksDestructiveBody(t *testing.T) {
 	)
 
 	// Get the flow ID from the store.
-	flows, err := store.ListFlows(context.Background(), flow.ListOptions{Limit: 1})
+	flows, err := store.ListStreams(context.Background(), flow.StreamListOptions{Limit: 1})
 	if err != nil {
 		t.Fatalf("list flows: %v", err)
 	}
@@ -142,12 +142,12 @@ func TestSafetyFilter_Resend_AllowsSafeBody(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -156,7 +156,7 @@ func TestSafetyFilter_Resend_AllowsSafeBody(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"query":"SELECT * FROM users"}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -165,7 +165,7 @@ func TestSafetyFilter_Resend_AllowsSafeBody(t *testing.T) {
 		},
 	)
 
-	flows, _ := store.ListFlows(context.Background(), flow.ListOptions{Limit: 1})
+	flows, _ := store.ListStreams(context.Background(), flow.StreamListOptions{Limit: 1})
 	flowID := flows[0].ID
 
 	cs := setupTestSessionWithSafety(t, store, newPermissiveClient(), safetyEngine)
@@ -189,12 +189,12 @@ func TestSafetyFilter_Resend_BlocksDestructiveHeaders(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/api")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -203,7 +203,7 @@ func TestSafetyFilter_Resend_BlocksDestructiveHeaders(t *testing.T) {
 			Headers:   map[string][]string{},
 			Body:      nil,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -212,7 +212,7 @@ func TestSafetyFilter_Resend_BlocksDestructiveHeaders(t *testing.T) {
 		},
 	)
 
-	flows, _ := store.ListFlows(context.Background(), flow.ListOptions{Limit: 1})
+	flows, _ := store.ListStreams(context.Background(), flow.StreamListOptions{Limit: 1})
 	flowID := flows[0].ID
 
 	cs := setupTestSessionWithSafety(t, store, newPermissiveClient(), safetyEngine)
@@ -378,12 +378,12 @@ func TestSafetyFilter_FuzzTemplate_BlocksDestructiveBody(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com/api")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -392,7 +392,7 @@ func TestSafetyFilter_FuzzTemplate_BlocksDestructiveBody(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"text/plain"}},
 			Body:      []byte("DROP TABLE users;"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -401,7 +401,7 @@ func TestSafetyFilter_FuzzTemplate_BlocksDestructiveBody(t *testing.T) {
 		},
 	)
 
-	flows, _ := store.ListFlows(context.Background(), flow.ListOptions{Limit: 1})
+	flows, _ := store.ListStreams(context.Background(), flow.StreamListOptions{Limit: 1})
 	flowID := flows[0].ID
 
 	ctx := context.Background()
@@ -479,12 +479,12 @@ func TestSafetyFilter_NoEngine_PassesThrough(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api")
 	saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -493,7 +493,7 @@ func TestSafetyFilter_NoEngine_PassesThrough(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"text/plain"}},
 			Body:      []byte("DROP TABLE users;"),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -502,7 +502,7 @@ func TestSafetyFilter_NoEngine_PassesThrough(t *testing.T) {
 		},
 	)
 
-	flows, _ := store.ListFlows(context.Background(), flow.ListOptions{Limit: 1})
+	flows, _ := store.ListStreams(context.Background(), flow.StreamListOptions{Limit: 1})
 	flowID := flows[0].ID
 
 	// No safety engine = should allow destructive payloads.

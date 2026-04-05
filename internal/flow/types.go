@@ -5,48 +5,44 @@ import (
 	"time"
 )
 
-// Flow represents a recorded proxy flow (connection-level metadata).
-// A flow contains one or more messages depending on the flow type:
-// unary flows have exactly one send + one receive message,
-// stream/bidirectional flows have multiple messages.
-type Flow struct {
-	// ID is the unique identifier of the flow.
+// Stream represents a recorded proxy stream (connection/RPC-level grouping).
+// A stream contains one or more flows: for HTTP unary, there is exactly
+// one send + one receive flow. For streaming protocols, there may be many.
+type Stream struct {
+	// ID is the unique identifier of the stream.
 	ID string
 	// ConnID is the connection ID for log correlation.
 	ConnID string
-	// Protocol is the protocol label assigned to the flow
+	// Protocol is the protocol label assigned to the stream
 	// (e.g., "HTTP/1.x", "HTTPS", "HTTP/2", "gRPC", "WebSocket", "TCP",
 	// "SOCKS5+HTTPS", "SOCKS5+HTTP").
 	Protocol string
 	// Scheme is the URL scheme or transport indicator
 	// (e.g., "https", "http", "wss", "ws", "tcp").
 	// It separates TLS/transport information from Protocol, so that
-	// filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
+	// filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC streams over TLS.
 	// WebSocket over TLS uses scheme="wss", not "https".
 	Scheme string
-	// FlowType indicates the communication pattern:
-	// "unary" (single request-response), "stream", or "bidirectional".
-	FlowType string
-	// State indicates the flow lifecycle state:
+	// State indicates the stream lifecycle state:
 	// "active" (in progress), "complete" (finished), or "error" (failed).
 	State string
-	// Timestamp is the time the flow was initiated.
+	// Timestamp is the time the stream was initiated.
 	Timestamp time.Time
-	// Duration is the total duration of the flow.
+	// Duration is the total duration of the stream.
 	Duration time.Duration
-	// Tags holds optional key-value metadata for the flow.
+	// Tags holds optional key-value metadata for the stream.
 	// Examples include security flags such as smuggling detection results.
 	// A nil map indicates no tags are present.
 	Tags map[string]string
 	// ConnInfo holds network and TLS connection metadata.
-	// May be nil for flows recorded without connection information.
+	// May be nil for streams recorded without connection information.
 	ConnInfo *ConnectionInfo
 	// BlockedBy indicates which subsystem blocked this request.
 	// Empty string means the request was not blocked.
 	// "target_scope" means it was blocked by the target scope rules.
 	BlockedBy string
 	// SendMs is the time in milliseconds to send the request (headers + body).
-	// Nil when not measured (e.g., Raw TCP, or legacy flows before this feature).
+	// Nil when not measured (e.g., Raw TCP, or legacy streams before this feature).
 	SendMs *int64 `json:"send_ms,omitempty"`
 	// WaitMs is the server processing time in milliseconds (TTFB).
 	// Nil when not measured.
@@ -56,7 +52,7 @@ type Flow struct {
 	ReceiveMs *int64 `json:"receive_ms,omitempty"`
 }
 
-// ConnectionInfo holds network-level and TLS metadata for a proxy flow.
+// ConnectionInfo holds network-level and TLS metadata for a proxy stream.
 type ConnectionInfo struct {
 	// ClientAddr is the remote address of the client (e.g., "192.168.1.100:54321").
 	ClientAddr string
@@ -76,24 +72,24 @@ type ConnectionInfo struct {
 	TLSServerCertSubject string
 }
 
-// Message represents a single directional message within a flow.
-// For HTTP unary flows, there are exactly two messages: one send (request)
+// Flow represents a single directional message within a stream.
+// For HTTP unary streams, there are exactly two flows: one send (request)
 // and one receive (response). For streaming protocols, there may be many.
-type Message struct {
-	// ID is the unique identifier of the message.
+type Flow struct {
+	// ID is the unique identifier of the flow.
 	ID string
-	// FlowID is the ID of the flow this message belongs to.
-	FlowID string
-	// Sequence is the order of this message within the flow (0-based).
+	// StreamID is the ID of the stream this flow belongs to.
+	StreamID string
+	// Sequence is the order of this flow within the stream (0-based).
 	Sequence int
-	// Direction indicates the message flow: "send" (client to server)
+	// Direction indicates the flow direction: "send" (client to server)
 	// or "receive" (server to client).
 	Direction string
-	// Timestamp is the time this message was captured.
+	// Timestamp is the time this flow was captured.
 	Timestamp time.Time
 	// Headers holds HTTP-style headers. May be nil for non-HTTP protocols.
 	Headers map[string][]string
-	// Body holds the message body content.
+	// Body holds the flow body content.
 	Body []byte
 	// RawBytes holds the original raw bytes as captured on the wire.
 	// This preserves header ordering, whitespace, and protocol version
@@ -103,28 +99,25 @@ type Message struct {
 	// BodyTruncated indicates whether the body was truncated during recording.
 	BodyTruncated bool
 	// Method is the HTTP request method (e.g., "GET", "POST").
-	// Only set for HTTP send messages.
+	// Only set for HTTP send flows.
 	Method string
-	// URL is the HTTP request URL. Only set for HTTP send messages.
+	// URL is the HTTP request URL. Only set for HTTP send flows.
 	URL *url.URL
 	// StatusCode is the HTTP response status code.
-	// Only set for HTTP receive messages.
+	// Only set for HTTP receive flows.
 	StatusCode int
-	// Metadata holds protocol-specific key-value metadata for this message.
+	// Metadata holds protocol-specific key-value metadata for this flow.
 	Metadata map[string]string
 }
 
-// FlowUpdate holds the fields that can be updated on an existing flow.
+// StreamUpdate holds the fields that can be updated on an existing stream.
 // Only non-zero/non-nil fields are applied.
-type FlowUpdate struct {
-	// State sets the flow state (e.g., "complete", "error").
+type StreamUpdate struct {
+	// State sets the stream state (e.g., "complete", "error").
 	State string
-	// FlowType overrides the flow type (e.g., "stream" for SSE).
-	// Only applied when non-empty.
-	FlowType string
-	// Duration sets the flow duration.
+	// Duration sets the stream duration.
 	Duration time.Duration
-	// Tags replaces the flow tags.
+	// Tags replaces the stream tags.
 	Tags map[string]string
 	// ServerAddr sets the upstream server address in ConnInfo.
 	// Only applied when non-empty.

@@ -146,13 +146,13 @@ func newH2CClient(proxyAddr string) *gohttp.Client {
 }
 
 // pollGRPCFlows polls the store until the expected number of gRPC flows appear.
-func pollGRPCFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Flow {
+func pollGRPCFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Stream {
 	t.Helper()
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	var err error
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "gRPC", Limit: 100})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Protocol: "gRPC", Limit: 100})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -165,11 +165,11 @@ func pollGRPCFlows(t *testing.T, ctx context.Context, store flow.Store, wantCoun
 }
 
 // pollFlowState polls until the flow reaches the expected state.
-func pollFlowState(t *testing.T, ctx context.Context, store flow.Store, flowID, wantState string) *flow.Flow {
+func pollFlowState(t *testing.T, ctx context.Context, store flow.Store, flowID, wantState string) *flow.Stream {
 	t.Helper()
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		fl, err := store.GetFlow(ctx, flowID)
+		fl, err := store.GetStream(ctx, flowID)
 		if err != nil {
 			continue
 		}
@@ -325,9 +325,6 @@ func TestIntegration_GRPC_ServerStreaming(t *testing.T) {
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
-	if fl.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
-	}
 }
 
 func TestIntegration_GRPC_ClientStreaming(t *testing.T) {
@@ -394,9 +391,6 @@ func TestIntegration_GRPC_ClientStreaming(t *testing.T) {
 	// Verify flow recording: should be "stream" type (multiple req, single resp).
 	flows := pollGRPCFlows(t, ctx, store, 1)
 	fl := flows[0]
-	if fl.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
-	}
 }
 
 func TestIntegration_GRPC_BidirectionalStreaming(t *testing.T) {
@@ -475,9 +469,6 @@ func TestIntegration_GRPC_BidirectionalStreaming(t *testing.T) {
 	// Verify no deadlock occurred and flow recording completed.
 	flows := pollGRPCFlows(t, ctx, store, 1)
 	fl := flows[0]
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
-	}
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
 	}
@@ -676,10 +667,10 @@ func TestIntegration_GRPC_ProgressiveRecording_ActiveThenComplete(t *testing.T) 
 	}()
 
 	// Wait for the flow to appear in "active" state.
-	var activeFlow *flow.Flow
+	var activeFlow *flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "gRPC", State: "active", Limit: 10})
+		flows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "gRPC", State: "active", Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -710,12 +701,9 @@ func TestIntegration_GRPC_ProgressiveRecording_ActiveThenComplete(t *testing.T) 
 
 	// Verify flow transitions to "complete".
 	completedFlow := pollFlowState(t, ctx, store, activeFlow.ID, "complete")
-	if completedFlow.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", completedFlow.FlowType, "stream")
-	}
 
 	// Verify messages were recorded.
-	msgs, err := store.GetMessages(ctx, activeFlow.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, activeFlow.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -768,7 +756,7 @@ func TestIntegration_GRPC_MCP_ProtobufDecoded(t *testing.T) {
 	flows := pollGRPCFlows(t, ctx, store, 1)
 	fl := flows[0]
 
-	msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}

@@ -222,17 +222,17 @@ func newH2FETLSClient(proxyAddr string, caCert *x509.Certificate) *gohttp.Client
 
 // pollH2FEFlows polls the store until the expected number of flows with the
 // given protocol appear or timeout.
-func pollH2FEFlows(t *testing.T, ctx context.Context, store flow.Store, protocol string, wantCount int) []*flow.Flow {
+func pollH2FEFlows(t *testing.T, ctx context.Context, store flow.Store, protocol string, wantCount int) []*flow.Stream {
 	t.Helper()
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	var err error
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		opts := flow.ListOptions{Limit: 100}
+		opts := flow.StreamListOptions{Limit: 100}
 		if protocol != "" {
 			opts.Protocol = protocol
 		}
-		flows, err = store.ListFlows(ctx, opts)
+		flows, err = store.ListStreams(ctx, opts)
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -245,11 +245,11 @@ func pollH2FEFlows(t *testing.T, ctx context.Context, store flow.Store, protocol
 }
 
 // pollH2FEFlowMessages polls until both send and receive messages appear for a flow.
-func pollH2FEFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
+func pollH2FEFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Flow) {
 	t.Helper()
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		msgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+		msgs, err := store.GetFlows(ctx, flowID, flow.FlowListOptions{})
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
 		}
@@ -315,9 +315,6 @@ func TestIntegration_H2FrameEngine_H2C_GET(t *testing.T) {
 	fl := flows[0]
 	if fl.Protocol != "HTTP/2" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "HTTP/2")
-	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
 	}
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
@@ -689,7 +686,7 @@ func TestIntegration_H2FrameEngine_GRPC_Unary(t *testing.T) {
 	}
 
 	// Verify messages exist.
-	msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -762,9 +759,6 @@ func TestIntegration_H2FrameEngine_GRPC_ServerStreaming(t *testing.T) {
 	fl := flows[0]
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
-	}
-	if fl.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
 	}
 }
 

@@ -9,12 +9,12 @@ import (
 
 // buildProtocolSummary generates a protocol-specific summary map for a flow.
 // The summary provides key information relevant to the flow's protocol type.
-func buildProtocolSummary(protocol, sessionType string, msgs []*flow.Message) map[string]string {
+func buildProtocolSummary(protocol string, msgs []*flow.Flow) map[string]string {
 	switch protocol {
 	case "WebSocket":
 		return buildWebSocketSummary(msgs)
 	case "HTTP/2":
-		return buildHTTP2Summary(sessionType, msgs)
+		return buildHTTP2Summary(msgs)
 	case "gRPC", "gRPC-Web":
 		return buildGRPCSummary(msgs)
 	case "TCP":
@@ -25,7 +25,7 @@ func buildProtocolSummary(protocol, sessionType string, msgs []*flow.Message) ma
 }
 
 // buildWebSocketSummary generates summary info for WebSocket flows.
-func buildWebSocketSummary(msgs []*flow.Message) map[string]string {
+func buildWebSocketSummary(msgs []*flow.Flow) map[string]string {
 	summary := map[string]string{
 		"message_count": strconv.Itoa(len(msgs)),
 	}
@@ -42,7 +42,7 @@ func buildWebSocketSummary(msgs []*flow.Message) map[string]string {
 }
 
 // buildHTTP2Summary generates summary info for HTTP/2 sessions.
-func buildHTTP2Summary(sessionType string, msgs []*flow.Message) map[string]string {
+func buildHTTP2Summary(msgs []*flow.Flow) map[string]string {
 	// Count streams: in HTTP/2, each send+receive pair is one stream.
 	sendCount := 0
 	for _, msg := range msgs {
@@ -64,7 +64,7 @@ func buildHTTP2Summary(sessionType string, msgs []*flow.Message) map[string]stri
 }
 
 // buildGRPCSummary generates summary info for gRPC sessions.
-func buildGRPCSummary(msgs []*flow.Message) map[string]string {
+func buildGRPCSummary(msgs []*flow.Flow) map[string]string {
 	summary := map[string]string{}
 
 	// Extract gRPC service/method from the first send message's metadata.
@@ -97,7 +97,7 @@ func buildGRPCSummary(msgs []*flow.Message) map[string]string {
 }
 
 // buildTCPSummary generates summary info for Raw TCP sessions.
-func buildTCPSummary(msgs []*flow.Message) map[string]string {
+func buildTCPSummary(msgs []*flow.Flow) map[string]string {
 	var sendBytes, recvBytes int
 	for _, msg := range msgs {
 		switch msg.Direction {

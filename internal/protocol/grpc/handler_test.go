@@ -17,11 +17,11 @@ import (
 
 // mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
-	flows    []*flow.Flow
-	messages []*flow.Message
+	flows    []*flow.Stream
+	messages []*flow.Flow
 }
 
-func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *mockStore) SaveStream(_ context.Context, s *flow.Stream) error {
 	if s.ID == "" {
 		s.ID = uuid.New().String()
 	}
@@ -29,7 +29,7 @@ func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	return nil
 }
 
-func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (m *mockStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	for _, s := range m.flows {
 		if s.ID == id {
 			if update.State != "" {
@@ -47,7 +47,7 @@ func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpd
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
+func (m *mockStore) GetStream(_ context.Context, id string) (*flow.Stream, error) {
 	for _, s := range m.flows {
 		if s.ID == id {
 			return s, nil
@@ -56,15 +56,15 @@ func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
 	return nil, fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
+func (m *mockStore) ListFlows(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
 	return m.flows, nil
 }
 
-func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
+func (m *mockStore) CountStreams(_ context.Context, _ flow.StreamListOptions) (int, error) {
 	return len(m.flows), nil
 }
 
-func (m *mockStore) DeleteFlow(_ context.Context, _ string) error { return nil }
+func (m *mockStore) DeleteStream(_ context.Context, _ string) error { return nil }
 func (m *mockStore) DeleteAllFlows(_ context.Context) (int64, error) {
 	return 0, nil
 }
@@ -78,15 +78,15 @@ func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error
 	return 0, nil
 }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
-	var result []*flow.Message
+func (m *mockStore) GetFlows(_ context.Context, flowID string, opts flow.FlowListOptions) ([]*flow.Flow, error) {
+	var result []*flow.Flow
 	for _, msg := range m.messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			if opts.Direction != "" && msg.Direction != opts.Direction {
 				continue
 			}
@@ -96,10 +96,10 @@ func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.Mess
 	return result, nil
 }
 
-func (m *mockStore) CountMessages(_ context.Context, flowID string) (int, error) {
+func (m *mockStore) CountFlows(_ context.Context, flowID string) (int, error) {
 	count := 0
 	for _, msg := range m.messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			count++
 		}
 	}
@@ -114,10 +114,10 @@ func (m *mockStore) ListMacros(_ context.Context) ([]*flow.MacroRecord, error) {
 func (m *mockStore) DeleteMacro(_ context.Context, _ string) error             { return nil }
 
 // messagesForSession returns messages for a given flow ID.
-func (m *mockStore) messagesForSession(flowID string) []*flow.Message {
-	var result []*flow.Message
+func (m *mockStore) messagesForSession(flowID string) []*flow.Flow {
+	var result []*flow.Flow
 	for _, msg := range m.messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			result = append(result, msg)
 		}
 	}
@@ -268,35 +268,6 @@ func TestParseServiceMethod(t *testing.T) {
 	}
 }
 
-// --- classifyFlowType tests ---
-
-func TestClassifyFlowType(t *testing.T) {
-	tests := []struct {
-		name       string
-		reqFrames  int
-		respFrames int
-		want       string
-	}{
-		{name: "unary (1 req, 1 resp)", reqFrames: 1, respFrames: 1, want: "unary"},
-		{name: "unary (0 req, 0 resp)", reqFrames: 0, respFrames: 0, want: "unary"},
-		{name: "unary (0 req, 1 resp)", reqFrames: 0, respFrames: 1, want: "unary"},
-		{name: "unary (1 req, 0 resp)", reqFrames: 1, respFrames: 0, want: "unary"},
-		{name: "server streaming", reqFrames: 1, respFrames: 3, want: "stream"},
-		{name: "client streaming", reqFrames: 3, respFrames: 1, want: "stream"},
-		{name: "bidirectional", reqFrames: 3, respFrames: 3, want: "bidirectional"},
-		{name: "bidirectional (many)", reqFrames: 10, respFrames: 5, want: "bidirectional"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ClassifyFlowType(tt.reqFrames, tt.respFrames)
-			if got != tt.want {
-				t.Errorf("ClassifyFlowType(%d, %d) = %q, want %q", tt.reqFrames, tt.respFrames, got, tt.want)
-			}
-		})
-	}
-}
-
 // --- RecordSession tests ---
 
 func TestRecordSession_UnaryRPC(t *testing.T) {
@@ -353,9 +324,6 @@ func TestRecordSession_UnaryRPC(t *testing.T) {
 	fl := store.flows[0]
 	if fl.Protocol != "gRPC" {
 		t.Errorf("protocol = %q, want %q", fl.Protocol, "gRPC")
-	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
 	}
 	if fl.State != "complete" {
 		t.Errorf("state = %q, want %q", fl.State, "complete")
@@ -473,9 +441,6 @@ func TestRecordSession_ServerStreaming(t *testing.T) {
 		t.Fatalf("sessions count = %d, want 1", len(store.flows))
 	}
 	fl := store.flows[0]
-	if fl.FlowType != "stream" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "stream")
-	}
 
 	// 1 send + 3 receive = 4 messages.
 	msgs := store.messagesForSession(fl.ID)
@@ -560,9 +525,6 @@ func TestRecordSession_BidirectionalStreaming(t *testing.T) {
 	}
 
 	fl := store.flows[0]
-	if fl.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "bidirectional")
-	}
 
 	// 3 send + 2 receive = 5 messages.
 	msgs := store.messagesForSession(fl.ID)
@@ -638,9 +600,6 @@ func TestRecordSession_ErrorResponse(t *testing.T) {
 	}
 
 	fl := store.flows[0]
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
-	}
 
 	msgs := store.messagesForSession(fl.ID)
 	if len(msgs) != 2 {
@@ -843,9 +802,6 @@ func TestRecordSession_TrailersOnly_NoResponseFrames(t *testing.T) {
 	}
 
 	fl := store.flows[0]
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
-	}
 
 	msgs := store.messagesForSession(fl.ID)
 	if len(msgs) != 2 {
@@ -903,9 +859,6 @@ func TestRecordSession_TrailersOnly_RequestWithNoResponseFrames(t *testing.T) {
 	}
 
 	fl := store.flows[0]
-	if fl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", fl.FlowType, "unary")
-	}
 
 	msgs := store.messagesForSession(fl.ID)
 	if len(msgs) != 2 {

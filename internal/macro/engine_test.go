@@ -61,7 +61,7 @@ func TestValidateMacro(t *testing.T) {
 		},
 		{
 			name:    "empty name",
-			macro:   &Macro{Steps: []Step{{ID: "s1", FlowID: "sess1"}}},
+			macro:   &Macro{Steps: []Step{{ID: "s1", StreamID: "sess1"}}},
 			wantErr: true,
 		},
 		{
@@ -74,7 +74,7 @@ func TestValidateMacro(t *testing.T) {
 			macro: func() *Macro {
 				steps := make([]Step, MaxSteps+1)
 				for i := range steps {
-					steps[i] = Step{ID: fmt.Sprintf("s%d", i), FlowID: "sess"}
+					steps[i] = Step{ID: fmt.Sprintf("s%d", i), StreamID: "sess"}
 				}
 				return &Macro{Name: "test", Steps: steps}
 			}(),
@@ -84,7 +84,7 @@ func TestValidateMacro(t *testing.T) {
 			name: "empty step ID",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{FlowID: "sess1"}},
+				Steps: []Step{{StreamID: "sess1"}},
 			},
 			wantErr: true,
 		},
@@ -93,8 +93,8 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", FlowID: "sess1"},
-					{ID: "s1", FlowID: "sess2"},
+					{ID: "s1", StreamID: "sess1"},
+					{ID: "s1", StreamID: "sess2"},
 				},
 			},
 			wantErr: true,
@@ -111,7 +111,7 @@ func TestValidateMacro(t *testing.T) {
 			name: "invalid on_error",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{ID: "s1", FlowID: "sess1", OnError: "invalid"}},
+				Steps: []Step{{ID: "s1", StreamID: "sess1", OnError: "invalid"}},
 			},
 			wantErr: true,
 		},
@@ -119,14 +119,14 @@ func TestValidateMacro(t *testing.T) {
 			name: "retry_count at maximum",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{ID: "s1", FlowID: "sess1", RetryCount: MaxRetryCount}},
+				Steps: []Step{{ID: "s1", StreamID: "sess1", RetryCount: MaxRetryCount}},
 			},
 		},
 		{
 			name: "retry_count exceeds maximum",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{ID: "s1", FlowID: "sess1", RetryCount: MaxRetryCount + 1}},
+				Steps: []Step{{ID: "s1", StreamID: "sess1", RetryCount: MaxRetryCount + 1}},
 			},
 			wantErr: true,
 		},
@@ -134,7 +134,7 @@ func TestValidateMacro(t *testing.T) {
 			name: "retry_count far exceeds maximum",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{ID: "s1", FlowID: "sess1", RetryCount: 999999}},
+				Steps: []Step{{ID: "s1", StreamID: "sess1", RetryCount: 999999}},
 			},
 			wantErr: true,
 		},
@@ -143,8 +143,8 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", FlowID: "sess1", When: &Guard{Step: "s2"}},
-					{ID: "s2", FlowID: "sess2"},
+					{ID: "s1", StreamID: "sess1", When: &Guard{Step: "s2"}},
+					{ID: "s2", StreamID: "sess2"},
 				},
 			},
 			wantErr: true,
@@ -155,7 +155,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", FlowID: "sess1",
+						ID: "s1", StreamID: "sess1",
 						Extract: []ExtractionRule{{Source: ExtractionSourceBody, From: ExtractionFromResponse}},
 					},
 				},
@@ -168,7 +168,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", FlowID: "sess1",
+						ID: "s1", StreamID: "sess1",
 						Extract: []ExtractionRule{{Name: "var1", From: ExtractionFromResponse}},
 					},
 				},
@@ -181,7 +181,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", FlowID: "sess1",
+						ID: "s1", StreamID: "sess1",
 						Extract: []ExtractionRule{{Name: "var1", Source: ExtractionSourceBody}},
 					},
 				},
@@ -194,7 +194,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", FlowID: "sess1",
+						ID: "s1", StreamID: "sess1",
 						Extract: []ExtractionRule{{Name: "var1", Source: "response", From: ExtractionFromResponse}},
 					},
 				},
@@ -207,7 +207,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", FlowID: "sess1",
+						ID: "s1", StreamID: "sess1",
 						Extract: []ExtractionRule{{Name: "var1", Source: ExtractionSourceBody, From: "body"}},
 					},
 				},
@@ -220,7 +220,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", FlowID: "sess1",
+						ID: "s1", StreamID: "sess1",
 						Extract: []ExtractionRule{{Name: "var1", Source: "response", From: "body"}},
 					},
 				},
@@ -233,7 +233,7 @@ func TestValidateMacro(t *testing.T) {
 				Name: "test",
 				Steps: []Step{
 					{
-						ID: "s1", FlowID: "sess1",
+						ID: "s1", StreamID: "sess1",
 						Extract: []ExtractionRule{
 							{Name: "v1", Source: ExtractionSourceHeader, From: ExtractionFromRequest, HeaderName: "X-Token"},
 							{Name: "v2", Source: ExtractionSourceBody, From: ExtractionFromResponse},
@@ -250,8 +250,8 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", FlowID: "sess1"},
-					{ID: "s2", FlowID: "sess2", When: &Guard{Step: "s1", StatusCode: intPtr(200)}},
+					{ID: "s1", StreamID: "sess1"},
+					{ID: "s2", StreamID: "sess2", When: &Guard{Step: "s1", StatusCode: intPtr(200)}},
 				},
 			},
 		},
@@ -260,9 +260,9 @@ func TestValidateMacro(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{
-					{ID: "s1", FlowID: "sess1", OnError: OnErrorAbort},
-					{ID: "s2", FlowID: "sess2", OnError: OnErrorSkip},
-					{ID: "s3", FlowID: "sess3", OnError: OnErrorRetry},
+					{ID: "s1", StreamID: "sess1", OnError: OnErrorAbort},
+					{ID: "s2", StreamID: "sess2", OnError: OnErrorSkip},
+					{ID: "s3", StreamID: "sess3", OnError: OnErrorRetry},
 				},
 			},
 		},
@@ -288,7 +288,7 @@ func TestValidateMacro_ErrorMessagesIncludeValidValues(t *testing.T) {
 			name: "invalid on_error includes valid values",
 			macro: &Macro{
 				Name:  "test",
-				Steps: []Step{{ID: "s1", FlowID: "sess1", OnError: "bad"}},
+				Steps: []Step{{ID: "s1", StreamID: "sess1", OnError: "bad"}},
 			},
 			wantSub: "valid: abort, skip, retry",
 		},
@@ -297,7 +297,7 @@ func TestValidateMacro_ErrorMessagesIncludeValidValues(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{{
-					ID: "s1", FlowID: "sess1",
+					ID: "s1", StreamID: "sess1",
 					Extract: []ExtractionRule{{Name: "v1", Source: "bad", From: ExtractionFromResponse}},
 				}},
 			},
@@ -308,7 +308,7 @@ func TestValidateMacro_ErrorMessagesIncludeValidValues(t *testing.T) {
 			macro: &Macro{
 				Name: "test",
 				Steps: []Step{{
-					ID: "s1", FlowID: "sess1",
+					ID: "s1", StreamID: "sess1",
 					Extract: []ExtractionRule{{Name: "v1", Source: ExtractionSourceBody, From: "bad"}},
 				}},
 			},
@@ -401,8 +401,8 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 		Name: "auth-flow",
 		Steps: []Step{
 			{
-				ID:     "login",
-				FlowID: "login-session",
+				ID:       "login",
+				StreamID: "login-session",
 				Extract: []ExtractionRule{
 					{
 						Name:       "session_cookie",
@@ -415,8 +415,8 @@ func TestEngine_Run_SimpleSequence(t *testing.T) {
 				},
 			},
 			{
-				ID:     "get-csrf",
-				FlowID: "csrf-session",
+				ID:       "get-csrf",
+				StreamID: "csrf-session",
 				OverrideHeaders: map[string]string{
 					"Cookie": "PHPSESSID=§session_cookie§",
 				},
@@ -483,7 +483,7 @@ func TestEngine_Run_VarOverride(t *testing.T) {
 
 	macro := &Macro{
 		Name:  "test",
-		Steps: []Step{{ID: "s1", FlowID: "sess1"}},
+		Steps: []Step{{ID: "s1", StreamID: "sess1"}},
 		InitialVars: map[string]string{
 			"key1": "initial",
 			"key2": "unchanged",
@@ -538,13 +538,13 @@ func TestEngine_Run_StepGuardSkip(t *testing.T) {
 	macro := &Macro{
 		Name: "conditional",
 		Steps: []Step{
-			{ID: "check", FlowID: "sess1"},
+			{ID: "check", StreamID: "sess1"},
 			{
-				ID:     "mfa",
-				FlowID: "sess2",
-				When:   &Guard{Step: "check", StatusCode: intPtr(302)}, // Only if redirect
+				ID:       "mfa",
+				StreamID: "sess2",
+				When:     &Guard{Step: "check", StatusCode: intPtr(302)}, // Only if redirect
 			},
-			{ID: "api", FlowID: "sess3"},
+			{ID: "api", StreamID: "sess3"},
 		},
 	}
 
@@ -596,10 +596,10 @@ func TestEngine_Run_StepGuardExecute(t *testing.T) {
 	macro := &Macro{
 		Name: "conditional-execute",
 		Steps: []Step{
-			{ID: "check", FlowID: "sess1"},
+			{ID: "check", StreamID: "sess1"},
 			{
-				ID:     "mfa",
-				FlowID: "sess2",
+				ID:       "mfa",
+				StreamID: "sess2",
 				When: &Guard{
 					Step:        "check",
 					StatusCode:  intPtr(302),
@@ -645,8 +645,8 @@ func TestEngine_Run_OnErrorAbort(t *testing.T) {
 	macro := &Macro{
 		Name: "abort-test",
 		Steps: []Step{
-			{ID: "fail-step", FlowID: "sess1", OnError: OnErrorAbort},
-			{ID: "never-reached", FlowID: "sess2"},
+			{ID: "fail-step", StreamID: "sess1", OnError: OnErrorAbort},
+			{ID: "never-reached", StreamID: "sess2"},
 		},
 	}
 
@@ -692,8 +692,8 @@ func TestEngine_Run_OnErrorSkip(t *testing.T) {
 	macro := &Macro{
 		Name: "skip-test",
 		Steps: []Step{
-			{ID: "fail-step", FlowID: "sess1", OnError: OnErrorSkip},
-			{ID: "ok-step", FlowID: "sess2"},
+			{ID: "fail-step", StreamID: "sess1", OnError: OnErrorSkip},
+			{ID: "ok-step", StreamID: "sess2"},
 		},
 	}
 
@@ -748,7 +748,7 @@ func TestEngine_Run_OnErrorRetry(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:           "flaky-step",
-				FlowID:       "sess1",
+				StreamID:     "sess1",
 				OnError:      OnErrorRetry,
 				RetryCount:   3,
 				RetryDelayMs: 1, // Minimal delay for tests.
@@ -790,7 +790,7 @@ func TestEngine_Run_OnErrorRetryExhausted(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:           "always-fail",
-				FlowID:       "sess1",
+				StreamID:     "sess1",
 				OnError:      OnErrorRetry,
 				RetryCount:   2,
 				RetryDelayMs: 1,
@@ -833,7 +833,7 @@ func TestEngine_Run_MacroTimeout(t *testing.T) {
 		Name:      "timeout-test",
 		TimeoutMs: 100, // 100ms macro timeout.
 		Steps: []Step{
-			{ID: "slow-step", FlowID: "sess1", TimeoutMs: 5000},
+			{ID: "slow-step", StreamID: "sess1", TimeoutMs: 5000},
 		},
 	}
 
@@ -878,11 +878,11 @@ func TestEngine_Run_StepTimeout(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:        "slow-step",
-				FlowID:    "sess1",
+				StreamID:  "sess1",
 				TimeoutMs: 100, // Short step timeout.
 				OnError:   OnErrorSkip,
 			},
-			{ID: "ok-step", FlowID: "sess2"},
+			{ID: "ok-step", StreamID: "sess2"},
 		},
 	}
 
@@ -927,8 +927,8 @@ func TestEngine_Run_TemplateExpansion(t *testing.T) {
 		Name: "template-test",
 		Steps: []Step{
 			{
-				ID:     "s1",
-				FlowID: "sess1",
+				ID:       "s1",
+				StreamID: "sess1",
 				OverrideHeaders: map[string]string{
 					"Cookie":       "sid=§session_cookie§",
 					"X-CSRF-Token": "§csrf§",
@@ -990,8 +990,8 @@ func TestEngine_Run_RequiredExtractionFailure(t *testing.T) {
 		Name: "required-fail",
 		Steps: []Step{
 			{
-				ID:     "s1",
-				FlowID: "sess1",
+				ID:       "s1",
+				StreamID: "sess1",
 				Extract: []ExtractionRule{
 					{
 						Name:     "token",
@@ -1033,7 +1033,7 @@ func TestEngine_Run_SessionFetchError(t *testing.T) {
 	macro := &Macro{
 		Name: "missing-session",
 		Steps: []Step{
-			{ID: "s1", FlowID: "nonexistent"},
+			{ID: "s1", StreamID: "nonexistent"},
 		},
 	}
 
@@ -1071,8 +1071,8 @@ func TestEngine_Run_KVStoreIndependence(t *testing.T) {
 		Name: "kv-test",
 		Steps: []Step{
 			{
-				ID:     "s1",
-				FlowID: "sess1",
+				ID:       "s1",
+				StreamID: "sess1",
 				Extract: []ExtractionRule{
 					{
 						Name:       "token",
@@ -1135,7 +1135,7 @@ func TestEngine_Run_ContextCancellation(t *testing.T) {
 		Name:      "cancel-test",
 		TimeoutMs: 10_000,
 		Steps: []Step{
-			{ID: "s1", FlowID: "sess1"},
+			{ID: "s1", StreamID: "sess1"},
 		},
 	}
 
@@ -1175,7 +1175,7 @@ func TestEngine_Run_OverrideURL(t *testing.T) {
 		Steps: []Step{
 			{
 				ID:          "s1",
-				FlowID:      "sess1",
+				StreamID:    "sess1",
 				OverrideURL: "https://example.com/§path§",
 			},
 		},
@@ -1216,7 +1216,7 @@ func TestEngine_Run_OverrideMethod(t *testing.T) {
 	macro := &Macro{
 		Name: "method-override",
 		Steps: []Step{
-			{ID: "s1", FlowID: "sess1", OverrideMethod: "POST"},
+			{ID: "s1", StreamID: "sess1", OverrideMethod: "POST"},
 		},
 	}
 
@@ -1248,7 +1248,7 @@ func TestBuildRequest(t *testing.T) {
 	body := "new body with §token§"
 	step := &Step{
 		ID:             "s1",
-		FlowID:         "sess1",
+		StreamID:       "sess1",
 		OverrideMethod: "POST",
 		OverrideURL:    "https://example.com/new",
 		OverrideHeaders: map[string]string{
@@ -1298,7 +1298,7 @@ func TestBuildRequest_NoOverrides(t *testing.T) {
 		Body:    []byte("body"),
 	}
 
-	step := &Step{ID: "s1", FlowID: "sess1"}
+	step := &Step{ID: "s1", StreamID: "sess1"}
 	kvStore := map[string]string{}
 
 	req, err := buildRequest(step, base, kvStore)
@@ -1372,7 +1372,7 @@ func TestBuildRequest_OverrideHeaders_CRLFInExpandedValue(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			step := &Step{
 				ID:              "step1",
-				FlowID:          "sess1",
+				StreamID:        "sess1",
 				OverrideHeaders: tt.headers,
 			}
 			base := &SendRequest{
@@ -1390,8 +1390,8 @@ func TestBuildRequest_OverrideHeaders_CRLFInExpandedValue(t *testing.T) {
 
 func TestBuildRequest_OverrideHeaders_CleanExpanded(t *testing.T) {
 	step := &Step{
-		ID:     "step1",
-		FlowID: "sess1",
+		ID:       "step1",
+		StreamID: "sess1",
 		OverrideHeaders: map[string]string{
 			"Authorization": "Bearer §token§",
 			"X-Request-ID":  "§req_id§",

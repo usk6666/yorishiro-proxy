@@ -769,30 +769,29 @@ func (h *Handler) recordBlockedCONNECTSessionWithTags(ctx context.Context, reqHo
 
 	protocol := socks5Protocol(ctx, "HTTPS")
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    connID,
 		Protocol:  protocol,
 		Scheme:    "https",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
 		Tags:      tags,
 		BlockedBy: blockedBy,
 		ConnInfo:  &flow.ConnectionInfo{ClientAddr: clientAddr},
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		logger.Error("blocked CONNECT flow save failed", "host", authority, "error", err)
 		return
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
 		Method:    "CONNECT",
 		URL:       connectURL,
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("blocked CONNECT send message save failed", "error", err)
 	}
 }
@@ -845,11 +844,10 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *parser.Raw
 		tags["safety_rule"] = violation.RuleID
 		tags["safety_target"] = violation.Target.String()
 	}
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    connID,
 		Protocol:  "HTTPS",
 		Scheme:    "https",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
 		Duration:  duration,
@@ -862,12 +860,12 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *parser.Raw
 			TLSALPN:    tlsMeta.ALPN,
 		},
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		logger.Error("blocked HTTPS flow save failed", "method", req.Method, "url", reqURL.String(), "error", err)
 		return
 	}
-	sendMsg := &flow.Message{
-		FlowID:        fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:      fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     start,
@@ -878,7 +876,7 @@ func (h *Handler) recordBlockedHTTPSSession(ctx context.Context, req *parser.Raw
 		RawBytes:      rawRequest,
 		BodyTruncated: reqTruncated,
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("blocked HTTPS send message save failed", "error", err)
 	}
 }

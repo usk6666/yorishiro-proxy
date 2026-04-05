@@ -169,7 +169,7 @@ func TestSafetyFilter_TextFrame_BlockedByInputFilter(t *testing.T) {
 
 	// Verify blocked frame was recorded with safety metadata.
 	messages := store.Messages()
-	var blockedMsg *flow.Message
+	var blockedMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && msg.Metadata["safety_blocked"] == "true" {
 			blockedMsg = msg
@@ -236,7 +236,7 @@ func TestSafetyFilter_TextFrame_PIIMasking(t *testing.T) {
 
 	// Verify the raw (unmasked) data was recorded in the flow store.
 	messages := store.Messages()
-	var recvMsg *flow.Message
+	var recvMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "receive" && len(msg.Body) > 0 {
 			recvMsg = msg
@@ -355,7 +355,7 @@ func TestSafetyFilter_LogOnly_ForwardsAndRecords(t *testing.T) {
 
 	// Verify safety_logged metadata was recorded.
 	messages := store.Messages()
-	var loggedMsg *flow.Message
+	var loggedMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && msg.Metadata["safety_logged"] == "true" {
 			loggedMsg = msg
@@ -599,7 +599,7 @@ func TestSafetyFilter_InputAndOutputCombined(t *testing.T) {
 
 	// Verify blocked message is recorded with metadata.
 	messages := store.Messages()
-	var blocked *flow.Message
+	var blocked *flow.Flow
 	for _, msg := range messages {
 		if msg.Metadata["safety_blocked"] == "true" {
 			blocked = msg
@@ -701,7 +701,7 @@ func TestSafetyFilter_BlockedFragmentedTextFrame_DropsContinuation(t *testing.T)
 
 	// Verify the blocked initial frame was recorded with safety metadata.
 	messages := store.Messages()
-	var blockedMsg *flow.Message
+	var blockedMsg *flow.Flow
 	for _, msg := range messages {
 		if msg.Direction == "send" && msg.Metadata["safety_blocked"] == "true" {
 			blockedMsg = msg

@@ -30,21 +30,20 @@ func newTestStore(t *testing.T) *flow.SQLiteStore {
 // insertTestFlow saves a flow with the given timestamp and returns its ID.
 func insertTestFlow(t *testing.T, ctx context.Context, store flow.Store, ts time.Time, protocol string) string {
 	t.Helper()
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    "conn-test",
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 	return fl.ID
 }
 
-func TestCleaner_MaxFlows(t *testing.T) {
+func TestCleaner_MaxStreams(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -58,8 +57,8 @@ func TestCleaner_MaxFlows(t *testing.T) {
 
 	// Configure cleaner to keep only 5 flows.
 	cfg := flow.CleanerConfig{
-		MaxFlows: 5,
-		Interval: 0, // no periodic cleanup; we test RunOnce
+		MaxStreams: 5,
+		Interval:   0, // no periodic cleanup; we test RunOnce
 	}
 	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
@@ -73,7 +72,7 @@ func TestCleaner_MaxFlows(t *testing.T) {
 	}
 
 	// Verify only the 5 newest flows remain.
-	remaining, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	remaining, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -127,7 +126,7 @@ func TestCleaner_MaxAge(t *testing.T) {
 		t.Errorf("expected 3 deleted, got %d", deleted)
 	}
 
-	remaining, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	remaining, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -149,11 +148,11 @@ func TestCleaner_MaxFlowsAndMaxAge_Combined(t *testing.T) {
 		insertTestFlow(t, ctx, store, now.Add(-time.Duration(i)*time.Second), "HTTP/1.x")
 	}
 
-	// MaxAge=1h deletes 3 old flows, then MaxFlows=5 deletes 2 more (7-5=2).
+	// MaxAge=1h deletes 3 old flows, then MaxStreams=5 deletes 2 more (7-5=2).
 	cfg := flow.CleanerConfig{
-		MaxAge:   1 * time.Hour,
-		MaxFlows: 5,
-		Interval: 0,
+		MaxAge:     1 * time.Hour,
+		MaxStreams: 5,
+		Interval:   0,
 	}
 	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
@@ -166,7 +165,7 @@ func TestCleaner_MaxFlowsAndMaxAge_Combined(t *testing.T) {
 		t.Errorf("expected 5 deleted (3 by age + 2 by count), got %d", deleted)
 	}
 
-	remaining, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	remaining, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -185,7 +184,7 @@ func TestCleaner_NoPolicyDeletesNothing(t *testing.T) {
 	}
 
 	cfg := flow.CleanerConfig{
-		// No MaxFlows, no MaxAge — nothing should be deleted.
+		// No MaxStreams, no MaxAge — nothing should be deleted.
 		Interval: 0,
 	}
 	logger := testutil.DiscardLogger()
@@ -199,7 +198,7 @@ func TestCleaner_NoPolicyDeletesNothing(t *testing.T) {
 		t.Errorf("expected 0 deleted, got %d", deleted)
 	}
 
-	remaining, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	remaining, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -218,8 +217,8 @@ func TestCleaner_StartStop_Lifecycle(t *testing.T) {
 	}
 
 	cfg := flow.CleanerConfig{
-		MaxFlows: 5,
-		Interval: 50 * time.Millisecond, // fast interval for testing
+		MaxStreams: 5,
+		Interval:   50 * time.Millisecond, // fast interval for testing
 	}
 	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
@@ -232,7 +231,7 @@ func TestCleaner_StartStop_Lifecycle(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		time.Sleep(50 * time.Millisecond)
 		var err error
-		remaining, err = store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+		remaining, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -263,8 +262,8 @@ func TestCleaner_StartStop_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cfg := flow.CleanerConfig{
-		MaxFlows: 100,
-		Interval: 50 * time.Millisecond,
+		MaxStreams: 100,
+		Interval:   50 * time.Millisecond,
 	}
 	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
@@ -292,8 +291,8 @@ func TestCleaner_PeriodicCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	cfg := flow.CleanerConfig{
-		MaxFlows: 3,
-		Interval: 100 * time.Millisecond,
+		MaxStreams: 3,
+		Interval:   100 * time.Millisecond,
 	}
 	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
@@ -306,12 +305,12 @@ func TestCleaner_PeriodicCleanup(t *testing.T) {
 		insertTestFlow(t, ctx, store, now.Add(time.Duration(i)*time.Second), "HTTP/1.x")
 	}
 
-	// Wait for periodic cleanup to reduce to MaxFlows.
+	// Wait for periodic cleanup to reduce to MaxStreams.
 	var remaining []*flow.Flow
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
 		var err error
-		remaining, err = store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+		remaining, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -330,8 +329,8 @@ func TestCleaner_ConcurrentRecordingAndCleanup(t *testing.T) {
 	defer cancel()
 
 	cfg := flow.CleanerConfig{
-		MaxFlows: 10,
-		Interval: 50 * time.Millisecond,
+		MaxStreams: 10,
+		Interval:   50 * time.Millisecond,
 	}
 	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
@@ -347,21 +346,20 @@ func TestCleaner_ConcurrentRecordingAndCleanup(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			ts := time.Now().UTC().Add(time.Duration(idx) * time.Millisecond)
-			fl := &flow.Flow{
+			fl := &flow.Stream{
 				ConnID:    fmt.Sprintf("conn-%d", idx),
 				Protocol:  "HTTP/1.x",
-				FlowType:  "unary",
 				State:     "active",
 				Timestamp: ts,
 				Duration:  50 * time.Millisecond,
 			}
-			if err := store.SaveFlow(ctx, fl); err != nil {
+			if err := store.SaveStream(ctx, fl); err != nil {
 				errCh <- fmt.Errorf("SaveFlow %d: %w", idx, err)
 				return
 			}
 			// Simulate completing the flow after a short delay.
 			time.Sleep(20 * time.Millisecond)
-			if err := store.UpdateFlow(ctx, fl.ID, flow.FlowUpdate{State: "complete"}); err != nil {
+			if err := store.UpdateStream(ctx, fl.ID, flow.StreamUpdate{State: "complete"}); err != nil {
 				errCh <- fmt.Errorf("UpdateFlow %d: %w", idx, err)
 				return
 			}
@@ -378,7 +376,7 @@ func TestCleaner_ConcurrentRecordingAndCleanup(t *testing.T) {
 	// After all insertions, wait for cleanup to stabilize.
 	time.Sleep(300 * time.Millisecond)
 
-	remaining, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	remaining, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -394,9 +392,9 @@ func TestCleaner_Enabled(t *testing.T) {
 		enabled bool
 	}{
 		{"no policy", flow.CleanerConfig{}, false},
-		{"max_flows only", flow.CleanerConfig{MaxFlows: 10}, true},
+		{"max_flows only", flow.CleanerConfig{MaxStreams: 10}, true},
 		{"max_age only", flow.CleanerConfig{MaxAge: time.Hour}, true},
-		{"both policies", flow.CleanerConfig{MaxFlows: 10, MaxAge: time.Hour}, true},
+		{"both policies", flow.CleanerConfig{MaxStreams: 10, MaxAge: time.Hour}, true},
 		{"interval only", flow.CleanerConfig{Interval: time.Minute}, false},
 	}
 	for _, tt := range tests {
@@ -419,8 +417,8 @@ func TestCleaner_StartWithZeroInterval(t *testing.T) {
 
 	// Interval=0 means only the initial cleanup runs, no periodic ticker.
 	cfg := flow.CleanerConfig{
-		MaxFlows: 5,
-		Interval: 0,
+		MaxStreams: 5,
+		Interval:   0,
 	}
 	logger := testutil.DiscardLogger()
 	cleaner := flow.NewCleaner(store, cfg, logger)
@@ -440,7 +438,7 @@ func TestCleaner_StartWithZeroInterval(t *testing.T) {
 	}
 
 	// Initial cleanup should have run.
-	remaining, err := store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+	remaining, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}

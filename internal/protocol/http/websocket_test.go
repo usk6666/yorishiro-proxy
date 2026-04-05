@@ -325,9 +325,6 @@ func TestRecordWebSocketError_Basic(t *testing.T) {
 	if entry.Session.Protocol != "WebSocket" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "WebSocket")
 	}
-	if entry.Session.FlowType != "bidirectional" {
-		t.Errorf("sessionType = %q, want %q", entry.Session.FlowType, "bidirectional")
-	}
 	if entry.Session.ConnID != "conn-ws-1" {
 		t.Errorf("connID = %q, want %q", entry.Session.ConnID, "conn-ws-1")
 	}

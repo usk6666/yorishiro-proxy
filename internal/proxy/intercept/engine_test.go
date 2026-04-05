@@ -665,7 +665,7 @@ func TestEngine_MatchesWebSocketFrame_FlowID(t *testing.T) {
 		Enabled:   true,
 		Direction: DirectionBoth,
 		Conditions: Conditions{
-			FlowID: "target-flow",
+			StreamID: "target-flow",
 		},
 	})
 
@@ -686,7 +686,7 @@ func TestEngine_MatchWebSocketFrameRules(t *testing.T) {
 	})
 	e.AddRule(Rule{
 		ID: "ws2", Enabled: true, Direction: DirectionRequest,
-		Conditions: Conditions{FlowID: "f1"},
+		Conditions: Conditions{StreamID: "f1"},
 	})
 	e.AddRule(Rule{
 		ID: "ws3", Enabled: false, Direction: DirectionBoth,

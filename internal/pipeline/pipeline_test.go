@@ -35,7 +35,7 @@ func TestRun_AllStepsCalled(t *testing.T) {
 	s3 := &mockStep{result: Result{Action: Continue}}
 
 	p := New(s1, s2, s3)
-	ex := &exchange.Exchange{FlowID: "f1"}
+	ex := &exchange.Exchange{StreamID: "f1"}
 	got, action, resp := p.Run(context.Background(), ex)
 
 	if action != Continue {
@@ -60,7 +60,7 @@ func TestRun_DropStopsExecution(t *testing.T) {
 	s3 := &mockStep{result: Result{Action: Continue}}
 
 	p := New(s1, s2, s3)
-	ex := &exchange.Exchange{FlowID: "f1"}
+	ex := &exchange.Exchange{StreamID: "f1"}
 	_, action, _ := p.Run(context.Background(), ex)
 
 	if action != Drop {
@@ -78,13 +78,13 @@ func TestRun_DropStopsExecution(t *testing.T) {
 }
 
 func TestRun_RespondReturnsResponse(t *testing.T) {
-	respEx := &exchange.Exchange{FlowID: "resp", Status: 403}
+	respEx := &exchange.Exchange{StreamID: "resp", Status: 403}
 	s1 := &mockStep{result: Result{Action: Continue}}
 	s2 := &mockStep{result: Result{Action: Respond, Response: respEx}}
 	s3 := &mockStep{result: Result{Action: Continue}}
 
 	p := New(s1, s2, s3)
-	ex := &exchange.Exchange{FlowID: "f1"}
+	ex := &exchange.Exchange{StreamID: "f1"}
 	_, action, resp := p.Run(context.Background(), ex)
 
 	if action != Respond {
@@ -99,7 +99,7 @@ func TestRun_RespondReturnsResponse(t *testing.T) {
 }
 
 func TestRun_ExchangeModificationPropagates(t *testing.T) {
-	modified := &exchange.Exchange{FlowID: "modified"}
+	modified := &exchange.Exchange{StreamID: "modified"}
 
 	s1 := &mockStep{result: Result{Action: Continue, Exchange: modified}}
 
@@ -108,7 +108,7 @@ func TestRun_ExchangeModificationPropagates(t *testing.T) {
 	s2 := &captureStep{result: Result{Action: Continue}, received: &receivedEx}
 
 	p := New(s1, s2)
-	original := &exchange.Exchange{FlowID: "original"}
+	original := &exchange.Exchange{StreamID: "original"}
 	got, action, _ := p.Run(context.Background(), original)
 
 	if action != Continue {
@@ -118,7 +118,7 @@ func TestRun_ExchangeModificationPropagates(t *testing.T) {
 		t.Fatal("expected modified exchange to be returned")
 	}
 	if receivedEx != modified {
-		t.Fatalf("step 2 should have received modified exchange, got FlowID=%q", receivedEx.FlowID)
+		t.Fatalf("step 2 should have received modified exchange, got StreamID=%q", receivedEx.StreamID)
 	}
 }
 
@@ -135,7 +135,7 @@ func (c *captureStep) Process(_ context.Context, ex *exchange.Exchange) Result {
 
 func TestRun_EmptyPipeline(t *testing.T) {
 	p := New()
-	ex := &exchange.Exchange{FlowID: "f1"}
+	ex := &exchange.Exchange{StreamID: "f1"}
 	got, action, resp := p.Run(context.Background(), ex)
 
 	if action != Continue {
@@ -159,7 +159,7 @@ func TestWithout_ExcludesMatchingType(t *testing.T) {
 	// Exclude all mockStep instances.
 	derived := p.Without(&mockStep{})
 
-	ex := &exchange.Exchange{FlowID: "f1"}
+	ex := &exchange.Exchange{StreamID: "f1"}
 	derived.Run(context.Background(), ex)
 
 	// s1 and s3 are mockStep — they should NOT have been called in the
@@ -182,7 +182,7 @@ func TestWithout_OriginalUnchanged(t *testing.T) {
 	p := New(s1, s2)
 	derived := p.Without(&anotherStep{})
 
-	ex := &exchange.Exchange{FlowID: "f1"}
+	ex := &exchange.Exchange{StreamID: "f1"}
 
 	// Run derived — only s1 should be called.
 	derived.Run(context.Background(), ex)

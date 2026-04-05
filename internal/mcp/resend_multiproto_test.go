@@ -118,15 +118,14 @@ func TestExecuteMultiProto_TCPReplay_NoSendMessages(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "tcp-empty",
 		Protocol:  "TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
@@ -148,26 +147,25 @@ func TestExecuteMultiProto_TCPReplay_NoTargetAddr(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "tcp-no-target",
 		Protocol:  "TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "tcp-no-target-send",
-		FlowID:    "tcp-no-target",
+		StreamID:  "tcp-no-target",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("hello"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -192,27 +190,26 @@ func TestExecuteMultiProto_TCPReplay_WithTargetAddr(t *testing.T) {
 	addr, cleanup := newRawEchoServer(t)
 	t.Cleanup(cleanup)
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "tcp-replay",
 		Protocol:  "TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "original:1234"},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "tcp-replay-send",
-		FlowID:    "tcp-replay",
+		StreamID:  "tcp-replay",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("GET / HTTP/1.1\r\nHost: test\r\n\r\n"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -258,28 +255,27 @@ func TestExecuteMultiProto_TCPReplay_RawBytesOnly(t *testing.T) {
 	addr, cleanup := newRawEchoServer(t)
 	t.Cleanup(cleanup)
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "tcp-rawbytes",
 		Protocol:  "TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: addr},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Store data in RawBytes only (Body is nil), which is how TCP relay records messages.
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "tcp-rawbytes-send",
-		FlowID:    "tcp-rawbytes",
+		StreamID:  "tcp-rawbytes",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		RawBytes:  []byte("GET /raw HTTP/1.1\r\nHost: test\r\n\r\n"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -318,7 +314,7 @@ func TestExecuteMultiProto_TCPReplay_RawBytesOnly(t *testing.T) {
 	}
 
 	// Verify that the replayed flow records messages using RawBytes.
-	replayMsgs, err := store.GetMessages(ctx, out.NewFlowID, flow.MessageListOptions{})
+	replayMsgs, err := store.GetFlows(ctx, out.NewFlowID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages for replay flow: %v", err)
 	}
@@ -362,30 +358,29 @@ func TestExecuteMultiProto_TCPReplay_BodyPreferredOverRawBytes(t *testing.T) {
 	addr, cleanup := newRawEchoServer(t)
 	t.Cleanup(cleanup)
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "tcp-both",
 		Protocol:  "TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: addr},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// When both Body and RawBytes are set, Body should take priority.
 	bodyData := "GET /body HTTP/1.1\r\nHost: body\r\n\r\n"
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "tcp-both-send",
-		FlowID:    "tcp-both",
+		StreamID:  "tcp-both",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte(bodyData),
 		RawBytes:  []byte("GET /raw HTTP/1.1\r\nHost: raw\r\n\r\n"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -436,15 +431,14 @@ func TestExecuteMultiProto_Resend_WebSocket_RequiresMessageSequence(t *testing.T
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "ws-resend-1",
 		Protocol:  "WebSocket",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
@@ -466,28 +460,27 @@ func TestExecuteMultiProto_Resend_WebSocket_MessageNotFound(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "ws-resend-2",
 		Protocol:  "WebSocket",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "ws-msg-0",
-		FlowID:    "ws-resend-2",
+		StreamID:  "ws-resend-2",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("hello"),
 		Metadata:  map[string]string{"opcode": "1"},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -510,27 +503,26 @@ func TestExecuteMultiProto_Resend_WebSocket_ReceiveMessage(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "ws-resend-3",
 		Protocol:  "WebSocket",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		ConnInfo:  &flow.ConnectionInfo{ServerAddr: "127.0.0.1:9999"},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	recvMsg := &flow.Message{
+	recvMsg := &flow.Flow{
 		ID:        "ws-msg-1",
-		FlowID:    "ws-resend-3",
+		StreamID:  "ws-resend-3",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("server msg"),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 

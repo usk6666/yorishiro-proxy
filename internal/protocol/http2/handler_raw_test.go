@@ -437,17 +437,17 @@ func mustParseURL(rawURL string) *url.URL {
 
 // mockFlowStore is a simple in-memory flow store for testing.
 type mockFlowStore struct {
-	flows    []*flow.Flow
-	messages []*flow.Message
+	flows    []*flow.Stream
+	messages []*flow.Flow
 	updates  []mockFlowUpdate
 }
 
 type mockFlowUpdate struct {
-	FlowID string
-	Update flow.FlowUpdate
+	StreamID string
+	Update   flow.StreamUpdate
 }
 
-func (m *mockFlowStore) SaveFlow(_ context.Context, f *flow.Flow) error {
+func (m *mockFlowStore) SaveStream(_ context.Context, f *flow.Stream) error {
 	if f.ID == "" {
 		f.ID = "flow-" + time.Now().Format("150405.000000")
 	}
@@ -455,13 +455,13 @@ func (m *mockFlowStore) SaveFlow(_ context.Context, f *flow.Flow) error {
 	return nil
 }
 
-func (m *mockFlowStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockFlowStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *mockFlowStore) UpdateFlow(_ context.Context, flowID string, update flow.FlowUpdate) error {
-	m.updates = append(m.updates, mockFlowUpdate{FlowID: flowID, Update: update})
+func (m *mockFlowStore) UpdateStream(_ context.Context, flowID string, update flow.StreamUpdate) error {
+	m.updates = append(m.updates, mockFlowUpdate{StreamID: flowID, Update: update})
 	return nil
 }
 

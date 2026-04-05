@@ -24,12 +24,12 @@ func rawHeadersToMap(rh parser.RawHeaders) map[string][]string {
 	return m
 }
 
-// VariantRecordWriter is the subset of flow.FlowWriter needed by variant
+// VariantRecordWriter is the subset of flow.Writer needed by variant
 // recording helpers. Defining a minimal interface here avoids importing the
 // full proxy package and keeps the dependency graph clean.
 type VariantRecordWriter interface {
-	AppendMessage(ctx context.Context, msg *flow.Message) error
-	UpdateFlow(ctx context.Context, id string, update flow.FlowUpdate) error
+	SaveFlow(ctx context.Context, f *flow.Flow) error
+	UpdateStream(ctx context.Context, id string, update flow.StreamUpdate) error
 }
 
 // ResponseSnapshot holds a copy of the response status code, headers, and body
@@ -45,8 +45,8 @@ type ResponseSnapshot struct {
 // ReceiveVariantParams holds the parameters needed to record the receive phase
 // with variant support, independent of the HTTP protocol version.
 type ReceiveVariantParams struct {
-	// FlowID is the ID of the flow being recorded.
-	FlowID string
+	// StreamID is the ID of the flow being recorded.
+	StreamID string
 	// RecvSequence is the sequence number to use for the first receive message.
 	RecvSequence int
 	// Start is the time the flow was initiated.
@@ -129,8 +129,8 @@ func recordSingleReceive(
 		p.RespBody, p.RespHeaders.Get("Content-Encoding"), logger,
 	)
 
-	msg := &flow.Message{
-		FlowID:        p.FlowID,
+	msg := &flow.Flow{
+		StreamID:      p.StreamID,
 		Sequence:      p.RecvSequence,
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
@@ -141,7 +141,7 @@ func recordSingleReceive(
 		BodyTruncated: truncated,
 		Metadata:      cloneMetadata(p.RawResponseMetadata),
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		logger.Error("receive message save failed", "error", err)
 	}
 
@@ -162,8 +162,8 @@ func recordOriginalReceive(
 	)
 
 	origMeta := mergeMetadata(p.RawResponseMetadata, map[string]string{"variant": "original"})
-	msg := &flow.Message{
-		FlowID:        p.FlowID,
+	msg := &flow.Flow{
+		StreamID:      p.StreamID,
 		Sequence:      p.RecvSequence,
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
@@ -174,7 +174,7 @@ func recordOriginalReceive(
 		BodyTruncated: truncated,
 		Metadata:      origMeta,
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		logger.Error("original receive message save failed", "error", err)
 	}
 }
@@ -191,8 +191,8 @@ func recordModifiedReceive(
 		p.RespBody, p.RespHeaders.Get("Content-Encoding"), logger,
 	)
 
-	msg := &flow.Message{
-		FlowID:        p.FlowID,
+	msg := &flow.Flow{
+		StreamID:      p.StreamID,
 		Sequence:      p.RecvSequence + 1,
 		Direction:     "receive",
 		Timestamp:     p.Start.Add(p.Duration),
@@ -202,7 +202,7 @@ func recordModifiedReceive(
 		BodyTruncated: truncated,
 		Metadata:      map[string]string{"variant": "modified"},
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		logger.Error("modified receive message save failed", "error", err)
 	}
 }
@@ -215,7 +215,7 @@ func completeFlow(
 	p ReceiveVariantParams,
 	logger *slog.Logger,
 ) {
-	update := flow.FlowUpdate{
+	update := flow.StreamUpdate{
 		State:      "complete",
 		Duration:   p.Duration,
 		ServerAddr: p.ServerAddr,
@@ -229,7 +229,7 @@ func completeFlow(
 	if len(p.Tags) > 0 {
 		update.Tags = p.Tags
 	}
-	if err := store.UpdateFlow(ctx, p.FlowID, update); err != nil {
+	if err := store.UpdateStream(ctx, p.StreamID, update); err != nil {
 		logger.Error("flow update failed", "error", err)
 	}
 }
