@@ -55,10 +55,10 @@ type KeyValue struct {
 
 // Exchange is the protocol-agnostic message unit.
 //
-// Identity fields (FlowID, Sequence, Direction) locate the message within
-// a flow. L7 structured view fields (Method, URL, Status, Headers, Trailers,
-// Body) provide a protocol-independent representation. Protocol and RawBytes
-// carry protocol identity and wire data respectively.
+// Identity fields (StreamID, FlowID, Sequence, Direction) locate the message
+// within a stream. L7 structured view fields (Method, URL, Status, Headers,
+// Trailers, Body) provide a protocol-independent representation. Protocol and
+// RawBytes carry protocol identity and wire data respectively.
 //
 // Opaque holds Codec-specific data that Pipeline Steps must never type-assert.
 // Metadata holds protocol-specific key-value pairs (e.g., WebSocket opcode,
@@ -68,8 +68,9 @@ type KeyValue struct {
 // and Pipeline processes only Headers.
 type Exchange struct {
 	// Identity
-	FlowID    string    // flow this message belongs to
-	Sequence  int       // order within the flow (0-origin)
+	StreamID  string    // stream (connection/RPC) this exchange belongs to
+	FlowID    string    // this individual flow's unique ID (resend/fuzz target unit)
+	Sequence  int       // order within the stream (0-origin)
 	Direction Direction // Send or Receive
 
 	// L7 structured view
@@ -103,6 +104,7 @@ func (e *Exchange) Clone() *Exchange {
 	}
 
 	c := &Exchange{
+		StreamID:  e.StreamID,
 		FlowID:    e.FlowID,
 		Sequence:  e.Sequence,
 		Direction: e.Direction,
