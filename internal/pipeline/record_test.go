@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"testing"
 
@@ -38,7 +39,7 @@ func (f *fakeFlowWriter) SaveFlow(_ context.Context, fl *flow.Flow) error {
 	return nil
 }
 
-func TestRecordStep_SendCreatesFlowAndMessage(t *testing.T) {
+func TestRecordStep_SendCreatesStreamAndFlow(t *testing.T) {
 	store := &fakeFlowWriter{}
 	step := NewRecordStep(store, nil)
 
@@ -67,6 +68,7 @@ func TestRecordStep_SendCreatesFlowAndMessage(t *testing.T) {
 		t.Fatal("RecordStep must not modify Exchange")
 	}
 
+	// Stream created.
 	if len(store.savedStreams) != 1 {
 		t.Fatalf("expected 1 saved stream, got %d", len(store.savedStreams))
 	}
@@ -84,10 +86,14 @@ func TestRecordStep_SendCreatesFlowAndMessage(t *testing.T) {
 		t.Errorf("stream scheme = %q, want %q", st.Scheme, "https")
 	}
 
+	// Flow created.
 	if len(store.savedFlows) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
 	}
 	fl := store.savedFlows[0]
+	if fl.ID != "flow-1" {
+		t.Errorf("flow ID = %q, want %q", fl.ID, "flow-1")
+	}
 	if fl.StreamID != "stream-1" {
 		t.Errorf("flow stream ID = %q, want %q", fl.StreamID, "stream-1")
 	}
@@ -106,15 +112,20 @@ func TestRecordStep_SendCreatesFlowAndMessage(t *testing.T) {
 	if string(fl.RawBytes) != "GET / HTTP/1.1\r\nHost: example.com\r\n\r\nrequest body" {
 		t.Errorf("flow raw bytes mismatch")
 	}
+
+	// No stream updates (Session's responsibility).
+	if len(store.updatedIDs) != 0 {
+		t.Errorf("expected 0 stream updates, got %d", len(store.updatedIDs))
+	}
 }
 
-func TestRecordStep_ReceiveAppendsMessageAndCompletes(t *testing.T) {
+func TestRecordStep_ReceiveCreatesFlowOnly(t *testing.T) {
 	store := &fakeFlowWriter{}
 	step := NewRecordStep(store, nil)
 
 	ex := &exchange.Exchange{
 		StreamID:  "stream-1",
-		FlowID:    "flow-1",
+		FlowID:    "flow-2",
 		Sequence:  1,
 		Direction: exchange.Receive,
 		Status:    200,
@@ -132,29 +143,69 @@ func TestRecordStep_ReceiveAppendsMessageAndCompletes(t *testing.T) {
 		t.Fatalf("expected Continue, got %v", r.Action)
 	}
 
+	// No stream created or updated.
+	if len(store.savedStreams) != 0 {
+		t.Fatalf("expected 0 saved streams, got %d", len(store.savedStreams))
+	}
+	if len(store.updatedIDs) != 0 {
+		t.Fatalf("expected 0 stream updates, got %d", len(store.updatedIDs))
+	}
+
+	// Flow created.
 	if len(store.savedFlows) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
 	}
 	fl := store.savedFlows[0]
+	if fl.ID != "flow-2" {
+		t.Errorf("flow ID = %q, want %q", fl.ID, "flow-2")
+	}
 	if fl.Direction != "receive" {
 		t.Errorf("flow direction = %q, want %q", fl.Direction, "receive")
 	}
 	if fl.StatusCode != 200 {
 		t.Errorf("status code = %d, want %d", fl.StatusCode, 200)
 	}
+}
 
-	if len(store.updatedIDs) != 1 {
-		t.Fatalf("expected 1 stream update, got %d", len(store.updatedIDs))
+func TestRecordStep_SubsequentSendCreatesFlowOnly(t *testing.T) {
+	store := &fakeFlowWriter{}
+	step := NewRecordStep(store, nil)
+
+	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
+		FlowID:    "flow-3",
+		Sequence:  2,
+		Direction: exchange.Send,
+		Method:    "POST",
+		Protocol:  exchange.HTTP1,
+		Body:      []byte("second request"),
 	}
-	if store.updatedIDs[0] != "stream-1" {
-		t.Errorf("updated stream ID = %q, want %q", store.updatedIDs[0], "stream-1")
+
+	ctx := context.Background()
+	step.Process(ctx, ex)
+
+	// No stream created (Sequence > 0).
+	if len(store.savedStreams) != 0 {
+		t.Fatalf("expected 0 saved streams, got %d", len(store.savedStreams))
 	}
-	if store.updates[0].State != "complete" {
-		t.Errorf("stream update state = %q, want %q", store.updates[0].State, "complete")
+
+	// Flow created.
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
+	}
+	fl := store.savedFlows[0]
+	if fl.ID != "flow-3" {
+		t.Errorf("flow ID = %q, want %q", fl.ID, "flow-3")
+	}
+	if fl.Direction != "send" {
+		t.Errorf("flow direction = %q, want %q", fl.Direction, "send")
+	}
+	if fl.Sequence != 2 {
+		t.Errorf("flow sequence = %d, want %d", fl.Sequence, 2)
 	}
 }
 
-func TestRecordStep_VariantRecordedOnHeaderChange(t *testing.T) {
+func TestRecordStep_VariantOnSendHeaderChange(t *testing.T) {
 	store := &fakeFlowWriter{}
 	step := NewRecordStep(store, nil)
 
@@ -186,7 +237,7 @@ func TestRecordStep_VariantRecordedOnHeaderChange(t *testing.T) {
 		t.Fatalf("expected Continue, got %v", r.Action)
 	}
 
-	// SaveStream + 2 variant flows (original + modified).
+	// Stream created (Sequence==0) + 2 variant flows.
 	if len(store.savedStreams) != 1 {
 		t.Fatalf("expected 1 saved stream, got %d", len(store.savedStreams))
 	}
@@ -198,6 +249,9 @@ func TestRecordStep_VariantRecordedOnHeaderChange(t *testing.T) {
 	if origFlow.Metadata["variant"] != "original" {
 		t.Errorf("first flow variant = %q, want %q", origFlow.Metadata["variant"], "original")
 	}
+	if origFlow.ID != "flow-1-original" {
+		t.Errorf("original flow ID = %q, want %q", origFlow.ID, "flow-1-original")
+	}
 	if origFlow.Headers["X-Original"] == nil {
 		t.Error("original flow should have X-Original header")
 	}
@@ -206,8 +260,59 @@ func TestRecordStep_VariantRecordedOnHeaderChange(t *testing.T) {
 	if modFlow.Metadata["variant"] != "modified" {
 		t.Errorf("second flow variant = %q, want %q", modFlow.Metadata["variant"], "modified")
 	}
+	if modFlow.ID != "flow-1" {
+		t.Errorf("modified flow ID = %q, want %q", modFlow.ID, "flow-1")
+	}
 	if modFlow.Headers["X-Modified"] == nil {
 		t.Error("modified flow should have X-Modified header")
+	}
+}
+
+func TestRecordStep_VariantOnReceiveBodyChange(t *testing.T) {
+	store := &fakeFlowWriter{}
+	step := NewRecordStep(store, nil)
+
+	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
+		FlowID:    "flow-2",
+		Sequence:  1,
+		Direction: exchange.Receive,
+		Status:    200,
+		Protocol:  exchange.HTTP1,
+		Headers: []exchange.KeyValue{
+			{Name: "Content-Type", Value: "text/plain"},
+		},
+		Body: []byte("original response"),
+	}
+
+	snap := ex.Clone()
+	ctx := withSnapshot(context.Background(), snap)
+
+	// Modify the Exchange body.
+	ex.Body = []byte("modified response")
+
+	step.Process(ctx, ex)
+
+	// 2 flows (variant), no stream updates.
+	if len(store.savedFlows) != 2 {
+		t.Fatalf("expected 2 flows (variant), got %d", len(store.savedFlows))
+	}
+	if store.savedFlows[0].Metadata["variant"] != "original" {
+		t.Errorf("first flow variant = %q, want %q", store.savedFlows[0].Metadata["variant"], "original")
+	}
+	if string(store.savedFlows[0].Body) != "original response" {
+		t.Errorf("original body = %q, want %q", store.savedFlows[0].Body, "original response")
+	}
+	if store.savedFlows[1].Metadata["variant"] != "modified" {
+		t.Errorf("second flow variant = %q, want %q", store.savedFlows[1].Metadata["variant"], "modified")
+	}
+	if string(store.savedFlows[1].Body) != "modified response" {
+		t.Errorf("modified body = %q, want %q", store.savedFlows[1].Body, "modified response")
+	}
+
+	// No stream updates (Session's responsibility).
+	if len(store.updatedIDs) != 0 {
+		t.Errorf("expected 0 stream updates, got %d", len(store.updatedIDs))
 	}
 }
 
@@ -258,6 +363,101 @@ func TestRecordStep_NilStoreReturnsImmediately(t *testing.T) {
 	}
 }
 
+func TestRecordStep_NilSnapshotRecordsSingleFlow(t *testing.T) {
+	store := &fakeFlowWriter{}
+	step := NewRecordStep(store, nil)
+
+	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
+		FlowID:    "flow-1",
+		Sequence:  0,
+		Direction: exchange.Send,
+		Method:    "GET",
+		Protocol:  exchange.HTTP1,
+		Headers: []exchange.KeyValue{
+			{Name: "Host", Value: "example.com"},
+		},
+	}
+
+	// No snapshot in context.
+	ctx := context.Background()
+	step.Process(ctx, ex)
+
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
+	}
+	if store.savedFlows[0].Metadata != nil {
+		t.Errorf("flow should have no variant metadata, got %v", store.savedFlows[0].Metadata)
+	}
+}
+
+func TestRecordStep_HeaderConversion(t *testing.T) {
+	store := &fakeFlowWriter{}
+	step := NewRecordStep(store, nil)
+
+	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
+		FlowID:    "flow-1",
+		Sequence:  0,
+		Direction: exchange.Send,
+		Protocol:  exchange.HTTP1,
+		Headers: []exchange.KeyValue{
+			{Name: "Set-Cookie", Value: "a=1"},
+			{Name: "set-cookie", Value: "b=2"},
+			{Name: "Host", Value: "example.com"},
+		},
+	}
+
+	step.Process(context.Background(), ex)
+
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
+	}
+	fl := store.savedFlows[0]
+
+	// Duplicate header names with different casing are preserved separately.
+	if len(fl.Headers["Set-Cookie"]) != 1 || fl.Headers["Set-Cookie"][0] != "a=1" {
+		t.Errorf("Set-Cookie = %v, want [a=1]", fl.Headers["Set-Cookie"])
+	}
+	if len(fl.Headers["set-cookie"]) != 1 || fl.Headers["set-cookie"][0] != "b=2" {
+		t.Errorf("set-cookie = %v, want [b=2]", fl.Headers["set-cookie"])
+	}
+	if len(fl.Headers["Host"]) != 1 || fl.Headers["Host"][0] != "example.com" {
+		t.Errorf("Host = %v, want [example.com]", fl.Headers["Host"])
+	}
+}
+
+func TestRecordStep_MetadataConversion(t *testing.T) {
+	store := &fakeFlowWriter{}
+	step := NewRecordStep(store, nil)
+
+	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
+		FlowID:    "flow-1",
+		Sequence:  0,
+		Direction: exchange.Send,
+		Protocol:  exchange.HTTP1,
+		Metadata: map[string]any{
+			"ws_opcode": "text",
+			"grpc_code": 0,
+		},
+	}
+
+	step.Process(context.Background(), ex)
+
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
+	}
+	fl := store.savedFlows[0]
+
+	if fl.Metadata["ws_opcode"] != "text" {
+		t.Errorf("ws_opcode = %q, want %q", fl.Metadata["ws_opcode"], "text")
+	}
+	if fl.Metadata["grpc_code"] != "0" {
+		t.Errorf("grpc_code = %q, want %q", fl.Metadata["grpc_code"], "0")
+	}
+}
+
 func TestRecordStep_NilBodyPassthrough(t *testing.T) {
 	store := &fakeFlowWriter{}
 	step := NewRecordStep(store, nil)
@@ -275,47 +475,13 @@ func TestRecordStep_NilBodyPassthrough(t *testing.T) {
 		Body: nil, // passthrough
 	}
 
-	ctx := context.Background()
-	step.Process(ctx, ex)
+	step.Process(context.Background(), ex)
 
 	if len(store.savedFlows) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(store.savedFlows))
 	}
 	if store.savedFlows[0].Body != nil {
 		t.Errorf("flow body should be nil for passthrough, got %v", store.savedFlows[0].Body)
-	}
-}
-
-func TestRecordStep_VariantOnBodyChange(t *testing.T) {
-	store := &fakeFlowWriter{}
-	step := NewRecordStep(store, nil)
-
-	ex := &exchange.Exchange{
-		StreamID:  "stream-1",
-		FlowID:    "flow-1",
-		Sequence:  0,
-		Direction: exchange.Send,
-		Method:    "POST",
-		Protocol:  exchange.HTTP1,
-		Body:      []byte("original"),
-	}
-
-	snap := ex.Clone()
-	ctx := withSnapshot(context.Background(), snap)
-
-	// Modify body.
-	ex.Body = []byte("modified")
-
-	step.Process(ctx, ex)
-
-	if len(store.savedFlows) != 2 {
-		t.Fatalf("expected 2 flows (variant), got %d", len(store.savedFlows))
-	}
-	if string(store.savedFlows[0].Body) != "original" {
-		t.Errorf("original body = %q, want %q", store.savedFlows[0].Body, "original")
-	}
-	if string(store.savedFlows[1].Body) != "modified" {
-		t.Errorf("modified body = %q, want %q", store.savedFlows[1].Body, "modified")
 	}
 }
 
@@ -350,6 +516,33 @@ func TestRecordStep_VariantOnRawBytesChange(t *testing.T) {
 		t.Errorf("modified raw = %q, want %q", store.savedFlows[1].RawBytes, "modified raw")
 	}
 }
+
+func TestRecordStep_SaveStreamErrorSkipsFlowRecord(t *testing.T) {
+	store := &fakeFlowWriter{
+		saveStreamErr: errTestSaveStream,
+	}
+	step := NewRecordStep(store, nil)
+
+	ex := &exchange.Exchange{
+		StreamID:  "stream-1",
+		FlowID:    "flow-1",
+		Sequence:  0,
+		Direction: exchange.Send,
+		Protocol:  exchange.HTTP1,
+	}
+
+	r := step.Process(context.Background(), ex)
+	if r.Action != Continue {
+		t.Fatalf("expected Continue even on error, got %v", r.Action)
+	}
+
+	// Stream save failed but Flow is still recorded (best effort).
+	if len(store.savedFlows) != 1 {
+		t.Fatalf("expected 1 flow (best effort), got %d", len(store.savedFlows))
+	}
+}
+
+var errTestSaveStream = fmt.Errorf("test save stream error")
 
 func TestPipeline_RunStoresSnapshot(t *testing.T) {
 	// Verify that Pipeline.Run() stores a snapshot in context that a Step
@@ -389,49 +582,6 @@ type snapshotCaptureStep struct {
 func (s *snapshotCaptureStep) Process(ctx context.Context, _ *exchange.Exchange) Result {
 	*s.captured = SnapshotFromContext(ctx)
 	return Result{}
-}
-
-func TestRecordStep_ReceiveVariantRecording(t *testing.T) {
-	store := &fakeFlowWriter{}
-	step := NewRecordStep(store, nil)
-
-	ex := &exchange.Exchange{
-		StreamID:  "stream-1",
-		FlowID:    "flow-1",
-		Sequence:  1,
-		Direction: exchange.Receive,
-		Status:    200,
-		Protocol:  exchange.HTTP1,
-		Headers: []exchange.KeyValue{
-			{Name: "Content-Type", Value: "text/plain"},
-		},
-		Body: []byte("original response"),
-	}
-
-	snap := ex.Clone()
-	ctx := withSnapshot(context.Background(), snap)
-
-	// Modify the Exchange (as a preceding Step would).
-	ex.Body = []byte("modified response")
-
-	step.Process(ctx, ex)
-
-	// 2 flows (variant) + 1 stream update.
-	if len(store.savedFlows) != 2 {
-		t.Fatalf("expected 2 flows (variant), got %d", len(store.savedFlows))
-	}
-	if store.savedFlows[0].Metadata["variant"] != "original" {
-		t.Errorf("first flow variant = %q, want %q", store.savedFlows[0].Metadata["variant"], "original")
-	}
-	if store.savedFlows[1].Metadata["variant"] != "modified" {
-		t.Errorf("second flow variant = %q, want %q", store.savedFlows[1].Metadata["variant"], "modified")
-	}
-	if len(store.updatedIDs) != 1 {
-		t.Fatalf("expected 1 stream update, got %d", len(store.updatedIDs))
-	}
-	if store.updates[0].State != "complete" {
-		t.Errorf("stream update state = %q, want %q", store.updates[0].State, "complete")
-	}
 }
 
 func TestExchangeModified_AllFields(t *testing.T) {
