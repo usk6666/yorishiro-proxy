@@ -117,6 +117,12 @@ func makeExchange(dir exchange.Direction, method string, seq int) *exchange.Exch
 	}
 }
 
+func makeExchangeWithStreamID(dir exchange.Direction, method string, seq int, streamID string) *exchange.Exchange {
+	ex := makeExchange(dir, method, seq)
+	ex.StreamID = streamID
+	return ex
+}
+
 func TestRunSession_Unary(t *testing.T) {
 	req := makeExchange(exchange.Send, "GET", 0)
 	resp := makeExchange(exchange.Receive, "", 1)
@@ -448,5 +454,215 @@ func TestRunSession_DropSendContinueReceive(t *testing.T) {
 	clientSent := clientCodec.getSent()
 	if len(clientSent) != 1 {
 		t.Fatalf("client.Send called %d times, want 1", len(clientSent))
+	}
+}
+
+func TestRunSession_OnComplete_NormalEOF(t *testing.T) {
+	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "stream-1")
+	resp := makeExchangeWithStreamID(exchange.Receive, "", 1, "stream-1")
+
+	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
+	upstreamCodec := &mockCodec{nextExchanges: []*exchange.Exchange{resp}}
+
+	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+		return upstreamCodec, nil
+	}
+	p := pipeline.New(passStep{})
+
+	var gotStreamID string
+	var gotErr error
+	called := false
+
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, streamID string, err error) {
+			called = true
+			gotStreamID = streamID
+			gotErr = err
+		},
+	}
+
+	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	if err != nil {
+		t.Fatalf("RunSession returned error: %v", err)
+	}
+
+	if !called {
+		t.Fatal("OnComplete was not called")
+	}
+	if gotStreamID != "stream-1" {
+		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "stream-1")
+	}
+	if gotErr != nil {
+		t.Errorf("OnComplete err = %v, want nil", gotErr)
+	}
+}
+
+func TestRunSession_OnComplete_Error(t *testing.T) {
+	sendErr := fmt.Errorf("upstream write error")
+	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "stream-err")
+
+	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
+	upstreamCodec := &mockCodec{sendErr: sendErr}
+
+	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+		return upstreamCodec, nil
+	}
+	p := pipeline.New(passStep{})
+
+	var gotStreamID string
+	var gotErr error
+	called := false
+
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, streamID string, err error) {
+			called = true
+			gotStreamID = streamID
+			gotErr = err
+		},
+	}
+
+	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	if err == nil {
+		t.Fatal("RunSession should return error")
+	}
+
+	if !called {
+		t.Fatal("OnComplete was not called on error")
+	}
+	if gotStreamID != "stream-err" {
+		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "stream-err")
+	}
+	if !errors.Is(gotErr, sendErr) {
+		t.Errorf("OnComplete err = %v, want wrapping %v", gotErr, sendErr)
+	}
+}
+
+func TestRunSession_OnComplete_Nil(t *testing.T) {
+	// OnComplete nil should not panic.
+	req := makeExchange(exchange.Send, "GET", 0)
+	resp := makeExchange(exchange.Receive, "", 1)
+
+	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
+	upstreamCodec := &mockCodec{nextExchanges: []*exchange.Exchange{resp}}
+
+	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+		return upstreamCodec, nil
+	}
+	p := pipeline.New(passStep{})
+
+	// No opts at all — backward compatible.
+	err := RunSession(context.Background(), clientCodec, dial, p)
+	if err != nil {
+		t.Fatalf("RunSession returned error: %v", err)
+	}
+
+	// Explicit nil OnComplete.
+	err = RunSession(context.Background(),
+		&mockCodec{nextExchanges: []*exchange.Exchange{makeExchange(exchange.Send, "GET", 0)}},
+		func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+			return &mockCodec{nextExchanges: []*exchange.Exchange{makeExchange(exchange.Receive, "", 1)}}, nil
+		},
+		pipeline.New(passStep{}),
+		SessionOptions{OnComplete: nil},
+	)
+	if err != nil {
+		t.Fatalf("RunSession returned error with nil OnComplete: %v", err)
+	}
+}
+
+func TestRunSession_OnComplete_StreamIDFromFirstExchange(t *testing.T) {
+	// Multiple exchanges with different StreamIDs — only the first is captured.
+	ex1 := makeExchangeWithStreamID(exchange.Send, "GET", 0, "first-stream")
+	ex2 := makeExchangeWithStreamID(exchange.Send, "GET", 1, "second-stream")
+
+	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{ex1, ex2}}
+	upstreamCodec := &mockCodec{} // no responses, will EOF immediately
+
+	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+		return upstreamCodec, nil
+	}
+	p := pipeline.New(passStep{})
+
+	var gotStreamID string
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, streamID string, _ error) {
+			gotStreamID = streamID
+		},
+	}
+
+	_ = RunSession(context.Background(), clientCodec, dial, p, opts)
+
+	if gotStreamID != "first-stream" {
+		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "first-stream")
+	}
+}
+
+func TestRunSession_OnComplete_ContextNotCancelled(t *testing.T) {
+	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "ctx-test")
+	resp := makeExchangeWithStreamID(exchange.Receive, "", 1, "ctx-test")
+
+	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
+	upstreamCodec := &mockCodec{nextExchanges: []*exchange.Exchange{resp}}
+
+	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+		return upstreamCodec, nil
+	}
+	p := pipeline.New(passStep{})
+
+	var ctxErr error
+	opts := SessionOptions{
+		OnComplete: func(ctx context.Context, _ string, _ error) {
+			ctxErr = ctx.Err()
+		},
+	}
+
+	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	if err != nil {
+		t.Fatalf("RunSession returned error: %v", err)
+	}
+
+	if ctxErr != nil {
+		t.Errorf("OnComplete context was cancelled: %v", ctxErr)
+	}
+}
+
+func TestRunSession_OnComplete_AllDropped(t *testing.T) {
+	// When all exchanges are dropped, no upstream is established.
+	// OnComplete should still be called with an empty StreamID.
+	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "dropped-stream")
+
+	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
+
+	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+		return &mockCodec{}, nil
+	}
+	p := pipeline.New(dropStep{})
+
+	var gotStreamID string
+	var gotErr error
+	called := false
+
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, streamID string, err error) {
+			called = true
+			gotStreamID = streamID
+			gotErr = err
+		},
+	}
+
+	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	if err != nil {
+		t.Fatalf("RunSession returned error: %v", err)
+	}
+
+	if !called {
+		t.Fatal("OnComplete was not called when all exchanges dropped")
+	}
+	// StreamID is still captured because we read the exchange before dropping.
+	if gotStreamID != "dropped-stream" {
+		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "dropped-stream")
+	}
+	if gotErr != nil {
+		t.Errorf("OnComplete err = %v, want nil", gotErr)
 	}
 }
