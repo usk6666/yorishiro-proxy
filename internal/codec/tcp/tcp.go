@@ -65,16 +65,18 @@ func (c *Codec) Next(ctx context.Context) (*exchange.Exchange, error) {
 		return nil, err
 	}
 
-	chunk := make([]byte, n)
-	copy(chunk, c.buf[:n])
+	body := make([]byte, n)
+	copy(body, c.buf[:n])
+	raw := make([]byte, n)
+	copy(raw, c.buf[:n])
 
 	ex := &exchange.Exchange{
 		StreamID:  c.streamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  c.seq,
 		Direction: c.direction,
-		Body:      chunk,
-		RawBytes:  chunk,
+		Body:      body,
+		RawBytes:  raw,
 		Protocol:  exchange.TCP,
 	}
 	c.seq++

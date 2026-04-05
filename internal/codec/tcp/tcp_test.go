@@ -247,6 +247,35 @@ func TestNewWithStreamID_GeneratesUUID(t *testing.T) {
 	}
 }
 
+func TestNext_BodyAndRawBytesSeparate(t *testing.T) {
+	// Verify that modifying Body in-place does not affect RawBytes
+	// (wire fidelity preservation).
+	client, server := net.Pipe()
+	defer client.Close()
+
+	c := New(server, "stream-1", exchange.Send)
+	defer c.Close()
+
+	go func() {
+		client.Write([]byte("original"))
+	}()
+
+	ex, err := c.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+
+	// Mutate Body in-place (simulating a Pipeline Step or plugin).
+	for i := range ex.Body {
+		ex.Body[i] = 'X'
+	}
+
+	// RawBytes must still contain the original wire data.
+	if string(ex.RawBytes) != "original" {
+		t.Errorf("RawBytes = %q after Body mutation, want %q", ex.RawBytes, "original")
+	}
+}
+
 func TestClose_ClosesConnection(t *testing.T) {
 	_, server := net.Pipe()
 
