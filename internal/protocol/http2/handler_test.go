@@ -28,11 +28,11 @@ import (
 // mockStore is a thread-safe minimal in-memory flow store for testing.
 type mockStore struct {
 	mu       sync.Mutex
-	flows    []*flow.Flow
-	messages []*flow.Message
+	flows    []*flow.Stream
+	messages []*flow.Flow
 }
 
-func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *mockStore) SaveStream(_ context.Context, s *flow.Stream) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s.ID == "" {
@@ -42,16 +42,13 @@ func (m *mockStore) SaveFlow(_ context.Context, s *flow.Flow) error {
 	return nil
 }
 
-func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (m *mockStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.flows {
 		if s.ID == id {
 			if update.State != "" {
 				s.State = update.State
-			}
-			if update.FlowType != "" {
-				s.FlowType = update.FlowType
 			}
 			if update.Duration != 0 {
 				s.Duration = update.Duration
@@ -71,7 +68,7 @@ func (m *mockStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpd
 	return fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
+func (m *mockStore) GetStream(_ context.Context, id string) (*flow.Stream, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.flows {
@@ -82,21 +79,21 @@ func (m *mockStore) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
 	return nil, fmt.Errorf("not found: %s", id)
 }
 
-func (m *mockStore) ListFlows(_ context.Context, _ flow.ListOptions) ([]*flow.Flow, error) {
+func (m *mockStore) ListFlows(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*flow.Flow, len(m.flows))
+	result := make([]*flow.Stream, len(m.flows))
 	copy(result, m.flows)
 	return result, nil
 }
 
-func (m *mockStore) CountFlows(_ context.Context, _ flow.ListOptions) (int, error) {
+func (m *mockStore) CountStreams(_ context.Context, _ flow.StreamListOptions) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.flows), nil
 }
 
-func (m *mockStore) DeleteFlow(_ context.Context, id string) error {
+func (m *mockStore) DeleteStream(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, s := range m.flows {
@@ -129,19 +126,19 @@ func (m *mockStore) DeleteExcessSessions(_ context.Context, _ int) (int64, error
 	return 0, nil
 }
 
-func (m *mockStore) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockStore) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)
 	return nil
 }
 
-func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.MessageListOptions) ([]*flow.Message, error) {
+func (m *mockStore) GetFlows(_ context.Context, flowID string, opts flow.FlowListOptions) ([]*flow.Flow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var result []*flow.Message
+	var result []*flow.Flow
 	for _, msg := range m.messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			if opts.Direction != "" && msg.Direction != opts.Direction {
 				continue
 			}
@@ -151,12 +148,12 @@ func (m *mockStore) GetMessages(_ context.Context, flowID string, opts flow.Mess
 	return result, nil
 }
 
-func (m *mockStore) CountMessages(_ context.Context, flowID string) (int, error) {
+func (m *mockStore) CountFlows(_ context.Context, flowID string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
 	for _, msg := range m.messages {
-		if msg.FlowID == flowID {
+		if msg.StreamID == flowID {
 			count++
 		}
 	}
@@ -172,9 +169,9 @@ func (m *mockStore) DeleteMacro(_ context.Context, _ string) error             {
 
 // mockEntry is a convenience view of a recorded flow with its send/receive messages.
 type mockEntry struct {
-	Session *flow.Flow
-	Send    *flow.Message
-	Receive *flow.Message
+	Session *flow.Stream
+	Send    *flow.Flow
+	Receive *flow.Flow
 }
 
 // Entries returns a list of mockEntry views for all recorded flows.
@@ -185,7 +182,7 @@ func (m *mockStore) Entries() []mockEntry {
 	for _, s := range m.flows {
 		e := mockEntry{Session: s}
 		for _, msg := range m.messages {
-			if msg.FlowID == s.ID {
+			if msg.StreamID == s.ID {
 				if msg.Direction == "send" && e.Send == nil {
 					e.Send = msg
 				}
@@ -471,9 +468,6 @@ func TestHandleStream_SessionRecording(t *testing.T) {
 	entry := entries[0]
 	if entry.Session.Protocol != "HTTP/2" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/2")
-	}
-	if entry.Session.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", entry.Session.FlowType, "unary")
 	}
 	if entry.Session.State != "complete" {
 		t.Errorf("state = %q, want %q", entry.Session.State, "complete")

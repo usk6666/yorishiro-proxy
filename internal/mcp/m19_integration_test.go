@@ -169,18 +169,17 @@ func TestM19_Compare_JSONResponse(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two flows with different JSON responses.
-	flowA := &flow.Flow{
+	flowA := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, flowA); err != nil {
+	if err := store.SaveStream(ctx, flowA); err != nil {
 		t.Fatalf("SaveFlow A: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    flowA.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  flowA.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -189,8 +188,8 @@ func TestM19_Compare_JSONResponse(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage A send: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:     flowA.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:   flowA.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -201,18 +200,17 @@ func TestM19_Compare_JSONResponse(t *testing.T) {
 		t.Fatalf("AppendMessage A recv: %v", err)
 	}
 
-	flowB := &flow.Flow{
+	flowB := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  80 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, flowB); err != nil {
+	if err := store.SaveStream(ctx, flowB); err != nil {
 		t.Fatalf("SaveFlow B: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:    flowB.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:  flowB.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -221,8 +219,8 @@ func TestM19_Compare_JSONResponse(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage B send: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID:     flowB.ID,
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID:   flowB.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -281,25 +279,24 @@ func TestM19_Compare_DifferentStatusCodes(t *testing.T) {
 	store := newFuzzTestStore(t)
 	ctx := context.Background()
 
-	flowA := &flow.Flow{
+	flowA := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  30 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, flowA); err != nil {
+	if err := store.SaveStream(ctx, flowA); err != nil {
 		t.Fatalf("SaveFlow A: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: flowA.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: flowA.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET",
 		URL: mustParseURL("http://example.com/api"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: flowA.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: flowA.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("OK"),
@@ -307,25 +304,24 @@ func TestM19_Compare_DifferentStatusCodes(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	flowB := &flow.Flow{
+	flowB := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  30 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, flowB); err != nil {
+	if err := store.SaveStream(ctx, flowB); err != nil {
 		t.Fatalf("SaveFlow B: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: flowB.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: flowB.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET",
 		URL: mustParseURL("http://example.com/api"),
 	}); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: flowB.ID, Sequence: 1, Direction: "receive",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: flowB.ID, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 404,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("Not Found"),

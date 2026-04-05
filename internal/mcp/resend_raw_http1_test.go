@@ -176,12 +176,12 @@ func TestResendRaw_HTTP1KeepAlive_NoTimeout(t *testing.T) {
 	u, _ := url.Parse(fmt.Sprintf("http://%s:%s/test", host, port))
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -190,7 +190,7 @@ func TestResendRaw_HTTP1KeepAlive_NoTimeout(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -255,12 +255,12 @@ func TestResendRaw_HTTPS_UsesHTTP1Parser(t *testing.T) {
 	u, _ := url.Parse(fmt.Sprintf("https://%s:%s/", host, port))
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTPS",
 			Timestamp: time.Now(),
 			Duration:  50 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -269,7 +269,7 @@ func TestResendRaw_HTTPS_UsesHTTP1Parser(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),

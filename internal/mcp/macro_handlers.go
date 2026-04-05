@@ -37,7 +37,7 @@ type macroParams struct {
 // macroStepInput represents a single macro step in the MCP input.
 type macroStepInput struct {
 	ID              string            `json:"id"`
-	FlowID          string            `json:"flow_id"`
+	StreamID        string            `json:"flow_id"`
 	OverrideMethod  string            `json:"override_method,omitempty"`
 	OverrideURL     string            `json:"override_url,omitempty"`
 	OverrideHeaders map[string]string `json:"override_headers,omitempty"`
@@ -251,7 +251,7 @@ func (s *Server) checkMacroStepsTargetScope(ctx context.Context, steps []macroSt
 				}
 			}
 		}
-		sendMsgs, msgErr := s.deps.store.GetMessages(ctx, step.FlowID, flow.MessageListOptions{Direction: "send"})
+		sendMsgs, msgErr := s.deps.store.GetFlows(ctx, step.StreamID, flow.FlowListOptions{Direction: "send"})
 		if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 			if step.OverrideURL == "" {
 				if scopeErr := s.checkTargetScopeURL(sendMsgs[0].URL); scopeErr != nil {
@@ -341,7 +341,7 @@ func configToMacro(name, description string, cfg macroConfig) (*macro.Macro, err
 func stepInputToStep(s macroStepInput) macro.Step {
 	step := macro.Step{
 		ID:              s.ID,
-		FlowID:          s.FlowID,
+		StreamID:        s.StreamID,
 		OverrideMethod:  s.OverrideMethod,
 		OverrideURL:     s.OverrideURL,
 		OverrideHeaders: s.OverrideHeaders,
@@ -414,7 +414,7 @@ func validateMacroStep(step *macro.Step, index int, seenIDs map[string]bool) err
 	}
 	seenIDs[step.ID] = true
 
-	if step.FlowID == "" {
+	if step.StreamID == "" {
 		return fmt.Errorf("step %q has no flow_id", step.ID)
 	}
 
@@ -571,16 +571,15 @@ func (s *Server) recordMacroStepSession(
 	if httpReq.URL != nil && httpReq.URL.Scheme == "https" {
 		scheme = "https"
 	}
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Scheme:    scheme,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
 		Duration:  duration,
 		Tags:      tags,
 	}
-	if err := s.deps.store.SaveFlow(ctx, fl); err != nil {
+	if err := s.deps.store.SaveStream(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -594,8 +593,8 @@ func (s *Server) recordMacroStepSession(
 
 	parsedURL := httpReq.URL
 
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: start,
@@ -604,7 +603,7 @@ func (s *Server) recordMacroStepSession(
 		Headers:   recordedHeaders,
 		Body:      req.Body,
 	}
-	if err := s.deps.store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := s.deps.store.SaveFlow(ctx, sendMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step send message",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -615,8 +614,8 @@ func (s *Server) recordMacroStepSession(
 		respHeaders[key] = values
 	}
 
-	recvMsg := &flow.Message{
-		FlowID:     fl.ID,
+	recvMsg := &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  start.Add(duration),
@@ -624,7 +623,7 @@ func (s *Server) recordMacroStepSession(
 		Headers:    respHeaders,
 		Body:       respBody,
 	}
-	if err := s.deps.store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := s.deps.store.SaveFlow(ctx, recvMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step receive message",
 			"macro", macroName, "step", req.StepID, "error", err)
 	}
@@ -632,13 +631,13 @@ func (s *Server) recordMacroStepSession(
 
 // storeFlowFetcher implements macro.FlowFetcher using the flow store.
 type storeFlowFetcher struct {
-	store flow.FlowReader
+	store flow.Reader
 }
 
 // GetFlowRequest retrieves the send message from a recorded flow
 // and converts it to a macro.SendRequest.
 func (f *storeFlowFetcher) GetFlowRequest(ctx context.Context, flowID string) (*macro.SendRequest, error) {
-	msgs, err := f.store.GetMessages(ctx, flowID, flow.MessageListOptions{Direction: "send"})
+	msgs, err := f.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, fmt.Errorf("get send messages for flow %s: %w", flowID, err)
 	}

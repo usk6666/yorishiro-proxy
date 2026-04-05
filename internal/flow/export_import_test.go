@@ -17,11 +17,10 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &Flow{
+	fl := &Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  protocol,
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  150 * time.Millisecond,
@@ -35,13 +34,13 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 			TLSServerCertSubject: "CN=example.com",
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &Message{
+	sendMsg := &Flow{
 		ID:        "msg-send-" + id,
-		FlowID:    id,
+		StreamID:  id,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -52,13 +51,13 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 		RawBytes:  []byte("GET " + urlStr + " HTTP/1.1\r\n"),
 		Metadata:  map[string]string{"key": "value"},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &Message{
+	recvMsg := &Flow{
 		ID:            "msg-recv-" + id,
-		FlowID:        id,
+		StreamID:      id,
 		Sequence:      1,
 		Direction:     "receive",
 		Timestamp:     ts.Add(100 * time.Millisecond),
@@ -67,7 +66,7 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 		Body:          []byte("<html>OK</html>"),
 		BodyTruncated: false,
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(receive): %v", err)
 	}
 }
@@ -84,9 +83,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 	// Export all sessions
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 2 {
 		t.Fatalf("expected 2 exported, got %d", n)
@@ -94,9 +93,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 	// Import into a fresh store
 	store2 := newTestStore(t)
-	result, err := ImportFlows(ctx, store2, &buf, ImportOptions{OnConflict: ConflictSkip})
+	result, err := ImportStreams(ctx, store2, &buf, ImportOptions{OnConflict: ConflictSkip})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 2 {
 		t.Errorf("expected 2 imported, got %d", result.Imported)
@@ -110,20 +109,17 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 	// Verify imported data matches
 	for _, id := range []string{"fl-1", "fl-2"} {
-		origSess, err := store.GetFlow(ctx, id)
+		origSess, err := store.GetStream(ctx, id)
 		if err != nil {
 			t.Fatalf("GetFlow(%s) from original: %v", id, err)
 		}
-		importedSess, err := store2.GetFlow(ctx, id)
+		importedSess, err := store2.GetStream(ctx, id)
 		if err != nil {
 			t.Fatalf("GetFlow(%s) from imported: %v", id, err)
 		}
 
 		if origSess.Protocol != importedSess.Protocol {
 			t.Errorf("session %s protocol: got %s, want %s", id, importedSess.Protocol, origSess.Protocol)
-		}
-		if origSess.FlowType != importedSess.FlowType {
-			t.Errorf("session %s session_type: got %s, want %s", id, importedSess.FlowType, origSess.FlowType)
 		}
 		if origSess.State != importedSess.State {
 			t.Errorf("session %s state: got %s, want %s", id, importedSess.State, origSess.State)
@@ -141,8 +137,8 @@ func TestExportImportRoundTrip(t *testing.T) {
 		}
 
 		// Verify messages
-		origMsgs, _ := store.GetMessages(ctx, id, MessageListOptions{})
-		importedMsgs, _ := store2.GetMessages(ctx, id, MessageListOptions{})
+		origMsgs, _ := store.GetFlows(ctx, id, FlowListOptions{})
+		importedMsgs, _ := store2.GetFlows(ctx, id, FlowListOptions{})
 		if len(origMsgs) != len(importedMsgs) {
 			t.Errorf("session %s message count: got %d, want %d", id, len(importedMsgs), len(origMsgs))
 			continue
@@ -188,12 +184,12 @@ func TestExportWithProtocolFilter(t *testing.T) {
 	makeTestSession(t, store, "fl-http", "HTTP/1.x", "http://example.com/", ts, nil)
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{
 		Filter:        ExportFilter{Protocol: "HTTPS"},
 		IncludeBodies: true,
 	})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 exported with HTTPS filter, got %d", n)
@@ -204,8 +200,8 @@ func TestExportWithProtocolFilter(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &record); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if record.Flow.Protocol != "HTTPS" {
-		t.Errorf("expected HTTPS, got %s", record.Flow.Protocol)
+	if record.Stream.Protocol != "HTTPS" {
+		t.Errorf("expected HTTPS, got %s", record.Stream.Protocol)
 	}
 }
 
@@ -219,12 +215,12 @@ func TestExportWithURLPatternFilter(t *testing.T) {
 	makeTestSession(t, store, "fl-home", "HTTPS", "https://example.com/index.html", ts, nil)
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{
 		Filter:        ExportFilter{URLPattern: "/api/"},
 		IncludeBodies: true,
 	})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 exported with /api/ URL filter, got %d", n)
@@ -248,7 +244,7 @@ func TestExportWithTimeFilter(t *testing.T) {
 	before := time.Date(2026, 2, 28, 23, 59, 59, 0, time.UTC)
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{
 		Filter: ExportFilter{
 			TimeAfter:  &after,
 			TimeBefore: &before,
@@ -256,7 +252,7 @@ func TestExportWithTimeFilter(t *testing.T) {
 		IncludeBodies: true,
 	})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 flow in February, got %d", n)
@@ -272,11 +268,11 @@ func TestExportMetadataOnly(t *testing.T) {
 	makeTestSession(t, store, "fl-meta", "HTTPS", "https://example.com/api", ts, []byte("request body"))
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{
 		IncludeBodies: false,
 	})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 exported, got %d", n)
@@ -287,7 +283,7 @@ func TestExportMetadataOnly(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	for _, msg := range record.Messages {
+	for _, msg := range record.Flows {
 		if msg.Body != "" {
 			t.Errorf("expected empty body with include_bodies=false, got %q", msg.Body)
 		}
@@ -314,15 +310,15 @@ func TestImportConflictSkip(t *testing.T) {
 	makeTestSession(t, store2, "fl-existing", "HTTP/1.x", "http://example.com/different", ts, []byte("different"))
 
 	var buf bytes.Buffer
-	_, err := ExportFlows(ctx, store2, &buf, ExportOptions{IncludeBodies: true})
+	_, err := ExportStreams(ctx, store2, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 
 	// Import with skip policy
-	result, err := ImportFlows(ctx, store, &buf, ImportOptions{OnConflict: ConflictSkip})
+	result, err := ImportStreams(ctx, store, &buf, ImportOptions{OnConflict: ConflictSkip})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 0 {
 		t.Errorf("expected 0 imported, got %d", result.Imported)
@@ -332,7 +328,7 @@ func TestImportConflictSkip(t *testing.T) {
 	}
 
 	// Verify original data is preserved
-	fl, err := store.GetFlow(ctx, "fl-existing")
+	fl, err := store.GetStream(ctx, "fl-existing")
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -354,15 +350,15 @@ func TestImportConflictReplace(t *testing.T) {
 	makeTestSession(t, store2, "fl-replace", "HTTP/1.x", "http://example.com/different", ts, []byte("replaced"))
 
 	var buf bytes.Buffer
-	_, err := ExportFlows(ctx, store2, &buf, ExportOptions{IncludeBodies: true})
+	_, err := ExportStreams(ctx, store2, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 
 	// Import with replace policy
-	result, err := ImportFlows(ctx, store, &buf, ImportOptions{OnConflict: ConflictReplace})
+	result, err := ImportStreams(ctx, store, &buf, ImportOptions{OnConflict: ConflictReplace})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
@@ -372,7 +368,7 @@ func TestImportConflictReplace(t *testing.T) {
 	}
 
 	// Verify replaced data
-	fl, err := store.GetFlow(ctx, "fl-replace")
+	fl, err := store.GetStream(ctx, "fl-replace")
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -388,13 +384,13 @@ func TestImportInvalidJSONL(t *testing.T) {
 
 	// Mix of valid and invalid lines
 	data := `not json at all
-{"flow":null,"messages":[],"version":"1"}
-{"flow":{"id":"good","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}
+{"flow":null,"flows":[],"version":"1"}
+{"stream":{"id":"good","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}
 {"broken json
 `
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{})
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
@@ -418,8 +414,8 @@ func TestImportInvalidJSONL(t *testing.T) {
 		if result.ErrorDetails[1].Line != 2 {
 			t.Errorf("expected error on line 2, got %d", result.ErrorDetails[1].Line)
 		}
-		if !strings.Contains(result.ErrorDetails[1].Reason, "missing flow") {
-			t.Errorf("expected 'missing flow' reason, got %q", result.ErrorDetails[1].Reason)
+		if !strings.Contains(result.ErrorDetails[1].Reason, "missing stream") {
+			t.Errorf("expected 'missing stream' reason, got %q", result.ErrorDetails[1].Reason)
 		}
 	}
 }
@@ -429,11 +425,11 @@ func TestImportInvalidVersion(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	data := `{"flow":{"id":"ver2","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"2"}`
+	data := `{"stream":{"id":"ver2","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"2"}`
 
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{})
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 0 {
 		t.Errorf("expected 0 imported for version mismatch, got %d", result.Imported)
@@ -448,8 +444,8 @@ func TestImportInvalidVersion(t *testing.T) {
 	if !strings.Contains(result.ErrorDetails[0].Reason, "unsupported version") {
 		t.Errorf("expected 'unsupported version' reason, got %q", result.ErrorDetails[0].Reason)
 	}
-	if result.ErrorDetails[0].FlowID != "ver2" {
-		t.Errorf("expected flow_id 'ver2', got %q", result.ErrorDetails[0].FlowID)
+	if result.ErrorDetails[0].StreamID != "ver2" {
+		t.Errorf("expected flow_id 'ver2', got %q", result.ErrorDetails[0].StreamID)
 	}
 }
 
@@ -459,9 +455,9 @@ func TestImportEmptyLines(t *testing.T) {
 	ctx := context.Background()
 
 	data := "\n\n\n"
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{})
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 0 {
 		t.Errorf("expected 0 imported for empty lines, got %d", result.Imported)
@@ -480,9 +476,9 @@ func TestExportJSONLFormat(t *testing.T) {
 	makeTestSession(t, store, "fl-format", "HTTPS", "https://example.com/api", ts, []byte("binary\x00data"))
 
 	var buf bytes.Buffer
-	_, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	_, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 
 	// Each line should be valid JSON
@@ -499,15 +495,15 @@ func TestExportJSONLFormat(t *testing.T) {
 	if record.Version != "1" {
 		t.Errorf("expected version 1, got %s", record.Version)
 	}
-	if record.Flow.ID != "fl-format" {
-		t.Errorf("expected flow ID fl-format, got %s", record.Flow.ID)
+	if record.Stream.ID != "fl-format" {
+		t.Errorf("expected flow ID fl-format, got %s", record.Stream.ID)
 	}
-	if record.Flow.Protocol != "HTTPS" {
-		t.Errorf("expected protocol HTTPS, got %s", record.Flow.Protocol)
+	if record.Stream.Protocol != "HTTPS" {
+		t.Errorf("expected protocol HTTPS, got %s", record.Stream.Protocol)
 	}
 
 	// Body should be Base64 encoded
-	for _, msg := range record.Messages {
+	for _, msg := range record.Flows {
 		if msg.Direction == "send" && msg.Body != "" {
 			decoded, err := base64.StdEncoding.DecodeString(msg.Body)
 			if err != nil {
@@ -526,9 +522,9 @@ func TestExportNoSessions(t *testing.T) {
 	ctx := context.Background()
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("expected 0 exported from empty store, got %d", n)
@@ -555,18 +551,18 @@ func TestLargeExportImport(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != count {
 		t.Fatalf("expected %d exported, got %d", count, n)
 	}
 
 	store2 := newTestStore(t)
-	result, err := ImportFlows(ctx, store2, &buf, ImportOptions{OnConflict: ConflictSkip})
+	result, err := ImportStreams(ctx, store2, &buf, ImportOptions{OnConflict: ConflictSkip})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != count {
 		t.Errorf("expected %d imported, got %d", count, result.Imported)
@@ -579,22 +575,21 @@ func TestExportSessionWithNilConnInfo(t *testing.T) {
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	fl := &Flow{
+	fl := &Stream{
 		ID:        "fl-noconn",
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1, got %d", n)
@@ -602,15 +597,15 @@ func TestExportSessionWithNilConnInfo(t *testing.T) {
 
 	// Import and verify
 	store2 := newTestStore(t)
-	result, err := ImportFlows(ctx, store2, &buf, ImportOptions{})
+	result, err := ImportStreams(ctx, store2, &buf, ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
 	}
 
-	imported, err := store2.GetFlow(ctx, "fl-noconn")
+	imported, err := store2.GetStream(ctx, "fl-noconn")
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -625,22 +620,21 @@ func TestExportImportWithURLMessage(t *testing.T) {
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	fl := &Flow{
+	fl := &Stream{
 		ID:        "fl-url",
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	complexURL, _ := url.Parse("https://example.com/path?key=value&foo=bar#fragment")
-	msg := &Message{
+	msg := &Flow{
 		ID:        "msg-url-1",
-		FlowID:    "fl-url",
+		StreamID:  "fl-url",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -649,26 +643,26 @@ func TestExportImportWithURLMessage(t *testing.T) {
 		Headers:   map[string][]string{"Content-Type": {"application/json"}},
 		Body:      []byte(`{"test":true}`),
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
 	var buf bytes.Buffer
-	_, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	_, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 
 	store2 := newTestStore(t)
-	result, err := ImportFlows(ctx, store2, &buf, ImportOptions{})
+	result, err := ImportStreams(ctx, store2, &buf, ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
 	}
 
-	msgs, err := store2.GetMessages(ctx, "fl-url", MessageListOptions{})
+	msgs, err := store2.GetFlows(ctx, "fl-url", FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -692,15 +686,15 @@ func TestExportImportDefaultConflictPolicy(t *testing.T) {
 	makeTestSession(t, store, "fl-default", "HTTPS", "https://example.com/", ts, nil)
 
 	var buf bytes.Buffer
-	_, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	_, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 
 	// Import with empty OnConflict (should default to skip)
-	result, err := ImportFlows(ctx, store, bytes.NewReader(buf.Bytes()), ImportOptions{})
+	result, err := ImportStreams(ctx, store, bytes.NewReader(buf.Bytes()), ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Skipped != 1 {
 		t.Errorf("expected 1 skipped with default policy, got %d", result.Skipped)
@@ -725,7 +719,7 @@ func TestExportCombinedFilters(t *testing.T) {
 	before := time.Date(2026, 2, 18, 0, 0, 0, 0, time.UTC)
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{
 		Filter: ExportFilter{
 			Protocol:   "HTTPS",
 			URLPattern: "/api/",
@@ -735,7 +729,7 @@ func TestExportCombinedFilters(t *testing.T) {
 		IncludeBodies: true,
 	})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	// Only fl-1 is HTTPS+/api/ but before time_after (excluded)
 	// fl-2 is HTTP/1.x (excluded by protocol)
@@ -761,12 +755,12 @@ func TestExportMaxFlows(t *testing.T) {
 
 	// Export with limit of 3
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{
 		IncludeBodies: true,
 		MaxFlows:      3,
 	})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 3 {
 		t.Errorf("expected 3 exported with MaxFlows=3, got %d", n)
@@ -791,12 +785,12 @@ func TestExportMaxFlowsZeroMeansNoLimit(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{
 		IncludeBodies: true,
 		MaxFlows:      0,
 	})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 5 {
 		t.Errorf("expected 5 exported with MaxFlows=0 (no limit), got %d", n)
@@ -809,10 +803,10 @@ func TestImportValidateIDs_ValidUUIDs(t *testing.T) {
 	ctx := context.Background()
 
 	// Use valid UUIDs
-	data := `{"flow":{"id":"550e8400-e29b-41d4-a716-446655440000","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[{"id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8","flow_id":"550e8400-e29b-41d4-a716-446655440000","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z"}],"version":"1"}`
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
+	data := `{"stream":{"id":"550e8400-e29b-41d4-a716-446655440000","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[{"id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8","stream_id":"550e8400-e29b-41d4-a716-446655440000","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z"}],"version":"1"}`
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported with valid UUIDs, got %d", result.Imported)
@@ -828,23 +822,23 @@ func TestImportValidateIDs_InvalidSessionID(t *testing.T) {
 	ctx := context.Background()
 
 	// Flow ID is not a valid UUID
-	data := `{"flow":{"id":"not-a-uuid","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
+	data := `{"stream":{"id":"not-a-uuid","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 0 {
-		t.Errorf("expected 0 imported with invalid flow UUID, got %d", result.Imported)
+		t.Errorf("expected 0 imported with invalid stream UUID, got %d", result.Imported)
 	}
 	if result.Errors != 1 {
-		t.Errorf("expected 1 error for invalid flow UUID, got %d", result.Errors)
+		t.Errorf("expected 1 error for invalid stream UUID, got %d", result.Errors)
 	}
 	// Verify error detail contains UUID info.
 	if len(result.ErrorDetails) != 1 {
 		t.Fatalf("expected 1 error detail, got %d", len(result.ErrorDetails))
 	}
-	if !strings.Contains(result.ErrorDetails[0].Reason, "invalid flow UUID") {
-		t.Errorf("expected 'invalid flow UUID' reason, got %q", result.ErrorDetails[0].Reason)
+	if !strings.Contains(result.ErrorDetails[0].Reason, "invalid stream UUID") {
+		t.Errorf("expected 'invalid stream UUID' reason, got %q", result.ErrorDetails[0].Reason)
 	}
 }
 
@@ -854,23 +848,23 @@ func TestImportValidateIDs_InvalidMessageID(t *testing.T) {
 	ctx := context.Background()
 
 	// Flow ID is valid UUID, but message ID is not
-	data := `{"flow":{"id":"550e8400-e29b-41d4-a716-446655440000","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[{"id":"bad-msg-id","flow_id":"550e8400-e29b-41d4-a716-446655440000","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z"}],"version":"1"}`
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
+	data := `{"stream":{"id":"550e8400-e29b-41d4-a716-446655440000","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[{"id":"bad-msg-id","stream_id":"550e8400-e29b-41d4-a716-446655440000","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z"}],"version":"1"}`
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: true})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 0 {
-		t.Errorf("expected 0 imported with invalid message UUID, got %d", result.Imported)
+		t.Errorf("expected 0 imported with invalid flow UUID, got %d", result.Imported)
 	}
 	if result.Errors != 1 {
-		t.Errorf("expected 1 error for invalid message UUID, got %d", result.Errors)
+		t.Errorf("expected 1 error for invalid flow UUID, got %d", result.Errors)
 	}
 	// Verify error detail contains message UUID info.
 	if len(result.ErrorDetails) != 1 {
 		t.Fatalf("expected 1 error detail, got %d", len(result.ErrorDetails))
 	}
-	if !strings.Contains(result.ErrorDetails[0].Reason, "invalid message UUID") {
-		t.Errorf("expected 'invalid message UUID' reason, got %q", result.ErrorDetails[0].Reason)
+	if !strings.Contains(result.ErrorDetails[0].Reason, "invalid flow UUID") {
+		t.Errorf("expected 'invalid flow UUID' reason, got %q", result.ErrorDetails[0].Reason)
 	}
 }
 
@@ -880,10 +874,10 @@ func TestImportValidateIDs_DisabledByDefault(t *testing.T) {
 	ctx := context.Background()
 
 	// Non-UUID IDs should be accepted when ValidateIDs is false (default)
-	data := `{"flow":{"id":"custom-id","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: false})
+	data := `{"stream":{"id":"custom-id","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{ValidateIDs: false})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported with ValidateIDs=false, got %d", result.Imported)
@@ -898,14 +892,14 @@ func TestImportMaxScannerBuffer(t *testing.T) {
 	// Create a JSONL line that definitely exceeds the small buffer limit (256 bytes).
 	// The base JSON structure alone is ~200 bytes; adding a long body ensures it exceeds 256.
 	longBody := strings.Repeat("A", 512)
-	data := fmt.Sprintf(`{"flow":{"id":"fl-buf","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[{"id":"msg-buf","flow_id":"fl-buf","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z","body":"%s"}],"version":"1"}`, longBody)
+	data := fmt.Sprintf(`{"stream":{"id":"fl-buf","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[{"id":"msg-buf","stream_id":"fl-buf","sequence":0,"direction":"send","timestamp":"2026-02-15T10:00:00Z","body":"%s"}],"version":"1"}`, longBody)
 
 	if len(data) <= 256 {
 		t.Fatalf("test data should exceed 256 bytes, got %d", len(data))
 	}
 
 	// With a very small buffer, the scanner should fail
-	_, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{
+	_, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{
 		MaxScannerBuffer: 256,
 	})
 	if err == nil {
@@ -922,10 +916,10 @@ func TestImportDefaultScannerBuffer(t *testing.T) {
 	ctx := context.Background()
 
 	// Normal data should work with default buffer
-	data := `{"flow":{"id":"fl-defbuf","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`
-	result, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{})
+	data := `{"stream":{"id":"fl-defbuf","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`
+	result, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Imported != 1 {
 		t.Errorf("expected 1 imported, got %d", result.Imported)
@@ -939,30 +933,30 @@ func TestImportErrorDetails_SaveSessionFailure(t *testing.T) {
 
 	// Create a flow that will cause a duplicate key error when imported twice.
 	sessID := "550e8400-e29b-41d4-a716-446655440099"
-	data := fmt.Sprintf(`{"flow":{"id":"%s","conn_id":"c","protocol":"HTTPS","flow_type":"unary","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"messages":[],"version":"1"}`, sessID)
+	data := fmt.Sprintf(`{"stream":{"id":"%s","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`, sessID)
 
 	// First import: should succeed.
-	r1, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{})
+	r1, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{})
 	if err != nil {
-		t.Fatalf("first ImportFlows: %v", err)
+		t.Fatalf("first ImportStreams: %v", err)
 	}
 	if r1.Imported != 1 {
 		t.Fatalf("first import: expected 1 imported, got %d", r1.Imported)
 	}
 
 	// Second import with skip: should skip.
-	r2, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{OnConflict: ConflictSkip})
+	r2, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{OnConflict: ConflictSkip})
 	if err != nil {
-		t.Fatalf("second ImportFlows: %v", err)
+		t.Fatalf("second ImportStreams: %v", err)
 	}
 	if r2.Skipped != 1 {
 		t.Errorf("expected 1 skipped, got %d", r2.Skipped)
 	}
 
 	// Second import with replace: should succeed.
-	r3, err := ImportFlows(ctx, store, strings.NewReader(data), ImportOptions{OnConflict: ConflictReplace})
+	r3, err := ImportStreams(ctx, store, strings.NewReader(data), ImportOptions{OnConflict: ConflictReplace})
 	if err != nil {
-		t.Fatalf("third ImportFlows: %v", err)
+		t.Fatalf("third ImportStreams: %v", err)
 	}
 	if r3.Imported != 1 {
 		t.Errorf("expected 1 imported with replace, got %d", r3.Imported)
@@ -985,9 +979,9 @@ func TestImportErrorDetailsCap(t *testing.T) {
 	for i := 0; i < maxErrorDetails+10; i++ {
 		lines.WriteString("not valid json\n")
 	}
-	result, err := ImportFlows(ctx, store, strings.NewReader(lines.String()), ImportOptions{})
+	result, err := ImportStreams(ctx, store, strings.NewReader(lines.String()), ImportOptions{})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Errors != maxErrorDetails+10 {
 		t.Errorf("expected %d errors, got %d", maxErrorDetails+10, result.Errors)
@@ -1008,11 +1002,10 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 	msgSendID := "550e8400-e29b-41d4-a716-446655440002"
 	msgRecvID := "550e8400-e29b-41d4-a716-446655440003"
 
-	fl := &Flow{
+	fl := &Stream{
 		ID:        sessID,
 		ConnID:    "conn-" + sessID,
 		Protocol:  "HTTPS",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  150 * time.Millisecond,
@@ -1026,13 +1019,13 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 			TLSServerCertSubject: "CN=example.com",
 		},
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &Message{
+	sendMsg := &Flow{
 		ID:        msgSendID,
-		FlowID:    sessID,
+		StreamID:  sessID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: ts,
@@ -1043,13 +1036,13 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 		RawBytes:  []byte("GET /api/users HTTP/1.1\r\n"),
 		Metadata:  map[string]string{"key": "value"},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
 
-	recvMsg := &Message{
+	recvMsg := &Flow{
 		ID:         msgRecvID,
-		FlowID:     sessID,
+		StreamID:   sessID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  ts.Add(100 * time.Millisecond),
@@ -1057,15 +1050,15 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 		Headers:    map[string][]string{"Content-Type": {"text/html"}},
 		Body:       []byte("<html>OK</html>"),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage(receive): %v", err)
 	}
 
 	// Export
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 exported, got %d", n)
@@ -1075,12 +1068,12 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 
 	// Import into a fresh store with ValidateIDs: true (like MCP handler does)
 	store2 := newTestStore(t)
-	result, err := ImportFlows(ctx, store2, &buf, ImportOptions{
+	result, err := ImportStreams(ctx, store2, &buf, ImportOptions{
 		OnConflict:  ConflictSkip,
 		ValidateIDs: true,
 	})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Errors != 0 {
 		t.Errorf("expected 0 errors, got %d", result.Errors)
@@ -1104,15 +1097,15 @@ func TestExportDeleteAllImportRoundTrip(t *testing.T) {
 	makeTestSession(t, store, "fl-2", "HTTP/1.x", "http://example.com/", ts.Add(time.Hour), []byte("body2"))
 
 	var buf bytes.Buffer
-	n, err := ExportFlows(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
 	if err != nil {
-		t.Fatalf("ExportFlows: %v", err)
+		t.Fatalf("ExportStreams: %v", err)
 	}
 	if n != 2 {
 		t.Fatalf("expected 2 exported, got %d", n)
 	}
 
-	deleted, err := store.DeleteAllFlows(ctx)
+	deleted, err := store.DeleteAllStreams(ctx)
 	if err != nil {
 		t.Fatalf("DeleteAllFlows: %v", err)
 	}
@@ -1120,13 +1113,13 @@ func TestExportDeleteAllImportRoundTrip(t *testing.T) {
 		t.Fatalf("expected 2 deleted, got %d", deleted)
 	}
 
-	result, err := ImportFlows(ctx, store, bytes.NewReader(buf.Bytes()), ImportOptions{OnConflict: ConflictSkip})
+	result, err := ImportStreams(ctx, store, bytes.NewReader(buf.Bytes()), ImportOptions{OnConflict: ConflictSkip})
 	if err != nil {
-		t.Fatalf("ImportFlows: %v", err)
+		t.Fatalf("ImportStreams: %v", err)
 	}
 	if result.Errors != 0 {
 		for _, e := range result.ErrorDetails {
-			t.Errorf("import error line %d (flow %s): %s", e.Line, e.FlowID, e.Reason)
+			t.Errorf("import error line %d (flow %s): %s", e.Line, e.StreamID, e.Reason)
 		}
 		t.Fatalf("expected 0 errors, got %d", result.Errors)
 	}

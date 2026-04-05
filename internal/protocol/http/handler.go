@@ -84,7 +84,7 @@ type Handler struct {
 // NewHandler creates a new HTTP handler with flow recording.
 // If issuer is non-nil, CONNECT requests are handled for HTTPS MITM;
 // otherwise CONNECT requests receive a 501 Not Implemented response.
-func NewHandler(store flow.FlowWriter, issuer *cert.Issuer, logger *slog.Logger) *Handler {
+func NewHandler(store flow.Writer, issuer *cert.Issuer, logger *slog.Logger) *Handler {
 	return &Handler{
 		HandlerBase: proxy.HandlerBase{
 			Store:     store,
@@ -803,11 +803,10 @@ func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *parser.
 		}
 		tags[k] = v
 	}
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ConnID:    connID,
 		Protocol:  "HTTP/1.x",
 		Scheme:    "http",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: start,
 		Duration:  duration,
@@ -815,12 +814,12 @@ func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *parser.
 		BlockedBy: blockedBy,
 		ConnInfo:  &flow.ConnectionInfo{ClientAddr: clientAddr},
 	}
-	if err := h.Store.SaveFlow(ctx, fl); err != nil {
+	if err := h.Store.SaveStream(ctx, fl); err != nil {
 		logger.Error("blocked flow save failed", "method", req.Method, "url", reqURL.String(), "error", err)
 		return
 	}
-	sendMsg := &flow.Message{
-		FlowID:        fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:      fl.ID,
 		Sequence:      0,
 		Direction:     "send",
 		Timestamp:     start,
@@ -831,7 +830,7 @@ func (h *Handler) recordBlockedSessionWithTags(ctx context.Context, req *parser.
 		RawBytes:      rawRequest,
 		BodyTruncated: reqTruncated,
 	}
-	if err := h.Store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("blocked send message save failed", "error", err)
 	}
 }

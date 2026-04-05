@@ -142,7 +142,7 @@ func TestRecordSendWithVariant_NoModification(t *testing.T) {
 	}
 
 	// Verify: only 1 send message, no variant metadata.
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -196,7 +196,7 @@ func TestRecordSendWithVariant_BodyModified(t *testing.T) {
 	}
 
 	// Verify: 2 send messages with variant metadata.
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -271,7 +271,7 @@ func TestRecordSendWithVariant_HeaderModified(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 2 (variant recording)", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -319,7 +319,7 @@ func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
 		t.Fatal("recordSendWithVariant returned nil")
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -360,7 +360,7 @@ func TestRecordSendWithVariant_NilSnap(t *testing.T) {
 		t.Errorf("recvSequence = %d, want 1", result.recvSequence)
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -427,7 +427,7 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 	}
 
 	// Verify intermediate state: flow is active, 2 send messages.
-	sess, err := store.GetFlow(ctx, sendResult.flowID)
+	sess, err := store.GetStream(ctx, sendResult.flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 		t.Errorf("state = %q, want %q", sess.State, "active")
 	}
 
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("after send: expected 2 messages, got %d", len(msgs))
 	}
@@ -452,7 +452,7 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 	}, logger)
 
 	// Verify final state: 3 messages total.
-	msgs, _ = store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ = store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 3 {
 		t.Fatalf("after receive: expected 3 messages, got %d", len(msgs))
 	}
@@ -481,7 +481,7 @@ func TestVariantRecording_FullLifecycle(t *testing.T) {
 	}
 
 	// Flow should be complete.
-	sess, _ = store.GetFlow(ctx, sendResult.flowID)
+	sess, _ = store.GetStream(ctx, sendResult.flowID)
 	if sess.State != "complete" {
 		t.Errorf("final state = %q, want %q", sess.State, "complete")
 	}
@@ -530,7 +530,7 @@ func TestVariantRecording_NoModification_FullLifecycle(t *testing.T) {
 		respBody:   []byte("ok"),
 	}, logger)
 
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -592,7 +592,7 @@ func TestRecordSendWithVariant_SelfContainedMessages(t *testing.T) {
 		t.Fatal("recordSendWithVariant returned nil")
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -736,7 +736,7 @@ func TestRecordReceiveWithVariant_NoModification(t *testing.T) {
 	}, &snap, logger)
 
 	// Should have 1 send + 1 receive = 2 messages total, no variant metadata on receive.
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	recvMsgs := filterDirection(msgs, "receive")
 	if len(recvMsgs) != 1 {
 		t.Fatalf("expected 1 receive message, got %d", len(recvMsgs))
@@ -782,7 +782,7 @@ func TestRecordReceiveWithVariant_StatusModified(t *testing.T) {
 		respBody:   body,
 	}, &snap, logger)
 
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	recvMsgs := filterDirection(msgs, "receive")
 	if len(recvMsgs) != 2 {
 		t.Fatalf("expected 2 receive messages, got %d", len(recvMsgs))
@@ -837,7 +837,7 @@ func TestRecordReceiveWithVariant_BodyModified(t *testing.T) {
 		respBody:   modBody,
 	}, &snap, logger)
 
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	recvMsgs := filterDirection(msgs, "receive")
 	if len(recvMsgs) != 2 {
 		t.Fatalf("expected 2 receive messages, got %d", len(recvMsgs))
@@ -878,7 +878,7 @@ func TestRecordReceiveWithVariant_NilSnap(t *testing.T) {
 		respBody:   []byte("ok"),
 	}, nil, logger)
 
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	recvMsgs := filterDirection(msgs, "receive")
 	if len(recvMsgs) != 1 {
 		t.Fatalf("expected 1 receive message, got %d", len(recvMsgs))
@@ -947,7 +947,7 @@ func TestRecordReceiveWithVariant_SequenceWithSendVariant(t *testing.T) {
 		respBody:   modRespBody,
 	}, &respSnap, logger)
 
-	msgs, _ := store.GetMessages(ctx, sendResult.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, sendResult.flowID, flow.FlowListOptions{})
 	if len(msgs) != 4 {
 		t.Fatalf("expected 4 messages (2 send + 2 receive), got %d", len(msgs))
 	}
@@ -975,15 +975,15 @@ func TestRecordReceiveWithVariant_SequenceWithSendVariant(t *testing.T) {
 	}
 
 	// Flow should be complete.
-	fl, _ := store.GetFlow(ctx, sendResult.flowID)
+	fl, _ := store.GetStream(ctx, sendResult.flowID)
 	if fl.State != "complete" {
 		t.Errorf("final state = %q, want %q", fl.State, "complete")
 	}
 }
 
 // filterDirection returns only messages with the given direction.
-func filterDirection(msgs []*flow.Message, direction string) []*flow.Message {
-	var result []*flow.Message
+func filterDirection(msgs []*flow.Flow, direction string) []*flow.Flow {
+	var result []*flow.Flow
 	for _, m := range msgs {
 		if m.Direction == direction {
 			result = append(result, m)

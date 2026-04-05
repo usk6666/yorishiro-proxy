@@ -391,15 +391,15 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 
 	// Save the token session (referenced by macro step).
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &flow.Flow{
+	tokenSess := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+	if err := store.SaveStream(ctx, tokenSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	tokenSendMsg := &flow.Message{
-		FlowID:    tokenSess.ID,
+	tokenSendMsg := &flow.Flow{
+		StreamID:  tokenSess.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -407,21 +407,21 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 		URL:       tokenURL,
 		Headers:   map[string][]string{},
 	}
-	if err := store.AppendMessage(ctx, tokenSendMsg); err != nil {
+	if err := store.SaveFlow(ctx, tokenSendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
 	// Save the target session (referenced by resend).
 	targetURL, _ := url.Parse(targetServer.URL + "/api/data")
-	targetSess := &flow.Flow{
+	targetSess := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	targetSendMsg := &flow.Message{
-		FlowID:    targetSess.ID,
+	targetSendMsg := &flow.Flow{
+		StreamID:  targetSess.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -429,7 +429,7 @@ func TestExecute_Resend_WithPreSendHook(t *testing.T) {
 		URL:       targetURL,
 		Headers:   map[string][]string{"Content-Type": {"application/json"}},
 	}
-	if err := store.AppendMessage(ctx, targetSendMsg); err != nil {
+	if err := store.SaveFlow(ctx, targetSendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -521,15 +521,15 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 
 	// Save macro step flow.
 	macroURL, _ := url.Parse(macroServer.URL + "/log")
-	macroSess := &flow.Flow{
+	macroSess := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, macroSess); err != nil {
+	if err := store.SaveStream(ctx, macroSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("log entry"),
@@ -539,15 +539,15 @@ func TestExecute_Resend_WithPostReceiveHook(t *testing.T) {
 
 	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &flow.Flow{
+	targetSess := &flow.Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -602,12 +602,12 @@ func TestExecute_Resend_WithInvalidHooks(t *testing.T) {
 
 	// Save a minimal target flow.
 	targetURL, _ := url.Parse("https://example.com/api")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -657,12 +657,12 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 
 	// Save token flow.
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+	tokenSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, tokenSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: tokenSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: tokenSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -671,12 +671,12 @@ func TestExecute_Resend_WithHookEncoder(t *testing.T) {
 
 	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -775,12 +775,12 @@ func TestExecute_Resend_WithNonexistentHookMacro(t *testing.T) {
 	ctx := context.Background()
 
 	targetURL, _ := url.Parse("https://example.com/api")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -829,12 +829,12 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 
 	// Save macro step flow.
 	macroURL, _ := url.Parse(macroStepServer.URL + "/login")
-	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, macroSess); err != nil {
+	macroSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, macroSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("password=§password§"),
@@ -844,12 +844,12 @@ func TestExecute_Resend_WithPreSendHookVars(t *testing.T) {
 
 	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -925,12 +925,12 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 
 	// Save macro step flow.
 	macroURL, _ := url.Parse(macroServer.URL + "/logout")
-	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, macroSess); err != nil {
+	macroSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, macroSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Cookie": {"§auth_session§"}},
 	}); err != nil {
@@ -986,12 +986,12 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 	ctx := context.Background()
 
 	macroURL, _ := url.Parse(macroServer.URL + "/cleanup")
-	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, macroSess); err != nil {
+	macroSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, macroSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1043,12 +1043,12 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 	ctx := context.Background()
 
 	macroURL, _ := url.Parse(macroServer.URL + "/cleanup")
-	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, macroSess); err != nil {
+	macroSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, macroSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1122,12 +1122,12 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 
 	// Save login session (for pre_send macro).
 	loginURL, _ := url.Parse(loginServer.URL + "/login")
-	loginSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, loginSess); err != nil {
+	loginSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, loginSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: loginSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: loginSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: loginURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1136,12 +1136,12 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 
 	// Save logout session (for post_receive macro).
 	logoutURL, _ := url.Parse(logoutServer.URL + "/logout")
-	logoutSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, logoutSess); err != nil {
+	logoutSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, logoutSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: logoutSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: logoutSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: logoutURL,
 		Headers: map[string][]string{"Cookie": {"§auth_session§"}},
 	}); err != nil {
@@ -1150,12 +1150,12 @@ func TestExecute_Resend_KVStorePropagationToPostReceive(t *testing.T) {
 
 	// Save target flow.
 	targetURL, _ := url.Parse(targetServer.URL + "/api")
-	targetSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, targetSess); err != nil {
+	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, targetSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: targetSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
 		Headers: map[string][]string{},
 	}); err != nil {

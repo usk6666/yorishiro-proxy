@@ -182,7 +182,7 @@ func (s *Server) registerQuery() {
 			"fuzz_jobs by status and tag; fuzz_results by status_code, body_contains, and outliers_only (returns only outlier results). " +
 			"Flows include protocol_summary with protocol-specific information. " +
 			"Flow state indicates lifecycle: 'active' (in progress), 'complete' (finished), 'error' (failed with 502 etc.). " +
-			"Streaming flows (flow_type != unary) include message_preview with the first 10 messages. " +
+			"Streaming protocols (more than 2 flows) include message_preview with the first 10 messages. " +
 			"Messages include metadata with protocol-specific fields (e.g. WebSocket opcode, gRPC service/method/grpc_status, variant original/modified). " +
 			"When intercept/transform modifies a request, the flow contains variant messages: original (seq=0, variant=original) and modified (seq=1, variant=modified). " +
 			"Similarly, when intercept modifies a response, the flow contains variant receive messages with original_response in the flow detail. " +
@@ -324,7 +324,6 @@ type queryFlowsEntry struct {
 	ID              string            `json:"id"`
 	Protocol        string            `json:"protocol"`
 	Scheme          string            `json:"scheme,omitempty"`
-	FlowType        string            `json:"flow_type"`
 	State           string            `json:"state"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
@@ -348,14 +347,14 @@ type queryFlowsResult struct {
 	Total int               `json:"total"`
 }
 
-// buildFlowListOptions constructs flow.ListOptions from query input parameters.
-func buildFlowListOptions(input queryInput) flow.ListOptions {
+// buildFlowListOptions constructs flow.StreamListOptions from query input parameters.
+func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
 	}
 
-	opts := flow.ListOptions{
+	opts := flow.StreamListOptions{
 		Limit:  limit,
 		Offset: input.Offset,
 		SortBy: input.SortBy,
@@ -377,7 +376,7 @@ func buildFlowListOptions(input queryInput) flow.ListOptions {
 
 // extractFlowSummary extracts the effective method, URL, and status code from flow messages.
 // It prefers "modified" variant messages as they represent the actually transmitted data.
-func extractFlowSummary(msgs []*flow.Message) (method, urlStr string, statusCode int) {
+func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode int) {
 	for _, msg := range msgs {
 		if msg.Direction == "send" {
 			variant := msg.Metadata["variant"]
@@ -410,12 +409,12 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 
 	opts := buildFlowListOptions(input)
 
-	flowList, err := s.deps.store.ListFlows(ctx, opts)
+	flowList, err := s.deps.store.ListStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list flows: %w", err)
 	}
 
-	total, err := s.deps.store.CountFlows(ctx, opts)
+	total, err := s.deps.store.CountStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count flows: %w", err)
 	}
@@ -423,19 +422,18 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 	entries := make([]queryFlowsEntry, 0, len(flowList))
 	for _, fl := range flowList {
 		// Fetch messages for method/url/status_code/message_count via JOIN data.
-		msgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
 
 		method, urlStr, statusCode := extractFlowSummary(msgs)
-		summary := buildProtocolSummary(fl.Protocol, fl.FlowType, msgs)
+		summary := buildProtocolSummary(fl.Protocol, msgs)
 
 		entries = append(entries, queryFlowsEntry{
 			ID:              fl.ID,
 			Protocol:        fl.Protocol,
 			Scheme:          fl.Scheme,
-			FlowType:        fl.FlowType,
 			State:           fl.State,
 			Method:          method,
 			URL:             urlStr,
@@ -469,7 +467,6 @@ type queryFlowResult struct {
 	ConnID                string              `json:"conn_id"`
 	Protocol              string              `json:"protocol"`
 	Scheme                string              `json:"scheme,omitempty"`
-	FlowType              string              `json:"flow_type"`
 	State                 string              `json:"state"`
 	Method                string              `json:"method"`
 	URL                   string              `json:"url"`
@@ -530,21 +527,21 @@ const streamPreviewLimit = 10
 // categorizedMessages holds messages split by direction with variant resolution.
 type categorizedMessages struct {
 	// sendMsg is the effective send message (modified variant if present).
-	sendMsg *flow.Message
+	sendMsg *flow.Flow
 	// originalSendMsg is the original send message before modification (nil if no variant).
-	originalSendMsg *flow.Message
+	originalSendMsg *flow.Flow
 	// recvMsg is the effective receive message (modified variant if present).
-	recvMsg *flow.Message
+	recvMsg *flow.Flow
 	// originalRecvMsg is the original receive message before modification (nil if no variant).
-	originalRecvMsg *flow.Message
+	originalRecvMsg *flow.Flow
 }
 
 // categorizeMessages splits messages by direction and resolves variant pairs.
 // For each direction, if multiple messages exist, the "modified" variant is the effective
 // message and the "original" variant is preserved for diff display.
-func categorizeMessages(msgs []*flow.Message) categorizedMessages {
-	var sendMsgs []*flow.Message
-	var recvMsgs []*flow.Message
+func categorizeMessages(msgs []*flow.Flow) categorizedMessages {
+	var sendMsgs []*flow.Flow
+	var recvMsgs []*flow.Flow
 	for _, msg := range msgs {
 		if msg.Direction == "send" {
 			sendMsgs = append(sendMsgs, msg)
@@ -563,7 +560,7 @@ func categorizeMessages(msgs []*flow.Message) categorizedMessages {
 // resolveVariantPair determines the effective and original messages from a slice of
 // directional messages. If variants exist, "modified" is the effective message and
 // "original" is preserved for diff display.
-func resolveVariantPair(msgs []*flow.Message) (effective, original *flow.Message) {
+func resolveVariantPair(msgs []*flow.Flow) (effective, original *flow.Flow) {
 	if len(msgs) == 0 {
 		return nil, nil
 	}
@@ -588,7 +585,7 @@ func resolveVariantPair(msgs []*flow.Message) (effective, original *flow.Message
 
 // buildOriginalRequest builds a queryVariantRequest from the original send message.
 // Returns nil if originalMsg is nil.
-func buildOriginalRequest(originalMsg *flow.Message) *queryVariantRequest {
+func buildOriginalRequest(originalMsg *flow.Flow) *queryVariantRequest {
 	if originalMsg == nil {
 		return nil
 	}
@@ -608,7 +605,7 @@ func buildOriginalRequest(originalMsg *flow.Message) *queryVariantRequest {
 
 // buildOriginalResponse builds a queryVariantResponse from the original receive message.
 // Returns nil if originalMsg is nil.
-func buildOriginalResponse(originalMsg *flow.Message) *queryVariantResponse {
+func buildOriginalResponse(originalMsg *flow.Flow) *queryVariantResponse {
 	if originalMsg == nil {
 		return nil
 	}
@@ -623,7 +620,7 @@ func buildOriginalResponse(originalMsg *flow.Message) *queryVariantResponse {
 }
 
 // buildMessagePreview creates a preview of messages for streaming flows, limited to streamPreviewLimit.
-func buildMessagePreview(msgs []*flow.Message) []queryMessageEntry {
+func buildMessagePreview(msgs []*flow.Flow) []queryMessageEntry {
 	previewLimit := streamPreviewLimit
 	if previewLimit > len(msgs) {
 		previewLimit = len(msgs)
@@ -641,12 +638,12 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		return nil, nil, fmt.Errorf("id is required for flow resource")
 	}
 
-	fl, err := s.deps.store.GetFlow(ctx, input.ID)
+	fl, err := s.deps.store.GetStream(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	msgs, err := s.deps.store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -705,14 +702,13 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		}
 	}
 
-	summary := buildProtocolSummary(fl.Protocol, fl.FlowType, msgs)
+	summary := buildProtocolSummary(fl.Protocol, msgs)
 
 	result := &queryFlowResult{
 		ID:                    fl.ID,
 		ConnID:                fl.ConnID,
 		Protocol:              fl.Protocol,
 		Scheme:                fl.Scheme,
-		FlowType:              fl.FlowType,
 		State:                 fl.State,
 		Method:                method,
 		URL:                   urlStr,
@@ -746,8 +742,9 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	s.filterOutputVariantRequest(result.OriginalRequest)
 	s.filterOutputVariantResponse(result.OriginalResponse)
 
-	// For streaming flows, include a message preview instead of full request/response.
-	if fl.FlowType != "unary" {
+	// For streaming protocols, include a message preview instead of full request/response.
+	// Streams with more than 2 flows are streaming (unary has exactly 1 send + 1 receive).
+	if len(msgs) > 2 {
 		result.MessagePreview = buildMessagePreview(msgs)
 		s.filterOutputMessages(result.MessagePreview)
 	}
@@ -781,7 +778,7 @@ type queryMessagesResult struct {
 
 // convertMessagesToEntries converts flow messages to queryMessageEntry slice.
 // It uses Body for text content and falls back to RawBytes for binary protocols.
-func convertMessagesToEntries(msgs []*flow.Message) []queryMessageEntry {
+func convertMessagesToEntries(msgs []*flow.Flow) []queryMessageEntry {
 	entries := make([]queryMessageEntry, 0, len(msgs))
 	for _, msg := range msgs {
 		bodyData := msg.Body
@@ -814,8 +811,8 @@ func convertMessagesToEntries(msgs []*flow.Message) []queryMessageEntry {
 
 // buildMessageListOptions validates and builds message list options from query input.
 // Returns an error if the direction filter value is invalid.
-func buildMessageListOptions(input queryInput) (flow.MessageListOptions, error) {
-	opts := flow.MessageListOptions{}
+func buildMessageListOptions(input queryInput) (flow.FlowListOptions, error) {
+	opts := flow.FlowListOptions{}
 	if input.Filter != nil && input.Filter.Direction != "" {
 		if input.Filter.Direction != "send" && input.Filter.Direction != "receive" {
 			return opts, fmt.Errorf("direction filter must be \"send\" or \"receive\", got %q", input.Filter.Direction)
@@ -826,7 +823,7 @@ func buildMessageListOptions(input queryInput) (flow.MessageListOptions, error) 
 }
 
 // paginateMessages applies offset and limit to a message slice, returning the page.
-func paginateMessages(msgs []*flow.Message, offset, limit int) []*flow.Message {
+func paginateMessages(msgs []*flow.Flow, offset, limit int) []*flow.Flow {
 	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
 	}
@@ -855,13 +852,13 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	// Verify the flow exists and resolve prefix IDs.
-	fl, err := s.deps.store.GetFlow(ctx, input.ID)
+	fl, err := s.deps.store.GetStream(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
 	// Get total message count for pagination.
-	total, err := s.deps.store.CountMessages(ctx, fl.ID)
+	total, err := s.deps.store.CountFlows(ctx, fl.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count messages: %w", err)
 	}
@@ -871,7 +868,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		return nil, nil, err
 	}
 
-	allMsgs, err := s.deps.store.GetMessages(ctx, fl.ID, msgOpts)
+	allMsgs, err := s.deps.store.GetFlows(ctx, fl.ID, msgOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -993,7 +990,7 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 	}
 
 	if s.deps.store != nil {
-		count, err := s.deps.store.CountFlows(ctx, flow.ListOptions{})
+		count, err := s.deps.store.CountStreams(ctx, flow.StreamListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("count flows: %w", err)
 		}
@@ -1250,8 +1247,8 @@ type queryInterceptQueueEntry struct {
 	Opcode string `json:"opcode,omitempty"`
 	// Direction is the frame direction: "client_to_server" or "server_to_client".
 	Direction string `json:"direction,omitempty"`
-	// FlowID is the WebSocket flow ID this frame belongs to.
-	FlowID string `json:"flow_id,omitempty"`
+	// StreamID is the WebSocket flow ID this frame belongs to.
+	StreamID string `json:"flow_id,omitempty"`
 	// UpgradeURL is the URL from the original WebSocket upgrade request.
 	UpgradeURL string `json:"upgrade_url,omitempty"`
 	// Sequence is the frame sequence number within the WebSocket connection.
@@ -1310,7 +1307,7 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 			entry.Protocol = "websocket"
 			entry.Opcode = wsOpcodeNameFromInt(item.WSOpcode)
 			entry.Direction = item.WSDirection
-			entry.FlowID = item.WSFlowID
+			entry.StreamID = item.WSFlowID
 			entry.UpgradeURL = item.WSUpgradeURL
 			entry.Sequence = item.WSSequence
 		} else {

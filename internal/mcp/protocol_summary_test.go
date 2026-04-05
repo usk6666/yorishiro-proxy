@@ -7,13 +7,13 @@ import (
 )
 
 func TestBuildProtocolSummary_WebSocket(t *testing.T) {
-	msgs := []*flow.Message{
+	msgs := []*flow.Flow{
 		{Sequence: 0, Direction: "send", Body: []byte("hello"), Metadata: map[string]string{"opcode": "1"}},
 		{Sequence: 1, Direction: "receive", Body: []byte("world"), Metadata: map[string]string{"opcode": "1"}},
 		{Sequence: 2, Direction: "send", Body: []byte("bye"), Metadata: map[string]string{"opcode": "8"}},
 	}
 
-	summary := buildProtocolSummary("WebSocket", "bidirectional", msgs)
+	summary := buildProtocolSummary("WebSocket", msgs)
 
 	if summary == nil {
 		t.Fatal("summary should not be nil for WebSocket")
@@ -27,7 +27,7 @@ func TestBuildProtocolSummary_WebSocket(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_WebSocket_Empty(t *testing.T) {
-	summary := buildProtocolSummary("WebSocket", "bidirectional", nil)
+	summary := buildProtocolSummary("WebSocket", nil)
 
 	if summary == nil {
 		t.Fatal("summary should not be nil")
@@ -41,12 +41,12 @@ func TestBuildProtocolSummary_WebSocket_Empty(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_HTTP2(t *testing.T) {
-	msgs := []*flow.Message{
+	msgs := []*flow.Flow{
 		{Sequence: 0, Direction: "send", Method: "GET"},
 		{Sequence: 1, Direction: "receive", StatusCode: 200},
 	}
 
-	summary := buildProtocolSummary("HTTP/2", "unary", msgs)
+	summary := buildProtocolSummary("HTTP/2", msgs)
 
 	if summary == nil {
 		t.Fatal("summary should not be nil for HTTP/2")
@@ -57,12 +57,12 @@ func TestBuildProtocolSummary_HTTP2(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_GRPC(t *testing.T) {
-	msgs := []*flow.Message{
+	msgs := []*flow.Flow{
 		{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "UserService", "method": "GetUser"}},
 		{Sequence: 1, Direction: "receive", Metadata: map[string]string{"grpc_status": "0"}},
 	}
 
-	summary := buildProtocolSummary("gRPC", "unary", msgs)
+	summary := buildProtocolSummary("gRPC", msgs)
 
 	if summary == nil {
 		t.Fatal("summary should not be nil for gRPC")
@@ -82,13 +82,13 @@ func TestBuildProtocolSummary_GRPC(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_TCP(t *testing.T) {
-	msgs := []*flow.Message{
+	msgs := []*flow.Flow{
 		{Sequence: 0, Direction: "send", Body: []byte("hello")},
 		{Sequence: 1, Direction: "receive", Body: []byte("world!")},
 		{Sequence: 2, Direction: "send", Body: []byte("bye")},
 	}
 
-	summary := buildProtocolSummary("TCP", "bidirectional", msgs)
+	summary := buildProtocolSummary("TCP", msgs)
 
 	if summary == nil {
 		t.Fatal("summary should not be nil for TCP")
@@ -102,17 +102,17 @@ func TestBuildProtocolSummary_TCP(t *testing.T) {
 }
 
 func TestBuildProtocolSummary_HTTP(t *testing.T) {
-	msgs := []*flow.Message{
+	msgs := []*flow.Flow{
 		{Sequence: 0, Direction: "send"},
 		{Sequence: 1, Direction: "receive"},
 	}
 
-	summary := buildProtocolSummary("HTTP/1.x", "unary", msgs)
+	summary := buildProtocolSummary("HTTP/1.x", msgs)
 	if summary != nil {
 		t.Error("summary should be nil for HTTP/1.x")
 	}
 
-	summary = buildProtocolSummary("HTTPS", "unary", msgs)
+	summary = buildProtocolSummary("HTTPS", msgs)
 	if summary != nil {
 		t.Error("summary should be nil for HTTPS")
 	}

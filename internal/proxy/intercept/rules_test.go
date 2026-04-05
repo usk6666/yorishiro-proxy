@@ -704,7 +704,7 @@ func TestCompileRule_WebSocketConditions(t *testing.T) {
 			name: "valid WebSocket rule with flow_id",
 			rule: Rule{
 				ID: "ws2", Enabled: true, Direction: DirectionBoth,
-				Conditions: Conditions{FlowID: "flow-123"},
+				Conditions: Conditions{StreamID: "flow-123"},
 			},
 			wantErr: false,
 		},
@@ -712,7 +712,7 @@ func TestCompileRule_WebSocketConditions(t *testing.T) {
 			name: "valid WebSocket rule with both conditions",
 			rule: Rule{
 				ID: "ws3", Enabled: true, Direction: DirectionResponse,
-				Conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-456"},
+				Conditions: Conditions{UpgradeURLPattern: "/ws/.*", StreamID: "flow-456"},
 			},
 			wantErr: false,
 		},
@@ -756,7 +756,7 @@ func TestCompileRule_WebSocketConditions(t *testing.T) {
 			rule: Rule{
 				ID: "ws8", Enabled: true, Direction: DirectionRequest,
 				Conditions: Conditions{
-					FlowID:      "flow-1",
+					StreamID:    "flow-1",
 					PathPattern: "/api/.*",
 				},
 			},
@@ -778,7 +778,7 @@ func TestCompileRule_WebSocketConditions(t *testing.T) {
 			rule: Rule{
 				ID: "ws10", Enabled: true, Direction: DirectionRequest,
 				Conditions: Conditions{
-					FlowID:      "flow-1",
+					StreamID:    "flow-1",
 					HeaderMatch: map[string]string{"Content-Type": "text/html"},
 				},
 			},
@@ -820,28 +820,28 @@ func TestMatchesWebSocketFrame(t *testing.T) {
 		},
 		{
 			name:       "flow ID matches",
-			conditions: Conditions{FlowID: "flow-123"},
+			conditions: Conditions{StreamID: "flow-123"},
 			upgradeURL: "/ws/any",
 			flowID:     "flow-123",
 			want:       true,
 		},
 		{
 			name:       "flow ID does not match",
-			conditions: Conditions{FlowID: "flow-123"},
+			conditions: Conditions{StreamID: "flow-123"},
 			upgradeURL: "/ws/any",
 			flowID:     "flow-456",
 			want:       false,
 		},
 		{
 			name:       "both conditions match",
-			conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-123"},
+			conditions: Conditions{UpgradeURLPattern: "/ws/.*", StreamID: "flow-123"},
 			upgradeURL: "/ws/chat",
 			flowID:     "flow-123",
 			want:       true,
 		},
 		{
 			name:       "upgrade URL matches but flow ID does not",
-			conditions: Conditions{UpgradeURLPattern: "/ws/.*", FlowID: "flow-123"},
+			conditions: Conditions{UpgradeURLPattern: "/ws/.*", StreamID: "flow-123"},
 			upgradeURL: "/ws/chat",
 			flowID:     "flow-999",
 			want:       false,
@@ -903,7 +903,7 @@ func TestIsWebSocketRule(t *testing.T) {
 		},
 		{
 			name:       "flow_id makes it WebSocket",
-			conditions: Conditions{FlowID: "flow-1"},
+			conditions: Conditions{StreamID: "flow-1"},
 			want:       true,
 		},
 	}

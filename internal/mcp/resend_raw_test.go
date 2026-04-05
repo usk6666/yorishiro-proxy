@@ -32,12 +32,12 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -46,7 +46,7 @@ func TestExecute_ResendRaw_OffsetPatch(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -101,12 +101,12 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -115,7 +115,7 @@ func TestExecute_ResendRaw_TextFindReplace(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -166,12 +166,12 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -180,7 +180,7 @@ func TestExecute_ResendRaw_BinaryFindReplace(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -230,12 +230,12 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -244,7 +244,7 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -296,7 +296,7 @@ func TestExecute_ResendRaw_DryRun_NoPatches(t *testing.T) {
 	}
 
 	// Verify no new flow was created (dry-run should NOT record).
-	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	sessions, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -313,12 +313,12 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -327,7 +327,7 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -384,7 +384,7 @@ func TestExecute_ResendRaw_DryRun_WithPatches(t *testing.T) {
 	}
 
 	// Verify no new flow was created.
-	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	sessions, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -401,12 +401,12 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -415,7 +415,7 @@ func TestExecute_ResendRaw_DryRun_WithOverrideRawBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -480,18 +480,17 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
 
 	// Create a flow with NO RawBytes — the test verifies that
 	// override_raw_base64 can supply raw bytes when the original flow has none.
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/2",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -500,11 +499,11 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
 		Headers:   map[string][]string{},
 		RawBytes:  nil, // No raw bytes stored
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	recvMsg := &flow.Message{
-		FlowID:     fl.ID,
+	recvMsg := &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
@@ -512,7 +511,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
 		Headers:    map[string][]string{},
 		Body:       []byte("ok"),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -601,12 +600,12 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes_DryRun(t *testin
 
 	// Create a flow with NO RawBytes.
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/2",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -615,7 +614,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes_DryRun(t *testin
 			Headers:   map[string][]string{},
 			RawBytes:  nil,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -670,12 +669,12 @@ func TestExecute_ResendRaw_NoRawBytesNoOverride_Error(t *testing.T) {
 
 	// Create a flow with NO RawBytes and no override.
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/2",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -684,7 +683,7 @@ func TestExecute_ResendRaw_NoRawBytesNoOverride_Error(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  nil,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -720,12 +719,12 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/original")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -734,7 +733,7 @@ func TestExecute_ResendRaw_OverrideRawBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -781,12 +780,12 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -795,7 +794,7 @@ func TestExecute_ResendRaw_OverrideRawBase64_IgnoresPatches(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -855,12 +854,12 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -869,7 +868,7 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -904,7 +903,7 @@ func TestExecute_ResendRaw_Tag(t *testing.T) {
 	}
 
 	// Verify the tag was stored on the flow.
-	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
+	newFl, err := store.GetStream(context.Background(), out.NewFlowID)
 	if err != nil {
 		t.Fatalf("get new flow: %v", err)
 	}
@@ -926,12 +925,12 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -940,7 +939,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -976,19 +975,16 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 	}
 
 	// Verify a new flow was created with correct metadata.
-	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
+	newFl, err := store.GetStream(context.Background(), out.NewFlowID)
 	if err != nil {
 		t.Fatalf("get new flow: %v", err)
-	}
-	if newFl.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want unary", newFl.FlowType)
 	}
 	if newFl.State != "complete" {
 		t.Errorf("state = %q, want complete", newFl.State)
 	}
 
 	// Verify send message has patched raw bytes.
-	sendMsgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "send"})
+	sendMsgs, err := store.GetFlows(context.Background(), out.NewFlowID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		t.Fatalf("GetMessages(send): %v", err)
 	}
@@ -1001,7 +997,7 @@ func TestExecute_ResendRaw_RecordsSession(t *testing.T) {
 	}
 
 	// Verify receive message exists.
-	recvMsgs, err := store.GetMessages(context.Background(), out.NewFlowID, flow.MessageListOptions{Direction: "receive"})
+	recvMsgs, err := store.GetFlows(context.Background(), out.NewFlowID, flow.FlowListOptions{Direction: "receive"})
 	if err != nil {
 		t.Fatalf("GetMessages(receive): %v", err)
 	}
@@ -1023,12 +1019,12 @@ func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1037,7 +1033,7 @@ func TestExecute_ResendRaw_InvalidOverrideRawBase64(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1070,12 +1066,12 @@ func TestExecute_ResendRaw_InvalidPatch(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1084,7 +1080,7 @@ func TestExecute_ResendRaw_InvalidPatch(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1123,12 +1119,12 @@ func TestExecute_ResendRaw_PatchOffsetBeyondData(t *testing.T) {
 	u, _ := url.Parse("http://example.com/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1137,7 +1133,7 @@ func TestExecute_ResendRaw_PatchOffsetBeyondData(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1211,12 +1207,12 @@ func TestExecute_ResendRaw_HooksNil_BackwardCompat(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/test")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1225,7 +1221,7 @@ func TestExecute_ResendRaw_HooksNil_BackwardCompat(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1268,12 +1264,12 @@ func TestExecute_ResendRaw_InvalidHooksRejected(t *testing.T) {
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	u, _ := url.Parse("http://127.0.0.1/test")
 
-	fl := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: fl.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: fl.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now(), Method: "GET", URL: u,
 		Headers: map[string][]string{}, RawBytes: rawReq,
 	}); err != nil {
@@ -1349,12 +1345,12 @@ func TestExecute_ResendRaw_WithPreSendHook(t *testing.T) {
 
 	// Save the raw resend target flow.
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1363,7 +1359,7 @@ func TestExecute_ResendRaw_WithPreSendHook(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1385,12 +1381,12 @@ func TestExecute_ResendRaw_WithPreSendHook(t *testing.T) {
 
 	// Save the macro step flow.
 	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, tokenSess); err != nil {
+	tokenSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, tokenSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: tokenSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: tokenSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
 		Headers: map[string][]string{},
 	}); err != nil {
@@ -1469,12 +1465,12 @@ func TestExecute_ResendRaw_WithPostReceiveHook(t *testing.T) {
 
 	// Save the raw resend target flow.
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -1483,7 +1479,7 @@ func TestExecute_ResendRaw_WithPostReceiveHook(t *testing.T) {
 			Headers:   map[string][]string{},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -1506,12 +1502,12 @@ func TestExecute_ResendRaw_WithPostReceiveHook(t *testing.T) {
 
 	// Save the macro step flow.
 	macroURL, _ := url.Parse(macroServer.URL + "/log")
-	macroSess := &flow.Flow{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveFlow(ctx, macroSess); err != nil {
+	macroSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, macroSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := store.AppendMessage(ctx, &flow.Message{
-		FlowID: macroSess.ID, Sequence: 0, Direction: "send",
+	if err := store.SaveFlow(ctx, &flow.Flow{
+		StreamID: macroSess.ID, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: macroURL,
 		Headers: map[string][]string{"Content-Type": {"text/plain"}},
 		Body:    []byte("log entry"),

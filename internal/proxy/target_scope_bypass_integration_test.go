@@ -174,7 +174,7 @@ func assertAllowed(t *testing.T, resp *gohttp.Response, body []byte) {
 func assertFlowBlocked(t *testing.T, ctx context.Context, store flow.Store, wantBlockedBy string) {
 	t.Helper()
 	time.Sleep(300 * time.Millisecond)
-	flows, err := store.ListFlows(ctx, flow.ListOptions{})
+	flows, err := store.ListStreams(ctx, flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -768,7 +768,7 @@ func TestBypass_CONNECT_FlowRecordingOnBlock(t *testing.T) {
 	// Wait for flow recording.
 	time.Sleep(500 * time.Millisecond)
 
-	flows, err := env.store.ListFlows(ctx, flow.ListOptions{})
+	flows, err := env.store.ListStreams(ctx, flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}

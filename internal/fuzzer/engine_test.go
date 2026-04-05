@@ -15,13 +15,13 @@ import (
 
 // mockFlowFetcher implements FlowFetcher for testing.
 type mockFlowFetcher struct {
-	fl       *flow.Flow
-	messages []*flow.Message
+	fl       *flow.Stream
+	messages []*flow.Flow
 	getErr   error
 	msgErr   error
 }
 
-func (m *mockFlowFetcher) GetFlow(_ context.Context, id string) (*flow.Flow, error) {
+func (m *mockFlowFetcher) GetStream(_ context.Context, id string) (*flow.Stream, error) {
 	if m.getErr != nil {
 		return nil, m.getErr
 	}
@@ -31,7 +31,7 @@ func (m *mockFlowFetcher) GetFlow(_ context.Context, id string) (*flow.Flow, err
 	return m.fl, nil
 }
 
-func (m *mockFlowFetcher) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
+func (m *mockFlowFetcher) GetFlows(_ context.Context, _ string, _ flow.FlowListOptions) ([]*flow.Flow, error) {
 	if m.msgErr != nil {
 		return nil, m.msgErr
 	}
@@ -40,13 +40,13 @@ func (m *mockFlowFetcher) GetMessages(_ context.Context, _ string, _ flow.Messag
 
 // mockFlowRecorder implements FlowRecorder for testing.
 type mockFlowRecorder struct {
-	flows    []*flow.Flow
-	messages []*flow.Message
+	flows    []*flow.Stream
+	messages []*flow.Flow
 	saveErr  error
 	msgErr   error
 }
 
-func (m *mockFlowRecorder) SaveFlow(_ context.Context, s *flow.Flow) error {
+func (m *mockFlowRecorder) SaveStream(_ context.Context, s *flow.Stream) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
@@ -57,7 +57,7 @@ func (m *mockFlowRecorder) SaveFlow(_ context.Context, s *flow.Flow) error {
 	return nil
 }
 
-func (m *mockFlowRecorder) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockFlowRecorder) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	if m.msgErr != nil {
 		return m.msgErr
 	}
@@ -138,7 +138,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: Config{
-				FlowID:     "sess-1",
+				StreamID:   "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X-A", PayloadSet: "set-a"},
@@ -155,13 +155,13 @@ func TestConfig_Validate(t *testing.T) {
 		},
 		{
 			name:    "missing attack_type",
-			cfg:     Config{FlowID: "sess-1"},
+			cfg:     Config{StreamID: "sess-1"},
 			wantErr: true,
 		},
 		{
 			name: "invalid attack_type",
 			cfg: Config{
-				FlowID:     "sess-1",
+				StreamID:   "sess-1",
 				AttackType: "invalid",
 				Positions:  []Position{{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"}},
 				PayloadSets: map[string]PayloadSet{
@@ -173,7 +173,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "no positions",
 			cfg: Config{
-				FlowID:     "sess-1",
+				StreamID:   "sess-1",
 				AttackType: "sequential",
 			},
 			wantErr: true,
@@ -181,7 +181,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "duplicate position ids",
 			cfg: Config{
-				FlowID:     "sess-1",
+				StreamID:   "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -196,7 +196,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "missing payload set reference",
 			cfg: Config{
-				FlowID:     "sess-1",
+				StreamID:   "sess-1",
 				AttackType: "sequential",
 				Positions: []Position{
 					{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "missing"},
@@ -221,13 +221,13 @@ func TestEngine_Run_Sequential(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api?key=val")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -253,7 +253,7 @@ func TestEngine_Run_Sequential(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:     "template-1",
+		StreamID:   "template-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{
@@ -321,13 +321,13 @@ func TestEngine_Run_Parallel(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/login")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "POST",
 				URL:       testURL,
@@ -349,7 +349,7 @@ func TestEngine_Run_Parallel(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:     "template-1",
+		StreamID:   "template-1",
 		AttackType: "parallel",
 		Positions: []Position{
 			{ID: "pos-0", Location: "body_json", JSONPath: "$.username", PayloadSet: "users"},
@@ -379,13 +379,13 @@ func TestEngine_Run_WithRemovePosition(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api?debug=true&key=val")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "template-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "template-1",
+				StreamID:  "template-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -401,7 +401,7 @@ func TestEngine_Run_WithRemovePosition(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:     "template-1",
+		StreamID:   "template-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "query", Name: "debug", Mode: "remove"},
@@ -439,7 +439,7 @@ func TestEngine_Run_SessionNotFound(t *testing.T) {
 	engine := NewEngine(fetcher, nil, nil, nil, "")
 
 	cfg := Config{
-		FlowID:     "nonexistent",
+		StreamID:   "nonexistent",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -457,16 +457,16 @@ func TestEngine_Run_SessionNotFound(t *testing.T) {
 
 func TestEngine_Run_NoSendMessages(t *testing.T) {
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{}, // no send messages
+		messages: []*flow.Flow{}, // no send messages
 	}
 	engine := NewEngine(fetcher, nil, nil, nil, "")
 
 	cfg := Config{
-		FlowID:     "sess-1",
+		StreamID:   "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -486,13 +486,13 @@ func TestEngine_Run_ContextCancelled(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "sess-1",
+				StreamID:  "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -515,7 +515,7 @@ func TestEngine_Run_ContextCancelled(t *testing.T) {
 	cancel() // Cancel immediately.
 
 	cfg := Config{
-		FlowID:     "sess-1",
+		StreamID:   "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -535,13 +535,13 @@ func TestEngine_Run_HTTPError(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "sess-1",
+				StreamID:  "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -559,7 +559,7 @@ func TestEngine_Run_HTTPError(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:     "sess-1",
+		StreamID:   "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "p0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -595,13 +595,13 @@ func TestEngine_Run_RangePayloads(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/user/1")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "sess-1",
+				StreamID:  "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -618,7 +618,7 @@ func TestEngine_Run_RangePayloads(t *testing.T) {
 
 	start, end := 1, 3
 	cfg := Config{
-		FlowID:     "sess-1",
+		StreamID:   "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "path", Match: "/user/(\\d+)", PayloadSet: "ids"},
@@ -645,13 +645,13 @@ func TestEngine_Run_TimeoutMs(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "sess-1",
+				StreamID:  "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -667,7 +667,7 @@ func TestEngine_Run_TimeoutMs(t *testing.T) {
 	engine := NewEngine(fetcher, recorder, fuzzStore, httpDoer, t.TempDir())
 
 	cfg := Config{
-		FlowID:     "sess-1",
+		StreamID:   "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},
@@ -689,7 +689,7 @@ func TestEngine_Run_TimeoutMs(t *testing.T) {
 
 func TestBuildRequestData(t *testing.T) {
 	u, _ := url.Parse("http://example.com/path")
-	msg := &flow.Message{
+	msg := &flow.Flow{
 		Method: "POST",
 		URL:    u,
 		Headers: map[string][]string{
@@ -740,13 +740,13 @@ func TestEngine_Run_JobTimestamps(t *testing.T) {
 	testURL, _ := url.Parse("http://example.com/api")
 
 	fetcher := &mockFlowFetcher{
-		fl: &flow.Flow{
+		fl: &flow.Stream{
 			ID:       "sess-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{
+		messages: []*flow.Flow{
 			{
-				FlowID:    "sess-1",
+				StreamID:  "sess-1",
 				Direction: "send",
 				Method:    "GET",
 				URL:       testURL,
@@ -764,7 +764,7 @@ func TestEngine_Run_JobTimestamps(t *testing.T) {
 	before := time.Now()
 
 	cfg := Config{
-		FlowID:     "sess-1",
+		StreamID:   "sess-1",
 		AttackType: "sequential",
 		Positions: []Position{
 			{ID: "pos-0", Location: "header", Name: "X", PayloadSet: "s"},

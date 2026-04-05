@@ -178,14 +178,11 @@ func TestH1Engine_RawBytes_HeaderCaseAndOrder(t *testing.T) {
 	}
 
 	// Verify flow recording with raw bytes.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	if fl.Protocol != "HTTP/1.x" {
 		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTP/1.x")
-	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow type = %q, want %q", fl.FlowType, "unary")
 	}
 
 	send, recv := pollFlowMessages(t, ctx, store, fl.ID)
@@ -267,7 +264,7 @@ func TestH1Engine_RawBytes_ObsFoldWhitespace(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, gohttp.StatusOK)
 	}
 
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	send, _ := pollFlowMessages(t, ctx, store, fl.ID)
@@ -339,7 +336,7 @@ func TestH1Engine_RawBytes_ChunkedRecordedWithoutDecoding(t *testing.T) {
 
 	// Verify flow recording: raw bytes should contain the original chunked
 	// encoding, NOT the decoded body.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	send, _ := pollFlowMessages(t, ctx, store, fl.ID)
@@ -406,7 +403,7 @@ func TestH1Engine_Anomaly_CLTEConflict(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	// Verify CL/TE anomaly tag is recorded.
@@ -447,7 +444,7 @@ func TestH1Engine_Anomaly_DuplicateCL(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	if fl.Tags == nil {
@@ -485,7 +482,7 @@ func TestH1Engine_Anomaly_InvalidTE(t *testing.T) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	if fl.Tags == nil {
@@ -529,11 +526,11 @@ func TestH1Engine_Anomaly_QueryViaMCP(t *testing.T) {
 	resp.Body.Close()
 
 	// Verify the flow is queryable via the store (simulating MCP query).
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	// Verify flow is retrievable by ID (MCP "resource: flow" equivalent).
-	retrieved, err := store.GetFlow(ctx, fl.ID)
+	retrieved, err := store.GetStream(ctx, fl.ID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -545,7 +542,7 @@ func TestH1Engine_Anomaly_QueryViaMCP(t *testing.T) {
 	}
 
 	// Verify messages are retrievable (MCP "resource: flow" with messages).
-	msgs, err := store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+	msgs, err := store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -592,7 +589,7 @@ func TestH1Engine_HTTP10_BasicProxy(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	if fl.Protocol != "HTTP/1.x" {
@@ -672,7 +669,7 @@ func TestH1Engine_HTTP10_EOFTerminated(t *testing.T) {
 	}
 
 	// Verify flow recording captured the response body.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	_, recv := pollFlowMessages(t, ctx, store, fl.ID)
@@ -727,7 +724,7 @@ func TestH1Engine_GoHTTPClient_GET(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 	if fl.State != "complete" {
 		t.Errorf("flow state = %q, want %q", fl.State, "complete")
@@ -772,7 +769,7 @@ func TestH1Engine_GoHTTPClient_POST(t *testing.T) {
 	}
 
 	// Verify flow.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 	send, recv := pollFlowMessages(t, ctx, store, fl.ID)
 	if send == nil {
@@ -847,7 +844,7 @@ func TestH1Engine_ConnPool_KeepAliveReuse(t *testing.T) {
 	}
 
 	// Verify all 3 requests were recorded as separate flows.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 3)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 3)
 	if len(flows) < 3 {
 		t.Errorf("expected at least 3 flows, got %d", len(flows))
 	}
@@ -883,10 +880,10 @@ func TestH1Engine_StateTransition_ActiveToComplete(t *testing.T) {
 	resp.Body.Close()
 
 	// Wait for flow to reach complete state.
-	var fl *flow.Flow
+	var fl *flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10})
+		flows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -950,10 +947,10 @@ func TestH1Engine_StateTransition_ErrorOnConnectionFailure(t *testing.T) {
 	}
 
 	// Verify flow is recorded with error state.
-	var fl *flow.Flow
+	var fl *flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10})
+		flows, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -970,7 +967,7 @@ func TestH1Engine_StateTransition_ErrorOnConnectionFailure(t *testing.T) {
 
 	if fl == nil {
 		// If no error-state flow appeared, check what flows exist.
-		flows, _ := store.ListFlows(ctx, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10})
+		flows, _ := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10})
 		if len(flows) == 0 {
 			// The proxy genuinely does not record flows for upstream dial failures.
 			// The 502 response assertion above is sufficient; no flow assertion needed.

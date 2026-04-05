@@ -31,7 +31,7 @@ const (
 // with the limits in the auto-transform, macro, body_patch, and fuzzer packages.
 const maxRegexPatternLen = 1024
 
-// maxFlowIDLen is the maximum allowed length (in bytes) for FlowID values.
+// maxFlowIDLen is the maximum allowed length (in bytes) for StreamID values.
 const maxFlowIDLen = 256
 
 // validDirections contains all valid Direction values for validation.
@@ -70,12 +70,12 @@ type Conditions struct {
 	// use ".*" instead.
 	UpgradeURLPattern string `json:"upgrade_url_pattern,omitempty"`
 
-	// FlowID specifies a particular WebSocket flow ID to intercept.
+	// StreamID specifies a particular WebSocket flow ID to intercept.
 	// This field is exclusive to WebSocket intercept rules. An empty string
 	// means this field is not set and does not contribute to WebSocket rule
 	// detection. A rule is recognized as a WebSocket rule only when at least
-	// one of UpgradeURLPattern or FlowID is non-empty.
-	FlowID string `json:"flow_id,omitempty"`
+	// one of UpgradeURLPattern or StreamID is non-empty.
+	StreamID string `json:"flow_id,omitempty"`
 }
 
 // Rule defines a single intercept rule with an ID, enabled state,
@@ -122,7 +122,7 @@ func compileRegexPattern(pattern string, fieldName string) (*regexp.Regexp, erro
 
 // validateConditionExclusivity checks that WebSocket and HTTP conditions are not mixed.
 func validateConditionExclusivity(c Conditions) error {
-	hasWSCondition := c.UpgradeURLPattern != "" || c.FlowID != ""
+	hasWSCondition := c.UpgradeURLPattern != "" || c.StreamID != ""
 	hasHTTPCondition := c.HostPattern != "" || c.PathPattern != "" ||
 		len(c.Methods) > 0 || len(c.HeaderMatch) > 0
 	if hasWSCondition && hasHTTPCondition {
@@ -147,8 +147,8 @@ func compileRule(r Rule) (*compiledRule, error) {
 		return nil, err
 	}
 
-	if len(r.Conditions.FlowID) > maxFlowIDLen {
-		return nil, fmt.Errorf("flow_id too long: %d > %d", len(r.Conditions.FlowID), maxFlowIDLen)
+	if len(r.Conditions.StreamID) > maxFlowIDLen {
+		return nil, fmt.Errorf("flow_id too long: %d > %d", len(r.Conditions.StreamID), maxFlowIDLen)
 	}
 
 	cr := &compiledRule{rule: r}
@@ -299,7 +299,7 @@ func kvGet(kv []exchange.KeyValue, name string) string {
 
 // isWebSocketRule returns true if the rule has any WebSocket-specific conditions.
 func (cr *compiledRule) isWebSocketRule() bool {
-	return cr.upgradeURLPatternRe != nil || cr.rule.Conditions.FlowID != ""
+	return cr.upgradeURLPatternRe != nil || cr.rule.Conditions.StreamID != ""
 }
 
 // matchesWebSocketFrame evaluates whether the compiled rule matches the given
@@ -311,8 +311,8 @@ func (cr *compiledRule) matchesWebSocketFrame(upgradeURL string, flowID string) 
 			return false
 		}
 	}
-	if cr.rule.Conditions.FlowID != "" {
-		if cr.rule.Conditions.FlowID != flowID {
+	if cr.rule.Conditions.StreamID != "" {
+		if cr.rule.Conditions.StreamID != flowID {
 			return false
 		}
 	}

@@ -847,7 +847,7 @@ func TestRecordSendWithVariant_RawBytesOnOriginalOnly(t *testing.T) {
 		t.Fatal("expected non-nil result")
 	}
 
-	msgs, _ := store.GetMessages(ctx, result.flowID, flow.MessageListOptions{})
+	msgs, _ := store.GetFlows(ctx, result.flowID, flow.FlowListOptions{})
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -1009,9 +1009,6 @@ func TestRecordBlocked_TargetScope(t *testing.T) {
 	}
 	if entry.Session.Protocol != "HTTP/2" {
 		t.Errorf("protocol = %q, want %q", entry.Session.Protocol, "HTTP/2")
-	}
-	if entry.Session.FlowType != "unary" {
-		t.Errorf("flow_type = %q, want %q", entry.Session.FlowType, "unary")
 	}
 	if entry.Session.Duration <= 0 {
 		t.Errorf("duration = %v, want positive", entry.Session.Duration)

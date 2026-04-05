@@ -395,18 +395,17 @@ func TestSafetyFilter_MCP_FuzzTemplateBlock(t *testing.T) {
 	// Directly save a flow with destructive body (bypassing proxy filter).
 	ctx := context.Background()
 	u, _ := url.Parse(fmt.Sprintf("http://%s/api/fuzz", upstreamAddr))
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := mainStore.SaveFlow(ctx, fl); err != nil {
+	if err := mainStore.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := mainStore.AppendMessage(ctx, &flow.Message{
-		FlowID:    fl.ID,
+	if err := mainStore.SaveFlow(ctx, &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now(),
@@ -417,8 +416,8 @@ func TestSafetyFilter_MCP_FuzzTemplateBlock(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
-	if err := mainStore.AppendMessage(ctx, &flow.Message{
-		FlowID:     fl.ID,
+	if err := mainStore.SaveFlow(ctx, &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now(),
@@ -480,18 +479,17 @@ func TestSafetyFilter_MCP_FuzzExpandedPayloadBlock(t *testing.T) {
 	// Create a safe template flow.
 	ctx := context.Background()
 	u, _ := url.Parse(fmt.Sprintf("http://%s/api/fuzz", upstreamAddr))
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := mainStore.SaveFlow(ctx, fl); err != nil {
+	if err := mainStore.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	if err := mainStore.AppendMessage(ctx, &flow.Message{
-		FlowID:    fl.ID,
+	if err := mainStore.SaveFlow(ctx, &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now(),
@@ -502,8 +500,8 @@ func TestSafetyFilter_MCP_FuzzExpandedPayloadBlock(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendMessage(send): %v", err)
 	}
-	if err := mainStore.AppendMessage(ctx, &flow.Message{
-		FlowID:     fl.ID,
+	if err := mainStore.SaveFlow(ctx, &flow.Flow{
+		StreamID:   fl.ID,
 		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now(),

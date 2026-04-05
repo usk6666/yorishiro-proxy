@@ -26,14 +26,13 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/users")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -42,7 +41,7 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 			Headers:   map[string][]string{"Content-Type": {"application/json"}},
 			Body:      []byte(`{"user":{"name":"alice","role":"viewer","active":true}}`),
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -108,7 +107,7 @@ func TestM3_Resend_BodyPatches_JSONPath(t *testing.T) {
 	}
 
 	// Verify the new flow was recorded in the store.
-	newFl, err := store.GetFlow(context.Background(), out.NewFlowID)
+	newFl, err := store.GetStream(context.Background(), out.NewFlowID)
 	if err != nil {
 		t.Fatalf("get new flow: %v", err)
 	}
@@ -125,14 +124,13 @@ func TestM3_Resend_DryRun(t *testing.T) {
 
 	u, _ := url.Parse(echoServer.URL + "/api/data")
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -140,7 +138,7 @@ func TestM3_Resend_DryRun(t *testing.T) {
 			URL:       u,
 			Headers:   map[string][]string{"Accept": {"text/html"}},
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),
@@ -193,7 +191,7 @@ func TestM3_Resend_DryRun(t *testing.T) {
 	}
 
 	// Verify no new flow was created (dry-run should NOT record).
-	sessions, err := store.ListFlows(context.Background(), flow.ListOptions{})
+	sessions, err := store.ListStreams(context.Background(), flow.StreamListOptions{})
 	if err != nil {
 		t.Fatalf("ListFlows: %v", err)
 	}
@@ -214,14 +212,13 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 	u, _ := url.Parse("http://" + host + ":" + port + "/original")
 
 	entry := saveTestEntry(t, store,
-		&flow.Flow{
+		&flow.Stream{
 			Protocol:  "HTTP/1.x",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now(),
 			Duration:  100 * time.Millisecond,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:  0,
 			Direction: "send",
 			Timestamp: time.Now(),
@@ -230,7 +227,7 @@ func TestM3_ResendRaw_WithPatches(t *testing.T) {
 			Headers:   map[string][]string{"Host": {"example.com"}},
 			RawBytes:  rawReq,
 		},
-		&flow.Message{
+		&flow.Flow{
 			Sequence:   1,
 			Direction:  "receive",
 			Timestamp:  time.Now(),

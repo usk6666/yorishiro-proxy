@@ -86,7 +86,7 @@ type Handler struct {
 }
 
 // NewHandler creates a new HTTP/2 handler with flow recording.
-func NewHandler(store flow.FlowWriter, logger *slog.Logger) *Handler {
+func NewHandler(store flow.Writer, logger *slog.Logger) *Handler {
 	return &Handler{
 		HandlerBase: proxy.HandlerBase{
 			Store:  store,

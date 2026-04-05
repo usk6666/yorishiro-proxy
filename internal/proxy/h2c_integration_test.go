@@ -136,10 +136,10 @@ func TestIntegration_H2C_GET(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -222,10 +222,10 @@ func TestIntegration_H2C_POST(t *testing.T) {
 	}
 
 	// Verify flow recording.
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 10})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -304,10 +304,10 @@ func TestIntegration_H2C_ConcurrentStreams(t *testing.T) {
 	}
 
 	// Wait for flows to be recorded.
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	for i := 0; i < 50; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}

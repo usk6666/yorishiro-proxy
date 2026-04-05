@@ -780,9 +780,6 @@ func TestE2E_InterceptWorkflow_FlowRecordingCompleteness(t *testing.T) {
 	if flowEntry.Protocol != "HTTP/1.x" {
 		t.Errorf("flow protocol = %q, want HTTP/1.x", flowEntry.Protocol)
 	}
-	if flowEntry.FlowType != "unary" {
-		t.Errorf("flow type = %q, want unary", flowEntry.FlowType)
-	}
 	if flowEntry.State != "complete" {
 		t.Errorf("flow state = %q, want complete", flowEntry.State)
 	}

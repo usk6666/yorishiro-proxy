@@ -368,7 +368,7 @@ func TestMTLS_ProxyWithClientCert(t *testing.T) {
 	}
 
 	// Verify flow was recorded.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 	fl := flows[0]
 	if fl.Protocol != "HTTPS" {
 		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
@@ -537,7 +537,7 @@ func TestMTLS_PerHostCertSwitching(t *testing.T) {
 	}
 
 	// Verify both flows were recorded.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 2)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 2)
 	if len(flows) != 2 {
 		t.Fatalf("expected 2 flows, got %d", len(flows))
 	}
@@ -598,7 +598,7 @@ func TestMTLS_TLSVerifyControl(t *testing.T) {
 	}
 
 	// Verify flow was recorded.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 	if len(flows) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(flows))
 	}
@@ -657,7 +657,7 @@ func TestMTLS_FlowHARExport(t *testing.T) {
 	}
 
 	// Wait for flow to persist.
-	pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 
 	// Export as HAR.
 	var buf bytes.Buffer

@@ -57,7 +57,7 @@ Each flow entry includes a `protocol_summary` field with protocol-specific infor
 - **gRPC**: `service`, `method`, `grpc_status`, `grpc_status_name`
 - **TCP**: `send_bytes`, `receive_bytes`
 
-Returns: `flows[]` (id, protocol, flow_type, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
+Returns: `flows[]` (id, protocol, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
 
 ### flow
 Get full details of a single flow including request/response headers, bodies, and connection info.
@@ -69,7 +69,7 @@ Flow state indicates the lifecycle stage:
 
 When intercept/transform modifies a request, the flow contains variant messages. The `original_request` field is populated with the pre-modification request data for diff comparison. The main request fields show the modified (actually sent) version.
 
-For streaming flows (`flow_type` != `"unary"`), the response includes:
+For streaming flows (message_count > 2), the response includes:
 - `message_preview`: The first 10 messages with full details (body, metadata, etc.)
 - `message_count`: Total number of messages in the flow
 - `protocol_summary`: Protocol-specific summary information
@@ -78,7 +78,7 @@ Use the `messages` resource with `limit`/`offset` to page through all messages.
 
 Requires: `id` (flow ID).
 
-Returns: id, conn_id, protocol, flow_type, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
+Returns: id, conn_id, protocol, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
 
 ### messages
 Get paginated messages within a flow. Supports direction filtering for streaming protocols.

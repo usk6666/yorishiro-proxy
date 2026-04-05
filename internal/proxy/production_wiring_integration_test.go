@@ -233,7 +233,7 @@ func TestIntegration_ProductionWiring_HTTPSMITM(t *testing.T) {
 	}
 
 	// Verify flow was recorded.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTPS", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTPS", Limit: 10}, 1)
 	fl := flows[0]
 	if fl.Protocol != "HTTPS" {
 		t.Errorf("flow protocol = %q, want %q", fl.Protocol, "HTTPS")
@@ -645,7 +645,7 @@ func TestIntegration_ProductionWiring_AllSettersHTTPForward(t *testing.T) {
 	}
 
 	// Verify all flows were recorded.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, len(tests))
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, len(tests))
 	if len(flows) != len(tests) {
 		t.Fatalf("expected %d flows, got %d", len(tests), len(flows))
 	}

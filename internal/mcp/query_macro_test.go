@@ -179,8 +179,8 @@ func TestQuery_Macro_Success(t *testing.T) {
 	if out.Steps[0].ID != "login" {
 		t.Errorf("Steps[0].ID = %q, want %q", out.Steps[0].ID, "login")
 	}
-	if out.Steps[0].FlowID != "sess-1" {
-		t.Errorf("Steps[0].FlowID = %q, want %q", out.Steps[0].FlowID, "sess-1")
+	if out.Steps[0].StreamID != "sess-1" {
+		t.Errorf("Steps[0].StreamID = %q, want %q", out.Steps[0].StreamID, "sess-1")
 	}
 	if len(out.Steps[0].Extract) != 1 {
 		t.Errorf("Steps[0].Extract count = %d, want 1", len(out.Steps[0].Extract))

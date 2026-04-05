@@ -139,17 +139,17 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 	}
 
 	// Fetch the template flow and validate it exists.
-	fl, err := r.engine.flowFetcher.GetFlow(ctx, cfg.FlowID)
+	fl, err := r.engine.flowFetcher.GetStream(ctx, cfg.StreamID)
 	if err != nil {
 		return nil, fmt.Errorf("get template flow: %w", err)
 	}
 
-	sendMsgs, err := r.engine.flowFetcher.GetMessages(ctx, fl.ID, flow.MessageListOptions{Direction: "send"})
+	sendMsgs, err := r.engine.flowFetcher.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, fmt.Errorf("get send messages: %w", err)
 	}
 	if len(sendMsgs) == 0 {
-		return nil, fmt.Errorf("template flow %s has no send messages", cfg.FlowID)
+		return nil, fmt.Errorf("template flow %s has no send messages", cfg.StreamID)
 	}
 	sendMsg := sendMsgs[0]
 
@@ -177,7 +177,7 @@ func (r *Runner) Start(ctx context.Context, cfg RunConfig) (*AsyncResult, error)
 	now := time.Now()
 	job := &flow.FuzzJob{
 		ID:        uuid.New().String(),
-		FlowID:    cfg.FlowID,
+		StreamID:  cfg.StreamID,
 		Config:    string(configJSON),
 		Status:    string(StatusRunning),
 		Tag:       cfg.Tag,
@@ -486,7 +486,7 @@ func (r *Runner) finalizeJob(job *flow.FuzzJob, ctrl *JobController, completed, 
 	completedAt := time.Now()
 	finalJob := &flow.FuzzJob{
 		ID:             job.ID,
-		FlowID:         job.FlowID,
+		StreamID:       job.StreamID,
 		Config:         job.Config,
 		Status:         string(finalStatus),
 		Tag:            job.Tag,
@@ -510,7 +510,7 @@ func (r *Runner) updateJobProgress(ctx context.Context, job *flow.FuzzJob, ctrl 
 	// Create a shallow copy to avoid data races.
 	update := &flow.FuzzJob{
 		ID:             job.ID,
-		FlowID:         job.FlowID,
+		StreamID:       job.StreamID,
 		Config:         job.Config,
 		Status:         string(ctrl.Status()),
 		Tag:            job.Tag,

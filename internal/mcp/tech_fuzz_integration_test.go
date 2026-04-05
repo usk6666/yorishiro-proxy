@@ -137,7 +137,7 @@ func TestTechDetect_NginxPHP(t *testing.T) {
 
 	// Get the flow details and check tags.
 	flowID := listResult.Flows[0].ID
-	fl, err := env.store.GetFlow(context.Background(), flowID)
+	fl, err := env.store.GetStream(context.Background(), flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestTechDetect_Express(t *testing.T) {
 	}
 
 	flowID := listResult.Flows[0].ID
-	fl, err := env.store.GetFlow(context.Background(), flowID)
+	fl, err := env.store.GetStream(context.Background(), flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestTechDetect_WordPress(t *testing.T) {
 	}
 
 	flowID := listResult.Flows[0].ID
-	fl, err := env.store.GetFlow(context.Background(), flowID)
+	fl, err := env.store.GetStream(context.Background(), flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}
@@ -734,18 +734,17 @@ func TestResendEnc_RegexBodyPatch(t *testing.T) {
 	// Save a template flow with JSON body.
 	ctx := context.Background()
 	u, _ := url.Parse(targetServer.URL + "/api/data")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -754,7 +753,7 @@ func TestResendEnc_RegexBodyPatch(t *testing.T) {
 		Headers:   map[string][]string{"Content-Type": {"application/json"}},
 		Body:      []byte(`{"token":"abc123","user":"test"}`),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -829,7 +828,7 @@ func TestTechDetect_MultipleDetections(t *testing.T) {
 	}
 
 	flowID := listResult.Flows[0].ID
-	fl, err := env.store.GetFlow(context.Background(), flowID)
+	fl, err := env.store.GetStream(context.Background(), flowID)
 	if err != nil {
 		t.Fatalf("GetFlow: %v", err)
 	}

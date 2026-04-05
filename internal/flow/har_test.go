@@ -8,36 +8,57 @@ import (
 	"time"
 )
 
-// mockFlowReader is a test double for FlowReader.
-type mockFlowReader struct {
-	flows    []*Flow
-	messages map[string][]*Message
+// mockHARStore is a test double for Store used in HAR export tests.
+type mockHARStore struct {
+	streams []*Stream
+	flows   map[string][]*Flow
 }
 
-func (m *mockFlowReader) GetFlow(_ context.Context, id string) (*Flow, error) {
-	for _, f := range m.flows {
-		if f.ID == id {
-			return f, nil
+func (m *mockHARStore) GetStream(_ context.Context, id string) (*Stream, error) {
+	for _, s := range m.streams {
+		if s.ID == id {
+			return s, nil
 		}
 	}
 	return nil, nil
 }
 
-func (m *mockFlowReader) ListFlows(_ context.Context, _ ListOptions) ([]*Flow, error) {
-	return m.flows, nil
+func (m *mockHARStore) ListStreams(_ context.Context, _ StreamListOptions) ([]*Stream, error) {
+	return m.streams, nil
 }
 
-func (m *mockFlowReader) CountFlows(_ context.Context, _ ListOptions) (int, error) {
-	return len(m.flows), nil
+func (m *mockHARStore) CountStreams(_ context.Context, _ StreamListOptions) (int, error) {
+	return len(m.streams), nil
 }
 
-func (m *mockFlowReader) GetMessages(_ context.Context, flowID string, _ MessageListOptions) ([]*Message, error) {
-	return m.messages[flowID], nil
+func (m *mockHARStore) GetFlow(_ context.Context, _ string) (*Flow, error) {
+	return nil, nil
 }
 
-func (m *mockFlowReader) CountMessages(_ context.Context, flowID string) (int, error) {
-	return len(m.messages[flowID]), nil
+func (m *mockHARStore) GetFlows(_ context.Context, streamID string, _ FlowListOptions) ([]*Flow, error) {
+	return m.flows[streamID], nil
 }
+
+func (m *mockHARStore) CountFlows(_ context.Context, streamID string) (int, error) {
+	return len(m.flows[streamID]), nil
+}
+
+func (m *mockHARStore) SaveStream(_ context.Context, _ *Stream) error                  { return nil }
+func (m *mockHARStore) UpdateStream(_ context.Context, _ string, _ StreamUpdate) error { return nil }
+func (m *mockHARStore) SaveFlow(_ context.Context, _ *Flow) error                      { return nil }
+func (m *mockHARStore) DeleteStream(_ context.Context, _ string) error                 { return nil }
+func (m *mockHARStore) DeleteAllStreams(_ context.Context) (int64, error)              { return 0, nil }
+func (m *mockHARStore) DeleteStreamsByProtocol(_ context.Context, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *mockHARStore) DeleteStreamsOlderThan(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
+func (m *mockHARStore) DeleteExcessStreams(_ context.Context, _ int) (int64, error) { return 0, nil }
+func (m *mockHARStore) SaveMacro(_ context.Context, _, _, _ string) error           { return nil }
+func (m *mockHARStore) GetMacro(_ context.Context, _ string) (*MacroRecord, error)  { return nil, nil }
+func (m *mockHARStore) ListMacros(_ context.Context) ([]*MacroRecord, error)        { return nil, nil }
+func (m *mockHARStore) DeleteMacro(_ context.Context, _ string) error               { return nil }
 
 func TestExportHAR_BasicHTTP(t *testing.T) {
 	t.Parallel()
@@ -46,13 +67,12 @@ func TestExportHAR_BasicHTTP(t *testing.T) {
 	waitMs := int64(100)
 	receiveMs := int64(20)
 
-	store := &mockFlowReader{
-		flows: []*Flow{
+	store := &mockHARStore{
+		streams: []*Stream{
 			{
 				ID:        "flow-1",
 				ConnID:    "conn-1",
 				Protocol:  "HTTPS",
-				FlowType:  "unary",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  125 * time.Millisecond,
@@ -64,11 +84,11 @@ func TestExportHAR_BasicHTTP(t *testing.T) {
 				},
 			},
 		},
-		messages: map[string][]*Message{
+		flows: map[string][]*Flow{
 			"flow-1": {
 				{
 					ID:        "msg-1",
-					FlowID:    "flow-1",
+					StreamID:  "flow-1",
 					Sequence:  0,
 					Direction: "send",
 					Timestamp: now,
@@ -81,7 +101,7 @@ func TestExportHAR_BasicHTTP(t *testing.T) {
 				},
 				{
 					ID:         "msg-2",
-					FlowID:     "flow-1",
+					StreamID:   "flow-1",
 					Sequence:   1,
 					Direction:  "receive",
 					Timestamp:  now.Add(125 * time.Millisecond),
@@ -177,22 +197,21 @@ func TestExportHAR_BinaryBody(t *testing.T) {
 	now := time.Now().UTC()
 	binaryBody := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A} // PNG header
 
-	store := &mockFlowReader{
-		flows: []*Flow{
+	store := &mockHARStore{
+		streams: []*Stream{
 			{
 				ID:        "flow-bin",
 				Protocol:  "HTTPS",
-				FlowType:  "unary",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  50 * time.Millisecond,
 			},
 		},
-		messages: map[string][]*Message{
+		flows: map[string][]*Flow{
 			"flow-bin": {
 				{
 					ID:        "msg-req",
-					FlowID:    "flow-bin",
+					StreamID:  "flow-bin",
 					Sequence:  0,
 					Direction: "send",
 					Timestamp: now,
@@ -201,7 +220,7 @@ func TestExportHAR_BinaryBody(t *testing.T) {
 				},
 				{
 					ID:         "msg-resp",
-					FlowID:     "flow-bin",
+					StreamID:   "flow-bin",
 					Sequence:   1,
 					Direction:  "receive",
 					Timestamp:  now.Add(50 * time.Millisecond),
@@ -244,23 +263,22 @@ func TestExportHAR_WebSocket(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 
-	store := &mockFlowReader{
-		flows: []*Flow{
+	store := &mockHARStore{
+		streams: []*Stream{
 			{
 				ID:        "flow-ws",
 				Protocol:  "WebSocket",
-				FlowType:  "bidirectional",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  5 * time.Second,
 			},
 		},
-		messages: map[string][]*Message{
+		flows: map[string][]*Flow{
 			"flow-ws": {
 				// Upgrade request.
 				{
 					ID:        "msg-upgrade-req",
-					FlowID:    "flow-ws",
+					StreamID:  "flow-ws",
 					Sequence:  0,
 					Direction: "send",
 					Timestamp: now,
@@ -274,7 +292,7 @@ func TestExportHAR_WebSocket(t *testing.T) {
 				// Upgrade response.
 				{
 					ID:         "msg-upgrade-resp",
-					FlowID:     "flow-ws",
+					StreamID:   "flow-ws",
 					Sequence:   1,
 					Direction:  "receive",
 					Timestamp:  now.Add(50 * time.Millisecond),
@@ -287,7 +305,7 @@ func TestExportHAR_WebSocket(t *testing.T) {
 				// WebSocket message: send.
 				{
 					ID:        "msg-ws-1",
-					FlowID:    "flow-ws",
+					StreamID:  "flow-ws",
 					Sequence:  2,
 					Direction: "send",
 					Timestamp: now.Add(100 * time.Millisecond),
@@ -297,7 +315,7 @@ func TestExportHAR_WebSocket(t *testing.T) {
 				// WebSocket message: receive.
 				{
 					ID:        "msg-ws-2",
-					FlowID:    "flow-ws",
+					StreamID:  "flow-ws",
 					Sequence:  3,
 					Direction: "receive",
 					Timestamp: now.Add(200 * time.Millisecond),
@@ -360,18 +378,18 @@ func TestExportHAR_WebSocket(t *testing.T) {
 func TestExportHAR_SkipsTCPAndGRPC(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	store := &mockFlowReader{
-		flows: []*Flow{
-			{ID: "flow-tcp", Protocol: "TCP", FlowType: "stream", State: "complete", Timestamp: now, Duration: time.Second},
-			{ID: "flow-grpc", Protocol: "gRPC", FlowType: "unary", State: "complete", Timestamp: now, Duration: time.Second},
-			{ID: "flow-http", Protocol: "HTTP/1.x", FlowType: "unary", State: "complete", Timestamp: now, Duration: time.Second},
+	store := &mockHARStore{
+		streams: []*Stream{
+			{ID: "flow-tcp", Protocol: "TCP", State: "complete", Timestamp: now, Duration: time.Second},
+			{ID: "flow-grpc", Protocol: "gRPC", State: "complete", Timestamp: now, Duration: time.Second},
+			{ID: "flow-http", Protocol: "HTTP/1.x", State: "complete", Timestamp: now, Duration: time.Second},
 		},
-		messages: map[string][]*Message{
+		flows: map[string][]*Flow{
 			"flow-tcp":  {},
 			"flow-grpc": {},
 			"flow-http": {
-				{ID: "msg-1", FlowID: "flow-http", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("http://example.com/")},
-				{ID: "msg-2", FlowID: "flow-http", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200},
+				{ID: "msg-1", StreamID: "flow-http", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("http://example.com/")},
+				{ID: "msg-2", StreamID: "flow-http", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200},
 			},
 		},
 	}
@@ -389,22 +407,21 @@ func TestExportHAR_SkipsTCPAndGRPC(t *testing.T) {
 func TestExportHAR_NilTimings(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	store := &mockFlowReader{
-		flows: []*Flow{
+	store := &mockHARStore{
+		streams: []*Stream{
 			{
 				ID:        "flow-no-timing",
 				Protocol:  "HTTPS",
-				FlowType:  "unary",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  50 * time.Millisecond,
 				// SendMs, WaitMs, ReceiveMs are all nil.
 			},
 		},
-		messages: map[string][]*Message{
+		flows: map[string][]*Flow{
 			"flow-no-timing": {
-				{ID: "msg-1", FlowID: "flow-no-timing", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")},
-				{ID: "msg-2", FlowID: "flow-no-timing", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200},
+				{ID: "msg-1", StreamID: "flow-no-timing", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")},
+				{ID: "msg-2", StreamID: "flow-no-timing", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200},
 			},
 		},
 	}
@@ -438,16 +455,16 @@ func TestExportHAR_TimeFilter(t *testing.T) {
 	after := base.Add(30 * time.Minute)
 	before := base.Add(90 * time.Minute)
 
-	store := &mockFlowReader{
-		flows: []*Flow{
-			{ID: "f1", Protocol: "HTTPS", FlowType: "unary", State: "complete", Timestamp: base, Duration: time.Millisecond},
-			{ID: "f2", Protocol: "HTTPS", FlowType: "unary", State: "complete", Timestamp: base.Add(time.Hour), Duration: time.Millisecond},
-			{ID: "f3", Protocol: "HTTPS", FlowType: "unary", State: "complete", Timestamp: base.Add(2 * time.Hour), Duration: time.Millisecond},
+	store := &mockHARStore{
+		streams: []*Stream{
+			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: base, Duration: time.Millisecond},
+			{ID: "f2", Protocol: "HTTPS", State: "complete", Timestamp: base.Add(time.Hour), Duration: time.Millisecond},
+			{ID: "f3", Protocol: "HTTPS", State: "complete", Timestamp: base.Add(2 * time.Hour), Duration: time.Millisecond},
 		},
-		messages: map[string][]*Message{
-			"f1": {{ID: "m1", FlowID: "f1", Sequence: 0, Direction: "send", Timestamp: base, Method: "GET", URL: mustParseURL("https://a.com/")}},
-			"f2": {{ID: "m2", FlowID: "f2", Sequence: 0, Direction: "send", Timestamp: base.Add(time.Hour), Method: "GET", URL: mustParseURL("https://b.com/")}},
-			"f3": {{ID: "m3", FlowID: "f3", Sequence: 0, Direction: "send", Timestamp: base.Add(2 * time.Hour), Method: "GET", URL: mustParseURL("https://c.com/")}},
+		flows: map[string][]*Flow{
+			"f1": {{ID: "m1", StreamID: "f1", Sequence: 0, Direction: "send", Timestamp: base, Method: "GET", URL: mustParseURL("https://a.com/")}},
+			"f2": {{ID: "m2", StreamID: "f2", Sequence: 0, Direction: "send", Timestamp: base.Add(time.Hour), Method: "GET", URL: mustParseURL("https://b.com/")}},
+			"f3": {{ID: "m3", StreamID: "f3", Sequence: 0, Direction: "send", Timestamp: base.Add(2 * time.Hour), Method: "GET", URL: mustParseURL("https://c.com/")}},
 		},
 	}
 
@@ -469,20 +486,20 @@ func TestExportHAR_TimeFilter(t *testing.T) {
 func TestExportHAR_MaxFlows(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	var flows []*Flow
-	msgs := map[string][]*Message{}
+	var flows []*Stream
+	msgs := map[string][]*Flow{}
 	for i := 0; i < 10; i++ {
 		id := "flow-" + string(rune('a'+i))
-		flows = append(flows, &Flow{
-			ID: id, Protocol: "HTTPS", FlowType: "unary", State: "complete",
+		flows = append(flows, &Stream{
+			ID: id, Protocol: "HTTPS", State: "complete",
 			Timestamp: now.Add(time.Duration(i) * time.Minute), Duration: time.Millisecond,
 		})
-		msgs[id] = []*Message{
-			{ID: "m-" + id, FlowID: id, Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")},
+		msgs[id] = []*Flow{
+			{ID: "m-" + id, StreamID: id, Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")},
 		}
 	}
 
-	store := &mockFlowReader{flows: flows, messages: msgs}
+	store := &mockHARStore{streams: flows, flows: msgs}
 
 	var buf bytes.Buffer
 	n, err := ExportHAR(context.Background(), store, &buf, ExportOptions{MaxFlows: 3}, "1.0.0")
@@ -498,21 +515,21 @@ func TestExportHAR_LargeFlowCount(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	count := 1100
-	var flows []*Flow
-	msgs := map[string][]*Message{}
+	var flows []*Stream
+	msgs := map[string][]*Flow{}
 	for i := 0; i < count; i++ {
 		id := "flow-" + time.Now().Format("20060102") + "-" + string(rune(i))
-		flows = append(flows, &Flow{
-			ID: id, Protocol: "HTTPS", FlowType: "unary", State: "complete",
+		flows = append(flows, &Stream{
+			ID: id, Protocol: "HTTPS", State: "complete",
 			Timestamp: now.Add(time.Duration(i) * time.Millisecond), Duration: time.Millisecond,
 		})
-		msgs[id] = []*Message{
-			{ID: "m-" + id, FlowID: id, Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")},
-			{ID: "r-" + id, FlowID: id, Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200, Body: []byte("ok")},
+		msgs[id] = []*Flow{
+			{ID: "m-" + id, StreamID: id, Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")},
+			{ID: "r-" + id, StreamID: id, Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200, Body: []byte("ok")},
 		}
 	}
 
-	store := &mockFlowReader{flows: flows, messages: msgs}
+	store := &mockHARStore{streams: flows, flows: msgs}
 
 	var buf bytes.Buffer
 	n, err := ExportHAR(context.Background(), store, &buf, ExportOptions{IncludeBodies: true}, "1.0.0")
@@ -536,12 +553,12 @@ func TestExportHAR_LargeFlowCount(t *testing.T) {
 func TestExportHAR_ContextCancellation(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	store := &mockFlowReader{
-		flows: []*Flow{
-			{ID: "f1", Protocol: "HTTPS", FlowType: "unary", State: "complete", Timestamp: now, Duration: time.Millisecond},
+	store := &mockHARStore{
+		streams: []*Stream{
+			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: now, Duration: time.Millisecond},
 		},
-		messages: map[string][]*Message{
-			"f1": {{ID: "m1", FlowID: "f1", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")}},
+		flows: map[string][]*Flow{
+			"f1": {{ID: "m1", StreamID: "f1", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")}},
 		},
 	}
 
@@ -557,9 +574,9 @@ func TestExportHAR_ContextCancellation(t *testing.T) {
 
 func TestExportHAR_EmptyFlows(t *testing.T) {
 	t.Parallel()
-	store := &mockFlowReader{
-		flows:    []*Flow{},
-		messages: map[string][]*Message{},
+	store := &mockHARStore{
+		streams: []*Stream{},
+		flows:   map[string][]*Flow{},
 	}
 
 	var buf bytes.Buffer
@@ -583,14 +600,14 @@ func TestExportHAR_EmptyFlows(t *testing.T) {
 func TestExportHAR_NoBodiesOption(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	store := &mockFlowReader{
-		flows: []*Flow{
-			{ID: "f1", Protocol: "HTTPS", FlowType: "unary", State: "complete", Timestamp: now, Duration: time.Millisecond},
+	store := &mockHARStore{
+		streams: []*Stream{
+			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: now, Duration: time.Millisecond},
 		},
-		messages: map[string][]*Message{
+		flows: map[string][]*Flow{
 			"f1": {
-				{ID: "m1", FlowID: "f1", Sequence: 0, Direction: "send", Timestamp: now, Method: "POST", URL: mustParseURL("https://example.com/"), Body: []byte("request body"), Headers: map[string][]string{"Content-Type": {"text/plain"}}},
-				{ID: "m2", FlowID: "f1", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200, Body: []byte("response body"), Headers: map[string][]string{"Content-Type": {"text/plain"}}},
+				{ID: "m1", StreamID: "f1", Sequence: 0, Direction: "send", Timestamp: now, Method: "POST", URL: mustParseURL("https://example.com/"), Body: []byte("request body"), Headers: map[string][]string{"Content-Type": {"text/plain"}}},
+				{ID: "m2", StreamID: "f1", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200, Body: []byte("response body"), Headers: map[string][]string{"Content-Type": {"text/plain"}}},
 			},
 		},
 	}
@@ -728,14 +745,14 @@ func TestHARSchemaValidation(t *testing.T) {
 	t.Parallel()
 	// Validates that the HAR output matches the expected JSON structure.
 	now := time.Now().UTC()
-	store := &mockFlowReader{
-		flows: []*Flow{
-			{ID: "f1", Protocol: "HTTPS", FlowType: "unary", State: "complete", Timestamp: now, Duration: 100 * time.Millisecond},
+	store := &mockHARStore{
+		streams: []*Stream{
+			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: now, Duration: 100 * time.Millisecond},
 		},
-		messages: map[string][]*Message{
+		flows: map[string][]*Flow{
 			"f1": {
-				{ID: "m1", FlowID: "f1", Sequence: 0, Direction: "send", Timestamp: now, Method: "POST", URL: mustParseURL("https://example.com/submit"), Body: []byte("data"), Headers: map[string][]string{"Content-Type": {"application/x-www-form-urlencoded"}}},
-				{ID: "m2", FlowID: "f1", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 201, Body: []byte("created"), Headers: map[string][]string{"Content-Type": {"text/plain"}}},
+				{ID: "m1", StreamID: "f1", Sequence: 0, Direction: "send", Timestamp: now, Method: "POST", URL: mustParseURL("https://example.com/submit"), Body: []byte("data"), Headers: map[string][]string{"Content-Type": {"application/x-www-form-urlencoded"}}},
+				{ID: "m2", StreamID: "f1", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 201, Body: []byte("created"), Headers: map[string][]string{"Content-Type": {"text/plain"}}},
 			},
 		},
 	}

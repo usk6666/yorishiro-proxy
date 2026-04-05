@@ -12,7 +12,7 @@ func TestFuzzJobStore_SaveAndGet(t *testing.T) {
 	ctx := context.Background()
 
 	job := &FuzzJob{
-		FlowID:    "fl-1",
+		StreamID:  "fl-1",
 		Config:    `{"attack_type":"sequential"}`,
 		Status:    "running",
 		Tag:       "test-tag",
@@ -33,8 +33,8 @@ func TestFuzzJobStore_SaveAndGet(t *testing.T) {
 		t.Fatalf("GetFuzzJob: %v", err)
 	}
 
-	if got.FlowID != "fl-1" {
-		t.Errorf("FlowID = %q, want %q", got.FlowID, "fl-1")
+	if got.StreamID != "fl-1" {
+		t.Errorf("StreamID = %q, want %q", got.StreamID, "fl-1")
 	}
 	if got.Status != "running" {
 		t.Errorf("Status = %q, want %q", got.Status, "running")
@@ -56,7 +56,7 @@ func TestFuzzJobStore_Update(t *testing.T) {
 	ctx := context.Background()
 
 	job := &FuzzJob{
-		FlowID:    "fl-1",
+		StreamID:  "fl-1",
 		Config:    `{}`,
 		Status:    "running",
 		CreatedAt: time.Now().UTC().Truncate(time.Millisecond),
@@ -113,19 +113,18 @@ func TestFuzzResultStore_SaveAndList(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a template flow first (for FK reference).
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	// Create a fuzz job.
 	job := &FuzzJob{
-		FlowID:    fl.ID,
+		StreamID:  fl.ID,
 		Config:    `{}`,
 		Status:    "running",
 		CreatedAt: time.Now().UTC(),
@@ -136,15 +135,14 @@ func TestFuzzResultStore_SaveAndList(t *testing.T) {
 	}
 
 	// Create result sessions.
-	resultSessions := make([]*Flow, 3)
+	resultSessions := make([]*Stream, 3)
 	for i := range 3 {
-		s := &Flow{
+		s := &Stream{
 			Protocol:  "HTTP/1.x",
-			FlowType:  "unary",
 			State:     "complete",
 			Timestamp: time.Now(),
 		}
-		if err := store.SaveFlow(ctx, s); err != nil {
+		if err := store.SaveStream(ctx, s); err != nil {
 			t.Fatalf("SaveFlow for result: %v", err)
 		}
 		resultSessions[i] = s
@@ -152,9 +150,9 @@ func TestFuzzResultStore_SaveAndList(t *testing.T) {
 
 	// Save results.
 	results := []*FuzzResult{
-		{FuzzID: job.ID, IndexNum: 0, FlowID: resultSessions[0].ID, Payloads: `{"pos-0":"a"}`, StatusCode: 200, ResponseLength: 100, DurationMs: 50},
-		{FuzzID: job.ID, IndexNum: 1, FlowID: resultSessions[1].ID, Payloads: `{"pos-0":"b"}`, StatusCode: 401, ResponseLength: 20, DurationMs: 30},
-		{FuzzID: job.ID, IndexNum: 2, FlowID: resultSessions[2].ID, Payloads: `{"pos-0":"c"}`, StatusCode: 200, ResponseLength: 150, DurationMs: 45, Error: ""},
+		{FuzzID: job.ID, IndexNum: 0, StreamID: resultSessions[0].ID, Payloads: `{"pos-0":"a"}`, StatusCode: 200, ResponseLength: 100, DurationMs: 50},
+		{FuzzID: job.ID, IndexNum: 1, StreamID: resultSessions[1].ID, Payloads: `{"pos-0":"b"}`, StatusCode: 401, ResponseLength: 20, DurationMs: 30},
+		{FuzzID: job.ID, IndexNum: 2, StreamID: resultSessions[2].ID, Payloads: `{"pos-0":"c"}`, StatusCode: 200, ResponseLength: 150, DurationMs: 45, Error: ""},
 	}
 	for _, r := range results {
 		if err := store.SaveFuzzResult(ctx, r); err != nil {
@@ -184,16 +182,16 @@ func TestFuzzResultStore_ListWithFilter(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{
+	fl := &Stream{
 		Protocol:  "HTTP/1.x",
 		Timestamp: time.Now(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	job := &FuzzJob{
-		FlowID:    fl.ID,
+		StreamID:  fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -205,8 +203,8 @@ func TestFuzzResultStore_ListWithFilter(t *testing.T) {
 
 	// Create result sessions.
 	for i := range 3 {
-		s := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-		if err := store.SaveFlow(ctx, s); err != nil {
+		s := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+		if err := store.SaveStream(ctx, s); err != nil {
 			t.Fatalf("SaveFlow: %v", err)
 		}
 		statusCode := 200
@@ -214,7 +212,7 @@ func TestFuzzResultStore_ListWithFilter(t *testing.T) {
 			statusCode = 401
 		}
 		r := &FuzzResult{
-			FuzzID: job.ID, IndexNum: i, FlowID: s.ID,
+			FuzzID: job.ID, IndexNum: i, StreamID: s.ID,
 			Payloads: `{}`, StatusCode: statusCode,
 		}
 		if err := store.SaveFuzzResult(ctx, r); err != nil {
@@ -249,13 +247,13 @@ func TestFuzzResultStore_ErrorField(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	job := &FuzzJob{
-		FlowID:    fl.ID,
+		StreamID:  fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -264,15 +262,15 @@ func TestFuzzResultStore_ErrorField(t *testing.T) {
 		t.Fatalf("SaveFuzzJob: %v", err)
 	}
 
-	errSess := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveFlow(ctx, errSess); err != nil {
+	errSess := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveStream(ctx, errSess); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	r := &FuzzResult{
 		FuzzID:   job.ID,
 		IndexNum: 0,
-		FlowID:   errSess.ID,
+		StreamID: errSess.ID,
 		Payloads: `{}`,
 		Error:    "connection refused",
 	}
@@ -325,7 +323,7 @@ func TestSchemaV2_Migration(t *testing.T) {
 
 	// Verify fuzz_jobs table exists.
 	job := &FuzzJob{
-		FlowID:    "test",
+		StreamID:  "test",
 		Config:    `{}`,
 		Status:    "running",
 		CreatedAt: time.Now().UTC(),
@@ -367,7 +365,7 @@ func TestListFuzzJobs_WithData(t *testing.T) {
 		{"error", ""},
 	} {
 		job := &FuzzJob{
-			FlowID:    "fl-1",
+			StreamID:  "fl-1",
 			Config:    `{}`,
 			Status:    tc.status,
 			Tag:       tc.tag,
@@ -442,7 +440,7 @@ func TestCountFuzzJobs(t *testing.T) {
 
 	for _, status := range []string{"running", "completed", "running"} {
 		job := &FuzzJob{
-			FlowID:    "fl-1",
+			StreamID:  "fl-1",
 			Config:    `{}`,
 			Status:    status,
 			CreatedAt: time.Now().UTC(),
@@ -476,13 +474,13 @@ func TestCountFuzzResults(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	job := &FuzzJob{
-		FlowID:    fl.ID,
+		StreamID:  fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -493,8 +491,8 @@ func TestCountFuzzResults(t *testing.T) {
 	}
 
 	for i := range 3 {
-		s := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-		if err := store.SaveFlow(ctx, s); err != nil {
+		s := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+		if err := store.SaveStream(ctx, s); err != nil {
 			t.Fatalf("SaveFlow: %v", err)
 		}
 		statusCode := 200
@@ -502,7 +500,7 @@ func TestCountFuzzResults(t *testing.T) {
 			statusCode = 401
 		}
 		r := &FuzzResult{
-			FuzzID: job.ID, IndexNum: i, FlowID: s.ID,
+			FuzzID: job.ID, IndexNum: i, StreamID: s.ID,
 			Payloads: `{}`, StatusCode: statusCode,
 		}
 		if err := store.SaveFuzzResult(ctx, r); err != nil {
@@ -534,13 +532,13 @@ func TestListFuzzResults_SortBy(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	job := &FuzzJob{
-		FlowID:    fl.ID,
+		StreamID:  fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -552,12 +550,12 @@ func TestListFuzzResults_SortBy(t *testing.T) {
 
 	// Create results with varying status codes.
 	for i, sc := range []int{500, 200, 301} {
-		s := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-		if err := store.SaveFlow(ctx, s); err != nil {
+		s := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+		if err := store.SaveStream(ctx, s); err != nil {
 			t.Fatalf("SaveFlow: %v", err)
 		}
 		r := &FuzzResult{
-			FuzzID: job.ID, IndexNum: i, FlowID: s.ID,
+			FuzzID: job.ID, IndexNum: i, StreamID: s.ID,
 			Payloads: `{}`, StatusCode: sc, DurationMs: (3 - i) * 100,
 		}
 		if err := store.SaveFuzzResult(ctx, r); err != nil {
@@ -607,13 +605,13 @@ func TestListFuzzResults_BodyContains(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &Flow{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	job := &FuzzJob{
-		FlowID:    fl.ID,
+		StreamID:  fl.ID,
 		Config:    `{}`,
 		Status:    "completed",
 		CreatedAt: time.Now().UTC(),
@@ -626,26 +624,26 @@ func TestListFuzzResults_BodyContains(t *testing.T) {
 	// Create results with sessions that have response messages containing different bodies.
 	bodies := []string{`{"role":"admin","ok":true}`, `{"role":"user","ok":true}`, `{"error":"denied"}`}
 	for i, body := range bodies {
-		s := &Flow{Protocol: "HTTP/1.x", FlowType: "unary", State: "complete", Timestamp: time.Now()}
-		if err := store.SaveFlow(ctx, s); err != nil {
+		s := &Stream{Protocol: "HTTP/1.x", State: "complete", Timestamp: time.Now()}
+		if err := store.SaveStream(ctx, s); err != nil {
 			t.Fatalf("SaveFlow: %v", err)
 		}
 
 		// Append a receive message with the body.
-		msg := &Message{
+		msg := &Flow{
 			ID:        s.ID + "-recv",
-			FlowID:    s.ID,
+			StreamID:  s.ID,
 			Sequence:  0,
 			Direction: "receive",
 			Timestamp: time.Now(),
 			Body:      []byte(body),
 		}
-		if err := store.AppendMessage(ctx, msg); err != nil {
+		if err := store.SaveFlow(ctx, msg); err != nil {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 
 		r := &FuzzResult{
-			FuzzID: job.ID, IndexNum: i, FlowID: s.ID,
+			FuzzID: job.ID, IndexNum: i, StreamID: s.ID,
 			Payloads: `{}`, StatusCode: 200,
 		}
 		if err := store.SaveFuzzResult(ctx, r); err != nil {

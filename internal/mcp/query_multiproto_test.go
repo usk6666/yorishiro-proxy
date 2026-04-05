@@ -17,16 +17,15 @@ func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionT
 	t.Helper()
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  protocol,
-		FlowType:  sessionType,
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  500 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow(%s): %v", id, err)
 	}
 
@@ -35,16 +34,16 @@ func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionT
 		if i%2 == 1 {
 			dir = "receive"
 		}
-		msg := &flow.Message{
+		msg := &flow.Flow{
 			ID:        fmt.Sprintf("%s-msg-%d", id, i),
-			FlowID:    id,
+			StreamID:  id,
 			Sequence:  i,
 			Direction: dir,
 			Timestamp: time.Now().UTC(),
 			Body:      []byte(fmt.Sprintf("message-%d", i)),
 			Metadata:  metadata,
 		}
-		if err := store.AppendMessage(ctx, msg); err != nil {
+		if err := store.SaveFlow(ctx, msg); err != nil {
 			t.Fatalf("AppendMessage(%d): %v", i, err)
 		}
 	}
@@ -167,39 +166,38 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "tcp-1",
 		Protocol:  "TCP",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "tcp-1-send",
-		FlowID:    "tcp-1",
+		StreamID:  "tcp-1",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("hello"),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	recvMsg := &flow.Message{
+	recvMsg := &flow.Flow{
 		ID:        "tcp-1-recv",
-		FlowID:    "tcp-1",
+		StreamID:  "tcp-1",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("world!"),
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -233,22 +231,21 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "grpc-1",
 		Protocol:  "gRPC",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
 	parsedURL, _ := url.Parse("https://example.com/pkg.UserService/GetUser")
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "grpc-1-send",
-		FlowID:    "grpc-1",
+		StreamID:  "grpc-1",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -257,20 +254,20 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 		Body:      []byte("grpc-request"),
 		Metadata:  map[string]string{"service": "UserService", "method": "GetUser"},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	recvMsg := &flow.Message{
+	recvMsg := &flow.Flow{
 		ID:        "grpc-1-recv",
-		FlowID:    "grpc-1",
+		StreamID:  "grpc-1",
 		Sequence:  1,
 		Direction: "receive",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("grpc-response"),
 		Metadata:  map[string]string{"grpc_status": "0"},
 	}
-	if err := store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -327,9 +324,6 @@ func TestQuery_Session_StreamingPreview(t *testing.T) {
 
 	if out.ID != "ws-detail" {
 		t.Errorf("id = %q, want ws-detail", out.ID)
-	}
-	if out.FlowType != "bidirectional" {
-		t.Errorf("flow_type = %q, want bidirectional", out.FlowType)
 	}
 	if out.MessageCount != 15 {
 		t.Errorf("message_count = %d, want 15", out.MessageCount)
@@ -491,27 +485,26 @@ func TestQuery_Messages_Metadata(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "ws-meta",
 		Protocol:  "WebSocket",
-		FlowType:  "bidirectional",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	msg := &flow.Message{
+	msg := &flow.Flow{
 		ID:        "ws-meta-msg-0",
-		FlowID:    "ws-meta",
+		StreamID:  "ws-meta",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("hello"),
 		Metadata:  map[string]string{"opcode": "1"},
 	}
-	if err := store.AppendMessage(ctx, msg); err != nil {
+	if err := store.SaveFlow(ctx, msg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
@@ -544,27 +537,26 @@ func TestQuery_Messages_GRPC_Metadata(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		ID:        "grpc-meta",
 		Protocol:  "gRPC",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	sendMsg := &flow.Message{
+	sendMsg := &flow.Flow{
 		ID:        "grpc-meta-send",
-		FlowID:    "grpc-meta",
+		StreamID:  "grpc-meta",
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Body:      []byte("grpc-body"),
 		Metadata:  map[string]string{"service": "UserService", "method": "GetUser", "grpc_encoding": "identity"},
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 

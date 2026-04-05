@@ -92,18 +92,17 @@ func saveFuzzTemplateSession(t *testing.T, store flow.Store, serverURL string) s
 	ctx := context.Background()
 
 	u, _ := url.Parse(serverURL + "/api/login")
-	fl := &flow.Flow{
+	fl := &flow.Stream{
 		Protocol:  "HTTP/1.x",
-		FlowType:  "unary",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
 	}
-	if err := store.SaveFlow(ctx, fl); err != nil {
+	if err := store.SaveStream(ctx, fl); err != nil {
 		t.Fatalf("SaveFlow: %v", err)
 	}
-	sendMsg := &flow.Message{
-		FlowID:    fl.ID,
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
@@ -112,7 +111,7 @@ func saveFuzzTemplateSession(t *testing.T, store flow.Store, serverURL string) s
 		Headers:   map[string][]string{"Content-Type": {"application/json"}},
 		Body:      []byte(`{"username":"admin","password":"password123"}`),
 	}
-	if err := store.AppendMessage(ctx, sendMsg); err != nil {
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 	return fl.ID

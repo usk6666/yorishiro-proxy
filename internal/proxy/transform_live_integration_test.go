@@ -602,7 +602,7 @@ func TestTransformLive_FlowRecording(t *testing.T) {
 	}
 
 	// Verify flow is recorded with correct protocol and state.
-	flows := pollFlows(t, ctx, store, flow.ListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
+	flows := pollFlows(t, ctx, store, flow.StreamListOptions{Protocol: "HTTP/1.x", Limit: 10}, 1)
 	fl := flows[0]
 
 	if fl.Protocol != "HTTP/1.x" {
@@ -610,9 +610,6 @@ func TestTransformLive_FlowRecording(t *testing.T) {
 	}
 	if fl.State != "complete" {
 		t.Errorf("flow state = %q, want %q", fl.State, "complete")
-	}
-	if fl.FlowType != "unary" {
-		t.Errorf("flow type = %q, want %q", fl.FlowType, "unary")
 	}
 
 	// Verify messages are recorded.

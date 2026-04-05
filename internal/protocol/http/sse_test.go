@@ -643,28 +643,28 @@ func TestStreamSSEBody(t *testing.T) {
 
 // sseTestFlowStore is a minimal flow store for testing SSE recording.
 type sseTestFlowStore struct {
-	flows    []*flow.Flow
-	messages []*flow.Message
+	flows    []*flow.Stream
+	messages []*flow.Flow
 	updates  []sseFlowUpdateRecord
 }
 
 type sseFlowUpdateRecord struct {
 	flowID string
-	update flow.FlowUpdate
+	update flow.StreamUpdate
 }
 
-func (s *sseTestFlowStore) SaveFlow(_ context.Context, f *flow.Flow) error {
+func (s *sseTestFlowStore) SaveStream(_ context.Context, f *flow.Stream) error {
 	f.ID = fmt.Sprintf("test-flow-%d", len(s.flows))
 	s.flows = append(s.flows, f)
 	return nil
 }
 
-func (s *sseTestFlowStore) AppendMessage(_ context.Context, m *flow.Message) error {
+func (s *sseTestFlowStore) SaveFlow(_ context.Context, m *flow.Flow) error {
 	s.messages = append(s.messages, m)
 	return nil
 }
 
-func (s *sseTestFlowStore) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (s *sseTestFlowStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	s.updates = append(s.updates, sseFlowUpdateRecord{flowID: id, update: update})
 	return nil
 }
@@ -709,9 +709,6 @@ func TestRecordSSEReceive(t *testing.T) {
 	if update.update.State != "active" {
 		t.Errorf("update State = %q, want %q", update.update.State, "active")
 	}
-	if update.update.FlowType != "stream" {
-		t.Errorf("update FlowType = %q, want %q", update.update.FlowType, "stream")
-	}
 	if update.update.Tags["streaming_type"] != "sse" {
 		t.Errorf("update Tags[streaming_type] = %q, want %q", update.update.Tags["streaming_type"], "sse")
 	}
@@ -727,8 +724,8 @@ func TestRecordSSEReceive(t *testing.T) {
 		t.Fatalf("expected 1 message, got %d", len(store.messages))
 	}
 	msg := store.messages[0]
-	if msg.FlowID != "flow-1" {
-		t.Errorf("message FlowID = %q, want %q", msg.FlowID, "flow-1")
+	if msg.StreamID != "flow-1" {
+		t.Errorf("message StreamID = %q, want %q", msg.StreamID, "flow-1")
 	}
 	if msg.Direction != "receive" {
 		t.Errorf("message Direction = %q, want %q", msg.Direction, "receive")
@@ -819,8 +816,8 @@ func TestRecordSSEEvent(t *testing.T) {
 	}
 
 	msg := store.messages[0]
-	if msg.FlowID != "flow-1" {
-		t.Errorf("FlowID = %q, want %q", msg.FlowID, "flow-1")
+	if msg.StreamID != "flow-1" {
+		t.Errorf("StreamID = %q, want %q", msg.StreamID, "flow-1")
 	}
 	if msg.Sequence != 2 {
 		t.Errorf("Sequence = %d, want %d", msg.Sequence, 2)
@@ -2344,8 +2341,8 @@ func TestBuildSSEEventMessage(t *testing.T) {
 
 	msg := buildSSEEventMessage("flow-1", 3, event)
 
-	if msg.FlowID != "flow-1" {
-		t.Errorf("FlowID = %q, want %q", msg.FlowID, "flow-1")
+	if msg.StreamID != "flow-1" {
+		t.Errorf("StreamID = %q, want %q", msg.StreamID, "flow-1")
 	}
 	if msg.Sequence != 3 {
 		t.Errorf("Sequence = %d, want 3", msg.Sequence)

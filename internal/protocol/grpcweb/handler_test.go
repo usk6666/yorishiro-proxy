@@ -14,8 +14,8 @@ import (
 
 // mockFlowWriter records calls to SaveFlow and AppendMessage for test verification.
 type mockFlowWriter struct {
-	flows     []*flow.Flow
-	messages  []*flow.Message
+	flows     []*flow.Stream
+	messages  []*flow.Flow
 	updates   []mockFlowUpdate
 	saveErr   error
 	appendErr error
@@ -23,10 +23,10 @@ type mockFlowWriter struct {
 
 type mockFlowUpdate struct {
 	id     string
-	update flow.FlowUpdate
+	update flow.StreamUpdate
 }
 
-func (m *mockFlowWriter) SaveFlow(_ context.Context, f *flow.Flow) error {
+func (m *mockFlowWriter) SaveStream(_ context.Context, f *flow.Stream) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
@@ -35,12 +35,12 @@ func (m *mockFlowWriter) SaveFlow(_ context.Context, f *flow.Flow) error {
 	return nil
 }
 
-func (m *mockFlowWriter) UpdateFlow(_ context.Context, id string, update flow.FlowUpdate) error {
+func (m *mockFlowWriter) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	m.updates = append(m.updates, mockFlowUpdate{id: id, update: update})
 	return nil
 }
 
-func (m *mockFlowWriter) AppendMessage(_ context.Context, msg *flow.Message) error {
+func (m *mockFlowWriter) SaveFlow(_ context.Context, msg *flow.Flow) error {
 	if m.appendErr != nil {
 		return m.appendErr
 	}
@@ -103,9 +103,6 @@ func TestRecordSession_Unary(t *testing.T) {
 	fl := store.flows[0]
 	if fl.Protocol != "gRPC-Web" {
 		t.Errorf("Protocol = %q, want %q", fl.Protocol, "gRPC-Web")
-	}
-	if fl.FlowType != "unary" {
-		t.Errorf("FlowType = %q, want %q", fl.FlowType, "unary")
 	}
 	if fl.State != "complete" {
 		t.Errorf("State = %q, want %q", fl.State, "complete")
@@ -216,9 +213,6 @@ func TestRecordSession_Base64(t *testing.T) {
 	if len(store.flows) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(store.flows))
 	}
-	if store.flows[0].FlowType != "unary" {
-		t.Errorf("FlowType = %q, want %q", store.flows[0].FlowType, "unary")
-	}
 
 	if len(store.messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(store.messages))
@@ -264,10 +258,6 @@ func TestRecordSession_ServerStreaming(t *testing.T) {
 
 	if err := h.RecordSession(context.Background(), info); err != nil {
 		t.Fatalf("RecordSession() error = %v", err)
-	}
-
-	if store.flows[0].FlowType != "stream" {
-		t.Errorf("FlowType = %q, want %q", store.flows[0].FlowType, "stream")
 	}
 
 	// 1 send + 3 receive = 4 messages.
@@ -324,10 +314,6 @@ func TestRecordSession_TrailersOnly(t *testing.T) {
 
 	if err := h.RecordSession(context.Background(), info); err != nil {
 		t.Fatalf("RecordSession() error = %v", err)
-	}
-
-	if store.flows[0].FlowType != "unary" {
-		t.Errorf("FlowType = %q, want %q", store.flows[0].FlowType, "unary")
 	}
 
 	// 1 send (no frames) + 1 receive (no frames) = 2 messages.
@@ -444,10 +430,6 @@ func TestRecordSession_BidirectionalStreaming(t *testing.T) {
 
 	if err := h.RecordSession(context.Background(), info); err != nil {
 		t.Fatalf("RecordSession() error = %v", err)
-	}
-
-	if store.flows[0].FlowType != "bidirectional" {
-		t.Errorf("FlowType = %q, want %q", store.flows[0].FlowType, "bidirectional")
 	}
 
 	// 2 send + 2 receive = 4 messages.

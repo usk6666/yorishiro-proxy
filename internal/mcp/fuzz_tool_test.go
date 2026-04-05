@@ -16,7 +16,7 @@ func TestValidateFuzzParams_AttackType(t *testing.T) {
 	// base returns a valid fuzzParams with all required fields populated.
 	base := func() fuzzParams {
 		return fuzzParams{
-			FlowID:     "flow-1",
+			StreamID:   "flow-1",
 			AttackType: "sequential",
 			Positions: []fuzzer.Position{
 				{ID: "pos-0", Location: "body_regex"},
@@ -79,48 +79,52 @@ func TestValidateFuzzParams_AttackType(t *testing.T) {
 // fuzzTestStore is a minimal flow.Store stub used only by fuzz_tool tests.
 // It returns pre-configured flows and messages; unimplemented methods panic.
 type fuzzTestStore struct {
-	flow              *flow.Flow
-	messages          []*flow.Message
+	flow              *flow.Stream
+	messages          []*flow.Flow
 	getMessagesCalled bool
 }
 
-func (s *fuzzTestStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) {
+func (s *fuzzTestStore) GetStream(_ context.Context, _ string) (*flow.Stream, error) {
 	return s.flow, nil
 }
 
-func (s *fuzzTestStore) GetMessages(_ context.Context, _ string, _ flow.MessageListOptions) ([]*flow.Message, error) {
+func (s *fuzzTestStore) GetFlow(_ context.Context, _ string) (*flow.Flow, error) {
+	return nil, nil
+}
+
+func (s *fuzzTestStore) GetFlows(_ context.Context, _ string, _ flow.FlowListOptions) ([]*flow.Flow, error) {
 	s.getMessagesCalled = true
 	return s.messages, nil
 }
 
 // The remaining Store interface methods are unused in these tests.
-func (s *fuzzTestStore) ListFlows(context.Context, flow.ListOptions) ([]*flow.Flow, error) {
+func (s *fuzzTestStore) ListStreams(context.Context, flow.StreamListOptions) ([]*flow.Stream, error) {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) CountFlows(context.Context, flow.ListOptions) (int, error) {
+func (s *fuzzTestStore) CountStreams(context.Context, flow.StreamListOptions) (int, error) {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) CountMessages(context.Context, string) (int, error) {
+func (s *fuzzTestStore) CountFlows(context.Context, string) (int, error) {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) SaveFlow(context.Context, *flow.Flow) error { panic("not implemented") }
-func (s *fuzzTestStore) UpdateFlow(context.Context, string, flow.FlowUpdate) error {
+func (s *fuzzTestStore) SaveStream(context.Context, *flow.Stream) error { panic("not implemented") }
+func (s *fuzzTestStore) UpdateStream(context.Context, string, flow.StreamUpdate) error {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) AppendMessage(context.Context, *flow.Message) error {
+func (s *fuzzTestStore) SaveFlow(context.Context, *flow.Flow) error {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) DeleteFlow(context.Context, string) error { panic("not implemented") }
-func (s *fuzzTestStore) DeleteAllFlows(context.Context) (int64, error) {
+func (s *fuzzTestStore) DeleteStream(context.Context, string) error { panic("not implemented") }
+func (s *fuzzTestStore) DeleteAllStreams(context.Context) (int64, error) {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) DeleteFlowsByProtocol(context.Context, string) (int64, error) {
+func (s *fuzzTestStore) DeleteStreamsByProtocol(context.Context, string) (int64, error) {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) DeleteFlowsOlderThan(context.Context, time.Time) (int64, error) {
+func (s *fuzzTestStore) DeleteStreamsOlderThan(context.Context, time.Time) (int64, error) {
 	panic("not implemented")
 }
-func (s *fuzzTestStore) DeleteExcessFlows(context.Context, int) (int64, error) {
+func (s *fuzzTestStore) DeleteExcessStreams(context.Context, int) (int64, error) {
 	panic("not implemented")
 }
 func (s *fuzzTestStore) SaveMacro(context.Context, string, string, string) error {
@@ -138,17 +142,17 @@ func TestHandleFuzzStart_RejectsGRPCFlow(t *testing.T) {
 	t.Parallel()
 
 	store := &fuzzTestStore{
-		flow: &flow.Flow{
+		flow: &flow.Stream{
 			ID:       "flow-grpc-1",
 			Protocol: "gRPC",
 		},
-		messages: []*flow.Message{},
+		messages: []*flow.Flow{},
 	}
 
 	srv := &Server{deps: &deps{store: store}}
 
 	params := fuzzParams{
-		FlowID:     "flow-grpc-1",
+		StreamID:   "flow-grpc-1",
 		AttackType: "sequential",
 		Positions: []fuzzer.Position{
 			{ID: "pos-0", Location: "body_regex"},
@@ -176,11 +180,11 @@ func TestHandleFuzzStart_AllowsHTTPFlow(t *testing.T) {
 	t.Parallel()
 
 	store := &fuzzTestStore{
-		flow: &flow.Flow{
+		flow: &flow.Stream{
 			ID:       "flow-http-1",
 			Protocol: "HTTP/1.x",
 		},
-		messages: []*flow.Message{},
+		messages: []*flow.Flow{},
 	}
 
 	// Server with store but no fuzzRunner — should pass the gRPC guard
@@ -188,7 +192,7 @@ func TestHandleFuzzStart_AllowsHTTPFlow(t *testing.T) {
 	srv := &Server{deps: &deps{store: store}}
 
 	params := fuzzParams{
-		FlowID:     "flow-http-1",
+		StreamID:   "flow-http-1",
 		AttackType: "sequential",
 		Positions: []fuzzer.Position{
 			{ID: "pos-0", Location: "body_regex"},
@@ -216,12 +220,11 @@ func TestHandleFuzzStart_GRPCWebUnaryAllowed(t *testing.T) {
 	t.Parallel()
 
 	store := &fuzzTestStore{
-		flow: &flow.Flow{
+		flow: &flow.Stream{
 			ID:       "flow-grpcweb-1",
 			Protocol: "gRPC-Web",
-			FlowType: "unary",
 		},
-		messages: []*flow.Message{},
+		messages: []*flow.Flow{},
 	}
 
 	// Server with store but no fuzzRunner — should pass protocol checks
@@ -229,7 +232,7 @@ func TestHandleFuzzStart_GRPCWebUnaryAllowed(t *testing.T) {
 	srv := &Server{deps: &deps{store: store}}
 
 	params := fuzzParams{
-		FlowID:     "flow-grpcweb-1",
+		StreamID:   "flow-grpcweb-1",
 		AttackType: "sequential",
 		Positions: []fuzzer.Position{
 			{ID: "pos-0", Location: "body_regex"},
@@ -252,34 +255,6 @@ func TestHandleFuzzStart_GRPCWebUnaryAllowed(t *testing.T) {
 	}
 }
 
-func TestHandleFuzzStart_GRPCWebStreamingRejected(t *testing.T) {
-	t.Parallel()
-
-	store := &fuzzTestStore{
-		flow: &flow.Flow{
-			ID:       "flow-grpcweb-stream-1",
-			Protocol: "gRPC-Web",
-			FlowType: "server-streaming",
-		},
-		messages: []*flow.Message{},
-	}
-
-	srv := &Server{deps: &deps{store: store}}
-
-	params := fuzzParams{
-		FlowID:     "flow-grpcweb-stream-1",
-		AttackType: "sequential",
-		Positions: []fuzzer.Position{
-			{ID: "pos-0", Location: "body_regex"},
-		},
-	}
-
-	_, _, err := srv.handleFuzzStart(context.Background(), params)
-	if err == nil {
-		t.Fatal("expected error for streaming gRPC-Web flow, got nil")
-	}
-
-	if !strings.Contains(err.Error(), "gRPC-Web streaming flows") {
-		t.Errorf("error = %q, want to contain 'gRPC-Web streaming flows'", err.Error())
-	}
-}
+// TestHandleFuzzStart_GRPCWebStreamingRejected was removed: FlowType is abolished
+// in the data model rewrite (USK-577). The MITM proxy cannot distinguish
+// unary from streaming gRPC-Web, so the rejection check no longer applies.

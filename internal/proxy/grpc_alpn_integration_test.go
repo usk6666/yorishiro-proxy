@@ -198,13 +198,13 @@ func buildGRPCFrame(t *testing.T, jsonStr string) []byte {
 }
 
 // pollGRPCALPNFlows polls the store until the expected number of gRPC flows appear.
-func pollGRPCALPNFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Flow {
+func pollGRPCALPNFlows(t *testing.T, ctx context.Context, store flow.Store, wantCount int) []*flow.Stream {
 	t.Helper()
-	var flows []*flow.Flow
+	var flows []*flow.Stream
 	var err error
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		flows, err = store.ListFlows(ctx, flow.ListOptions{Protocol: "gRPC", Limit: 100})
+		flows, err = store.ListStreams(ctx, flow.StreamListOptions{Protocol: "gRPC", Limit: 100})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}
@@ -217,11 +217,11 @@ func pollGRPCALPNFlows(t *testing.T, ctx context.Context, store flow.Store, want
 }
 
 // pollGRPCALPNFlowMessages polls until both send and receive messages appear.
-func pollGRPCALPNFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Message) {
+func pollGRPCALPNFlowMessages(t *testing.T, ctx context.Context, store flow.Store, flowID string) (send, recv *flow.Flow) {
 	t.Helper()
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		msgs, err := store.GetMessages(ctx, flowID, flow.MessageListOptions{})
+		msgs, err := store.GetFlows(ctx, flowID, flow.FlowListOptions{})
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
 		}
@@ -341,11 +341,11 @@ func TestIntegration_GRPC_TLS_ALPN_UnaryProxy(t *testing.T) {
 	// Verify messages are recorded.
 	// gRPC progressive recording (USK-520) records frames individually.
 	// Poll for at least one message in each direction.
-	var allMsgs []*flow.Message
+	var allMsgs []*flow.Flow
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
 		var msgErr error
-		allMsgs, msgErr = store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		allMsgs, msgErr = store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if msgErr != nil {
 			t.Fatalf("GetMessages: %v", msgErr)
 		}
@@ -521,11 +521,11 @@ func TestIntegration_GRPC_TLS_ALPN_FlowRecording(t *testing.T) {
 	// - seq=1+: individual frame messages with protobuf body
 	// - final: trailers receive message
 	// Wait for at least 3 messages (headers + request frame + response/trailers).
-	var allMsgs []*flow.Message
+	var allMsgs []*flow.Flow
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
 		var msgErr error
-		allMsgs, msgErr = store.GetMessages(ctx, fl.ID, flow.MessageListOptions{})
+		allMsgs, msgErr = store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if msgErr != nil {
 			t.Fatalf("GetMessages: %v", msgErr)
 		}
@@ -539,7 +539,7 @@ func TestIntegration_GRPC_TLS_ALPN_FlowRecording(t *testing.T) {
 	}
 
 	// Find a send message with body (frame data, not the headers-only message).
-	var sendWithBody *flow.Message
+	var sendWithBody *flow.Flow
 	for _, m := range allMsgs {
 		if m.Direction == "send" && len(m.Body) > 0 {
 			sendWithBody = m
@@ -559,7 +559,7 @@ func TestIntegration_GRPC_TLS_ALPN_FlowRecording(t *testing.T) {
 	}
 
 	// Find a receive message with body (response frame data).
-	var recvWithBody *flow.Message
+	var recvWithBody *flow.Flow
 	for _, m := range allMsgs {
 		if m.Direction == "receive" && len(m.Body) > 0 {
 			recvWithBody = m
@@ -571,7 +571,7 @@ func TestIntegration_GRPC_TLS_ALPN_FlowRecording(t *testing.T) {
 	}
 
 	// Verify the headers-only send message has Content-Type.
-	var headerMsg *flow.Message
+	var headerMsg *flow.Flow
 	for _, m := range allMsgs {
 		if m.Direction == "send" && m.Headers != nil {
 			headerMsg = m
@@ -719,10 +719,10 @@ func TestIntegration_GRPC_TLS_ALPN_ErrorPath_H1Only(t *testing.T) {
 	}
 
 	// Poll for flow recording instead of fixed sleep.
-	var allFlows []*flow.Flow
+	var allFlows []*flow.Stream
 	for i := 0; i < 60; i++ {
 		time.Sleep(100 * time.Millisecond)
-		allFlows, err = store.ListFlows(ctx, flow.ListOptions{Limit: 100})
+		allFlows, err = store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
 		if err != nil {
 			t.Fatalf("ListFlows: %v", err)
 		}

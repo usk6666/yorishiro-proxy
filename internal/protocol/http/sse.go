@@ -454,7 +454,7 @@ func (h *Handler) recordSSEEventWithVariant(ctx context.Context, flowID string, 
 		origSeq := int(seq.Add(1) - 1)
 		origMsg := buildSSEEventMessage(flowID, origSeq, origEvent)
 		origMsg.Metadata["variant"] = "original"
-		if err := h.Store.AppendMessage(ctx, origMsg); err != nil {
+		if err := h.Store.SaveFlow(ctx, origMsg); err != nil {
 			logger.Error("SSE original event message save failed",
 				"flow_id", flowID, "sequence", origSeq, "error", err)
 		}
@@ -462,7 +462,7 @@ func (h *Handler) recordSSEEventWithVariant(ctx context.Context, flowID string, 
 		modSeq := int(seq.Add(1) - 1)
 		modMsg := buildSSEEventMessage(flowID, modSeq, event)
 		modMsg.Metadata["variant"] = "modified"
-		if err := h.Store.AppendMessage(ctx, modMsg); err != nil {
+		if err := h.Store.SaveFlow(ctx, modMsg); err != nil {
 			logger.Error("SSE modified event message save failed",
 				"flow_id", flowID, "sequence", modSeq, "error", err)
 		}
@@ -593,19 +593,18 @@ func (h *Handler) recordSSEReceive(ctx context.Context, sendResult *sendRecordRe
 	}
 	tags = addSSETags(tags)
 
-	update := flow.FlowUpdate{
+	update := flow.StreamUpdate{
 		State:                "active",
-		FlowType:             "stream",
 		ServerAddr:           fwd.serverAddr,
 		TLSServerCertSubject: tlsCertSubject,
 		Tags:                 tags,
 	}
-	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+	if err := h.Store.UpdateStream(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("SSE flow update failed", "error", err)
 	}
 
-	recvMsg := &flow.Message{
-		FlowID:     sendResult.flowID,
+	recvMsg := &flow.Flow{
+		StreamID:   sendResult.flowID,
 		Sequence:   sendResult.recvSequence,
 		Direction:  "receive",
 		Timestamp:  start,
@@ -613,7 +612,7 @@ func (h *Handler) recordSSEReceive(ctx context.Context, sendResult *sendRecordRe
 		Headers:    rawHeadersToMap(fwd.resp.Headers),
 		Metadata:   map[string]string{"sse_type": "headers"},
 	}
-	if err := h.Store.AppendMessage(ctx, recvMsg); err != nil {
+	if err := h.Store.SaveFlow(ctx, recvMsg); err != nil {
 		logger.Error("SSE receive message save failed", "error", err)
 	}
 }
@@ -634,14 +633,14 @@ func (h *Handler) completeSSEFlow(ctx context.Context, sendResult *sendRecordRes
 		tags["sse_events_recorded"] = strconv.Itoa(eventsRecorded)
 	}
 
-	update := flow.FlowUpdate{
+	update := flow.StreamUpdate{
 		State:                "complete",
 		Duration:             duration,
 		ServerAddr:           fwd.serverAddr,
 		TLSServerCertSubject: tlsCertSubject,
 		Tags:                 tags,
 	}
-	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+	if err := h.Store.UpdateStream(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("SSE flow completion failed", "error", err)
 	}
 }
@@ -660,19 +659,19 @@ func (h *Handler) completeSSEFlowOnDrop(ctx context.Context, sendResult *sendRec
 	tags = addSSETags(tags)
 	tags["intercept_action"] = "drop"
 
-	update := flow.FlowUpdate{
+	update := flow.StreamUpdate{
 		State:                "complete",
 		Duration:             duration,
 		ServerAddr:           fwd.serverAddr,
 		TLSServerCertSubject: tlsCertSubject,
 		Tags:                 tags,
 	}
-	if err := h.Store.UpdateFlow(ctx, sendResult.flowID, update); err != nil {
+	if err := h.Store.UpdateStream(ctx, sendResult.flowID, update); err != nil {
 		logger.Error("SSE flow completion after drop failed", "error", err)
 	}
 }
 
-func buildSSEEventMessage(flowID string, msgSeq int, event *SSEEvent) *flow.Message {
+func buildSSEEventMessage(flowID string, msgSeq int, event *SSEEvent) *flow.Flow {
 	metadata := map[string]string{"sse_type": "event"}
 	if event.EventType != "" {
 		metadata["sse_event"] = event.EventType
@@ -691,8 +690,8 @@ func buildSSEEventMessage(flowID string, msgSeq int, event *SSEEvent) *flow.Mess
 		truncated = true
 	}
 
-	return &flow.Message{
-		FlowID:        flowID,
+	return &flow.Flow{
+		StreamID:      flowID,
 		Sequence:      msgSeq,
 		Direction:     "receive",
 		Timestamp:     time.Now(),
@@ -711,7 +710,7 @@ func (h *Handler) recordSSEEvent(ctx context.Context, flowID string, event *SSEE
 	msgSeq := int(seq.Add(1) - 1)
 	msg := buildSSEEventMessage(flowID, msgSeq, event)
 
-	if err := h.Store.AppendMessage(ctx, msg); err != nil {
+	if err := h.Store.SaveFlow(ctx, msg); err != nil {
 		logger.Error("SSE event message save failed",
 			"flow_id", flowID, "sequence", msgSeq, "error", err)
 	}

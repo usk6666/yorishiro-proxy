@@ -120,20 +120,20 @@ func (s *SQLiteStore) enqueueWrite(ctx context.Context, fn func(ctx context.Cont
 	}
 }
 
-// SaveFlow persists a new flow.
-func (s *SQLiteStore) SaveFlow(ctx context.Context, fl *Flow) error {
-	if fl.ID == "" {
-		fl.ID = uuid.New().String()
+// SaveStream persists a new stream.
+func (s *SQLiteStore) SaveStream(ctx context.Context, st *Stream) error {
+	if st.ID == "" {
+		st.ID = uuid.New().String()
 	}
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
-		return s.saveFlowSync(ctx, fl)
+		return s.saveStreamSync(ctx, st)
 	})
 }
 
-func (s *SQLiteStore) saveFlowSync(ctx context.Context, fl *Flow) error {
+func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 	tags := "{}"
-	if fl.Tags != nil {
-		tagsJSON, err := json.Marshal(fl.Tags)
+	if st.Tags != nil {
+		tagsJSON, err := json.Marshal(st.Tags)
 		if err != nil {
 			return fmt.Errorf("marshal tags: %w", err)
 		}
@@ -141,35 +141,30 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, fl *Flow) error {
 	}
 
 	var clientAddr, serverAddr, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject string
-	if fl.ConnInfo != nil {
-		clientAddr = fl.ConnInfo.ClientAddr
-		serverAddr = fl.ConnInfo.ServerAddr
-		tlsVersion = fl.ConnInfo.TLSVersion
-		tlsCipher = fl.ConnInfo.TLSCipher
-		tlsALPN = fl.ConnInfo.TLSALPN
-		tlsCertSubject = fl.ConnInfo.TLSServerCertSubject
+	if st.ConnInfo != nil {
+		clientAddr = st.ConnInfo.ClientAddr
+		serverAddr = st.ConnInfo.ServerAddr
+		tlsVersion = st.ConnInfo.TLSVersion
+		tlsCipher = st.ConnInfo.TLSCipher
+		tlsALPN = st.ConnInfo.TLSALPN
+		tlsCertSubject = st.ConnInfo.TLSServerCertSubject
 	}
 
-	flowType := fl.FlowType
-	if flowType == "" {
-		flowType = "unary"
-	}
-	state := fl.State
+	state := st.State
 	if state == "" {
 		state = "complete"
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO flows (id, conn_id, protocol, scheme, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		fl.ID,
-		fl.ConnID,
-		fl.Protocol,
-		fl.Scheme,
-		flowType,
+		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		st.ID,
+		st.ConnID,
+		st.Protocol,
+		st.Scheme,
 		state,
-		fl.Timestamp.UTC().Format(time.RFC3339Nano),
-		fl.Duration.Milliseconds(),
+		st.Timestamp.UTC().Format(time.RFC3339Nano),
+		st.Duration.Milliseconds(),
 		tags,
 		clientAddr,
 		serverAddr,
@@ -177,19 +172,19 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, fl *Flow) error {
 		tlsCipher,
 		tlsALPN,
 		tlsCertSubject,
-		fl.BlockedBy,
-		fl.SendMs,
-		fl.WaitMs,
-		fl.ReceiveMs,
+		st.BlockedBy,
+		st.SendMs,
+		st.WaitMs,
+		st.ReceiveMs,
 	)
 	if err != nil {
-		return fmt.Errorf("insert flow: %w", err)
+		return fmt.Errorf("insert stream: %w", err)
 	}
 	return nil
 }
 
-// UpdateFlow applies partial updates to an existing flow.
-func (s *SQLiteStore) UpdateFlow(ctx context.Context, id string, update FlowUpdate) error {
+// UpdateStream applies partial updates to an existing stream.
+func (s *SQLiteStore) UpdateStream(ctx context.Context, id string, update StreamUpdate) error {
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
 		var sets []string
 		var args []interface{}
@@ -197,10 +192,6 @@ func (s *SQLiteStore) UpdateFlow(ctx context.Context, id string, update FlowUpda
 		if update.State != "" {
 			sets = append(sets, "state = ?")
 			args = append(args, update.State)
-		}
-		if update.FlowType != "" {
-			sets = append(sets, "flow_type = ?")
-			args = append(args, update.FlowType)
 		}
 		if update.Duration != 0 {
 			sets = append(sets, "duration_ms = ?")
@@ -240,49 +231,49 @@ func (s *SQLiteStore) UpdateFlow(ctx context.Context, id string, update FlowUpda
 		}
 
 		args = append(args, id)
-		query := fmt.Sprintf("UPDATE flows SET %s WHERE id = ?", strings.Join(sets, ", "))
+		query := fmt.Sprintf("UPDATE streams SET %s WHERE id = ?", strings.Join(sets, ", "))
 		_, err := s.db.ExecContext(ctx, query, args...)
 		if err != nil {
-			return fmt.Errorf("update flow %s: %w", id, err)
+			return fmt.Errorf("update stream %s: %w", id, err)
 		}
 		return nil
 	})
 }
 
-// GetFlow retrieves a flow by ID. It accepts either a full UUID (36 chars)
+// GetStream retrieves a stream by ID. It accepts either a full UUID (36 chars)
 // or an 8-character prefix. For prefix lookups, the ID must match exactly
-// one flow; ambiguous prefixes return an error.
-func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
+// one stream; ambiguous prefixes return an error.
+func (s *SQLiteStore) GetStream(ctx context.Context, id string) (*Stream, error) {
 	// Try exact match first.
 	row := s.db.QueryRowContext(ctx,
-		`SELECT `+flowColumns+` FROM flows WHERE id = ?`, id)
-	fl, err := scanFlow(row)
+		`SELECT `+streamColumns+` FROM streams WHERE id = ?`, id)
+	st, err := scanStream(row)
 	if err == nil {
-		return fl, nil
+		return st, nil
 	}
 
 	// If the input is exactly 8 characters and exact match failed,
 	// attempt prefix resolution.
 	if len(id) == 8 {
-		resolved, resolveErr := s.resolvePrefix(ctx, id)
+		resolved, resolveErr := s.resolveStreamPrefix(ctx, id)
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
 		row = s.db.QueryRowContext(ctx,
-			`SELECT `+flowColumns+` FROM flows WHERE id = ?`, resolved)
-		return scanFlow(row)
+			`SELECT `+streamColumns+` FROM streams WHERE id = ?`, resolved)
+		return scanStream(row)
 	}
 
 	return nil, err
 }
 
-// resolvePrefix searches for flows matching the given 8-character ID prefix.
-// Returns the full ID if exactly one flow matches, or an error otherwise.
-func (s *SQLiteStore) resolvePrefix(ctx context.Context, prefix string) (string, error) {
+// resolveStreamPrefix searches for streams matching the given 8-character ID prefix.
+// Returns the full ID if exactly one stream matches, or an error otherwise.
+func (s *SQLiteStore) resolveStreamPrefix(ctx context.Context, prefix string) (string, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM flows WHERE id LIKE ? LIMIT 2`, prefix+"%")
+		`SELECT id FROM streams WHERE id LIKE ? LIMIT 2`, prefix+"%")
 	if err != nil {
-		return "", fmt.Errorf("resolve flow ID prefix: %w", err)
+		return "", fmt.Errorf("resolve stream ID prefix: %w", err)
 	}
 	defer rows.Close()
 
@@ -290,41 +281,41 @@ func (s *SQLiteStore) resolvePrefix(ctx context.Context, prefix string) (string,
 	for rows.Next() {
 		var matchID string
 		if err := rows.Scan(&matchID); err != nil {
-			return "", fmt.Errorf("scan flow ID: %w", err)
+			return "", fmt.Errorf("scan stream ID: %w", err)
 		}
 		matches = append(matches, matchID)
 	}
 	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("resolve flow ID prefix: %w", err)
+		return "", fmt.Errorf("resolve stream ID prefix: %w", err)
 	}
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("flow not found")
+		return "", fmt.Errorf("stream not found")
 	case 1:
 		return matches[0], nil
 	default:
-		return "", fmt.Errorf("ambiguous flow ID prefix %q: matched %d flows", prefix, len(matches))
+		return "", fmt.Errorf("ambiguous stream ID prefix %q: matched %d streams", prefix, len(matches))
 	}
 }
 
-// ValidateFlowID checks that the given ID is a valid flow ID format:
+// ValidateStreamID checks that the given ID is a valid stream ID format:
 // either a full UUID (36 chars) or an 8-character prefix.
 // Returns an error for lengths 1-7 and 9-35.
-func ValidateFlowID(id string) error {
+func ValidateStreamID(id string) error {
 	n := len(id)
 	if n == 36 || n == 8 {
 		return nil
 	}
-	return fmt.Errorf("invalid flow ID: must be full UUID (36 chars) or 8-char prefix")
+	return fmt.Errorf("invalid stream ID: must be full UUID (36 chars) or 8-char prefix")
 }
 
-// flowColumns is the list of columns selected in flow queries.
-const flowColumns = `id, conn_id, protocol, scheme, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms`
+// streamColumns is the list of columns selected in stream queries.
+const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms`
 
-// buildFlowWhereClause constructs a SQL WHERE clause from ListOptions.
-// Method, URLPattern, and StatusCode are matched via EXISTS subqueries on messages.
-func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
+// buildStreamWhereClause constructs a SQL WHERE clause from StreamListOptions.
+// Method, URLPattern, and StatusCode are matched via EXISTS subqueries on flows.
+func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 	var conditions []string
 	var args []interface{}
 
@@ -337,16 +328,16 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 		args = append(args, opts.Scheme)
 	}
 	if opts.Method != "" {
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND m.method = ?)")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND m.method = ?)")
 		args = append(args, opts.Method)
 	}
 	if opts.URLPattern != "" {
 		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.URLPattern)
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
 		args = append(args, "%"+escaped+"%")
 	}
 	if opts.StatusCode != 0 {
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
 		args = append(args, opts.StatusCode)
 	}
 	if opts.BlockedBy != "" {
@@ -373,7 +364,7 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 	}
 	if opts.Host != "" {
 		// Match against server_addr (host:port or host) or the host portion
-		// of the URL stored in send messages. server_addr may contain a port,
+		// of the URL stored in send flows. server_addr may contain a port,
 		// so we check both exact match and host-prefix match (host:*).
 		// For URL-based matching, we use multiple LIKE patterns with right-side
 		// boundary anchoring to avoid subdomain false positives:
@@ -382,7 +373,7 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 		//   %://host:  — port number follows
 		//   %://host   — end of string (bare host)
 		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.Host)
-		conditions = append(conditions, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.flow_id = s.id AND m.direction = 'send' AND (m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\')))")
+		conditions = append(conditions, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND (m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\')))")
 		args = append(args, opts.Host, escaped+":%", "%://"+escaped+"/%", "%://"+escaped+"?%", "%://"+escaped+":%", "%://"+escaped)
 	}
 
@@ -393,27 +384,27 @@ func buildFlowWhereClause(opts ListOptions) (string, []interface{}) {
 	return clause, args
 }
 
-// validFlowSortColumns maps allowed SortBy values to SQL column expressions.
-var validFlowSortColumns = map[string]string{
+// validStreamSortColumns maps allowed SortBy values to SQL column expressions.
+var validStreamSortColumns = map[string]string{
 	"timestamp":   "s.timestamp",
 	"duration_ms": "s.duration_ms",
 }
 
-// flowOrderClause returns the ORDER BY clause for flow list queries.
+// streamOrderClause returns the ORDER BY clause for stream list queries.
 // Invalid or empty sortBy values fall back to timestamp descending.
-func flowOrderClause(sortBy string) string {
-	if col, ok := validFlowSortColumns[sortBy]; ok {
+func streamOrderClause(sortBy string) string {
+	if col, ok := validStreamSortColumns[sortBy]; ok {
 		return " ORDER BY " + col + " DESC"
 	}
 	return " ORDER BY s.timestamp DESC"
 }
 
-// ListFlows returns flows matching the given options.
-func (s *SQLiteStore) ListFlows(ctx context.Context, opts ListOptions) ([]*Flow, error) {
-	whereClause, args := buildFlowWhereClause(opts)
+// ListStreams returns streams matching the given options.
+func (s *SQLiteStore) ListStreams(ctx context.Context, opts StreamListOptions) ([]*Stream, error) {
+	whereClause, args := buildStreamWhereClause(opts)
 
-	query := "SELECT " + flowColumns + " FROM flows s" + whereClause
-	query += flowOrderClause(opts.SortBy)
+	query := "SELECT " + streamColumns + " FROM streams s" + whereClause
+	query += streamOrderClause(opts.SortBy)
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -424,48 +415,48 @@ func (s *SQLiteStore) ListFlows(ctx context.Context, opts ListOptions) ([]*Flow,
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list flows: %w", err)
+		return nil, fmt.Errorf("list streams: %w", err)
 	}
 	defer rows.Close()
 
-	var flows []*Flow
+	var streams []*Stream
 	for rows.Next() {
-		fl, err := scanFlow(rows)
+		st, err := scanStream(rows)
 		if err != nil {
 			return nil, err
 		}
-		flows = append(flows, fl)
+		streams = append(streams, st)
 	}
-	return flows, rows.Err()
+	return streams, rows.Err()
 }
 
-// CountFlows returns the total number of flows matching the given filter options.
-func (s *SQLiteStore) CountFlows(ctx context.Context, opts ListOptions) (int, error) {
-	whereClause, args := buildFlowWhereClause(opts)
+// CountStreams returns the total number of streams matching the given filter options.
+func (s *SQLiteStore) CountStreams(ctx context.Context, opts StreamListOptions) (int, error) {
+	whereClause, args := buildStreamWhereClause(opts)
 
-	query := "SELECT COUNT(*) FROM flows s" + whereClause
+	query := "SELECT COUNT(*) FROM streams s" + whereClause
 
 	var count int
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count flows: %w", err)
+		return 0, fmt.Errorf("count streams: %w", err)
 	}
 	return count, nil
 }
 
-// DeleteFlow removes a flow by ID (messages are cascade-deleted).
-func (s *SQLiteStore) DeleteFlow(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM flows WHERE id = ?", id)
+// DeleteStream removes a stream by ID (flows are cascade-deleted).
+func (s *SQLiteStore) DeleteStream(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM streams WHERE id = ?", id)
 	if err != nil {
-		return fmt.Errorf("delete flow %s: %w", id, err)
+		return fmt.Errorf("delete stream %s: %w", id, err)
 	}
 	return nil
 }
 
-// DeleteAllFlows removes all flows and returns the number of deleted rows.
-func (s *SQLiteStore) DeleteAllFlows(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM flows")
+// DeleteAllStreams removes all streams and returns the number of deleted rows.
+func (s *SQLiteStore) DeleteAllStreams(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM streams")
 	if err != nil {
-		return 0, fmt.Errorf("delete all flows: %w", err)
+		return 0, fmt.Errorf("delete all streams: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -474,12 +465,12 @@ func (s *SQLiteStore) DeleteAllFlows(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// DeleteFlowsByProtocol removes flows matching the given protocol.
-func (s *SQLiteStore) DeleteFlowsByProtocol(ctx context.Context, protocol string) (int64, error) {
+// DeleteStreamsByProtocol removes streams matching the given protocol.
+func (s *SQLiteStore) DeleteStreamsByProtocol(ctx context.Context, protocol string) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM flows WHERE protocol = ?", protocol)
+		"DELETE FROM streams WHERE protocol = ?", protocol)
 	if err != nil {
-		return 0, fmt.Errorf("delete flows by protocol %q: %w", protocol, err)
+		return 0, fmt.Errorf("delete streams by protocol %q: %w", protocol, err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -488,13 +479,13 @@ func (s *SQLiteStore) DeleteFlowsByProtocol(ctx context.Context, protocol string
 	return n, nil
 }
 
-// DeleteFlowsOlderThan removes flows with timestamps before the given cutoff.
-func (s *SQLiteStore) DeleteFlowsOlderThan(ctx context.Context, before time.Time) (int64, error) {
+// DeleteStreamsOlderThan removes streams with timestamps before the given cutoff.
+func (s *SQLiteStore) DeleteStreamsOlderThan(ctx context.Context, before time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM flows WHERE timestamp < ?",
+		"DELETE FROM streams WHERE timestamp < ?",
 		before.UTC().Format(time.RFC3339Nano))
 	if err != nil {
-		return 0, fmt.Errorf("delete flows older than %s: %w", before.Format(time.RFC3339), err)
+		return 0, fmt.Errorf("delete streams older than %s: %w", before.Format(time.RFC3339), err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -503,16 +494,16 @@ func (s *SQLiteStore) DeleteFlowsOlderThan(ctx context.Context, before time.Time
 	return n, nil
 }
 
-// DeleteExcessFlows removes the oldest flows exceeding maxCount.
-func (s *SQLiteStore) DeleteExcessFlows(ctx context.Context, maxCount int) (int64, error) {
+// DeleteExcessStreams removes the oldest streams exceeding maxCount.
+func (s *SQLiteStore) DeleteExcessStreams(ctx context.Context, maxCount int) (int64, error) {
 	if maxCount <= 0 {
 		return 0, fmt.Errorf("maxCount must be > 0, got %d", maxCount)
 	}
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM flows WHERE id NOT IN (SELECT id FROM flows ORDER BY timestamp DESC LIMIT ?)",
+		"DELETE FROM streams WHERE id NOT IN (SELECT id FROM streams ORDER BY timestamp DESC LIMIT ?)",
 		maxCount)
 	if err != nil {
-		return 0, fmt.Errorf("delete excess flows: %w", err)
+		return 0, fmt.Errorf("delete excess streams: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
@@ -521,20 +512,20 @@ func (s *SQLiteStore) DeleteExcessFlows(ctx context.Context, maxCount int) (int6
 	return n, nil
 }
 
-// AppendMessage persists a new message associated with a flow.
-func (s *SQLiteStore) AppendMessage(ctx context.Context, msg *Message) error {
-	if msg.ID == "" {
-		msg.ID = uuid.New().String()
+// SaveFlow persists a new flow associated with a stream.
+func (s *SQLiteStore) SaveFlow(ctx context.Context, f *Flow) error {
+	if f.ID == "" {
+		f.ID = uuid.New().String()
 	}
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
-		return s.appendMessageSync(ctx, msg)
+		return s.saveFlowSync(ctx, f)
 	})
 }
 
-func (s *SQLiteStore) appendMessageSync(ctx context.Context, msg *Message) error {
+func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 	headers := "{}"
-	if msg.Headers != nil {
-		headersJSON, err := json.Marshal(msg.Headers)
+	if f.Headers != nil {
+		headersJSON, err := json.Marshal(f.Headers)
 		if err != nil {
 			return fmt.Errorf("marshal headers: %w", err)
 		}
@@ -542,8 +533,8 @@ func (s *SQLiteStore) appendMessageSync(ctx context.Context, msg *Message) error
 	}
 
 	metadata := "{}"
-	if msg.Metadata != nil {
-		metaJSON, err := json.Marshal(msg.Metadata)
+	if f.Metadata != nil {
+		metaJSON, err := json.Marshal(f.Metadata)
 		if err != nil {
 			return fmt.Errorf("marshal metadata: %w", err)
 		}
@@ -551,40 +542,47 @@ func (s *SQLiteStore) appendMessageSync(ctx context.Context, msg *Message) error
 	}
 
 	urlStr := ""
-	if msg.URL != nil {
-		urlStr = msg.URL.String()
+	if f.URL != nil {
+		urlStr = f.URL.String()
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (id, flow_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
+		`INSERT INTO flows (id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID,
-		msg.FlowID,
-		msg.Sequence,
-		msg.Direction,
-		msg.Timestamp.UTC().Format(time.RFC3339Nano),
+		f.ID,
+		f.StreamID,
+		f.Sequence,
+		f.Direction,
+		f.Timestamp.UTC().Format(time.RFC3339Nano),
 		headers,
-		msg.Body,
-		msg.RawBytes,
-		boolToInt(msg.BodyTruncated),
-		msg.Method,
+		f.Body,
+		f.RawBytes,
+		boolToInt(f.BodyTruncated),
+		f.Method,
 		urlStr,
-		msg.StatusCode,
+		f.StatusCode,
 		metadata,
 	)
 	if err != nil {
-		return fmt.Errorf("insert message: %w", err)
+		return fmt.Errorf("insert flow: %w", err)
 	}
 	return nil
 }
 
-// messageColumns is the list of columns selected in message queries.
-const messageColumns = `id, flow_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata`
+// flowColumns is the list of columns selected in flow queries.
+const flowColumns = `id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata`
 
-// GetMessages retrieves messages for a flow, optionally filtered by direction.
-func (s *SQLiteStore) GetMessages(ctx context.Context, flowID string, opts MessageListOptions) ([]*Message, error) {
-	query := "SELECT " + messageColumns + " FROM messages WHERE flow_id = ?"
-	args := []interface{}{flowID}
+// GetFlow retrieves a flow by ID.
+func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+flowColumns+` FROM flows WHERE id = ?`, id)
+	return scanFlow(row)
+}
+
+// GetFlows retrieves flows for a stream, optionally filtered by direction.
+func (s *SQLiteStore) GetFlows(ctx context.Context, streamID string, opts FlowListOptions) ([]*Flow, error) {
+	query := "SELECT " + flowColumns + " FROM flows WHERE stream_id = ?"
+	args := []interface{}{streamID}
 
 	if opts.Direction != "" {
 		query += " AND direction = ?"
@@ -595,26 +593,26 @@ func (s *SQLiteStore) GetMessages(ctx context.Context, flowID string, opts Messa
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("get messages: %w", err)
+		return nil, fmt.Errorf("get flows: %w", err)
 	}
 	defer rows.Close()
 
-	var messages []*Message
+	var flows []*Flow
 	for rows.Next() {
-		msg, err := scanMessage(rows)
+		f, err := scanFlow(rows)
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, msg)
+		flows = append(flows, f)
 	}
-	return messages, rows.Err()
+	return flows, rows.Err()
 }
 
-// CountMessages returns the number of messages for a flow.
-func (s *SQLiteStore) CountMessages(ctx context.Context, flowID string) (int, error) {
+// CountFlows returns the number of flows for a stream.
+func (s *SQLiteStore) CountFlows(ctx context.Context, streamID string) (int, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE flow_id = ?", flowID).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count messages: %w", err)
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM flows WHERE stream_id = ?", streamID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count flows: %w", err)
 	}
 	return count, nil
 }
@@ -723,9 +721,9 @@ type scannable interface {
 	Scan(dest ...interface{}) error
 }
 
-func scanFlow(row scannable) (*Flow, error) {
+func scanStream(row scannable) (*Stream, error) {
 	var (
-		fl             Flow
+		st             Stream
 		tsStr          string
 		durationMs     int64
 		tagsStr        string
@@ -742,12 +740,11 @@ func scanFlow(row scannable) (*Flow, error) {
 	)
 
 	err := row.Scan(
-		&fl.ID,
-		&fl.ConnID,
-		&fl.Protocol,
-		&fl.Scheme,
-		&fl.FlowType,
-		&fl.State,
+		&st.ID,
+		&st.ConnID,
+		&st.Protocol,
+		&st.Scheme,
+		&st.State,
 		&tsStr,
 		&durationMs,
 		&tagsStr,
@@ -764,27 +761,27 @@ func scanFlow(row scannable) (*Flow, error) {
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("flow not found")
+			return nil, fmt.Errorf("stream not found")
 		}
-		return nil, fmt.Errorf("scan flow: %w", err)
+		return nil, fmt.Errorf("scan stream: %w", err)
 	}
 
 	if tagsStr != "" && tagsStr != "{}" {
-		if err := json.Unmarshal([]byte(tagsStr), &fl.Tags); err != nil {
-			slog.Warn("failed to parse flow tags", "flow_id", fl.ID, "value", tagsStr, "error", err)
-			fl.Tags = nil
+		if err := json.Unmarshal([]byte(tagsStr), &st.Tags); err != nil {
+			slog.Warn("failed to parse stream tags", "stream_id", st.ID, "value", tagsStr, "error", err)
+			st.Tags = nil
 		}
 	}
 
 	ts, err := time.Parse(time.RFC3339Nano, tsStr)
 	if err != nil {
-		slog.Warn("failed to parse flow timestamp (possible bug)", "value", tsStr, "error", err)
+		slog.Warn("failed to parse stream timestamp (possible bug)", "value", tsStr, "error", err)
 	}
-	fl.Timestamp = ts
-	fl.Duration = time.Duration(durationMs) * time.Millisecond
+	st.Timestamp = ts
+	st.Duration = time.Duration(durationMs) * time.Millisecond
 
 	if clientAddr != "" || serverAddr != "" || tlsVersion != "" || tlsCipher != "" || tlsALPN != "" || tlsCertSubject != "" {
-		fl.ConnInfo = &ConnectionInfo{
+		st.ConnInfo = &ConnectionInfo{
 			ClientAddr:           clientAddr,
 			ServerAddr:           serverAddr,
 			TLSVersion:           tlsVersion,
@@ -794,17 +791,17 @@ func scanFlow(row scannable) (*Flow, error) {
 		}
 	}
 
-	fl.BlockedBy = blockedBy
-	fl.SendMs = nullInt64ToPtr(sendMs)
-	fl.WaitMs = nullInt64ToPtr(waitMs)
-	fl.ReceiveMs = nullInt64ToPtr(receiveMs)
+	st.BlockedBy = blockedBy
+	st.SendMs = nullInt64ToPtr(sendMs)
+	st.WaitMs = nullInt64ToPtr(waitMs)
+	st.ReceiveMs = nullInt64ToPtr(receiveMs)
 
-	return &fl, nil
+	return &st, nil
 }
 
-func scanMessage(row scannable) (*Message, error) {
+func scanFlow(row scannable) (*Flow, error) {
 	var (
-		msg           Message
+		f             Flow
 		tsStr         string
 		headersStr    string
 		urlStr        string
@@ -813,51 +810,51 @@ func scanMessage(row scannable) (*Message, error) {
 	)
 
 	err := row.Scan(
-		&msg.ID,
-		&msg.FlowID,
-		&msg.Sequence,
-		&msg.Direction,
+		&f.ID,
+		&f.StreamID,
+		&f.Sequence,
+		&f.Direction,
 		&tsStr,
 		&headersStr,
-		&msg.Body,
-		&msg.RawBytes,
+		&f.Body,
+		&f.RawBytes,
 		&bodyTruncated,
-		&msg.Method,
+		&f.Method,
 		&urlStr,
-		&msg.StatusCode,
+		&f.StatusCode,
 		&metadataStr,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("message not found")
+			return nil, fmt.Errorf("flow not found")
 		}
-		return nil, fmt.Errorf("scan message: %w", err)
+		return nil, fmt.Errorf("scan flow: %w", err)
 	}
 
 	if urlStr != "" {
 		parsed, err := url.Parse(urlStr)
 		if err == nil {
-			msg.URL = parsed
+			f.URL = parsed
 		}
 	}
 
-	if err := json.Unmarshal([]byte(headersStr), &msg.Headers); err != nil {
-		msg.Headers = make(map[string][]string)
+	if err := json.Unmarshal([]byte(headersStr), &f.Headers); err != nil {
+		f.Headers = make(map[string][]string)
 	}
 	if metadataStr != "" && metadataStr != "{}" {
-		if err := json.Unmarshal([]byte(metadataStr), &msg.Metadata); err != nil {
-			msg.Metadata = nil
+		if err := json.Unmarshal([]byte(metadataStr), &f.Metadata); err != nil {
+			f.Metadata = nil
 		}
 	}
 
 	ts, err := time.Parse(time.RFC3339Nano, tsStr)
 	if err != nil {
-		slog.Warn("failed to parse message timestamp (possible bug)", "value", tsStr, "error", err)
+		slog.Warn("failed to parse flow timestamp (possible bug)", "value", tsStr, "error", err)
 	}
-	msg.Timestamp = ts
-	msg.BodyTruncated = bodyTruncated != 0
+	f.Timestamp = ts
+	f.BodyTruncated = bodyTruncated != 0
 
-	return &msg, nil
+	return &f, nil
 }
 
 // boolToInt converts a boolean to an integer (0 or 1) for SQLite storage.
