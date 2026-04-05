@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec"
 	"github.com/usk6666/yorishiro-proxy/internal/exchange"
@@ -21,6 +22,44 @@ import (
 // Send Exchange so that the target address can be derived from the request
 // (e.g., HTTP forward proxy uses the URL to determine the upstream host).
 type DialFunc func(ctx context.Context, ex *exchange.Exchange) (codec.Codec, error)
+
+// SessionOptions configures optional callbacks for RunSession.
+type SessionOptions struct {
+	// OnComplete is called after both goroutines have terminated.
+	// streamID is the StreamID captured from the first Exchange (may be empty
+	// if no Exchange was processed). err is nil on normal EOF termination, or
+	// the error that caused the session to end.
+	//
+	// The context passed to OnComplete is derived from the original context
+	// (not the errgroup context), so it remains valid for store writes even
+	// after the errgroup cancels its derived context.
+	OnComplete func(ctx context.Context, streamID string, err error)
+}
+
+// streamCapture captures the StreamID from the first Exchange in a
+// goroutine-safe manner.
+type streamCapture struct {
+	mu       sync.Mutex
+	streamID string
+	captured bool
+}
+
+// set records the StreamID if it has not been captured yet.
+func (s *streamCapture) set(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.captured {
+		s.streamID = id
+		s.captured = true
+	}
+}
+
+// get returns the captured StreamID.
+func (s *streamCapture) get() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streamID
+}
 
 // upstreamHolder passes the upstream Codec from goroutine 1 to goroutine 2
 // with proper synchronization via the ready channel. The done channel is
@@ -42,8 +81,18 @@ type upstreamHolder struct {
 // Both goroutines are managed by errgroup.WithContext: if either returns an
 // error the context is cancelled and the other goroutine terminates. io.EOF
 // from Codec.Next is treated as normal stream termination, not an error.
-func RunSession(ctx context.Context, client codec.Codec, dial DialFunc, p *pipeline.Pipeline) error {
+func RunSession(ctx context.Context, client codec.Codec, dial DialFunc, p *pipeline.Pipeline, opts ...SessionOptions) error {
 	defer client.Close()
+
+	var opt SessionOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
+	// Keep a reference to the original context for OnComplete, because
+	// errgroup.WithContext creates a derived context that is cancelled when
+	// Wait() returns — making it unusable for store writes.
+	origCtx := ctx
 
 	uh := &upstreamHolder{
 		ready: make(chan struct{}),
@@ -55,18 +104,26 @@ func RunSession(ctx context.Context, client codec.Codec, dial DialFunc, p *pipel
 		}
 	}()
 
+	sc := &streamCapture{}
+
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		defer close(uh.done)
-		return clientToUpstream(ctx, client, dial, p, uh)
+		return clientToUpstream(ctx, client, dial, p, uh, sc)
 	})
 
 	g.Go(func() error {
-		return upstreamToClient(ctx, client, p, uh)
+		return upstreamToClient(ctx, client, p, uh, sc)
 	})
 
-	return g.Wait()
+	result := g.Wait()
+
+	if opt.OnComplete != nil {
+		opt.OnComplete(context.WithoutCancel(origCtx), sc.get(), result)
+	}
+
+	return result
 }
 
 // clientToUpstream reads Exchanges from the client, runs them through the
@@ -78,6 +135,7 @@ func clientToUpstream(
 	dial DialFunc,
 	p *pipeline.Pipeline,
 	uh *upstreamHolder,
+	sc *streamCapture,
 ) error {
 	for {
 		ex, err := client.Next(ctx)
@@ -87,6 +145,8 @@ func clientToUpstream(
 			}
 			return fmt.Errorf("client.Next: %w", err)
 		}
+
+		sc.set(ex.StreamID)
 
 		ex, action, resp := p.Run(ctx, ex)
 		switch action {
@@ -124,6 +184,7 @@ func upstreamToClient(
 	client codec.Codec,
 	p *pipeline.Pipeline,
 	uh *upstreamHolder,
+	sc *streamCapture,
 ) error {
 	// Wait for upstream to be established, goroutine 1 to exit, or context
 	// cancellation. If goroutine 1 exits without establishing upstream
@@ -152,6 +213,8 @@ func upstreamToClient(
 			}
 			return fmt.Errorf("upstream.Next: %w", err)
 		}
+
+		sc.set(ex.StreamID)
 
 		ex, action, _ := p.Run(ctx, ex)
 		if action == pipeline.Drop {
