@@ -1,8 +1,8 @@
 package http
 
 import (
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // rawHeadersToKeyValues converts parser.RawHeaders to []exchange.KeyValue.
