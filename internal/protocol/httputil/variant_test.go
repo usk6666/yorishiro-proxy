@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // h2r is a test helper that converts gohttp.Header to parser.RawHeaders.

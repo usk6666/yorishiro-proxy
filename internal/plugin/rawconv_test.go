@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 )
 
 func TestRawRequestToMap(t *testing.T) {
