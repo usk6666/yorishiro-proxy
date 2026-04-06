@@ -1184,7 +1184,9 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 		t.Errorf("new flow BlockedBy = %q, want %q", got.BlockedBy, "target_scope")
 	}
 
-	// Verify schema version is now 6 (V3 adds blocked_by, V4 renames sessions→flows, V5 adds timing columns, V6 adds scheme).
+	// Verify schema version is latest (V3 adds blocked_by, V4 renames sessions→flows,
+	// V5 adds timing columns, V6 adds scheme, V7 renames flows→streams,
+	// V8 adds direction to unique constraint).
 	checkDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open check db: %v", err)
@@ -1195,8 +1197,8 @@ func TestSQLiteStore_BlockedBy_MigrationFromV2(t *testing.T) {
 	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 7 {
-		t.Errorf("schema version = %d, want 7", version)
+	if version != latestVersion() {
+		t.Errorf("schema version = %d, want %d", version, latestVersion())
 	}
 }
 
@@ -1315,13 +1317,13 @@ func TestSQLiteStore_V7Migration_TableRename(t *testing.T) {
 		}
 	}
 
-	// Verify schema version is 7.
+	// Verify schema version is latest.
 	var version int
 	if err := checkDB.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 7 {
-		t.Errorf("schema version = %d, want 7", version)
+	if version != latestVersion() {
+		t.Errorf("schema version = %d, want %d", version, latestVersion())
 	}
 
 	// Verify cascade delete still works.

@@ -261,6 +261,12 @@ func (c *Codec) sendRequest(ex *exchange.Exchange) error {
 		return fmt.Errorf("http1 codec send request: missing opaque data")
 	}
 
+	// Sync internal state from the Exchange so that the subsequent
+	// nextResponse() call produces a response Exchange with the correct
+	// StreamID (set by the client-side Codec that parsed the request).
+	c.streamID = ex.StreamID
+	c.sequence = ex.Sequence
+
 	rawReq := opaque.rawReq
 
 	// Check if anything changed.
