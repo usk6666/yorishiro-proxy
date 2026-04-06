@@ -224,6 +224,45 @@ ALTER TABLE fuzz_jobs RENAME COLUMN flow_id TO stream_id;
 ALTER TABLE fuzz_results RENAME COLUMN flow_id TO stream_id;
 `
 
+// schemaV8 changes the unique constraint on flows from (stream_id, sequence)
+// to (stream_id, sequence, direction). This is needed because bidirectional
+// protocols like TCP use the same StreamID for both send and receive flows,
+// and each direction maintains its own independent sequence counter.
+// HTTP/1.x naturally avoids collisions (request seq=0, response seq=1) but
+// TCP sends seq=0,1,2... and receives seq=0,1,2... within the same stream.
+const schemaV8 = `
+-- Recreate flows table with updated unique constraint
+CREATE TABLE flows_new (
+	id              TEXT PRIMARY KEY,
+	stream_id       TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+	sequence        INTEGER NOT NULL,
+	direction       TEXT NOT NULL,
+	timestamp       DATETIME NOT NULL,
+	headers         TEXT NOT NULL DEFAULT '{}',
+	body            BLOB,
+	raw_bytes       BLOB,
+	body_truncated  INTEGER NOT NULL DEFAULT 0,
+	method          TEXT NOT NULL DEFAULT '',
+	url             TEXT NOT NULL DEFAULT '',
+	status_code     INTEGER NOT NULL DEFAULT 0,
+	metadata        TEXT NOT NULL DEFAULT '{}',
+	UNIQUE(stream_id, sequence, direction)
+);
+
+INSERT INTO flows_new (id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
+SELECT id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata
+FROM flows;
+
+DROP TABLE flows;
+ALTER TABLE flows_new RENAME TO flows;
+
+CREATE INDEX IF NOT EXISTS idx_flows_stream_id ON flows(stream_id);
+CREATE INDEX IF NOT EXISTS idx_flows_direction ON flows(direction);
+CREATE INDEX IF NOT EXISTS idx_flows_method ON flows(method);
+CREATE INDEX IF NOT EXISTS idx_flows_url ON flows(url);
+CREATE INDEX IF NOT EXISTS idx_flows_status_code ON flows(status_code);
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
 	2: schemaV2,
@@ -232,6 +271,7 @@ var migrations = map[int]string{
 	5: schemaV5,
 	6: schemaV6,
 	7: schemaV7,
+	8: schemaV8,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -257,17 +297,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		// V7 renames tables that are FK targets, so foreign keys must be
 		// temporarily disabled. PRAGMA cannot run inside a transaction, so
 		// we toggle it outside the migration transaction.
-		if v == 7 {
+		// Migrations that recreate FK-referencing tables require foreign keys
+		// to be temporarily disabled. PRAGMA cannot run inside a transaction.
+		needsFKOff := v == 7 || v == 8
+		if needsFKOff {
 			if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
-				return fmt.Errorf("disable foreign keys for migration v7: %w", err)
+				return fmt.Errorf("disable foreign keys for migration v%d: %w", v, err)
 			}
 		}
 		if err := execMigration(ctx, db, v, ddl, current == 0 && v == 1); err != nil {
 			return fmt.Errorf("migration to version %d: %w", v, err)
 		}
-		if v == 7 {
+		if needsFKOff {
 			if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-				return fmt.Errorf("re-enable foreign keys after migration v7: %w", err)
+				return fmt.Errorf("re-enable foreign keys after migration v%d: %w", v, err)
 			}
 		}
 	}
