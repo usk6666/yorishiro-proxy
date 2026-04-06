@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 

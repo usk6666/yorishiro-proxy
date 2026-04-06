@@ -4,7 +4,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	http1codec "github.com/usk6666/yorishiro-proxy/internal/codec/http1"
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
@@ -18,16 +19,16 @@ type H1Transport = httputil.H1Transport
 // import httputil.RoundTripResult directly.
 type RoundTripResult = httputil.RoundTripResult
 
-// serializeRequest delegates to httputil.SerializeRequest. This unexported
+// serializeRequest delegates to http1codec.SerializeRequest. This unexported
 // wrapper exists for callers within the protocol/http package (e.g.,
 // websocket.go) that use the original name.
 func serializeRequest(req *parser.RawRequest) []byte {
-	return httputil.SerializeRequest(req)
+	return http1codec.SerializeRequest(req)
 }
 
-// writeRequest delegates to httputil.WriteRequest. This unexported wrapper
+// writeRequest delegates to http1codec.WriteRequest. This unexported wrapper
 // exists for callers within the protocol/http package (e.g., websocket.go)
 // that use the original name.
 func writeRequest(conn net.Conn, header []byte, body io.Reader) error {
-	return httputil.WriteRequest(conn, header, body)
+	return http1codec.WriteRequest(conn, header, body)
 }

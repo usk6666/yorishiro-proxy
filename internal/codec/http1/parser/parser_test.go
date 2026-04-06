@@ -691,12 +691,12 @@ func TestParseResponse_NoReasonPhrase(t *testing.T) {
 // --- Truncated raw bytes ---
 
 func TestParseRequest_RawBytesTruncation(t *testing.T) {
-	// Create a request with headers exceeding maxRawCaptureSize.
+	// Create a request with headers exceeding MaxRawCaptureSize.
 	var b strings.Builder
 	b.WriteString("GET / HTTP/1.1\r\n")
 	// Write enough headers to exceed 2MB.
 	line := "X-Pad: " + strings.Repeat("A", 1000) + "\r\n"
-	for b.Len() < maxRawCaptureSize+1000 {
+	for b.Len() < MaxRawCaptureSize+1000 {
 		b.WriteString(line)
 	}
 	b.WriteString("\r\n")
@@ -708,8 +708,8 @@ func TestParseRequest_RawBytesTruncation(t *testing.T) {
 	if !req.Truncated {
 		t.Error("expected Truncated=true for oversized headers")
 	}
-	if len(req.RawBytes) > maxRawCaptureSize {
-		t.Errorf("RawBytes len = %d, should not exceed %d", len(req.RawBytes), maxRawCaptureSize)
+	if len(req.RawBytes) > MaxRawCaptureSize {
+		t.Errorf("RawBytes len = %d, should not exceed %d", len(req.RawBytes), MaxRawCaptureSize)
 	}
 }
 

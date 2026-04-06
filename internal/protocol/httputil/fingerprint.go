@@ -3,8 +3,8 @@ package httputil
 import (
 	"encoding/json"
 
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // MergeTechnologyTags runs the fingerprint detector (if non-nil) on the

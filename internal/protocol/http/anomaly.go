@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 )
 
 // anomalyTags converts parser anomalies into session tags for flow recording.

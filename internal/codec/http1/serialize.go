@@ -3,18 +3,29 @@ package http1
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"net"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
-// serializeRequest converts a RawRequest into wire-format bytes (request-line +
-// headers + CRLF). Header order and OWS are preserved. Body is NOT included.
-//
-// This delegates to httputil.SerializeRequest which already implements the
-// correct wire-fidelity serialization.
+// SerializeRequest delegates to httputil.SerializeRequest. The canonical
+// implementation lives in httputil to avoid circular imports (codec/http1
+// imports httputil for StatusText).
+func SerializeRequest(req *parser.RawRequest) []byte {
+	return httputil.SerializeRequest(req)
+}
+
+// serializeRequest is the unexported version used by the Codec internally.
 func serializeRequest(req *parser.RawRequest) []byte {
 	return httputil.SerializeRequest(req)
+}
+
+// WriteRequest delegates to httputil.WriteRequest. The canonical
+// implementation lives in httputil to avoid circular imports.
+func WriteRequest(conn net.Conn, header []byte, body io.Reader) error {
+	return httputil.WriteRequest(conn, header, body)
 }
 
 // serializeResponse converts a RawResponse into wire-format bytes (status-line +
@@ -38,7 +49,17 @@ func serializeResponse(resp *parser.RawResponse) []byte {
 	}
 
 	// Headers in wire order, preserving OWS via RawValue.
-	for _, h := range resp.Headers {
+	writeRawHeaders(&buf, resp.Headers)
+
+	// End of headers.
+	buf.WriteString("\r\n")
+
+	return buf.Bytes()
+}
+
+// writeRawHeaders writes headers to a buffer, preserving wire order and OWS.
+func writeRawHeaders(buf *bytes.Buffer, headers parser.RawHeaders) {
+	for _, h := range headers {
 		if h.RawValue != "" {
 			buf.WriteString(h.Name)
 			buf.WriteByte(':')
@@ -50,9 +71,4 @@ func serializeResponse(resp *parser.RawResponse) []byte {
 		}
 		buf.WriteString("\r\n")
 	}
-
-	// End of headers.
-	buf.WriteString("\r\n")
-
-	return buf.Bytes()
 }

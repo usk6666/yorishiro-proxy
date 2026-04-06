@@ -126,7 +126,7 @@ type RawRequest struct {
 	Anomalies  []Anomaly
 	Close      bool // true if Connection: close or HTTP/1.0 default
 
-	// Truncated is true when RawBytes was capped at maxRawCaptureSize.
+	// Truncated is true when RawBytes was capped at MaxRawCaptureSize.
 	Truncated bool
 }
 
@@ -140,6 +140,6 @@ type RawResponse struct {
 	RawBytes   []byte
 	Anomalies  []Anomaly
 
-	// Truncated is true when RawBytes was capped at maxRawCaptureSize.
+	// Truncated is true when RawBytes was capped at MaxRawCaptureSize.
 	Truncated bool
 }

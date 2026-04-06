@@ -16,12 +16,12 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )

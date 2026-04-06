@@ -26,12 +26,25 @@ type mockCodec struct {
 	closed        bool
 	blockNext     chan struct{} // if non-nil, Next blocks until closed or ctx done
 	sendErr       error         // if set, Send returns this error
+	nextGate      chan struct{} // if non-nil, Next waits for a value before each return
 }
 
 func (m *mockCodec) Next(ctx context.Context) (*exchange.Exchange, error) {
 	if m.blockNext != nil {
 		select {
 		case <-m.blockNext:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// If nextGate is set, wait for a signal before returning each exchange.
+	// This allows tests to synchronize Next() calls with external events
+	// (e.g., ensuring Send() has been called before the next response is
+	// returned).
+	if m.nextGate != nil {
+		select {
+		case <-m.nextGate:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -179,8 +192,24 @@ func TestRunSession_Stream(t *testing.T) {
 		upstreamExchanges = append(upstreamExchanges, makeExchange(exchange.Receive, "", i))
 	}
 
+	// Use a buffered nextGate channel so that each upstream Next() call
+	// waits for an explicit signal. This prevents a race where the
+	// upstream-to-client goroutine drains all responses before the
+	// client-to-upstream goroutine has finished, and then the done/ready
+	// channel ordering causes the upstream reader to exit early.
+	//
+	// We pre-fill the gate with len(upstreamExchanges)+1 tokens:
+	// one for each response, plus one for the final EOF call.
+	gate := make(chan struct{}, len(upstreamExchanges)+1)
+	for i := 0; i < len(upstreamExchanges)+1; i++ {
+		gate <- struct{}{}
+	}
+
 	clientCodec := &mockCodec{nextExchanges: clientExchanges}
-	upstreamCodec := &mockCodec{nextExchanges: upstreamExchanges}
+	upstreamCodec := &mockCodec{
+		nextExchanges: upstreamExchanges,
+		nextGate:      gate,
+	}
 
 	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
 		return upstreamCodec, nil

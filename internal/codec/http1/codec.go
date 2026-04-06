@@ -12,8 +12,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/http/parser"
 )
 
 // passthroughThreshold is the body size above which passthrough mode is used.
