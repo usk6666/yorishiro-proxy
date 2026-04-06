@@ -9,9 +9,9 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
-// maxRawCaptureSize limits the size of raw bytes captured in serialization.
-// Matches the parser and handler limits.
-const maxRawCaptureSize = 2 << 20 // 2 MiB
+// maxRawCaptureSize is an alias for parser.MaxRawCaptureSize, the single
+// source of truth for the raw-bytes capture limit within codec/http1.
+const maxRawCaptureSize = parser.MaxRawCaptureSize
 
 // WriteRawResponse writes a parser.RawResponse to a net.Conn. The body bytes
 // are provided separately because resp.Body may have been consumed.

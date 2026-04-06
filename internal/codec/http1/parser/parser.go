@@ -11,15 +11,17 @@ import (
 
 // Limits to prevent resource exhaustion.
 const (
-	// maxRawCaptureSize is the maximum number of bytes captured in RawBytes.
+	// MaxRawCaptureSize is the maximum number of bytes captured in RawBytes.
 	// Matches the existing captureReader limit in the HTTP handler.
-	maxRawCaptureSize = 2 << 20 // 2 MiB
+	// Exported so that sibling packages (e.g., codec/http1) can reuse the
+	// same constant without duplication.
+	MaxRawCaptureSize = 2 << 20 // 2 MiB
 
 	// maxRequestLineSize limits the request/status line length.
 	maxRequestLineSize = 8192 // 8 KiB
 
 	// maxHeaderSize limits the total header section size (including all lines).
-	// Set above maxRawCaptureSize so raw bytes truncation is tested before
+	// Set above MaxRawCaptureSize so raw bytes truncation is tested before
 	// header parsing fails outright.
 	maxHeaderSize = 4 << 20 // 4 MiB
 
@@ -27,7 +29,7 @@ const (
 	maxHeaderCount = 10000
 )
 
-// captureWriter records bytes written to it up to maxRawCaptureSize.
+// captureWriter records bytes written to it up to MaxRawCaptureSize.
 type captureWriter struct {
 	buf       bytes.Buffer
 	truncated bool
@@ -37,7 +39,7 @@ func (cw *captureWriter) write(p []byte) {
 	if cw.truncated {
 		return
 	}
-	remaining := maxRawCaptureSize - cw.buf.Len()
+	remaining := MaxRawCaptureSize - cw.buf.Len()
 	if remaining <= 0 {
 		cw.truncated = true
 		return

@@ -10,52 +10,22 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
-// SerializeRequest converts a RawRequest into wire-format bytes (request-line +
-// headers + CRLF). Header order is preserved exactly as in RawHeaders. The
-// body is NOT included in the returned bytes — it is written separately to
-// allow streaming.
+// SerializeRequest delegates to httputil.SerializeRequest. The canonical
+// implementation lives in httputil to avoid circular imports (codec/http1
+// imports httputil for StatusText).
 func SerializeRequest(req *parser.RawRequest) []byte {
-	var buf bytes.Buffer
-
-	// Request line: METHOD SP RequestURI SP Proto CRLF
-	proto := req.Proto
-	if proto == "" {
-		proto = "HTTP/1.1"
-	}
-	buf.WriteString(req.Method)
-	buf.WriteByte(' ')
-	buf.WriteString(req.RequestURI)
-	buf.WriteByte(' ')
-	buf.WriteString(proto)
-	buf.WriteString("\r\n")
-
-	// Headers in wire order.
-	writeRawHeaders(&buf, req.Headers)
-
-	// End of headers.
-	buf.WriteString("\r\n")
-
-	return buf.Bytes()
+	return httputil.SerializeRequest(req)
 }
 
 // serializeRequest is the unexported version used by the Codec internally.
 func serializeRequest(req *parser.RawRequest) []byte {
-	return SerializeRequest(req)
+	return httputil.SerializeRequest(req)
 }
 
-// WriteRequest writes the serialized header payload and then streams the body
-// (if any) to the connection. Used for raw mode where the entire request
-// (including body) is in the header parameter.
+// WriteRequest delegates to httputil.WriteRequest. The canonical
+// implementation lives in httputil to avoid circular imports.
 func WriteRequest(conn net.Conn, header []byte, body io.Reader) error {
-	if _, err := io.Copy(conn, bytes.NewReader(header)); err != nil {
-		return err
-	}
-	if body != nil {
-		if _, err := io.Copy(conn, body); err != nil {
-			return err
-		}
-	}
-	return nil
+	return httputil.WriteRequest(conn, header, body)
 }
 
 // serializeResponse converts a RawResponse into wire-format bytes (status-line +
