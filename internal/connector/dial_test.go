@@ -214,6 +214,46 @@ func TestDialUpstream_TLS_UnknownALPN_FallbackToTCP(t *testing.T) {
 	}
 }
 
+// TestDialUpstream_StandardTLS_MinVersionFloor asserts that a caller-provided
+// TLSConfig with a sub-TLS1.2 MinVersion is raised to TLS 1.2 by
+// DialUpstream. This brings the standard path into parity with the uTLS path
+// (which pins TLS 1.2 unconditionally) and prevents a stale caller config
+// from silently downgrading the handshake.
+func TestDialUpstream_StandardTLS_MinVersionFloor(t *testing.T) {
+	t.Parallel()
+	// Server requires TLS 1.2+; a client that honours MinVersion=TLS10
+	// would negotiate TLS 1.2 anyway — we rely on the handshake succeeding
+	// to prove the floor was enforced. The real regression guard is that
+	// no downgrade is attempted.
+	srv := newTLSServer(t, []string{"http/1.1"})
+	defer srv.Close()
+
+	result, err := DialUpstream(context.Background(), srv.addr, DialOpts{
+		TLSConfig: &tls.Config{
+			ServerName:         "localhost",
+			InsecureSkipVerify: true,             //nolint:gosec // test
+			MinVersion:         tls.VersionTLS10, // intentionally too low
+		},
+		OfferALPN:   []string{"http/1.1"},
+		DialTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("DialUpstream: %v", err)
+	}
+	defer result.Conn.Close()
+	defer result.Codec.Close()
+
+	tc, ok := result.Conn.(*tls.Conn)
+	if !ok {
+		t.Fatalf("Conn = %T, want *tls.Conn", result.Conn)
+	}
+	state := tc.ConnectionState()
+	if state.Version < tls.VersionTLS12 {
+		t.Errorf("negotiated TLS version = 0x%x, want >= TLS 1.2 (0x%x)",
+			state.Version, tls.VersionTLS12)
+	}
+}
+
 // --- DialUpstream: uTLS -------------------------------------------------------
 
 func TestDialUpstream_UTLS_Chrome_HTTP11(t *testing.T) {
