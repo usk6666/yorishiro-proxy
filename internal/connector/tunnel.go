@@ -22,6 +22,7 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -122,11 +123,22 @@ type TunnelHandler struct {
 	// Clock is overridable for tests so BlockInfo.Timestamp is
 	// deterministic. nil falls back to time.Now.
 	Clock func() time.Time
+
+	// pluginDispatchOverride is a test-only override that replaces the
+	// PluginEngine.Dispatch call in dispatchOnTLSHandshake. It is
+	// intentionally unexported so production code cannot set it.
+	pluginDispatchOverride pluginHookDispatcher
 }
 
 // tunnelHookTimeout bounds the on_tls_handshake plugin dispatch so a slow
 // plugin cannot stall a tunnel.
 const tunnelHookTimeout = 5 * time.Second
+
+// clientHandshakeTimeout bounds the server-side TLS handshake we perform
+// toward the client. Without this bound, a client that completes CONNECT and
+// then stalls its ClientHello would pin one goroutine, one held upstream
+// connection, and one issued leaf cert indefinitely (CWE-400 slow-loris).
+const clientHandshakeTimeout = 10 * time.Second
 
 // Handle drives a single tunnel from the raw (post-handshake) client
 // connection through to session.RunSession. The target argument is the
@@ -167,7 +179,7 @@ func (t *TunnelHandler) Handle(ctx context.Context, conn net.Conn, target, sourc
 	// Step 3: passthrough.
 	if t.Passthrough != nil && t.Passthrough.Contains(host) {
 		logger.Debug("tunnel: passthrough", "target", target)
-		return t.relayPassthrough(ctx, conn, target)
+		return t.relayPassthrough(ctx, conn, target, sourceProtocol)
 	}
 
 	if t.Issuer == nil {
@@ -321,9 +333,10 @@ func (t *TunnelHandler) cacheKey(target string) ALPNCacheKey {
 	}
 }
 
-// clientCertHash returns a stable hash of the mTLS client certificate, or
-// an empty string when no cert is configured. The actual hash is just
-// hex(sha256) over the leaf cert's DER — we do not verify the cert here.
+// clientCertHash returns a stable hex(sha256) hash of the mTLS client
+// certificate's leaf DER, or an empty string when no cert is configured. The
+// hash is used as part of the ALPN cache key to keep two client profiles
+// with different certs from sharing a slot. We do not verify the cert here.
 func clientCertHash(cert *tls.Certificate) string {
 	if cert == nil || len(cert.Certificate) == 0 {
 		return ""
@@ -332,14 +345,8 @@ func clientCertHash(cert *tls.Certificate) string {
 	if err != nil || leaf == nil {
 		return ""
 	}
-	// Use the cert's raw bytes as the key material. Fingerprint length is
-	// fine here because collisions are operationally harmless — at worst
-	// two certs share an ALPN cache slot.
-	sum := leaf.Raw
-	if len(sum) > 32 {
-		sum = sum[:32]
-	}
-	return fmt.Sprintf("%x", sum)
+	sum := sha256.Sum256(leaf.Raw)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 // resolveClientALPN returns the ALPN list to offer the client, an
@@ -416,7 +423,9 @@ func (t *TunnelHandler) handshakeClient(ctx context.Context, conn net.Conn, sni 
 	}
 
 	tlsConn := tls.Server(conn, cfg)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
+	hsCtx, cancel := context.WithTimeout(ctx, clientHandshakeTimeout)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
 		return nil, fmt.Errorf("tunnel: client TLS handshake for %s: %w", sni, err)
 	}
 	return tlsConn, nil
@@ -548,14 +557,14 @@ func (t *TunnelHandler) makeDialFunc(
 
 // relayPassthrough implements raw io.Copy in both directions — no Pipeline
 // is run, as decrypted inspection is impossible for bytes we never decrypt.
-func (t *TunnelHandler) relayPassthrough(ctx context.Context, client net.Conn, target string) error {
+func (t *TunnelHandler) relayPassthrough(ctx context.Context, client net.Conn, target, sourceProtocol string) error {
 	upstream, err := DialUpstream(ctx, target, DialOpts{
 		// Intentionally no TLSConfig — plain TCP relay.
 		DialTimeout:   t.DialOpts.DialTimeout,
 		UpstreamProxy: t.DialOpts.UpstreamProxy,
 	})
 	if err != nil {
-		t.fireBlock(ctx, target, "upstream_unreachable", "CONNECT")
+		t.fireBlock(ctx, target, "upstream_unreachable", sourceProtocol)
 		return nil
 	}
 	defer upstream.Conn.Close()
@@ -597,10 +606,22 @@ func bidirectionalCopy(ctx context.Context, a, b net.Conn) error {
 	return err
 }
 
+// pluginHookDispatcher abstracts the plugin.Engine.Dispatch signature so the
+// dispatchOnTLSHandshake unit test can inject a failing stub without having
+// to build a real Starlark plugin. Production code always uses
+// (*plugin.Engine).Dispatch.
+type pluginHookDispatcher func(ctx context.Context, hook plugin.Hook, data map[string]any) (*plugin.HookResult, error)
+
 // dispatchOnTLSHandshake delivers the on_tls_handshake plugin hook, logging
 // any plugin error and swallowing it so the tunnel continues (fail-open).
 func (t *TunnelHandler) dispatchOnTLSHandshake(ctx context.Context, host string, state tls.ConnectionState) {
-	if t.PluginEngine == nil {
+	var dispatch pluginHookDispatcher
+	switch {
+	case t.pluginDispatchOverride != nil:
+		dispatch = t.pluginDispatchOverride
+	case t.PluginEngine != nil:
+		dispatch = t.PluginEngine.Dispatch
+	default:
 		return
 	}
 
@@ -621,7 +642,7 @@ func (t *TunnelHandler) dispatchOnTLSHandshake(ctx context.Context, host string,
 		"server_name": host,
 	}
 
-	if _, err := t.PluginEngine.Dispatch(hookCtx, plugin.HookOnTLSHandshake, data); err != nil {
+	if _, err := dispatch(hookCtx, plugin.HookOnTLSHandshake, data); err != nil {
 		t.loggerFor(ctx).Warn("plugin on_tls_handshake hook error", "host", host, "error", err)
 	}
 }
