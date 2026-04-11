@@ -317,54 +317,9 @@ func TestPassthroughList_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestMatchWildcard(t *testing.T) {
-	tests := []struct {
-		pattern  string
-		hostname string
-		want     bool
-	}{
-		{"*.example.com", "foo.example.com", true},
-		{"*.example.com", "bar.baz.example.com", true},
-		{"*.example.com", "example.com", false},
-		{"*.example.com", "notexample.com", false},
-		{"example.com", "foo.example.com", false},  // not a wildcard pattern
-		{"*example.com", "foo.example.com", false}, // malformed: missing dot after *
-		{"*.com", "example.com", true},
-		{"*.com", "com", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.pattern+"_"+tt.hostname, func(t *testing.T) {
-			got := matchWildcard(tt.pattern, tt.hostname)
-			if got != tt.want {
-				t.Errorf("matchWildcard(%q, %q) = %v, want %v", tt.pattern, tt.hostname, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNormalizePattern(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"example.com", "example.com"},
-		{"EXAMPLE.COM", "example.com"},
-		{"  Example.Com  ", "example.com"},
-		{"*.EXAMPLE.COM", "*.example.com"},
-		{"", ""},
-		{"   ", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := normalizePattern(tt.input)
-			if got != tt.want {
-				t.Errorf("normalizePattern(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
+// TestMatchWildcard and TestNormalizePattern moved to
+// internal/connector/passthrough_test.go alongside the implementation
+// (USK-559 architecture rewrite M36-M44).
 
 func TestPassthroughList_Clear(t *testing.T) {
 	pl := NewPassthroughList()
