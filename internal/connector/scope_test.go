@@ -1,4 +1,4 @@
-package proxy
+package connector
 
 import (
 	"net/url"

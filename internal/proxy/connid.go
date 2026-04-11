@@ -1,87 +1,67 @@
 package proxy
 
+// This file is a backward-compatibility shim. The real implementations live
+// in internal/connector/. The wrappers here keep existing internal/proxy/
+// handlers compiling during the M36-M44 architecture rewrite; both the
+// wrappers and the legacy proxy package are scheduled for deletion in M44.
+
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
+
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
-// connIDSize is the number of random bytes used to generate a connection ID.
-// This produces a 8-character hex string.
-const connIDSize = 4
-
-type contextKey int
-
-const (
-	ctxKeyConnID contextKey = iota
-	ctxKeyLogger
-	ctxKeyClientAddr
-	ctxKeyListenerName
-)
-
-// GenerateConnID returns a random 8-character hex string for connection identification.
+// GenerateConnID returns a random 8-character hex string for connection
+// identification. Delegates to connector.GenerateConnID.
 func GenerateConnID() string {
-	b := make([]byte, connIDSize)
-	if _, err := rand.Read(b); err != nil {
-		// Fallback: this should never happen in practice.
-		return "00000000"
-	}
-	return hex.EncodeToString(b)
+	return connector.GenerateConnID()
 }
 
 // ContextWithConnID returns a new context with the given connection ID.
+// Delegates to connector.ContextWithConnID.
 func ContextWithConnID(ctx context.Context, connID string) context.Context {
-	return context.WithValue(ctx, ctxKeyConnID, connID)
+	return connector.ContextWithConnID(ctx, connID)
 }
 
-// ConnIDFromContext returns the connection ID stored in the context, or empty string.
+// ConnIDFromContext returns the connection ID stored in the context, or empty
+// string. Delegates to connector.ConnIDFromContext.
 func ConnIDFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(ctxKeyConnID).(string); ok {
-		return v
-	}
-	return ""
+	return connector.ConnIDFromContext(ctx)
 }
 
 // ContextWithClientAddr returns a new context with the given client address.
+// Delegates to connector.ContextWithClientAddr.
 func ContextWithClientAddr(ctx context.Context, addr string) context.Context {
-	return context.WithValue(ctx, ctxKeyClientAddr, addr)
+	return connector.ContextWithClientAddr(ctx, addr)
 }
 
-// ClientAddrFromContext returns the client address stored in the context, or empty string.
+// ClientAddrFromContext returns the client address stored in the context, or
+// empty string. Delegates to connector.ClientAddrFromContext.
 func ClientAddrFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(ctxKeyClientAddr).(string); ok {
-		return v
-	}
-	return ""
+	return connector.ClientAddrFromContext(ctx)
 }
 
 // ContextWithListenerName returns a new context with the given listener name.
+// Delegates to connector.ContextWithListenerName.
 func ContextWithListenerName(ctx context.Context, name string) context.Context {
-	return context.WithValue(ctx, ctxKeyListenerName, name)
+	return connector.ContextWithListenerName(ctx, name)
 }
 
-// ListenerNameFromContext returns the listener name stored in the context, or empty string.
+// ListenerNameFromContext returns the listener name stored in the context,
+// or empty string. Delegates to connector.ListenerNameFromContext.
 func ListenerNameFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(ctxKeyListenerName).(string); ok {
-		return v
-	}
-	return ""
+	return connector.ListenerNameFromContext(ctx)
 }
 
 // ContextWithLogger returns a new context with the given logger.
+// Delegates to connector.ContextWithLogger.
 func ContextWithLogger(ctx context.Context, logger *slog.Logger) context.Context {
-	return context.WithValue(ctx, ctxKeyLogger, logger)
+	return connector.ContextWithLogger(ctx, logger)
 }
 
-// LoggerFromContext returns the logger stored in the context, or the fallback logger.
-// If fallback is nil, slog.Default() is returned.
+// LoggerFromContext returns the logger stored in the context, or the fallback
+// logger. Delegates to connector.LoggerFromContext.
 func LoggerFromContext(ctx context.Context, fallback *slog.Logger) *slog.Logger {
-	if v, ok := ctx.Value(ctxKeyLogger).(*slog.Logger); ok {
-		return v
-	}
-	if fallback != nil {
-		return fallback
-	}
-	return slog.Default()
+	return connector.LoggerFromContext(ctx, fallback)
 }

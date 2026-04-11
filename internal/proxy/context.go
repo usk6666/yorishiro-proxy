@@ -1,28 +1,24 @@
 package proxy
 
-import "context"
+// This file is a backward-compatibility shim. The real implementations live
+// in internal/connector/. The wrappers here keep existing internal/proxy/
+// handlers compiling during the M36-M44 architecture rewrite; both the
+// wrappers and the legacy proxy package are scheduled for deletion in M44.
 
-// Forward target context keys for storing TCP forwarding metadata.
-// These are defined in the proxy package (rather than protocol/tcp) to
-// avoid import cycles: protocol handlers depend on proxy, and need access
-// to the forwarding target from context.
+import (
+	"context"
 
-type forwardTargetCtxKey struct{}
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
+)
 
-// ContextWithForwardTarget stores the TCP forward target address in the context.
-// This is used by TCPForwardListener to pass the target to L7 protocol handlers
-// so they can resolve the upstream connection without requiring CONNECT or other
-// protocol-level target resolution.
+// ContextWithForwardTarget stores the TCP forward target address in the
+// context. Delegates to connector.ContextWithForwardTarget.
 func ContextWithForwardTarget(ctx context.Context, target string) context.Context {
-	return context.WithValue(ctx, forwardTargetCtxKey{}, target)
+	return connector.ContextWithForwardTarget(ctx, target)
 }
 
-// ForwardTargetFromContext retrieves the TCP forward target address from the context.
-// Returns the target and true if set, or empty string and false if not present
-// (i.e. the connection did not come through a TCP forward listener).
+// ForwardTargetFromContext retrieves the TCP forward target address from the
+// context. Delegates to connector.ForwardTargetFromContext.
 func ForwardTargetFromContext(ctx context.Context) (string, bool) {
-	if v, ok := ctx.Value(forwardTargetCtxKey{}).(string); ok && v != "" {
-		return v, true
-	}
-	return "", false
+	return connector.ForwardTargetFromContext(ctx)
 }
