@@ -190,16 +190,27 @@ func upstreamToClient(
 	// cancellation. If goroutine 1 exits without establishing upstream
 	// (e.g., all Exchanges were dropped), we return immediately.
 	//
-	// Priority select: check uh.ready first (non-blocking) to avoid the Go
-	// select random-choice problem when both uh.ready and uh.done are closed
-	// simultaneously (goroutine 1 closes ready then done in quick succession).
+	// Priority handling: goroutine 1 closes uh.ready before uh.done, so if
+	// we see uh.done we must re-check uh.ready before bailing out — the
+	// select-random-choice rule means a naive select could pick uh.done even
+	// when uh.ready was closed first. The outer non-blocking probe handles
+	// the common fast-path where ready is already closed on entry; the
+	// inner re-check handles the case where ready closes just before done
+	// while we are waiting.
 	select {
 	case <-uh.ready:
 	default:
 		select {
 		case <-uh.ready:
 		case <-uh.done:
-			return nil
+			// goroutine 1 may have closed ready immediately before done.
+			// Re-check non-blockingly: if ready is now closed, upstream was
+			// established and we must process it; otherwise bail.
+			select {
+			case <-uh.ready:
+			default:
+				return nil
+			}
 		case <-ctx.Done():
 			return nil
 		}
