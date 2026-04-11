@@ -37,3 +37,13 @@ func (pc *PeekConn) Buffered() int {
 func (pc *PeekConn) Read(b []byte) (int, error) {
 	return pc.reader.Read(b)
 }
+
+// Reader returns the internal *bufio.Reader. Callers that need line-oriented
+// reads (e.g. the HTTP/1.x request parser) use this directly so that
+// peeked/buffered bytes and newly read bytes share the same buffer. Creating
+// a second bufio.Reader on top of PeekConn risks swallowing bytes intended
+// for the post-handoff tunnel (e.g. a TLS ClientHello that arrived in the
+// same TCP segment as the CONNECT headers).
+func (pc *PeekConn) Reader() *bufio.Reader {
+	return pc.reader
+}
