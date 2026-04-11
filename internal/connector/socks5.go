@@ -13,6 +13,7 @@ package connector
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -123,7 +124,12 @@ func NewStaticAuthenticator(creds map[string]string) *StaticAuthenticator {
 	return &StaticAuthenticator{credentials: clone}
 }
 
-// Authenticate implements Authenticator.
+// Authenticate implements Authenticator. The password comparison uses
+// crypto/subtle.ConstantTimeCompare to avoid a timing side-channel on the
+// password byte length / contents (CWE-208). A user-existence side-channel
+// still exists via the map lookup, but RFC 1929 transmits credentials in
+// plaintext over TCP so this is a defense-in-depth measure, not a primary
+// mitigation.
 func (s *StaticAuthenticator) Authenticate(username, password string) bool {
 	if s == nil || len(s.credentials) == 0 {
 		return false
@@ -132,7 +138,7 @@ func (s *StaticAuthenticator) Authenticate(username, password string) bool {
 	if !ok {
 		return false
 	}
-	return expected == password
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(password)) == 1
 }
 
 // SOCKS5Negotiator drives the SOCKS5 handshake (RFC 1928 method negotiation,
@@ -230,7 +236,16 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 	}
 
 	// Step 3: TargetScope check. Duplicate with TunnelHandler's own scope
-	// check; that is intentional per the Issue's Design Judgment #2.
+	// check; that is intentional per the Issue's Design Judgment #2 — SOCKS5
+	// needs to send REP=0x02 BEFORE any tunnel bytes, which TunnelHandler's
+	// later check cannot provide.
+	//
+	// Scheme is passed as "" because at handshake time SOCKS5 does not know
+	// the tunneled protocol. Scope rules that are restricted by Schemes
+	// (e.g. Schemes: ["https"]) will not match here and will instead be
+	// enforced downstream by TunnelHandler with scheme="https". This means
+	// scheme-aware denial for scheme-restricted rules is deferred by one
+	// step but not bypassed.
 	if n.Scope != nil && n.Scope.HasRules() {
 		host, portStr, splitErr := net.SplitHostPort(target)
 		port := 0
