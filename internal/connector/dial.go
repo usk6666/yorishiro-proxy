@@ -214,13 +214,6 @@ func performTLSHandshake(ctx context.Context, conn net.Conn, opts DialOpts) (net
 // performStandardTLSHandshake uses crypto/tls.
 func performStandardTLSHandshake(ctx context.Context, conn net.Conn, opts DialOpts) (net.Conn, string, error) {
 	cfg := opts.TLSConfig.Clone()
-	// Enforce a TLS 1.2 floor regardless of what the caller passed in. The
-	// uTLS path (performUTLSHandshake) pins MinVersion=TLS12 unconditionally;
-	// matching that here prevents a caller-provided tls.Config with
-	// MinVersion=TLS10/TLS11 from silently downgrading the handshake.
-	if cfg.MinVersion < tls.VersionTLS12 {
-		cfg.MinVersion = tls.VersionTLS12
-	}
 	if opts.InsecureSkipVerify {
 		cfg.InsecureSkipVerify = true //nolint:gosec // proxy requires MITM
 	}
