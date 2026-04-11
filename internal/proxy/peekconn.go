@@ -1,39 +1,21 @@
 package proxy
 
+// This file is a backward-compatibility shim. The real PeekConn lives in
+// internal/connector/. The alias here keeps existing internal/proxy/
+// handlers compiling during the M36-M44 architecture rewrite; both the
+// alias and the legacy proxy package are scheduled for deletion in M44.
+
 import (
-	"bufio"
 	"net"
+
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
-// PeekConn wraps a net.Conn with a buffered reader, allowing bytes to be
-// peeked without consuming them from the stream. Subsequent Read calls
-// return the peeked bytes followed by the rest of the stream.
-type PeekConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
+// PeekConn is an alias for connector.PeekConn.
+type PeekConn = connector.PeekConn
 
-// NewPeekConn wraps conn with a buffered reader.
+// NewPeekConn wraps conn with a buffered reader. It delegates to
+// connector.NewPeekConn.
 func NewPeekConn(conn net.Conn) *PeekConn {
-	return &PeekConn{
-		Conn:   conn,
-		reader: bufio.NewReader(conn),
-	}
-}
-
-// Peek returns the next n bytes without advancing the reader.
-func (pc *PeekConn) Peek(n int) ([]byte, error) {
-	return pc.reader.Peek(n)
-}
-
-// Buffered returns the number of bytes currently available in the buffer
-// without requiring a read from the underlying connection.
-func (pc *PeekConn) Buffered() int {
-	return pc.reader.Buffered()
-}
-
-// Read reads data from the buffered reader, returning any previously peeked
-// bytes before reading new data from the underlying connection.
-func (pc *PeekConn) Read(b []byte) (int, error) {
-	return pc.reader.Read(b)
+	return connector.NewPeekConn(conn)
 }
